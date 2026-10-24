@@ -1024,6 +1024,18 @@ export class DispatchService {
      *  size (a food/grocery order's bulk — never parcel work). Omitted = any
      *  vehicle, exactly as before. */
     packageSize?: string | null,
+    /** [TAXI-FLOW 22 Oct 2026] The person the supply is FOR. Dispatch never
+     *  offers a ride to its booker (findCandidates' excludeUserId), so a probe
+     *  made on someone's behalf — the ride queue, "drivers are back" — must not
+     *  count that person's own driver profile as supply either. Omitted = the
+     *  anonymous area read, exactly as before. */
+    excludeUserId?: string | null,
+    /** [TAXI-FLOW · REVIEW-G #2022 S4-3] What THIS ride needs of a car — the
+     *  same filters dispatch applies to its offers (class tier, seats, stops).
+     *  A probe made for a particular ride (the queue scan, the request
+     *  pre-check) counts only cars dispatch could actually offer it to.
+     *  Omitted = any car, exactly as before. */
+    ride?: { rideClass?: RideClass | null; passengerCount?: number | null; taxiStops?: boolean } | null,
   ): Promise<{
     level: 'GOOD' | 'LOW' | 'NONE';
     /** Stable client contract: null when no eligible fresh mover exists. */
@@ -1035,13 +1047,14 @@ export class DispatchService {
       BASE_RADIUS_KM,
       pool,
       floatRequired,
-      null,
+      ride?.rideClass ?? null,
       tenantId,
       packageSize ?? null,
-      undefined,
-      undefined,
+      excludeUserId ?? undefined,
+      ride?.passengerCount ?? undefined,
       undefined,
       false,
+      ride?.taxiStops ?? undefined,
     );
     const level = candidates.length >= 3 ? 'GOOD' : candidates.length >= 1 ? 'LOW' : 'NONE';
     return {
@@ -1321,6 +1334,8 @@ export class DispatchService {
           id: true, status: true, riderId: true, driverId: true, orderType: true, holdExpiresAt: true,
           fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
+          // [REVIEW-G S4-1] The food-age cutoff below pins the riderless stretch it read.
+          riderAssignmentVersion: true,
           // [TAXI multi-stop] Whether the ride has stops: the offer card shows them.
           taxiStopCount: true,
           subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true, foodAgeWaivedAt: true,
@@ -3004,6 +3019,20 @@ export class DispatchService {
       const authority = await this.offerAuthority(order.id, pool, order.fulfillmentModeVersion);
       if (!authority.offerable) return false;
     }
+    // [OF-01 · COORD ruling 19 Oct 2026: one notice per state change, ever]
+    // Every search cycle used to tell the customer, the store and every admin
+    // again — a riderless order on staging sent its customer 219 notices in 19
+    // days. Each notice below is now keyed to the order's STATE (its status
+    // and its rider/driver assignment versions): a re-search of the same state
+    // collapses into the first notice (no second push), while a real change —
+    // the store marks it ready, a rider hands it back — may be told once more.
+    // The replay tag [E36] is subsumed: a redelivered run is the same state.
+    const state = await this.prisma.order.findUnique({
+      where: { id: order.id },
+      select: { status: true, riderAssignmentVersion: true, driverAssignmentVersion: true },
+    });
+    const epoch = state ? `${state.status}.${state.riderAssignmentVersion}.${state.driverAssignmentVersion}` : (replayTag ?? 'unknown');
+    const isParcel = order.orderType === 'COURIER';
     if (attempts < EXHAUST_CAP && this.scheduleRedispatch) {
       const retryDelay = order.isExpress ? EXPRESS_REDISPATCH_DELAY_MS : REDISPATCH_DELAY_MS;
       if (await this.scheduleRedispatch(order.id, retryDelay, replayTag ? redispatchJobId(order.id, replayTag) : undefined)) {
@@ -3019,11 +3048,9 @@ export class DispatchService {
           body: `All nearby movers are busy right now — we are automatically retrying for order ${order.orderNumber}.`,
           audience: 'customer',
           data: order.orderType === 'TAXI' ? taxiNotificationData(order.id, { kind: 'dispatch_retrying' }) : { kind: 'dispatch_retrying', orderId: order.id },
-          // [E36] A redelivered run re-sends under the same replay tag, and
-          // the (user, dedupeKey) unique collapses it into the first row. Not
-          // keyed by the attempt count: that restarts at 1 after a manual
-          // retry, and a genuine new cycle must still be told.
-          ...(replayTag ? { dedupeKey: `dispatch-retrying:${order.id}:${replayTag}` } : {}),
+          // [OF-01] Once per order state (see `epoch` above): every later
+          // attempt and cycle of the same state collapses into this row.
+          dedupeKey: `dispatch-retrying:${order.id}:${epoch}`,
         });
         return true;
       }
@@ -3057,6 +3084,8 @@ export class DispatchService {
                 body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
                 data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
                 tenantId: order.tenantId,
+                // [OF-01] One page per admin per order state, past the Redis window too.
+                dedupeKey: `dispatch-exhausted-ops:${order.id}:${epoch}`,
               }),
             ).catch(() => {});
             return true;
@@ -3115,11 +3144,16 @@ export class DispatchService {
       userId: order.customerId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'No movers available right now',
-      body: `We could not find a mover for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
+      // [OF-17] A parcel has no store to "hold it": its sender may cancel for
+      // free at any time while nobody has taken it.
+      body: isParcel
+        ? `We could not find a rider for your parcel ${order.orderNumber} yet. We are still looking — you can cancel it for free at any time while no rider has taken it.`
+        : `We could not find a mover for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
       audience: 'customer',
       data: order.orderType === 'TAXI' ? taxiNotificationData(order.id, { kind: 'dispatch_exhausted' }) : { kind: 'dispatch_exhausted', orderId: order.id },
-      // [E36] A redelivered run collapses into its first terminal notice.
-      ...(replayTag ? { dedupeKey: `dispatch-exhausted:${order.id}:${replayTag}` } : {}),
+      // [OF-01] Once per order state; a redelivered run [E36] or a later
+      // cycle of the same state collapses into the first terminal notice.
+      dedupeKey: `dispatch-exhausted:${order.id}:${epoch}`,
     });
     // Terminal socket signal to the rider's LIVE screen (mirrors the assigned
     // emit) — so a taxi rider's ActiveRide can flip from "contacting drivers…"
@@ -3134,7 +3168,7 @@ export class DispatchService {
         body: `No mover accepted order ${order.orderNumber}. You can hold it and retry, or cancel it.`,
         audience: 'business',
         data: { kind: 'dispatch_exhausted', orderId: order.id },
-        ...(replayTag ? { dedupeKey: `dispatch-exhausted:${order.id}:${replayTag}` } : {}),
+        dedupeKey: `dispatch-exhausted:${order.id}:${epoch}`,
       });
     }
 
@@ -3152,6 +3186,8 @@ export class DispatchService {
         body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
         data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
         tenantId: order.tenantId,
+        // [OF-01] One page per admin per order state, past the Redis window too.
+        dedupeKey: `dispatch-exhausted-ops:${order.id}:${epoch}`,
       }),
     ).catch(() => {});
     return true;

@@ -28,10 +28,19 @@
 # keys in the store; no unfilled site details; and, for the whole stack, every
 # served name must already resolve to THIS host (Caddy obtains certificates
 # for them, and the public names stay on the old host until DNS moves).
+#
+# [DEPLOY-FIX · staging #14, 23 Oct] Once the checkout is at the requested SHA,
+# the rest of the deploy is THAT revision's pilot-up.sh: when it differs from
+# the script already running, it is started again from its first line (once;
+# see "the requested revision's own steps" below).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# The arguments exactly as given and the running script's own text, kept before
+# anything moves, for the restart after the checkout (below).
+PILOT_UP_ARGS=("$@")
+PILOT_UP_SELF="$HERE/${0##*/}"
 DATA_ONLY=0
 NO_PUBLIC=0
 PLACES_PHOTON=0
@@ -42,6 +51,7 @@ COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml
 ROUTING=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.routing.yml")
 
 die() { echo "FATAL: $*" >&2; exit 1; }
+PILOT_UP_SELF_TEXT="$(< "$PILOT_UP_SELF")" || die "cannot read the running deploy script $PILOT_UP_SELF"
 env_value() {
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
@@ -52,6 +62,15 @@ env_setting() {
 }
 
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA"
+# [DEPLOY-FIX] The stage this run deploys, and, in a restarted run (below), the
+# proof that it is the same stage and SHA the first run was asked for: a
+# restart that lost `--no-public` or `--data-only` would stand up the public
+# stack, so any mismatch refuses before anything else happens.
+PILOT_UP_MODE=full
+[ "$DATA_ONLY" -eq 0 ] || PILOT_UP_MODE=data-only
+[ "$NO_PUBLIC" -eq 0 ] || PILOT_UP_MODE=no-public
+[ -z "${PILOT_UP_REEXEC+set}" ] || [ "$PILOT_UP_REEXEC" = "$PILOT_UP_MODE $SHA" ] ||
+  die "PILOT_UP_REEXEC is set but does not name this stage and SHA ($PILOT_UP_MODE); a restarted deploy must keep the first run's arguments. Unset it, or run from a clean shell"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
 # [PROD-PATH] One reading of deploy/.env. Compose takes the LAST of two lines
@@ -424,6 +443,10 @@ if [ "$PILOT_ENV" = production ]; then
   if [ "$DATA_ONLY" -eq 0 ]; then
     systemctl is-enabled --quiet swift-backup-hourly.timer && systemctl is-active --quiet swift-backup-hourly.timer ||
       die "PILOT_ENV=production needs the hourly backup timer enabled and active before the API starts (sudo systemctl enable --now swift-backup-hourly.timer; PILOT-RUNBOOK §4)"
+    # [Off-site erasure ledger] Every erasure must leave the host within minutes; the API pages
+    # production when one has not. The shipper exists before the API does.
+    systemctl is-enabled --quiet swift-erasure-ledger.timer && systemctl is-active --quiet swift-erasure-ledger.timer ||
+      die "PILOT_ENV=production needs the off-site erasure ledger timer enabled and active before the API starts (sudo systemctl enable --now swift-erasure-ledger.timer; PILOT-RUNBOOK §4)"
   fi
 fi
 if [ "$PILOT_ENV" = production ]; then
@@ -439,6 +462,28 @@ git merge-base --is-ancestor "$SHA" origin/main ||
   die "the requested SHA is not on current origin/main"
 git switch --detach "$SHA"
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "checkout differs from requested SHA"
+# [DEPLOY-FIX · staging #14, 23 Oct] The requested revision's own steps. Bash
+# reads a script while it runs, and the switch above replaced this file with
+# the requested revision's: without this, every step below would be the
+# PREVIOUS revision's (staging #14 so skipped the new upload-scanner start and
+# its EICAR proof, and uploads failed closed until clamd was started by hand).
+# So when the checked-out script differs from the one running, it is started
+# again with the same arguments, in this same process (exec: same PID, same
+# log): every check above runs again under the requested revision's rules
+# (each only reads; nothing but the checkout has changed), its switch is then
+# a no-op, and the rest is that revision's. The marker names the stage and
+# the SHA: the restarted run refuses at its top unless both match, and a
+# restarted script that still differs refuses here instead of looping.
+PILOT_UP_CHECKED_OUT="$(< "$PILOT_UP_SELF")" ||
+  die "cannot read the checked-out deploy script at $SHA; the checkout moved, nothing else changed"
+if [ "$PILOT_UP_CHECKED_OUT" != "$PILOT_UP_SELF_TEXT" ]; then
+  [ -z "${PILOT_UP_REEXEC+set}" ] ||
+    die "the deploy script still differs from the checked-out one after restarting at $SHA; refusing to run another revision's steps (the checkout moved, nothing else changed)"
+  echo "pilot-up: $SHA has its own pilot-up.sh; restarting it ($PILOT_UP_MODE; its checks run again, then its steps)"
+  export PILOT_UP_REEXEC="$PILOT_UP_MODE $SHA"
+  exec "$BASH" "$PILOT_UP_SELF" ${PILOT_UP_ARGS[@]+"${PILOT_UP_ARGS[@]}"}
+fi
+unset PILOT_UP_REEXEC
 export SWIFT_TAG="$SHA"
 # [PROD-PATH] The website's build channel follows the host: the staging site
 # calls the staging API, the production site the production API, and the

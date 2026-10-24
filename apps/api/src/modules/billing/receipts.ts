@@ -42,6 +42,9 @@ export async function issueReceipt(
       amount: input.amount,
       channel: input.channel ?? null,
       mmgRef: input.mmgRef ?? null,
+      // [R12] Every debit of this money now records what it paid
+      // (fee-receipt-allocation.ts), so the receipt can name the week(s).
+      weeksTracked: true,
     },
   });
   return { receiptNumber };

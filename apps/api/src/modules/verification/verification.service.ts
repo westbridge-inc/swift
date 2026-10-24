@@ -43,6 +43,7 @@ import { decryptBuffer, getKeyProvider } from '../../providers/storage/envelope'
 import { customerIdHoldReasons, readCustomerIdFacts, ON_FILE_REVIEWER, type CustomerIdHoldReason } from './customer-id';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../billing/billing-access';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -2233,8 +2234,11 @@ export class VerificationService {
         throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
       }
       await this.projectVendorActivation(tx, userId, { vendorId });
-      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
-      if (after.status !== 'ACTIVE') throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, suspensionSource: true, isVerified: true } });
+      // [#1541] Live under billing's hold (documents approved, weekly fee unpaid: holdActivationForUnpaidFee) is
+      // this activation too; the payment that clears the fee opens the store.
+      const heldForFee = after.status === 'SUSPENDED' && after.suspensionSource === 'BILLING' && after.isVerified;
+      if (after.status !== 'ACTIVE' && !heldForFee) throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
       await onActivated?.(tx);
     });
   }
@@ -2272,6 +2276,8 @@ export class VerificationService {
       if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
+    // [#1541] Settlement's payer -> subscriptions locks before any fee read or store write (billing-access.ts).
+    await lockVendorActivationBilling(db, userId);
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
       include: {
@@ -2328,6 +2334,9 @@ export class VerificationService {
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
+        // [#1541 · #1516 review S4] A store whose weekly fee billing holds goes live UNDER that hold
+        // (billing-access.ts), never open while its fee is unpaid; the promotion below then finds it not pending.
+        if (await holdActivationForUnpaidFee(db, vendor.id)) await this.tellOwnerFeeHoldsGoLive(db, userId, vendor);
         await db.vendor.updateMany({
           where: { id: vendor.id, status: 'PENDING_APPROVAL' },
           data: { status: 'ACTIVE' },
@@ -2369,6 +2378,27 @@ export class VerificationService {
       body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
+    });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [#1541] The one notice for a store that went live under billing's hold: its documents are approved, and
+   *  paying the weekly fee opens it. Sent on the hold's own edge (PENDING_APPROVAL → SUSPENDED, once per
+   *  activation), whichever path ran the projection — the console's approve sends none of its own for it.
+   *  Delivered after the projection commits. */
+  private async tellOwnerFeeHoldsGoLive(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+  ): Promise<void> {
+    // [item 20] The owner's inbox, written inside the projection transaction (often an admin's or a job's): with the
+    // wall on, an INSERT without RETURNING through the one notice helper (notice_write admits it; a read-back would not).
+    const notice = await insertNoticeFor(db, {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Documents approved',
+      body: `${vendor.name}'s documents are approved. Pay the weekly fee to open the store for orders.`,
+      data: { vendorId: vendor.id },
     });
     this.projectionNotices.get(db)?.push(notice.id);
   }

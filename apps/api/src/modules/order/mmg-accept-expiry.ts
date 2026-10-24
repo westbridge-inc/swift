@@ -1,4 +1,6 @@
 import type { Prisma } from '@prisma/client';
+import { ownerRlsBindEnabled } from '../../lib/owner-rls';
+import { closeOrderCase } from '../../lib/owner-wall-tickets';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { formatMoney } from '../../utils/currency-amount';
 
@@ -158,16 +160,20 @@ export function mmgStoreSilentStorePush(orderNumber: string, amount: number, cur
 /** [REVIEW-G S4] The case closes in the same commit as what ends it: the store's "Paid by MMG", or the order's
  *  cancellation (e.g. the customer later says they did not pay, so the 30-minute rule cancels it). */
 export async function closeStoreSilentMmgCase(
-  tx: { supportTicket: { updateMany(args: Prisma.SupportTicketUpdateManyArgs): Promise<{ count: number }> } },
+  tx: { supportTicket: { updateMany(args: Prisma.SupportTicketUpdateManyArgs): Promise<{ count: number }> } }
+    & { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> },
   orderId: string,
   outcome: 'PAID_BY_MMG' | 'CANCELLED',
   now: Date = new Date(),
 ): Promise<number> {
+  const adminNote = outcome === 'PAID_BY_MMG' ? 'Closed automatically: the store marked the MMG payment received ("Paid by MMG").' : 'Closed automatically: the order was cancelled.';
+  // [item 20] The customer's case, closed in the store's (or the sweep's) transaction: with the wall on, the narrow action.
+  if (ownerRlsBindEnabled()) return closeOrderCase(tx, orderId, MMG_STORE_SILENT_SUBJECT, adminNote, now);
   const { count } = await tx.supportTicket.updateMany({
     where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, status: { in: ['OPEN', 'IN_PROGRESS'] } },
     data: {
       status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedAt: now,
-      adminNote: outcome === 'PAID_BY_MMG' ? 'Closed automatically: the store marked the MMG payment received ("Paid by MMG").' : 'Closed automatically: the order was cancelled.',
+      adminNote,
     },
   });
   return count;

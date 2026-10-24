@@ -46,6 +46,7 @@ import {
 } from '../../providers/card/card-provider';
 import { formatMoney, toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
+import { recordWalletDebitInTx } from './fee-receipt-allocation';
 import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
@@ -371,8 +372,18 @@ function readRetierLower(value: unknown): { rate: number; tier: string; seenAt: 
 /** [R27] What one weekly re-tier pass did to one subscription. */
 type RetierMove = { held?: true; lowered?: { from: number; to: number }; dropped?: HeldFeeRise };
 
-/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. */
-export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off: pay this week with MMG on the checkout page';
+/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. It names
+ *  no way to pay: the payment-failed notice's paying sentence (feePayLine) names the MMG checkout only
+ *  while it is live for the partner, otherwise the amount and when it is due. */
+export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off';
+
+/** [S1 · Option A · REVIEW-F S3-1] The ordinary payment-failed notice: `<reason>. <retry> <payLine>`.
+ *  A week that failed because the push rail is off promises no retry: a retry fails the same way and
+ *  can never collect, so the partner is told the fee was not collected and the way to pay today. */
+function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: string): string {
+  if (reason === MMG_PUSH_OFF_REASON) return `${MMG_PUSH_OFF_REASON}, so this week's fee was not collected. ${payLine}`;
+  return `${reason}. ${retrySentence} ${payLine}`;
+}
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -1838,7 +1849,7 @@ export class BillingService {
     // [PROD-PATH] No live way to pay: the fee is paused before the prepaid
     // spend and before the no-rail fall-through (which would record a
     // failure). billSubscription stops earlier; this is its second wall.
-    if (noLivePayPath()) return { ok: false, deferred: true };
+    if (await noLivePayPath(this.prisma)) return { ok: false, deferred: true };
     // Prepaid balance is money Swift already holds — spend it before pinging any
     // external rail. This is also what makes an admin top-up reinstate a CARD/MMG
     // sub: the recorded cash settles the fee instead of firing a fresh (and
@@ -2273,6 +2284,7 @@ export class BillingService {
     // 0 and we throw, rolling back the payment row, the period move and the
     // ledger entry with it. The cycle simply retries. Skipping a week is
     // recoverable; taking money without granting service is not.
+    let prepaidSpent: { amount: number; balanceBefore: number } | null = null;
     if (spendPrepaid && spendPrepaid > 0) {
       const debited = await tx.prepaidBalance.updateMany({
         where: { subscriptionId: sub.id, currencyCode: sub.currencyCode, balance: { gte: spendPrepaid } },
@@ -2281,6 +2293,9 @@ export class BillingService {
       if (debited.count !== 1) {
         throw new Error(`prepaid balance no longer covers ${spendPrepaid} for subscription ${sub.id}`);
       }
+      // [R12] The wallet row is locked by the debit: its balance now is exact.
+      const walletAfter = await tx.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id }, select: { balance: true } });
+      prepaidSpent = { amount: spendPrepaid, balanceBefore: Number(walletAfter.balance) + spendPrepaid };
       await this.observer.afterSuccessfulChargePrepaidDebit?.(sub.id, tx);
     }
 
@@ -2322,7 +2337,7 @@ export class BillingService {
       },
     });
 
-    await tx.billingEvent.create({
+    const successEvent = await tx.billingEvent.create({
       data: {
         subscriptionId: sub.id,
         type: 'CHARGE_SUCCESS',
@@ -2333,6 +2348,14 @@ export class BillingService {
         ...(usdTrio ?? {}),
       },
     });
+    // [R12] The week the prepaid money bought is written on the receipts that
+    // money came from (oldest money first), in this transaction.
+    if (prepaidSpent) {
+      await recordWalletDebitInTx(tx, {
+        subscriptionId: sub.id, amount: prepaidSpent.amount, balanceBefore: prepaidSpent.balanceBefore,
+        kind: 'WEEK', billingEventId: successEvent.id, periodStart, periodEnd,
+      });
+    }
 
     // The obligation advances on the success record just booked, in the
     // currency this settlement was pinned to (never relabelled).
@@ -2485,6 +2508,11 @@ export class BillingService {
         idempotencyKey: opts.eventKey,
         note: opts.note,
       },
+    });
+    // [R12] The returned payment's own receipt gives its money back first.
+    await recordWalletDebitInTx(tx, {
+      subscriptionId: opts.subscriptionId, amount: opts.amount, balanceBefore: Number(wallet.balance),
+      kind: 'RETURNED', billingEventId: event.id, ownMmgRef: opts.mmgRef,
     });
     await postLedger(tx, {
       idempotencyKey: `ledger:${opts.eventKey}`,
@@ -3889,7 +3917,7 @@ export class BillingService {
    */
   private async finishExhaustedGrace(sub: SubWithRelations, now: Date): Promise<'pending' | 'suspended' | null> {
     // [PROD-PATH] Nothing suspends anyone while no partner can pay.
-    if (noLivePayPath()) return 'pending';
+    if (await noLivePayPath(this.prisma)) return 'pending';
     const result = await this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
       const clock = await currentDunningClock(tx, sub.id, now);
@@ -3973,7 +4001,7 @@ export class BillingService {
         userId: this.payerUserId(sub), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub),
         title: final ? 'Final warning — payment needed' : 'Subscription payment failed',
         body: final ? `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`
-          : `${reason}. We will retry after the remaining retry interval. ${payLine}`,
+          : failedFeeNoticeBody(reason, 'We will retry after the remaining retry interval.', payLine),
         data: { kind: final ? 'billing_final_warning' : 'billing_failed', subscriptionId: sub.id, ...(final ? { suspendsAt: gracePeriodEnd.toISOString() } : {}) },
         feeStageKey: `${final ? 'final-warning' : 'failed'}:a${attempts}`,
         ...(final ? { feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}` } : {}),
@@ -4020,7 +4048,7 @@ export class BillingService {
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${payLine}`,
+      body: failedFeeNoticeBody(reason, `We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}).`, payLine),
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
       feeStageKey: `failed:a${attempts}`,
@@ -4947,7 +4975,8 @@ export class BillingService {
    * can no longer leave a changed bill with no audit row. The rate write is a
    * compare-and-set on the rate this run read: two runs racing over the same
    * subscription (the weekly job and an operator's manual run) move it once
-   * and write one event — the loser matches nothing and writes nothing.
+   * and write one event — the loser matches nothing and writes nothing. It
+   * also requires no negotiated rate and no waived fee [G S4-2].
    *
    * Key policy: `tier:<subscription>:<n>:<from>-><to>` — the n-th tier
    * change of this subscription, counted under the row lock the CAS above
@@ -4965,8 +4994,11 @@ export class BillingService {
     const from = Number(sub.weeklyRate);
     const apply = async (tx: Prisma.TransactionClient) => {
       await lockSubscriptionPayer(tx, sub.id);
+      // [G S4-2] A negotiated rate or a waived fee is a human decision: one set after the caller read
+      // the plan (an operator's waive, the USD migration's customRate) leaves weeklyRate as it was, so
+      // the compare-and-set checks both too and the move loses.
       const won = await tx.subscription.updateMany({
-        where: { id: sub.id, weeklyRate: sub.weeklyRate },
+        where: { id: sub.id, weeklyRate: sub.weeklyRate, customRate: null, feeWaived: false },
         data: { weeklyRate: target.rate },
       });
       if (won.count === 0) return false;

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { serviceQuoteAmountSchema } from './service-job-transition';
 

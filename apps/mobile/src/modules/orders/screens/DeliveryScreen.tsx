@@ -33,11 +33,12 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
-import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
+import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
+import { isTaxiOrder } from '../../../lib/orderTrackRoute';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -418,6 +419,17 @@ export function DeliveryScreen() {
   };
 
   const o = order.data;
+  // [TAXI-FLOW 22 Oct] THE BACKSTOP. A ride is never drawn as a store order
+  // ("Sent to the store", "Preparing", "have $800 ready for the seller"). Any
+  // door that reaches this screen with a ride's id — a notification tap, the
+  // inbox, an older caller — is handed to the ride screen the moment the
+  // server's order type is known. `replace`, so Back does not return here.
+  const rideHandedOn = useRef(false);
+  useEffect(() => {
+    if (!isTaxiOrder(o) || rideHandedOn.current) return;
+    rideHandedOn.current = true;
+    navigation.replace('Taxi');
+  }, [navigation, o]);
   const orderStatus = String(o?.status ?? '').toUpperCase();
   const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)
     && !(o?.fulfillment === 'PICKUP' && orderStatus === 'PICKED_UP');
@@ -682,6 +694,15 @@ export function DeliveryScreen() {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
         {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
+  if (isTaxiOrder(o)) {
+    // The hand-off above is on its way: nothing of the store screen shows.
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
         <Header />
         <LoadingBlock />
       </View>
@@ -1048,7 +1069,63 @@ export function DeliveryScreen() {
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
           {!terminal ? items
             .filter((it: any) => it.subStatus === 'PENDING')
-            .map((it: any) => (
+            .map((it: any) => isRemovalQuestion(it.substitution) ? (
+              /* [O-4 · owner 22 Oct 2026] Asked before the store accepted: nothing to swap. The
+                 customer agrees to the changed order before paying, or cancels it (free while the
+                 store has not accepted). */
+              <View
+                key={`sub-${it.id}`}
+                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <Feather name="alert-circle" size={16} color={color.brand[600]} />
+                  <T variant="label" weight="bold" style={{ flex: 1 }}>
+                    {it.name} is out of stock
+                  </T>
+                </View>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {it.substitution?.lastItem
+                    ? `${o.vendor?.name ?? 'The store'} can't supply it.`
+                    : `${o.vendor?.name ?? 'The store'} can't supply it. Continue without it, or cancel the order. Nothing has been charged.`}
+                </T>
+                {removalChangeText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {removalChangeText(it.substitution)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                  {it.substitution?.lastItem ? null : (
+                    <PillButton
+                      label="Continue without it"
+                      size="md"
+                      style={{ flex: 1 }}
+                      loading={decideSub.isPending}
+                      disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                      onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
+                    />
+                  )}
+                  <PillButton
+                    label="Cancel order"
+                    variant="soft"
+                    size="md"
+                    style={{ flex: 1 }}
+                    loading={cancelChecking || cancelOrder.isPending}
+                    disabled={!o.canCancel}
+                    onPress={() => { void openCancelConfirmation(); }}
+                  />
+                </View>
+              </View>
+            ) : (
               <View
                 key={`sub-${it.id}`}
                 style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}

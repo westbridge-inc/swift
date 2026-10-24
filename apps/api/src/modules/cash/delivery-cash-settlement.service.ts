@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import type { PrismaClient } from '@prisma/client';
 import { CashSettlementStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';

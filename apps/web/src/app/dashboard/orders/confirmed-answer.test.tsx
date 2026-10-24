@@ -107,9 +107,9 @@ describe('a store tap shows the server\'s confirmed answer as soon as it lands',
     void queryClient.invalidateQueries({ predicate: (query) => JSON.stringify(query.queryKey).includes('"order","order-live"') });
     await waitFor(() => expect(gate.reads.length).toBe(1));
     await act(async () => { gate.puts[0]!(); });
-    await waitFor(() => expect(within(dialog()).getByRole('button', { name: 'Mark ready' })).toBeTruthy());
+    await waitFor(() => expect(within(dialog()).getByRole('button', { name: 'Ready for delivery' })).toBeTruthy());
     await act(async () => { gate.reads[0]!(); await new Promise((resolve) => { setTimeout(resolve, 50); }); });
-    expect(within(dialog()).getByRole('button', { name: 'Mark ready' })).toBeTruthy();
+    expect(within(dialog()).getByRole('button', { name: 'Ready for delivery' })).toBeTruthy();
     expect(within(dialog()).queryByRole('button', { name: 'Start preparing' })).toBeNull();
   });
 });

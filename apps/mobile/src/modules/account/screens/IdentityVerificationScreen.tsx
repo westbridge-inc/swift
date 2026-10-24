@@ -8,6 +8,7 @@ import { BrandCheckbox, Card, PillButton, T } from '../../../kit';
 import { CUSTOMER_ID_CONSENT_TEXT } from '../../../lib/uploadConsentCopy';
 import { Badge } from '../../../kit/badge';
 import { PressableScale } from '../../../kit/pressable-scale';
+import { touchTarget } from '../../../kit/touch-target';
 import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
 import { idCheckOf, submittedCopy, type CustomerIdCheck } from '../../../lib/customerIdCopy';
 import {
@@ -111,7 +112,8 @@ export function IdentityVerificationScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.lg, paddingVertical: space.sm }}>
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(24)}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
         <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Add your ID</T>

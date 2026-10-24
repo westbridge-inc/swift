@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   owner: { userId: 'subject-a', generation: 1 },
-  deleteAccount: vi.fn(), requestAccountClosure: vi.fn(), logout: vi.fn(), success: vi.fn(),
+  deleteAccount: vi.fn(), requestAccountClosure: vi.fn(), logout: vi.fn(), success: vi.fn(), error: vi.fn(),
   profile: { firstName: 'Synthetic', lastName: 'Subject' } as Record<string, unknown>,
 }));
 vi.mock('react', async (original) => ({
@@ -15,7 +15,12 @@ vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 vi.mock('@swift/ui', () => ({ color: { surface: { subtle: '' }, brand: { 50: '', 600: '' }, success: '' }, space: {} }));
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({}),
-  useMutation: (options: { mutationFn: () => unknown }) => ({ mutate: options.mutationFn }),
+  useMutation: (options: { mutationFn: () => unknown; onError?: (error: unknown) => void }) => ({
+    mutate: async () => {
+      try { return await options.mutationFn(); }
+      catch (error) { if (!options.onError) throw error; options.onError(error); }
+    },
+  }),
 }));
 vi.mock('../../../hooks/customer', () => ({ useProfile: () => ({ data: mocks.profile }) }));
 vi.mock('../../../services/api', () => ({ customerApi: { deleteAccount: mocks.deleteAccount, requestAccountClosure: mocks.requestAccountClosure } }));
@@ -26,7 +31,7 @@ vi.mock('../../../stores/authStore', () => ({
   useAuthStore: (select: (state: unknown) => unknown) => select({ logoutIfCurrent: mocks.logout }),
 }));
 vi.mock('../../../kit', () => Object.fromEntries(['ErrorState', 'Header', 'IconChip', 'LabeledInput', 'LoadingBlock', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'SettingsRow', 'T'].map((name) => [name, name])));
-vi.mock('../../../kit/toast', () => ({ toast: { success: mocks.success } }));
+vi.mock('../../../kit/toast', () => ({ toast: { success: mocks.success, error: mocks.error } }));
 import { PersonalDataScreen } from './PersonalDataScreen';
 
 function button(node: any): any {
@@ -71,6 +76,20 @@ describe('account deletion confirmation', () => {
     await button(PersonalDataScreen()).props.onPress();
     expect(mocks.success).toHaveBeenCalledExactlyOnceWith(message);
     expect(mocks.logout).toHaveBeenCalledOnce();
+  });
+
+  // The server's own refusal words (partner-wind-down.ts BLOCKER_MESSAGE:
+  // FEE_CREDIT with its amount filled in, and OPEN_CLAIM), shown as sent.
+  it.each([
+    'You have GY$1,500 paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.',
+    'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
+  ])('shows the deletion refusal in the server words and keeps the session (%s)', async (message) => {
+    mocks.deleteAccount.mockRejectedValue({ response: { status: 409, data: { error: { code: 'PARTNER_OBLIGATIONS', message } } } });
+    await button(PersonalDataScreen()).props.onPress();
+    expect(mocks.deleteAccount).toHaveBeenCalledExactlyOnceWith(mocks.owner);
+    expect(mocks.error).toHaveBeenCalledExactlyOnceWith(message);
+    expect(mocks.success).not.toHaveBeenCalled();
+    expect(mocks.logout).not.toHaveBeenCalled();
   });
 
   it('keeps the completed deletion confirmation for a completed response', async () => {

@@ -207,6 +207,8 @@ describe('[Row 117] with web taxi booking on, the trip page carries the ride’s
       driver: { vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', licensePlate: 'PXX 1234', user: { firstName: 'Dev' } },
     } as never);
     vi.spyOn(rides, 'activeRide').mockResolvedValue({ id: ORDER.id, driver: { currentLat: 6.81, currentLng: -58.16, user: { firstName: 'Dev', phone: '+5920000000' } } } as never);
+    vi.spyOn(rides, 'tripShares').mockResolvedValue([]);
+    vi.spyOn(rides, 'outstandingCheckin').mockResolvedValue(null);
   });
 
   it('shows the ride code, the driver’s position and SOS — and no "open the app" notice', async () => {
@@ -445,6 +447,32 @@ describe('[SUBSTITUTION] the store asks the customer about a swap', () => {
     expect(screen.getByText(/If it isn't approved by .+, the store settles this item with you directly\./)).toBeTruthy();
   });
 
+  // [O-4 · owner 22 Oct 2026] Nothing to swap, asked before the store accepted.
+  it('a removal question: "Continue without it" answers yes; "Cancel order" opens the checked cancel; no decline is offered', async () => {
+    const removal = { ...CASH_VIEW, kind: 'REMOVAL', priceDelta: -1500, decisions: { approve: true, reject: false } };
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(swapOrder(removal, { status: 'PENDING', canCancel: true }) as never);
+    const decide = vi.spyOn(orders, 'decideSubstitution').mockResolvedValue({} as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('heading', { name: 'Fried Rice is out of stock' })).toBeTruthy();
+    expect(screen.getByText('Continuing without it lowers your total by $1,500. You pay only the new total.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Decline' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Continue without it' }));
+    expect(decide).toHaveBeenCalledWith('order-1', 'line-1', true);
+    expect((screen.getByRole('button', { name: 'Cancel order' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('[REVIEW-F S3-1] the only item left: no "Continue", the reason in words, and only the free cancel', async () => {
+    const only = { ...CASH_VIEW, kind: 'REMOVAL', lastItem: true, priceDelta: null, decisions: { approve: false, reject: false },
+      settlementGuidance: "This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.", ifNoAnswer: 'CANCEL' };
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(swapOrder(only, { status: 'PENDING', canCancel: true }) as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('heading', { name: 'Fried Rice is out of stock' })).toBeTruthy();
+    expect(screen.getByText("This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.")).toBeTruthy();
+    expect(screen.getByText(/If you don't, the order is cancelled\. Nothing has been charged\./)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Continue without it' })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Cancel order' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('a removed line reads removed and charges nothing on the receipt preview', async () => {
     vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'PREPARING', paymentMethod: 'CASH', paymentAction: null, totalAmount: 1900, subtotalCustomer: 1900,
@@ -466,9 +494,49 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   const auth = await import('@/lib/auth');
   const fetchSpy = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: {} } as never);
   await orders.getOrder('order-9');
-  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v1');
+  // [O-4] v2: this page renders the pre-accept removal question too (a v1 client is served a legacy line).
+  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
+});
+
+// [WEB-TAXI · TAXI waiting charge · research E4] The live waiting count and the
+// receipt's waiting line, as the phone shows them (WaitingCard, RidePostTripSheet).
+describe('the waiting charge on the trip page', () => {
+  const WAITING = { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', pickupWaitMinutes: 7, waitingMinutes: 13, waitingCharge: 300, running: false, nextChargeAt: null };
+
+  it('shows the live wait the server sends: minutes, the charge so far, the block, cash at the end', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, waiting: WAITING } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    const card = await screen.findByRole('region', { name: 'Waiting' });
+    expect(card.textContent).toContain('13 min waited');
+    expect(card.textContent).toContain('$300 so far');
+    expect(card.textContent).toContain('$300 per 10 minutes');
+    expect(card.textContent).toContain('At the pickup: 7 min');
+    expect(card.textContent).toContain('Paid in cash with your fare at the end.');
+  });
+
+  it('no waiting object from the server: no card, nothing invented', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    await screen.findByText(/Open the Swift app for your safety PIN and SOS/);
+    expect(screen.queryByText(/min waited/)).toBeNull();
+  });
+
+  it('a finished ride’s receipt itemises trip + waiting = total', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'COMPLETED', subtotalCustomer: 2800, totalAmount: 2800, paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, fareBreakdown: { routeFare: 2800, waitingMinutes: 13, waitingCharge: 300, total: 3100, currencyCode: 'GYD' } } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Waiting 13 min')).toBeTruthy();
+    expect(screen.getByText('Trip').nextSibling?.textContent).toBe('$2,800');
+    expect(screen.getByText('Waiting 13 min').nextSibling?.textContent).toBe('$300');
+    expect(screen.getByText('Total').nextSibling?.textContent).toBe('$3,100');
+  });
 });
 
 // ---------------------------------------------------------------------------

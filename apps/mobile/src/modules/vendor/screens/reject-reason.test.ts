@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BOOKING_REJECT_REASONS, ORDER_REJECT_REASONS, rejectReasonsFor } from '../rejectReasons';
+import { cardTapFor } from '../boardTaps';
 
 // ---------------------------------------------------------------------------
 // [E10 · DS200 D1] EVERY REJECTION CARRIES ITS REASON.
@@ -26,7 +27,11 @@ describe('[E10] the board collects a reason before it rejects', () => {
   it('every board card routes Reject/Decline to the reason chooser, never straight to the API', () => {
     const handlers = board.match(/onAction=\{[\s\S]*?\}\}?\n/g) ?? [];
     expect(handlers.length).toBe(3);
-    for (const h of handlers) expect(h).toMatch(/action === 'reject'[\s\S]*setRejecting\(/);
+    // [STORE-DASH] Every card's tap goes through ONE router (onCardAction), and
+    // that router sends Reject/Decline to the reason chooser (boardTaps.cardTapFor).
+    for (const h of handlers) expect(h).toMatch(/onCardAction\(/);
+    expect(board).toMatch(/const onCardAction = [\s\S]*?if \(tap === 'reject'\) setRejecting\(/);
+    expect(cardTapFor('reject')).toBe('reject');
     // the old shape: every action, reject included, mutated with no reason
     expect(board).not.toMatch(/onAction=\{\(action, code\) => orderAction\.mutate\(\{ id: o\.id, action, code \}\)\}/);
   });

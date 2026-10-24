@@ -9,6 +9,8 @@ import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
+import { ownerRlsBindEnabled } from '../lib/owner-rls';
+import { insertTicketFor, orderCaseExists } from '../lib/owner-wall-tickets';
 import { recoveryFor } from './recovery-policy';
 import {
   requireActiveDiscoveryTenant,
@@ -404,6 +406,12 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   // [E20] A booking was declined by its PROVIDER, never "the store" — the same
   // voice the vendor decline copy uses. Food keeps its wording word for word.
   const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
+  // [O-4 · owner 22 Oct 2026] A store that asked the customer about an out-of-stock item before
+  // accepting is never cancelled for the customer's time: decided on the LOCKED row (a question
+  // asks under the same order lock), and the job is armed again for the store's new deadline.
+  const { storeClockAfterQuestion, vendorResponseSlaMinutes } = await import('../modules/order/response-sla');
+  const slaMinutes = await vendorResponseSlaMinutes(ctx.prisma);
+  let waitingUntil: Date | null = null;
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
     ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
@@ -415,11 +423,28 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
       cancellation: { by: null, reason },
       requireHoldExpired: true,
       releaseStaleMoverPointer: true,
+      withinTransaction: async (tx) => {
+        const lines = await tx.orderItem.findMany({ where: { orderId }, select: { substituteDecideBy: true } });
+        const due = storeClockAfterQuestion(lines, slaMinutes);
+        if (due && due.getTime() > Date.now()) {
+          waitingUntil = due;
+          throw new AppError(409, 'STORE_WAITING_ON_CUSTOMER', 'The store is waiting for the customer to answer an out-of-stock question');
+        }
+      },
       invalidStatus: () => new AppError(409, 'AUTO_CANCEL_NOT_ELIGIBLE', 'Order is held or no longer pending'),
     }));
   } catch (error) {
     if (error instanceof AppError && (error.code === 'AUTO_CANCEL_NOT_ELIGIBLE' || error.code === 'NOT_FOUND')) {
       return false; // held, already accepted, already cancelled, or gone — no-op
+    }
+    if (error instanceof AppError && error.code === 'STORE_WAITING_ON_CUSTOMER' && waitingUntil) {
+      const dueAt: Date = waitingUntil;
+      const { persistAutoCancelRearmInTransaction } = await import('../modules/order/checkout-outbox');
+      const tenant = await ctx.prisma.order.findUnique({ where: { id: orderId }, select: { tenantId: true } });
+      if (tenant) {
+        await ctx.prisma.$transaction((tx) => persistAutoCancelRearmInTransaction(tx, { orderId, tenantId: tenant.tenantId, dueAt }));
+      }
+      return false;
     }
     // [REPORT-006 F-006-01] A vendor who confirmed the MMG payment landed HAS
     // responded — auto-cancelling would mint CANCELLED+CAPTURED with no refund
@@ -540,11 +565,13 @@ export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: stri
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
     const order = await tx.order.findUnique({ where: { id: orderId } });
     if (!order || !isStoreSilentOnClaimedMmgPayment(order, new Date())) return null;
-    const existing = await tx.supportTicket.findFirst({ where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT }, select: { id: true } });
+    // [item 20] The customer's case, looked up and opened by the sweep bound to the order's tenant: with the wall on, the
+    // narrow action and the one ticket helper.
+    const existing = ownerRlsBindEnabled()
+      ? await orderCaseExists(tx, orderId, MMG_STORE_SILENT_SUBJECT)
+      : await tx.supportTicket.findFirst({ where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT }, select: { id: true } });
     if (existing) return null;
-    const ticket = await tx.supportTicket.create({
-      data: { userId: order.customerId, orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, message: mmgStoreSilentTicketMessage(order.orderNumber) },
-    });
+    const ticket = await insertTicketFor(tx, { userId: order.customerId, orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, message: mmgStoreSilentTicketMessage(order.orderNumber) });
     return { ticketId: ticket.id, order };
   });
   if (!opened) return false;
@@ -1395,6 +1422,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info({ ...result }, 'backup freshness checked');
         return;
       }
+      if (job.name === 'erasure-ledger-watch') {
+        // [Off-site erasure ledger] An erasure not shipped off-site within 10 minutes pages the platform.
+        const { pageErasureLedgerShipping } = await import('../modules/ops/erasure-ledger-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageErasureLedgerShipping({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        ctx.log.info({ stale: result.stale, unshipped: result.unshipped, oldestMinutes: result.oldestMinutes }, 'erasure ledger shipping checked');
+        return;
+      }
 
       // [DCR-1 CW] Commencement Watch: scan the Gazette/parliament sources,
       // dedupe alerts, notify the founder channels. Observes and alerts ONLY.
@@ -2040,6 +2075,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // [ads security] advertiser team invitations past their days are deleted (they hold a person's id).
+        const { AdvertiserService } = await import('../modules/ads/advertiser.service');
+        const expiredInvites = await new AdvertiserService(ctx.prisma, ctx.io).purgeExpiredTeamInvites();
+        if (expiredInvites > 0) ctx.log.info({ expiredInvites }, 'ads: expired team invitations deleted');
         // §16 "review SLA at risk": reviewable creatives past 75% of the SLA
         // window page ops — once per creative per window (redis once-key),
         // same posture as incident-sla-watch.
@@ -2071,10 +2110,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // or, on MMG, the question is withdrawn — so no order waits forever on
         // an answer. CAS per line; each line runs in its own order's tenant.
         const { sweepSubstitutionDeadlines } = await import('../modules/order/picking.service');
+        const { OrderService } = await import('../modules/order/order.service');
         const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
           narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
+          // [O-4] the only item left with no answer cancels its waiting order (free) through the seam.
+          orderService: new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         });
-        if (res.removed + res.withdrawn + res.started + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
+        if (res.removed + res.withdrawn + res.started + res.cancelled + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
         return;
       }
 
@@ -2483,6 +2525,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // cutoff go to a person, cancelled by the system, marking nobody.
         const { sweepFoodAge } = await import('../modules/dispatch/rescue');
         const { NotificationService } = await import('../modules/notification/notification.service');
+        // [OF-33] A rider who accepted and never picks up (GPS alive): one
+        // nudge, then the leg goes back to dispatch as a no-show. Never a cancel.
+        const { sweepPickupOverdue } = await import('../modules/dispatch/pickup-overdue');
+        const overduePickups = await sweepPickupOverdue(
+          { prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) },
+          async (orderId) => { await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 }); },
+        );
+        if (overduePickups.released.length > 0) ctx.log.warn({ released: overduePickups.released }, 'pickup-overdue: rider no-shows released back to dispatch');
         const aged = await sweepFoodAge({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
         if (aged.retired.length > 0) ctx.log.warn({ retired: aged.retired }, 'rescue: orders too old to deliver were cancelled and handed to a person');
         if (dw.recovered.length + dw.flagged.length > 0) {
@@ -2837,6 +2887,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // or are staying on the machine they protect.
   await queues.verificationQueue.add('backup-freshness', {}, {
     repeat: { pattern: '30 5 * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Off-site erasure ledger] Every five minutes: an erasure the host unit has not shipped off-site
+  // within 10 minutes pages the platform responders.
+  await queues.verificationQueue.add('erasure-ledger-watch', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

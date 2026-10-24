@@ -244,8 +244,9 @@ const MOVER: Readonly<Record<`${OrderStatus}`, string>> = {
   RETURNED: 'Returned',
 };
 
-/** A job's status in the rider's or driver's words; one this build has not been taught reads "In progress", never the code. */
+/** A job's status in the rider's or driver's words; one this build has not been taught reads "Status unavailable"
+ *  (as on the store screens), never the code and never "In progress", which is untrue for a status that ended. */
 export function moverStatusLabel(status: string | null | undefined): string {
   const s = String(status ?? '').trim().toUpperCase();
-  return Object.prototype.hasOwnProperty.call(MOVER, s) ? MOVER[s as `${OrderStatus}`] : 'In progress';
+  return Object.prototype.hasOwnProperty.call(MOVER, s) ? MOVER[s as `${OrderStatus}`] : 'Status unavailable';
 }
