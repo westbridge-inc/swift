@@ -298,9 +298,9 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
     const before = await orderRow(orderId);
     const card = await storeDetail(orderId);
     expect(card).toMatchObject({ handedToRiderAt: null });
-    expect(typeof card.rider?.photoUrl).toBe('string');
-    expect(card.rider?.photoUrl).not.toBe(AVATAR_KEY);
-    expect(card.rider?.photoUrl).toMatch(/\?.*(expires|signature)=/i); // a signed, expiring read of the private object
+    expect(typeof card.rider?.['photoUrl']).toBe('string');
+    expect(card.rider?.['photoUrl']).not.toBe(AVATAR_KEY);
+    expect(card.rider?.['photoUrl']).toMatch(/\?.*(expires|signature)=/i); // a signed, expiring read of the private object
     expect(card.rider).toMatchObject({
       vehicleMake: 'Honda', vehicleModel: 'CG125', vehicleColor: 'Red', licensePlate: 'CJ 1234',
       user: { firstName: 'Ravi' },
@@ -402,7 +402,7 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
     const near = await makeRider('Nia', STORE);
     await sys(() => app.prisma.user.update({ where: { id: near.userId }, data: { avatar: 'avatars/o2-nia.jpg' } }));
     const nearOrder = await riderOwnedDelivery(near);
-    expect(typeof (await storeDetail(nearOrder)).rider?.photoUrl).toBe('string');
+    expect(typeof (await storeDetail(nearOrder)).rider?.['photoUrl']).toBe('string');
     expect((await handedToRider(nearOrder)).statusCode).toBe(200);
     for (const step of ['en-route-pickup', 'arrived-pickup', 'picked-up']) {
       const res = await call('PUT', `/api/v1/rider/orders/${nearOrder}/${step}`, near.token, {});
