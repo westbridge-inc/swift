@@ -7,6 +7,7 @@ import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
 import { HANDOVER_WORDS, handoverNeedsNoCode, withHandoverSteps } from '../storeHandover';
+import { mmgDisputePaused } from '../order-dispute';
 import { RiderHandoverLine } from '../RiderHandoverLine';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
@@ -195,7 +196,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const isAppt = order.fulfillment === 'APPOINTMENT';
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
   // [STORE-DASH · O-2] The hand-overs ride on top of the shared steps (storeHandover).
-  const actions = withHandoverSteps(order, orderActions(order));
+  const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   // [MOB-050] The one state where a counter hand-over is due.
   const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
   const busy = orderAction.isPending;

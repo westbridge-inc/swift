@@ -2,9 +2,11 @@
  * [STORE-DASH · O-2, owner ruling 22 Oct 19:45Z] What the store reads at a hand-over: the takeaway
  * name and order-number check, the rider's first name, vehicle and photo, and the words — one plain
  * file (no React Native imports), read by the phone and imported as is by the web orders screens.
- * The rules for WHEN a hand-over step is offered stay in storeOrderRules.ts.
+ * It imports nothing: the screen says whether the order is paused for an MMG payment review
+ * (order-dispute mmgDisputePaused, which each orders screen already reads for its notice). That
+ * keeps order-dispute inside the dashboard's shared step code, where the bundler inlines it, so
+ * every dashboard page stays byte-for-byte the size it was (web perf budget on #2054).
  */
-import { mmgDisputePaused } from './order-dispute';
 
 // ─── O-2 hand-overs (owner ruling 22 Oct 19:45Z; server contract STORE-FLOW, #2055) ───────────────
 // - Takeaway: the store's requirePickupCode setting is OFF by default; the server says per order
@@ -46,8 +48,8 @@ export type HandoverStep = 'handed-to-rider' | 'handed-to-customer';
  * "Handed to customer"; a Swift-rider delivery with nothing left for the kitchen gets "Handed to
  * rider". Nothing changes on an order paused for an MMG payment review (only Reject survives).
  */
-export function withHandoverSteps<K extends string>(order: HandoverOrder, steps: { label: string; action: K }[]): { label: string; action: K | HandoverStep }[] {
-  if (mmgDisputePaused(order)) return steps;
+export function withHandoverSteps<K extends string>(order: HandoverOrder, steps: { label: string; action: K }[], paused: boolean): { label: string; action: K | HandoverStep }[] {
+  if (paused) return steps;
   if (handoverNeedsNoCode(order) && steps.some((s) => s.action === 'complete-pickup')) {
     return steps.map((s) => (s.action === 'complete-pickup' ? { label: HANDOVER_WORDS.toCustomer, action: 'handed-to-customer' as const } : s));
   }
@@ -61,9 +63,9 @@ export function withHandoverSteps<K extends string>(order: HandoverOrder, steps:
  * (its notice says "Don't hand anything over until then"). Null when the code is on, or on an
  * older server: the screen keeps today's code words.
  */
-export function pickupCheckWords(order: HandoverOrder): string | null {
+export function pickupCheckWords(order: HandoverOrder, paused: boolean): string | null {
   if (!handoverNeedsNoCode(order)) return null;
-  if (mmgDisputePaused(order)) return HANDOVER_WORDS.collects;
+  if (paused) return HANDOVER_WORDS.collects;
   return HANDOVER_WORDS.checkName(order?.customer?.firstName, order?.orderNumber);
 }
 

@@ -63,6 +63,7 @@ import {
 import { cardTapFor } from '../boardTaps';
 import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
 import { HANDOVER_WORDS, pickupCheckWords, withHandoverSteps } from '../storeHandover';
+import { mmgDisputePaused } from '../order-dispute';
 import { RiderHandoverLine } from '../RiderHandoverLine';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
@@ -105,7 +106,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   showStore?: boolean;
 }) {
   // [STORE-DASH · O-2] The hand-overs ride on top of the shared steps (storeHandover).
-  const actions = withHandoverSteps(order, orderActions(order));
+  const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   const isMmg = order.paymentMethod === 'MOBILE_MONEY';
   const mmgPaid = order.paymentStatus === 'CAPTURED';
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes((order.status || '').toUpperCase());
@@ -210,7 +211,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
           <T variant="label" tone="muted">
             {/* [STORE-DASH · O-2] With the store's pickup code off: check the name and the order number
                 (never a hand-over prompt on a paused order — REVIEW-F S3-1 on #2054). */}
-            {pickupCheckWords(order) ?? 'Ask the customer for their code at collection'}
+            {pickupCheckWords(order, mmgDisputePaused(order)) ?? 'Ask the customer for their code at collection'}
           </T>
         </View>
       ) : !isPickup && order.deliveryAddress ? (

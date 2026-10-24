@@ -564,7 +564,7 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
   // [STORE-DASH · O-2] The hand-overs ride on top of the app's steps (storeHandover), as on the phone card.
-  const actions = withHandoverSteps(order, orderActions(order)).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
+  const actions = withHandoverSteps(order, orderActions(order), paused).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
   if (actions.length === 0 && !isMmg && !paused && !order.handedToRiderAt) return null;
   const busy = act.isPending || reject.isPending;
   return (

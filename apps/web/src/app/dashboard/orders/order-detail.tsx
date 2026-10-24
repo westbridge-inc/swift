@@ -576,7 +576,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       {/* [REVIEW-F S4-3 on #2054] Not on a closed order; with the code off, the name and order-number
           check (never a hand-over prompt while paused — storeHandover.pickupCheckWords). */}
       {o.fulfillment === 'PICKUP' && !['COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s) && (
-        <p className="mt-3 text-sm text-[var(--swift-muted)]">{pickupCheckWords(o) ?? 'Customer collects with a pickup code.'}</p>
+        <p className="mt-3 text-sm text-[var(--swift-muted)]">{pickupCheckWords(o, paused) ?? 'Customer collects with a pickup code.'}</p>
       )}
 
       {/* [STORE-DASH] The lines are ticked on the order's own state, never on the board's copy. */}

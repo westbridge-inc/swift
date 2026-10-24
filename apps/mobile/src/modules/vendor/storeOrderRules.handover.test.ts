@@ -114,15 +114,15 @@ describe('[REVIEW-F S3-1 on #2054] the takeaway line never prompts a hand-over o
   const pickup = (extra: Record<string, unknown> = {}) => ({ status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', customer: { firstName: 'Asha' }, orderNumber: 'SW-1001', ...extra });
   const paused = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:00:00.000Z' };
   it('code off: the name and order-number check', () => {
-    expect(pickupCheckWords(pickup({ pickupCodeRequired: false }))).toBe('Check the name before you hand it over: Asha · order #SW-1001');
+    expect(pickupCheckWords(pickup({ pickupCodeRequired: false }), false)).toBe('Check the name before you hand it over: Asha · order #SW-1001');
   });
   it('code off on an order paused for an MMG payment review: no hand-over prompt', () => {
-    expect(pickupCheckWords(pickup({ pickupCodeRequired: false, ...paused }))).toBe('The customer collects this order.');
+    expect(pickupCheckWords(pickup({ pickupCodeRequired: false, ...paused }), true)).toBe('The customer collects this order.');
   });
   it('code on, or an older server: null (the screen keeps its code words)', () => {
-    expect(pickupCheckWords(pickup({ pickupCodeRequired: true }))).toBeNull();
-    expect(pickupCheckWords(pickup())).toBeNull();
-    expect(pickupCheckWords(null)).toBeNull();
+    expect(pickupCheckWords(pickup({ pickupCodeRequired: true }), false)).toBeNull();
+    expect(pickupCheckWords(pickup(), false)).toBeNull();
+    expect(pickupCheckWords(null, false)).toBeNull();
   });
 });
 
@@ -152,7 +152,7 @@ describe('[O-2] the phone sends the right request for each', () => {
   it('[REVIEW-F S3-1/S4-1 on #2054] the board card shows the rider check only beside its "Handed to rider" button, and the takeaway line through pickupCheckWords', () => {
     const board = read('src/modules/vendor/screens/VendorOps.tsx');
     expect(board).toMatch(/\{actions\.some\(\(a\) => a\.action === 'handed-to-rider'\) \? <RiderHandoverLine rider=\{order\.rider\} \/> : null\}/);
-    expect(board).toMatch(/\{pickupCheckWords\(order\) \?\? 'Ask the customer for their code at collection'\}/);
+    expect(board).toMatch(/\{pickupCheckWords\(order, mmgDisputePaused\(order\)\) \?\? 'Ask the customer for their code at collection'\}/);
     expect(board).not.toMatch(/canMarkHandedToRider\(order\) \? <RiderHandoverLine/);
   });
   it('the tap\'s answer writes handedToRiderAt into the order\'s caches', () => {
@@ -165,28 +165,35 @@ describe('[O-2] the hand-overs ride on top of the shared steps (withHandoverStep
   const takeaway = (extra: Record<string, unknown> = {}) => ({ status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', ...extra });
   const paused = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:00:00.000Z' };
   it('code off: "Mark picked up" becomes "Handed to customer"', () => {
-    expect(withHandoverSteps(takeaway({ pickupCodeRequired: false }), pickedUp)).toEqual([{ label: 'Handed to customer', action: 'handed-to-customer' }]);
+    expect(withHandoverSteps(takeaway({ pickupCodeRequired: false }), pickedUp, false)).toEqual([{ label: 'Handed to customer', action: 'handed-to-customer' }]);
   });
   it('code on, or an older server: the steps are unchanged', () => {
-    expect(withHandoverSteps(takeaway({ pickupCodeRequired: true }), pickedUp)).toEqual(pickedUp);
-    expect(withHandoverSteps(takeaway(), pickedUp)).toEqual(pickedUp);
+    expect(withHandoverSteps(takeaway({ pickupCodeRequired: true }), pickedUp, false)).toEqual(pickedUp);
+    expect(withHandoverSteps(takeaway(), pickedUp, false)).toEqual(pickedUp);
   });
   it('a Swift rider at the counter with nothing left for the kitchen: "Handed to rider"', () => {
-    expect(withHandoverSteps(delivery(), [])).toEqual([{ label: 'Handed to rider', action: 'handed-to-rider' }]);
+    expect(withHandoverSteps(delivery(), [], false)).toEqual([{ label: 'Handed to rider', action: 'handed-to-rider' }]);
   });
   it('[REVIEW-F S4-1] a kitchen step still due ("Ready for delivery"): no "Handed to rider" yet', () => {
     const ready = [{ label: 'Ready for delivery', action: 'ready' as const }];
-    expect(withHandoverSteps(delivery({ status: 'RIDER_ASSIGNED' }), ready)).toEqual(ready);
+    expect(withHandoverSteps(delivery({ status: 'RIDER_ASSIGNED' }), ready, false)).toEqual(ready);
   });
   it('[REVIEW-F S3-1] paused for an MMG payment review: nothing is added or changed', () => {
-    expect(withHandoverSteps(delivery(paused), [])).toEqual([]);
-    expect(withHandoverSteps(takeaway({ pickupCodeRequired: false, ...paused }), [])).toEqual([]);
+    expect(withHandoverSteps(delivery(paused), [], true)).toEqual([]);
+    expect(withHandoverSteps(takeaway({ pickupCodeRequired: false, ...paused }), pickedUp, true)).toEqual(pickedUp);
   });
-  it('both phone screens and the web card add them to the shared steps', () => {
+  it('both phone screens and the web card add them to the shared steps, saying whether the order is paused', () => {
     for (const f of ['src/modules/vendor/screens/VendorOps.tsx', 'src/modules/vendor/screens/VendorOrderDetailScreen.tsx']) {
-      expect(read(f), f).toMatch(/const actions = withHandoverSteps\(order, orderActions\(order\)\);/);
+      expect(read(f), f).toMatch(/const actions = withHandoverSteps\(order, orderActions\(order\), mmgDisputePaused\(order\)\);/);
+      expect(read(f), f).toMatch(/import \{ mmgDisputePaused \} from '\.\.\/order-dispute';/);
     }
-    expect(read('../web/src/components/orders-home.tsx')).toMatch(/const actions = withHandoverSteps\(order, orderActions\(order\)\)\.filter\(/);
+    const card = read('../web/src/components/orders-home.tsx');
+    expect(card).toMatch(/const paused = mmgDisputePaused\(order\);\n[^]*const actions = withHandoverSteps\(order, orderActions\(order\), paused\)\.filter\(/);
+    const win = read('../web/src/app/dashboard/orders/order-detail.tsx');
+    expect(win).toMatch(/const paused = mmgDisputePaused\(o\);[^]*\{pickupCheckWords\(o, paused\) \?\? 'Customer collects with a pickup code\.'\}/);
+  });
+  it('[web perf budget on #2054] storeHandover.ts imports nothing, so the dashboard\'s shared order-dispute code stays inlined', () => {
+    expect(read('src/modules/vendor/storeHandover.ts')).not.toMatch(/^\s*import\b/m);
   });
   it('the shared step lists stay as they were (the dashboard\'s shared code does not grow)', () => {
     for (const f of ['src/modules/vendor/shared.tsx', '../web/src/lib/vendor-hub.ts', 'src/modules/vendor/storeOrderRules.ts', '../web/src/lib/vendor-api.ts']) {
