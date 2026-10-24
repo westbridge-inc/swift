@@ -140,7 +140,9 @@ async function providerLists(prisma: ProviderVerificationDb, userId: string) {
  * base (identity + character) PLUS any trade-mandated extension from
  * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
  * Electrical work is illegal without a GEI Electrical Contractor Licence, so
- * electricians carry `gei_electrical_licence` as a GATE, never a badge.
+ * electricians carry `gei_electrical_licence` as a GATE. [ROLE-DOCS · PR 3] Once a
+ * person has approved it, it is also the licence line ("Licence on file, checked
+ * on [date]", requiredLicenceCheckedOn) — never a badge of its own.
  *
  * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
  * floor (identity, police clearance and its own licences), which no stored
@@ -226,8 +228,23 @@ export function tradeLicencesOf(checklist: readonly string[]): string[] {
  * record) but is never shown as a licence a person checked.
  */
 export async function requiredLicenceCheckedOn(prisma: ProviderVerificationDb, userId: string, now = new Date()): Promise<Date | null> {
+  return (await requiredLicenceStatus(prisma, userId, now)).checkedOn;
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] Whether the provider's trade REQUIRES a licence, and the day a person checked
+ * it (requiredLicenceCheckedOn). A trade that requires a licence is never "self-skilled": with no person's check the
+ * line reads "No trade credential shown", never "Self-skilled".
+ */
+export async function requiredLicenceStatus(
+  prisma: ProviderVerificationDb, userId: string, now = new Date(),
+): Promise<{ required: boolean; checkedOn: Date | null }> {
   const licences = tradeLicencesOf(await providerChecklist(prisma, userId));
-  if (licences.length === 0) return null;
+  if (licences.length === 0) return { required: false, checkedOn: null };
+  return { required: true, checkedOn: await personCheckedOn(prisma, userId, licences, now) };
+}
+
+async function personCheckedOn(prisma: ProviderVerificationDb, userId: string, licences: string[], now: Date): Promise<Date | null> {
   const rows = (await approvedEvidenceFor(prisma, userId, licences, now)).filter((row) => row.userId === userId);
   const approvers = [...new Set(rows.map((row) => row.approvedBy).filter((by) => !/^(system$|kyc:|auto:|engine:)/.test(by)))];
   const people = approvers.length === 0
@@ -280,8 +297,8 @@ export async function projectProviderVerificationLocked(
         },
       })
     : 0;
-  // [ROLE-DOCS · PR 3] A required trade licence a person approved is not "self-skilled" either.
-  const selfSkilled = matchingQualificationCount === 0 && (await requiredLicenceCheckedOn(tx, userId)) === null;
+  // [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] A trade that requires a licence is never "self-skilled".
+  const selfSkilled = matchingQualificationCount === 0 && !(await requiredLicenceStatus(tx, userId)).required;
 
   await observer?.afterSnapshot?.({
     providerId: provider.id,
