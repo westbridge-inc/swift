@@ -140,6 +140,13 @@ describe('[ROLE-DOCS] what counts as trading under your own name (BNA s.3)', () 
     expect(OWN_NAME_DECLARATION_V1).not.toMatch(/other than by marriage/);
   });
 
+  it('[REVIEW-M #2046 S4] the vendors column is added under a 10 s lock timeout (vendors is a hot table)', () => {
+    const sql = readFileSync(join(__dirname, '../../prisma/migrations/20261021170000_vendor_own_name/migration.sql'), 'utf8');
+    const lock = sql.indexOf("SET lock_timeout = '10s';");
+    expect(lock).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(sql.indexOf('ALTER TABLE "vendors"'));
+  });
+
   it('the own-name lists replace ONLY the business registration, for the three store types asked for one', () => {
     for (const role of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const standard = DEFAULT_DOCUMENT_CHECKLISTS[role]!;
