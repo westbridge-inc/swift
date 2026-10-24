@@ -61,7 +61,9 @@ export function counterpartPhone(
 
 /**
  * Null every counterpart personal phone on an order-shaped payload, in place:
- * customer.phone, rider.phone, rider.user.phone, driver.phone, driver.user.phone.
+ * customer.phone, rider.phone, rider.user.phone, driver.phone, driver.user.phone,
+ * and the parcel recipient's number the sender typed (courierRecipientPhone,
+ * shown to the assigned courier rider; the bridge can call the recipient).
  * A no-op when this request may have them.
  */
 export function withCounterpartPhones<T>(request: { headers: Headers }, order: T): T {
@@ -74,5 +76,6 @@ export function withCounterpartPhones<T>(request: { headers: Headers }, order: T
     const user = party['user'] as Record<string, unknown> | null | undefined;
     if (user && typeof user === 'object' && 'phone' in user) user['phone'] = null;
   }
+  if ('courierRecipientPhone' in row) row['courierRecipientPhone'] = null;
   return order;
 }

@@ -9,10 +9,14 @@
  * store. The store builds already installed (no header) keep receiving the
  * number they dial today until COUNTERPART_PHONES_TO_OLD_APPS=0 retires it.
  *
- * Three fields no build ever read are gone for EVERY client: the store's
- * account/OTP line and the parcel recipient's number on the rider's live
- * order, and (static, counterpart-phone-census.test.ts) the driver's phone on
- * the accept socket event and both phones on the cash-settlement ledger.
+ * The parcel recipient's number (typed by the sender) is gated the same way
+ * on the courier rider's live order: #1694 sends it to the assigned rider for
+ * the handover, and the bridge can call the recipient instead.
+ *
+ * Fields no build ever read are gone for EVERY client: the store's account/OTP
+ * line on the rider's live order, and (static, counterpart-phone-census.test.ts)
+ * the driver's phone on the accept socket event and both phones on the
+ * cash-settlement ledger.
  *
  * Every party here has a REAL, distinct phone, so a leak shows as that string
  * in the body. Every number comes from testPhone() (the run-wide fictional
@@ -167,6 +171,8 @@ const SURFACES: Surface[] = [
   { name: 'GET /vendor/orders/:id (store sees customer)', url: () => `/api/v1/vendor/orders/${foodId}`, token: () => owner.token, counterpart: () => phones['diner']!, headers: vendorHeaders },
   { name: 'GET /vendor/orders/:id (store sees rider)', url: () => `/api/v1/vendor/orders/${foodId}`, token: () => owner.token, counterpart: () => phones['rider']!, headers: vendorHeaders },
   { name: 'GET /vendor/orders (store board sees rider)', url: () => '/api/v1/vendor/orders', token: () => owner.token, counterpart: () => phones['rider']!, headers: vendorHeaders },
+  { name: 'GET /rider/orders/active (courier rider sees parcel recipient)', url: () => '/api/v1/rider/orders/active', token: () => courierP.token, counterpart: () => RECIPIENT },
+  { name: 'GET /rider/orders/active-legs (courier rider sees parcel recipient)', url: () => '/api/v1/rider/orders/active-legs', token: () => courierP.token, counterpart: () => RECIPIENT },
 ];
 
 describe('[O-1] a bridge-aware client is sent no counterpart personal phone', () => {
@@ -203,13 +209,13 @@ describe('[O-1 retirement] COUNTERPART_PHONES_TO_OLD_APPS=0: no client is sent o
 describe('[O-1] fields no build reads are gone for every client', () => {
   for (const headers of [{}, BRIDGE]) {
     const who = Object.keys(headers).length ? 'bridge-aware' : 'old build';
-    it(`the rider's live parcel carries no recipient number (${who})`, async () => {
+    it(`the rider's live parcel is returned and keeps the recipient key (${who})`, async () => {
       for (const url of ['/api/v1/rider/orders/active', '/api/v1/rider/orders/active-legs']) {
         const res = await get(url, courierP.token, headers);
         expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
         expect(res.body.includes(parcelId), `${url} did not return the parcel at all`).toBe(true);
-        expect(res.body.includes(RECIPIENT), `${url} sent the recipient's number`).toBe(false);
-        expect(res.body.includes('courierRecipientPhone'), `${url} still names the recipient field`).toBe(false);
+        // the key stays (null for a bridge-aware client), so every build's `phone ? <Call> : null` holds
+        expect(res.body.includes('courierRecipientPhone'), `${url} dropped the recipient field`).toBe(true);
       }
     });
     it(`the rider's live store order carries no store account line (${who})`, async () => {

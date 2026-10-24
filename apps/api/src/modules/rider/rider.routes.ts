@@ -1271,8 +1271,8 @@ export async function riderRoutes(app: FastifyInstance) {
     const order = await app.prisma.order.findUnique({
       where: { id: rider.currentOrderId, riderId: rider.id },
       // [F-0011] The response spreads this row wholesale — omit at the source.
-      // [O-1] Likewise the parcel recipient's number: no build read it.
-      omit: { ...HANDOVER_SECRETS_OMIT, courierRecipientPhone: true },
+      // [O-1] The parcel recipient's number is gated below (withCounterpartPhones).
+      omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
 
@@ -1298,7 +1298,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const rows = await app.prisma.order.findMany({
       where: { riderId: rider.id, orderType: { not: 'TAXI' }, status: { notIn: TERMINAL_ORDER_STATUSES } },
       orderBy: { acceptedAt: 'asc' },
-      omit: { ...HANDOVER_SECRETS_OMIT, courierRecipientPhone: true },
+      omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
     const legs = rows.map((o) => ({ ...withCounterpartPhones(request, activeOrderView(o)), isPrimary: o.id === rider.currentOrderId }));

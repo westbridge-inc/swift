@@ -159,6 +159,7 @@ describe('[O-1] the gate itself', () => {
       customer: { firstName: 'A', phone: P1 },
       rider: { phone: P2, user: { firstName: 'B', phone: P3 } },
       driver: { user: { phone: P4 } },
+      courierRecipientPhone: P2,
       orderNumber: 'X',
     };
     const out = withCounterpartPhones(req(BRIDGE_ON), o);
@@ -167,6 +168,7 @@ describe('[O-1] the gate itself', () => {
     expect(out.customer.phone).toBeNull();
     expect(out.rider.user.phone).toBeNull();
     expect('phone' in out.driver.user).toBe(true);
+    expect(out.courierRecipientPhone).toBeNull();
     const legacy = { customer: { phone: P1 } };
     expect(withCounterpartPhones(req(), legacy).customer.phone).toBe(P1);
   });
