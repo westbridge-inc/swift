@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 vi.mock('../plugins/prisma', () => ({ runWithoutTenant: (fn: () => unknown) => fn() }));
-vi.mock('./helpers/fixture-ids', () => ({ testPhone: () => '+5920600001' }));
+vi.mock('./helpers/fixture-ids', () => ({ testPhone: () => 'synthetic-phone' }));
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 
 // The suites' second approver is made once per tenant and removed by
