@@ -1,6 +1,7 @@
 import type { FastifyInstance, HTTPMethods, InjectOptions } from 'fastify';
 import type { PrismaClient, UserRole } from '@prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
+import { sessionCredentialDigest } from '../../lib/session-credential';
 
 // ---------------------------------------------------------------------------
 // [row 300 · T3] The route-table cross-tenant attack matrix.
@@ -196,8 +197,10 @@ export async function seedWorld(owner: PrismaClient): Promise<World> {
 /** A live session and access token for an attacker (privileged roles sign in by OTP, as their assurance requires). */
 export async function mintToken(app: FastifyInstance, owner: PrismaClient, attacker: { userId: string; role: UserRole }): Promise<string> {
   const token = app.jwt.sign({ userId: attacker.userId, role: attacker.role, jti: randomBytes(6).toString('hex') });
+  // This raw owner client sits outside the app client's credential-digest
+  // extension, so it stores the digests itself (sessions keep digests only).
   await owner.session.create({ data: {
-    userId: attacker.userId, token, refreshToken: randomBytes(24).toString('hex'), authMethod: 'OTP',
+    userId: attacker.userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(randomBytes(24).toString('hex')), authMethod: 'OTP',
     deviceId: 'matrix', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000),
   } });
   return token;
