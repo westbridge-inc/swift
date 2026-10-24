@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { partnerPriceList } from '../country/partner-pricing';

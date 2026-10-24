@@ -282,7 +282,7 @@ describe('§9.1 video transport cap (the 5 MB global-limit bug)', () => {
     const member = await makeCustomer();
     const a = await app.prisma.advertiser.create({ data: { companyName: `Vid ${nanoid(6)}`, industry: 'RETAIL', contactName: 'V', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000002', createdByUserId: member.userId, status: 'APPROVED' } });
     advertiserIds.push(a.id);
-    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: member.userId, role: 'OWNER' } });
+    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: member.userId, role: 'OWNER', acceptedAt: new Date() } });
     const p = await app.prisma.adPlacement.create({ data: { key: `v-${nanoid(6)}`, name: 'Hero', tier: 1, mediaKind: 'VIDEO', weeklyPrice: 50000, slotsPerWeek: 1 } });
     placementIds.push(p.id);
     const c = await app.prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: 'VidCamp', cities: ['*'], startWeek: WEEK1, endWeek: WEEK1, status: 'PENDING_REVIEW' } });

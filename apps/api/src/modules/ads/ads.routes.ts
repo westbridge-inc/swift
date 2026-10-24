@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AdvertiserService } from './advertiser.service';
 import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
 import { AdCheckoutService } from './checkout.service';
@@ -8,8 +8,8 @@ import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
 import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { adsEnabled } from './ads-enabled';
+import { NotificationService } from '../notification/notification.service';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
 // the "under review" dashboard read. Ops/admin queue actions live in the admin
@@ -74,7 +74,7 @@ export async function adsRoutes(app: FastifyInstance) {
    *  the inventory engine. */
   app.get<{ Params: { id: string } }>('/placements/:id/availability', auth, async (request) => {
     const member = await app.prisma.advertiserMember.findFirst({
-      where: { userId: request.user.userId },
+      where: { userId: request.user.userId, acceptedAt: { not: null } },
       select: { advertiserId: true },
     });
     if (!member) {
@@ -329,47 +329,35 @@ export async function adsRoutes(app: FastifyInstance) {
     };
   });
 
-  /** §14.6 team — list members; OWNER adds MANAGER/ANALYST by phone (the
-   *  invited person must already have a Swift account). */
-  app.get<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => {
-    await advertisers.assertMember(request.params.id, request.user.userId);
-    const members = await app.prisma.advertiserMember.findMany({ where: { advertiserId: request.params.id } });
-    const users = await app.prisma.user.findMany({
-      where: { id: { in: members.map((m) => m.userId) } },
-      select: { id: true, firstName: true, lastName: true, phone: true },
-    });
-    const userById = new Map(users.map((u) => [u.id, u]));
-    return {
-      success: true,
-      data: members.map((m) => {
-        const u = userById.get(m.userId);
-        return { userId: m.userId, role: m.role, name: u ? `${u.firstName} ${u.lastName}`.trim() : null, phone: u?.phone ?? null };
-      }),
-    };
-  });
+  /** §14.6 team — [ads security] a member reads the team: accepted members by name and phone, an
+   *  open invitation by its role only. OWNER invites by phone; the person accepts or declines. */
+  app.get<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => ({
+    success: true, data: await advertisers.teamList(request.params.id, request.user.userId),
+  }));
 
   app.post<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => {
     const body = z.object({
       phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Use international format, e.g. +5926001234.'),
       role: z.enum(['MANAGER', 'ANALYST']),
     }).parse(request.body ?? {});
-    await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
-    const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
-    // [REVIEW-PARTNER] No membership is granted by a demo account (about the
-    // caller alone, so it says nothing about the number typed).
-    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
-    // [Row 55] One reply for every number: an unknown phone is no longer a
-    // 404 and a known one no longer hands back its user id. (Invite + accept
-    // for advertiser teams follows after launch; ads are off at launch.)
-    // A demo account is never granted one either; same reply.
-    if (invited && !(await isReviewAccount(app.prisma, invited.id))) {
-      await app.prisma.advertiserMember.upsert({
-        where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
-        create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
-        update: { role: body.role },
-      });
-    }
+    // [Row 55] One reply for every number: an unknown phone, a demo account and a real one answer
+    // alike, and the reply never carries a user id. Nothing is granted until the person accepts.
+    await advertisers.inviteToTeam({ redis: app.redis, notifications: new NotificationService(app.prisma, app.io) },
+      request.params.id, request.user.userId, body.phone, body.role);
     return { success: true, data: { status: 'SENT_IF_ACCOUNT', role: body.role } };
+  });
+
+  /** The caller's own open team invitations. */
+  app.get('/advertiser/invites', auth, async (request) => ({ success: true, data: await advertisers.listTeamInvites(request.user.userId) }));
+
+  app.post<{ Params: { id: string } }>('/advertiser/:id/members/accept', auth, async (request) => {
+    await advertisers.acceptTeamInvite(request.params.id, request.user.userId);
+    return { success: true, data: { status: 'ACCEPTED' } };
+  });
+
+  app.post<{ Params: { id: string } }>('/advertiser/:id/members/decline', auth, async (request) => {
+    await advertisers.declineTeamInvite(request.params.id, request.user.userId);
+    return { success: true, data: { status: 'DECLINED' } };
   });
 
   /** §14.4 — the EXACT refund the advertiser will get if they cancel now,

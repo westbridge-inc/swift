@@ -1422,6 +1422,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info({ ...result }, 'backup freshness checked');
         return;
       }
+      if (job.name === 'erasure-ledger-watch') {
+        // [Off-site erasure ledger] An erasure not shipped off-site within 10 minutes pages the platform.
+        const { pageErasureLedgerShipping } = await import('../modules/ops/erasure-ledger-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageErasureLedgerShipping({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        ctx.log.info({ stale: result.stale, unshipped: result.unshipped, oldestMinutes: result.oldestMinutes }, 'erasure ledger shipping checked');
+        return;
+      }
 
       // [DCR-1 CW] Commencement Watch: scan the Gazette/parliament sources,
       // dedupe alerts, notify the founder channels. Observes and alerts ONLY.
@@ -2067,6 +2075,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // [ads security] advertiser team invitations past their days are deleted (they hold a person's id).
+        const { AdvertiserService } = await import('../modules/ads/advertiser.service');
+        const expiredInvites = await new AdvertiserService(ctx.prisma, ctx.io).purgeExpiredTeamInvites();
+        if (expiredInvites > 0) ctx.log.info({ expiredInvites }, 'ads: expired team invitations deleted');
         // §16 "review SLA at risk": reviewable creatives past 75% of the SLA
         // window page ops — once per creative per window (redis once-key),
         // same posture as incident-sla-watch.
@@ -2513,6 +2525,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // cutoff go to a person, cancelled by the system, marking nobody.
         const { sweepFoodAge } = await import('../modules/dispatch/rescue');
         const { NotificationService } = await import('../modules/notification/notification.service');
+        // [OF-33] A rider who accepted and never picks up (GPS alive): one
+        // nudge, then the leg goes back to dispatch as a no-show. Never a cancel.
+        const { sweepPickupOverdue } = await import('../modules/dispatch/pickup-overdue');
+        const overduePickups = await sweepPickupOverdue(
+          { prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) },
+          async (orderId) => { await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 }); },
+        );
+        if (overduePickups.released.length > 0) ctx.log.warn({ released: overduePickups.released }, 'pickup-overdue: rider no-shows released back to dispatch');
         const aged = await sweepFoodAge({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
         if (aged.retired.length > 0) ctx.log.warn({ retired: aged.retired }, 'rescue: orders too old to deliver were cancelled and handed to a person');
         if (dw.recovered.length + dw.flagged.length > 0) {
@@ -2867,6 +2887,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // or are staying on the machine they protect.
   await queues.verificationQueue.add('backup-freshness', {}, {
     repeat: { pattern: '30 5 * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Off-site erasure ledger] Every five minutes: an erasure the host unit has not shipped off-site
+  // within 10 minutes pages the platform responders.
+  await queues.verificationQueue.add('erasure-ledger-watch', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

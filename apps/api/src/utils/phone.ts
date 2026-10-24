@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../lib/zod';
 
 /**
  * Normalize a user-entered phone to the ONE canonical form the platform stores

@@ -6,7 +6,7 @@ import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-ca
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
@@ -1502,6 +1502,10 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put('/profile', auth, async (request) => {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
+    // [PIN-OWNER] Either coordinate makes this an owner action, even when the
+    // pair is incomplete. Refuse before validation or any profile/money write.
+    const supplied = request.body as { latitude?: unknown; longitude?: unknown } | null;
+    if (supplied?.latitude !== undefined || supplied?.longitude !== undefined) requireRole(access, 'OWNER');
     const body = updateVendorProfileSchema.parse(request.body);
     if (body.name !== undefined) {
       // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.

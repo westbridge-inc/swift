@@ -1,7 +1,7 @@
 import { errorCodes, type FastifyInstance, type FastifyRequest } from 'fastify';
 import { Readable } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { BillingService } from './billing.service';
 import { AgentCashService } from './agent-cash.service';
 import { resolveSan } from './san.service';
