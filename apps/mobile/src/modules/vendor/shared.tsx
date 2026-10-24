@@ -22,7 +22,7 @@ export function prettyVendorType(t?: string) {
 
 // ─── Order helpers ───────────────────────────────────────────────────────────
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 /** Statuses where a rider owns the status lane; kitchen progress then rides
  *  the preparingAt/readyAt timestamps (see the vendor prep routes). */

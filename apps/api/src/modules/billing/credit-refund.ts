@@ -3,7 +3,7 @@ import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
 import { AppError } from '../../utils/errors';
 import { isDuplicateOn } from '../money/evidence';
 import { lockMoverFeeAuthority, lockSubscriptionPayer } from '../subscription/mover-fee-authority';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { isSoleApprover } from '../admin/solo-approval';
 import { normaliseReference } from '../money/evidence';
 import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings } from './ledger';

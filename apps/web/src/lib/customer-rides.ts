@@ -42,3 +42,15 @@ export async function requestRide(body: WebRideRequest, idempotencyKey: string):
 export async function rideSos(id: string, point: { lat: number; lng: number } | null): Promise<{ status?: string; sosAlertId?: string }> {
   return (await apiFetch(`/api/v1/rides/${encodeURIComponent(id)}/sos`, { method: 'POST', body: JSON.stringify(point ?? {}) })).data;
 }
+
+// ── [WEB-TAXI] Trip Guardian on the trip page ──────────────────────────────
+// The phone raises its check-in card from the order room AND asks the server
+// on arrival (GET /safety/guardian/checkin — the caller's own trip only); the
+// page asks on every refresh. Answers go to the same endpoint the phone uses.
+export interface GuardianCheckin { sessionId: string; orderId: string; level: 'SOFT' | 'HARD'; requestedAt: string; deadlineAt: string | null }
+export async function outstandingCheckin(): Promise<GuardianCheckin | null> {
+  return (await apiFetch('/api/v1/safety/guardian/checkin', undefined, { redirectOnExpired: false })).data ?? null;
+}
+export async function answerCheckin(response: 'OK' | 'NEED_HELP'): Promise<{ escalated: boolean }> {
+  return (await apiFetch('/api/v1/safety/guardian/checkin', { method: 'POST', body: JSON.stringify({ response }) })).data;
+}
