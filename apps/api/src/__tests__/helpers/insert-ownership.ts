@@ -37,8 +37,10 @@ function trackedInserts(delegate: Delegate, ids: Ids, prefix: string) {
 /** A run owns successful inserts on its client, never a before/after census.
  * Production writes many notices inside interactive transactions (the fee
  * demand, handover and pickup notices: lib/owner-wall-notices), on a tx client
- * whose delegates are not the app client's, so every transaction the app opens
- * hands its callback a client whose notice and alert inserts are recorded too. */
+ * whose delegates are not the app client's, and some routes use an `$extends`
+ * client of their own (the admin routes' tenant client). Every transaction the
+ * app opens, and every client it extends once tracking starts, records its
+ * notice and alert inserts too: start tracking before the routes register. */
 export function trackMessageInserts(prisma: PrismaClient) {
   const alertIds = new Set<string>();
   const notificationIds = new Set<string>();
@@ -54,22 +56,35 @@ export function trackMessageInserts(prisma: PrismaClient) {
   spyAll(prisma.alertDelivery, forAlerts(prisma.alertDelivery));
   spyAll(prisma.notification, forNotices(prisma.notification));
 
-  const trackTx = (tx: Prisma.TransactionClient): Prisma.TransactionClient => {
-    const alerts = { ...forAlerts(tx.alertDelivery) };
-    const notices = { ...forNotices(tx.notification) };
-    const wrap = (delegate: object, tracked: Record<string, unknown>) => new Proxy(delegate, {
-      get: (target, key, receiver) => (typeof key === 'string' && key in tracked ? tracked[key] : Reflect.get(target, key, receiver)),
+  // A client the app derives from this one (a transaction's client, or an
+  // `$extends` client such as the admin routes' tenant client) answers with
+  // recording delegates too, and so do the clients derived from it.
+  const wrapDelegate = (delegate: object, tracked: Record<string, unknown>) => new Proxy(delegate, {
+    get: (target, key, receiver) => (typeof key === 'string' && key in tracked ? tracked[key] : Reflect.get(target, key, receiver)),
+  });
+  const runTracked = (run: (arg: unknown, options?: unknown) => Promise<unknown>) => (arg: unknown, options?: unknown) => (typeof arg === 'function'
+    ? run((tx: Prisma.TransactionClient) => (arg as (client: Prisma.TransactionClient) => unknown)(trackClient(tx)), options)
+    : run(arg, options));
+  function trackClient<C extends object>(client: C): C {
+    const base = client as unknown as Prisma.TransactionClient & { $transaction?: (arg: unknown, options?: unknown) => Promise<unknown>; $extends?: (...args: unknown[]) => object };
+    const alertDelivery = wrapDelegate(base.alertDelivery, forAlerts(base.alertDelivery));
+    const notification = wrapDelegate(base.notification, forNotices(base.notification));
+    const transaction = base.$transaction ? runTracked(base.$transaction.bind(base)) : undefined;
+    const extend = base.$extends ? (...args: unknown[]) => trackClient(base.$extends!(...args)) : undefined;
+    return new Proxy(client, {
+      get: (target, key, receiver) => {
+        if (key === 'alertDelivery') return alertDelivery;
+        if (key === 'notification') return notification;
+        if (key === '$transaction' && transaction) return transaction;
+        if (key === '$extends' && extend) return extend;
+        return Reflect.get(target, key, receiver);
+      },
     });
-    const alertDelivery = wrap(tx.alertDelivery, alerts);
-    const notification = wrap(tx.notification, notices);
-    return new Proxy(tx, {
-      get: (target, key, receiver) => (key === 'alertDelivery' ? alertDelivery : key === 'notification' ? notification : Reflect.get(target, key, receiver)),
-    });
-  };
+  }
   const transaction = prisma.$transaction.bind(prisma) as (arg: unknown, options?: unknown) => Promise<unknown>;
-  spies.push(vi.spyOn(prisma, '$transaction').mockImplementation(((arg: unknown, options?: unknown) => (typeof arg === 'function'
-    ? transaction((tx: Prisma.TransactionClient) => (arg as (client: Prisma.TransactionClient) => unknown)(trackTx(tx)), options)
-    : transaction(arg, options))) as unknown as typeof prisma.$transaction));
+  spies.push(vi.spyOn(prisma, '$transaction').mockImplementation(runTracked(transaction) as unknown as typeof prisma.$transaction));
+  const extend = prisma.$extends.bind(prisma) as (...args: unknown[]) => object;
+  spies.push(vi.spyOn(prisma, '$extends').mockImplementation(((...args: unknown[]) => trackClient(extend(...args))) as unknown as typeof prisma.$extends));
 
   return { alertIds, notificationIds, restore: () => { for (const spy of spies) spy.mockRestore(); } };
 }

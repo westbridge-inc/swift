@@ -188,6 +188,17 @@ export function createGolden(phonePrefix: string, fixture: string) {
     registerEmptyJsonBodyParser(app);
     await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
     await app.register(prismaPlugin);
+    // [G7-01] Track every production write path, for every alert kind
+    // (helpers/insert-ownership): a single create owns its ID only after
+    // success, bulk RETURNING captures only rows actually inserted (so
+    // skipDuplicates cannot claim a peer's keyed alert), and notices written
+    // inside interactive transactions or through an extended client are
+    // recorded too. It starts before any route registers, so a route that
+    // extends the client (the admin routes' tenant client) extends this one.
+    const tracking = trackMessageInserts(app.prisma);
+    createdAlertIds = tracking.alertIds;
+    createdNotificationIds = tracking.notificationIds;
+    restoreTracking.push(tracking.restore);
     await app.register(redisPlugin);
     await app.register(authPlugin);
     await app.register(socketPlugin);
@@ -198,16 +209,6 @@ export function createGolden(phonePrefix: string, fixture: string) {
     await app.register(authRoutes, { prefix: '/api/v1/auth' });
     if (extra) await extra(app);
     await app.ready();
-    // [G7-01] Track every production write path, for every alert kind
-    // (helpers/insert-ownership): a single create owns its ID only after
-    // success, bulk RETURNING captures only rows actually inserted (so
-    // skipDuplicates cannot claim a peer's keyed alert), and the notices main
-    // writes inside interactive transactions (upsert / createMany on a tx
-    // client) are recorded as well.
-    const tracking = trackMessageInserts(app.prisma);
-    createdAlertIds = tracking.alertIds;
-    createdNotificationIds = tracking.notificationIds;
-    restoreTracking.push(tracking.restore);
     await purge();
   }
 
