@@ -145,7 +145,7 @@ afterAll(async () => {
   }
 });
 
-const call = (method: 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown) =>
+const call = (method: 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: Record<string, unknown>) =>
   app.inject({ method, url: `/api/v1/vendor${url}`, headers: { authorization: `Bearer ${token}` }, ...(payload === undefined ? {} : { payload }) });
 
 describe('[Row 300 · T3] option routes on the walled login: another tenant gets 404, never 500', () => {
