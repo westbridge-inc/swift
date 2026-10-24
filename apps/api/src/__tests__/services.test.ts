@@ -270,7 +270,10 @@ describe('Services — provider verification + qualification badge', () => {
 
     const me = await inject('GET', '/api/v1/services/providers/me', undefined, p.token);
     expect(me.json().data.certified).toBe(false);
-    expect(me.json().data.selfSkilled).toBe(true);
+    // [REVIEW-F #2053 S4-2] the electrician's trade requires the GEI licence, so it is never "Self-skilled": with no
+    // person's check of that licence on record here, the line reads "No trade credential shown".
+    expect(me.json().data.selfSkilled).toBe(false);
+    expect(me.json().data.licenceCheckedOn).toBeNull();
   });
 
   it('binds credentials to the canonical current trade and refuses a GEI claim from any trade', async () => {
