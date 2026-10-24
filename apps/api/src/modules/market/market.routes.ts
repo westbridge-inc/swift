@@ -1,7 +1,7 @@
 import { readFeePause } from '../billing/mmg-pause';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
 import { bindBrowseTenant, decodeScopedCursor, encodeScopedCursor, requireRequestTenant } from '../search/search-scope';
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';

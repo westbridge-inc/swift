@@ -59,6 +59,12 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // Orders, the customer side of a journey
     'substitution_pending', 'line_refunded', 'handover_review', 'delivery_options', 'delivery_cash_settlement',
     'dispatch_retrying', 'dispatch_exhausted', 'converted_to_pickup', 'mover_session_revocation',
+    // [OF-01/17] The ONE "no rider yet — you can cancel for free" notice; standard, like its dispatch peers.
+    'riderless_cutoff',
+    // [OF-33] The customer and the store, once each: the rider did not come, a new rider is being found.
+    'rider_no_show',
+    // [OF-33] The store, once: the rider is at the counter and the order is not marked ready.
+    'rider_waiting',
     // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
     // (prompt, audible); promoting them to job_update is a product decision.
     'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
@@ -66,6 +72,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // standard (by fallback) before it had a kind; it stays standard, and
     // promoting it to job_update is a product decision, like the relay kinds.
     'mover_job_cancelled',
+    // [OF-33] The rider holding a job, told to pick it up now or hand it back before it is
+    // released. Standard, like mover_job_cancelled; promoting it to job_update is a product decision.
+    'pickup_overdue',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
     // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
@@ -113,7 +122,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
     // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
     'csae_report',
-    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old',
+    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
     'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
