@@ -7,7 +7,7 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
