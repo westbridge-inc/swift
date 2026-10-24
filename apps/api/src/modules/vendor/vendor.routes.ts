@@ -2667,7 +2667,8 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  plate). EVIDENCE, not custody: the status is unchanged (the rider's "Picked up" moves it), one
    *  status-log row is written, and a repeat tap (or one after the pickup) is a 200 with no new row.
    *  Courier/parcel and taxi are never here (no store); a self-delivery has no Swift rider. */
-  app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', tap, async (request) => {
+  // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
+  app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY' || order.orderType === 'COURIER' || order.orderType === 'TAXI') {
       throw new AppError(400, 'NOT_A_RIDER_DELIVERY', 'This order is not handed to a Swift rider.');

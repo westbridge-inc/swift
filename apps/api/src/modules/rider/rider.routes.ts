@@ -1553,6 +1553,8 @@ export async function riderRoutes(app: FastifyInstance) {
       // has not set one. What it does is WRITE DOWN what the platform already
       // knew at that moment, so the radius can eventually be chosen from a
       // measured distribution instead of guessed.
+      // [O-2 · owner 22 Oct 2026] "Picked up" records the same evidence (the
+      // distance to the store), and is never refused for it either.
       //
       // The fix is the one already on the rider row — the same persisted fix
       // dispatch reads — so no client sends anything and no rider is stranded
