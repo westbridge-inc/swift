@@ -118,7 +118,7 @@ describe('[REVIEW-F S3-1 on #2054] the board card: no hand-over prompt on a paus
   const pause = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:05:00.000Z' };
   const riderOrder = (extra: Record<string, unknown> = {}) => ({ ...order('order-r', 'RIDER_ARRIVED_PICKUP'), riderId: 'r-1', rider: { user: { firstName: 'Devon' } }, handedToRiderAt: null, ...extra });
   const takeaway = (extra: Record<string, unknown> = {}) => ({ ...order('order-t', 'READY_FOR_PICKUP'), fulfillment: 'PICKUP', customer: { firstName: 'Asha' }, pickupCodeRequired: false, ...extra });
-  function cardTree(o: Record<string, unknown>) {
+  function cardTree(o: { id: string } & Record<string, unknown>) {
     fx.orders = [o];
     fx.pending = new Set();
     fx.steps = [];
