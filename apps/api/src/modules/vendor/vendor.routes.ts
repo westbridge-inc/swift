@@ -91,7 +91,7 @@ import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { resolveAvatarUrls } from '../../utils/avatar-url';
-import { HANDED_TO_RIDER_NOTE } from '../order/store-handover-log';
+import { HANDED_TO_RIDER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
@@ -673,12 +673,11 @@ async function storeHandoverFields(
   const riderIds = [...new Set(orders.map((o) => o.riderId).filter((r): r is string => !!r))];
   const [handed, riders] = await Promise.all([
     ids.length ? app.prisma.orderStatusLog.findMany({
-      where: { orderId: { in: ids }, note: HANDED_TO_RIDER_NOTE }, select: { orderId: true, createdAt: true }, orderBy: { createdAt: 'asc' },
+      where: handoverEpisodeRowsWhere(ids), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
     }) : [],
     riderIds.length ? app.prisma.rider.findMany({ where: { id: { in: riderIds } }, select: { id: true, user: { select: { avatar: true } } } }) : [],
   ]);
-  const firstHanded = new Map<string, Date>();
-  for (const row of handed) if (!firstHanded.has(row.orderId)) firstHanded.set(row.orderId, row.createdAt);
+  const firstHanded = handedToRiderSinceAssignment(handed);
   const photos = await resolveAvatarUrls(riders.map((r) => r.user?.avatar));
   const photoOf = new Map(riders.map((r) => [r.id, r.user?.avatar ? photos.get(r.user.avatar) ?? null : null]));
   const out = new Map<string, { pickupCodeRequired: boolean; handedToRiderAt: string | null; rider?: object | null }>();
@@ -2674,17 +2673,26 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'NOT_A_RIDER_DELIVERY', 'This order is not handed to a Swift rider.');
     }
     const HANDOVER_STATUSES: readonly string[] = ['READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+    // Still with the store and no rider can have taken it yet: the answer is "no rider yet", not a status.
+    const BEFORE_A_RIDER: readonly string[] = ['ACCEPTED', 'PREPARING'];
     const AFTER_PICKUP: readonly string[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'];
     const handed = await app.prisma.$transaction(async (tx) => {
       // The order lock every transition takes: a cancellation or a rider release committing first is seen here.
       await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
       const live = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, riderId: true } });
-      const already = await tx.orderStatusLog.findFirst({ where: { orderId: order.id, note: HANDED_TO_RIDER_NOTE }, select: { createdAt: true } });
-      if (already || AFTER_PICKUP.includes(live.status)) return { handedToRiderAt: already?.createdAt ?? null, wrote: false };
+      // Idempotent per rider: a tap already made for THIS rider's assignment answers again; one made for a
+      // rider who since handed the order back does not speak for the new one.
+      const episodeRows = await tx.orderStatusLog.findMany({
+        where: handoverEpisodeRowsWhere([order.id]), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
+      });
+      const already = handedToRiderSinceAssignment(episodeRows).get(order.id) ?? null;
+      if (already || AFTER_PICKUP.includes(live.status)) return { handedToRiderAt: already, wrote: false };
+      if (!live.riderId && (BEFORE_A_RIDER.includes(live.status) || HANDOVER_STATUSES.includes(live.status))) {
+        throw new AppError(409, 'NO_RIDER_YET', 'No Swift rider has taken this order yet. Hand it over when the rider arrives.');
+      }
       if (!HANDOVER_STATUSES.includes(live.status)) {
         throw new AppError(409, 'INVALID_STATUS', `This order is ${live.status.toLowerCase().replace(/_/g, ' ')} — nothing to hand over.`);
       }
-      if (!live.riderId) throw new AppError(409, 'NO_RIDER_YET', 'No Swift rider has taken this order yet. Hand it over when the rider arrives.');
       const row = await tx.orderStatusLog.create({
         data: { orderId: order.id, status: live.status, changedBy: request.user.userId, note: HANDED_TO_RIDER_NOTE },
         select: { createdAt: true },

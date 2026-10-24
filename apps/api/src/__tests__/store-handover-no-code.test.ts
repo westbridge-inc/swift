@@ -230,7 +230,7 @@ describe('[O-2] takeaway: the pickup code is off by default, for every store', (
     await setCodeRequired(true);
     try {
       const profile = await call('GET', '/api/v1/vendor/profile', owner.token, undefined, asStore());
-      expect(profile.json().data.requirePickupCode).toBe(true);
+      expect((profile.json().data.vendors as Array<{ id: string; requirePickupCode: boolean }>).find((v) => v.id === vendorId)?.requirePickupCode).toBe(true);
       const order = await readyTakeaway();
       expect(await storeDetail(order.id)).toMatchObject({ pickupCodeRequired: true });
       const missing = await completePickup(order.id);
@@ -311,6 +311,23 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
     const wrong = await handedToRider(takeaway.id);
     expect(wrong.statusCode).toBe(400);
     expect(wrong.json().error.code).toBe('NOT_A_RIDER_DELIVERY');
+  });
+
+  it('a tap is per rider: after the rider hands the order back, the next rider\'s card is not "handed" and the tap is recorded again', async () => {
+    const first = await makeRider('Ade');
+    const orderId = await riderOwnedDelivery(first);
+    expect((await handedToRider(orderId)).statusCode).toBe(200);
+    const back = await call('POST', `/api/v1/rider/orders/${orderId}/handback`, first.token, { reason: 'bike trouble' });
+    expect(back.statusCode, back.body).toBe(200);
+
+    const next = await makeRider('Kemi');
+    const grab = await call('POST', `/api/v1/rider/orders/${orderId}/accept`, next.token, {});
+    expect(grab.statusCode, grab.body).toBe(200);
+    expect(await storeDetail(orderId)).toMatchObject({ handedToRiderAt: null, rider: { user: { firstName: 'Kemi' } } });
+    const tap = await handedToRider(orderId);
+    expect(tap.statusCode, tap.body).toBe(200);
+    expect((await logs(orderId)).filter((l) => l.note === HANDED_TO_RIDER_NOTE)).toHaveLength(2);
+    expect(await storeDetail(orderId)).toMatchObject({ handedToRiderAt: tap.json().data.handedToRiderAt });
   });
 
   it('the rider\'s "Picked up" records the GPS distance to the store as evidence; a rider with no fix is never stopped', async () => {
