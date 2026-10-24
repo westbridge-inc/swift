@@ -15,7 +15,8 @@
  * the accept socket event and both phones on the cash-settlement ledger.
  *
  * Every party here has a REAL, distinct phone, so a leak shows as that string
- * in the body. The seeded numbers sit in +5920…, a range no subscriber holds.
+ * in the body. Every number comes from testPhone() (the run-wide fictional
+ * +59206nnnnn block no subscriber holds), so parallel files never collide.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -34,6 +35,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 grantSuiteCapability('unscoped-mutation');
 
@@ -51,7 +53,7 @@ const phones: Record<string, string> = {};
 
 type Person = { id: string; token: string; phone: string };
 async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}): Promise<Person> {
-  const phone = `+5920${NUM}${n}`;
+  const phone = testPhone();
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone, firstName: 'Gate', lastName: `Party${n}`, roles: roles as never, activeRole: active as never,
     countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId: 'swift-default', ...extra,
@@ -80,8 +82,8 @@ const get = (url: string, token: string, headers: Record<string, string> = {}) =
 let passenger: Person, driverP: Person, diner: Person, riderP: Person, sender: Person, courierP: Person, owner: Person;
 let driverId = '', riderId = '', courierRiderId = '', vendorId = '';
 let rideId = '', foodId = '', parcelId = '';
-const RECIPIENT = `+5920${NUM}8`;
-const STORE_ACCOUNT_LINE = `+5920${NUM}9`;
+const RECIPIENT = testPhone();
+const STORE_ACCOUNT_LINE = testPhone();
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';

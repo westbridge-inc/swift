@@ -167,7 +167,8 @@ export const DARK_FEATURES: DarkFeature[] = [
     key: 'counterpart_phones_to_old_apps',
     setting: 'COUNTERPART_PHONES_TO_OLD_APPS',
     source: 'env',
-    offWhen: '0',
+    // On unless the trimmed value is exactly '0' (modules/calls/counterpart-phone.ts reads it so).
+    enabledWhenPattern: /^(?!0$)/,
     title: "Old app builds still get the other party's number",
     whileOff:
       "No app is sent another person's personal phone number: phones on store builds 9-12 (iPhone) and vc7-vc8 (Android) show no Call button for the rider, driver, customer or store on a live order and use chat or support instead. Builds that know the Swift call bridge are not affected (they are never sent a number). Set to 0 only when those builds are retired.",

@@ -31,7 +31,7 @@
 export const CALL_BRIDGE_CLIENT_HEADER = 'x-swift-call-bridge';
 export const CALL_BRIDGE_CLIENT_VERSION = '1';
 
-/** The retirement switch. On unless set to exactly '0' (dark-features entry). */
+/** The retirement switch. On unless set to '0' (blanks ignored; dark-features entry). */
 export const COUNTERPART_PHONES_TO_OLD_APPS_ENV = 'COUNTERPART_PHONES_TO_OLD_APPS';
 
 type Headers = Record<string, string | string[] | undefined>;
@@ -47,7 +47,7 @@ export function counterpartPhonesAllowed(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   if (request.headers[CALL_BRIDGE_CLIENT_HEADER] !== undefined) return false;
-  return env[COUNTERPART_PHONES_TO_OLD_APPS_ENV] !== '0';
+  return env[COUNTERPART_PHONES_TO_OLD_APPS_ENV]?.trim() !== '0';
 }
 
 /** The phone itself when this request may have it, else null (the key stays,

@@ -19,9 +19,12 @@ import {
   withCounterpartPhones,
 } from '../modules/calls/counterpart-phone';
 import { DARK_FEATURES } from '../modules/ops/dark-features';
+import { testPhone } from './helpers/fixture-ids';
 
 const SRC = join(__dirname, '..');
 const BRIDGE_ON = { 'x-swift-call-bridge': '1' };
+/** Fictional numbers from the run-wide +59206 block (never stored here). */
+const [P1, P2, P3, P4] = [testPhone(), testPhone(), testPhone(), testPhone()];
 const PHONE_SELECT = /phone: true|withPhone: true/g;
 
 const GATED = 'counterpart surface: goes through modules/calls/counterpart-phone (old builds keep it until retired)';
@@ -153,9 +156,9 @@ describe('[O-1] the gate itself', () => {
 
   it('withCounterpartPhones nulls every party phone in place and keeps the keys', () => {
     const o = {
-      customer: { firstName: 'A', phone: '+5920000001' },
-      rider: { phone: '+5920000002', user: { firstName: 'B', phone: '+5920000003' } },
-      driver: { user: { phone: '+5920000004' } },
+      customer: { firstName: 'A', phone: P1 },
+      rider: { phone: P2, user: { firstName: 'B', phone: P3 } },
+      driver: { user: { phone: P4 } },
       orderNumber: 'X',
     };
     const out = withCounterpartPhones(req(BRIDGE_ON), o);
@@ -164,20 +167,23 @@ describe('[O-1] the gate itself', () => {
     expect(out.customer.phone).toBeNull();
     expect(out.rider.user.phone).toBeNull();
     expect('phone' in out.driver.user).toBe(true);
-    const legacy = { customer: { phone: '+5920000001' } };
-    expect(withCounterpartPhones(req(), legacy).customer.phone).toBe('+5920000001');
+    const legacy = { customer: { phone: P1 } };
+    expect(withCounterpartPhones(req(), legacy).customer.phone).toBe(P1);
   });
 
   it('counterpartPhone answers null to a bridge-aware client', () => {
-    expect(counterpartPhone(req(BRIDGE_ON), '+5920000001')).toBeNull();
-    expect(counterpartPhone(req(), '+5920000001')).toBe('+5920000001');
+    expect(counterpartPhone(req(BRIDGE_ON), P1)).toBeNull();
+    expect(counterpartPhone(req(), P1)).toBe(P1);
     expect(counterpartPhone(req(), undefined)).toBeNull();
   });
 
-  it('the retirement switch is in the dark-features register (off at exactly 0)', () => {
+  it('the retirement switch is in the dark-features register (off at 0, blanks ignored)', () => {
     const entry = DARK_FEATURES.find((f) => f.setting === 'COUNTERPART_PHONES_TO_OLD_APPS');
-    expect(entry?.offWhen).toBe('0');
     expect(entry?.source).toBe('env');
+    expect(entry?.enabledWhenPattern?.test('0')).toBe(false);
+    expect(entry?.enabledWhenPattern?.test('')).toBe(true);
+    expect(entry?.enabledWhenPattern?.test('1')).toBe(true);
+    expect(counterpartPhonesAllowed(req(), { [COUNTERPART_PHONES_TO_OLD_APPS_ENV]: ' 0 ' })).toBe(false);
   });
 });
 

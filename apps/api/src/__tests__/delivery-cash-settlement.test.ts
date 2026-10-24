@@ -256,7 +256,9 @@ describe('ledger lists', () => {
     for (const s of data.unsettled) {
       expect(s.status).not.toBe('SETTLED');
       expect(s.vendor?.name).toBeTruthy();
-      expect(s.vendor?.phone).toBeTruthy(); // reachable to make the cash handover
+      // [O-1] The store's account line is never sent (no build or dashboard ever showed it);
+      // the two sides reach each other through the order (chat / the Swift call bridge).
+      expect(s.vendor).not.toHaveProperty('phone');
       expect(typeof s.amount).toBe('number');
     }
   });
@@ -272,7 +274,8 @@ describe('ledger lists', () => {
     expect(data.summary.owed).toBe(expected);
     for (const s of data.unsettled) {
       expect(s.rider?.name).toBeTruthy();
-      expect(s.rider?.phone).toBeTruthy(); // reachable to make the cash handover
+      // [O-1] The rider's personal number is never sent (no build or dashboard ever showed it).
+      expect(s.rider).not.toHaveProperty('phone');
     }
   });
 
