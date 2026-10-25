@@ -543,10 +543,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     // holds it — never shown while they're still deciding on a driver.
     // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
     // off (the default), the passenger pays the driver directly at drop-off.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
-    // [O-1] The driver's personal number only to an installed store build (it dials it);
-    // a bridge-aware client calls through Swift and is sent none.
-    driver.user = { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) };
+    // [O-1] The driver's personal number: as today while the call bridge is off; with it on, only to an
+    // installed store build (it dials it) — a bridge-aware client calls through Swift and is sent none.
+    const driver = {
+      ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average,
+      user: { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) },
+    };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
