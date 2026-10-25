@@ -5,9 +5,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getProfile, getStoreVat, sendVatCertificate, updateStoreVat, type StoreVatView } from '@/lib/vendor-api';
 import { LEGAL_URL } from '@/lib/api';
 import { storeKey } from '@/lib/store-scope';
+import { GRA_VAT_URL } from '@/lib/store-vat-words';
 
-/** Where the owner reads the GRA's own words on VAT (the API cites the Act and the GRA policies it follows). */
-export const GRA_VAT_URL = 'https://www.gra.gov.gy/vat-invoices/';
 
 const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '');
 
@@ -169,6 +168,7 @@ export function VatCard({ storeId }: { storeId: string | null }) {
             type="file"
             accept="image/jpeg,image/png,image/webp,application/pdf"
             aria-label="VAT certificate file"
+            disabled={send.isPending}
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];

@@ -4,13 +4,14 @@ import { memo, useCallback, useDeferredValue, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
-import { adjustStock, getCategories, getItems, money, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
+import { adjustStock, getCategories, getItems, getProfile, getStoreVat, money, setItemAvailability, updateItem, type CatalogItem, type VatClass } from '@/lib/vendor-api';
 import { Pictogram } from '@/components/glyphs';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
 import { instantSwitch } from '@/lib/instant-toggle';
+import { GRA_VAT_URL, vatClassWords } from '@/lib/store-vat-words';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -97,7 +98,7 @@ function PriceEdit({ item, onDone }: { item: CatalogItem; onDone: () => void }) 
  * items as the same objects), not every row of the catalogue. Off-screen rows also skip
  * layout and paint until scrolled to (content-visibility), which long catalogues need.
  */
-const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPrice, onToggle, onAdjust, onEditPrice, onSaved }: {
+const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPrice, onToggle, onAdjust, onEditPrice, onSaved, vatRate, vatPending, onVatClass }: {
   item: CatalogItem;
   pending: boolean;
   adjusting: boolean;
@@ -106,6 +107,10 @@ const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPric
   onAdjust: (_id: string | null) => void;
   onEditPrice: (_id: string | null) => void;
   onSaved: () => void;
+  /** Set only when the owner's store has told Swift it is VAT-registered: the item's VAT class is shown and can change. */
+  vatRate: number | null;
+  vatPending: boolean;
+  onVatClass: (_id: string, _vatClass: VatClass) => void;
 }) {
   const low = i.stockQuantity != null && i.stockQuantity <= (i.lowStockThreshold ?? 5);
   return <article aria-label={i.name} className="border-b border-[var(--swift-border)] py-5" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 120px' }}>
@@ -125,6 +130,17 @@ const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPric
       {low && <span className="font-semibold text-amber-700">Low stock</span>}
       {i.stockQuantity == null ? <span>Stock untracked</span> : <button onClick={() => onAdjust(adjusting ? null : i.id)} className="sw-link-btn min-h-8">{i.stockQuantity} in stock · Adjust stock</button>}
       {i.sku && <span>SKU: {i.sku}</span>}
+      {vatRate != null && (
+        <select
+          aria-label={`VAT class: ${i.name}`}
+          value={i.vatClass ?? 'STANDARD'}
+          disabled={vatPending}
+          onChange={(e) => onVatClass(i.id, e.target.value as VatClass)}
+          className="min-h-8 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-2 text-[13px]"
+        >
+          {vatClassWords(vatRate).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+      )}
     </div>
     {adjusting && <StockAdjust item={i} onDone={() => { onAdjust(null); onSaved(); }} />}
   </article>;
@@ -144,6 +160,17 @@ export default function InventoryPage() {
   const categories = useQuery({ queryKey: storeKey(storeId, 'categories'), queryFn: getCategories });
 
   const refresh = useCallback(() => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'items') }), [queryClient, storeId]);
+  // [STORE-VAT · owner O-5] The owner whose store told Swift it is VAT-registered gives each item its VAT class here.
+  const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
+  const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
+  const vat = useQuery({ queryKey: storeKey(storeId, 'vat'), queryFn: getStoreVat, enabled: isOwner });
+  const vatRate = vat.data && vat.data.status !== 'NONE' ? vat.data.ratePercent : null;
+  const vatMut = useMutation({
+    mutationFn: (v: { id: string; vatClass: VatClass }) => updateItem(v.id, { vatClass: v.vatClass }),
+    onSettled: () => void refresh(),
+  });
+  const setVat = vatMut.mutate;
+  const onVatClass = useCallback((id: string, vatClass: VatClass) => setVat({ id, vatClass }), [setVat]);
   // [PERF row 562] An item's in-stock switch moves at the tap and goes back if the server refuses.
   // Only that item's switch waits for its answer: the others stay usable (they used to lock together).
   const availKey = ['item-availability', storeId];
@@ -181,7 +208,7 @@ export default function InventoryPage() {
 
   return (
     <div className="space-y-5">
-      <MutationNotice errors={[availMut.error]} />
+      <MutationNotice errors={[availMut.error, vatMut.error]} />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           {/* As in the app (VendorMenuScreen): the store type's name, then "Your menu" with live and sold-out counts. */}
@@ -223,11 +250,20 @@ export default function InventoryPage() {
 
       {items.isError && <DataUnavailable what="your menu" error={items.error} onRetry={() => void items.refetch()} />}
       {categories.isError && <DataUnavailable what="your menu categories" error={categories.error} onRetry={() => void categories.refetch()} />}
+      {vat.isError && <DataUnavailable what="your VAT settings" error={vat.error} onRetry={() => void vat.refetch()} />}
+      {vatRate != null && (
+        <p className="text-sm text-[var(--swift-muted)]">
+          You choose each item&apos;s VAT class, and you are responsible for it. Most goods are standard-rated; some basic
+          foods and household goods are zero-rated, and some supplies are exempt. Check with the{' '}
+          <a href={GRA_VAT_URL} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">GRA</a>.
+        </p>
+      )}
       {items.isLoading && <div className="sw-empty" role="status"><span className="sw-skeleton h-24 w-full" />Loading your menu…</div>}
       {!items.isLoading && !items.isError && !list.length && <p className="sw-board-empty">No items match.</p>}
       <div className="grid gap-x-8 wide:grid-cols-2">
         {list.map(i => <ItemRow key={i.id} item={i} pending={availPending.has(i.id)} adjusting={adjusting === i.id} editingPrice={editingPrice === i.id}
-          onToggle={onToggle} onAdjust={setAdjusting} onEditPrice={setEditingPrice} onSaved={refresh} />)}
+          onToggle={onToggle} onAdjust={setAdjusting} onEditPrice={setEditingPrice} onSaved={refresh}
+          vatRate={vatRate} vatPending={vatMut.isPending && vatMut.variables?.id === i.id} onVatClass={onVatClass} />)}
       </div>
       <p className="text-xs text-[var(--swift-muted)]">
         Photos, descriptions, options and new single items are managed in the Swift app — you can edit prices, stock and availability here.
