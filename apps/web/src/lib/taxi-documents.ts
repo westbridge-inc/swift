@@ -26,5 +26,7 @@ const TAXI_HINTS: Record<string, string> = {
 };
 
 export const isTaxiChecklist = (checklist: readonly string[]) => checklist.includes('hire_car_driver_licence');
+/** The web's own plain name for a document, when it has one. */
+export const plainDocumentName = (docType: string): string | undefined => LABELS[docType];
 export const documentLabel = (docType: string) => LABELS[docType] ?? docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 export const taxiDocumentHint = (docType: string, checklist: readonly string[]) => (isTaxiChecklist(checklist) ? TAXI_HINTS[docType] : undefined);

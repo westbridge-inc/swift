@@ -10,12 +10,16 @@ import { describe, expect, it } from 'vitest';
 
 const API = readFileSync(join(process.cwd(), '..', 'api', 'src', 'modules', 'verification', 'upload-consent.ts'), 'utf8');
 const PAGE = readFileSync(join(process.cwd(), 'src', 'app', 'portal', 'documents', 'page.tsx'), 'utf8');
-const MOVER_API = readFileSync(join(process.cwd(), 'src', 'lib', 'mover-api.ts'), 'utf8');
+// [DOCS-1] The tick, the upload and the in-review words live in the one component both
+// the mover portal and the store console render; the request in the shared client.
+const UPLOAD = readFileSync(join(process.cwd(), 'src', 'components', 'partner-documents.tsx'), 'utf8');
+const STORE_PAGE = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'documents', 'page.tsx'), 'utf8');
+const DOCUMENTS_API = readFileSync(join(process.cwd(), 'src', 'lib', 'partner-documents.ts'), 'utf8');
 
 const apiText = /document_v1: \{[\s\S]*?text: '([^']+)'/.exec(API)?.[1];
 /** The label as a person reads it: JSX tags and {' '} removed, whitespace collapsed. */
 const label = (() => {
-  const m = /<span>\s*(I consent to Swift processing this document[\s\S]*?)<\/span>\s*<\/label>/.exec(PAGE);
+  const m = /<span>\s*(I consent to Swift processing this document[\s\S]*?)<\/span>\s*<\/label>/.exec(UPLOAD);
   return m?.[1]!.replace(/\{' '\}/g, ' ').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 })();
 
@@ -26,11 +30,11 @@ describe('the website upload tick says the recorded words', () => {
   });
 
   it('the upload tells the API it showed the tick', () => {
-    expect(MOVER_API).toMatch(/consentTick: 'document_v1'/);
+    expect(DOCUMENTS_API).toMatch(/consentTick: 'document_v1'/);
   });
 
   it('no review-time promise faster than the support hours', () => {
-    expect(PAGE).not.toMatch(/within 24 hours/);
-    expect(PAGE).toContain('Monday to Saturday, 8:00–20:00 Guyana time');
+    for (const words of [PAGE, UPLOAD, STORE_PAGE]) expect(words).not.toMatch(/within 24 hours/);
+    for (const words of [PAGE, UPLOAD, STORE_PAGE]) expect(words).toContain('Monday to Saturday, 8:00–20:00 Guyana time');
   });
 });

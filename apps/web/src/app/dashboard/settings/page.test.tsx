@@ -56,6 +56,23 @@ describe('dashboard settings: the store card', () => {
     expect(screen.queryByText(/Waiting for Swift/)).toBeNull();
   });
 
+  // [DOCS-1] The store's documents are its owner's: the owner gets the way to
+  // them from Account; a manager's login is not offered a page of its own.
+  it('an owner is offered the store’s Documents page; a manager is not', async () => {
+    stubReads();
+    setSelectedStore('store-1');
+    const owner = renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: /^Documents/ }).getAttribute('href')).toBe('/dashboard/documents');
+    owner.unmount();
+    vi.restoreAllMocks();
+    stubReads();
+    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: 'MANAGER' } as never);
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /^Documents/ })).toBeNull();
+  });
+
   it('never says "checked" once a checked document has lapsed', () => {
     const now = new Date('2026-10-16T12:00:00.000Z');
     expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it in the Swift app');
