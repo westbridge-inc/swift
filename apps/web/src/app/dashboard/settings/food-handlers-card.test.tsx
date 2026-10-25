@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
-import * as vendorApi from '@/lib/vendor-api';
+import * as vendorApi from '@/lib/food-handlers-api';
 import { FoodHandlersCard } from './food-handlers-card';
 
 // ---------------------------------------------------------------------------
@@ -56,5 +56,17 @@ describe('[FOOD-PERMIT] the food handlers card', () => {
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
     await settled();
     expect(none.container.textContent).toBe('');
+  });
+});
+
+// [FOOD-PERMIT · perf] vendor-api.ts is in every dashboard page's first load; the tick's calls stay out of it.
+describe('[FOOD-PERMIT · perf] the food handlers calls are not in the shared vendor API module', () => {
+  it('vendor-api.ts holds neither call; the card imports them from food-handlers-api.ts', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const shared = readFileSync(join(process.cwd(), 'src', 'lib', 'vendor-api.ts'), 'utf8');
+    const card = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'settings', 'food-handlers-card.tsx'), 'utf8');
+    expect(shared).not.toMatch(/FoodHandlers|food-handlers/);
+    expect(card).toContain("import { getFoodHandlers, tickFoodHandlers } from '@/lib/food-handlers-api';");
   });
 });

@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getFoodHandlers, tickFoodHandlers } from '@/lib/vendor-api';
+import { getFoodHandlers, tickFoodHandlers } from '@/lib/food-handlers-api';
 import { storeKey } from '@/lib/store-scope';
 
 /**
