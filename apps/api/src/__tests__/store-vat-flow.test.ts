@@ -238,6 +238,25 @@ describe('2. the store says it is VAT-registered: PENDING, nothing a customer se
     expect(codeOf(res)).toBe('VAT_NOT_CLAIMED');
   });
 
+  it('the business’s VAT is the OWNER’s to give: a store manager can neither read it, answer it nor send a certificate (403)', async () => {
+    const manager = await app.prisma.user.create({ data: {
+      phone: testPhone(), firstName: 'Vat', lastName: 'Manager', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true,
+    } });
+    userIds.push(manager.id);
+    await app.prisma.vendorStaff.create({ data: { vendorId, userId: manager.id, role: 'MANAGER', invitedBy: ownerUserId } });
+    const token = await session(manager.id, 'CUSTOMER');
+    const asks = [
+      ['GET', '/vat', undefined],
+      ['PUT', '/vat', { registered: true, vatRegistrationNumber: VAT_NUMBER, mode: 'PRICES_INCLUDE_VAT' }],
+      ['POST', '/vat/certificate', { fileUrl: await ownedVerificationFixture(app.prisma, ownerUserId), consent: true, privacyNoticeVersion: 'v1' }],
+    ] as const;
+    for (const [method, path, payload] of asks) {
+      const res = await call(method, `/api/v1/vendor${path}`, token, payload);
+      expect(res.statusCode, `${method} ${path} ${res.body}`).toBe(403);
+    }
+    expect((await vendorRow()).vatStatus).toBe('NONE');
+  });
+
   it('yes + number + "prices include VAT" -> PENDING; the storefront still shows no VAT', async () => {
     const res = await vendorCall('PUT', '/vat', { registered: true, vatRegistrationNumber: VAT_NUMBER, mode: 'PRICES_INCLUDE_VAT' });
     expect(res.statusCode, res.body).toBe(200);
