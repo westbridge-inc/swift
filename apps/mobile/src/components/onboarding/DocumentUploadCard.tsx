@@ -13,6 +13,8 @@ import {
 import type { AuthSessionSnapshot } from '../../lib/authSession';
 import { pendingDocumentLabel } from './documentChecklistPresentation';
 import { docLabel } from './docLabels';
+import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
+import { SENSITIVE_CONSENT_ASK } from './documentConsentRecord';
 
 const label = docLabel;
 /** Friendly document name for other surfaces (suspension banners etc.); the names live in ./docLabels. */
@@ -43,6 +45,7 @@ export function DocumentUploadCard({
   optionalHint,
   hint,
   consented = false,
+  askConsentFirst = false,
 }: {
   role: string;
   docType: string;
@@ -60,6 +63,9 @@ export function DocumentUploadCard({
   hint?: string;
   /** [R17] The checklist's consent tick is given: only then can a document be uploaded. */
   consented?: boolean;
+  /** [DOC-CONSENT · DPA s.9(1)(a), research D1] The tick on screen stands only on the person's record and this
+   *  document is sensitive (a police clearance): ask for the consent again, in the ledger's words, before the photo. */
+  askConsentFirst?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -149,7 +155,7 @@ function explainPermissionDenied(
 
   // Docs are photographed at the counter/kerb more often than they sit in the
   // gallery — offer the camera first, library as the alternative.
-  const pick = () =>
+  const choosePhoto = () =>
     Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
       ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
       : 'Add a clear, well-lit photo. All corners visible, no glare.', [
@@ -158,6 +164,15 @@ function explainPermissionDenied(
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
     ]);
+  // [DOC-CONSENT] The start of every upload (a first one, a re-upload, a replacement). A sensitive document whose
+  // tick stands only on the record asks first, in the exact words the ledger anchors the upload to; only
+  // "I consent" goes on to the photo. Every other upload starts at the photo, as before.
+  const pick = askConsentFirst
+    ? () => Alert.alert(label(docType), `${SENSITIVE_CONSENT_ASK}\n\n${DOCUMENT_CONSENT_TEXT}`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'I consent', onPress: choosePhoto },
+    ])
+    : choosePhoto;
   const confirmReplace = () =>
     Alert.alert('Replace this document?', 'Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.', [
       { text: 'Cancel', style: 'cancel' },

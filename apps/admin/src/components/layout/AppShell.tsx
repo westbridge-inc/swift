@@ -50,7 +50,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       if (!user || !isAdmin) { dropSessionCache(); router.replace('/login'); return; }
       if (attested.current !== null && attested.current !== user.id) dropSessionCache();
       attested.current = user.id;
-      setRole(user.activeRole ?? null);
+      // [ADMIN-ROLE] The chip names the admin role the account HOLDS, which is
+      // what the server acts under; never the phone app's mode (an admin whose
+      // phone is in rider mode is still an admin here).
+      setRole(user.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : 'ADMIN');
       setReadyPath(pathname);
     });
     return () => { cancelled = true; };
