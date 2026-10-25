@@ -41,6 +41,12 @@ describe('[REVIEW-G S4 on #2001] legal versions are ordered by day, then by the 
     expect(acceptanceStatus({ tosVersion: '2026-10-25.2', roles: CUSTOMER }, '2026-10-25.10', LATER)).toMatchObject({ needsAcceptance: true, summary: ['nine', 'ten'] });
   });
 
+  it('the newest and the oldest-first summary come from the order, never from where an entry sits in the list', () => {
+    const shuffled = [LATER[1], LATER[0]];
+    expect(materialVersion('2026-10-25.10', shuffled)).toBe('2026-10-25.10');
+    expect(acceptanceStatus({ tosVersion: '2026-10-25.2', roles: CUSTOMER }, '2026-10-25.10', shuffled)).toMatchObject({ needsAcceptance: true, summary: ['nine', 'ten'] });
+  });
+
   it('a stored version of another shape is older than every real one: that person is asked again', () => {
     for (const odd of ['1.0', 'v2', '', '2026-10-25.x', '2026-13-01.1.2']) {
       expect(compare!(odd, '2026-07-15'), odd).toBeLessThan(0);
