@@ -47,6 +47,7 @@ import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
 import { counterpartPhone } from '../calls/counterpart-phone';
+import { withoutPositionEvidence } from '../order/customer-timeline';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -542,10 +543,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     // holds it — never shown while they're still deciding on a driver.
     // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
     // off (the default), the passenger pays the driver directly at drop-off.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
-    // [O-1] The driver's personal number only to an installed store build (it dials it);
-    // a bridge-aware client calls through Swift and is sent none.
-    driver.user = { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) };
+    // [O-1] The driver's personal number: as today while the call bridge is off; with it on, only to an
+    // installed store build (it dials it) — a bridge-aware client calls through Swift and is sent none.
+    const driver = {
+      ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average,
+      user: { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) },
+    };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
@@ -568,6 +571,10 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    // [REVIEW-F S4-2 on #2055] The driver's recorded position (a step note's ' — gps:…' evidence, kept
+    // for support and appeals) is never the passenger's to read: the same cut as the customer's
+    // order timeline. Every other field of a row is unchanged.
+    ride.statusHistory = ride.statusHistory.map((row) => ({ ...row, note: withoutPositionEvidence(row.note) }));
     if (ride.driver) {
       const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
       Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });
