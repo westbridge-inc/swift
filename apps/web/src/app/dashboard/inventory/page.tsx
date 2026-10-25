@@ -22,7 +22,7 @@ function StockAdjust({ item, onDone }: { item: CatalogItem; onDone: () => void }
   // after a failure cannot move stock twice; changing it is a new adjustment.
   const [commandKey, setCommandKey] = useState(() => crypto.randomUUID());
   const mut = useMutation({
-    mutationFn: () => adjustStock(item.id, delta, reason, undefined, commandKey),
+    mutationFn: () => adjustStock(item.id, delta, reason, commandKey),
     onSuccess: () => { setCommandKey(crypto.randomUUID()); onDone(); },
     onError: (e) => setError((e as Error).message),
   });
