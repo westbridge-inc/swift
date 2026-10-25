@@ -85,12 +85,16 @@ export const TAXI_01: Journey<Ctx> = {
   id: 'TAXI-01',
   estimateSeconds: 330,
   title: 'Ride request + queue (mobile only)',
-  cases: 'L2 request; L1 denial; no-supply queue; auto-request recovery',
+  cases: 'L2 request; L1 request (no ID asked, owner 24 Oct 2026); no-supply queue; auto-request recovery',
   async run(rec, ctx) {
     const C7 = ctx.roster.customers.C7!.session;
     rec.require('an L2 passenger was provisioned', !ctx.world.notReady.C7, ctx.world.notReady.C7 ?? '');
-    const l1 = await POST('/rides/request', rideBody(), ctx.roster.customers.C1!.session.token);
-    rec.deny('an L1 account cannot request a ride', l1, [403], ['ID_VERIFICATION_REQUIRED'], `reason=${l1.json?.error?.details?.reason ?? ''}`);
+    // [Owner ruling 24 Oct 2026] A ride needs no ID on file: an L1 account books like any other. Its ride is
+    // withdrawn at once so the L2 cases below meet a clean board.
+    const C1 = ctx.roster.customers.C1!.session;
+    const l1 = await POST('/rides/request', rideBody(), C1.token);
+    rec.expect('an L1 account (no ID on file) requests a ride — no ID asked', l1, 201, undefined, `code=${l1.json?.error?.code ?? ''}`);
+    if (l1.json?.data?.ride?.id) await cancelRide(C1, l1.json.data.ride.id);
     const est = await POST('/rides/estimate', { pickup: PICKUP, dropoff: DROPOFF }, C7.token);
     const eco = (est.json?.data?.tiers ?? []).find((t: any) => t.rideClass === 'ECONOMY');
     rec.check('the estimate prices an economy ride', est.ok && Number(eco?.fare) > 0, `→ ${brief(est)} economy=${eco?.fare} ${est.json?.data?.currencyCode ?? ''}`);
@@ -656,7 +660,7 @@ async function stopsSwitchedOn(rec: Recorder, ctx: Ctx, C7: Session, maxStops: n
         `this build wrote no verification on the far arrival (note=${note2 ?? 'none'}): #1908 is not in it, so the waiting charge must stay off with stops on`);
     }
     rec.deny('a skip without a reason', await stopMove(D, ride2!.id, 1, 'skip', {}), [400]);
-    rec.deny('a skip reason the passenger must never be sent (a phone number)', await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Call me on 600 1234 instead' }), [400], ['SKIP_REASON_REFUSED']);
+    rec.deny('a skip reason the passenger must never be sent (a phone number)', await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Call me on +592 012 3456 instead' }), [400], ['SKIP_REASON_REFUSED']);
     const skip = await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Road or access blocked' });
     rec.check('ride 2: stop 1 skipped with its reason, the destination next', skip.ok && skip.json?.data?.stop?.status === 'SKIPPED' && skip.json?.data?.stop?.skipReason === 'Road or access blocked' && skip.json?.data?.nextStopSequence === null,
       `→ ${brief(skip)} stop=${skip.json?.data?.stop?.status}`);

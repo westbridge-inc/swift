@@ -66,21 +66,21 @@ export default function PaymentConfirmationsPage() {
     if (!queueResult.isError && !approvalResult.isError) { setQueued({}); locks.reloaded(mark); }
   };
   return (
-    <div className="space-y-5">
+    <div className="mc-page space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h1 className="text-2xl font-bold">Payment confirmations</h1>
-          <p className="text-sm text-[var(--muted)] mt-1">Weekly-fee payments waiting for review. The billing clock is paused; the remaining grace is preserved.</p></div>
-        <button type="button" className="px-4 py-2 border border-[var(--border)] rounded-lg text-sm" onClick={() => void reload()} disabled={sending || queue.isFetching || approvals.isFetching}>Reload confirmations</button>
+        <div>
+          <p className="text-sm mc-muted mt-1">Weekly-fee payments waiting for review. The billing clock is paused; the remaining grace is preserved.</p></div>
+        <button type="button" className="px-4 py-2 border border-[var(--mc-line)] rounded-lg text-sm" onClick={() => void reload()} disabled={sending || queue.isFetching || approvals.isFetching}>Reload confirmations</button>
       </div>
-      <p className="text-sm text-[var(--muted)]">Every resolution is approved on Approvals before it applies: by a second admin, or, while the owner is the only admin who can approve it, by the owner after a waiting period (solo approval). Review the payment evidence, request a decision, then complete it on Approvals once it is approved.</p>
+      <p className="text-sm mc-muted">Every resolution is approved on Approvals before it applies: by a second admin, or, while the owner is the only admin who can approve it, by the owner after a waiting period (solo approval). Review the payment evidence, request a decision, then complete it on Approvals once it is approved.</p>
       {queue.isPending && <p role="status">Loading payment confirmations…</p>}
       {queue.isError && <QueryFailed error={queue.error} what="payment confirmations" />}
       {approvals.isError && <QueryFailed error={approvals.error} what="existing approvals" />}
       {!queue.isPending && !queue.isError && !rows.length && <p>No payment confirmations need review.</p>}
-      {!queue.isError && rows.length > 0 && <div className="overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--panel)]">
+      {!queue.isError && rows.length > 0 && <div className="overflow-x-auto rounded-[var(--mc-radius)] border border-[var(--mc-line)] bg-[var(--mc-card)]">
         <table aria-label="Payment confirmations" className="w-full text-sm text-left">
-          <thead className="text-xs text-[var(--muted)]"><tr>{['Payment / partner', 'Review', 'Remaining grace', 'Action'].map((title) => <th key={title} scope="col" className="p-4">{title}</th>)}</tr></thead>
-          <tbody className="divide-y divide-[var(--border)]">{rows.map((row) => {
+          <thead className="mc-muted text-xs"><tr>{['Payment / partner', 'Review', 'Remaining grace', 'Action'].map((title) => <th key={title} scope="col" className="p-4">{title}</th>)}</tr></thead>
+          <tbody className="divide-y divide-[var(--mc-line)]">{rows.map((row) => {
             const approval = activeApproval(row, approvals.data ?? []);
             const waiting = queued[row.id] || approval;
             const reference = row.swiftReference ?? row.sourceId ?? row.id;
@@ -88,19 +88,19 @@ export default function PaymentConfirmationsPage() {
             // MMG already reports a credited transaction for this checkout: closing it as NOT PAID would be wrong.
             const credited = (row.settlementPayments ?? []).length > 0;
             return <tr key={row.id}>
-              <td className="p-4"><p className="font-medium">{SOURCE[row.source] ?? row.source}</p><p className="font-mono break-all">{reference}</p><p className="text-[var(--muted)]">{row.partner ?? 'Partner unavailable'}</p>
-                {row.source === 'MMG_CHECKOUT' && row.sourceId && <Link className="underline text-[var(--accent)]" href={`/mmg-payments?checkout=${encodeURIComponent(row.sourceId)}`}>MMG timeline</Link>}</td>
-              <td className="p-4"><p className={row.overdue ? 'text-amber-400 font-semibold' : ''}>{row.overdue ? 'Overdue for review' : 'Review due'} · {when(row.reviewDueAt)}</p><p className="text-[var(--muted)]">Began {when(row.beganAt)}</p><p>{reasonWords(row.reason)}</p></td>
+              <td className="p-4"><p className="font-medium">{SOURCE[row.source] ?? row.source}</p><p className="font-mono break-all">{reference}</p><p className="mc-muted">{row.partner ?? 'Partner unavailable'}</p>
+                {row.source === 'MMG_CHECKOUT' && row.sourceId && <Link className="underline text-[var(--mc-accent)]" href={`/mmg-payments?checkout=${encodeURIComponent(row.sourceId)}`}>MMG timeline</Link>}</td>
+              <td className="p-4"><p className={row.overdue ? 'mc-text-warn font-semibold' : ''}>{row.overdue ? 'Overdue for review' : 'Review due'} · {when(row.reviewDueAt)}</p><p className="mc-muted">Began {when(row.beganAt)}</p><p>{reasonWords(row.reason)}</p></td>
               <td className="p-4 whitespace-nowrap">{grace(row.remainingGraceMs)}</td>
               <td className="p-4">{row.source === 'RETURN_REANCHOR' ? <p>Read-only. Compare the days billed with the time this partner was suspended, and correct any difference through the existing billing workflow.</p> : !row.resolvable || !row.sourceId ? <p>Read-only. Review through the existing obligation workflow.</p> : waiting ? <div role="status">
                 <p>{approval?.status === 'APPROVED' ? 'Approved; waiting for the requester to apply it on Approvals.' : 'Waiting for approval: a second admin, or solo approval on Approvals. Nothing has changed yet.'}</p>
-                <Link className="underline text-[var(--accent)]" href="/approvals">Open Approvals</Link>
+                <Link className="underline text-[var(--mc-accent)]" href="/approvals">Open Approvals</Link>
               </div> : row.status === 'SETTLEMENT_APPLY_PENDING' ? <p role="status">This payment is confirmed as PAID and its MMG credit is being applied to this fee. Nothing to request.</p> : <div className="flex flex-wrap gap-2">
                 {lock?.state === 'sending' && <p>A request for this payment is still being sent. Wait for the answer.</p>}
                 {lock?.state === 'reload' && <p>Reload confirmations before another request.</p>}
                 {credited && <p id={`credited-${row.id}`}>MMG shows a credited payment for this checkout — reconcile it as PAID instead.</p>}
-                <button type="button" disabled={!ready || !!lock || credited} aria-describedby={credited ? `credited-${row.id}` : undefined} aria-label={`Close as NOT PAID ${reference}`} onClick={() => setSelection({ row, decision: 'UNPAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Close as NOT PAID</button>
-                <button type="button" disabled={!ready || !!lock} aria-label={`Mark PAID ${reference}`} onClick={() => setSelection({ row, decision: 'PAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Mark PAID</button>
+                <button type="button" disabled={!ready || !!lock || credited} aria-describedby={credited ? `credited-${row.id}` : undefined} aria-label={`Close as NOT PAID ${reference}`} onClick={() => setSelection({ row, decision: 'UNPAID' })} className="px-3 py-2 border border-[var(--mc-line)] rounded-lg disabled:opacity-40">Close as NOT PAID</button>
+                <button type="button" disabled={!ready || !!lock} aria-label={`Mark PAID ${reference}`} onClick={() => setSelection({ row, decision: 'PAID' })} className="px-3 py-2 border border-[var(--mc-line)] rounded-lg disabled:opacity-40">Mark PAID</button>
               </div>}</td>
             </tr>;
           })}</tbody>
@@ -156,23 +156,23 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
       inFlight.current = false; setBusy(false);
     }
   };
-  const inputClass = 'w-full mt-1 p-2 rounded-lg border border-[var(--border)] bg-[var(--bg)]';
-  return <form aria-label="Resolve payment confirmation" onSubmit={submit} noValidate className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-5 space-y-4">
+  const inputClass = 'w-full mt-1 p-2 rounded-lg border border-[var(--mc-line)] bg-[var(--mc-card)]';
+  return <form aria-label="Resolve payment confirmation" onSubmit={submit} noValidate className="rounded-[var(--mc-radius)] border border-[var(--mc-line)] bg-[var(--mc-card)] p-5 space-y-4">
     <h2 className="font-semibold">{decision === 'UNPAID' ? 'Close as NOT PAID' : 'Mark PAID'} · {row.swiftReference ?? row.sourceId}</h2>
     <p>{decision === 'UNPAID'
       ? `Close as NOT PAID: ${mmg ? 'the checkout becomes NOT_PAID' : 'the payment becomes failed'}; nothing is credited. ${NOT_PAID_CLOCK}`
       : mmg ? "Mark PAID: only with MMG's transaction id; credits once" : 'Mark PAID: only with recorded settlement evidence; credits once.'}</p>
-    {decision === 'PAID' && <p className="text-sm text-[var(--muted)]">Swift rechecks the existing confirmation record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
+    {decision === 'PAID' && <p className="text-sm mc-muted">Swift rechecks the existing confirmation record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
     {decision === 'PAID' && mmg && <label className="block text-sm">MMG transaction ID<select className={inputClass} value={paymentId} onChange={(e) => setPaymentId(e.target.value)} disabled={busy || stale}>
       <option value="">Select a recorded MMG transaction</option>{row.settlementPayments?.map((payment) => <option key={payment.providerPaymentId} value={payment.providerPaymentId}>{payment.mmgTransactionId}</option>)}
     </select></label>}
     <label className="block text-sm">Evidence reference<input className={inputClass} value={evidence} onChange={(e) => setEvidence(e.target.value)} maxLength={128} disabled={busy || stale} /></label>
     <label className="block text-sm">Reason<textarea className={inputClass} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} rows={3} disabled={busy || stale} /></label>
-    <p className="text-sm text-[var(--muted)]">State what you checked. Whoever approves it will review this reason and the exact decision.</p>
-    {problem && <p role="alert" className="text-amber-400">{problem}</p>}
+    <p className="text-sm mc-muted">State what you checked. Whoever approves it will review this reason and the exact decision.</p>
+    {problem && <p role="alert" className="mc-text-warn">{problem}</p>}
     {error != null && <MutationError error={error} label="The resolution was not confirmed" />}
     {stale && <p>Reload confirmations and review the current evidence before requesting another decision.</p>}
-    <div className="flex flex-wrap gap-3"><button disabled={busy || stale} className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg disabled:opacity-40">{busy ? 'Requesting…' : 'Request approval'}</button>
-      <button type="button" disabled={busy} onClick={onCancel} className="px-4 py-2 border border-[var(--border)] rounded-lg">Close</button></div>
+    <div className="flex flex-wrap gap-3"><button disabled={busy || stale} className="mc-btn mc-btn-primary">{busy ? 'Requesting…' : 'Request approval'}</button>
+      <button type="button" disabled={busy} onClick={onCancel} className="px-4 py-2 border border-[var(--mc-line)] rounded-lg">Close</button></div>
   </form>;
 }

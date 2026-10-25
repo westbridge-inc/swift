@@ -38,12 +38,12 @@ const STATUS_WORDS: Record<MmgCheckoutSupportStatus, string> = {
   OPEN: 'Open', CONFIRMING: 'Confirming', CONFIRMED: 'Confirmed', NOT_PAID: 'Not paid', EXPIRED: 'Expired', HELD: 'Held for review',
 };
 const STATUS_TONE: Record<MmgCheckoutSupportStatus, string> = {
-  OPEN: 'bg-sky-500/15 text-sky-400',
-  CONFIRMING: 'bg-amber-500/15 text-amber-400',
-  CONFIRMED: 'bg-emerald-500/15 text-emerald-400',
-  NOT_PAID: 'bg-white/10 text-[var(--muted)]',
-  EXPIRED: 'bg-white/10 text-[var(--muted)]',
-  HELD: 'bg-red-500/15 text-red-400',
+  OPEN: 'bg-[var(--mc-info-soft)] mc-text-info',
+  CONFIRMING: 'bg-[var(--mc-warn-soft)] mc-text-warn',
+  CONFIRMED: 'bg-[var(--mc-good-soft)] mc-text-good',
+  NOT_PAID: 'bg-[var(--mc-surface)] mc-muted',
+  EXPIRED: 'bg-[var(--mc-surface)] mc-muted',
+  HELD: 'bg-[var(--mc-bad-soft)] mc-text-bad',
 };
 const MATCH_WORDS: Record<MmgCheckoutSupportMatch, string> = {
   SWIFT_REFERENCE: 'Swift reference',
@@ -92,7 +92,7 @@ function isQueuedAnswer(error: unknown): boolean {
 
 function WaitingForApproval() {
   return (
-    <p role="status" className="text-xs text-[var(--muted)]">
+    <p role="status" className="mc-muted text-xs">
       Sent for a second admin&apos;s approval. Nothing has changed yet. Once approved, execute it from{' '}
       <Link href="/approvals" className="underline">Approvals</Link>. Do not ask again.
     </p>
@@ -107,7 +107,7 @@ function StatusPill({ status }: { status: MmgCheckoutSupportStatus }) {
 function Id({ value, empty, wrap = false }: { value: string | null; empty: string; wrap?: boolean }) {
   return value
     ? <span className={`font-mono text-xs ${wrap ? 'break-all' : 'whitespace-nowrap'}`}>{value}</span>
-    : <span className="text-[var(--muted)] text-xs whitespace-nowrap">{empty}</span>;
+    : <span className="mc-muted text-xs whitespace-nowrap">{empty}</span>;
 }
 
 type Applied = { q: string; status: MmgCheckoutSupportStatus | ''; run: number };
@@ -140,9 +140,8 @@ export default function MmgPaymentsPage() {
   };
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">MMG payments</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
+    <div className="mc-page">
+      <p className="mc-muted text-sm mb-6">
         Find a partner&apos;s MMG weekly-fee payment by any reference they or MMG can quote. Every search and every opened payment is recorded.
       </p>
 
@@ -154,43 +153,43 @@ export default function MmgPaymentsPage() {
           onChange={(event) => setQ(event.target.value)}
           placeholder={SEARCH_HINT}
           maxLength={64}
-          className="flex-1 bg-[var(--panel)] border border-[var(--border)] rounded-lg px-4 py-2.5 text-sm placeholder:text-[var(--muted)]"
+          className="mc-input flex-1"
         />
         <select
           aria-label="Status"
           value={status}
           onChange={(event) => setStatus(event.target.value as MmgCheckoutSupportStatus | '')}
-          className="bg-[var(--panel)] border border-[var(--border)] rounded-lg px-3 py-2.5 text-sm"
+          className="bg-[var(--mc-card)] border border-[var(--mc-line)] rounded-lg px-3 py-2.5 text-sm"
         >
           <option value="">All statuses</option>
           {(Object.keys(STATUS_WORDS) as MmgCheckoutSupportStatus[]).map((s) => <option key={s} value={s}>{STATUS_WORDS[s]}</option>)}
         </select>
-        <button type="submit" className="px-5 py-2.5 rounded-lg bg-[var(--accent)] text-white text-sm font-semibold">Search</button>
+        <button type="submit" className="mc-btn mc-btn-primary">Search</button>
       </form>
 
-      <section aria-label="Payments" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden mb-6">
+      <section aria-label="Payments" className="bg-[var(--mc-card)] rounded-[var(--mc-radius)] border border-[var(--mc-line)] overflow-hidden mb-6">
         {list.isPending ? (
-          <p role="status" className="p-12 text-center text-[var(--muted)] text-sm">Searching…</p>
+          <p role="status" className="p-12 text-center mc-muted text-sm">Searching…</p>
         ) : list.isError && !list.data ? (
-          <div role="alert" className="p-6 text-sm text-red-400">Could not load MMG payments: {messageOf(list.error)}</div>
+          <div role="alert" className="p-6 text-sm mc-text-bad">Could not load MMG payments: {messageOf(list.error)}</div>
         ) : rows.length === 0 ? (
           <div className="p-12 flex flex-col items-center text-center">
-            <Receipt size={40} className="text-[var(--muted)] mb-3" />
-            <p className="text-sm text-[var(--muted)]">{applied.q ? 'No MMG payment matches that exactly.' : 'No MMG payments yet.'}</p>
+            <Receipt size={40} className="mc-muted mb-3" />
+            <p className="text-sm mc-muted">{applied.q ? 'No MMG payment matches that exactly.' : 'No MMG payments yet.'}</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-[var(--muted)] text-xs">
+            <table className="mc-table mc-table-auto">
+              <thead className="text-left mc-muted text-xs">
                 <tr>
                   {['Created', 'Swift reference', 'MMG transaction ID', 'MMG reference', 'Amount', 'Status', 'Partner', applied.q ? 'Matched by' : null, '']
                     .filter((h): h is string => h !== null)
                     .map((h) => <th key={h || 'open'} scope="col" className="px-4 py-3 font-medium">{h}</th>)}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[var(--border)]">
+              <tbody className="divide-y divide-[var(--mc-line)]">
                 {rows.map((row) => (
-                  <tr key={row.id} className={openId === row.id ? 'bg-white/5' : undefined}>
+                  <tr key={row.id} className={openId === row.id ? 'bg-[var(--mc-surface)]' : undefined}>
                     <td className="px-4 py-3 whitespace-nowrap">{when(row.createdAt)}</td>
                     <td className="px-4 py-3"><Id value={row.swiftReference} empty="—" /></td>
                     <td className="px-4 py-3"><Id value={row.mmgTransactionId} empty="Not confirmed" /></td>
@@ -199,7 +198,7 @@ export default function MmgPaymentsPage() {
                     <td className="px-4 py-3"><StatusPill status={row.status} /></td>
                     <td className="px-4 py-3">
                       <p className="whitespace-nowrap">{row.partner.displayName ?? '—'}</p>
-                      <p className="text-xs text-[var(--muted)] whitespace-nowrap">{KIND_WORDS[row.partner.kind]}{row.partner.maskedPhone ? ` · ${row.partner.maskedPhone}` : ''}</p>
+                      <p className="text-xs mc-muted whitespace-nowrap">{KIND_WORDS[row.partner.kind]}{row.partner.maskedPhone ? ` · ${row.partner.maskedPhone}` : ''}</p>
                     </td>
                     {applied.q ? <td className="px-4 py-3 text-xs">{row.matchedBy.map((m) => MATCH_WORDS[m]).join(', ')}</td> : null}
                     <td className="px-4 py-3">
@@ -207,7 +206,7 @@ export default function MmgPaymentsPage() {
                         type="button"
                         onClick={() => setOpenId(row.id)}
                         aria-label={`Open payment ${row.swiftReference}`}
-                        className="text-xs underline text-[var(--accent)]"
+                        className="text-xs underline text-[var(--mc-accent)]"
                       >
                         Open
                       </button>
@@ -217,13 +216,13 @@ export default function MmgPaymentsPage() {
               </tbody>
             </table>
             {list.hasNextPage ? (
-              <div className="p-4 border-t border-[var(--border)]">
+              <div className="p-4 border-t border-[var(--mc-line)]">
                 <button type="button" disabled={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()} className="text-sm underline disabled:opacity-50">
                   {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
                 </button>
               </div>
             ) : null}
-            {list.isFetchNextPageError ? <p role="alert" className="px-4 pb-4 text-sm text-red-400">Could not load more: {messageOf(list.error)}</p> : null}
+            {list.isFetchNextPageError ? <p role="alert" className="px-4 pb-4 text-sm mc-text-bad">Could not load more: {messageOf(list.error)}</p> : null}
           </div>
         )}
       </section>
@@ -244,14 +243,14 @@ function Detail({ id }: { id: string }) {
   useEffect(() => {
     if (detail.data) panel.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
   }, [detail.data]);
-  if (detail.isPending) return <p role="status" className="text-sm text-[var(--muted)]">Opening the payment…</p>;
-  if (detail.isError) return <div role="alert" className="text-sm text-red-400">Could not open this payment: {messageOf(detail.error)}</div>;
+  if (detail.isPending) return <p role="status" className="text-sm mc-muted">Opening the payment…</p>;
+  if (detail.isError) return <div role="alert" className="text-sm mc-text-bad">Could not open this payment: {messageOf(detail.error)}</div>;
   const d: MmgCheckoutSupportDetail = detail.data.data;
   return (
-    <section ref={panel} aria-label="Payment detail" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 space-y-6 scroll-mt-6">
+    <section ref={panel} aria-label="Payment detail" className="bg-[var(--mc-card)] rounded-[var(--mc-radius)] border border-[var(--mc-line)] p-6 space-y-6 scroll-mt-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs text-[var(--muted)]">Swift reference</p>
+          <p className="mc-muted text-xs">Swift reference</p>
           <h2 className="font-mono text-base break-all">{d.swiftReference}</h2>
         </div>
         <StatusPill status={d.status} />
@@ -282,7 +281,7 @@ function Detail({ id }: { id: string }) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <dt className="text-xs text-[var(--muted)]">{label}</dt>
+      <dt className="mc-muted text-xs">{label}</dt>
       <dd className="mt-0.5">{children}</dd>
     </div>
   );
@@ -295,10 +294,10 @@ function Credited({ period }: { period: MmgCheckoutCreditedPeriod }) {
       ? 'Credited; being applied to the weekly fee.'
       : 'Credited and kept toward the next weekly fee.';
   return (
-    <div className="rounded-lg border border-[var(--border)] p-4 text-sm">
-      <p className="text-xs text-[var(--muted)] mb-1">Credited period</p>
+    <div className="rounded-lg border border-[var(--mc-line)] p-4 text-sm">
+      <p className="text-xs mc-muted mb-1">Credited period</p>
       <p>{line}</p>
-      {period.receiptNumber ? <p className="text-xs text-[var(--muted)] mt-1">Receipt {period.receiptNumber}</p> : null}
+      {period.receiptNumber ? <p className="text-xs mc-muted mt-1">Receipt {period.receiptNumber}</p> : null}
     </div>
   );
 }
@@ -306,15 +305,15 @@ function Credited({ period }: { period: MmgCheckoutCreditedPeriod }) {
 function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[]; truncated: boolean }) {
   return (
     <div>
-      <h3 className="text-xs font-semibold tracking-widest text-[var(--muted)] mb-2">TIMELINE</h3>
+      <h3 className="text-xs font-semibold tracking-widest mc-muted mb-2">TIMELINE</h3>
       {entries.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">MMG has not replied, and Swift has not looked this payment up yet.</p>
+        <p className="text-sm mc-muted">MMG has not replied, and Swift has not looked this payment up yet.</p>
       ) : (
         <ol className="space-y-3">
           {entries.map((e, i) => (
-            <li key={`${e.at}-${i}`} className="border-l-2 border-[var(--border)] pl-3 text-sm">
-              <p className="font-medium">{SOURCE_WORDS[e.source]} <span className="text-[var(--muted)] font-normal">· {when(e.at)}</span></p>
-              <p className="text-xs text-[var(--muted)] mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+            <li key={`${e.at}-${i}`} className="border-l-2 border-[var(--mc-line)] pl-3 text-sm">
+              <p className="font-medium">{SOURCE_WORDS[e.source]} <span className="mc-muted font-normal">· {when(e.at)}</span></p>
+              <p className="text-xs mc-muted mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
                 {e.resultCode !== null ? <span>Result code {e.resultCode} ({RESULT_WORDS[e.resultCode] ?? 'undocumented'})</span> : null}
                 {e.transactionStatus ? <span>MMG status: {e.transactionStatus}</span> : null}
                 {e.amount ? <span>Amount: {e.amount} {e.currency ?? ''}</span> : null}
@@ -327,7 +326,7 @@ function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[];
           ))}
         </ol>
       )}
-      {truncated ? <p className="text-xs text-[var(--muted)] mt-2">Showing the first records only.</p> : null}
+      {truncated ? <p className="text-xs mc-muted mt-2">Showing the first records only.</p> : null}
     </div>
   );
 }
@@ -369,7 +368,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
   // A failed read is said out loud: hiding the panel would hide a return that is held for a person.
   if (view.isError) {
     return (
-      <section aria-label="Return this payment" className="rounded-lg border border-[var(--border)] p-4 space-y-3 text-sm">
+      <section aria-label="Return this payment" className="rounded-lg border border-[var(--mc-line)] p-4 space-y-3 text-sm">
         <h3 className="font-semibold">Return this payment to the partner</h3>
         <QueryFailed error={view.error} what="the return status of this payment" onRetry={() => void view.refetch()} retrying={view.isFetching} />
       </section>
@@ -382,20 +381,20 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
   const queued = isQueuedAnswer(ask.error);
 
   return (
-    <section aria-label="Return this payment" className="rounded-lg border border-[var(--border)] p-4 space-y-3 text-sm">
+    <section aria-label="Return this payment" className="rounded-lg border border-[var(--mc-line)] p-4 space-y-3 text-sm">
       <h3 className="font-semibold">Return this payment to the partner</h3>
       {v.reversals.map((r) => (
-        <div key={r.id} className="rounded-md bg-[var(--bg)] p-3 space-y-1">
+        <div key={r.id} className="rounded-md bg-[var(--mc-card)] p-3 space-y-1">
           <p className="font-semibold">{RETURN_STATE_WORDS[r.state]}</p>
-          <p className="text-xs text-[var(--muted)]">{gyd(r.amount)} {r.currencyCode} · asked {when(r.sentAt)}{r.reversedAt ? ` · returned ${when(r.reversedAt)}` : ''}</p>
-          {r.heldReason ? <p className="text-xs text-amber-400">{HELD_WORDS[r.heldReason] ?? r.heldReason}. Check the MMG statement before anything else.</p> : null}
-          {r.resolution ? <p className="text-xs text-[var(--muted)]">{RESOLUTION_WORDS[r.resolution] ?? r.resolution}</p> : null}
+          <p className="mc-muted text-xs">{gyd(r.amount)} {r.currencyCode} · asked {when(r.sentAt)}{r.reversedAt ? ` · returned ${when(r.reversedAt)}` : ''}</p>
+          {r.heldReason ? <p className="text-xs mc-text-warn">{HELD_WORDS[r.heldReason] ?? r.heldReason}. Check the MMG statement before anything else.</p> : null}
+          {r.resolution ? <p className="mc-muted text-xs">{RESOLUTION_WORDS[r.resolution] ?? r.resolution}</p> : null}
           {r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING' ? (
             <button
               type="button"
               disabled={check.isPending}
               onClick={() => check.mutate(r.id)}
-              className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40"
+              className="rounded-lg border border-[var(--mc-line)] px-3 py-1 text-xs disabled:opacity-40"
             >
               {check.isPending ? 'Checking…' : 'Check with MMG'}
             </button>
@@ -405,10 +404,10 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
       {check.error ? <MutationError error={check.error} label="MMG could not be checked" /> : null}
       {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} heldReason={r.heldReason} lookupStatus={r.lookupStatus} onDone={refresh} />)}
       {!v.switchedOn ? (
-        <p className="text-xs text-[var(--muted)]">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
+        <p className="mc-muted text-xs">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
       ) : !v.canReverse ? (
         v.refusal && !v.reversals.some((r) => r.state === 'REVERSED' || r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING')
-          ? <p className="text-xs text-[var(--muted)]">{v.refusal.message}</p>
+          ? <p className="mc-muted text-xs">{v.refusal.message}</p>
           : null
       ) : (
         <form
@@ -420,7 +419,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
             ask.mutate(undefined, { onSettled: () => { sending.current = false; } });
           }}
         >
-          <p className="text-xs text-[var(--muted)]">
+          <p className="mc-muted text-xs">
             MMG returns the whole payment ({gyd(amount)} {currencyCode}) to the partner&apos;s MMG account, and Swift deducts it from
             what the partner has paid toward weekly fees once MMG confirms. A second admin must approve it first.
           </p>
@@ -432,9 +431,9 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
             disabled={queued}
             aria-label="Why it is being returned"
             placeholder="Why it is being returned (for example: paid this week twice). Required."
-            className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+            className="mc-input"
           />
-          <label className="block text-xs text-[var(--muted)]">
+          <label className="mc-field">
             Type the whole amount to confirm
             <input
               value={typed}
@@ -442,13 +441,13 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
               inputMode="numeric"
               disabled={queued}
               aria-label="Amount to return"
-              className="mt-1 block w-40 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+              className="mt-1 block w-40 rounded-lg border border-[var(--mc-line)] bg-[var(--mc-card)] px-2 py-1.5 text-sm"
             />
           </label>
           <button
             type="submit"
             disabled={ask.isPending || queued || !amountOk || !reasonOk}
-            className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
+            className="mc-btn mc-btn-primary"
           >
             {ask.isPending ? 'Sending…' : queued ? 'Waiting for approval' : 'Return this payment'}
           </button>
@@ -487,7 +486,7 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
   return (
     <form
       aria-label="Resolve the held return"
-      className="space-y-2 rounded-md border border-[var(--border)] p-3"
+      className="space-y-2 rounded-md border border-[var(--mc-line)] p-3"
       onSubmit={(e) => {
         e.preventDefault();
         if (!ok || queued || sending.current) return;
@@ -521,7 +520,7 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
         onChange={(e) => setReference(e.target.value)}
         aria-label="MMG reference"
         placeholder={outcome === 'NOT_RETURNED' ? 'The MMG statement line or reference' : "MMG's reversal reference"}
-        className="block w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+        className="block w-full rounded-lg border border-[var(--mc-line)] bg-[var(--mc-card)] px-2 py-1.5 text-sm"
       />
       <textarea
         value={reason}
@@ -529,9 +528,9 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
         rows={2}
         aria-label="Why"
         placeholder="What you checked. Required."
-        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+        className="mc-input"
       />
-      <button type="submit" disabled={resolve.isPending || queued || !ok} className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40">
+      <button type="submit" disabled={resolve.isPending || queued || !ok} className="rounded-lg border border-[var(--mc-line)] px-3 py-1 text-xs disabled:opacity-40">
         {resolve.isPending ? 'Sending…' : queued ? 'Waiting for approval' : 'Send for approval'}
       </button>
       </fieldset>

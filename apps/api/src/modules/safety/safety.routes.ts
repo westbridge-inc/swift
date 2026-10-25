@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from '../../lib/zod';
 import { SosService, LIVE_SOS_STATUSES } from './sos.service';
 import { GuardianService } from './guardian.service';
@@ -484,13 +485,14 @@ export async function safetyRoutes(app: FastifyInstance) {
     if (!looksLikeImage(buffer)) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
-    await scanUpload(buffer, { surface: 'liveness', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'liveness', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
       folder: `liveness/${request.user.userId}`,
     });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'liveness', fileKey: url, buffer, storage: getStorageProvider() });
     const result = await liveness.check({ userId: request.user.userId, profile, selfieUrl: url });
     return { success: true, data: result };
   });

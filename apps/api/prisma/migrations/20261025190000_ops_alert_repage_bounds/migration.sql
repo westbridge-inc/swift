@@ -14,6 +14,7 @@ ALTER TABLE "ops_alerts" ADD COLUMN "oncallTextedList" TEXT;
 ALTER TABLE "ops_alert_recipients" ADD COLUMN "pagedLevel" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "ops_alert_recipients" ADD COLUMN "lastPagedAt" TIMESTAMP(3);
 
+CREATE INDEX "ops_alerts_oncallTextedList_oncallTextedAt_idx" ON "ops_alerts"("oncallTextedList", "oncallTextedAt");
 CREATE INDEX "ops_alert_recipients_userId_lastPagedAt_idx" ON "ops_alert_recipients"("userId", "lastPagedAt");
 
 -- Every escalation so far already re-paged every recipient and texted the

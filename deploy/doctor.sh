@@ -93,6 +93,9 @@ else
         *'"malwareScanner":"down"'*) bad "upload malware scanner is DOWN: every upload is refused until clamd answers (docker compose -f deploy/docker-compose.yml logs --tail=100 clamd)" ;;
         *) warn "upload malware scanner state not reported (an API older than the scanner deployment)" ;;
       esac
+      case "$HEALTH" in
+        *'"malwareScanBypass":true'*) bad "MALWARE_SCAN BYPASS IS ON in the running API: a mover's uploads are stored unscanned while clamd is down (remove MALWARE_SCAN_BYPASS from deploy/.env and recreate api worker)" ;;
+      esac
       ;;
     # No token, or a rejected one: the API hides the per-check detail and the
     # only thing a 200 tells us is the aggregate status. That is not a FAIL.
@@ -248,6 +251,10 @@ fi
 # the role contract through deploy/rls-logins.sh roles (reason codes only),
 # and each container's settings by NAME (a value is never printed).
 env_line() { [ -f "$HERE/.env" ] && grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
+# [COORD 21 Oct] The upload malware scan emergency bypass shouts while it is set.
+if [ "$(env_line MALWARE_SCAN_BYPASS)" = 1 ]; then
+  bad "MALWARE_SCAN_BYPASS=1 in deploy/.env: THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON (liveness selfies, onboarding documents and vehicle photos stored unscanned while clamd is down; ops paged hourly)"
+fi
 if [ "$(env_line TENANT_RLS_BIND)" = 1 ]; then
   WALL_ROLES="$("$HERE/rls-logins.sh" roles 2>/dev/null | tail -1)"
   case "$WALL_ROLES" in
