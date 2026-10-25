@@ -38,6 +38,12 @@ describe('[R7] a licence label says who checked it and when', () => {
     expect(screen).not.toContain('Certified qualification');
   });
 
+  it('[REVIEW-F #2053 S3-1] the partner’s own dashboard shows the same dated licence label, never a "Certified" pill', () => {
+    const screen = strip(src('src/modules/services/screens/ServiceProviderScreen.tsx'));
+    expect(screen).toContain('<TonePill label={licenceLabel(provider.licenceCheckedOn)!} tone="neutral" />');
+    expect(screen).not.toContain('label="Certified"');
+  });
+
   it('the profile counts steps done; it never calls a selfie or a first order "Verified"', () => {
     const profile = strip(src('src/modules/profile/screens/ProfileScreen.tsx'));
     expect(profile).toContain('done — next: ${nextFact.next}');

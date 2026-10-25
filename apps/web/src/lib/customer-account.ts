@@ -42,6 +42,11 @@ export async function uploadSelfie(file: File): Promise<{ user: any }> {
   return (await apiFetch('/api/v1/auth/selfie', { method: 'POST', body: form })).data as { user: any };
 }
 
+/** [ROLE-DOCS · owner 21 Oct 2026] Sign "I trade under my own name" for the store just created (in place of a business registration). */
+export async function signOwnName() {
+  return (await apiFetch('/api/v1/vendor/onboarding/own-name', { method: 'POST', body: JSON.stringify({ accept: true, attestationVersion: 'v1' }) })).data;
+}
+
 /** Partner onboarding — turn a fresh account into a vendor or a mover. */
 export async function becomePartner(body: any) {
   return (await apiFetch('/api/v1/partner/become', { method: 'POST', body: JSON.stringify(body) })).data;

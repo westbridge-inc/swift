@@ -6,7 +6,8 @@ import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
-import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer-account';
+import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
+import { ownNameStoreType } from '@/lib/own-name-store-type';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
@@ -27,6 +28,8 @@ import { loadStorePicker } from './store-picker-loader';
 import type { WeeklyFee as WeeklyFeeComponent } from './weekly-fee';
 import type { FeeState } from '@/lib/signup-fee';
 import { loadWeeklyFee } from './weekly-fee-loader';
+import type { OwnNameChoice as OwnNameChoiceComponent } from './own-name-choice';
+import { loadOwnNameChoice } from './own-name-loader';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
@@ -92,6 +95,9 @@ export default function SignupPage() {
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
+  // [ROLE-DOCS · owner 21 Oct 2026] own name (no business registration, BNA s.3) or a business name; the declaration tick
+  const [nameBasis, setNameBasis] = useState<'REGISTERED' | 'OWN_NAME'>('REGISTERED');
+  const [ownNameTick, setOwnNameTick] = useState(false);
   const [storePin, setStorePin] = useState<StorePin | null>(null);
   const [placingStore, setPlacingStore] = useState(false);
   const storePinButton = useRef<HTMLButtonElement>(null);
@@ -140,6 +146,15 @@ export default function SignupPage() {
     if (!feeStep || WeeklyFee || feeLoadFailed) return;
     loadWeeklyFee().then((m) => setWeeklyFee(() => m.WeeklyFee), () => setFeeLoadFailed(true));
   }, [feeStep, WeeklyFee, feeLoadFailed]);
+  // [ROLE-DOCS · #2046 · perf] The own-name choice and its declaration load on the business step, for a store type
+  // asked for a business registration; until then the store is registered-name (the default), so nothing is lost.
+  const [OwnNameChoice, setOwnNameChoice] = useState<typeof OwnNameChoiceComponent | null>(null);
+  const [ownNameLoadFailed, setOwnNameLoadFailed] = useState(false);
+  const ownNameStep = step === 'business' && ownNameStoreType(biz.vendorType);
+  useEffect(() => {
+    if (!ownNameStep || OwnNameChoice || ownNameLoadFailed) return;
+    loadOwnNameChoice().then((m) => setOwnNameChoice(() => m.OwnNameChoice), () => setOwnNameLoadFailed(true));
+  }, [ownNameStep, OwnNameChoice, ownNameLoadFailed]);
   // A tick is given to the agreement on screen: it is cleared whenever the role
   // or the step changes, so it never carries from one agreement to the other,
   // nor survives leaving the step (reset during render, so no frame shows it).
@@ -224,9 +239,13 @@ export default function SignupPage() {
   const doBusiness = () => wrap(async () => {
     if (!storePin || placingStore) throw new Error('Place your store on the map');
     if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
+    const ownName = nameBasis === 'OWN_NAME' && ownNameStoreType(biz.vendorType);
+    if (ownName && !ownNameTick) throw new Error('Sign the own-name declaration to continue');
     if (fee.ask) throw new Error(fee.ask);
     if (!agree) throw new Error('Tick the Vendor Partner Agreement to continue');
-    await feeChecked(becomePartner({ role: 'VENDOR', acceptAgreement: true, ...(fee.ack && { weeklyFeeAck: fee.ack }), business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } }));
+    await feeChecked(becomePartner({ role: 'VENDOR', acceptAgreement: true, ...(fee.ack && { weeklyFeeAck: fee.ack }), business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude, ...(ownName ? { nameBasis: 'OWN_NAME' } : {}) } }));
+    // The store exists: the ticked declaration is signed now (the app's Documents offers it again if this fails).
+    if (ownName) await signOwnName().catch(() => undefined);
     router.replace('/dashboard');
   });
   const editBusinessAddress = (patch: Partial<typeof biz>) => {
@@ -367,6 +386,11 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
             </select></div>
+            {ownNameStoreType(biz.vendorType) ? (OwnNameChoice
+              ? <OwnNameChoice storeName={biz.name} nameBasis={nameBasis} onNameBasis={setNameBasis} tick={ownNameTick} onTick={setOwnNameTick} />
+              : ownNameLoadFailed
+                ? <button type="button" className={styles.roleButton} onClick={() => setOwnNameLoadFailed(false)}>Couldn’t load the store-name choice — try again</button>
+                : null) : null}
             <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
