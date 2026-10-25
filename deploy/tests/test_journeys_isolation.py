@@ -149,6 +149,28 @@ class JourneysIsolationChecker(unittest.TestCase):
         model["services"]["journeys"]["network_mode"] = "host"
         self.assert_refused(model, "journeys uses the host network", "--require-journeys")
 
+    def test_the_private_api_may_join_the_internal_scanner_network_and_nothing_else(self):
+        # [Row 312 · COORD 21 Oct] clamd sits on its own internal network shared only with the API;
+        # the private instance IS the API (it scans its uploads), so it may join that one network.
+        model = rendered_model()
+        model["networks"]["scanner"] = {"name": "swift_scanner", "internal": True}
+        model["services"]["api-journeys"]["networks"] = {"private": None, "scanner": None}
+        result = check(model, "--require-journeys")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # ... only while it has no route out,
+        model["networks"]["scanner"] = {"name": "swift_scanner"}
+        self.assert_refused(model, "api-journeys must be attached to swift-pilot-private only", "--require-journeys")
+        # ... never in place of the private network,
+        model = rendered_model()
+        model["networks"]["scanner"] = {"name": "swift_scanner", "internal": True}
+        model["services"]["api-journeys"]["networks"] = {"scanner": None}
+        self.assert_refused(model, "api-journeys must be attached to swift-pilot-private only", "--require-journeys")
+        # ... and never for the runner.
+        model = rendered_model()
+        model["networks"]["scanner"] = {"name": "swift_scanner", "internal": True}
+        model["services"]["journeys"]["networks"] = {"private": None, "scanner": None}
+        self.assert_refused(model, "journeys must be attached to swift-pilot-private only", "--require-journeys")
+
     def test_refuses_a_non_external_private_network(self):
         model = rendered_model()
         model["networks"]["private"] = {"name": "swift-pilot-private"}

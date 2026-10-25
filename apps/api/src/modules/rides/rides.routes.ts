@@ -45,6 +45,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
+import { withoutPositionEvidence } from '../order/customer-timeline';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -563,6 +564,10 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    // [REVIEW-F S4-2 on #2055] The driver's recorded position (a step note's ' — gps:…' evidence, kept
+    // for support and appeals) is never the passenger's to read: the same cut as the customer's
+    // order timeline. Every other field of a row is unchanged.
+    ride.statusHistory = ride.statusHistory.map((row) => ({ ...row, note: withoutPositionEvidence(row.note) }));
     if (ride.driver) {
       const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
       Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });

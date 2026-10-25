@@ -1,6 +1,7 @@
 import { discardUnusedCustomerSelfie } from '../user/upload-erasure';
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
+import { documentScanState, uploadScanRefusal, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -183,7 +184,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
     const sealedType = photo?.mimeType ?? file.mimetype;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
-    await scanUpload(buffer, { surface: 'verification', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
@@ -228,6 +229,8 @@ export async function verificationRoutes(app: FastifyInstance) {
           createdBy: request.user.userId,
         },
       });
+      // [Row 312] Stored sealed: the rescan opens it with this key row (found by the same fileKey).
+      await recordUnscannedUpload(app.prisma, scan, { surface: 'verification', fileKey: url, buffer, sealed: true, storage });
 
       if (dup) {
         // Global correlation is a platform review signal. Tenant-local
@@ -281,6 +284,9 @@ export async function verificationRoutes(app: FastifyInstance) {
       throw documentReviewerRequired();
     }
     const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
+    // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
+    // staff before its rescan answers CLEAN, whatever link was minted.
+    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 

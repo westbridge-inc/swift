@@ -24,20 +24,15 @@ export default function DashboardPage() {
   const metric = (value: string | undefined) => (blind ? METRIC_UNAVAILABLE : (value ?? '—'));
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-[var(--muted)] text-sm">
-            {new Date().toLocaleDateString('en-US', {
-              weekday: 'long',
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric',
-            })}
-          </p>
-        </div>
-      </div>
+    <div className="mc-page space-y-5">
+      <p className="mc-muted">
+        {new Date().toLocaleDateString('en-GB', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })}
+      </p>
 
       {blind && (
         <DataUnavailable
@@ -48,9 +43,9 @@ export default function DashboardPage() {
         />
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <MetricCard
-          title="Weekly Revenue"
+          title="Weekly fees"
           value={blind || stats?.revenue?.weeklySubscriptionRevenue == null
             ? METRIC_UNAVAILABLE
             : `GY$${Number(stats.revenue.weeklySubscriptionRevenue).toLocaleString()}`}
@@ -61,7 +56,7 @@ export default function DashboardPage() {
             completed is a bad day that reads as a good one. The overview has
             computed todayCompletedOrders all along and the card dropped it. */}
         <MetricCard
-          title="Orders Today"
+          title="Orders today"
           value={metric(stats?.todayOrders?.toString())}
           subtitle={
             stats?.todayCompletedOrders != null
@@ -75,26 +70,26 @@ export default function DashboardPage() {
             activeVendors/totalVendors were computed and rendered nowhere in
             the whole admin app [F-260]. */}
         <MetricCard
-          title="Live Merchants"
+          title="Live businesses"
           value={metric(stats?.activeVendors?.toString())}
           subtitle={stats?.totalVendors != null ? `of ${stats.totalVendors} onboarded` : undefined}
           loading={isLoading}
         />
         <MetricCard
-          title="Active Riders"
+          title="Riders online"
           value={metric(stats?.activeRiders?.toString())}
           subtitle="online"
           loading={isLoading}
         />
         <MetricCard
-          title="Active Drivers"
+          title="Drivers online"
           value={metric(stats?.activeDrivers?.toString())}
           subtitle="online"
           loading={isLoading}
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <RevenueBreakdown
           data={stats?.subscriptionBreakdown}
           weeklyTotal={stats?.revenue?.weeklySubscriptionRevenue}
