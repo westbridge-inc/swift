@@ -3,6 +3,7 @@ erasure ledger onto it BEFORE it reports a restore. Drives the real script with
 command stand-ins (no services): every docker call is logged with the database
 it targets and what it was fed. The SQL itself is proven on real databases by
 apps/api/src/__tests__/restore-erasure-replay.test.ts."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -39,6 +40,8 @@ if sql.startswith('COPY (') and 'TO STDOUT' in sql:
     if fail == 'export': sys.exit(8)
     sys.exit(0)
 if 'restore_ledger_' in sql and 'BEGIN;' in sql:
+    with open(os.environ['CALL_LOG'] + '.replay', 'w') as saved:
+        saved.write(sql)
     if fail == 'replay': sys.exit(9)
     print('erasure ledger replayed: 0 destroyed keys, 0 receipts, 0 retired documents, 0 closed accounts in the live ledger; changed in this copy: nothing (the copy already matched)')
     sys.exit(0)
@@ -57,7 +60,7 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         deploy = root / 'deploy'
         deploy.mkdir()
-        for name in ('restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql'):
+        for name in ('restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql', 'restore-offsite-ledger.sql'):
             shutil.copy2(DEPLOY / name, deploy / name)
         (deploy / '.env').write_text('POSTGRES_DB=swift_live_fixture\n')
         bins = root / 'bin'
@@ -71,8 +74,11 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         log = root / 'calls'
         log.write_text('')
         env = dict(os.environ, PATH=f'{bins}:{os.environ["PATH"]}', CALL_LOG=str(log), FAIL=fail, **env_extra)
+        self.replay_script = ''
         r = subprocess.run(['bash', str(deploy / 'restore.sh'), *project, *extra_args, str(dump), 'swift_restore_privacy'],
                            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        replay = Path(str(log) + '.replay')
+        self.replay_script = replay.read_text() if replay.exists() else ''
         projects = Path(str(log) + '.projects')
         self.projects = projects.read_text().split() if projects.exists() else []
         return r, log.read_text().splitlines()
@@ -247,6 +253,81 @@ class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):
         self.assertNotIn('RESTORE OK', r.stdout + r.stderr)
         self.assertFalse(any('DROP DATABASE' in l for l in calls))
 
+
+
+OFFSITE = [
+    {"id": "0b9f0c3e-1111-4a2b-8c3d-000000000001", "kind": "closed_accounts", "entry": {"id": "synthetic-closed", "kept": []}, "createdAt": "2026-10-21T12:00:00.000"},
+    {"id": "0b9f0c3e-1111-4a2b-8c3d-000000000002", "kind": "destroyed_keys", "entry": {"fileKey": "k", "createdBy": "synthetic-closed", "shreddedAt": None}, "createdAt": "2026-10-21T12:00:01.000"},
+]
+
+
+class TheOffsiteLedger(unittest.TestCase):
+    """[Off-site erasure ledger] restore.sh --ledger-from <file>: the entries the host unit shipped (the
+    owner decrypts them on his own computer). They join the live ledger, or stand alone when the live
+    database is gone."""
+    run_restore = RestoreQuarantineAndReplay.run_restore
+    first = staticmethod(RestoreQuarantineAndReplay.first)
+
+    def ledger(self, lines, mode=0o600):
+        d = Path(tempfile.mkdtemp(prefix='swift-offsite-ledger-'))
+        self.addCleanup(shutil.rmtree, d, True)
+        f = d / 'ledger.jsonl'
+        f.write_text(''.join((l if isinstance(l, str) else json.dumps(l)) + '\n' for l in lines))
+        f.chmod(mode)
+        return str(f)
+
+    def test_a_ledger_others_can_read_or_a_malformed_one_is_refused_before_anything(self):
+        for path in (self.ledger(OFFSITE, 0o644), self.ledger(['not json']), self.ledger([{**OFFSITE[0], 'kind': 'something_else'}]),
+                     self.ledger([{**OFFSITE[0], 'id': 'not-a-uuid'}]), '/nonexistent/ledger.jsonl'):
+            with self.subTest(path=path):
+                r, calls = self.run_restore('', ('--ledger-from', path))
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('--ledger-from', r.stderr)
+                self.assertFalse(any('CREATE DATABASE' in l for l in calls))
+
+    def test_with_the_live_database_the_offsite_entries_join_the_live_ledger(self):
+        r, calls = self.run_restore('', ('--ledger-from', self.ledger(OFFSITE)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any(':: COPY (' in l and l.startswith('psql db=swift_live_fixture') for l in calls))
+        script = self.replay_script
+        self.assertIn('CREATE TEMP TABLE restore_offsite', script)
+        self.assertIn('"kind": "destroyed_keys"', script.replace('""', '"'))
+        self.assertLess(script.index('INSERT INTO restore_ledger_closed_account_rows'), script.index('REPLAY THE LIVE ERASURE LEDGER'))
+        self.assertIn('RESTORE OK', r.stdout)
+
+    def test_without_the_live_database_the_offsite_ledger_makes_the_copy_erasure_complete_up_to_its_newest_entry(self):
+        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone', '--ledger-from', self.ledger(OFFSITE)))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertEqual([l for l in calls if 'db=swift_live_fixture' in l], [])
+        self.assertIn('CREATE TEMP TABLE restore_ledger_closed_accounts', self.replay_script)
+        self.assertIn('CREATE TEMP TABLE restore_offsite', self.replay_script)
+        out = r.stdout + r.stderr
+        self.assertIn('erasure-complete up to 2026-10-21T12:00:01.000', out)
+        self.assertNotIn('NOT erasure-complete: replay the off-site ledger', out)
+        self.assertNotIn('RESTORE OK', out)
+
+
+
+class TheDeidentificationGap(unittest.TestCase):
+    """[#1984 COORD ruling 14:11Z] Until the follow-up re-runs the app's own erasure passes on the copy,
+    no restore claims to cover the #1905/#1945 de-identifications."""
+    run_restore = RestoreQuarantineAndReplay.run_restore
+    first = staticmethod(RestoreQuarantineAndReplay.first)
+    LINE = 'NOT erasure-complete for #1905/#1945 de-identifications'
+
+    def test_every_restore_says_so(self):
+        # (--compare-source takes the same closing path; the stand-in has no tables to compare)
+        for args, code in (((), 0), (('--no-live-ledger', '--i-know-live-is-gone'), 3)):
+            with self.subTest(args=args):
+                r, _ = self.run_restore('', args)
+                self.assertEqual(r.returncode, code, r.stderr)
+                out = r.stdout + r.stderr
+                self.assertIn(self.LINE, out)
+                if 'RESTORE OK' in r.stdout:
+                    self.assertLess(r.stdout.index(self.LINE), r.stdout.index('RESTORE OK'))
+
+    def test_the_runbook_says_so(self):
+        self.assertIn(self.LINE, (DEPLOY / 'PILOT-RUNBOOK.md').read_text())
 
 
 class RunsUnderAnyStderr(unittest.TestCase):
