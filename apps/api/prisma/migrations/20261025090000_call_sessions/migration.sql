@@ -20,6 +20,7 @@
 --     rlsDdlFor('call_sessions') from src/lib/tenant-rls.ts, byte for byte.
 --  5. Tenant lineage: the row's tenant is its order's tenant. The text is the call_sessions rule of
 --     tenantLineageDdl(), byte for byte (the taxi_ride_waiting shape).
+--  6. The erasure-ledger capture trigger (#1984), as on every table the restore replay deletes from.
 --
 -- ROLLBACK: rollback.sql beside this file (forward repair is preferred). Roll the application back
 -- first: the previous application never reads this table. The guard refuses while any row exists
@@ -120,3 +121,9 @@ CREATE OR REPLACE FUNCTION call_sessions_tenant_matches_order() RETURNS trigger 
 DROP TRIGGER IF EXISTS call_sessions_tenant_matches_order ON call_sessions;
 
 CREATE TRIGGER call_sessions_tenant_matches_order BEFORE INSERT OR UPDATE OF "tenantId", "orderId" ON call_sessions FOR EACH ROW EXECUTE FUNCTION call_sessions_tenant_matches_order();
+
+-- 6. [Restore replays erasures · #1984] The account erasure deletes a closed account's call rows
+--    (account-erasure-register: CallSession.callerUserId CLEARED); the restore replay deletes them from a
+--    restored copy too (deploy/restore-replay-erasures.sql), so each delete is captured in the erasure
+--    ledger like every other table the replay deletes from. Dropped with the table on rollback.
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON call_sessions FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('callerUserId', 'id');

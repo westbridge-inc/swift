@@ -360,9 +360,15 @@ export async function handleVoiceStep(
     }
     case 'status': {
       if (!ended && event.callStatus && TERMINAL_CALL_STATUSES.has(event.callStatus)) {
+        // The status is in each WHERE (REVIEW-M S4-3): a callee's 1 that lands while this runs is never
+        // overwritten as NOT_CONNECTED; a connected call is only ended.
         await deps.prisma.callSession.updateMany({
-          where: { id: session.id, endedAt: null },
-          data: session.status === CALL_STATUS.CONNECTED ? { endedAt: now } : notConnected,
+          where: { id: session.id, endedAt: null, status: { not: CALL_STATUS.CONNECTED } },
+          data: notConnected,
+        });
+        await deps.prisma.callSession.updateMany({
+          where: { id: session.id, endedAt: null, status: CALL_STATUS.CONNECTED },
+          data: { endedAt: now },
         });
       }
       return { step: null };

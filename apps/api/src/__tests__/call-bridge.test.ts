@@ -387,6 +387,18 @@ describe('[O-1] the call itself: Press 1 on both legs', () => {
     expect((await hook('leg1-gather', callId, { Digits: '1' })).body).not.toContain('<Dial');
   });
 
+  it('[REVIEW-M S4-3] a terminal status callback after the callee\'s 1 ends the call, never turns it NOT_CONNECTED', async () => {
+    const o = await liveFood();
+    const { callId } = (await bridge(diner.token, o.id, 'rider')).json().data;
+    await hook('leg1-gather', callId, { Digits: '1' });
+    await hook('screen-gather', callId, { Digits: '1' });
+    await hook('status', callId, { CallStatus: 'completed', CallDuration: '61' });
+    const row = await session(callId);
+    expect(row.status).toBe('CONNECTED');
+    expect(row.endedAt).not.toBeNull();
+    expect(row.connectedAt).not.toBeNull();
+  });
+
   it('any key but 1 on leg 1 ends it without dialling', async () => {
     const o = await liveFood();
     const { callId } = (await bridge(diner.token, o.id, 'rider')).json().data;
