@@ -207,6 +207,8 @@ describe('[Row 117] with web taxi booking on, the trip page carries the ride’s
       driver: { vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', licensePlate: 'PXX 1234', user: { firstName: 'Dev' } },
     } as never);
     vi.spyOn(rides, 'activeRide').mockResolvedValue({ id: ORDER.id, driver: { currentLat: 6.81, currentLng: -58.16, user: { firstName: 'Dev', phone: '+5920000000' } } } as never);
+    vi.spyOn(rides, 'tripShares').mockResolvedValue([]);
+    vi.spyOn(rides, 'outstandingCheckin').mockResolvedValue(null);
   });
 
   it('shows the ride code, the driver’s position and SOS — and no "open the app" notice', async () => {
@@ -496,6 +498,45 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
+});
+
+// [WEB-TAXI · TAXI waiting charge · research E4] The live waiting count and the
+// receipt's waiting line, as the phone shows them (WaitingCard, RidePostTripSheet).
+describe('the waiting charge on the trip page', () => {
+  const WAITING = { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', pickupWaitMinutes: 7, waitingMinutes: 13, waitingCharge: 300, running: false, nextChargeAt: null };
+
+  it('shows the live wait the server sends: minutes, the charge so far, the block, cash at the end', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, waiting: WAITING } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    const card = await screen.findByRole('region', { name: 'Waiting' });
+    expect(card.textContent).toContain('13 min waited');
+    expect(card.textContent).toContain('$300 so far');
+    expect(card.textContent).toContain('$300 per 10 minutes');
+    expect(card.textContent).toContain('At the pickup: 7 min');
+    expect(card.textContent).toContain('Paid in cash with your fare at the end.');
+  });
+
+  it('no waiting object from the server: no card, nothing invented', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    await screen.findByText(/Open the Swift app for your safety PIN and SOS/);
+    expect(screen.queryByText(/min waited/)).toBeNull();
+  });
+
+  it('a finished ride’s receipt itemises trip + waiting = total', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'COMPLETED', subtotalCustomer: 2800, totalAmount: 2800, paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, fareBreakdown: { routeFare: 2800, waitingMinutes: 13, waitingCharge: 300, total: 3100, currencyCode: 'GYD' } } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Waiting 13 min')).toBeTruthy();
+    expect(screen.getByText('Trip').nextSibling?.textContent).toBe('$2,800');
+    expect(screen.getByText('Waiting 13 min').nextSibling?.textContent).toBe('$300');
+    expect(screen.getByText('Total').nextSibling?.textContent).toBe('$3,100');
+  });
 });
 
 // ---------------------------------------------------------------------------
