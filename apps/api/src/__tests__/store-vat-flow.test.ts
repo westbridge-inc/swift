@@ -19,6 +19,7 @@ import { VAT_CERTIFICATE_DOC_TYPE } from '../modules/store-vat/store-vat';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import { testPhone } from './helpers/fixture-ids';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] A VAT-registered store's VAT, end to end on a real database.
@@ -136,7 +137,18 @@ beforeAll(async () => {
     status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, minOrderAmount: 0,
   } });
   vendorId = vendor.id; vendorIds.push(vendor.id);
-  categoryId = (await app.prisma.category.create({ data: { vendorId, name: 'Shelf', sortOrder: 0 } })).id;
+  // A live store: its own checklist, approved by a person. Every document decision re-projects the owner's stores, so
+  // a store missing its checklist would be closed by that projection whatever the VAT certificate did.
+  const { checklist } = await verification.activationChecklist(owner.id, 'SUPERMARKET');
+  expect(checklist).not.toContain(VAT_CERTIFICATE_DOC_TYPE);
+  for (const docType of checklist) {
+    await app.prisma.verificationDocument.create({ data: {
+      userId: owner.id, role: 'VENDOR_OWNER', docType, fileUrl: `verification/${RUN}/${docType}.enc`,
+      status: 'APPROVED', reviewedBy: 'seed', reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1',
+    } as never });
+  }
+  expect((await verification.activationChecklist(owner.id, 'SUPERMARKET')).complete).toBe(true);
+  categoryId =(await app.prisma.category.create({ data: { vendorId, name: 'Shelf', sortOrder: 0 } })).id;
   const item = (name: string, price: number, vatClass?: 'ZERO_RATED' | 'EXEMPT') =>
     app.prisma.item.create({ data: { vendorId, categoryId, name: word(name), basePrice: price, isAvailable: true, ...(vatClass ? { vatClass } : {}) } });
   soapId = (await item('Soap', 1000)).id;
@@ -174,7 +186,8 @@ afterAll(async () => {
   await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: dids } } } });
   await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: dids } } });
   await app.prisma.verificationDocument.deleteMany({ where: { id: { in: dids } } });
-  await app.prisma.stockMovement.deleteMany({ where: { item: { vendorId: { in: vendorIds } } } });
+  const itemIds = (await app.prisma.item.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((i) => i.id);
+  await app.prisma.stockMovement.deleteMany({ where: { itemId: { in: itemIds } } });
   await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.subscription.deleteMany({ where: { vendorId: { in: vendorIds } } });
@@ -322,6 +335,8 @@ describe('4. a PERSON decides', () => {
     const row = await vendorRow();
     expect(row).toMatchObject({ vatStatus: 'APPROVED', vatApprovedNumber: VAT_NUMBER, vatApprovedName: 'Vat Corner Trading', vatReviewedBy: reviewerId });
     expect(row.vatEffectiveFrom?.toISOString().slice(0, 10)).toBe('2026-01-01');
+    // The certificate is no store document: approving it neither opens nor closes the store.
+    expect(row).toMatchObject({ status: 'ACTIVE', isVerified: true, acceptingOrders: true });
     const doc = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: certificateDocId } });
     expect(doc).toMatchObject({ status: 'APPROVED', reviewedBy: reviewerId });
     expect(await app.prisma.auditLog.count({ where: { action: 'APPROVE_STORE_VAT', entityId: vendorId, userId: reviewerId } })).toBe(1);
@@ -372,7 +387,7 @@ describe('5. VAT inside the price: storefront, cart, checkout', () => {
 
 describe('6. the goods change, the VAT follows (one recompute)', () => {
   it('an approved swap takes the SUBSTITUTE’s class; a removed line carries no VAT', async () => {
-    await app.prisma.order.update({ where: { id: vatOrderId }, data: { status: 'PREPARING', holdExpiresAt: null } });
+    await walkOrderStatus(app.prisma as never, vatOrderId, 'PREPARING', { holdExpiresAt: null });
     const picking = new PickingService(app.prisma, app.io);
     const soapLine = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: vatOrderId, itemId: soapId } });
     await picking.proposeSubstitution(vatOrderId, soapLine.id, towelId, ownerUserId);
@@ -401,7 +416,7 @@ describe('6. the goods change, the VAT follows (one recompute)', () => {
       expect(order.vatRateBps).toBeNull();
       expect(order.vatAmount).toBeNull();
       expect(order.items.every((i) => i.vatClass === null)).toBe(true);
-      await app.prisma.order.update({ where: { id: order.id }, data: { status: 'PREPARING', holdExpiresAt: null } });
+      await walkOrderStatus(app.prisma as never, order.id, 'PREPARING', { holdExpiresAt: null });
       await new PickingService(app.prisma, app.io).refundLine(order.id, order.items[0]!.id, ownerUserId);
       expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).vatAmount).toBeNull();
     } finally {
@@ -412,7 +427,7 @@ describe('6. the goods change, the VAT follows (one recompute)', () => {
 
 describe('7. the receipt of the VAT order', () => {
   it('shows the VAT included and the store as the one charging it; never called a tax invoice', async () => {
-    await app.prisma.order.update({ where: { id: vatOrderId }, data: { status: 'DELIVERED', paymentStatus: 'CAPTURED', deliveredAt: new Date() } });
+    await walkOrderStatus(app.prisma as never, vatOrderId, 'DELIVERED', { paymentStatus: 'CAPTURED', deliveredAt: new Date() });
     const res = await call('GET', `/api/v1/customer/orders/${vatOrderId}/receipt`, customer.token);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.body).toContain('VAT included (14%)');
