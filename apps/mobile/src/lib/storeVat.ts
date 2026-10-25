@@ -85,6 +85,15 @@ export interface StoreVatStatusView {
   approved: { number: string | null; registeredName: string | null; effectiveFrom: string | null } | null;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+/** [REVIEW-F #2103 S4] A certificate's effective date as people read it ("1 Jan 2026"): a calendar day stored as midnight
+ *  UTC, read in UTC (never the evening before). A fixed month table, not Intl: the same words on every phone. */
+export function calendarDay(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
 /** The store owner's status line (the same words as the web dashboard). Never promises VAT a person has not approved. */
 export function storeVatStatusLine(v: StoreVatStatusView): string {
   switch (v.status) {
@@ -96,7 +105,7 @@ export function storeVatStatusLine(v: StoreVatStatusView): string {
         : 'Send your GRA VAT registration certificate below. A person at Swift checks it before anything changes.';
     case 'APPROVED':
       if (!v.effective) return 'Approved, but VAT is not on your orders right now. Your prices and receipts show no VAT.';
-      return `Approved from ${(v.approved?.effectiveFrom ?? '').slice(0, 10)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
+      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
     case 'REJECTED':
       return `Not approved${v.reviewNote ? `: ${v.reviewNote}` : ''}. Correct it and send your certificate again.`;
     case 'REVOKED':

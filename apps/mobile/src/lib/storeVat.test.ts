@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cartVat, cartVatLine, itemVatNote, orderVatLine, storefrontVat, storefrontVatLine, vatClassChoices } from './storeVat';
+import { calendarDay, cartVat, cartVatLine, itemVatNote, orderVatLine, storefrontVat, storefrontVatLine, storeVatStatusLine, vatClassChoices } from './storeVat';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] The phone's VAT words. VAT shows only where the server says a person-approved store's VAT is
@@ -59,5 +59,15 @@ describe('[O-5 · REVIEW-F #2087 S4] item classes before and after approval', ()
   it('never says VAT is inside the price before a person approved the store; the rate from the API after', () => {
     expect(vatClassChoices(14, false)[0]!.label).toBe('Standard (VAT once your VAT is approved)');
     expect(vatClassChoices(14, true)[0]!.label).toBe('Standard (14% VAT inside the price)');
+  });
+});
+
+describe('[O-5 · REVIEW-F #2103 S4] the store’s approved line reads the date as a day', () => {
+  it('"Approved from 1 Jan 2026", the calendar day itself (never the evening before), the same words as the web and the notice', () => {
+    expect(calendarDay('2026-09-01T00:00:00.000Z')).toBe('1 Sep 2026');
+    expect(storeVatStatusLine({
+      status: 'APPROVED', effective: true, ratePercent: 14, reviewNote: null, certificate: null,
+      approved: { number: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01T00:00:00.000Z' },
+    })).toBe('Approved from 1 Jan 2026. Your prices include VAT at 14%, and receipts say “VAT charged by Sample Shop Ltd · VAT reg. no. 012345678”.');
   });
 });
