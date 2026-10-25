@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 const apiFetch = vi.hoisted(() => vi.fn(async (_path: string, _init?: RequestInit) => ({ data: {} })));
 vi.mock('./auth', () => ({ apiFetch }));
 
-import { adjustStock } from './vendor-api';
+import { adjustStock } from './stock-adjust';
 
 // [MASTER-025] A stock adjustment is one command. The page mints a key per
 // adjustment as entered and the server answers a repeat of that key with the
