@@ -624,6 +624,8 @@ export interface RideRequestBody {
   stops?: TaxiStopInput[];
   /** The fare of the chosen class from the latest quote of exactly this itinerary. */
   expectedFare?: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms shown beside that fare, when any were. */
+  waiting?: { chargePerBlock: number; blockMinutes: number };
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
@@ -914,7 +916,8 @@ export const servicesApi = {
   removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
-      type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
+      // [ROLE-DOCS · owner 21 Oct 2026] no GEI_LICENCE: an electrician's GEI licence is a required checklist document
+      type: 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
       referenceNumber?: string;
     },
     session?: AuthSessionSnapshot,
@@ -962,7 +965,8 @@ export const verificationApi = {
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
+    // [ROLE-DOCS · owner 21 Oct 2026] the ID alone: a customer never gives a photo (the server drops build 9's selfieUrl)
+    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
@@ -1275,6 +1279,8 @@ export const vendorApi = {
   setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
     api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
+  /** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
+  handedToRider: (id: string) => api.put(`/vendor/orders/${id}/handed-to-rider`, {}),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
@@ -1360,7 +1366,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
   // redraws it without location or camera data, and serves it to customers), or taken down.

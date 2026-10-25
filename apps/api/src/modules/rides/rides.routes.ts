@@ -80,6 +80,9 @@ const requestRideSchema = z.object({
   // server's own fare, never used as the price.
   stops: z.array(z.unknown()).nullish(),
   expectedFare: zMoneyWhole.optional(),
+  // [TAXI waiting charge · quote proof] The waiting terms the passenger was
+  // shown beside the fare, echoed back (the website; the phone from build 13).
+  waiting: z.object({ chargePerBlock: zMoneyWhole, blockMinutes: z.number().int().min(1).max(1440) }).optional(),
 });
 
 const cancelSchema = z.object({
@@ -257,6 +260,8 @@ export async function ridesRoutes(app: FastifyInstance) {
       // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
       // passenger was shown travels to the booking for every ride that has one.
       ...(body.expectedFare !== undefined ? { expectedFare: body.expectedFare } : {}),
+      // [TAXI waiting charge · quote proof] The terms the passenger was shown, when echoed.
+      ...(body.waiting !== undefined ? { waitingEcho: { chargePerBlock: body.waiting.chargePerBlock, blockMinutes: body.waiting.blockMinutes } } : {}),
     };
     const userId = request.user.userId;
     if (body.expectedFare === undefined) {

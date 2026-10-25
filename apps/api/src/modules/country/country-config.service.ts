@@ -349,23 +349,43 @@ export class CountryConfigService {
    *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, the car photo with
    *                the plate showing, fitness — master plan §3.1)
    * [VERIFY-DOCS · owner rulings 6 Oct 2026] the base itself is empty: police
-   * clearance is optional for every mover, and a licence holder's national ID
-   * is optional (getMoverOptionalDocuments).
+   * clearance is never required of a mover. [ROLE-DOCS · owner 21 Oct 2026] Only a
+   * taxi driver may add one, and a licence holder is not asked for a national ID
+   * (getMoverOptionalDocuments).
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
   async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    return moverRequiredFrom(config.documentChecklists as Record<string, string[]>, vehicleType);
+    return moverRequiredFrom(moverListsFrom(config.documentChecklists), vehicleType);
   }
 
   /** The documents a mover on this vehicle MAY add (the `_OPTIONAL` lists of the base and
    *  of each profile), minus what the vehicle requires. Display and upload only. [VERIFY-DOCS] */
   async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    const lists = config.documentChecklists as Record<string, string[]>;
+    const lists = moverListsFrom(config.documentChecklists);
     return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType)], moverRequiredFrom(lists, vehicleType));
   }
+}
+
+/**
+ * [ROLE-DOCS · owner ruling 21 Oct 2026] Lists the owner retired. A stored copy written by an older seed (production
+ * holds the 2026-10-14.5 seed) never brings them back: no optional document for EVERY mover (the optional national ID
+ * and the riders' police clearance are gone) and no customer ID + selfie list.
+ */
+export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
+
+/** The mover lists: the code's lists UNDER the stored (signed) ones, minus the retired keys. FAIL CLOSED (security
+ *  review, COORD 21 Oct): a key the stored row lacks — a profile added in code, or a row seeded before the key existed —
+ *  takes the code's list, never "no documents". A key the stored row HAS wins, an explicit [] included: that is a signed
+ *  decision (the MOVER base itself is [] by the owner's rulings of 6 Oct). Production's 2026-10-14.5 row holds every
+ *  profile key a vehicle asks for today (MOVER_NO_LICENCE, MOVER_MOTOR, MOVER_TAXI_EXTRA, MOVER_COMMERCIAL); from the
+ *  code it gains only MOVER_TAXI_EXTRA_OPTIONAL. */
+export function moverListsFrom(stored: unknown): Record<string, string[]> {
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
+  for (const key of RETIRED_LIST_KEYS) delete lists[key];
+  return lists;
 }
 
 /** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */

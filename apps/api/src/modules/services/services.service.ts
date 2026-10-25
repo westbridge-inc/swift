@@ -238,7 +238,8 @@ export async function projectProviderVerificationLocked(
           trade,
           status: 'VERIFIED',
           verifiedAt: { not: null },
-          ...(trade === 'electrician' ? {} : { type: { not: 'GEI_LICENCE' } }),
+          // [ROLE-DOCS · owner 21 Oct 2026] a GEI_LICENCE qualification counts for no trade (qualificationTypeMatchesTrade)
+          type: { not: 'GEI_LICENCE' },
         },
       })
     : 0;

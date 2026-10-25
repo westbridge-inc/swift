@@ -77,7 +77,7 @@ describe('onboarding review loop', () => {
     );
 
     const doc = await verification.submitDocument(
-      applicant.id, 'MOVER', 'police_clearance', await ownedVerificationFixture(app.prisma, applicant.id), 'v1',
+      applicant.id, 'MOVER', 'hire_car_driver_licence', await ownedVerificationFixture(app.prisma, applicant.id), 'v1',
     );
     expect(doc.status).toBe('PENDING');
 
