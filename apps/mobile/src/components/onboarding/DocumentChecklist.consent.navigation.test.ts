@@ -44,6 +44,8 @@ vi.mock('../../kit', async () => {
     T: ({ children }: any) => R.createElement('span', null, children),
   };
 });
+// [ROLE-DOCS] The own-name card belongs to business checklists and talks to the server itself: out of this test.
+vi.mock('./OwnNameCard', () => ({ OwnNameCard: () => null }));
 vi.mock('./DocumentUploadCard', async () => {
   const R = await import('react');
   return {

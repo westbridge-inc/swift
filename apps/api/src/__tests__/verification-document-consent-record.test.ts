@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { publishLegalDocument, recordConsent } from '../modules/legal/consent.service';
+import { hashDocument, publishLegalDocument, recordConsent } from '../modules/legal/consent.service';
 import { UPLOAD_CONSENT } from '../modules/verification/upload-consent';
 import { documentConsentOnRecord } from '../modules/verification/document-consent-record';
 import { registrationProofFor } from './helpers/otp';
@@ -151,6 +151,21 @@ describe('[DOC-CONSENT] GET /verification/status says whether the document tick 
       evidence: { control: 'doc_consent_test' },
     }));
     expect((await status(mover.token)).documentConsent).toEqual({ tick: 'document_v1', given: false, givenAt: null });
+
+    // Both anchors count on their own: a row naming v1 over other words' hash, or these words' hash under another
+    // version, is not a grant to these words (rows the app never writes; written raw to prove each check).
+    const raw = (documentVersion: string, documentContentHash: string) => app.prisma.consentRecord.create({ data: {
+      subjectType: 'driver', subjectId: mover.userId, documentType: WORDS.documentType, documentVersion, documentContentHash,
+      action: 'granted', surface: 'ios', evidence: { control: 'doc_consent_test' },
+    } });
+    await append('re_granted');
+    expect((await status(mover.token)).documentConsent).toMatchObject({ given: true });
+    await raw(WORDS.version, hashDocument(`Other words ${runBase}.`));
+    expect((await status(mover.token)).documentConsent).toMatchObject({ given: false });
+    await append('re_granted');
+    expect((await status(mover.token)).documentConsent).toMatchObject({ given: true });
+    await raw(otherVersion, hashDocument(WORDS.text));
+    expect((await status(mover.token)).documentConsent).toMatchObject({ given: false });
   });
 
   it('the record belongs to the subject the upload recorded: a mover\'s tick is not shown on a business checklist', async () => {
