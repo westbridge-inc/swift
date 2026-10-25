@@ -63,7 +63,7 @@ const NOW = Date.parse('2026-10-25T16:30:00.000Z');
 let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 const render = async () => { await act(async () => root.render(React.createElement(OpsAlertsScreen))); };
-const click = async (label: string, within: ParentNode = host) => {
+const click = async (label: string, within: { querySelectorAll: HTMLDivElement['querySelectorAll'] } = host) => {
   const b = Array.from(within.querySelectorAll('button')).find((x) => x.textContent === label);
   if (!b) throw new Error(`no button "${label}" in: ${host.textContent}`);
   await act(async () => { b.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); });
