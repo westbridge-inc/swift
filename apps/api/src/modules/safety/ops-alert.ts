@@ -47,9 +47,11 @@ export const drillIntervalDays = () => { const n = Number(process.env['OPS_ALERT
  *  - a person is re-paged at most OPS_ALERT_REPAGE_MAX_PER_HOUR (12) times an
  *    hour, and the on-call list texted as often: every alert owed at that
  *    moment travels in ONE push (one inbox notice per person, updated in place,
- *    that replaces the last one on the phone) and ONE text. Nothing owed is
- *    dropped: a re-page held by the spacing goes out in the next one. The first
- *    escalation of an SOS is never held by the spacing;
+ *    that replaces the last one on the phone) and ONE text. A re-page held by
+ *    the spacing is not dropped: it goes out in the next one (a send that fails
+ *    after its claim waits for the next escalation, as before). The first
+ *    escalation of an SOS is never held by the spacing, for a person or for
+ *    the on-call phones;
  *  - the platform is paged ("OVERDUE") once per alert, at its first escalation.
  * First pages are never limited: a new alert always pages at once.
  */

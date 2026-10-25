@@ -54,15 +54,15 @@ const at = (base: Date, seconds: number) => new Date(base.getTime() + seconds * 
 
 interface Person { userId: string; token: string; device: string }
 let seq = 0;
-async function person(roles: UserRole[] = ['SUPER_ADMIN']): Promise<Person> {
+async function person(roles: UserRole[] = ['SUPER_ADMIN'], activeRole: UserRole = roles[0]!): Promise<Person> {
   seq += 1;
   const user = await runWithoutTenant(() => app.prisma.user.create({
-    data: { phone: testPhone(), firstName: 'Storm', lastName: `S${RUN}${seq}`, roles, activeRole: roles[0]!, status: 'ACTIVE', isPhoneVerified: true },
+    data: { phone: testPhone(), firstName: 'Storm', lastName: `S${RUN}${seq}`, roles, activeRole, status: 'ACTIVE', isPhoneVerified: true },
   }), 'test-fixture:drill-storm');
   userIds.push(user.id);
   const device = `ExponentPushToken[storm-${RUN}-${seq}]`;
   await runWithoutTenant(() => app.prisma.deviceToken.create({ data: { userId: user.id, token: device, platform: 'ios' } }), 'test-fixture:drill-storm');
-  const token = app.jwt.sign({ userId: user.id, role: roles[0]!, jti: nanoid(8) });
+  const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   await runWithoutTenant(() => app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'storm', deviceType: 'test', authMethod: 'OTP', expiresAt: new Date(Date.now() + DAY) } }), 'test-fixture:drill-storm');
   return { userId: user.id, token, device };
 }
@@ -207,6 +207,16 @@ describe('[DRILL-STORM 1] a drill nobody acknowledges is a FAILED drill, closed 
     expect(listed).toMatchObject({ id: drill, closeReason: DRILL_FAILED_REASON });
     const refused = await app.inject({ method: 'GET', url: '/api/v1/safety/ops-alerts/failed-drills', headers: { authorization: `Bearer ${tenantAdmin.token}` } });
     expect(refused.statusCode).toBe(403);
+    // [ADMIN-ROLE · REVIEW-G #2096] the role the account HOLDS decides, never the app's mode:
+    // a platform operator whose phone is in rider mode sees them; a mode that is not a held role sees nothing
+    const inRiderMode = await person(['SUPER_ADMIN', 'CUSTOMER', 'RIDER'], 'RIDER');
+    const asRider = await app.inject({ method: 'GET', url: '/api/v1/safety/ops-alerts/failed-drills', headers: { authorization: `Bearer ${inRiderMode.token}` } });
+    expect(asRider.statusCode).toBe(200);
+    expect((asRider.json().data as Array<{ id: string }>).map((r) => r.id)).toContain(drill);
+    const modeOnly = await person(['CUSTOMER'], 'SUPER_ADMIN');
+    const asMode = await app.inject({ method: 'GET', url: '/api/v1/safety/ops-alerts/failed-drills', headers: { authorization: `Bearer ${modeOnly.token}` } });
+    expect([401, 403]).toContain(asMode.statusCode);
+    expect(asMode.body).not.toContain(drill);
 
     // The gauge counts it.
     const scan = await runWithoutTenant(() => scanOpsAlerts(app.prisma, at(t0, 1_000)), 'test:drill-storm');
@@ -300,6 +310,31 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
     const later = await sweep(at(t0, 570), mine);
     expect(later.escalated).toContain(sos);
     expect(repagesTo(responder)).toHaveLength(3);
+  });
+});
+
+describe('[DRILL-STORM 2b · REVIEW-G S3-1] a new SOS reaches the on-call phones at once, whatever was just texted', () => {
+  it('a drill was just texted to on-call; a NEW SOS escalating inside the spacing is texted to on-call NOW', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const drill = await open(mine, 'DRILL', t0, [responder]);
+    const first = await sweep(at(t0, 120), mine); // the drill escalates: on-call texted at +120 s
+    expect(first.escalated).toEqual([drill]);
+    const textedForDrill = textsToOncall().length;
+    const sos = await open(mine, 'SOS', at(t0, 130), [responder]); // its own first page texts on-call too
+    const opened = textsToOncall().length;
+    expect(opened).toBe(textedForDrill + 1);
+    const res = await sweep(at(t0, 260), mine); // 140 s after the drill's text: inside the 5-minute spacing
+    expect(res.escalated).toEqual([sos]);
+    expect(textsToOncall()).toHaveLength(opened + 1);
+    expect(textsToOncall().at(-1)!.body).toContain(`UNACKNOWLEDGED (1×): ${(await alertRow(sos)).title}`);
+    expect((await alertRow(sos)).oncallTextedLevel).toBe(1);
+    // anything else still waits its turn: the drill's second escalation (+420 s) is inside the spacing of the SOS text
+    const p = textsToOncall().length;
+    const later = await sweep(at(t0, 420), mine);
+    expect(later.escalated).toEqual([drill]);
+    expect(textsToOncall()).toHaveLength(p);
+    expect((await alertRow(drill)).oncallTextedLevel).toBe(1);
   });
 });
 
