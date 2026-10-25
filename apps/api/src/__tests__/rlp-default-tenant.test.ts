@@ -10,7 +10,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
-import { LOSS_PROTECTION_DEFAULTS, provisionReserveForPreviousMonth } from '../modules/cash/rlp';
+import { LOSS_PROTECTION_DEFAULTS, provisionReserveForPreviousMonth, sweepLossProtection } from '../modules/cash/rlp';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +80,14 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
     expect(tried?.message ?? '').not.toMatch(/\d{2,}/);
     expect(await sys(() => app.prisma.rlpReserveEntry.count({ where: { claimId: claim.id } }))).toBe(0);
     expect((await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } }))).status).toBe('APPROVED');
+
+    // The daily sweep is about Swift's own claims: another operator's approved claim, however late, is neither
+    // listed in its SLA page nor flagged by it.
+    const sweep = await sys(() => sweepLossProtection(app.prisma, {
+      now: new Date(Date.now() + 30 * 86_400_000), rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS }), gateFor: async () => 1,
+    }));
+    expect(sweep.breached.map((b) => b.claimId)).not.toContain(claim.id);
+    expect((await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } }))).flags).toEqual([]);
   });
 
   it('monthly provisioning counts only the default tenant\'s paid fees, and its notice pages the default tenant\'s admins only', async () => {
@@ -117,6 +125,6 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
     const calls = rlp.split('notifyAdmins(prisma').length - 1;
     expect(calls).toBeGreaterThanOrEqual(3);
     expect(rlp).not.toMatch(/tenantId: null/);
-    expect(rlp.split('tenantId: RLP_TENANT').length - 1).toBe(calls);
+    expect(rlp.match(/notifyAdmins\(prisma, opts\.notifications, \{\s*tenantId: RLP_TENANT,/g)?.length ?? 0).toBe(calls);
   });
 });
