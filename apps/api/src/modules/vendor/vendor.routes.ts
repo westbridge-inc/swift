@@ -91,6 +91,7 @@ import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { resolveAvatarUrls } from '../../utils/avatar-url';
 import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
@@ -727,7 +728,7 @@ export function assertNoOpenCustomerQuestion(
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
-async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string) {
+async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string, request: { headers: Record<string, string | string[] | undefined> }) {
   const { vendorIds } = await resolveVendor(app, userId);
   const order = await app.prisma.order.findUnique({
     where: { id: orderId },
@@ -746,6 +747,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       // [COORD 17 Oct] The store order screen's Call button: first name + phone, never the last name.
+      // [O-1] The customer's and rider's phones go only to an installed store build (below).
       customer: { select: { id: true, firstName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
@@ -761,7 +763,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
   if ((order.holdExpiresAt && order.holdExpiresAt > new Date()) || cancelledWhileHeld(order)) {
     throw new NotFoundError('Order', orderId);
   }
-  return order;
+  // [O-1 · owner 19:40Z] A bridge-aware store screen calls through Swift: no personal number.
+  return withCounterpartPhones(request, order);
 }
 
 // ---------------------------------------------------------------------------
@@ -1998,7 +2001,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ack — explicit acknowledgement without accept/reject. */
   app.put<{ Params: IdParam }>('/orders/:id/ack', auth, async (request) => {
-    await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert. [Q10]
     // Only AFTER the ownership check: it used to run first, so any signed-in
     // account naming an order id stamped that store receipt, then got a 404.
@@ -2065,21 +2068,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
-    const data = orders.map((order) => redactCustomerContact({
+    const data = orders.map((order) => withCounterpartPhones(request, redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       ...handover.get(order.id),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       ...storeMmgPayBy(order),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
-    }));
+    })));
 
     return { success: true, ...paginatedResponse(data, total, pagination) };
   });
 
   /** GET /orders/:id — Full order detail */
   app.get<{ Params: IdParam }>('/orders/:id', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // The takeover polls this read: the response-SLA deadline is computed here,
     // from the same inputs the auto-cancel job was enqueued with.
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
@@ -2097,7 +2100,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  confirms the goods came back. Closes the return (RETURNED) through the
    *  canonical seam, which resolves the case and frees the rider. */
   app.post<{ Params: IdParam }>('/orders/:id/recovery/return-received', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     if (order.orderType === 'COURIER') {
       throw new AppError(409, 'NOT_A_STORE_RETURN', 'A courier parcel goes back to its sender, not to a store.');
     }
@@ -2109,7 +2112,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/accept — Accept an incoming order */
   app.put<{ Params: IdParam }>('/orders/:id/accept', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
@@ -2289,7 +2292,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
     // complete-appointment. Marking it "preparing" sent the customer kitchen
@@ -2318,7 +2321,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
     // that already sits in PREPARING is not reopened into the kitchen path.
@@ -2380,7 +2383,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  = "get a rider instead" — which dispatches a rider if none is assigned yet,
    *  the fallback that stops a self-delivery order dying in the kitchen. */
   app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     const { mode } = fulfillmentModeSchema.parse(request.body);
     if (order.fulfillment !== 'DELIVERY') {
@@ -2455,7 +2458,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/items/:lineId/picked — staff tick a shelf-picked line. */
   app.put('/orders/:id/items/:lineId/picked', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    await resolveOwnedOrder(app, request.user.userId, id, request);
     const { picked } = z.object({ picked: z.boolean() }).parse(request.body);
     const line = await picking.setPicked(id, lineId, picked);
     return { success: true, data: line };
@@ -2465,7 +2468,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
   app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id, request);
     const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
     const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
     await ackPreAcceptQuestion(order, request.user.userId);
@@ -2476,7 +2479,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  comes off the order, totals shrink, stock goes back on the shelf. */
   app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id, request);
     // [O-4] On a waiting order this ASKS the customer (continue without it, or cancel); after the
     // accept it removes the line at once, as before.
     const line = await picking.refundLine(id, lineId, request.user.userId);
@@ -2567,7 +2570,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Swift; this only records confirmation + tells the customer live. MMG orders
    *  only (cash is settled at handover). Idempotent. */
   app.post<{ Params: IdParam }>('/orders/:id/confirm-payment', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER may confirm an MMG
     // payment; STAFF may not. Checked first, before any read-back or write, so
     // a refused tap leaves the order exactly as it was.
@@ -2776,7 +2779,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  holds the order and asks Swift to search again (fresh radius, cleared
    *  decline memory). No-op while an offer is already live. */
   app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
@@ -2797,7 +2800,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
@@ -2830,7 +2833,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Courier/parcel and taxi are never here (no store); a self-delivery has no Swift rider. */
   // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
   app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // [REVIEW-G S4-4 on #2055] Like every other in-flight store action: a closed (or non-billing
     // suspended) store's staff cannot tap.
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
@@ -2874,7 +2877,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
@@ -2901,7 +2904,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
    *  carries the cash-capture gate and the PIN check. */
   app.put<{ Params: IdParam }>('/orders/:id/delivered', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
       throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
@@ -2923,7 +2926,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
   app.put<{ Params: IdParam }>('/orders/:id/reject', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
