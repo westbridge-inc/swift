@@ -285,7 +285,7 @@ export function VendorAccountScreen() {
         {/* A guest's sample store has no pin to move: the save needs a real account. */}
         {isOwner && !guestSample && store ? <StoreLocationCard store={store} /> : null}
 
-        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
+        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} storeName={store?.name} /> : null}
 
         {/* [STORE-VAT · owner O-5] The business's VAT registration is the owner's to give; a sample store has none. */}
         {isOwner && !samplePreview && store ? <StoreVatSection style={{ marginBottom: space.lg }} /> : null}
@@ -437,11 +437,11 @@ function StoreLocationCard({ store }: { store: any }) {
  * expiry — an approved document re-opens for upload inside its 30-day renewal
  * window, and an expired one explains exactly why commerce stopped.
  */
-function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
+function VendorDocumentsSection({ vendorType, storeName }: { vendorType: string; storeName?: string | null }) {
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(vendorType);
   return (
     <View style={{ marginBottom: space.lg }}>
-      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={storeName} />
     </View>
   );
 }

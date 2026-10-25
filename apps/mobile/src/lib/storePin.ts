@@ -177,7 +177,13 @@ export interface BusinessSetupFields {
   city: string;
   agree: boolean;
   pin: StorePin | null;
+  /** [ROLE-DOCS · owner 21 Oct 2026] absent = a business name, as before */
+  nameBasis?: 'REGISTERED' | 'OWN_NAME';
+  ownNameTick?: boolean;
 }
+
+/** [ROLE-DOCS] Only the store types asked for a business registration can trade under an own name. */
+const ownNameStore = (form: BusinessSetupFields) => form.nameBasis === 'OWN_NAME' && form.type !== 'SERVICE';
 
 /**
  * [#947's grammar] The first thing the form still needs, in the order it asks
@@ -191,6 +197,7 @@ export function businessSetupBlocker(form: BusinessSetupFields): string | null {
   if (form.addr.trim().length < 3) return 'Add the street address';
   if (form.city.trim().length < 2) return 'Add the city';
   if (!confirmedStorePin(form.pin)) return 'Place your store on the map';
+  if (ownNameStore(form) && !form.ownNameTick) return 'Sign the own-name declaration';
   if (!form.agree) return 'Agree to the Business Agreement first';
   return null;
 }
@@ -211,6 +218,7 @@ export function vendorBusinessPayload(form: BusinessSetupFields) {
     city: form.city.trim(),
     latitude: pin.latitude,
     longitude: pin.longitude,
+    ...(ownNameStore(form) ? { nameBasis: 'OWN_NAME' as const } : {}),
   };
 }
 
@@ -224,5 +232,7 @@ export function storeCreateErrorCopy(error: unknown): string {
   if (body?.code === STORE_PIN_OUT_OF_MARKET) {
     return body.message ?? 'That pin is outside the area Swift serves. Move it to your store.';
   }
+  // [ROLE-DOCS] the store's name is not just the owner's surname with first names or initials: the server says why
+  if (body?.code === 'OWN_NAME_MISMATCH' && body.message) return body.message;
   return 'Couldn’t create your store. Try again.';
 }

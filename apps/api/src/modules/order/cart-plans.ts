@@ -231,7 +231,7 @@ export interface PricedBasket {
   /** The tip actually charged: zero unless some plan is DELIVERY (a pickup or
    *  appointment-only basket has no rider to tip). */
   effectiveTip: number;
-  /** Feeds checkout's ID gate and the customer's totalSpent. Equal to the sum
+  /** Feeds checkout's call-to-confirm flag and the customer's totalSpent. Equal to the sum
    *  of `perPlan[].total` (the discount never exceeds what the plans absorb). */
   grandTotal: number;
   /** Index-aligned with the input plans. */

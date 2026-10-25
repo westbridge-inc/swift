@@ -38,3 +38,15 @@ describe('[PERF · row 628] the weekly fee block loads on the partner steps only
     expect(feeLoader.split('\n').filter((line) => /^import\s/.test(line))).toEqual([]);
   });
 });
+
+describe('[ROLE-DOCS · #2046 · perf] the own-name choice and its declaration load on the business step only', () => {
+  const ownNameLoader = readFileSync(join(__dirname, 'own-name-loader.ts'), 'utf8');
+  it('the page holds neither the declaration’s words nor the choice up front (type imports cost nothing at run time)', () => {
+    expect(staticImports.filter((line) => /own-name-copy'|own-name-choice'/.test(line) && !/^import type /.test(line))).toEqual([]);
+    expect(staticImports).toContain("import { loadOwnNameChoice } from './own-name-loader';");
+    expect(staticImports).toContain("import { ownNameStoreType } from '@/lib/own-name-store-type';");
+    expect(page).not.toMatch(/OWN_NAME_DECLARATION_WEB|I TRADE UNDER MY OWN NAME/);
+    expect(ownNameLoader).toContain("export const loadOwnNameChoice = () => import('./own-name-choice');");
+    expect(ownNameLoader.split('\n').filter((line) => /^import\s/.test(line))).toEqual([]);
+  });
+});

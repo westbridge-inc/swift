@@ -5,13 +5,14 @@
 // /rides/capabilities → webBooking, answered to a browser session only while
 // WEB_TAXI_BOOKING is on). The server is the gate either way: it refuses every
 // browser ride request while the switch is off, books only at the fare the
-// customer was shown, and runs the phone's own gates (ID on file for a first
-// ride, one ride at a time, strikes, a banned account).
+// customer was shown, and runs the phone's own gates (one ride at a time,
+// strikes, a banned account). [Owner ruling 24 Oct 2026] No ID on file is
+// asked for a ride any more, so there is no "add your ID" answer here.
 // ---------------------------------------------------------------------------
 
 /** What the customer is told when a booking did not go through, and what the page does next. */
 export interface BookingProblem {
-  kind: 'fare-changed' | 'id-needed' | 'ride-in-progress' | 'booking-off' | 'unconfirmed' | 'in-flight' | 'refused';
+  kind: 'fare-changed' | 'ride-in-progress' | 'booking-off' | 'unconfirmed' | 'in-flight' | 'refused';
   message: string;
   /** Keep this booking's key for the next press: the server may already hold the request. */
   keepKey: boolean;
@@ -27,8 +28,6 @@ export function bookingProblem(error: unknown): BookingProblem {
     case 'WAITING_TERMS_CHANGED':
       // Priced again like a changed fare: the new quote carries the new terms.
       return { kind: 'fare-changed', message: 'The waiting charge changed since you looked. Check the new terms, then request again.', keepKey: false };
-    case 'ID_VERIFICATION_REQUIRED':
-      return { kind: 'id-needed', message: 'Your first ride needs your ID on file. Add your ID in the Swift app (Account), then book here.', keepKey: false };
     case 'RIDE_IN_PROGRESS':
       return { kind: 'ride-in-progress', message: 'You already have a ride in progress.', keepKey: false };
     case 'TAXI_MOBILE_APP_REQUIRED':

@@ -569,6 +569,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /dlq': c('C0', 'ops.read'),
   'POST /dlq/:queue/:id/requeue': c('C2', 'ops.dlq.requeue'),
   'DELETE /dlq/:queue/:id': c('C3', 'ops.dlq.delete'),
+  // [Row 312] Evidence held in the malware quarantine: listed, and its scan retried; released ONLY on a CLEAN answer.
+  'GET /upload-scan-debts/held': c('C1', 'ops.uploads.held.read'),
+  // [ADM-004] The trail names the debt row's outcome fields; never its object keys (a storage key can
+  // embed an owner's id, and the audit table is append-only).
+  'POST /upload-scan-debts/:id/release': c('C3', 'ops.uploads.release', { model: 'uploadScanDebt', fields: ['result', 'releasedAt', 'attempts', 'rescannedAt'] }),
 
   // ── Discovery taxonomy ──────────────────────────────────────────────────
   'GET /discovery/categories': c('C0', 'discovery.read'),

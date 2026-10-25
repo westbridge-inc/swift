@@ -71,7 +71,13 @@ def network_names(model, service):
     return {k: (declared.get(k) or {}).get("name", k) for k in keys}
 
 
-def check_private_attachment(model, name, service):
+# [Row 312] The upload malware scanner sits on its own INTERNAL network (Compose key `scanner`), shared
+# only with the API and the worker. The private journeys instance is the API, so it may join that one
+# network too (no route out, no other member but the scanner); the runner never may.
+SCANNER_KEY = "scanner"
+
+
+def check_private_attachment(model, name, service, allow_scanner=False):
     if service.get("ports"):
         raise Refused(f"{name} publishes a host port")
     if service.get("network_mode"):
@@ -79,9 +85,18 @@ def check_private_attachment(model, name, service):
     if service.get("privileged"):
         raise Refused(f"{name} is privileged")
     nets = network_names(model, service)
-    if list(nets.values()) != [PRIVATE_NETWORK]:
-        raise Refused(f"{name} must be attached to {PRIVATE_NETWORK} only (found: {sorted(nets.values())})")
-    declared = (model.get("networks") or {}).get(next(iter(nets)), {})
+    declared_all = model.get("networks") or {}
+    extra = [k for k, v in nets.items() if v != PRIVATE_NETWORK]
+    scanner_ok = all(
+        allow_scanner and k == SCANNER_KEY
+        and (declared_all.get(k) or {}).get("internal") is True
+        and not (declared_all.get(k) or {}).get("external")
+        for k in extra)
+    if list(nets.values()).count(PRIVATE_NETWORK) != 1 or not scanner_ok:
+        allowed = f"{PRIVATE_NETWORK} only" + (" (and the internal scanner network)" if allow_scanner else "")
+        raise Refused(f"{name} must be attached to {allowed} (found: {sorted(nets.values())})")
+    private_key = next(k for k, v in nets.items() if v == PRIVATE_NETWORK)
+    declared = declared_all.get(private_key, {})
     if not declared.get("external"):
         raise Refused(f"{name}'s network must be the external {PRIVATE_NETWORK} bridge")
     for volume in service.get("volumes") or []:
@@ -125,7 +140,7 @@ def verify(model, caddyfile_text, require_journeys=False, forbid_journeys=False)
             raise Refused(f"{name} is missing from the journeys model")
 
     private, runner = services[PRIVATE], services[RUNNER]
-    check_private_attachment(model, PRIVATE, private)
+    check_private_attachment(model, PRIVATE, private, allow_scanner=True)
     check_private_attachment(model, RUNNER, runner)
 
     # 3. The private instance: the public API's image, loadtest, both switches.
