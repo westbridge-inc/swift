@@ -297,6 +297,31 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
   });
 });
 
+describe('[DRILL-STORM 2b · REVIEW-G S3-1] a new SOS reaches the on-call phones at once, whatever was just texted', () => {
+  it('a drill was just texted to on-call; a NEW SOS escalating inside the spacing is texted to on-call NOW', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const drill = await open(mine, 'DRILL', t0, [responder]);
+    const first = await sweep(at(t0, 120), mine); // the drill escalates: on-call texted at +120 s
+    expect(first.escalated).toEqual([drill]);
+    const textedForDrill = textsToOncall().length;
+    const sos = await open(mine, 'SOS', at(t0, 130), [responder]); // its own first page texts on-call too
+    const opened = textsToOncall().length;
+    expect(opened).toBe(textedForDrill + 1);
+    const res = await sweep(at(t0, 260), mine); // 140 s after the drill's text: inside the 5-minute spacing
+    expect(res.escalated).toEqual([sos]);
+    expect(textsToOncall()).toHaveLength(opened + 1);
+    expect(textsToOncall().at(-1)!.body).toContain(`UNACKNOWLEDGED (1×): ${(await alertRow(sos)).title}`);
+    expect((await alertRow(sos)).oncallTextedLevel).toBe(1);
+    // anything else still waits its turn: the drill's second escalation (+420 s) is inside the spacing of the SOS text
+    const p = textsToOncall().length;
+    const later = await sweep(at(t0, 420), mine);
+    expect(later.escalated).toEqual([drill]);
+    expect(textsToOncall()).toHaveLength(p);
+    expect((await alertRow(drill)).oncallTextedLevel).toBe(1);
+  });
+});
+
 describe('[DRILL-STORM 3] many old open alerts never produce a burst', () => {
   it('a backlog of old open alerts never starves a new one: the sweep takes never-escalated alerts first', async () => {
     const t0 = epoch(); const mine: string[] = [];
