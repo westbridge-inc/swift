@@ -7,7 +7,7 @@ import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
 import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
-import { OWN_NAME_DECLARATION_WEB, ownNameSigningFor, ownNameStoreType } from '@/lib/own-name-copy';
+import { ownNameStoreType } from '@/lib/own-name-store-type';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
@@ -28,6 +28,8 @@ import { loadStorePicker } from './store-picker-loader';
 import type { WeeklyFee as WeeklyFeeComponent } from './weekly-fee';
 import type { FeeState } from '@/lib/signup-fee';
 import { loadWeeklyFee } from './weekly-fee-loader';
+import type { OwnNameChoice as OwnNameChoiceComponent } from './own-name-choice';
+import { loadOwnNameChoice } from './own-name-loader';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
@@ -144,6 +146,15 @@ export default function SignupPage() {
     if (!feeStep || WeeklyFee || feeLoadFailed) return;
     loadWeeklyFee().then((m) => setWeeklyFee(() => m.WeeklyFee), () => setFeeLoadFailed(true));
   }, [feeStep, WeeklyFee, feeLoadFailed]);
+  // [ROLE-DOCS · #2046 · perf] The own-name choice and its declaration load on the business step, for a store type
+  // asked for a business registration; until then the store is registered-name (the default), so nothing is lost.
+  const [OwnNameChoice, setOwnNameChoice] = useState<typeof OwnNameChoiceComponent | null>(null);
+  const [ownNameLoadFailed, setOwnNameLoadFailed] = useState(false);
+  const ownNameStep = step === 'business' && ownNameStoreType(biz.vendorType);
+  useEffect(() => {
+    if (!ownNameStep || OwnNameChoice || ownNameLoadFailed) return;
+    loadOwnNameChoice().then((m) => setOwnNameChoice(() => m.OwnNameChoice), () => setOwnNameLoadFailed(true));
+  }, [ownNameStep, OwnNameChoice, ownNameLoadFailed]);
   // A tick is given to the agreement on screen: it is cleared whenever the role
   // or the step changes, so it never carries from one agreement to the other,
   // nor survives leaving the step (reset during render, so no frame shows it).
@@ -375,21 +386,11 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
             </select></div>
-            {ownNameStoreType(biz.vendorType) ? (
-              <fieldset className={styles.field}>
-                <legend className={styles.label}>What name does your store use?</legend>
-                <label><input type="radio" name="name-basis" checked={nameBasis === 'OWN_NAME'} onChange={() => { setNameBasis('OWN_NAME'); setOwnNameTick(false); }} /> My own name — just my surname, with or without my first names or initials (for example “Persaud” or “R. Persaud”)</label>
-                <label><input type="radio" name="name-basis" checked={nameBasis === 'REGISTERED'} onChange={() => { setNameBasis('REGISTERED'); setOwnNameTick(false); }} /> A business name, or a company</label>
-                {nameBasis === 'OWN_NAME' ? (
-                  <>
-                    <p className={styles.bodyCopy}>The law does not ask you to register your own name as a business name, so you sign a short declaration instead of uploading a business registration. A person on our team checks it against your ID.</p>
-                    {ownNameSigningFor(biz.name) ? <p className={styles.bodyCopy}><strong>{ownNameSigningFor(biz.name)}</strong></p> : null}
-                    <pre className={styles.bodyCopy} style={{ whiteSpace: 'pre-wrap' }}>{OWN_NAME_DECLARATION_WEB}</pre>
-                    <label><input type="checkbox" checked={ownNameTick} onChange={(e) => setOwnNameTick(e.target.checked)} /> I have read the declaration above and I sign it.</label>
-                  </>
-                ) : null}
-              </fieldset>
-            ) : null}
+            {ownNameStoreType(biz.vendorType) ? (OwnNameChoice
+              ? <OwnNameChoice storeName={biz.name} nameBasis={nameBasis} onNameBasis={setNameBasis} tick={ownNameTick} onTick={setOwnNameTick} />
+              : ownNameLoadFailed
+                ? <button type="button" className={styles.roleButton} onClick={() => setOwnNameLoadFailed(false)}>Couldn’t load the store-name choice — try again</button>
+                : null) : null}
             <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>

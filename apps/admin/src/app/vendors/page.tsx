@@ -41,7 +41,6 @@ export default function VendorsPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Businesses</h1>
       <ListToolbar
         state={state}
         onChange={setState}

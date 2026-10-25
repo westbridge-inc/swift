@@ -18,7 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
-import { fareBreakdownOf, liveWaiting, waitingDisclosure } from '../../../lib/taxiWaiting';
+import { fareBreakdownOf, liveWaiting, waitingDisclosure, waitingEcho } from '../../../lib/taxiWaiting';
 import { AddStopRow, RideItinerary, RouteLegs, StopNumber, StopRows, WaitingCard, oneFareLine } from '../TaxiStops';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
@@ -514,12 +514,16 @@ function TaxiBooking({ navigation }: any) {
   // fare the passenger saw (409 FARE_CHANGED refetches the quote otherwise).
   // With stops, the stops too, in the passenger's order; a ride with stops is
   // never sent without its fare.
+  // [TAXI waiting charge · quote proof] With the fare, the waiting terms shown
+  // beside it (waitingTerms below), so the server books the terms the passenger saw.
   const requestPayload = (): RideRequestBody | null => {
     const base = tripPayload();
     if (!base) return null;
-    if (stops.length === 0) return selectedTier ? { ...base, expectedFare: selectedTier.fare } : base;
+    const echo = waitingEcho(estimate);
+    const quote = (fare: number) => ({ expectedFare: fare, ...(echo ? { waiting: echo } : {}) });
+    if (stops.length === 0) return selectedTier ? { ...base, ...quote(selectedTier.fare) } : base;
     if (!selectedTier) return null;
-    return { ...base, stops: stopsWire, expectedFare: selectedTier.fare };
+    return { ...base, stops: stopsWire, ...quote(selectedTier.fare) };
   };
 
   const onRequest = () => {
@@ -1402,7 +1406,8 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
     && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
     && !pinVerified;
   // [owner #50] The server's verdict decides (`canCancel` on the ride read):
-  // free while no driver has accepted, inside the five minutes after acceptance (owner ruling 14 Oct), or when
+  // free while no driver has accepted, inside the free-cancel window after acceptance (one minute, owner ruling 22 Oct;
+  // the server's FREE_CANCEL_WINDOW_MIN decides), or when
   // the driver is very late — otherwise the passenger contacts the driver. A
   // server that does not say yet leaves the old status rule in charge.
   const serverAllowsCancel = typeof ride.canCancel === 'boolean' ? ride.canCancel : true;

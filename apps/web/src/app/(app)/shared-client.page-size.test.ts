@@ -51,13 +51,13 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
     users: { 'app/(app)/courier/page.tsx': "import { courierEstimate, requestCourier, type CourierRequest } from '@/lib/customer-courier';" },
   },
   'lib/customer-rides.ts': {
-    calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide', 'rideCapabilities', 'requestRide', 'rideSos', 'outstandingCheckin', 'answerCheckin'],
+    calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide', 'rideCapabilities', 'requestRide', 'rideSos', 'outstandingCheckin', 'answerCheckin', 'shareTrip', 'tripShares', 'stopTripShares', 'reportNotMyDriver'],
     imports: ["import { apiFetch } from './auth';"],
     users: {
       'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';",
       'app/(app)/taxi/taxi-fare-estimate.tsx': "import { activeRide, rideCapabilities, rideEstimate } from '@/lib/customer-rides';",
       'app/(app)/taxi/taxi-booking.tsx': "import { requestRide, type WebRideRequest } from '@/lib/customer-rides';",
-      'components/taxi-trip-safety.tsx': "import { answerCheckin, outstandingCheckin, rideSos, type GuardianCheckin } from '@/lib/customer-rides';",
+      'components/taxi-trip-safety.tsx': "import { answerCheckin, outstandingCheckin, reportNotMyDriver, rideSos, shareTrip, stopTripShares, tripShares, type GuardianCheckin } from '@/lib/customer-rides';",
     },
   },
   'lib/customer-market.ts': {

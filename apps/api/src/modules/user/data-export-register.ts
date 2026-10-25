@@ -330,12 +330,31 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'createdAt'],
   },
   {
+    // [REVIEW-M S3 on #2027 · follow-up] The record of each store the person OWNS, read through the ownership
+    // (VendorOwner.userId = the person; never a store they only work at): for a sole trader its phone, email,
+    // address and map pin can be the owner's own contact and home place, and its MMG details their own wallet.
+    // What the owner sets for the store is in. Images are stored files; staff notes, a checkout hold and who
+    // placed it, the ratings totals, being featured and system bookkeeping are not.
+    category: 'storesOwned', model: 'Vendor', through: 'owner', by: ['userId'], key: 'id',
+    omit: {
+      logoUrl: 'STORED_FILE', coverImageUrl: 'STORED_FILE', tierNote: 'INTERNAL_NOTE', mmgCheckoutHeldReason: 'INTERNAL_NOTE',
+      mmgCheckoutHeldAt: 'FRAUD_SAFETY', suspensionSource: 'SYSTEM', isFeatured: 'SYSTEM', mmgMissesClearedAt: 'SYSTEM', nameReviewApprovedHash: 'SYSTEM',
+    },
+    fields: [
+      'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
+      'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders',
+      'deliveryRadius', 'minOrderAmount', 'estimatedPrepTime', 'cuisineTypes', 'tags', 'refundRule', 'vatRegistrationNumber', 'qrSlug',
+      'mmgNumber', 'mmgNumberPending', 'mmgNumberPendingAt', 'mmgNumberApplyAt', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt',
+      'isVerified', 'activationValidUntil', 'tier', 'tierChangedAt', 'status', 'totalOrders', 'nameReviewApprovedAt', 'createdAt', 'updatedAt',
+    ],
+  },
+  {
     category: 'storeStaffRoles', model: 'VendorStaff', by: ['userId'], key: 'id',
     fields: ['id', 'userId', 'role', 'createdAt'],
   },
   {
     category: 'advertiserMemberships', model: 'AdvertiserMember', by: ['userId'], key: 'advertiserId',
-    fields: ['advertiserId', 'userId', 'role', 'createdAt'],
+    fields: ['advertiserId', 'userId', 'role', 'createdAt', 'acceptedAt'],
   },
   {
     category: 'advertisersCreated', model: 'Advertiser', by: ['createdByUserId'], key: 'id',
@@ -462,7 +481,7 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
  * them is red in account-export-register.test until it is exported through its parent or named here.
  */
 export const PLACES_NOT_EXPORTED: Readonly<Record<string, string>> = {
-  Vendor: 'a store’s own record (its name, contact and map pin, shown to its customers and riders); the owner sees and edits it in the store dashboard; not yet exported through storeOwnership (follow-up owed)',
+  // [REVIEW-M S3 on #2027] Vendor is exported through the ownership now (storesOwned).
 };
 
 /** Person links whose rows are already in a category through another column of the same row. */

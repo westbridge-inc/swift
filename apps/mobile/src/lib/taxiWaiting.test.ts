@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clockLabel, fareBreakdownOf, liveWaiting, stopWaitMinutes, waitingDisclosure, waitingView } from './taxiWaiting';
+import { clockLabel, fareBreakdownOf, liveWaiting, stopWaitMinutes, waitingDisclosure, waitingEcho, waitingView } from './taxiWaiting';
 import { ESTIMATE_WITH_ONE_STOP, FARE_BREAKDOWN, RIDE_STOPS_PENDING, WAITING_LIVE, WAITING_TERMS, riderRideWithStops } from './taxiContract.fixtures';
 
 // ---------------------------------------------------------------------------
@@ -10,6 +10,20 @@ import { ESTIMATE_WITH_ONE_STOP, FARE_BREAKDOWN, RIDE_STOPS_PENDING, WAITING_LIV
 // ---------------------------------------------------------------------------
 
 const nextAt = Date.parse(WAITING_LIVE.nextChargeAt);
+
+describe('[quote proof] the terms echoed with the booking', () => {
+  it('the numbers behind the line shown, and nothing else', () => {
+    expect(waitingEcho({ ...ESTIMATE_WITH_ONE_STOP.data, waiting: WAITING_TERMS })).toEqual({ chargePerBlock: 300, blockMinutes: 10 });
+  });
+
+  it('none when no line is shown: no terms, broken terms or fractional numbers', () => {
+    expect(waitingEcho(ESTIMATE_WITH_ONE_STOP.data)).toBeNull();
+    expect(waitingEcho(undefined)).toBeNull();
+    for (const waiting of [null, { chargePerBlock: 'x', blockMinutes: 10 }, { chargePerBlock: 500, blockMinutes: 0 }, { chargePerBlock: -5, blockMinutes: 10 }, { chargePerBlock: 300.5, blockMinutes: 10 }]) {
+      expect(waitingEcho({ waiting }), JSON.stringify(waiting)).toBeNull();
+    }
+  });
+});
 
 describe('the disclosure before booking (§8.2)', () => {
   it('shows the server’s own sentence', () => {

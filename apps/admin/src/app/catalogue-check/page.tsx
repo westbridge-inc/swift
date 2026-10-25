@@ -191,7 +191,6 @@ export default function CatalogueCheckPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="text-2xl font-bold mb-2">Catalogue check</h1>
       <p className="mc-muted mb-4 text-sm">
         Swift never carries alcohol, tobacco, vapes, cannabis or other drugs, 18+ items, medicines, cooking gas, fuel,
         fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms,

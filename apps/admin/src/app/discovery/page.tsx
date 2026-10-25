@@ -19,6 +19,7 @@ import { MutationError } from '@/components/MutationError';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { humanise } from '@/lib/labels';
 
 // ---------------------------------------------------------------------------
 // The taxonomy, and the two decisions nobody could make.
@@ -140,16 +141,13 @@ export default function DiscoveryPage() {
   const tagged = cats.filter((c) => c.status === 'ACTIVE').length;
 
   return (
-    <div className="space-y-6">
+    <div className="mc-page space-y-5">
       <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Discovery</h1>
-          <p className="mt-1 max-w-2xl text-sm text-neutral-500">
-            The category taxonomy customers browse by, and the queue of categories vendors have asked for.
-            {categories.isSuccess ? <>{' '}{tagged} of {cats.length} categories are visible to customers.</> : null}
-          </p>
-        </div>
-        <div className="text-right">
+        <p className="mc-muted max-w-2xl">
+          The categories customers browse by, and the queue of categories businesses have asked for.
+          {categories.isSuccess ? <>{' '}{tagged} of {cats.length} categories are visible to customers.</> : null}
+        </p>
+        <div className="max-w-xs text-right">
           <button
             type="button"
             onClick={async () => {
@@ -162,155 +160,134 @@ export default function DiscoveryPage() {
               if (go) backfill.mutate();
             }}
             disabled={backfill.isPending}
-            className="rounded bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="mc-btn"
           >
             {backfill.isPending ? 'Queueing…' : 'Run the backfill'}
           </button>
-          <p className="mt-1 max-w-xs text-xs text-neutral-500">
-            Tags existing items against the taxonomy. Items are suggested to their vendor for review,
-            not tagged behind their back.
+          <p className="mc-muted mt-1 text-xs">
+            Matches existing items to the categories. Each match is suggested to the business for review,
+            never tagged behind their back.
           </p>
-          {backfillNote && <p className="mt-2 max-w-xs text-xs text-neutral-700">{backfillNote}</p>}
+          {backfillNote && <p className="mc-note mt-2 text-left text-xs">{backfillNote}</p>}
         </div>
       </header>
 
-      <nav className="flex gap-2 border-b border-neutral-200">
+      <div className="mc-tabs" role="group" aria-label="Discovery">
         {(['requests', 'categories'] as Tab[]).map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => { setTab(t); setActiveId(null); setMutationError(null); }}
             aria-pressed={tab === t}
-            className={`px-3 py-2 text-sm ${tab === t ? 'border-b-2 border-neutral-900 font-medium' : 'text-neutral-500'}`}
+            className="mc-tab"
           >
             {t === 'requests' ? 'Requests' : 'Taxonomy'}
           </button>
         ))}
-      </nav>
+      </div>
 
       <MutationError error={mutationError} label="discovery action" />
 
       {tab === 'requests' ? (
-        <section className="space-y-4">
-          <div className="flex gap-2">
+        <section className="space-y-3">
+          <div className="mc-tabs mc-tabs-sub" role="group" aria-label="Request status">
             {REQUEST_STATUSES.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setStatus(s)}
-                aria-pressed={status === s}
-                className={`rounded px-2 py-1 text-xs ${status === s ? 'bg-neutral-900 text-white' : 'bg-neutral-100'}`}
-              >
-                {s}
+              <button key={s} type="button" onClick={() => setStatus(s)} aria-pressed={status === s} className="mc-tab">
+                {humanise(s)}
               </button>
             ))}
           </div>
 
-          {requests.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
+          {requests.isLoading ? <div className="mc-loading" aria-busy="true">Loading…</div> : null}
           {requests.isError ? (
             <QueryFailed error={requests.error} what="the category requests" onRetry={() => void requests.refetch()} retrying={requests.isFetching} />
           ) : null}
           {!requests.isLoading && !requests.isError && rows.length === 0 ? (
-            <p className="text-sm text-neutral-500">Nothing in this queue.</p>
+            <div className="mc-empty">Nothing in this queue.</div>
           ) : null}
 
-          <ul className="space-y-3">
+          <ul className="mc-list">
             {rows.map((r) => (
-              <li key={r.id} className="rounded border border-neutral-200 p-4">
+              <li key={r.id} className="mc-card">
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="font-medium">{r.proposedName}</p>
-                    <p className="text-xs text-neutral-500">
+                  <div className="min-w-0">
+                    <p className="mc-card-title">{r.proposedName}</p>
+                    <p className="mc-muted text-xs">
                       {r.vendorName ?? 'Vendor no longer on Swift'} · {new Date(r.createdAt).toLocaleDateString('en-GB')}
                     </p>
-                    {r.note && <p className="mt-2 text-sm text-neutral-700">“{r.note}”</p>}
-                    {r.resolutionNote && <p className="mt-2 text-xs text-neutral-500">Resolution: {r.resolutionNote}</p>}
+                    {r.note && <p className="mt-2">“{r.note}”</p>}
+                    {r.resolutionNote && <p className="mc-muted mt-2 text-xs">Resolution: {r.resolutionNote}</p>}
                   </div>
                   {r.status === 'PENDING' && (
-                    <button type="button" onClick={() => setActiveId(activeId === r.id ? null : r.id)} className="text-sm underline">
+                    <button type="button" onClick={() => setActiveId(activeId === r.id ? null : r.id)} aria-expanded={activeId === r.id} className="mc-btn">
                       {activeId === r.id ? 'Close' : 'Decide'}
                     </button>
                   )}
                 </div>
 
                 {activeId === r.id && (
-                  <div className="mt-4 space-y-4 border-t border-neutral-100 pt-4">
+                  <div className="mt-4 space-y-4 border-t border-[var(--mc-line)] pt-4">
                     {/* MAP FIRST, deliberately. Most requests are a near-duplicate
                         of something that already exists, and every new slug is
                         permanent — mergedIntoId exists because a slug is never
                         edited afterwards. */}
                     <div>
-                      <p className="text-sm font-medium">Map to an existing category</p>
-                      <p className="text-xs text-neutral-500">The usual answer. Nothing new is minted and the vendor still gets what they asked for.</p>
-                      <div className="mt-2 flex gap-2">
+                      <p className="font-semibold">Map to an existing category</p>
+                      <p className="mc-muted text-xs">The usual answer. Nothing new is made and the business still gets what they asked for.</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
                         <select
                           value={mapTarget}
                           onChange={(e) => setMapTarget(e.target.value)}
                           aria-label="Existing category to map to"
-                          className="rounded border border-neutral-300 px-2 py-1 text-sm"
+                          className="mc-select"
                         >
                           <option value="">Choose a category…</option>
                           {cats.filter((c) => c.status === 'ACTIVE' && !c.mergedIntoId).map((c) => (
                             <option key={c.id} value={c.slug}>{c.name} ({c.slug})</option>
                           ))}
                         </select>
-                        <button
-                          type="button"
-                          disabled={!mapTarget || mapTo.isPending}
-                          onClick={() => mapTo.mutate(r.id)}
-                          className="rounded bg-neutral-900 px-3 py-1 text-sm text-white disabled:opacity-40"
-                        >
+                        <button type="button" disabled={!mapTarget || mapTo.isPending} onClick={() => mapTo.mutate(r.id)} className="mc-btn mc-btn-primary">
                           Map
                         </button>
                       </div>
                     </div>
 
                     <div>
-                      <p className="text-sm font-medium">Or create it as a new category</p>
+                      <p className="font-semibold">Or create it as a new category</p>
                       <div className="mt-2 flex flex-wrap gap-2">
                         {/* Owner 17 Oct: a category carries one of the app's icons,
                             never an emoji. The route refuses any key not on this list. */}
-                        <select value={iconKey} onChange={(e) => setIconKey(e.target.value)} aria-label="Icon" className="rounded border border-neutral-300 px-2 py-1 text-sm">
+                        <select value={iconKey} onChange={(e) => setIconKey(e.target.value)} aria-label="Icon" className="mc-select">
                           <option value="">Choose an icon…</option>
                           {CATEGORY_ICON_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
                         </select>
                         {/* Enums, never text: the route refuses anything else. */}
-                        <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind" className="rounded border border-neutral-300 px-2 py-1 text-sm">
-                          {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+                        <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind" className="mc-select">
+                          {KINDS.map((k) => <option key={k} value={k}>{humanise(k)}</option>)}
                         </select>
-                        <select value={vertical} onChange={(e) => setVertical(e.target.value)} aria-label="Vertical" className="rounded border border-neutral-300 px-2 py-1 text-sm">
-                          {VERTICALS.map((v) => <option key={v} value={v}>{v}</option>)}
+                        <select value={vertical} onChange={(e) => setVertical(e.target.value)} aria-label="Vertical" className="mc-select">
+                          {VERTICALS.map((v) => <option key={v} value={v}>{humanise(v)}</option>)}
                         </select>
-                        <button
-                          type="button"
-                          disabled={!iconKey || approve.isPending}
-                          onClick={() => approve.mutate(r.id)}
-                          className="rounded bg-neutral-900 px-3 py-1 text-sm text-white disabled:opacity-40"
-                        >
+                        <button type="button" disabled={!iconKey || approve.isPending} onClick={() => approve.mutate(r.id)} className="mc-btn mc-btn-primary">
                           Create
                         </button>
                       </div>
-                      <p className="mt-1 text-xs text-neutral-500">The app draws the icon you choose. The button stays off until you choose one.</p>
+                      <p className="mc-muted mt-1 text-xs">The app draws the icon you choose. The button stays off until you choose one.</p>
                     </div>
 
                     <div>
-                      <p className="text-sm font-medium">Or turn it down</p>
-                      <p className="text-xs text-neutral-500">The vendor is shown this text verbatim, so write it to them.</p>
-                      <div className="mt-2 flex gap-2">
+                      <p className="font-semibold">Or turn it down</p>
+                      <p className="mc-muted text-xs">The business is shown this text word for word, so write it to them.</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
                         <input
                           value={reason}
                           onChange={(e) => setReason(e.target.value)}
                           placeholder="Why not"
                           aria-label="Rejection reason"
                           maxLength={300}
-                          className="flex-1 rounded border border-neutral-300 px-2 py-1 text-sm"
+                          className="mc-input flex-1"
                         />
-                        <button
-                          type="button"
-                          disabled={reason.trim().length < 3 || reject.isPending}
-                          onClick={() => reject.mutate(r.id)}
-                          className="rounded border border-red-300 px-3 py-1 text-sm text-red-700 disabled:opacity-40"
-                        >
+                        <button type="button" disabled={reason.trim().length < 3 || reject.isPending} onClick={() => reject.mutate(r.id)} className="mc-btn mc-btn-danger">
                           Reject
                         </button>
                       </div>
@@ -323,49 +300,51 @@ export default function DiscoveryPage() {
         </section>
       ) : (
         <section className="space-y-3">
-          {categories.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
+          {categories.isLoading ? <div className="mc-loading" aria-busy="true">Loading…</div> : null}
           {actions.banner}
           {categories.isError ? (
             <QueryFailed error={categories.error} what="the categories" onRetry={() => void categories.refetch()} retrying={categories.isFetching} />
           ) : null}
-          {categories.isSuccess && cats.length === 0 ? <p className="text-sm text-neutral-500">No categories yet.</p> : null}
+          {categories.isSuccess && cats.length === 0 ? <div className="mc-empty">No categories yet.</div> : null}
           {categories.isSuccess && cats.length > 0 ? (
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs uppercase text-neutral-500">
+          <div className="mc-table-wrap overflow-x-auto">
+          <table className="mc-table" style={{ tableLayout: 'auto' }}>
+            <thead>
               <tr>
-                <th className="py-2">Category</th><th>Icon</th><th>Slug</th><th>Kind</th><th>Vertical</th>
-                <th>Aliases</th><th>Visible</th><th />
+                <th className="mc-label">Category</th><th className="mc-label">Icon</th><th className="mc-label">Slug</th><th className="mc-label">Kind</th><th className="mc-label">Vertical</th>
+                <th className="mc-label">Aliases</th><th className="mc-label">Visible</th><th />
               </tr>
             </thead>
             <tbody>
               {cats.map((c) => (
-                <tr key={c.id} className="border-t border-neutral-100">
-                  <td className="py-2">{c.name}</td>
-                  <td className="text-neutral-500">{iconLabel(c.iconKey)}</td>
-                  <td className="text-neutral-500">{c.slug}</td>
-                  <td className="text-neutral-500">{c.kind}</td>
-                  <td className="text-neutral-500">{c.vertical}</td>
-                  <td className="text-neutral-500">{c.aliases.length}</td>
-                  <td>
+                <tr key={c.id}>
+                  <td data-label="Category" data-primary className="font-semibold">{c.name}</td>
+                  <td data-label="Icon" className="mc-muted">{iconLabel(c.iconKey)}</td>
+                  <td data-label="Slug" className="mc-muted mc-mono">{c.slug}</td>
+                  <td data-label="Kind" className="mc-muted">{humanise(c.kind)}</td>
+                  <td data-label="Vertical" className="mc-muted">{humanise(c.vertical)}</td>
+                  <td data-label="Aliases" className="mc-muted mc-numbers">{c.aliases.length}</td>
+                  <td data-label="Visible">
                     {c.mergedIntoId ? (
-                      <span className="text-xs text-neutral-500">merged</span>
+                      <span className="mc-muted text-xs">merged</span>
                     ) : (
                       <span className="inline-flex items-center gap-2">
-                        <span className={`rounded px-2 py-0.5 text-xs ${c.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 'bg-neutral-100 text-neutral-600'}`}>
+                        <span className={`mc-badge${c.status === 'ACTIVE' ? ' mc-tone-good' : ''}`}>
                           {c.status === 'ACTIVE' ? 'Visible' : 'Hidden'}
                         </span>
                         <button
                           type="button"
                           onClick={() => toggleVisibility(c)}
                           aria-label={c.status === 'ACTIVE' ? `Hide ${c.name} from customers` : `Show ${c.name} to customers`}
-                          className="rounded border border-neutral-300 px-2 py-0.5 text-xs"
+                          className="mc-btn"
+                          style={{ minHeight: 36 }}
                         >
                           {c.status === 'ACTIVE' ? 'Hide' : 'Show'}
                         </button>
                       </span>
                     )}
                   </td>
-                  <td className="text-right">
+                  <td data-align="right">
                     {!c.mergedIntoId && (
                       <select
                         aria-label={`Merge ${c.name} into`}
@@ -376,7 +355,7 @@ export default function DiscoveryPage() {
                           const target = cats.find((o) => o.id === targetId);
                           if (target) merge(c, target);
                         }}
-                        className="rounded border border-neutral-200 px-1 py-0.5 text-xs"
+                        className="mc-select"
                       >
                         <option value="">Merge into…</option>
                         {cats.filter((o) => o.id !== c.id && !o.mergedIntoId).map((o) => (
@@ -389,10 +368,11 @@ export default function DiscoveryPage() {
               ))}
             </tbody>
           </table>
+          </div>
           ) : null}
-          <p className="text-xs text-neutral-500">
-            Hiding a category un-ships it without deleting anything. Merging redirects one into another and
-            keeps the old slug resolving — which is why a slug is never edited in place.
+          <p className="mc-muted text-xs">
+            Hiding a category takes it away from customers without deleting anything. Merging sends one into another and
+            keeps the old address working — which is why a slug is never edited in place.
           </p>
         </section>
       )}
