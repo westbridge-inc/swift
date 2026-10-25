@@ -1625,6 +1625,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
   });
 
+  /** GET /vat/report?from=YYYY-MM-DD&to=YYYY-MM-DD — [STORE-VAT · PR4] the store's VAT report for its accountant: its
+   *  own supplied VAT orders, by Guyana day, as the sales lines of the GRA VAT return. OWNER only (the business's tax
+   *  figures). Read from the VAT each order froze; Swift never files the return. */
+  app.get('/vat/report', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const query = z.object({ from: z.string().max(10), to: z.string().max(10) }).strict().parse(request.query);
+    const { storeVatReport } = await import('../store-vat/vat-report');
+    return { success: true, data: await storeVatReport(app.prisma, vendorId, query.from, query.to) };
+  });
+
   /**
    * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
    * week's usage, whether promoted placement is open, what would promote the store, and the
