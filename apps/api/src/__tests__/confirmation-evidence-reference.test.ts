@@ -93,8 +93,8 @@ describe('POST /admin/billing/confirmations/:id/resolve reads the reference by t
     expect(res.statusCode, res.body).toBe(404);
   });
 
-  it('a reference with a line break or markup is refused before the resolver runs', async () => {
-    for (const bad of ['line one\nline two', '<b>ref 12345</b>']) {
+  it('a reference with a line break or markup, or too short once trimmed, is refused before the resolver runs', async () => {
+    for (const bad of ['line one\nline two', '<b>ref 12345</b>', '   ref 123   ']) {
       const res = await resolve(bad);
       expect(res.statusCode, `${JSON.stringify(bad)} ${res.body}`).toBe(400);
     }

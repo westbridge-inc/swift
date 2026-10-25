@@ -38,6 +38,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { EVIDENCE_REFERENCE_MAX, EVIDENCE_REFERENCE_MIN, EVIDENCE_REFERENCE_SHAPE } from '@swift/types';
 import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
@@ -5482,7 +5483,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
     const body = z.object({ sourceId: z.string().min(1), epoch: z.number().int().positive(), clockVersion: z.number().int().nonnegative(),
       decision: z.enum(['UNPAID', 'PAID']), providerPaymentId: z.string().min(1).optional(),
-      evidenceReference: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:/-]+$/),
+      // [Owner, admin-staging 25 Oct] The one rule the console checks too (@swift/types): a trimmed human reference.
+      evidenceReference: z.string().trim().min(EVIDENCE_REFERENCE_MIN).max(EVIDENCE_REFERENCE_MAX).regex(EVIDENCE_REFERENCE_SHAPE),
       reason: z.string().trim().min(8).max(500),
     }).strict().parse(request.body);
     const { resolveFinanceConfirmation } = await import('../billing/confirmation-finance');

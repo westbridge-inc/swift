@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorCode, errorDetails, errorStatus, fetchConfirmationApprovals, fetchPaymentConfirmations, requestConfirmationResolution, type PaymentConfirmation } from '@/lib/api';
 import type { ApprovalRow } from '@/lib/approvals';
 import { checkReason } from '@/lib/reason-rules';
+import { EVIDENCE_REFERENCE_MAX, evidenceReferenceProblem } from '@swift/types';
 import { useConfirmationRequestLocks, type ConfirmationRequestLocks } from '@/lib/confirmation-request-locks';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { MutationError } from '@/components/MutationError';
@@ -126,7 +127,9 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
     event.preventDefault();
     if (inFlight.current || stale) return;
     const checked = checkReason(reason);
-    if (!/^[A-Za-z0-9._:/-]{8,128}$/.test(evidence)) { setProblem('Evidence reference must be 8–128 characters: letters, numbers, dot, underscore, colon, slash or hyphen.'); return; }
+    // [Owner, admin-staging 25 Oct] The one rule the server enforces too (@swift/types): a trimmed human reference.
+    const evidenceProblem = evidenceReferenceProblem(evidence);
+    if (evidenceProblem) { setProblem(evidenceProblem); return; }
     if (!checked.ok) { setProblem(checked.message); return; }
     if (decision === 'PAID' && mmg && !row.settlementPayments?.some((p) => p.providerPaymentId === paymentId)) { setProblem('Select a recorded MMG transaction. If none is available, complete the existing settlement workflow first.'); return; }
     if (!row.sourceId) return;
@@ -136,7 +139,7 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
     let answer: 'queued' | 'refused' | 'uncertain' = 'uncertain';
     try {
       await requestConfirmationResolution(row.id, { sourceId: row.sourceId, epoch: row.epoch, clockVersion: row.clockVersion, decision,
-        ...(decision === 'PAID' && mmg ? { providerPaymentId: paymentId } : {}), evidenceReference: evidence, reason: checked.reason });
+        ...(decision === 'PAID' && mmg ? { providerPaymentId: paymentId } : {}), evidenceReference: evidence.trim(), reason: checked.reason });
       setStale(true);
       setError(new Error('The server did not confirm a queued approval. Reload confirmations and check Approvals before sending again.'));
     } catch (err) {
@@ -166,7 +169,7 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
     {decision === 'PAID' && mmg && <label className="block text-sm">MMG transaction ID<select className={inputClass} value={paymentId} onChange={(e) => setPaymentId(e.target.value)} disabled={busy || stale}>
       <option value="">Select a recorded MMG transaction</option>{row.settlementPayments?.map((payment) => <option key={payment.providerPaymentId} value={payment.providerPaymentId}>{payment.mmgTransactionId}</option>)}
     </select></label>}
-    <label className="block text-sm">Evidence reference<input className={inputClass} value={evidence} onChange={(e) => setEvidence(e.target.value)} maxLength={128} disabled={busy || stale} /></label>
+    <label className="block text-sm">Evidence reference<input className={inputClass} value={evidence} onChange={(e) => setEvidence(e.target.value)} maxLength={EVIDENCE_REFERENCE_MAX} disabled={busy || stale} /></label>
     <label className="block text-sm">Reason<textarea className={inputClass} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} rows={3} disabled={busy || stale} /></label>
     <p className="text-sm text-[var(--muted)]">State what you checked. Whoever approves it will review this reason and the exact decision.</p>
     {problem && <p role="alert" className="text-amber-400">{problem}</p>}
