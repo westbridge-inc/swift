@@ -347,3 +347,151 @@ async function closeUnpaid(db: PrismaClient, holdId: string, checkoutId: string,
     return resolved.status === 'PROVEN_UNPAID';
   });
 }
+
+// ---------------------------------------------------------------------------
+// [REVIEW-M #2098 S3-1 (b) · COORD 25 Oct] After an automatic close, MMG's
+// history is watched for a week for any record naming this checkout. A page
+// MMG kept open past the close (its own limit is unconfirmed, U8) may still
+// have been paid with no reply: such money is never lost. On a record naming
+// the checkout, the checkout is held for a person exactly as a late paid MMG
+// record is (the verifier's hold(): HELD, the pause retaken for the same
+// obligation as LATE_POSITIVE_REVIEW, admins paged, the partner told not to
+// pay again). Nothing is credited or returned automatically. MMG is read in
+// one-hour slices from where the last clean read ended, so no answer is cut
+// at the row limit unseen; a failed or partial read is read again later. If
+// the week ends without every hour read, the admins are paged once.
+// ---------------------------------------------------------------------------
+
+/** Marks the watch's HISTORY observations. */
+export const AUTO_CLOSE_WATCH_PURPOSE = 'NO_REPLY_POST_CLOSE_WATCH';
+/** How long after an automatic close MMG's records are watched (as a late reply is, LATE_WINDOW_MS). */
+export const AUTO_CLOSE_WATCH_MS = 7 * 24 * 3_600_000;
+/** The first watch read after the close, then one every six hours (as the late checks). */
+export const AUTO_CLOSE_WATCH_FIRST_MS = 30 * 60_000;
+export const AUTO_CLOSE_WATCH_EVERY_MS = 6 * 3_600_000;
+/** The hold reason when MMG shows a record naming an automatically closed checkout. */
+export const AUTO_CLOSE_LATE_RECORD_REASON = 'LATE_HISTORY_RECORD_AFTER_AUTO_CLOSE';
+/** The audit action of that hold. */
+export const AUTO_CLOSE_LATE_RECORD_AUDIT = 'MMG_AUTO_CLOSED_CHECKOUT_LATE_RECORD';
+const WATCH_SLICE_MS = 3_600_000;
+const WATCH_SLICES_PER_CHECK = 8;
+/** After the week, one more day to finish reading before the admins are paged. */
+const WATCH_GRACE_MS = 24 * 3_600_000;
+/** Each slice reaches back over the last one by MMG's tolerance and margin. */
+const WATCH_OVERLAP_MS = MMG_HISTORY_CLOCK_TOLERANCE_MS + MMG_HISTORY_MARGIN_MS;
+
+export type WatchDecision = 'WATCH_CLEAR' | 'LATE_RECORD' | 'WATCH_READ_FAILED' | 'WATCH_INCOMPLETE' | 'WATCH_ENDED_INCOMPLETE';
+
+/**
+ * One pass, from the checkout poll (as the system). `holdForReview` is the
+ * verifier's own hold for a person; `pageAdmins` its admin page. Returns how
+ * many automatically closed checkouts were read and how many were held.
+ */
+export async function watchAutoClosedCheckouts(
+  db: PrismaClient,
+  deps: {
+    lookup: MmgCheckoutLookupClient;
+    zone: MmgCreationZone | null;
+    redact: (value: Record<string, unknown>) => Prisma.InputJsonValue;
+    holdForReview: (checkoutId: string, reason: string, at: Date) => Promise<void>;
+    pageAdmins: (input: { tenantId: string | null; title: string; body: string; data: Record<string, unknown>; dedupeKey: string }) => Promise<unknown>;
+  },
+  now: Date,
+): Promise<{ read: number; held: number }> {
+  const out = { read: 0, held: 0 };
+  if (!deps.zone) return out;
+  const zone = deps.zone;
+  const closed = await db.paymentConfirmationHold.findMany({
+    where: { status: 'PROVEN_UNPAID', resolvedBy: NO_REPLY_CHECK_ACTOR,
+      // The week, a day to finish reading, and a day in which an unfinished watch pages the admins.
+      resolvedAt: { gte: new Date(now.getTime() - AUTO_CLOSE_WATCH_MS - 2 * WATCH_GRACE_MS) },
+      checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } },
+    orderBy: [{ resolvedAt: 'desc' }, { id: 'asc' }], take: SCAN,
+    select: { id: true, resolvedAt: true, checkout: { select: { id: true, tenantId: true, merchantTransactionId: true } } },
+  });
+  let reads = 0;
+  for (const hold of closed) {
+    if (reads >= CHECK_BATCH) break;
+    const c = hold.checkout!;
+    const closedAt = hold.resolvedAt!.getTime();
+    const end = closedAt + AUTO_CLOSE_WATCH_MS;
+    const last = await db.mmgCheckoutObservation.findFirst({
+      where: { intentId: c.id, source: 'HISTORY', detail: null, body: { path: ['purpose'], equals: AUTO_CLOSE_WATCH_PURPOSE } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { createdAt: true, body: true },
+    });
+    const lastBody = (last?.body ?? null) as Record<string, unknown> | null;
+    // A record already found keeps being found (coverage stops before it) until
+    // the checkout is held: a hold that failed is tried again on the next read.
+    if (lastBody?.['decision'] === 'WATCH_ENDED_INCOMPLETE') continue;
+    const covered = typeof lastBody?.['coveredUntilMs'] === 'number' ? lastBody['coveredUntilMs'] as number : closedAt - NO_REPLY_SETTLE_MARGIN_MS;
+    if (covered >= end) continue; // the whole week was read clean
+    const due = last ? last.createdAt.getTime() + AUTO_CLOSE_WATCH_EVERY_MS : closedAt + AUTO_CLOSE_WATCH_FIRST_MS;
+    if (due > now.getTime()) continue;
+    reads += 1;
+    try {
+      if (await watchOne(db, deps, zone, c, covered, end, now)) out.held += 1;
+      out.read += 1;
+    } catch (err) {
+      log().error({ err, checkoutId: c.id }, '[MMG checkout] the watch after an automatic close failed; it is read again later');
+    }
+  }
+  return out;
+}
+
+async function watchOne(
+  db: PrismaClient, deps: Parameters<typeof watchAutoClosedCheckouts>[1], zone: MmgCreationZone,
+  c: { id: string; tenantId: string; merchantTransactionId: string }, coveredFrom: number, end: number, now: Date,
+): Promise<boolean> {
+  const ours = c.merchantTransactionId;
+  const limit = Math.min(end, now.getTime() - NO_REPLY_SETTLE_MARGIN_MS);
+  const slices: Array<{ fromdate: string; todate: string; rowsReturned: number | null }> = [];
+  let covered = coveredFrom;
+  let decision: WatchDecision = 'WATCH_CLEAR';
+  let naming: Record<string, unknown>[] = [];
+  for (let i = 0; i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
+    const to = Math.min(covered + WATCH_SLICE_MS, limit);
+    const query: MmgHistoryQuery = { fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(to, zone, 'ceil'), rows: MMG_HISTORY_ROWS };
+    const answer = await deps.lookup.transactionHistoryRows(query);
+    mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
+    if (answer.outcome !== 'rows') {
+      slices.push({ fromdate: query.fromdate, todate: query.todate, rowsReturned: null });
+      decision = 'WATCH_READ_FAILED';
+      break;
+    }
+    slices.push({ fromdate: query.fromdate, todate: query.todate, rowsReturned: answer.rows.length });
+    // Only rows naming this checkout are written down; others' payments never are.
+    naming = answer.rows.filter((row) => leaves(row).some((v) => v.includes(ours)));
+    if (naming.length > 0) { decision = 'LATE_RECORD'; break; }
+    if (mmgHistoryTruncated(answer.rows.length, query)) { decision = 'WATCH_INCOMPLETE'; break; }
+    covered = to;
+  }
+  // The week is over and could not be read whole: a person looks, once.
+  if (decision !== 'LATE_RECORD' && covered < end && now.getTime() >= end + WATCH_GRACE_MS) decision = 'WATCH_ENDED_INCOMPLETE';
+  // [I9] Written down before anything is decided on it.
+  await db.mmgCheckoutObservation.create({ data: {
+    tenantId: c.tenantId, intentId: c.id, source: 'HISTORY', detail: null, createdAt: now,
+    body: deps.redact({ purpose: AUTO_CLOSE_WATCH_PURPOSE, decision, slices, coveredUntilMs: covered, naming }),
+    failure: decision === 'WATCH_CLEAR' ? 'HISTORY_NOT_FOUND' : decision === 'LATE_RECORD' ? null : 'HISTORY_FAILED',
+  } });
+  if (decision === 'WATCH_ENDED_INCOMPLETE') {
+    await deps.pageAdmins({
+      tenantId: c.tenantId, title: 'MMG checkout closed as not paid could not be fully re-checked',
+      body: `Checkout ${c.id} was closed as not paid when MMG's history showed no payment for it, but MMG's history for the week after could not be read in full. Nothing was credited. Check the MMG statement for a payment naming this checkout.`,
+      data: { kind: 'billing_invariants', alert: 'mmg-auto-close-unwatched', checkoutId: c.id },
+      dedupeKey: `mmg-auto-close-unwatched:${c.id}`,
+    }).catch((err) => log().error({ err, checkoutId: c.id }, '[MMG checkout] the unwatched-close page failed'));
+    return false;
+  }
+  if (decision !== 'LATE_RECORD') return false;
+  await deps.holdForReview(c.id, AUTO_CLOSE_LATE_RECORD_REASON, now);
+  const held = await db.mmgCheckoutIntent.findUnique({ where: { id: c.id }, select: { status: true, reason: true, subscriptionId: true } });
+  if (held?.status !== 'HELD') return false;
+  const hold = await db.paymentConfirmationHold.findUnique({ where: { checkoutId: c.id }, select: { id: true, status: true, reason: true, sourceEpoch: true } });
+  await db.auditLog.create({ data: { action: AUTO_CLOSE_LATE_RECORD_AUDIT, entity: 'MmgCheckoutIntent', entityId: c.id, changes: {
+    tenantId: c.tenantId, checkoutId: c.id, subscriptionId: held.subscriptionId, reason: held.reason, actor: NO_REPLY_CHECK_ACTOR,
+    confirmationId: hold?.id ?? null, confirmationStatus: hold?.status ?? null, confirmationReason: hold?.reason ?? null,
+    epoch: hold?.sourceEpoch ?? null, slices, coveredUntilMs: covered,
+  } } });
+  mmgCheckoutEventsCounter.labels('auto_closed_late_record').inc();
+  return true;
+}
