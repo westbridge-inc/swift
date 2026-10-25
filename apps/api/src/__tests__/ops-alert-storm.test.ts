@@ -298,6 +298,17 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
 });
 
 describe('[DRILL-STORM 3] many old open alerts never produce a burst', () => {
+  it('a backlog of old open alerts never starves a new one: the sweep takes never-escalated alerts first', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    // ten old pages, escalated a minute ago (not due again), older deadlines than the new page
+    for (let i = 0; i < 10; i += 1) await legacy(mine, 'PLATFORM', { createdAt: at(t0, -86_400 - i * 60), level: 3, lastEscalatedAt: at(t0, -60), recipients: [responder] });
+    const fresh = await open(mine, 'SOS', at(t0, -200), [responder]);
+    const res = await runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: t0, limit: 5, alertIds: mine }), 'test:drill-storm');
+    expect(res.escalated).toEqual([fresh]);
+  });
+
+
   it('the first sweep re-pages each person ONCE and texts on-call ONCE, closes the old drills with ONE summary, and an hour of sweeps stays inside the cap', async () => {
     const t0 = epoch(); const mine: string[] = [];
     const responder = await person();

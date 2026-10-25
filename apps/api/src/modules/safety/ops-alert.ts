@@ -197,7 +197,8 @@ async function openOpsAlertUnscoped(
   const alert = await prisma.opsAlert.create({
     data: {
       tenantId: input.tenantId, kind: input.kind, sosAlertId: input.sosAlertId ?? null, title: input.title, body: input.body,
-      ackDeadlineAt,
+      // [DRILL-STORM] Opened at `now`, the clock its deadline (and a drill's window) is measured on.
+      createdAt: now, ackDeadlineAt,
       recipients: { create: userIds.map((userId) => ({ tenantId: input.tenantId, userId })) },
     },
     include: { recipients: true },
@@ -388,28 +389,31 @@ export async function escalateOverdueOpsAlerts(
     const fiction = await isFiction(prisma, a.tenantId);
     // [DRILL-STORM] The backoff: the repeat doubles after each escalation, to the kind's ceiling.
     const escalationDue = !(a.lastEscalatedAt && now.getTime() - a.lastEscalatedAt.getTime() < escalationIntervalSeconds(a.kind, a.escalationLevel) * 1000);
-    if (!escalationDue || killed) {
-      if (escalationDue) opsAlertCounter.labels('escalation_killed').inc();
-      // Not escalating on this pass: a recipient attached late still gets the page itself now.
-      for (const r of a.recipients.filter((x) => attachedLate.includes(x.id))) {
-        const id = await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: a.title, body: a.body, data: { kind: 'ops_alert_escalated', opsAlertId: a.id, sosAlertId: a.sosAlertId, level: a.escalationLevel } }).catch(() => null);
-        if (id) await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { notificationId: id, deliveredAt: now } }).catch(() => null);
+    let escalatedNow = false;
+    if (escalationDue && !killed) {
+      // One sweep escalates an alert once: a concurrent sweep, or an acknowledgement, wins.
+      const claim = await prisma.opsAlert.updateMany({ where: { id: a.id, escalationLevel: a.escalationLevel, acknowledgedAt: null, closedAt: null }, data: { escalationLevel: a.escalationLevel + 1, lastEscalatedAt: now } });
+      if (claim.count !== 1) continue;
+      escalatedNow = true; a.escalationLevel += 1; a.lastEscalatedAt = now;
+    } else if (escalationDue) opsAlertCounter.labels('escalation_killed').inc();
+    const level = a.escalationLevel;
+    // A recipient attached late gets the page itself now, escalating or not (the rollback included):
+    // the first time a person hears of an alert is never held back. It counts as their re-page at this level.
+    for (const r of a.recipients.filter((x) => attachedLate.includes(x.id))) {
+      const id = await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: a.title, body: a.body, data: { kind: 'ops_alert_escalated', opsAlertId: a.id, sosAlertId: a.sosAlertId, level } }).catch(() => null);
+      if (id) {
+        await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { notificationId: id, deliveredAt: now, pagedLevel: level, lastPagedAt: now } }).catch(() => null);
+        r.pagedLevel = level;
       }
-      live.push({ alert: a, fiction });
-      continue;
     }
-    const level = a.escalationLevel + 1;
-    // One sweep escalates an alert once: a concurrent sweep, or an acknowledgement, wins.
-    const claim = await prisma.opsAlert.updateMany({ where: { id: a.id, escalationLevel: a.escalationLevel, acknowledgedAt: null, closedAt: null }, data: { escalationLevel: level, lastEscalatedAt: now } });
-    if (claim.count !== 1) continue;
-    a.escalationLevel = level; a.lastEscalatedAt = now;
+    live.push({ alert: a, fiction });
+    if (!escalatedNow) continue;
     opsAlertCounter.labels('escalated').inc();
     if (level === 1) opsAlertCounter.labels('zero_ack_by_deadline').inc();
     log().error({ opsAlertId: a.id, sosAlertId: a.sosAlertId, level, recipients: a.recipients.length }, '[S-19] ops alert unacknowledged past its deadline — escalated');
     escalated.push(a.id);
     // [DRILL-STORM] The platform is paged once per alert, at its first escalation; the ladder re-pages after that.
     if (!fiction && level === 1) platformPage.push(a.id);
-    live.push({ alert: a, fiction });
   }
   // [DRILL-STORM] The re-pages: collapsed per person and per on-call list, spaced, nothing owed dropped.
   // The rollback (OPS_ALERT_ESCALATION_KILL) pauses them with the escalation.
@@ -470,7 +474,7 @@ async function repageOwed(prisma: PrismaClient, notifications: NotificationServi
         await ownerWallSystem('ops-alert:repage-notice', () => prisma.notification.update({ where: { id: existing.id }, data: notice }));
         await notifications.publishPersisted(existing.id, { requirePush: true });
       } else {
-        await notifications.sendReach({ userId, type: 'SYSTEM_ANNOUNCEMENT', title: words.title, body: words.body, data, dedupeKey: OPS_UNACKED_KEY });
+        await notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', title: words.title, body: words.body, data, dedupeKey: OPS_UNACKED_KEY });
       }
       opsAlertCounter.labels('repaged').inc();
     } catch (err) {
