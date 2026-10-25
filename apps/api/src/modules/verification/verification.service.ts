@@ -1669,9 +1669,11 @@ export class VerificationService {
   /**
    * [POLICE-CLEARANCE CONSENT] The person withdraws their police clearance, before it is erased (dsar.eraseDocumentsFor
    * shreds it next and the purge moves it to PURGED): a committed one is REVOKED first, so its kept record says so and
-   * loses its dates (no "clear" and no issue date survive); every one carries the withdrawal note; eligibility is
-   * recomputed in the same transaction (police-cleared off; a home-visit provider whose list needs it stops being
-   * verified; a business owner's home visits pause through homeVisitsCleared). A held clearance is not passed here.
+   * loses its dates and content hash (no "clear", no issue date survive — only a note); one still in review leaves
+   * review (EXPIRED: it can never be approved after the withdrawal); every one carries the withdrawal note; eligibility
+   * is recomputed in the same transaction (police-cleared off; a home-visit provider whose list needs it stops being
+   * verified; a business owner's home visits pause through homeVisitsCleared). [REVIEW-G2 S3-1] A clearance under a
+   * legal hold is withdrawn the same way — the hold keeps its bytes, never its use.
    */
   async markPoliceClearanceWithdrawn(userId: string, docIds: readonly string[]): Promise<void> {
     if (docIds.length === 0) return;
@@ -1682,8 +1684,10 @@ export class VerificationService {
         if (!doc) continue;
         const note = { reviewNote: POLICE_CLEARANCE_WITHDRAWN_NOTE, expiresAt: null };
         if (doc.state === 'COMMITTED') await hopDocState(tx, { id, userId }, 'COMMITTED', 'REVOKED', note);
-        else await tx.verificationDocument.updateMany({ where: { id, userId, legalHoldId: null }, data: note });
-        await tx.documentRecord.updateMany({ where: { submissionId: id }, data: { issuedOn: null, expiresOn: null } });
+        else if (doc.state === 'REVIEW_QUEUED' || doc.state === 'IN_REVIEW' || doc.state === 'INFO_REQUESTED') {
+          await hopDocState(tx, { id, userId }, doc.state, 'EXPIRED', note);
+        } else await tx.verificationDocument.updateMany({ where: { id, userId }, data: note });
+        await tx.documentRecord.updateMany({ where: { submissionId: id }, data: { issuedOn: null, expiresOn: null, contentSha256: null } });
       }
       await projectProviderVerificationLocked(tx, userId);
       await this.projectVendorActivation(tx, userId);
@@ -2045,9 +2049,9 @@ export class VerificationService {
     // ("Replaced — waiting for review"). Additive field; older apps ignore it.
     // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
     const replacedNotes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote).map((d) => d.reviewNote));
-    // [POLICE-CLEARANCE CONSENT] A police clearance the person withdrew is gone (only a note is kept): the checklist
-    // offers a new one instead of showing it "Rejected".
-    const documents = rows.filter((d) => d.state !== 'SUPERSEDED' && !(d.purgedAt && d.reviewNote === POLICE_CLEARANCE_WITHDRAWN_NOTE))
+    // [POLICE-CLEARANCE CONSENT] A police clearance the person withdrew is gone for them (only a note is kept; a legal
+    // hold may keep its bytes, never its use): the checklist offers a new one instead of showing it "Rejected".
+    const documents = rows.filter((d) => d.state !== 'SUPERSEDED' && !(d.docType === POLICE_CLEARANCE_DOC_TYPE && d.reviewNote === POLICE_CLEARANCE_WITHDRAWN_NOTE))
       .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d))
       // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
       // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as

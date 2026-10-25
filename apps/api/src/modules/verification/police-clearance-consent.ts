@@ -29,6 +29,13 @@ export const POLICE_CLEARANCE_WITHDRAWN_NOTE = 'WITHDRAWN: by the person';
 
 export type PoliceClearanceKind = 'taxi' | 'home';
 
+/** The checklist a stored clearance belongs to, from the role it was stored under (a tradesperson's are CUSTOMER rows). */
+export function policeClearanceChecklistOf(docRole: string): 'MOVER' | 'SERVICE' | 'SERVICE_PROVIDER' {
+  if (docRole === 'MOVER' || docRole === 'RIDER' || docRole === 'DRIVER') return 'MOVER';
+  if (docRole === 'CUSTOMER') return 'SERVICE_PROVIDER';
+  return 'SERVICE';
+}
+
 /** A mover's clearance is the taxi driver's optional one; a service business or tradesperson's is for home visits. */
 export function policeClearanceKind(role: string): PoliceClearanceKind | null {
   if (role === 'MOVER') return 'taxi';
@@ -106,7 +113,7 @@ export async function recordPoliceClearanceConsent(
  */
 export async function recordPoliceClearanceWithdrawal(
   prisma: PrismaClient,
-  input: { userId: string; role: string; current: PoliceClearanceConsent; surface: ConsentSurface; ip?: string | null; withdrawn: number },
+  input: { userId: string; role: string; current: PoliceClearanceConsent; surface: ConsentSurface; ip?: string | null; withdrawn: number; path: string },
 ): Promise<void> {
   const subjectType = consentSubjectForRole(input.role);
   const latest = await currentConsentDetailed(prisma, subjectType, input.userId, POLICE_CLEARANCE_CONSENT_TYPE);
@@ -122,6 +129,6 @@ export async function recordPoliceClearanceWithdrawal(
     action: 'withdrawn',
     surface: input.surface,
     ip: input.ip ?? null,
-    evidence: { control: 'police_clearance_withdrawn', path: 'verification/police-clearance/withdraw', documents: input.withdrawn },
+    evidence: { control: 'police_clearance_withdrawn', path: input.path, documents: input.withdrawn },
   }));
 }

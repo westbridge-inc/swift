@@ -162,6 +162,22 @@ describe('[2026-10-18] a non-material bump asks nobody again', () => {
     }
   });
 
+  // [POLICE-CLEARANCE CONSENT · COORD 25 Oct 22:17Z — 2026-10-25.2 NON-material] Privacy s.6 narrows what is kept of a
+  // police clearance and adds a withdrawal right: nobody at 2026-10-25.1 is asked; anyone below it is asked exactly as
+  // at 2026-10-25.1 (its material summary, and anything older they missed).
+  it('[2026-10-25.2 non-material] nobody at 2026-10-25.1 is asked again; below it, the same summaries as at 2026-10-25.1', () => {
+    expect(NON_MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-25.2');
+    expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-25.2');
+    expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
+    for (const roles of [['CUSTOMER'], ['MOVER', 'CUSTOMER'], ['VENDOR_OWNER', 'CUSTOMER']] as UserRole[][]) {
+      expect(acceptanceStatus({ tosVersion: '2026-10-25.1', roles }, '2026-10-25.2')).toMatchObject({ needsAcceptance: false, summary: [] });
+      expect(acceptanceStatus({ tosVersion: '2026-10-25.2', roles }, '2026-10-25.2')).toMatchObject({ needsAcceptance: false, summary: [] });
+      for (const tosVersion of ['2026-10-17', '2026-10-18', '2026-10-21', '2026-10-25']) {
+        expect(acceptanceStatus({ tosVersion, roles }, '2026-10-25.2')).toEqual(acceptanceStatus({ tosVersion, roles }, '2026-10-25.1'));
+      }
+    }
+  });
+
   it('builds 9-11 are never asked: only GET/POST /auth/legal-acceptance read acceptance, and sign-up stamps the server\'s version', () => {
     const SRC = join(__dirname, '..');
     const files: string[] = [];
@@ -256,14 +272,18 @@ describe('GET/POST /auth/legal-acceptance', () => {
   it('[2026-10-25.1 material, served] people are asked once, with exactly what changed materially since they accepted', async () => {
     const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
-    expect(LEGAL_VERSION).toBe('2026-10-25.1');
+    // [POLICE-CLEARANCE CONSENT] served as 2026-10-25.2 (non-material on top): the material summary is still 2026-10-25.1's.
+    expect(LEGAL_VERSION).toBe('2026-10-25.2');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-25.1');
     for (const [accepted, summary] of [['2026-10-17', [...v21, ...v251]], ['2026-10-18', [...v21, ...v251]], ['2026-10-21', [...v251]], ['2026-10-25', [...v251]]] as const) {
       const person = await mkUser(['CUSTOMER'] as UserRole[], accepted);
-      expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-25.1', acceptedVersion: accepted, needsAcceptance: true, summary: [...summary] });
-      expect((await call('POST', person.token, { version: '2026-10-25.1', accept: true })).statusCode).toBe(200);
-      expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: '2026-10-25.1', needsAcceptance: false, summary: [] });
+      expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: accepted, needsAcceptance: true, summary: [...summary] });
+      expect((await call('POST', person.token, { version: LEGAL_VERSION, accept: true })).statusCode).toBe(200);
+      expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: LEGAL_VERSION, needsAcceptance: false, summary: [] });
     }
+    // A person at 2026-10-25.1 is not asked under 2026-10-25.2.
+    const atV251 = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-25.1');
+    expect((await call('GET', atV251.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: '2026-10-25.1', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {

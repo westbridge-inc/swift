@@ -18,6 +18,9 @@ import {
   POLICE_CLEARANCE_TICK, policeClearanceConsentFor, policeClearanceKind,
 } from '../modules/verification/police-clearance-consent';
 import { registrationProofFor } from './helpers/otp';
+import { placeDocLegalHold, releaseDocLegalHold } from '../modules/verification/legal-hold';
+import { LEGAL_VERSION, PRIVACY } from '../modules/legal/legal.routes';
+import { NON_MATERIAL_CHANGES, MATERIAL_CHANGES } from '../modules/legal/reaccept';
 
 // ---------------------------------------------------------------------------
 // [POLICE-CLEARANCE CONSENT · owner 25 Oct 2026 · DPA s.2 + s.9(1)(a), legal research D1/D2, Privacy s.3]
@@ -31,8 +34,8 @@ import { registrationProofFor } from './helpers/otp';
 // ---------------------------------------------------------------------------
 
 const runBase = 592_089_100_000 + Math.floor(Math.random() * 800_000);
-const PHONES = { taxi: `+${runBase + 1}`, words: `+${runBase + 2}`, admin: `+${runBase + 3}`, old: `+${runBase + 4}` };
-const ALL_PHONES = Object.values(PHONES);
+const PHONES = { taxi: `+${runBase + 1}`, words: `+${runBase + 2}`, admin: `+${runBase + 3}`, old: `+${runBase + 4}`, held: `+${runBase + 5}`, dsar: `+${runBase + 6}` };
+const ALL_PHONES = [...Object.values(PHONES), `+${runBase + 7}`];
 
 let app: FastifyInstance;
 let service: VerificationService;
@@ -62,6 +65,10 @@ async function cleanup() {
   const users = await app.prisma.user.findMany({ where: { phone: { in: ALL_PHONES } }, select: { id: true } });
   const ids = users.map((u) => u.id);
   if (ids.length) {
+    for (const hold of await app.prisma.docLegalHold.findMany({ where: { subjectUserId: { in: ids }, releasedAt: null }, select: { id: true } })) {
+      await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: adminId || ids[0]!, reason: 'Test cleanup' });
+    }
+    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: ids } } });
     const docs = await app.prisma.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } });
     await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
     await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
@@ -194,11 +201,12 @@ describe('[POLICE-CLEARANCE] the upload records its own consent; a withdrawal er
     await runWithTenant('swift-default', () => service.approveDocument(uploaded.id, adminId, new Date(Date.now() + 200 * 86_400_000)));
     expect(await isPoliceCleared(app.prisma, driver.userId)).toBe(true);
     expect(await homeVisitsCleared(app.prisma, driver.userId), 'the same evidence opens home visits').toBe(true);
+    await app.prisma.documentRecord.update({ where: { submissionId: uploaded.id }, data: { contentSha256: 'a'.repeat(64) } });
 
     // … and withdrawing it while the account is active erases it now, keeps only a note, and says so in the ledger.
     const withdrawn = await inject('POST', '/api/v1/verification/police-clearance/withdraw', { role: 'MOVER' }, driver.token);
     expect(withdrawn.statusCode, withdrawn.body).toBe(200);
-    expect(withdrawn.json().data).toEqual({ withdrawn: 1, kept: 0 });
+    expect(withdrawn.json().data).toEqual({ withdrawn: 1, keptForLegalHold: 0, deletionPending: 0 });
     expect(await isPoliceCleared(app.prisma, driver.userId)).toBe(false);
     expect(await homeVisitsCleared(app.prisma, driver.userId), 'home visits pause').toBe(false);
     const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: uploaded.id } });
@@ -210,7 +218,8 @@ describe('[POLICE-CLEARANCE] the upload records its own consent; a withdrawal er
     expect(after.reviewNote).toBe('WITHDRAWN: by the person');
     expect(after.expiresAt).toBeNull();
     const record = await app.prisma.documentRecord.findUniqueOrThrow({ where: { submissionId: uploaded.id } });
-    expect(record).toMatchObject({ status: 'REVOKED', issuedOn: null, expiresOn: null });
+    // [REVIEW-M S4] only a note: no dates and no content hash survive on the kept record (the deletion receipt stays).
+    expect(record).toMatchObject({ status: 'REVOKED', issuedOn: null, expiresOn: null, contentSha256: null });
     expect(await app.prisma.deletionReceipt.count({ where: { submissionId: uploaded.id } })).toBeGreaterThan(0);
     const ledger = await policeRows(driver.userId);
     expect(ledger.map((r) => r.action)).toEqual(['granted', 'withdrawn']);
@@ -220,7 +229,7 @@ describe('[POLICE-CLEARANCE] the upload records its own consent; a withdrawal er
 
     // Nothing left to withdraw: nothing happens and nothing is recorded.
     const again = await inject('POST', '/api/v1/verification/police-clearance/withdraw', { role: 'MOVER' }, driver.token);
-    expect(again.json().data).toEqual({ withdrawn: 0, kept: 0 });
+    expect(again.json().data).toEqual({ withdrawn: 0, keptForLegalHold: 0, deletionPending: 0 });
     expect(await policeRows(driver.userId)).toHaveLength(2);
     // A checklist with no police clearance has nothing to withdraw.
     const notHere = await inject('POST', '/api/v1/verification/police-clearance/withdraw', { role: 'RESTAURANT' }, driver.token);
@@ -241,5 +250,76 @@ describe('[POLICE-CLEARANCE] DSAR erasure: a consent-based document is not an "a
     expect(refusalGround({ ...live, docType: 'police_clearance' })).toBeNull();
     expect(refusalGround({ ...live, docType: 'drivers_licence' })).toBe('ACTIVE_LICENCE');
     expect(refusalGround({ ...live, docType: 'police_clearance', held: true })).toBe('LEGAL_HOLD');
+  });
+});
+
+describe('[POLICE-CLEARANCE] a withdrawal always counts — a legal hold keeps the bytes, never the clearance', () => {
+  const approvedClearance = async (who: { userId: string; token: string }, marker: string) => {
+    const words = (await status(who.token)).policeClearanceConsent!;
+    expect((await uploadPolice(who, marker, { consentTick: POLICE_CLEARANCE_TICK, consentVersion: words.version })).statusCode).toBe(201);
+    const doc = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: who.userId, docType: 'police_clearance' }, orderBy: { createdAt: 'desc' } });
+    await runWithTenant('swift-default', () => service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * 86_400_000)));
+    expect(await isPoliceCleared(app.prisma, who.userId)).toBe(true);
+    return doc;
+  };
+
+  it('[REVIEW-G2 S3-1] under a legal hold: the bytes stay for the hold, but the clearance is revoked, stops counting, and the ledger records the withdrawal', async () => {
+    const driver = await taxiDriver(PHONES.held);
+    const doc = await approvedClearance(driver, 'pc-held');
+    await placeDocLegalHold(app.prisma, { subjectUserId: driver.userId, documentIds: [doc.id], placedBy: adminId, ownerId: adminId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
+
+    const res = await inject('POST', '/api/v1/verification/police-clearance/withdraw', { role: 'MOVER' }, driver.token);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toEqual({ withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 });
+    const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(after.purgedAt, 'the hold keeps the bytes').toBeNull();
+    expect(after.fileUrl).not.toBe('');
+    expect(after).toMatchObject({ state: 'REVOKED', status: 'REJECTED', reviewNote: 'WITHDRAWN: by the person', expiresAt: null });
+    expect(await app.prisma.documentRecord.findUniqueOrThrow({ where: { submissionId: doc.id } })).toMatchObject({ status: 'REVOKED', issuedOn: null, expiresOn: null });
+    expect(await isPoliceCleared(app.prisma, driver.userId), 'a withdrawn clearance never counts').toBe(false);
+    expect(await homeVisitsCleared(app.prisma, driver.userId)).toBe(false);
+    expect((await policeRows(driver.userId)).map((r) => r.action)).toEqual(['granted', 'withdrawn']);
+    expect((await status(driver.token)).documents.filter((d) => d.docType === 'police_clearance')).toEqual([]);
+  });
+
+  it('[REVIEW-G2 S3-1] one still in review under a hold leaves review: it can never be approved after the withdrawal', async () => {
+    const driver = await taxiDriver(`+${runBase + 7}`);
+    const words = (await status(driver.token)).policeClearanceConsent!;
+    expect((await uploadPolice(driver, 'pc-held-pending', { consentTick: POLICE_CLEARANCE_TICK, consentVersion: words.version })).statusCode).toBe(201);
+    const doc = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: driver.userId, docType: 'police_clearance' } });
+    await placeDocLegalHold(app.prisma, { subjectUserId: driver.userId, documentIds: [doc.id], placedBy: adminId, ownerId: adminId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
+    expect((await inject('POST', '/api/v1/verification/police-clearance/withdraw', { role: 'MOVER' }, driver.token)).json().data).toEqual({ withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 });
+    const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(after.status).not.toBe('PENDING');
+    await expect(runWithTenant('swift-default', () => service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * 86_400_000)))).rejects.toThrow();
+    expect(await isPoliceCleared(app.prisma, driver.userId)).toBe(false);
+  });
+
+  it('[REVIEW-G2 S4] the DSAR erase door is a withdrawal too: revoked, erased, and in the ledger', async () => {
+    const driver = await taxiDriver(PHONES.dsar);
+    const doc = await approvedClearance(driver, 'pc-dsar');
+    const res = await inject('POST', '/api/v1/verification/dsar/documents/erase', { documentIds: [doc.id] }, driver.token);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toEqual([expect.objectContaining({ documentId: doc.id, outcome: 'DESTROYED' })]);
+    expect(await isPoliceCleared(app.prisma, driver.userId)).toBe(false);
+    expect(await app.prisma.documentRecord.findUniqueOrThrow({ where: { submissionId: doc.id } })).toMatchObject({ status: 'REVOKED', issuedOn: null, expiresOn: null });
+    const ledger = await policeRows(driver.userId);
+    expect(ledger.map((r) => r.action)).toEqual(['granted', 'withdrawn']);
+    expect(ledger[1]).toMatchObject({ subjectType: 'driver', evidence: { control: 'police_clearance_withdrawn', path: 'verification/dsar/documents/erase' } });
+  });
+});
+
+describe('[POLICE-CLEARANCE] the Privacy Policy says it (COORD 25 Oct: non-material, LEGAL_VERSION 2026-10-25.2)', () => {
+  it('section 6 states what is kept, when the image goes, and the withdrawal — no day count (the days are a setting)', () => {
+    expect(PRIVACY).toContain('A police clearance is kept only as whether it was clear and the date it was issued: its image is deleted soon after our check (the app shows how many days before you upload it), and you can withdraw it at any time on its card in the app (Withdraw my police clearance); Swift then deletes it and keeps only a note that it was withdrawn, unless the law requires us to keep more.');
+    const s6 = /<h2>6\. Retention and deletion<\/h2>\s*<p>([\s\S]*?)<\/p>/.exec(PRIVACY)?.[1] ?? '';
+    expect(s6).toContain('police clearance');
+    expect(s6).not.toMatch(/police clearance[^.]*\d+ days/);
+  });
+
+  it('served as 2026-10-25.2, classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-25.2');
+    expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-25.2')).toHaveLength(1);
+    expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-25.2');
   });
 });

@@ -17,7 +17,8 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, UPLOAD_CONSENT_VIAS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { documentConsentOnRecord } from './document-consent-record';
 import {
-  POLICE_CLEARANCE_TICK, policeClearanceConsentFor, policeClearanceKind, recordPoliceClearanceConsent, recordPoliceClearanceWithdrawal,
+  POLICE_CLEARANCE_TICK, POLICE_CLEARANCE_WITHDRAWN_NOTE, policeClearanceChecklistOf, policeClearanceConsentFor, policeClearanceKind,
+  recordPoliceClearanceConsent, recordPoliceClearanceWithdrawal,
 } from './police-clearance-consent';
 import { POLICE_CLEARANCE_DOC_TYPE } from './doc-registry';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -95,6 +96,25 @@ export async function verificationRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const auth = { preHandler: [app.authenticate] };
 
+  /**
+   * [POLICE-CLEARANCE CONSENT] The person's withdrawal of these police clearances — from the withdraw button or the
+   * DSAR erase door: each is withdrawn first (revoked or out of review, record stripped, eligibility recomputed; a
+   * legal hold keeps the bytes, never the use), and the ledger records it under the subject each was stored for.
+   * The caller erases them next.
+   */
+  async function withdrawPoliceClearances(
+    userId: string, docs: ReadonlyArray<{ id: string; role: string }>, request: Parameters<typeof consentSurfaceOf>[0] & { ip: string }, path: string,
+  ): Promise<void> {
+    if (docs.length === 0) return;
+    await verification.markPoliceClearanceWithdrawn(userId, docs.map((d) => d.id));
+    const byChecklist = new Map<string, number>();
+    for (const d of docs) byChecklist.set(policeClearanceChecklistOf(d.role), (byChecklist.get(policeClearanceChecklistOf(d.role)) ?? 0) + 1);
+    for (const [role, withdrawn] of byChecklist) {
+      const current = await policeClearanceConsentFor(app.prisma, role);
+      if (current) await recordPoliceClearanceWithdrawal(app.prisma, { userId, role, current, surface: consentSurfaceOf(request), ip: request.ip, withdrawn, path });
+    }
+  }
+
   /** GET /status?role= — checklist, submitted docs, what's missing. [DOC-CONSENT] `documentConsent` (additive; older
    *  apps ignore it): whether this person's document-upload tick is on record, so the checklist shows their own
    *  recorded choice instead of an empty box on every visit (document-consent-record.ts). */
@@ -141,6 +161,15 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /dsar/documents/erase — destroy what can be destroyed now; refuse the rest with the ground stated. */
   app.post('/dsar/documents/erase', auth, async (request) => {
     const { documentIds } = z.object({ documentIds: z.array(z.string().min(1)).min(1).max(50).optional() }).parse(request.body ?? {});
+    // [POLICE-CLEARANCE CONSENT · REVIEW-G2 S4] Erasing a police clearance withdraws it: same withdrawal, same ledger row.
+    const police = await app.prisma.verificationDocument.findMany({
+      where: {
+        userId: request.user.userId, docType: POLICE_CLEARANCE_DOC_TYPE, purgedAt: null,
+        OR: [{ reviewNote: null }, { reviewNote: { not: POLICE_CLEARANCE_WITHDRAWN_NOTE } }], ...(documentIds ? { id: { in: documentIds } } : {}),
+      },
+      select: { id: true, role: true },
+    });
+    await withdrawPoliceClearances(request.user.userId, police, request, 'verification/dsar/documents/erase');
     const { eraseDocumentsFor } = await import('./dsar');
     return { success: true, data: await eraseDocumentsFor(app.prisma, verification, request.user.userId, documentIds) };
   });
@@ -159,19 +188,19 @@ export async function verificationRoutes(app: FastifyInstance) {
     }
     const userId = request.user.userId;
     const docs = await app.prisma.verificationDocument.findMany({
-      where: { userId, docType: POLICE_CLEARANCE_DOC_TYPE, purgedAt: null }, select: { id: true, legalHoldId: true },
+      where: { userId, docType: POLICE_CLEARANCE_DOC_TYPE, purgedAt: null, OR: [{ reviewNote: null }, { reviewNote: { not: POLICE_CLEARANCE_WITHDRAWN_NOTE } }] },
+      select: { id: true, role: true },
     });
-    if (docs.length === 0) return { success: true, data: { withdrawn: 0, kept: 0 } };
-    // Withdrawn first (a committed clearance is revoked and its record loses its dates), then erased; a held one is
-    // left exactly as it is and counted as kept.
-    await verification.markPoliceClearanceWithdrawn(userId, docs.filter((d) => d.legalHoldId === null).map((d) => d.id));
+    if (docs.length === 0) return { success: true, data: { withdrawn: 0, keptForLegalHold: 0, deletionPending: 0 } };
+    // Withdrawn first (revoked or out of review, record stripped, eligibility recomputed, ledger row), then erased.
+    // [REVIEW-G2 S3-1] A clearance under a legal hold is withdrawn too: the hold keeps its bytes, never its use.
+    await withdrawPoliceClearances(userId, docs, request, 'verification/police-clearance/withdraw');
     const { eraseDocumentsFor } = await import('./dsar');
     const outcomes = await eraseDocumentsFor(app.prisma, verification, userId, docs.map((d) => d.id));
-    const erased = outcomes.filter((o) => o.outcome === 'DESTROYED' || o.outcome === 'ALREADY_DESTROYED').map((o) => o.documentId);
-    if (erased.length > 0) {
-      await recordPoliceClearanceWithdrawal(app.prisma, { userId, role, current, surface: consentSurfaceOf(request), ip: request.ip, withdrawn: erased.length });
-    }
-    return { success: true, data: { withdrawn: erased.length, kept: outcomes.length - erased.length } };
+    // [REVIEW-M S4] What a hold keeps and what storage has not confirmed deleted yet are told apart.
+    const keptForLegalHold = outcomes.filter((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD').length;
+    const erased = outcomes.filter((o) => o.outcome === 'DESTROYED' || o.outcome === 'ALREADY_DESTROYED').length;
+    return { success: true, data: { withdrawn: docs.length, keptForLegalHold, deletionPending: outcomes.length - erased - keptForLegalHold } };
   });
 
   /** POST /dsar/documents/rectify — re-open a review case; the correction is a reviewer action (DOC-INV-34). */
