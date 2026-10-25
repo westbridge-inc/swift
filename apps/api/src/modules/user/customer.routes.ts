@@ -601,10 +601,11 @@ async function buildCartResponse(
   const discount = priced.discount;
   const totalAmount = sumOf(priced.perPlan.map((p) => p.total));
   // [STORE-VAT · owner O-5] The VAT INSIDE each approved VAT store's goods (never added: the totals above are
-  // unchanged), by the same function and discount split checkout freezes.
+  // unchanged), by the same function and discount split checkout freezes. Only a discount the STORE gives lowers its
+  // VAT (REVIEW-M #2085 S3-1, VAT Act s.2): a Swift-funded promo is paid to the store, so it counts in full.
   const vatByVendor = await cartVatByVendor(app.prisma, plans.map((p, i) => ({
     vendorId: p.vendorId,
-    goodsDiscount: priced.perPlan[i]!.allocation?.goods ?? 0,
+    storeFundedGoodsDiscount: promo?.funder === 'VENDOR' ? (priced.perPlan[i]!.allocation?.goods ?? 0) : 0,
     lines: itemDetails.filter((d) => d.vendorId === p.vendorId && d.isAvailable).map((d) => ({
       id: d.id, amount: d.lineTotal, vatClass: cart.items.find((ci) => ci.id === d.id)?.item.vatClass ?? 'STANDARD',
     })),

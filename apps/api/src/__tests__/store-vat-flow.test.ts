@@ -45,6 +45,7 @@ let app: FastifyInstance;
 let verification: VerificationService;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
+const promoIds: string[] = [];
 let ownerUserId = '';
 let ownerToken = '';
 let reviewerId = '';
@@ -103,8 +104,8 @@ async function fillCart(lines: Array<{ itemId: string; quantity: number }>) {
   return cart.json().data as { totalAmount: number; subtotalCustomer: number; vendors: Array<{ vendorId: string; totalAmount: number; vat: unknown }> };
 }
 
-async function checkout() {
-  const res = await call('POST', '/api/v1/customer/checkout', customer.token, { paymentMethod: 'CASH' }, { 'idempotency-key': `vat-${nanoid(10)}` });
+async function checkout(extra: Record<string, unknown> = {}) {
+  const res = await call('POST', '/api/v1/customer/checkout', customer.token, { paymentMethod: 'CASH', ...extra }, { 'idempotency-key': `vat-${nanoid(10)}` });
   expect(res.statusCode, res.body).toBeLessThan(300);
   return app.prisma.order.findFirstOrThrow({ where: { customerId: customer.userId }, orderBy: { createdAt: 'desc' }, include: { items: true } });
 }
@@ -182,6 +183,7 @@ afterAll(async () => {
   await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: oids } } });
   await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: oids } } });
+  if (promoIds.length) await app.prisma.promoCode.deleteMany({ where: { id: { in: promoIds } } });
   await app.prisma.cart.deleteMany({ where: { customerId: { in: userIds } } });
   await app.prisma.verificationDecisionOutbox.deleteMany({ where: { documentId: { in: dids } } });
   await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: dids } } } });
@@ -481,6 +483,58 @@ describe('7. the receipt of the VAT order', () => {
     expect(res.body).toContain('(zero-rated)');
     expect(res.body).toMatch(/<h1>Receipt/);
     expect(res.body.toLowerCase().split('tax invoice').length - 1).toBe(1);
+  });
+});
+
+// [REVIEW-M #2085 S3-1] VAT Act s.2: the store's consideration is what is paid "by any person, directly or indirectly".
+// A discount Swift pays for is paid to the store by Swift (sponsorReceivable), so the store's VAT stays on the full goods
+// price; only a discount the store itself gives lowers it. The customer's total is the same either way.
+describe('7b. who paid for a discount decides the store’s VAT', () => {
+  const promo = async (funder: 'PLATFORM' | 'VENDOR') => {
+    const row = await app.prisma.promoCode.create({ data: {
+      code: `VAT${funder[0]}${wordFreeTag(6)}`, description: 'store vat discount check', discountType: 'FIXED_AMOUNT', discountValue: 200,
+      applicableTo: [], validFrom: new Date(Date.now() - DAY), validUntil: new Date(Date.now() + DAY), maxUsesPerUser: 5, funder,
+      ...(funder === 'VENDOR' ? { vendorId } : {}),
+    } });
+    promoIds.push(row.id);
+    return row;
+  };
+  const quoteWith = async (promoId: string) => {
+    await fillCart([{ itemId: soapId, quantity: 1 }]);
+    const cart = await app.prisma.cart.findUniqueOrThrow({ where: { customerId: customer.userId } });
+    await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: promoId } });
+    const res = await call('GET', '/api/v1/customer/cart', customer.token);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().data as { discount: number; totalAmount: number; vendors: Array<{ vat: { included: number; standardGoods: number } | null }> };
+  };
+
+  it('a discount SWIFT pays for: the store’s VAT stays on the full goods price (cart, order, receipt)', async () => {
+    const code = await promo('PLATFORM');
+    const quote = await quoteWith(code.id);
+    expect(quote.discount).toBe(200);
+    expect(quote.vendors[0]!.vat).toMatchObject({ included: 123, standardGoods: 1000 });
+    const order = await checkout({ promoCode: code.code });
+    expect(Number(order.discount)).toBe(200);
+    expect(Number(order.totalAmount)).toBe(quote.totalAmount);
+    expect((await app.prisma.promoRedemption.findUniqueOrThrow({ where: { orderId: order.id } })).funder).toBe('PLATFORM');
+    expect(Number(order.vatBase)).toBe(1000);
+    expect(Number(order.vatAmount)).toBe(123);
+    await walkOrderStatus(app.prisma as never, order.id, 'DELIVERED', { paymentStatus: 'CAPTURED', deliveredAt: new Date() });
+    const receipt = await call('GET', `/api/v1/customer/orders/${order.id}/receipt`, customer.token);
+    expect(receipt.statusCode, receipt.body).toBe(200);
+    expect(receipt.body).toContain('<tr><td>Standard-rated goods (incl. VAT)</td><td class="num">');
+    expect(receipt.body).toMatch(/<tr><td>VAT included \(14%\)<\/td><td class="num">[^<]*123[^<]*<\/td><\/tr>/);
+  });
+
+  it('a discount the STORE gives: the store’s VAT is on what the customer paid for the goods (800 -> 98)', async () => {
+    const code = await promo('VENDOR');
+    const quote = await quoteWith(code.id);
+    expect(quote.discount).toBe(200);
+    expect(quote.vendors[0]!.vat).toMatchObject({ included: 98, standardGoods: 1000 });
+    const order = await checkout({ promoCode: code.code });
+    expect((await app.prisma.promoRedemption.findUniqueOrThrow({ where: { orderId: order.id } })).funder).toBe('VENDOR');
+    expect(Number(order.vatBase)).toBe(800);
+    expect(Number(order.vatAmount)).toBe(98);
   });
 });
 

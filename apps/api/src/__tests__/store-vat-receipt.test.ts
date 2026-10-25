@@ -45,6 +45,7 @@ const vatOrder = {
   vatStandardGoods: 1000,
   vatZeroRatedGoods: 600,
   vatExemptGoods: 0,
+  vatBase: 1000,
   vatSellerNumber: '012345678',
   vatSellerName: 'Corner Shop <Ltd> & Co',
 };
@@ -101,6 +102,39 @@ describe('an order of a person-approved VAT store', () => {
   it('shows no VAT block when the frozen seller details are missing (never a VAT line without a person-approved number)', () => {
     const noNumber = renderReceiptHtml({ ...vatOrder, vatSellerNumber: null } as never);
     expect(noNumber).not.toMatch(/VAT included|VAT charged by|tax invoice/);
+  });
+
+  // [REVIEW-F #2085 S3-1] The VAT is INSIDE the prices: it must never sit in the totals column, where it reads as added on top.
+  it('the VAT summary sits UNDER the Total, never inside the totals column, and the column still adds up', () => {
+    const grand = html.indexOf('<tr class="grand">');
+    expect(grand).toBeGreaterThan(0);
+    const totalsColumn = html.slice(html.indexOf('<table>'), grand);
+    expect(totalsColumn).not.toMatch(/VAT|rated goods|Exempt goods/);
+    expect(html.indexOf('VAT summary')).toBeGreaterThan(grand);
+    expect(html.indexOf('VAT included (14%)')).toBeGreaterThan(grand);
+    // Items + delivery pay - discount + tip = Total, as on every receipt.
+    const withDiscount = renderReceiptHtml({ ...vatOrder, discount: 200, totalAmount: 2200 } as never);
+    expect(withDiscount).toContain('<tr class="totals"><td>Items</td><td class="num">GY$1,600 GYD</td></tr>');
+    expect(withDiscount).toContain('<tr class="totals"><td>Delivery pay for your rider</td><td class="num">GY$800 GYD</td></tr>');
+    expect(withDiscount).toContain('<tr class="totals"><td>Discount</td><td class="num">−GY$200 GYD</td></tr>');
+    expect(withDiscount).toContain('<tr class="grand"><td>Total</td><td class="num">GY$2,200 GYD</td></tr>');
+  });
+
+  // [REVIEW-M #2085 S3-1 · REVIEW-F S4] The summary shows the amount the VAT was taken from, so the two reconcile; a
+  // discount the store itself gave lowers it (a discount Swift pays the store for does not: VAT Act s.2).
+  it('the standard-rated amount shown is the one the VAT was taken from, so the figures reconcile', () => {
+    expect(html).toContain('<tr><td>Standard-rated goods (incl. VAT)</td><td class="num">GY$1,000 GYD</td></tr>');
+    const storeDiscount = renderReceiptHtml({ ...vatOrder, discount: 200, totalAmount: 2200, vatBase: 800, vatAmount: 98 } as never);
+    expect(storeDiscount).toContain('<tr><td>Standard-rated goods, after the store’s own discount (incl. VAT)</td><td class="num">GY$800 GYD</td></tr>');
+    expect(storeDiscount).toContain('<tr><td>VAT included (14%)</td><td class="num">GY$98 GYD</td></tr>');
+  });
+
+  it('the summary’s words say how the VAT is worked out and who charges it (pinned in full)', () => {
+    expect(html).toContain(
+      'VAT charged by Corner Shop &lt;Ltd&gt; &amp; Co · VAT reg. no. 012345678. The prices of the goods include VAT at 14%. '
+      + 'The VAT is worked out on the store’s price for its standard-rated goods, less any discount the store itself gave; '
+      + 'delivery pay, tips and Swift’s fees carry no VAT. Corner Shop &lt;Ltd&gt; &amp; Co issues its own tax invoice for these goods.',
+    );
   });
 
   it('a removed line is still priced at nothing and keeps its class tag', () => {

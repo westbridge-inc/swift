@@ -17,6 +17,8 @@
  * not VAT-registered; billing/fee-receipt.ts is untouched).
  */
 
+import { guyanaDayKey } from '../../utils/guyana-day';
+
 /** The certificate a store sends: a code-level document type (like IDENTITY_DOC_TYPE), outside every store
  *  checklist, so no platform config changes. Reviewed by a person; never auto-approved. */
 export const VAT_CERTIFICATE_DOC_TYPE = 'vat_registration_certificate';
@@ -66,7 +68,7 @@ export const STORE_VAT_MODES_OFFERED: ReadonlySet<string> = new Set(['PRICES_INC
  * this and nothing else. True only while: the switch is on; a person APPROVED the store; a mode the server can
  * honour is chosen; the approval froze a number and a name; the number the store has on its profile is still
  * the one the person approved (a changed number stops VAT at once, before anyone re-checks it); and the
- * certificate's effective date has arrived.
+ * certificate's effective date has arrived in Guyana (inEffectOn).
  */
 export function storeVatEffective(row: StoreVatRow, env: Record<string, string | undefined> = process.env, now: Date = new Date()): boolean {
   if (!storeVatEnabled(env)) return false;
@@ -74,6 +76,14 @@ export function storeVatEffective(row: StoreVatRow, env: Record<string, string |
   if (!row.vatMode || !STORE_VAT_MODES_OFFERED.has(row.vatMode)) return false;
   if (!row.vatApprovedNumber || !row.vatApprovedName) return false;
   if (row.vatApprovedNumber !== row.vatRegistrationNumber) return false;
-  if (row.vatEffectiveFrom && row.vatEffectiveFrom.getTime() > now.getTime()) return false;
+  if (row.vatEffectiveFrom && !inEffectOn(row.vatEffectiveFrom, now)) return false;
   return true;
+}
+
+/**
+ * [REVIEW-M #2085 S4-1] A certificate's effective date is a GUYANA calendar day (a DATE column, read as its
+ * YYYY-MM-DD): it is in effect from 00:00 Guyana time that day, never from 00:00 UTC (20:00 the evening before).
+ */
+export function inEffectOn(effectiveFrom: Date, now: Date = new Date()): boolean {
+  return effectiveFrom.toISOString().slice(0, 10) <= guyanaDayKey(now);
 }
