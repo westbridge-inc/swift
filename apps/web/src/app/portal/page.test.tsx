@@ -170,6 +170,17 @@ describe('[P36] the taxi driver office matches the phone', () => {
     expect(tab.close).not.toHaveBeenCalled();
   });
 
+  it('a statement link that is not a path on Swift\'s API ("//host") is refused: the tab closes', async () => {
+    office({ rider: false, driver: true }, { path: '//elsewhere.example/statement' });
+    const tab = { opener: {} as unknown, location: { href: 'about:blank' }, close: vi.fn() };
+    vi.stubGlobal('open', vi.fn(() => tab));
+    renderWithQuery(<PortalHome />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Get earnings statement' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('We couldn’t open your statement. Try again.');
+    expect(tab.close).toHaveBeenCalledTimes(1);
+    expect(tab.location.href).toBe('about:blank');
+  });
+
   it('a statement the server cannot mint closes the tab and says so', async () => {
     office({ rider: false, driver: true }, {});
     const tab = { opener: {} as unknown, location: { href: 'about:blank' }, close: vi.fn() };

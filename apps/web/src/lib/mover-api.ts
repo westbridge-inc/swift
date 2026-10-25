@@ -47,7 +47,8 @@ export const getDriverSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/
 export const getEarningsStatementPath = (role: 'rider' | 'driver') =>
   apiFetch(`/api/v1/${role}/earnings/statement?link=1`).then((r) => {
     const path = (r.data as { path?: unknown } | null | undefined)?.path;
-    if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('Statement link missing from the response.');
+    // [REVIEW-G #2113 S4-1] A path on Swift's API only: '//host' would be protocol-relative under an empty origin.
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error('Statement link missing from the response.');
     return path;
   });
 
