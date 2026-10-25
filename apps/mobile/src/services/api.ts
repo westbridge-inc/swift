@@ -1234,6 +1234,8 @@ export interface VendorItemInput {
   bulk?: 'normal' | 'bulky' | 'very_bulky';
   stockQuantity?: number;
   imageUrl?: string;
+  /** [STORE-VAT · owner O-5] The store's VAT class for the item; omitted = unchanged (STANDARD for a new item). */
+  vatClass?: 'STANDARD' | 'ZERO_RATED' | 'EXEMPT';
 }
 
 export const vendorApi = {
@@ -1287,6 +1289,13 @@ export const vendorApi = {
   returnReceived: (id: string) => api.post(`/vendor/orders/${id}/recovery/return-received`, {}),
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
+  /** [STORE-VAT · owner O-5] The store's VAT (OWNER only): its answer, its certificate, and what a person decided. */
+  vat: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/vat', capturedVendorAuthConfig(session, storeId)),
+  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.put('/vendor/vat', data, capturedVendorAuthConfig(session, storeId)),
+  /** The certificate file was uploaded first (/verification/upload); this files it for a PERSON's check. */
+  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.post('/vendor/vat/certificate', data, capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedVendorAuthConfig(session, storeId)),

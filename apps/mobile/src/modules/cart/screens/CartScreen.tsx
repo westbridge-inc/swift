@@ -57,6 +57,7 @@ import { checkoutTipAmount } from '../checkout-tip';
 import {
   cartLineMeta,
   cartStaleCheckoutCode,
+  cartVatRows,
   cartPricingChoices,
   checkoutErrorMessage,
   deliveryFeeRows,
@@ -1028,6 +1029,12 @@ export function CartScreen() {
                 value={cart.isPlaceholderData ? 'Updating…' : money(displayedTotal)}
                 strong
               />
+              {/* [STORE-VAT · owner O-5] The VAT a person-approved VAT store's goods already include (never added to the total). */}
+              {cartVatRows(c).map((row) => (
+                <T key={row.vendorId} variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                  {row.text}
+                </T>
+              ))}
             </View>
             {apptOnly ? (
               <View style={{ marginTop: space.sm, gap: 4 }}>
