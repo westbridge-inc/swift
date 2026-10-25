@@ -7,6 +7,7 @@ import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../modules/order/m
 import { drainCheckoutOutbox, persistDispatchCommandInTransaction } from '../modules/order/checkout-outbox';
 import { readOfferItinerary } from '../modules/rides/taxi-stops-read';
 import { offerCardAddresses } from '../modules/dispatch/board-privacy';
+import { assignmentLogWhere } from '../modules/order/store-handover-log';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -53,6 +54,9 @@ const context = vm.createContext({
   // [ORDER-SPINE S1-6] dispatchOrder's direct-MMG offer gate — the production
   // predicate itself, not a copy (these orders are CASH, so it lets them by).
   mmgDispatchBlocked,
+  // [O-2] the assignment-episode count's predicate — the production one itself (the store's
+  // "Handed to rider" row never counts as an assignment).
+  assignmentLogWhere,
   // [PAYMENT-SIMPLIFY] the stuck reconciler's MMG filter — the production predicate itself (these orders are CASH).
   mmgDispatchEligibleWhere,
   // [TAXI multi-stop 3/8] the offer card's stops — the production reader itself

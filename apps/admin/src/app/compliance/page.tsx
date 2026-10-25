@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { humanise } from '@/lib/labels';
 
 /**
  * The liability shield. Three panels:
@@ -62,160 +63,155 @@ export default function CompliancePage() {
   const violations: any[] = d?.openViolations ?? [];
   const queue: any[] = d?.reviewQueue ?? [];
 
+  const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-bold">Compliance</h1>
-        <button
-          type="button"
-          onClick={runAudit}
-          className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
-        >
+    <div className="mc-page">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <p className="mc-muted max-w-3xl">
+          Every day Swift re-checks everyone on the road against their document checklist and keeps the evidence.
+          An unlicensed or uninsured mover working through Swift is a lawsuit — this page is where that never happens.
+        </p>
+        <button type="button" onClick={runAudit} className="mc-btn mc-btn-primary">
           Run audit now
         </button>
       </div>
-      <p className="text-[var(--muted)] text-sm mb-6">
-        Every day Swift re-checks everyone on the road against their document checklist and keeps the evidence.
-        An unlicensed or uninsured mover operating here is a lawsuit — this page is where that never happens.
-      </p>
 
       {actions.banner}
 
       {q.isLoading ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-center text-[var(--muted)]">Loading…</div>
+        <div className="mc-loading" aria-busy="true">Loading the compliance checks…</div>
       ) : q.isError ? (
         // A failed read is never "nobody is operating outside the rules": say we could not look.
         <QueryFailed error={q.error} what="the compliance checks" onRetry={() => void q.refetch()} retrying={q.isFetching} />
       ) : (
       <>
       {/* Open violations */}
-      <h2 className="font-semibold mb-2">
-        Open violations{' '}
-        <span className={violations.length === 0 ? 'text-emerald-400' : 'text-red-400'}>({violations.length})</span>
-      </h2>
-      <div className="space-y-3 mb-8">
-        {violations.length === 0 ? (
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-center text-[var(--muted)]">
-            Nobody is operating outside the rules — and the run log below proves it.
-          </div>
-        ) : (
-          violations.map((v) => (
-            <div key={v.id} className="bg-[var(--panel)] rounded-xl border border-red-900/60 p-5">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="font-semibold">
-                  {v.user?.firstName} {v.user?.lastName}
-                </span>
-                <span className="text-xs text-[var(--muted)]">{v.user?.phone}</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 font-bold">
-                  {String(v.reason).replaceAll('_', ' ')}
-                </span>
-                <span className="text-xs text-[var(--muted)]">{v.moverKind}</span>
-                <span className="text-xs text-[var(--muted)] ml-auto">{new Date(v.createdAt).toLocaleString()}</span>
-              </div>
-              <p className="text-sm text-[var(--muted)] mt-2">
-                Action taken: <b className="text-white">{String(v.actionTaken).replaceAll('_', ' ')}</b> — they stay
-                offline until their documents pass again.
-              </p>
-              <div className="mt-3 flex gap-2">
-                <button
-                  onClick={() => setOpenEvidence(openEvidence === v.id ? null : v.id)}
-                  className="px-3 py-1.5 text-xs rounded-lg border border-[var(--border)] hover:bg-[var(--panel-2)]"
-                >
-                  {openEvidence === v.id ? 'Hide evidence' : 'View evidence'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => resolve(v)}
-                  className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
-                  title="Only succeeds once their checklist passes again"
-                >
-                  Mark resolved
-                </button>
-              </div>
-              {openEvidence === v.id && (
-                <pre className="mt-3 p-3 rounded-lg bg-black/40 text-xs text-[var(--muted)] overflow-x-auto">
-                  {JSON.stringify(v.evidence, null, 2)}
-                </pre>
-              )}
+      <section className="mc-section">
+        <h2 className="mc-section-title">
+          Open violations{' '}
+          <span className={violations.length === 0 ? 'mc-text-good' : 'mc-text-bad'}>({violations.length})</span>
+        </h2>
+        <div className="mc-list">
+          {violations.length === 0 ? (
+            <div className="mc-empty">
+              Nobody is operating outside the rules — and the run log below proves it.
             </div>
-          ))
-        )}
-      </div>
+          ) : (
+            violations.map((v) => (
+              <div key={v.id} className="mc-card border-l-4 border-l-[var(--mc-bad)]">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="mc-card-title">
+                    {v.user?.firstName} {v.user?.lastName}
+                  </span>
+                  <span className="mc-muted mc-numbers text-xs">{v.user?.phone}</span>
+                  <span className="mc-badge mc-tone-bad">{humanise(String(v.reason))}</span>
+                  <span className="mc-muted text-xs">{humanise(String(v.moverKind))}</span>
+                  <span className="mc-muted mc-numbers ml-auto text-xs">{when(v.createdAt)}</span>
+                </div>
+                <p className="mc-muted mt-2">
+                  Action taken: <b className="text-[var(--mc-ink)]">{humanise(String(v.actionTaken))}</b> — they stay
+                  offline until their documents pass again.
+                </p>
+                <div className="mc-actions">
+                  <button
+                    type="button"
+                    onClick={() => setOpenEvidence(openEvidence === v.id ? null : v.id)}
+                    aria-expanded={openEvidence === v.id}
+                    className="mc-btn"
+                  >
+                    {openEvidence === v.id ? 'Hide evidence' : 'View evidence'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => resolve(v)}
+                    className="mc-btn"
+                    title="Only succeeds once their checklist passes again"
+                  >
+                    Mark resolved
+                  </button>
+                </div>
+                {openEvidence === v.id && (
+                  <pre className="mc-mono mt-3 overflow-x-auto rounded-[var(--mc-radius-sm)] bg-[var(--mc-surface)] p-3">
+                    {JSON.stringify(v.evidence, null, 2)}
+                  </pre>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </section>
 
       {/* Re-verification queue */}
-      <h2 className="font-semibold mb-2">Random re-verification queue ({queue.length})</h2>
-      <div className="space-y-3 mb-8">
-        {queue.length === 0 ? (
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-center text-[var(--muted)]">
-            No open cases. A random sample of active movers is drawn on the 1st of each month.
-          </div>
-        ) : (
-          queue.map((c) => (
-            <div key={c.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="font-semibold">
-                  {c.user?.firstName} {c.user?.lastName}
-                </span>
-                <span className="text-xs text-[var(--muted)]">{c.user?.phone}</span>
-                <span className="text-xs text-amber-400">due {new Date(c.dueAt).toLocaleDateString()}</span>
-              </div>
-              <p className="text-xs text-[var(--muted)] mt-1.5">
-                Re-open their documents in Verification and confirm they are genuine and current — then decide here.
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => decide(c, true)}
-                  className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
-                >
-                  Documents check out
-                </button>
-                <button
-                  type="button"
-                  onClick={() => decide(c, false)}
-                  className="px-3 py-1.5 text-xs rounded-lg bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
-                >
-                  Fail — force offline
-                </button>
-              </div>
+      <section className="mc-section">
+        <h2 className="mc-section-title">Random re-verification queue ({queue.length})</h2>
+        <div className="mc-list">
+          {queue.length === 0 ? (
+            <div className="mc-empty">
+              No open cases. A random sample of active movers is drawn on the 1st of each month.
             </div>
-          ))
-        )}
-      </div>
+          ) : (
+            queue.map((c) => (
+              <div key={c.id} className="mc-card">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="mc-card-title">
+                    {c.user?.firstName} {c.user?.lastName}
+                  </span>
+                  <span className="mc-muted mc-numbers text-xs">{c.user?.phone}</span>
+                  <span className="mc-badge mc-tone-warn">Due {new Date(c.dueAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
+                </div>
+                <p className="mc-muted mt-1.5 text-xs">
+                  Re-open their documents in Documents and confirm they are genuine and current — then decide here.
+                </p>
+                <div className="mc-actions">
+                  <button type="button" onClick={() => decide(c, true)} className="mc-btn mc-btn-primary">
+                    Documents check out
+                  </button>
+                  <button type="button" onClick={() => decide(c, false)} className="mc-btn mc-btn-danger">
+                    Fail — force offline
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
 
       {/* Run history */}
-      <h2 className="font-semibold mb-2">Audit runs (evidence trail)</h2>
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="text-left text-xs text-[var(--muted)] border-b border-[var(--border)]">
-            <tr>
-              <th className="px-4 py-2.5">When</th>
-              <th className="px-4 py-2.5">Trigger</th>
-              <th className="px-4 py-2.5">Online movers checked</th>
-              <th className="px-4 py-2.5">Violations</th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.length === 0 && (
+      <section className="mc-section">
+        <h2 className="mc-section-title">Audit runs (evidence trail)</h2>
+        <div className="mc-table-wrap overflow-x-auto">
+          <table className="mc-table">
+            <thead>
               <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-[var(--muted)]">
-                  No runs yet — the daily job writes one every morning, or run one now.
-                </td>
+                <th className="mc-label">When</th>
+                <th className="mc-label">Started by</th>
+                <th className="mc-label">Online movers checked</th>
+                <th className="mc-label">Violations</th>
               </tr>
-            )}
-            {runs.map((r) => (
-              <tr key={r.id} className="border-b border-[var(--border)]/50 last:border-0">
-                <td className="px-4 py-2.5">{new Date(r.startedAt).toLocaleString()}</td>
-                <td className="px-4 py-2.5 text-[var(--muted)]">{r.trigger}</td>
-                <td className="px-4 py-2.5">{r.moversChecked}</td>
-                <td className={`px-4 py-2.5 font-bold ${r.violations > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-                  {r.violations}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {runs.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="mc-table-empty">
+                    No runs yet — the daily job writes one every morning, or run one now.
+                  </td>
+                </tr>
+              )}
+              {runs.map((r) => (
+                <tr key={r.id}>
+                  <td data-label="When" className="mc-numbers">{when(r.startedAt)}</td>
+                  <td data-label="Started by" className="mc-muted">{humanise(String(r.trigger))}</td>
+                  <td data-label="Online movers checked" className="mc-numbers">{r.moversChecked}</td>
+                  <td data-label="Violations" className={`mc-numbers font-bold ${r.violations > 0 ? 'mc-text-bad' : 'mc-text-good'}`}>
+                    {r.violations}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
       </>
       )}
     </div>
