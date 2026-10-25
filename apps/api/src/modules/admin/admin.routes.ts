@@ -713,6 +713,20 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   };
 
+  // [REVIEW-M S3-2 on #2069] Platform money that is not a founder control: the
+  // rider loss-protection reserve is a COUNTRY ledger (rlp_reserve_entries has
+  // no tenant; production's claim payouts draw on it). Only the canonical
+  // tenant's admins read it or post an entry; their ordinary capability and
+  // the second person still apply. Another operator's admin is refused before
+  // anything is read or written.
+  const canonicalTenantGuard = async (request: any, reply: any) => {
+    await adminGuard(request, reply);
+    if (reply.sent) return;
+    if (requireTenantId() !== 'swift-default') {
+      throw new ForbiddenError('Platform controls require the default tenant');
+    }
+  };
+
   // Belt-and-suspenders (pre-launch audit): the guard is applied per-route on
   // all 42 routes today, but a future admin route that forgets its preHandler
   // would be unauthenticated. This plugin-scoped onRequest hook enforces admin
@@ -6577,13 +6591,13 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── [DOC-1 §31.4 · P31-1] Rider loss protection: the reserve line and suspension ──
 
   /** The named reserve line for a country: balance, floor, this month's provisioning, latest entries. */
-  app.get('/cash-rules/rlp/reserve', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/cash-rules/rlp/reserve', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     return { success: true, data: await cashRules.lossProtectionReserve(country.toUpperCase()) };
   });
 
   /** A manual entry on the reserve line — a top-up or a correction. Money: audited with the resulting balance. */
-  app.post('/cash-rules/rlp/reserve/adjust', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/cash-rules/rlp/reserve/adjust', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const body = z.object({
       countryCode: z.string().length(2),
       amount: z.number().finite(),
