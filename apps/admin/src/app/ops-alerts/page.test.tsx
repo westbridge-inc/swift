@@ -145,7 +145,7 @@ describe('Ops alerts', () => {
   it('says plainly when nothing is waiting', async () => {
     mockApi(handler({ open: [], failed: [] }));
     renderWithQuery(<OpsAlertsPage />);
-    expect(await screen.findByText('Nothing is waiting. Every page has been acknowledged.')).toBeTruthy();
+    expect(await screen.findByText('Nothing is waiting for acknowledgement.')).toBeTruthy();
     expect(await screen.findByText('No drill has failed.')).toBeTruthy();
   });
 

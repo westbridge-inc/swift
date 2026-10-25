@@ -11,7 +11,7 @@ import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-c
 import { registerErrorHandler } from '../middleware/error-handler';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { NotificationService } from '../modules/notification/notification.service';
-import { openOpsAlert, escalateOverdueOpsAlerts, acknowledgeOpsAlert, scanOpsAlerts, runOpsAlertDrillIfDue, DRILL_FAILED_REASON } from '../modules/safety/ops-alert';
+import { openOpsAlert, escalateOverdueOpsAlerts, acknowledgeOpsAlert, scanOpsAlerts, runOpsAlertDrillIfDue, DRILL_FAILED_REASON, guyanaTime } from '../modules/safety/ops-alert';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -146,6 +146,9 @@ describe('[DRILL-STORM 1] a drill nobody acknowledges is a FAILED drill, closed 
     const drill = await open(mine, 'DRILL', t0, [responder]);
     expect(pushesTo(responder)).toHaveLength(1);
     expect(textsToOncall()).toHaveLength(1);
+    // [console] the FIRST page already says where it is acknowledged (push and on-call text)
+    expect(pushesTo(responder)[0]!.body).toContain('Acknowledge it in Mission Control > Ops alerts.');
+    expect(textsToOncall()[0]!.body).toContain('Acknowledge it in Mission Control > Ops alerts.');
 
     // Inside the 15-minute window it exercises the escalation path, exactly like a real page.
     const inWindow = await series(t0, mine, responder, 10, 890, 10);
@@ -165,7 +168,7 @@ describe('[DRILL-STORM 1] a drill nobody acknowledges is a FAILED drill, closed 
     const summary = await inbox(responder, 'ops_alert_drill_failed');
     expect(summary).toHaveLength(1);
     expect(summary[0]!.title).toBe('Drill FAILED: nobody acknowledged the SOS paging drill');
-    expect(summary[0]!.body).toBe(`The ops alert drill opened at ${t0.toISOString()} was not acknowledged within 15 minutes. It is closed as a FAILED drill and will not page again. Check that on-call staff get Swift pages, then run a drill from Mission Control > Ops alerts.`);
+    expect(summary[0]!.body).toBe(`The ops alert drill opened at ${guyanaTime(t0)} was not acknowledged within 15 minutes. It is closed as a FAILED drill and will not page again. Check that on-call staff get Swift pages, then run a drill from Mission Control > Ops alerts.`);
     expect((summary[0]!.data as Record<string, unknown>)['opsAlertId']).toBe(drill);
 
     // Six hours of sweeps after the window: nobody is paged, nothing is texted, nothing is said twice.
@@ -334,7 +337,7 @@ describe('[DRILL-STORM 3] many old open alerts never produce a burst', () => {
     expect(repagesTo(responder).length - p0).toBe(1);
     const push = repagesTo(responder).at(-1)!;
     expect(push.title).toBe('UNACKNOWLEDGED: 20 ops alerts, including an SOS');
-    expect(push.body).toContain(`Nobody has acknowledged 20 ops alerts; the oldest has waited since ${at(t0, -3_600 - 19 * 60).toISOString()}.`);
+    expect(push.body).toContain(`Nobody has acknowledged 20 ops alerts; the oldest has waited since ${guyanaTime(at(t0, -3_600 - 19 * 60))}.`);
     expect(push.options?.collapseId).toBe('ops-alert-unacked');
     expect(push.data!['opsAlertId']).toBe(fresh[0]);
     expect(push.data!['count']).toBe(20);
@@ -377,5 +380,14 @@ describe('[DRILL-STORM · console] an acknowledgement is audited', () => {
     const again = await app.inject({ method: 'POST', url: `/api/v1/safety/ops-alerts/${page}/ack`, headers: { authorization: `Bearer ${responder.token}`, 'content-type': 'application/json' }, payload: {} });
     expect(again.json().data.acknowledged).toBe(false);
     expect(await runWithoutTenant(() => app.prisma.auditLog.count({ where: { entity: 'OpsAlert', entityId: page } }), 'test-read:drill-storm')).toBe(1);
+  });
+});
+
+describe('[DRILL-STORM · console] times read in Guyana time, never raw UTC', () => {
+  it('a moment is written as the responder reads it, in plain ASCII', () => {
+    expect(guyanaTime(new Date('2026-10-25T16:35:30.000Z'))).toBe('25 Oct, 12:35 pm Guyana time');
+    expect(guyanaTime(new Date('2026-10-25T04:05:00.000Z'))).toBe('25 Oct, 12:05 am Guyana time');
+    expect(guyanaTime(new Date('2026-10-25T03:59:00.000Z'))).toBe('24 Oct, 11:59 pm Guyana time');
+    expect(/^[\x20-\x7e]+$/.test(guyanaTime(new Date()))).toBe(true);
   });
 });

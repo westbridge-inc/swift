@@ -72,6 +72,14 @@ export const OPS_UNACKED_KEY = 'ops-alert-unacked';
 /** [DRILL-STORM] Where a page is acknowledged: the console's Ops alerts screen (plain ASCII: it travels by SMS too). */
 export const ACK_WHERE = 'Mission Control > Ops alerts';
 
+/** [DRILL-STORM · REVIEW-F S4] A moment as the responder reads it: "25 Oct, 12:35 pm Guyana time" (never raw UTC). */
+export function guyanaTime(at: Date): string {
+  const day = at.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short' });
+  const time = at.toLocaleTimeString('en-US', { timeZone: 'America/Guyana', hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase().replace(/\s/g, ' ');
+  // (newer ICU puts a narrow no-break space before am/pm: plain ASCII, it travels by SMS)
+  return `${day}, ${time} Guyana time`;
+}
+
 /** "2 minutes", "15 minutes", "90 seconds". */
 export function durationWords(seconds: number): string {
   if (seconds % 60 === 0) { const m = seconds / 60; return m === 1 ? '1 minute' : `${m} minutes`; }
@@ -208,7 +216,8 @@ async function openOpsAlertUnscoped(
   let inboxed = 0; let pushed = 0;
   for (const r of alert.recipients) {
     try {
-      const sent = await notifications.sendReach({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: input.title, body: input.body, data: { ...input.data, opsAlertId: alert.id } });
+      // [DRILL-STORM · REVIEW-F S4] the first page names where it is acknowledged, like every re-page
+      const sent = await notifications.sendReach({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: input.title, body: `${input.body} Acknowledge it in ${ACK_WHERE}.`, data: { ...input.data, opsAlertId: alert.id } });
       if (sent.pushed) pushed += 1;
       if (sent.id) { inboxed += 1; await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { notificationId: sent.id, deliveredAt: now } }); }
     } catch (err) {
@@ -219,7 +228,7 @@ async function openOpsAlertUnscoped(
   // (The store-review fiction returned above: its pages text nobody.)
   const phones = input.oncallPhones ?? onCallPhones();
   const sms = input.sms !== undefined ? input.sms : phones.length > 0 ? await defaultOpsSms() : null;
-  const oncallTexted = await textOnCall(sms, phones, alert.id, `Swift ops: ${input.title}. ${input.body}`);
+  const oncallTexted = await textOnCall(sms, phones, alert.id, `Swift ops: ${input.title}. Acknowledge it in ${ACK_WHERE}. ${input.body}`);
   const reached = pushed + oncallTexted;
   opsAlertCounter.labels('opened').inc();
   if (userIds.length === 0) {
@@ -321,10 +330,10 @@ export function repageWords(alerts: SweptAlert[]): { title: string; body: string
   const first = sorted[0]!;
   if (sorted.length === 1) {
     const title = `UNACKNOWLEDGED (${first.escalationLevel}×): ${first.title}`;
-    return { title, body: `Nobody has acknowledged this alert since ${first.createdAt.toISOString()}. ${first.body} Acknowledge it now in ${ACK_WHERE}.`, text: `Swift ops: ${title}. Acknowledge it in ${ACK_WHERE}. ${first.body}` };
+    return { title, body: `Nobody has acknowledged this alert since ${guyanaTime(first.createdAt)}. ${first.body} Acknowledge it now in ${ACK_WHERE}.`, text: `Swift ops: ${title}. Acknowledge it in ${ACK_WHERE}. ${first.body}` };
   }
   const sos = sorted.some((a) => a.kind === 'SOS') ? ', including an SOS' : '';
-  const since = oldestOf(sorted).createdAt.toISOString();
+  const since = guyanaTime(oldestOf(sorted).createdAt);
   return {
     title: `UNACKNOWLEDGED: ${sorted.length} ops alerts${sos}`,
     body: `Nobody has acknowledged ${sorted.length} ops alerts; the oldest has waited since ${since}. First: ${first.title}. Acknowledge them now in ${ACK_WHERE}.`,
@@ -513,8 +522,8 @@ async function announceFailedDrills(prisma: PrismaClient, notifications: Notific
   const window = durationWords(drillWindowSeconds());
   const advice = `Check that on-call staff get Swift pages, then run a drill from ${ACK_WHERE}.`;
   const body = drills.length === 1
-    ? `The ops alert drill opened at ${oldest.createdAt.toISOString()} was not acknowledged within ${window}. It is closed as a FAILED drill and will not page again. ${advice}`
-    : `${drills.length} ops alert drills were not acknowledged within ${window}; the oldest opened at ${oldest.createdAt.toISOString()}. They are closed as FAILED drills and will not page again. ${advice}`;
+    ? `The ops alert drill opened at ${guyanaTime(oldest.createdAt)} was not acknowledged within ${window}. It is closed as a FAILED drill and will not page again. ${advice}`
+    : `${drills.length} ops alert drills were not acknowledged within ${window}; the oldest opened at ${guyanaTime(oldest.createdAt)}. They are closed as FAILED drills and will not page again. ${advice}`;
   await notifyAdmins(prisma, notifications, {
     tenantId: null,
     title: 'Drill FAILED: nobody acknowledged the SOS paging drill',

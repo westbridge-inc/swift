@@ -124,7 +124,7 @@ export default function OpsAlertsPage() {
     body: (
       <p>
         Every platform operator is paged and every on-call phone is texted now, exactly like a real SOS. Acknowledge it
-        on this screen within 2 minutes. If nobody does, it is re-paged like a real SOS for 15 minutes, then closed as
+        on this screen before its deadline. If nobody does, it is re-paged like a real SOS until its drill window ends, then closed as
         a FAILED drill.
       </p>
     ),
@@ -149,7 +149,7 @@ export default function OpsAlertsPage() {
         ) : alerts.isError ? (
           <QueryFailed error={alerts.error} what="the ops alerts" onRetry={() => void alerts.refetch()} retrying={alerts.isFetching} />
         ) : open.length === 0 ? (
-          <div className="mc-card">Nothing is waiting. Every page has been acknowledged.</div>
+          <div className="mc-card">Nothing is waiting for acknowledgement.</div>
         ) : (
           <ul className="space-y-3">
             {open.map((a) => <AlertRow key={a.id} alert={a} now={now} onDone={done} />)}
@@ -163,7 +163,7 @@ export default function OpsAlertsPage() {
             <button type="button" className="mc-btn ml-auto" onClick={() => void drill()}>Run a drill…</button>
           </div>
           <p className="mc-muted mb-3 text-sm">
-            A drill nobody acknowledged within 15 minutes. Each one means a real SOS could have gone unanswered: check
+            A drill nobody acknowledged within its window. Each one means a real SOS could have gone unanswered: check
             that the on-call staff get Swift pages, then run a drill.
           </p>
           {failed.isLoading ? (
