@@ -69,6 +69,8 @@ export const drillWindowSeconds = () => { const n = Number(process.env['OPS_ALER
 export const DRILL_FAILED_REASON = 'drill-failed-unacknowledged';
 /** The one escalation notice a person holds (inbox dedupe key), and the push key that replaces it on the phone. */
 export const OPS_UNACKED_KEY = 'ops-alert-unacked';
+/** [DRILL-STORM] Where a page is acknowledged: the console's Ops alerts screen (plain ASCII: it travels by SMS too). */
+export const ACK_WHERE = 'Mission Control > Ops alerts';
 
 /** "2 minutes", "15 minutes", "90 seconds". */
 export function durationWords(seconds: number): string {
@@ -78,7 +80,7 @@ export function durationWords(seconds: number): string {
 
 /** What a drill tells the people it pages. */
 export function drillBody(manual: boolean): string {
-  return `${manual ? 'A manual' : 'This is a scheduled'} drill of the SOS paging path. Acknowledge it within ${durationWords(ackDeadlineSeconds())}. If nobody does, it escalates like a real SOS for ${durationWords(drillWindowSeconds())}, then closes as a FAILED drill and stops paging.`;
+  return `${manual ? 'A manual' : 'This is a scheduled'} drill of the SOS paging path. Acknowledge it in ${ACK_WHERE} within ${durationWords(ackDeadlineSeconds())}. If nobody does, it escalates like a real SOS for ${durationWords(drillWindowSeconds())}, then closes as a FAILED drill and stops paging.`;
 }
 export const onCallPhones = (env: Record<string, string | undefined> = process.env): string[] => (env['OPS_ONCALL_PHONES'] ?? '').split(',').map((p) => p.trim()).filter((p) => /^\+[1-9]\d{6,14}$/.test(p));
 export const opsAlertEscalationKilled = (env: Record<string, string | undefined> = process.env) => env['OPS_ALERT_ESCALATION_KILL'] === '1';
@@ -319,14 +321,14 @@ export function repageWords(alerts: SweptAlert[]): { title: string; body: string
   const first = sorted[0]!;
   if (sorted.length === 1) {
     const title = `UNACKNOWLEDGED (${first.escalationLevel}×): ${first.title}`;
-    return { title, body: `Nobody has acknowledged this alert since ${first.createdAt.toISOString()}. ${first.body} Acknowledge it now.`, text: `Swift ops: ${title}. ${first.body}` };
+    return { title, body: `Nobody has acknowledged this alert since ${first.createdAt.toISOString()}. ${first.body} Acknowledge it now in ${ACK_WHERE}.`, text: `Swift ops: ${title}. Acknowledge it in ${ACK_WHERE}. ${first.body}` };
   }
   const sos = sorted.some((a) => a.kind === 'SOS') ? ', including an SOS' : '';
   const since = oldestOf(sorted).createdAt.toISOString();
   return {
     title: `UNACKNOWLEDGED: ${sorted.length} ops alerts${sos}`,
-    body: `Nobody has acknowledged ${sorted.length} ops alerts; the oldest has waited since ${since}. First: ${first.title}. Acknowledge them now.`,
-    text: `Swift ops: ${sorted.length} ops alerts are UNACKNOWLEDGED${sos}. The oldest has waited since ${since}. First: ${first.title}. Open Swift and acknowledge them.`,
+    body: `Nobody has acknowledged ${sorted.length} ops alerts; the oldest has waited since ${since}. First: ${first.title}. Acknowledge them now in ${ACK_WHERE}.`,
+    text: `Swift ops: ${sorted.length} ops alerts are UNACKNOWLEDGED${sos}. The oldest has waited since ${since}. First: ${first.title}. Acknowledge them in ${ACK_WHERE}.`,
   };
 }
 
@@ -509,7 +511,7 @@ async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: 
 async function announceFailedDrills(prisma: PrismaClient, notifications: NotificationService, drills: SweptAlert[]): Promise<void> {
   const oldest = oldestOf(drills);
   const window = durationWords(drillWindowSeconds());
-  const advice = 'Check that on-call staff get Swift pages, then run a manual drill.';
+  const advice = `Check that on-call staff get Swift pages, then run a drill from ${ACK_WHERE}.`;
   const body = drills.length === 1
     ? `The ops alert drill opened at ${oldest.createdAt.toISOString()} was not acknowledged within ${window}. It is closed as a FAILED drill and will not page again. ${advice}`
     : `${drills.length} ops alert drills were not acknowledged within ${window}; the oldest opened at ${oldest.createdAt.toISOString()}. They are closed as FAILED drills and will not page again. ${advice}`;

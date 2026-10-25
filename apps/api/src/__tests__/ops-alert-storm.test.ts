@@ -165,7 +165,7 @@ describe('[DRILL-STORM 1] a drill nobody acknowledges is a FAILED drill, closed 
     const summary = await inbox(responder, 'ops_alert_drill_failed');
     expect(summary).toHaveLength(1);
     expect(summary[0]!.title).toBe('Drill FAILED: nobody acknowledged the SOS paging drill');
-    expect(summary[0]!.body).toBe(`The ops alert drill opened at ${t0.toISOString()} was not acknowledged within 15 minutes. It is closed as a FAILED drill and will not page again. Check that on-call staff get Swift pages, then run a manual drill.`);
+    expect(summary[0]!.body).toBe(`The ops alert drill opened at ${t0.toISOString()} was not acknowledged within 15 minutes. It is closed as a FAILED drill and will not page again. Check that on-call staff get Swift pages, then run a drill from Mission Control > Ops alerts.`);
     expect((summary[0]!.data as Record<string, unknown>)['opsAlertId']).toBe(drill);
 
     // Six hours of sweeps after the window: nobody is paged, nothing is texted, nothing is said twice.
@@ -214,7 +214,7 @@ describe('[DRILL-STORM 1] a drill nobody acknowledges is a FAILED drill, closed 
     const t0 = epoch();
     const res = await runWithoutTenant(() => runOpsAlertDrillIfDue(app.prisma, notifications(), t0), 'test:drill-storm');
     expect(res.opened).toBeTruthy(); alertIds.push(res.opened!);
-    expect((await alertRow(res.opened!)).body).toBe('This is a scheduled drill of the SOS paging path. Acknowledge it within 2 minutes. If nobody does, it escalates like a real SOS for 15 minutes, then closes as a FAILED drill and stops paging.');
+    expect((await alertRow(res.opened!)).body).toBe('This is a scheduled drill of the SOS paging path. Acknowledge it in Mission Control > Ops alerts within 2 minutes. If nobody does, it escalates like a real SOS for 15 minutes, then closes as a FAILED drill and stops paging.');
   });
 });
 
@@ -243,6 +243,9 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
     expect(notice).toHaveLength(1);
     expect(notice[0]!.title).toBe(`UNACKNOWLEDGED (${escalations.length}×): ${(await alertRow(page)).title}`);
     expect(notice[0]!.isRead).toBe(false);
+    // [console] every re-page and on-call text says where a page is acknowledged
+    expect(notice[0]!.body).toContain('Acknowledge it now in Mission Control > Ops alerts.');
+    expect(textsToOncall().at(-1)!.body).toContain('Acknowledge it in Mission Control > Ops alerts.');
   }, 120_000);
 
   it('an SOS page backs off to a 15-minute ceiling: four re-pages every hour, for as long as nobody acknowledges', async () => {
@@ -337,6 +340,8 @@ describe('[DRILL-STORM 3] many old open alerts never produce a burst', () => {
     expect(push.data!['count']).toBe(20);
     expect(textsToOncall().length - x0).toBe(1);
     expect(textsToOncall().at(-1)!.body).toContain('Swift ops: 20 ops alerts are UNACKNOWLEDGED, including an SOS.');
+    expect(textsToOncall().at(-1)!.body).toContain('Acknowledge them in Mission Control > Ops alerts.');
+    expect(push.body).toContain('Acknowledge them now in Mission Control > Ops alerts.');
     // ONE summary for three failed drills
     const summaries = await inbox(responder, 'ops_alert_drill_failed');
     expect(summaries).toHaveLength(1);
