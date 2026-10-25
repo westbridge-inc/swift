@@ -624,6 +624,8 @@ export interface RideRequestBody {
   stops?: TaxiStopInput[];
   /** The fare of the chosen class from the latest quote of exactly this itinerary. */
   expectedFare?: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms shown beside that fare, when any were. */
+  waiting?: { chargePerBlock: number; blockMinutes: number };
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
@@ -914,7 +916,8 @@ export const servicesApi = {
   removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
-      type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
+      // [ROLE-DOCS · owner 21 Oct 2026] no GEI_LICENCE: an electrician's GEI licence is a required checklist document
+      type: 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
       referenceNumber?: string;
     },
     session?: AuthSessionSnapshot,
@@ -962,7 +965,8 @@ export const verificationApi = {
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
+    // [ROLE-DOCS · owner 21 Oct 2026] the ID alone: a customer never gives a photo (the server drops build 9's selfieUrl)
+    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };

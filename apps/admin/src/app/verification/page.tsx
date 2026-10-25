@@ -23,7 +23,8 @@ const EXPIRING_DOC_TYPES = [
   'drivers_licence',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate. [owner 16 Oct]
   // The restaurant licence, sanitary certificate and trade licence ask for their YEAR (reviewerTypes).
-  'liquor_licence', 'sanitary_certificate', 'trade_licence',
+  // [ROLE-DOCS · owner 21 Oct 2026] no liquor licence: alcohol is banned outright and no gate names it.
+  'sanitary_certificate', 'trade_licence',
   // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
   // validity like a licence, so the console must ask for its date too.
   'self_declaration_unregistered',
@@ -245,14 +246,14 @@ export default function VerificationPage() {
   const rider = profile.data?.data?.rider;
   const businesses: { id?: string; name: string }[] = profile.data?.data?.vendorOwner?.vendors ?? [];
   const clearFilters = () => { setSearch(''); setRole(''); setType(''); setAge(''); };
-  return <div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
+  return <div className="mc-page"><div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
-      <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
+      <header className="rc-page-heading"><p>Review the evidence and record the decision. Oldest submissions first.</p></header>
       {!applicant && <ReviewerAccess />}
       {!applicant && <CatalogueApproverAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
-        <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
+        <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{label('VerificationDocumentStatus', s)}</button>)}</div>
         <div className="rc-tabs" aria-label="Review lane">{LANES.map((l) => <button key={l.value} disabled={busy} aria-pressed={l.value === lane} onClick={() => { setLane(l.value); openApplicant(null); clearFilters(); }}>
           {l.label}<span aria-hidden="true"> {laneCounts ? (l.value === 'all' ? laneCounts.operator + laneCounts.customer : laneCounts[l.value]) : '—'}</span>
         </button>)}</div>
@@ -358,5 +359,5 @@ export default function VerificationPage() {
         <div className="rc-dialog-actions"><button type="button" disabled={busy} onClick={() => setDecision(null)}>Cancel</button><button className="rc-primary" type="submit" disabled={busy || reasonTooShort(reason) || (decision === 'reject' && !reasonCode) || (decision === 'approve' && !!approveBlocked)}>{busy ? 'Saving decision…' : decision === 'approve' ? 'Confirm approval' : 'Confirm rejection'}</button></div>
       </form>
     </Modal>}
-  </div>;
+  </div></div>;
 }

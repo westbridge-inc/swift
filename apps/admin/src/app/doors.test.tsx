@@ -100,7 +100,8 @@ describe('[MC-AD4] held orders', () => {
   it('with nothing held there is no held section at all', async () => {
     serveOrders({ body: { success: true, data: [] } });
     renderWithQuery(<OrdersPage />);
-    await screen.findByRole('heading', { name: 'Orders' });
+    // [ADMIN-UI] The page title is the shell header now; wait for the order list's own answer instead.
+    await screen.findByText('No orders yet.');
     await waitFor(() => expect(screen.queryByRole('region', { name: /Held for review/ })).toBeNull());
   });
 });

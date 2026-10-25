@@ -52,10 +52,10 @@ const CONSENT_DOC_PHONE = `+${runBase + 11}`;
 const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE];
 
 // [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
-// documents; the licence is their photo ID, so the national ID — and, for every mover, the police
-// clearance — are OPTIONAL: accepted for upload, never a gate.
+// documents; the licence is their photo ID. [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] A
+// delivery rider is offered nothing optional any more: no second ID, no police clearance (taxi drivers only).
 const MOVER_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
-const MOVER_OPTIONAL_DOCS = ['national_id', 'police_clearance'];
+const MOVER_OPTIONAL_DOCS: string[] = [];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -295,7 +295,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
     const doc = await app.prisma.verificationDocument.findFirstOrThrow({
-      where: { userId: moverUserId, docType: 'national_id', status: 'PENDING' },
+      where: { userId: moverUserId, docType: 'drivers_licence', status: 'PENDING' },
     });
     rejectedDocId = doc.id;
 
@@ -320,8 +320,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   it('resubmission after rejection creates a fresh PENDING document', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'national_id',
-      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'national_id_v2'),
+      docType: 'drivers_licence',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'drivers_licence_v2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -362,7 +362,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   it('an approved document cannot be submitted again', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'national_id',
+      docType: 'drivers_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'dupe'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -682,13 +682,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity only — no vehicle docs; police clearance optional', async () => {
+  it('asks a bicycle courier for identity only — no vehicle docs, nothing optional', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required;
-    // the police clearance is optional for every mover. The vehicle documents scale away.
+    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required.
+    // [ROLE-DOCS · owner 21 Oct 2026] a delivery rider is not offered a police clearance (taxi drivers only).
     expect(data.checklist).toEqual(['national_id']);
-    expect(data.optional).toEqual(['police_clearance']);
+    expect(data.optional).toEqual([]);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');
@@ -729,6 +729,8 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const u = await signup(FACE_MATCH_PHONE, 'MOVER');
     faceToken = u.tokens.accessToken;
     faceUserId = u.user.id;
+    // [ROLE-DOCS · owner 21 Oct 2026] only a bicycle rider sends a national ID now (a licence holder is not asked)
+    await app.prisma.rider.create({ data: { userId: faceUserId, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } });
   });
 
   it('refuses an ID submission when no profile selfie exists', async () => {

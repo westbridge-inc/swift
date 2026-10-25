@@ -627,6 +627,46 @@ backups. Before the first production backup:
    swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
+4. Install the OFF-SITE ERASURE LEDGER timer (production and staging). Every
+   erasure writes its ledger entry in its own transaction; this unit ships the
+   unshipped entries every minute, encrypted to the same owner key, to
+   `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`:
+
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.service /etc/systemd/system/swift-erasure-ledger.service
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.timer /etc/systemd/system/swift-erasure-ledger.timer
+       systemctl daemon-reload
+       systemctl enable --now swift-erasure-ledger.timer
+       systemctl list-timers swift-erasure-ledger.timer
+
+   The ledger objects live under the backups' own prefix, so the bucket
+   keeps them at least as long as the backups. Never give the
+   `erasure-ledger/` prefix a shorter lifecycle rule than the dumps. An entry
+   still unshipped after 10 minutes pages the platform responders (the API's
+   erasure-ledger watch; production only), and doctor.sh FAILs. pilot-up.sh
+   refuses a production stage that starts the API unless this timer is
+   enabled and active. Every batch is encrypted to the owner key in every
+   environment, so staging needs BACKUP_GPG_RECIPIENT_FILE and
+   BACKUP_GPG_FINGERPRINT too, or it ships nothing (and doctor.sh FAILs).
+
+   Replaying it (a restore without the live database):
+   - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`.
+     The ones from before the backup you restore are harmless (each fact is
+     applied once). Fetch them all rather than guess the cut.
+   - Decrypt them on the owner's own computer, concatenate them into one file,
+     and `chmod 600` it.
+   - Copy it to the restore host and run `restore.sh --project <name>
+     --no-live-ledger --i-know-live-is-gone --ledger-from <file> <dump>`. Add
+     the two DR flags only when the live database is really gone; with it,
+     `--ledger-from` joins the live ledger.
+   - When the restore is done, shred the decrypted file on BOTH machines
+     (`shred -u <file>`, or `rm -P` on a Mac).
+
+   Every restore (drill, rehearsal or DR) also prints
+   `NOT erasure-complete for #1905/#1945 de-identifications`: the replay does not yet re-run the
+   app's own erasure passes, so those de-identifications (updates, not
+   deletes) are not re-applied to the copy. Until the follow-up lands, re-apply
+   them by hand for every closed account before anything from a restored copy
+   is used.
 
 ## 5. Restore drill, with no live overwrite
 

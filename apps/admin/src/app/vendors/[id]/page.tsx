@@ -261,9 +261,9 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
           {String(v.name ?? '?').trim().charAt(0).toUpperCase() || '?'}
         </div>
         <div className="min-w-0 flex-1 basis-56">
-          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+          <h2 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
             <Truncate text={v.name} lines={2} focusable />
-          </h1>
+          </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <StatusBadge group="VendorStatus" value={v.status} />
             <span className={`mc-badge${v.acceptingOrders ? ' mc-tone-good' : ''}`}>
