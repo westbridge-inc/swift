@@ -289,7 +289,8 @@ function sources(dir: string): string[] {
 }
 const FILES = Object.fromEntries(sources(join(SRC, 'modules')).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')]));
 /** The approval gate itself: every C4/C5 admin request spends its approval once, before the handler. */
-const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED' }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
+// [#2086] The spend's compare-and-set also carries the expiry (a lapsed approval never spends): the pin follows it.
+const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED', expiresAt: { gt: now } }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
 const RESULT = census(FILES, SCOPE, OUT, PENDING_FIX, GATE);
 
 describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () => {
