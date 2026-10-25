@@ -7,6 +7,10 @@
  * an automatic check flags it — then it is held for a person. An admin can withdraw it at any
  * time (back to L1). Partner, driver and rider documents keep their human review unchanged.
  *
+ * [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Taxi rides and orders at or above the
+ * threshold no longer need L2. The ID stays optional and is kept as before (retention-rules.ts);
+ * L2 still lifts a STRIKE_RESTRICTED account and the high-value promo gate (order.service).
+ *
  * Truthfulness: "on file" means a picture of an ID is stored and the automatic checks below
  * found nothing suspicious. It does NOT mean a person (or a machine) read and confirmed the
  * ID, so nothing here — or anywhere this feeds — may say "verified by Swift". Only an ID a

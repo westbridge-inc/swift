@@ -26,9 +26,10 @@ const FAQS: { q: string; a: string }[] = [
     a: 'Open the order from Home or My Orders. You’ll see the live map, the rider’s position, and every stage from the kitchen to your gate.',
   },
   {
-    q: 'Why does Swift ask for my ID?',
+    q: 'Does Swift need my ID?',
     // [Owner ruling 8 Oct 2026 — CUSTOMER ID] on file at once, no selfie. [16 Oct] Customers take no photos, taxi included.
-    a: 'Bigger orders and taxi rides need your ID on file — a quick photo of your government ID, no selfie. It goes on file right away (sometimes a person checks it first).',
+    // [Owner ruling 24 Oct 2026] No ID for taxi rides or bigger orders: asked only after strikes or for a big promo.
+    a: 'You don’t need an ID to order or to take a taxi. The app asks for one only after repeated failed deliveries or payments, or for a high-value promo code. It’s a quick photo of your government ID, no selfie, and it goes on file right away (sometimes a person checks it first).',
   },
   {
     q: 'Can I cancel an order?',

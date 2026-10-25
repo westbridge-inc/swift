@@ -22,7 +22,7 @@ export interface ReviewDocument {
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
   previousDecision?: PreviousDecision | null;
-  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind'>;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind' | 'ownNameConfirmed'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
   user?: {
@@ -45,7 +45,7 @@ const LABELS: Record<string, string> = {
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
   // [MC-PR2] checklist photo types the queue and the activation checklist both name
-  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
+  storefront_photo: 'Storefront photo', own_name_declaration: 'Own-name declaration (no business registration)', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   // [TRADES · 13 Oct 2026; R15] service-trade documents
   pest_control_operator_licence: 'PTCCB pest-control operator licence', pesticide_applicator_certificate: 'PTCCB applicator certificate',
   eating_house_registration: 'Eating-house registration', gei_electrical_licence: 'GEI electrical licence',
