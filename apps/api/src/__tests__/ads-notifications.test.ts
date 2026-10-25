@@ -43,7 +43,7 @@ async function seedCampaign(opts: { status?: 'PENDING_PAYMENT' | 'LIVE' } = {}) 
   const owner = await makeOwnerUser();
   const a = await app.prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000003', createdByUserId: owner.id, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: owner.id, role: 'OWNER' } });
+  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: owner.id, role: 'OWNER', acceptedAt: new Date() } });
   const p = await app.prisma.adPlacement.create({ data: { key: `n-${nanoid(6)}`, name: 'P', tier: 3, mediaKind: 'IMAGE', weeklyPrice: 7000, slotsPerWeek: 6 } });
   placementIds.push(p.id);
   const c = await app.prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: `Camp ${nanoid(4)}`, cities: ['*'], startWeek: WEEK1, endWeek: WEEK1, status: opts.status ?? 'PENDING_PAYMENT' } });

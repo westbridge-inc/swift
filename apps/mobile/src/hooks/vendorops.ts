@@ -506,6 +506,19 @@ export function useToggleOrders() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
+/** [STORE-DASH · O-2] The store's "Ask for the pickup code" setting (owner/manager; rides the store profile). */
+export function useSetRequirePickupCode() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (requirePickupCode: boolean) => unwrap(vendorApi.updateProfile({ requirePickupCode })),
+    // The orders carry pickupCodeRequired: re-read them too, so the cards switch with the setting.
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    ]),
+  });
+}
+
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
 export function useSetSelfDelivery() {
@@ -546,7 +559,7 @@ export function useOrderAction() {
       reason,
     }: {
       id: string;
-      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
       code?: string;
       /** reject only — the server records it and tells the customer why. */
       reason?: string;
@@ -557,6 +570,9 @@ export function useOrderAction() {
       if (action === 'ready') return unwrap(vendorApi.ready(id));
       if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
+      // [STORE-DASH · O-2] The store's pickup code is off: no code is sent (the server completes the hand-over).
+      if (action === 'handed-to-customer') return unwrap(vendorApi.completePickup(id));
+      if (action === 'handed-to-rider') return unwrap(vendorApi.handedToRider(id));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
       // [E10] Never send a bare rejection: the API refuses it, and the customer
       // must be told why. Every screen collects a preset before it gets here.
@@ -575,7 +591,7 @@ export function useOrderAction() {
 }
 
 /** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
-const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt'] as const;
+const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt', 'handedToRiderAt'] as const;
 
 /** Writes the confirmed fields of a tap's answer into the order's caches, when the answer is that order. */
 export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 'setQueryData'>, id: string, answer: unknown): boolean {

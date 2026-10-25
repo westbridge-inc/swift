@@ -306,7 +306,7 @@ describe('[seal 3] role grants: refused inside every authority', () => {
     // An advertiser a demo account owns (planted) grants no membership.
     const adv = await system(async () => {
       const a = await app.prisma.advertiser.create({ data: { companyName: `Demo Co ${RUN}`, industry: 'Retail', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234', createdByUserId: ids.customer, tenantId: REVIEW } as never });
-      await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ids.customer, role: 'OWNER' } });
+      await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ids.customer, role: 'OWNER', acceptedAt: new Date() } });
       return a;
     });
     const member = await withAdsOn(() => call('POST', `/api/v1/ads/advertiser/${adv.id}/members`, tokens.customer, { phone: riderPhone, role: 'MANAGER' }));
