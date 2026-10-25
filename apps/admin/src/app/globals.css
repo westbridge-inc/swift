@@ -431,3 +431,92 @@ body {
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .mc-select { min-height: 40px; max-width: 100%; padding: 0 .5rem; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); background: var(--mc-card); color: var(--mc-ink); font: inherit; }
 .mc-link-button { border: 0; background: none; padding: 0; color: var(--mc-accent); font: inherit; font-weight: 650; text-decoration: underline; cursor: pointer; min-height: 0; }
+
+/* [ADMIN-UI] Shared pieces for every Mission Control page: the screen's one
+   title is the shell header (an h1), so a page opens straight onto its work.
+   Tabs and filters are pills; inputs, empty states and stat tiles share one look. */
+.mc-header-title { margin: 0; }
+.mc-tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .9rem; }
+.mc-tab { display: inline-flex; align-items: center; gap: .4rem; min-height: 40px; padding: .35rem .85rem; border-radius: 9999px; border: 1px solid var(--mc-line-strong); background: var(--mc-card); color: var(--mc-muted-strong); font: 600 .8125rem/1.2 var(--mc-font-body); cursor: pointer; white-space: nowrap; }
+.mc-tab:hover:not(:disabled) { border-color: var(--mc-accent); color: var(--mc-accent); }
+.mc-tab:disabled { opacity: .5; cursor: not-allowed; }
+.mc-tab[aria-pressed=true], .mc-tab[aria-selected=true], .mc-tab[aria-current=page] { background: var(--mc-accent-soft); border-color: var(--mc-accent); color: var(--mc-accent); }
+.mc-tab-count { font-family: var(--mc-font-numbers); font-variant-numeric: tabular-nums; }
+.mc-tabs-sub .mc-tab { min-height: 36px; font-size: .75rem; padding: .25rem .7rem; }
+.mc-input { min-height: 44px; width: 100%; min-width: 0; padding: .5rem .7rem; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); background: var(--mc-card); color: var(--mc-ink); font: inherit; }
+textarea.mc-input { min-height: 5.5rem; resize: vertical; }
+select.mc-input { padding-right: .4rem; }
+.mc-input:focus { border-color: var(--mc-accent); box-shadow: 0 0 0 2px var(--mc-accent-soft); outline: none; }
+.mc-input:disabled { background: var(--mc-surface); color: var(--mc-muted); }
+.mc-field { display: grid; gap: .3rem; min-width: 0; color: var(--mc-ink); font-weight: 600; font-size: .8125rem; }
+.mc-field-hint { font-weight: 400; font-size: .75rem; color: var(--mc-muted); }
+.mc-check { display: inline-flex; align-items: center; gap: .5rem; min-height: 44px; font-weight: 600; color: var(--mc-ink); }
+.mc-check input { width: 18px; height: 18px; accent-color: var(--mc-accent); }
+.mc-section { margin-bottom: 1.5rem; }
+.mc-section-title { font-family: var(--mc-font-numbers); font-size: 1.0625rem; font-weight: 650; letter-spacing: -.01em; margin: 0 0 .6rem; color: var(--mc-ink); }
+.mc-card-title { font-size: .9375rem; font-weight: 700; margin: 0; color: var(--mc-ink); overflow-wrap: anywhere; }
+.mc-list { display: grid; gap: .75rem; }
+.mc-list-plain { display: grid; }
+.mc-list-plain > * + * { border-top: 1px solid var(--mc-line); }
+.mc-empty { padding: 2rem 1rem; text-align: center; color: var(--mc-muted); background: var(--mc-card); border: 1px dashed var(--mc-line-strong); border-radius: var(--mc-radius); }
+.mc-loading { padding: 1.25rem 1rem; color: var(--mc-muted); background: var(--mc-card); border: 1px solid var(--mc-line); border-radius: var(--mc-radius); }
+.mc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .75rem; }
+.mc-text-good { color: var(--mc-good); }
+.mc-text-warn { color: var(--mc-warn); }
+.mc-text-bad { color: var(--mc-bad); }
+.mc-text-small { font-size: .75rem; }
+.mc-note { padding: .55rem .75rem; border-radius: var(--mc-radius-sm); background: var(--mc-surface); border: 1px solid var(--mc-line); color: var(--mc-muted-strong); font-size: .8125rem; }
+.mc-note-warn { background: var(--mc-warn-soft); border-color: transparent; color: var(--mc-warn); }
+.mc-note-bad { background: var(--mc-bad-soft); border-color: transparent; color: var(--mc-bad); }
+.mc-note-good { background: var(--mc-good-soft); border-color: transparent; color: var(--mc-good); }
+.mc-note-info { background: var(--mc-info-soft); border-color: transparent; color: var(--mc-info); }
+.mc-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .75rem; margin-bottom: 1.25rem; }
+.mc-stat-value { font-family: var(--mc-font-numbers); font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 650; letter-spacing: -.02em; line-height: 1.15; color: var(--mc-ink); overflow-wrap: anywhere; }
+.mc-stat-sub { font-size: .75rem; color: var(--mc-muted); margin-top: .2rem; }
+.mc-alert { padding: .6rem .8rem; border-radius: var(--mc-radius-sm); border: 1px solid rgb(185 28 28 / 30%); background: var(--mc-bad-soft); color: var(--mc-bad); font-size: .875rem; font-family: var(--mc-font-body); }
+.mc-grid-2 { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
+.mc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; overflow-wrap: anywhere; }
+.mc-text-info { color: var(--mc-info); }
+/* A full-bleed workspace (the live map): no page padding, exactly the height of <main>. */
+.mc-page.mc-page-flush { padding: 0; height: calc(100% + 2rem); min-height: 0; }
+@media (min-width: 768px) { .mc-page.mc-page-flush { padding: 0; height: calc(100% + 3rem); } }
+
+/* [ADMIN-UI] The old dark sheet's tokens, re-pointed at Mission Control inside
+   every light surface. Anything a page still paints with var(--panel),
+   var(--border), var(--muted) or var(--accent) — the Review Center, the shared
+   dialog, a leftover on a converted page — reads as the light design, never as
+   a dark panel inside a light page. */
+.mc-page, .review-center, .admin-modal {
+  --ink: var(--mc-surface);
+  --panel: var(--mc-card);
+  --panel-2: var(--mc-surface);
+  --border: var(--mc-line);
+  --text: var(--mc-ink);
+  --muted: var(--mc-muted);
+  --accent: var(--mc-accent);
+  --accent-deep: var(--mc-accent);
+  --accent-soft: var(--mc-accent-soft);
+  --good: var(--mc-good);
+  --warn: var(--mc-warn);
+  --bad: var(--mc-bad);
+}
+.admin-modal { background: var(--mc-card); color: var(--mc-ink); font-family: var(--mc-font-body); }
+.admin-modal-overlay { background: rgb(33 26 26 / 45%); }
+.admin-modal button, .review-center button { background: var(--mc-card); color: var(--mc-muted-strong); border-color: var(--mc-line-strong); font-family: var(--mc-font-body); font-weight: 600; }
+.admin-modal button:hover:not(:disabled), .review-center button:hover:not(:disabled) { color: var(--mc-accent); border-color: var(--mc-accent); }
+.admin-modal .rc-primary, .review-center .rc-primary, .admin-modal .rc-primary:hover:not(:disabled), .review-center .rc-primary:hover:not(:disabled) { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
+.admin-modal input, .admin-modal select, .admin-modal textarea, .review-center input:not([type=checkbox]), .review-center select { background: var(--mc-card); border-color: var(--mc-line-strong); }
+.review-center { color: var(--mc-ink); font-family: var(--mc-font-body); }
+.review-center .rc-tabs button[aria-pressed=true] { color: var(--mc-accent); }
+.review-center .rc-chip-pending, .review-center .rc-chip-resubmitted { background: var(--mc-warn-soft); color: var(--mc-warn); border-color: transparent; }
+.review-center .rc-chip-approved { background: var(--mc-good-soft); color: var(--mc-good); border-color: transparent; }
+.review-center .rc-chip-rejected, .review-center .rc-chip-expired { background: var(--mc-bad-soft); color: var(--mc-bad); border-color: transparent; }
+.review-center .rc-chip-renewal { background: var(--mc-info-soft); color: var(--mc-info); border-color: transparent; }
+.review-center .rc-previous { border-color: transparent; background: var(--mc-warn-soft); }
+.review-center .rc-error { color: var(--mc-bad); }
+.review-center .rc-fields small { color: var(--mc-warn); }
+.review-center .rc-queue-table th { font-weight: 700; letter-spacing: .07em; text-transform: uppercase; font-size: .6875rem; }
+.mc-input-number { width: 8rem; text-align: right; }
+.review-center .rc-page-heading { margin-bottom: 1rem; }
+.review-center .rc-empty > span:first-child { display: block; font-weight: 700; color: var(--mc-ink); margin-bottom: .25rem; }
+.review-center .rc-evidence-viewport { background: var(--mc-surface); }

@@ -370,6 +370,33 @@ class SeedProductionScript(unittest.TestCase):
         self.assertNotIn("DATABASE_URL", result.stdout + result.stderr)
         self.assertNotIn("DATABASE_URL", calls)
 
+    def test_stdout_carries_only_the_seeds_own_text(self):
+        """The request run's stdout is what the operator saves and the signers
+        read (`> ~/seed-request.txt`): exactly the seed's own text. The image
+        build talks on stderr, where the operator still sees it (14 Oct: 87
+        build lines in front of the request block made the signer refuse it)."""
+        block = ("swift-seed-approval v2\n"
+                 "request: cmVxdWVzdA==\n"
+                 "end of request\n")
+        (self.tmp / "block.txt").write_text(block)
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\n'
+                'case "$*" in\n'
+                '  *"exec -T postgres"*) echo "1:staging"; exit 0;;\n'
+                '  *"config --quiet"*) echo "WARN the attribute version is obsolete"; exit 0;;\n'
+                '  *" build seed"*) i=0; while [ $i -lt 87 ]; do echo "#$i [build 2/9] RUN pnpm install"; i=$((i+1)); done; echo "build progress" >&2; exit 0;;\n'
+                '  *"run --rm --no-TTY seed"*) cat "$BLOCK"; echo "Container seed-run Creating" >&2; exit 2;;\n'
+                '  *) exit 0;;\n'
+                'esac')
+        sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; '
+                '*fetch*) echo "From github.com:example/swift";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001", BLOCK=str(self.tmp / "block.txt"))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, block)
+        self.assertIn("[build 2/9] RUN pnpm install", result.stderr)
+        self.assertEqual(result.stderr.count("[build 2/9]"), 87)
+        self.assertIn("From github.com:example/swift", result.stderr)
+        self.assertIn("attribute version is obsolete", result.stderr)
+
     def test_the_script_and_its_compose_override_never_carry_database_url(self):
         script = (DEPLOY / "seed-production.sh").read_text()
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
@@ -1493,8 +1520,11 @@ class AdminConsoleCompose(unittest.TestCase):
         admin = self.admin()
         self.assertIn("dockerfile: apps/admin/Dockerfile", admin)
         self.assertIn("image: swift-admin:${SWIFT_TAG:-local}", admin)
+        # [ADMIN-TILES] The only other input is the Live Ops map's MapTiler BROWSER key (public by
+        # design, certified !not-a-secret in security/public-env-allowlist.txt), the website's key.
         self.assertEqual(re.findall(r"(?m)^        ([A-Z][A-Z0-9_]*): (.*)$", admin),
-                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}")])
+                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}"),
+                          ("NEXT_PUBLIC_MAPTILER_KEY", "${WEB_MAPTILER_KEY:-}")])
 
     def test_the_console_has_a_memory_ceiling_that_v8_collects_below(self):
         admin = self.admin()
@@ -1547,7 +1577,8 @@ class AdminConsoleRenderedByCompose(unittest.TestCase):
         self.assertNotIn("ports", admin)
         self.assertEqual(list((admin.get("networks") or {}).keys()), ["private"])
         self.assertEqual(sorted((admin.get("environment") or {}).keys()), ["NODE_OPTIONS"])
-        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid"})
+        # [ADMIN-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so the Live Ops map has no tiles.
+        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid", "NEXT_PUBLIC_MAPTILER_KEY": ""})
         self.assertEqual(model["services"]["caddy"]["environment"]["ADMIN_HOST"], "admin-staging.example.invalid")
         # pilot-up's isolation check passes with the console in the model.
         check = subprocess.run(
@@ -1799,7 +1830,11 @@ class AdminConsoleDockerfile(unittest.TestCase):
         declared = re.search(r"(?m)^ARG NEXT_PUBLIC_API_URL$", build)
         self.assertIsNotNone(declared, "NEXT_PUBLIC_API_URL must be a build ARG with no baked-in default")
         self.assertLess(declared.start(), build.index("RUN pnpm run build"))
-        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL"])
+        # [ADMIN-TILES] ...and the Live Ops map's public MapTiler browser key, also before the build.
+        tiles = re.search(r"(?m)^ARG NEXT_PUBLIC_MAPTILER_KEY$", build)
+        self.assertIsNotNone(tiles, "NEXT_PUBLIC_MAPTILER_KEY must be a build ARG with no baked-in default")
+        self.assertLess(tiles.start(), build.index("RUN pnpm run build"))
+        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_MAPTILER_KEY"])
         self.assertIn("ENV SWIFT_ADMIN_IMAGE_BUILD=1", build)
         # A public variable in the runtime would claim a setting the bundle cannot change.
         self.assertNotIn("NEXT_PUBLIC_", self.stages["runtime"])
@@ -1809,7 +1844,14 @@ class AdminConsoleDockerfile(unittest.TestCase):
         for line in re.findall(r"(?m)^ENV (.*)$", self.text):
             names += re.findall(r"([A-Z][A-Z0-9_]*)=", line)
         self.assertTrue(names)
+        # [ADMIN-TILES] Exempt ONLY a public (NEXT_PUBLIC_) name the allowlist certifies "!not-a-secret"
+        # with its written who-can-read / what-it-allows reasoning — today the MapTiler browser key.
+        certified = set(re.findall(r"(?m)^(NEXT_PUBLIC_[A-Z0-9_]+) !not-a-secret ",
+                                   (DEPLOY.parent / "security" / "public-env-allowlist.txt").read_text()))
+        self.assertEqual(certified & set(names), {"NEXT_PUBLIC_MAPTILER_KEY"})
         for name in names:
+            if name in certified:
+                continue
             self.assertNotRegex(name, r"SECRET|TOKEN|PASSWORD|PASSWD|KEY|HASH|CREDENTIAL|AUTH", name)
         # The build context never carries a settings file: every .env stays out.
         ignored = (DEPLOY.parent / ".dockerignore").read_text().splitlines()

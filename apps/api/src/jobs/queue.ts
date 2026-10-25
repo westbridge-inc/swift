@@ -2075,6 +2075,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // [ads security] advertiser team invitations past their days are deleted (they hold a person's id).
+        const { AdvertiserService } = await import('../modules/ads/advertiser.service');
+        const expiredInvites = await new AdvertiserService(ctx.prisma, ctx.io).purgeExpiredTeamInvites();
+        if (expiredInvites > 0) ctx.log.info({ expiredInvites }, 'ads: expired team invitations deleted');
         // §16 "review SLA at risk": reviewable creatives past 75% of the SLA
         // window page ops — once per creative per window (redis once-key),
         // same posture as incident-sla-watch.

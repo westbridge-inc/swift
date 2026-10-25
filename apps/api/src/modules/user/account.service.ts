@@ -60,7 +60,8 @@ export async function closesByRequest(
 ): Promise<boolean> {
   return roles.includes('VENDOR_OWNER')
     || !!await db.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
-    || !!await db.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } });
+    // [ads security] an open, unaccepted team invitation is not a membership
+    || !!await db.advertiserMember.findFirst({ where: { userId, acceptedAt: { not: null } }, select: { advertiserId: true } });
 }
 
 export class AccountService {

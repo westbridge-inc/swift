@@ -53,6 +53,8 @@ export function TaxiBooking({ estimate, pickup, dropoff, activeRideId, onFareCha
       passengerCount: 1,
       rideClass: tier.rideClass,
       expectedFare: tier.fare,
+      // The waiting terms printed under the fare, echoed so the server books the terms the customer saw.
+      ...(estimate.waitingTerms ? { waiting: estimate.waitingTerms } : {}),
     };
     const intent = JSON.stringify(body);
     if (attempt.current?.intent !== intent) attempt.current = { intent, key: newBookingKey() };

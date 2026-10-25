@@ -3,13 +3,13 @@ import { gpsEvidence } from '../cash/cash-rules.service';
 import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 // ---------------------------------------------------------------------------
-// [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile lets a
-// manager (or anyone holding a manager session) move the pin riders and
-// customers are sent to. Without a record, a store could be relocated with no
-// way to tell who moved it, from where, or when. So a move writes an audit row
-// in the transaction that makes it, and when the mover is not the owner the
-// owner is told, with a notice that commits with the move and is fanned out
-// after it.
+// [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile requires
+// the owner to move the pin riders and customers are sent to. Without a record,
+// a store could be relocated with no way to tell who moved it, from where, or
+// when. So a move writes an audit row in the transaction that makes it. [PIN-OWNER]
+// The route now lets only the owner move it; when a mover is ever not the owner
+// (an earlier manager move, or a future non-route caller) the owner is told, with
+// a notice that commits with the move and is fanned out after it.
 // ---------------------------------------------------------------------------
 
 type Tx = Prisma.TransactionClient;

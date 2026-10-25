@@ -335,7 +335,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'advertiserMemberships', model: 'AdvertiserMember', by: ['userId'], key: 'advertiserId',
-    fields: ['advertiserId', 'userId', 'role', 'createdAt'],
+    fields: ['advertiserId', 'userId', 'role', 'createdAt', 'acceptedAt'],
   },
   {
     category: 'advertisersCreated', model: 'Advertiser', by: ['createdByUserId'], key: 'id',
