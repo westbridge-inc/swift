@@ -26,6 +26,9 @@ import { testPhone } from './helpers/fixture-ids';
 
 grantSuiteCapability('unscoped-mutation');
 
+/** fetch's own init type (the DOM name is not a lint global here). */
+type FetchInit = NonNullable<Parameters<typeof fetch>[1]>;
+
 const TOKEN = 'bridge-test-webhook-token';
 const SID = `AC${'1'.repeat(32)}`;
 const KEY = `SK${'2'.repeat(32)}`;
@@ -42,7 +45,7 @@ const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'call-bridge-te
 /** What the stubbed Twilio was asked to do, and what it answers next. */
 const placed: URLSearchParams[] = [];
 let twilioAnswers: 'ok' | 'refuse' = 'ok';
-const http = (async (_url: string, init: RequestInit) => {
+const http = (async (_url: string, init: FetchInit) => {
   placed.push(new URLSearchParams(String(init.body)));
   if (twilioAnswers === 'refuse') return new Response('{}', { status: 400 });
   return new Response(JSON.stringify({ sid: `CA${nanoid(32).replace(/[^a-f0-9]/gi, 'a').slice(0, 32).padEnd(32, 'a')}` }), { status: 201 });
@@ -156,9 +159,9 @@ const bridge = (token: string, orderId: string, target: string) =>
   app.inject({ method: 'POST', url: '/api/v1/calls/bridge', headers: { authorization: `Bearer ${token}` }, payload: { orderId, target } });
 
 /** Post a webhook exactly as Twilio would: form body, signature over the public URL + form. */
-function hook(step: string, sessionId: string, form: Record<string, string> = {}, opts: { sign?: 'ok' | 'none' | 'wrong-url' } = {}) {
+function hook(step: string, callId: string, form: Record<string, string> = {}, opts: { sign?: 'ok' | 'none' | 'wrong-url' } = {}) {
   const fields = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, [v]]));
-  const query = `?s=${encodeURIComponent(sessionId)}`;
+  const query = `?s=${encodeURIComponent(callId)}`;
   const signedUrl = opts.sign === 'wrong-url' ? `${BASE}/${step}?s=someone-else` : `${BASE}/${step}${query}`;
   const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
   if (opts.sign !== 'none') headers['x-twilio-signature'] = twilioSignature(TOKEN, signedUrl, fields);

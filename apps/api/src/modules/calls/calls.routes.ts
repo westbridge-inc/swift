@@ -150,14 +150,14 @@ export async function callVoiceRoutes(app: FastifyInstance, opts: CallRoutesOpti
     if (!(CALL_STEPS as readonly string[]).includes(step)) return reply.code(404).type('text/plain').send('not found');
     const admitted = admit(request, reply, step);
     if (!admitted) return reply;
-    const sessionId = typeof request.query.s === 'string' ? request.query.s : '';
+    const callId = typeof request.query.s === 'string' ? request.query.s : '';
     const deps: CallBridgeDeps = { prisma: app.prisma, provider: admitted.provider, config: admitted.config, notifications };
     // The call's own operator: read once as system work, then everything runs inside that tenant.
-    const tenantId = sessionId
-      ? await runAsSystem('call-bridge-webhook', () => app.prisma.callSession.findUnique({ where: { id: sessionId }, select: { tenantId: true } }).catch(() => null))
+    const tenantId = callId
+      ? await runAsSystem('call-bridge-webhook', () => app.prisma.callSession.findUnique({ where: { id: callId }, select: { tenantId: true } }).catch(() => null))
       : null;
     const result = tenantId
-      ? await runWithTenant(tenantId.tenantId, () => handleVoiceStep(deps, step, sessionId, { fields: admitted.fields }, callRelayEnabled()))
+      ? await runWithTenant(tenantId.tenantId, () => handleVoiceStep(deps, step, callId, { fields: admitted.fields }, callRelayEnabled()))
       : { step: step === 'status' ? null : ({ verb: 'hangup' } as const) };
     if (!result.step) return reply.code(204).send();
     const out = admitted.provider.render(result.step);

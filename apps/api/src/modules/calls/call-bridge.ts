@@ -62,7 +62,7 @@ export const CALL_WORDS = {
  *  the ring on both legs plus the 30-minute limit, with a minute to spare. */
 export const CALL_STALE_AFTER_MS = (CALL_TIME_LIMIT_SECONDS + 2 * CALL_RING_SECONDS + 60) * 1000;
 
-const SESSION_ID = /^c[a-z0-9]{20,32}$/;
+const CALL_ID = /^c[a-z0-9]{20,32}$/;
 const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
 
 type Notifier = { send(payload: NotificationPayload): Promise<string> };
@@ -154,8 +154,8 @@ function peopleFor(order: PartyOrder, role: CallTarget): string[] {
   }
 }
 
-const webhookUrl = (config: CallRelayConfig, step: CallStepName, sessionId: string) =>
-  `${config.webhookBase}/${step}?s=${encodeURIComponent(sessionId)}`;
+const webhookUrl = (config: CallRelayConfig, step: CallStepName, callId: string) =>
+  `${config.webhookBase}/${step}?s=${encodeURIComponent(callId)}`;
 
 async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOrder | null> {
   return prisma.order.findUnique({ where: { id: orderId }, select: ORDER_PARTIES });
@@ -172,7 +172,7 @@ async function warnOfCall(
   listeners: string[],
   listenerRole: CallTarget,
   otherRole: CallTarget,
-  sessionId: string,
+  callId: string,
   leg: 1 | 2,
 ): Promise<void> {
   if (listenerRole === 'recipient') return;
@@ -189,7 +189,7 @@ async function warnOfCall(
         : `Swift is calling you about your order ${order.orderNumber}: ${about}. Answer, then press 1 to connect.`,
       // callOrderId, never orderId: an older app opens itself, not a screen that cannot show this order.
       data: { kind: 'call_incoming', callOrderId: order.id, orderType: order.orderType, from: otherRole, leg },
-      dedupeKey: `call:${sessionId}:${leg}`,
+      dedupeKey: `call:${callId}:${leg}`,
     });
   }
 }
@@ -222,9 +222,9 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
     throw new AppError(409, 'CALL_NO_NUMBER', 'Swift has no number to call for this. Message them in chat, or ask support.');
   }
 
-  let sessionId: string;
+  let callId: string;
   try {
-    sessionId = await deps.prisma.$transaction(async (tx) => {
+    callId = await deps.prisma.$transaction(async (tx) => {
       // [REVIEW-M S4-2] One start at a time per order: the count below and the insert see the same rows,
       // so the attempt cap is exact even when a first attempt failed at once and two taps race.
       await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
@@ -255,22 +255,22 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
     throw err;
   }
 
-  await warnOfCall(deps, order, [input.userId], callerRole, input.target, sessionId, 1);
+  await warnOfCall(deps, order, [input.userId], callerRole, input.target, callId, 1);
   try {
     const placed = await deps.provider.placeCall({
       to: caller.phone,
       callerId: deps.config.callerId,
-      answerUrl: webhookUrl(deps.config, 'leg1', sessionId),
-      statusUrl: webhookUrl(deps.config, 'status', sessionId),
+      answerUrl: webhookUrl(deps.config, 'leg1', callId),
+      statusUrl: webhookUrl(deps.config, 'status', callId),
       ringSeconds: CALL_RING_SECONDS,
       limitSeconds: CALL_TIME_LIMIT_SECONDS,
     });
-    await deps.prisma.callSession.update({ where: { id: sessionId }, data: { providerCallId: placed.providerCallId } });
+    await deps.prisma.callSession.update({ where: { id: callId }, data: { providerCallId: placed.providerCallId } });
   } catch {
-    await deps.prisma.callSession.update({ where: { id: sessionId }, data: { status: CALL_STATUS.FAILED, endedAt: deps.now?.() ?? new Date() } });
+    await deps.prisma.callSession.update({ where: { id: callId }, data: { status: CALL_STATUS.FAILED, endedAt: deps.now?.() ?? new Date() } });
     throw new AppError(502, 'CALL_PROVIDER_FAILED', 'Swift could not place the call right now. Try again, or message them in chat.');
   }
-  return { callId: sessionId, status: CALL_STATUS.DIALING_CALLER };
+  return { callId, status: CALL_STATUS.DIALING_CALLER };
 }
 
 export interface VoiceStepResult {
@@ -287,14 +287,14 @@ const hangup = (say?: string): VoiceStepResult => ({ step: say ? { verb: 'hangup
 export async function handleVoiceStep(
   deps: CallBridgeDeps,
   step: CallStepName,
-  sessionId: string,
+  callId: string,
   hook: Pick<ProviderWebhook, 'fields'>,
   relayOn: boolean,
 ): Promise<VoiceStepResult> {
   const now = deps.now?.() ?? new Date();
   const event = deps.provider.read(hook.fields);
-  const session = SESSION_ID.test(sessionId)
-    ? await deps.prisma.callSession.findUnique({ where: { id: sessionId } })
+  const session = CALL_ID.test(callId)
+    ? await deps.prisma.callSession.findUnique({ where: { id: callId } })
     : null;
   if (!session) return step === 'status' ? { step: null } : hangup();
   const ended = session.endedAt !== null;
