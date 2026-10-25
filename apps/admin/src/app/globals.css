@@ -520,3 +520,4 @@ select.mc-input { padding-right: .4rem; }
 .review-center .rc-page-heading { margin-bottom: 1rem; }
 .review-center .rc-empty > span:first-child { display: block; font-weight: 700; color: var(--mc-ink); margin-bottom: .25rem; }
 .review-center .rc-evidence-viewport { background: var(--mc-surface); }
+.mc-badge-alarm { background: var(--mc-bad); color: #fff; border-color: transparent; }

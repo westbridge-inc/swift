@@ -235,6 +235,9 @@ async function makeVendor(owner: Actor, name: string, slugTag: string, dish: str
       name,
       slug: `gold6-c05-${slugTag}-${nanoid(6).toLowerCase()}`,
       vendorType: 'RESTAURANT',
+      // [O-2 · owner 22 Oct 2026] The takeaway code is off by default; these stores kept it ON, which is
+      // the coded flow this file pins (wrong-code denial, the counter lockout).
+      requirePickupCode: true,
       phone: `${PHONE_PREFIX}9${String(vendorSeq).padStart(2, '0')}`,
       addressLine1: name === 'Counter Diner' ? '6 Counter Lane' : '8 Counter Row',
       city: 'Georgetown',

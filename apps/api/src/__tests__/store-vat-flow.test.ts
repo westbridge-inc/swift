@@ -18,7 +18,7 @@ import { approveStoreVat, rejectStoreVat, type DocumentDecider } from '../module
 import { VAT_CERTIFICATE_DOC_TYPE } from '../modules/store-vat/store-vat';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { ownedVerificationFixture } from './helpers/verification-object';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,8 @@ import { walkOrderStatus } from './helpers/order-status-walk';
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
-const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
+// [flake class 4] Digits only: the prohibited-items checker reads the store's name (checked-names.test.ts).
+const RUN = wordFreeTag(6);
 const REASON = `Checked the GRA certificate against the store record ${RUN}`;
 const VAT_NUMBER = '012345678';
 

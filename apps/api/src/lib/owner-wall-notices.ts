@@ -143,7 +143,8 @@ export async function publicPhoneAsked(tx: TxRaw, userId: string, vendorId: stri
 
 /** [#1905 erasure] Remove every notice of a person being erased, from inside the erasure transaction (which
  *  holds their users row lock), whoever runs it: the person, an admin closing the account, the retry sweep.
- *  Returns how many. */
+ *  Returns how many. [row 622] The action refuses (throws) unless the account carries the erasure tombstone,
+ *  which the closure writes first. */
 export async function eraseNoticesOf(tx: TxRaw, userId: string): Promise<number> {
   const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_erase_notices(${userId}) AS n`;
   return row?.n ?? 0;

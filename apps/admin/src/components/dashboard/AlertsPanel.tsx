@@ -30,8 +30,8 @@ export function AlertsPanel({
   }
 
   return (
-    <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-      <h3 className="text-lg font-semibold mb-4">Alerts & Issues</h3>
+    <div className="mc-card">
+      <h3 className="mc-section-title">Needs you</h3>
       <div className="space-y-2">
         {unavailable ? (
           // [A-06] The panel that most needed this: an operator reading
@@ -42,8 +42,8 @@ export function AlertsPanel({
             lastSuccessAt={lastSuccessAt}
           />
         ) : items.length === 0 ? (
-          <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5 text-[var(--muted)]">
-            <CheckCircle2 size={16} className="text-green-400 shrink-0" />
+          <div className="mc-note mc-note-good flex items-center gap-3">
+            <CheckCircle2 size={16} className="shrink-0" />
             <span className="text-sm">All clear — no active alerts.</span>
           </div>
         ) : (
@@ -51,15 +51,15 @@ export function AlertsPanel({
             <Link
               key={i}
               href={alert.href}
-              className="flex items-center gap-3 p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group"
+              className="group flex min-h-[44px] items-center gap-3 rounded-[var(--mc-radius-sm)] border border-[var(--mc-line)] p-3 hover:border-[var(--mc-accent)]"
             >
               {alert.level === 'error' ? (
-                <AlertCircle size={16} className="text-red-400 shrink-0" />
+                <AlertCircle size={16} className="mc-text-bad shrink-0" />
               ) : (
-                <AlertTriangle size={16} className="text-yellow-400 shrink-0" />
+                <AlertTriangle size={16} className="mc-text-warn shrink-0" />
               )}
-              <span className="text-sm flex-1">{alert.message}</span>
-              <ChevronRight size={15} className="text-[var(--muted)] group-hover:text-white transition-colors" />
+              <span className="flex-1 font-semibold">{alert.message}</span>
+              <ChevronRight size={15} className="mc-muted group-hover:text-[var(--mc-accent)]" />
             </Link>
           ))
         )}

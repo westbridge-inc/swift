@@ -101,6 +101,25 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
     expect(screen.queryByText(/store's own rider/)).toBeNull();
   });
 
+  // [O-2 · REVIEW-F S3-3 on #2055] The store's code is off by default: the counter asks for the first name
+  // and order number. The code stays on screen in case an older store app asks; an older server = today's words.
+  it('a takeaway tells the customer what the counter asks for', async () => {
+    const TAKEAWAY = { ...ORDER, status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', pickupAddress: '7 Counter Lane, Georgetown', pickupCode: '482193' };
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired: false } as never);
+    const view = render(<OrderDetailPage />);
+    expect(await screen.findByText('At the counter, give your first name and order number. If they ask for a code:')).toBeTruthy();
+    expect(screen.getByText('482193')).toBeTruthy();
+    expect(screen.queryByText('Show this pickup code')).toBeNull();
+    view.unmount();
+    for (const pickupCodeRequired of [true, undefined]) {
+      vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired } as never);
+      const again = render(<OrderDetailPage />);
+      expect(await screen.findByText('Show this pickup code')).toBeTruthy();
+      expect(screen.queryByText(/give your first name/)).toBeNull();
+      again.unmount();
+    }
+  });
+
   it('says who is paid and how much BEFORE anything opens', async () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(/sends .* directly to Shanta Kitchen/)).toBeTruthy();

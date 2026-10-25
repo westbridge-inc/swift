@@ -86,7 +86,10 @@ describe('service catalogue authority', () => {
     expect(documents('lawyer').some((doc) => doc.label.includes('Right to practise'))).toBe(true);
     expect(documents('tutor').some((doc) => doc.label.includes('tutors work with children'))).toBe(true);
     expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'barber')).toBe(false);
-    expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'electrician')).toBe(true);
+    // [ROLE-DOCS · owner 21 Oct 2026] a GEI_LICENCE qualification badges no trade, electrician included:
+    // the GEI licence is the electrician's required checklist document
+    expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'electrician')).toBe(false);
+    expect(qualificationTypeMatchesTrade('CVQ', 'electrician')).toBe(true);
     expect(catalog.categories.every((category) => !category.appointmentsEnabled)).toBe(true);
   });
 

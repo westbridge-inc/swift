@@ -152,8 +152,8 @@ async function partnerAccounts(db: Db, tenantId: string) {
 
 /**
  * [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] The documents a pack partner presents: what the vehicle
- * requires, plus the identity document a mover MAY add. A motorised mover's national ID became optional (the
- * licence is photo ID); the fixture partner still presents one, so it stays identity-verified (L2) as before.
+ * requires, plus any identity document a mover MAY add. [ROLE-DOCS · owner 21 Oct 2026] No vehicle partner is
+ * offered a second ID any more (the licence is photo ID), so a motorised pack partner presents none.
  */
 export async function packPartnerDocuments(db: Db, countryCode: string, vehicleType: VehicleType): Promise<string[]> {
   const countries = new CountryConfigService(db);
@@ -279,11 +279,10 @@ export async function seedReviewPartners(db: Db, tenantId: string, now = new Dat
       await commitFixtureDocument(db, spec, user.id, docType, now);
       documentsCommitted += 1;
     }
-    // An approved identity document is L2, exactly as the approval path promotes it.
-    if (user.trustLevel === 'L1') {
-      const checklist = await packPartnerDocuments(db, user.countryCode, spec.vehicleType);
-      if (checklist.some((t) => IDENTITY_DOC_TYPES.includes(t))) await db.user.update({ where: { id: user.id }, data: { trustLevel: 'L2' } });
-    }
+    // The pack partners have always been L2 (the store build under review was approved with them so). [ROLE-DOCS ·
+    // owner 21 Oct 2026] The optional national ID this was hung on is gone for vehicle partners, so the fiction keeps
+    // its level as it always had it rather than change a store-reviewed account; no production path reads this.
+    if (user.trustLevel === 'L1') await db.user.update({ where: { id: user.id }, data: { trustLevel: 'L2' } });
   }
   return { ...(await reviewPartnerFacts(db, tenantId, now)), documentsCommitted };
 }

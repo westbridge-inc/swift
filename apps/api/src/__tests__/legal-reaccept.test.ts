@@ -211,17 +211,20 @@ describe('GET/POST /auth/legal-acceptance', () => {
   // 2026-10-22 (non-material, on top of the 2026-10-21 material change), a person who accepted 2026-10-17 or
   // 2026-10-18 is asked once, shown only what changed materially since — the waiting charge and crash reports, never a
   // line for the one-minute cancel window — and after the tick is not asked again. A person at 2026-10-21 is not asked.
-  it('[2026-10-21 material, served 2026-10-22] a person who accepted 2026-10-17 or 2026-10-18 is asked once, with the 2026-10-21 summary only', async () => {
+  // [ROLE-DOCS] The served version is now 2026-10-22.1, NON-material on top of 2026-10-22: same summary, same answers.
+  it('[2026-10-21 material, served 2026-10-22.1] a person who accepted 2026-10-17 or 2026-10-18 is asked once, with the 2026-10-21 summary only', async () => {
     const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
-    expect(LEGAL_VERSION).toBe('2026-10-22');
+    expect(LEGAL_VERSION).toBe('2026-10-22.1');
+    expect(NON_MATERIAL_CHANGES.map((c) => c.version)).toEqual(expect.arrayContaining(['2026-10-22', '2026-10-22.1']));
+    expect(materialVersion('2026-10-22.1')).toBe('2026-10-21');
     for (const accepted of ['2026-10-17', '2026-10-18']) {
       const person = await mkUser(['CUSTOMER'] as UserRole[], accepted);
-      expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-22', acceptedVersion: accepted, needsAcceptance: true, summary: [...v21] });
-      expect((await call('POST', person.token, { version: '2026-10-22', accept: true })).statusCode).toBe(200);
-      expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: '2026-10-22', needsAcceptance: false, summary: [] });
+      expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-22.1', acceptedVersion: accepted, needsAcceptance: true, summary: [...v21] });
+      expect((await call('POST', person.token, { version: '2026-10-22.1', accept: true })).statusCode).toBe(200);
+      expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: '2026-10-22.1', needsAcceptance: false, summary: [] });
     }
     const at21 = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-21');
-    expect((await call('GET', at21.token)).json().data).toMatchObject({ currentVersion: '2026-10-22', acceptedVersion: '2026-10-21', needsAcceptance: false, summary: [] });
+    expect((await call('GET', at21.token)).json().data).toMatchObject({ currentVersion: '2026-10-22.1', acceptedVersion: '2026-10-21', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {

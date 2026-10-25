@@ -31,6 +31,7 @@ import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swap
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
+import { pickupCodeWords } from './pickup-words';
 import { lazyRetry } from '@/lib/chunk-retry';
 
 // [Row 117] A taxi ride's code, driver position and SOS — only while the server
@@ -87,6 +88,9 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [O-2] false = the store does not ask for the code (it asks for the first name and order number);
+   *  absent on an older server = today's words. */
+  pickupCodeRequired?: boolean;
   /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
   ridePin?: string | null;
   /** [R14] Set (verbatim) while the store delivers this order with its own rider; null otherwise. */
@@ -762,7 +766,7 @@ export default function OrderDetailPage() {
               </div>
               {order.pickupCode ? (
                 <div className={styles.pickupCode}>
-                  <span>Show this pickup code</span>
+                  <span>{pickupCodeWords(order.pickupCodeRequired)}</span>
                   <strong>{order.pickupCode}</strong>
                 </div>
               ) : null}

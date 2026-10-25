@@ -940,15 +940,16 @@ export class VerificationService {
    * L2 customer ID. [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] (customer-id.ts): the ID
    * goes ON FILE at once — L2 now, no admin approval — unless an automatic check flags it; then
    * it waits for a person, who approves or rejects it. An admin can withdraw it at any time
-   * (revokeDocument → back to L1). No face match: the selfie is optional (old apps still send
-   * one; it must be the caller's own upload) and is never compared or sent anywhere — a profile
-   * photo is a taxi-only requirement, enforced at ride booking. A document processor that reads
+   * (revokeDocument → back to L1). No face match, and no selfie at all: [ROLE-DOCS · owner 21 Oct
+   * 2026] a customer never gives a photo (owner 16 Oct), so the selfie store build 9 still sends is
+   * dropped by the route before it reaches this method — never resolved, read, stored or linked
+   * (the route erases that upload right after the intake when it is the caller's own: REVIEW-F S3-1,
+   * user/upload-erasure discardUnusedCustomerSelfie). A document processor that reads
    * documents can still reject (an auto-reject stands) or refer the document to a person.
    */
   async submitIdentity(
     userId: string,
     idDocumentUrl: string,
-    selfieUrl: string | undefined,
     privacyNoticeVersion: string,
   ) {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true, countryCode: true } });
@@ -958,8 +959,6 @@ export class VerificationService {
     }
     const object = await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
     assertClaimableUpload(object);
-    // [Row 249] The selfie is checked, never linked: an old one may be gone with the unclaimed-upload sweep.
-    if (selfieUrl !== undefined) assertClaimableUpload(await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId }));
 
     // [DGP-1 · DOC-1 §2] the ID check sends the national ID — same gate as any document.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
@@ -1101,7 +1100,10 @@ export class VerificationService {
    *  persisted rider/driver profiles actually hold (plus the CAR base so a
    *  profile-less prospective mover can still start with base docs). A BUS or
    *  cargo mover can submit its commercial types; nobody can submit a type no
-   *  class of theirs requires. */
+   *  class of theirs requires.
+   *  [ROLE-DOCS · owner 21 Oct 2026] An OPTIONAL document comes only from a vehicle the
+   *  mover really holds, never from the CAR base: a delivery rider is not offered the
+   *  taxi driver's optional police clearance, and cannot send one. */
   private async moverSubmittableChecklist(countryCode: string, userId: string): Promise<string[]> {
     const [rider, driver] = await Promise.all([
       this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
@@ -1110,10 +1112,11 @@ export class VerificationService {
     const classes = new Set<VehicleType>(['CAR']);
     if (rider?.vehicleType) classes.add(rider.vehicleType);
     if (driver?.vehicleType) classes.add(driver.vehicleType);
+    const held = new Set<VehicleType>([rider?.vehicleType, driver?.vehicleType].filter((type): type is VehicleType => !!type));
     const lists = await Promise.all(
       [...classes].flatMap((vehicleType) => [
         this.countryConfig.getMoverChecklist(countryCode, vehicleType),
-        this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType),
+        ...(held.has(vehicleType) ? [this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType)] : []),
       ]),
     );
     return [...new Set(lists.flat())];
