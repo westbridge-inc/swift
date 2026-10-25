@@ -5,10 +5,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getProfile, getStoreVat, sendVatCertificate, updateStoreVat, type StoreVatView } from '@/lib/vendor-api';
 import { LEGAL_URL } from '@/lib/api';
 import { storeKey } from '@/lib/store-scope';
-import { GRA_VAT_URL } from '@/lib/store-vat-words';
+import { GRA_VAT_URL, calendarDay } from '@/lib/store-vat-words';
 
 
-const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '');
+
 
 /**
  * [STORE-VAT · owner O-5] The one line that says where the store's VAT stands, in the owner's words. Only an APPROVED
@@ -24,7 +24,7 @@ export function vatStatusLine(v: StoreVatView): string {
         : 'Send your GRA VAT registration certificate below. A person at Swift checks it before anything changes.';
     case 'APPROVED':
       if (!v.effective) return 'Approved, but VAT is not on your orders right now. Your prices and receipts show no VAT.';
-      return `Approved from ${day(v.approved?.effectiveFrom)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
+      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
     case 'REJECTED':
       return `Not approved${v.reviewNote ? `: ${v.reviewNote}` : ''}. Correct it and send your certificate again.`;
     case 'REVOKED':

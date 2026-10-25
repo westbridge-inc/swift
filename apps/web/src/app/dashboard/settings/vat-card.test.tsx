@@ -135,7 +135,7 @@ describe('[O-5] the status line never promises VAT a person has not approved', (
     expect(vatStatusLine(view({ status: 'APPROVED', effective: false }))).toBe('Approved, but VAT is not on your orders right now. Your prices and receipts show no VAT.');
     expect(vatStatusLine(view({
       status: 'APPROVED', effective: true, approved: { number: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01T00:00:00.000Z', reviewedAt: null },
-    }))).toBe('Approved from 2026-01-01. Your prices include VAT at 14%, and receipts say “VAT charged by Sample Shop Ltd · VAT reg. no. 012345678”.');
+    }))).toBe('Approved from 1 Jan 2026. Your prices include VAT at 14%, and receipts say “VAT charged by Sample Shop Ltd · VAT reg. no. 012345678”.');
     expect(vatStatusLine(view({ status: 'REJECTED', reviewNote: 'The photo is unreadable' }))).toBe('Not approved: The photo is unreadable. Correct it and send your certificate again.');
     expect(vatStatusLine(view({ status: 'REVOKED', reviewNote: 'GRA cancelled the registration' }))).toBe('VAT withdrawn: GRA cancelled the registration. New orders carry no VAT.');
   });

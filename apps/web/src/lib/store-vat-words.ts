@@ -12,3 +12,12 @@ export const vatClassWords = (ratePercent: number, effective = true): ReadonlyAr
   { value: 'ZERO_RATED', label: 'Zero-rated (no VAT)' },
   { value: 'EXEMPT', label: 'Exempt (no VAT)' },
 ];
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+/** [REVIEW-F #2102 S4] A certificate's effective date as people read it ("1 Jan 2026"): a calendar day (stored as
+ *  midnight UTC), read in UTC so it never shifts to the evening before. The same words as the server's notice. */
+export function calendarDay(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
