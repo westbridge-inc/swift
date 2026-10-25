@@ -39,7 +39,7 @@ const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: 
 function reach(recipients: OpsAlertRow['recipients']): string {
   const delivered = recipients.filter((r) => r.deliveredAt).length;
   const seen = recipients.filter((r) => r.seenAt).length;
-  if (recipients.length === 0) return 'Nobody to page yet: no responder is set up. The on-call phones are texted.';
+  if (recipients.length === 0) return 'Not paged to anyone yet: no responder is set up. The on-call phones are texted.';
   return `Paged ${recipients.length} ${recipients.length === 1 ? 'person' : 'people'} · delivered to ${delivered} · opened by ${seen}`;
 }
 
@@ -59,7 +59,7 @@ function AlertRow({ alert, now, onDone }: { alert: OpsAlertRow; now: number; onD
     submit: () => acknowledgeOpsAlert(alert.id),
     success: (res) => (res.data.acknowledged
       ? succeeded('Acknowledged. The re-pages have stopped.')
-      : succeeded('Nothing to do: someone already acknowledged it, or it was closed.')),
+      : succeeded('Already handled: someone acknowledged it first, or it was closed.')),
   }));
 
   return (

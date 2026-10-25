@@ -102,7 +102,7 @@ describe('Ops alerts', () => {
     const { user } = renderWithQuery(<OpsAlertsPage />);
     await user.click(await screen.findByRole('button', { name: 'Acknowledge…' }));
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Acknowledge' }));
-    expect(await screen.findByText('Nothing to do: someone already acknowledged it, or it was closed.')).toBeTruthy();
+    expect(await screen.findByText('Already handled: someone acknowledged it first, or it was closed.')).toBeTruthy();
   });
 
   it('a refused acknowledgement is shown as refused, never as done', async () => {
