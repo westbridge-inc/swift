@@ -36,10 +36,11 @@ const FAILED = {
   recipients: [{ userId: 'u1', deliveredAt: '2026-10-22T02:04:21.000Z', seenAt: null }],
 };
 
-function handler(opts: { open?: unknown[]; failed?: unknown[] | 'forbidden'; extra?: (_r: ApiRequest) => { status?: number; body: unknown } | undefined } = {}) {
+function handler(opts: { open?: unknown[]; failed?: unknown[] | 'forbidden' | 'broken'; extra?: (_r: ApiRequest) => { status?: number; body: unknown } | undefined } = {}) {
   return (request: ApiRequest) => {
     if (request.method === 'GET' && request.url.pathname === '/api/v1/safety/ops-alerts') return { body: { success: true, data: opts.open ?? [SOS, DRILL] } };
     if (request.method === 'GET' && request.url.pathname === '/api/v1/safety/ops-alerts/failed-drills') {
+      if (opts.failed === 'broken') return { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'The server could not answer.' } } };
       return opts.failed === 'forbidden'
         ? { status: 403, body: { success: false, error: { code: 'FORBIDDEN', message: 'Failed drills are for platform operators.' } } }
         : { body: { success: true, data: opts.failed ?? [FAILED] } };
@@ -131,6 +132,14 @@ describe('Ops alerts', () => {
     expect(await screen.findByRole('listitem', { name: 'URGENT: SOS ACTIVE' })).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Failed drills' })).toBeNull());
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a failed drills list that could not be read says so, never "No drill has failed."', async () => {
+    mockApi(handler({ failed: 'broken' }));
+    renderWithQuery(<OpsAlertsPage />);
+    const section = await screen.findByRole('region', { name: 'Failed drills' });
+    expect(await within(section).findByRole('alert')).toBeTruthy();
+    expect(section.textContent).not.toContain('No drill has failed.');
   });
 
   it('says plainly when nothing is waiting', async () => {
