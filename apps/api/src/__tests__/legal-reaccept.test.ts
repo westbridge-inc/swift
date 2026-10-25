@@ -173,7 +173,9 @@ describe('[2026-10-18] a non-material bump asks nobody again', () => {
       expect(acceptanceStatus({ tosVersion: '2026-10-25.1', roles }, '2026-10-25.2')).toMatchObject({ needsAcceptance: false, summary: [] });
       expect(acceptanceStatus({ tosVersion: '2026-10-25.2', roles }, '2026-10-25.2')).toMatchObject({ needsAcceptance: false, summary: [] });
       for (const tosVersion of ['2026-10-17', '2026-10-18', '2026-10-21', '2026-10-25']) {
-        expect(acceptanceStatus({ tosVersion, roles }, '2026-10-25.2')).toEqual(acceptanceStatus({ tosVersion, roles }, '2026-10-25.1'));
+        const at251 = acceptanceStatus({ tosVersion, roles }, '2026-10-25.1');
+        expect(acceptanceStatus({ tosVersion, roles }, '2026-10-25.2'), `${tosVersion} ${roles.join('+')}`).toMatchObject({ needsAcceptance: true, summary: at251.summary });
+        expect(at251.needsAcceptance).toBe(true);
       }
     }
   });
