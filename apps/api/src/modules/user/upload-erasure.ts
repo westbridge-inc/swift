@@ -119,6 +119,54 @@ async function closedAccount(tx: Prisma.TransactionClient, userId: string) {
 }
 
 /**
+ * [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-F #2001 S3-1] The selfie store build 9 still uploads beside a customer's ID.
+ * The intake no longer reads it (a customer never gives a photo), so it is a face Swift does not need: it is erased
+ * NOW, not left as an unclaimed upload until the account closes. Same proof as the account-erasure pass, for this one
+ * key only: it must be the caller's own encrypted upload in their own verification folder, named by nothing else
+ * (no document, mover, recovery or other envelope), and the person must hold no legal hold. Crypto-shred first, then
+ * the bytes; an absence the provider does not confirm stays open for the account-erasure retry. Never throws: the
+ * customer's ID intake has already succeeded. Returns what happened, for the caller's log and tests.
+ */
+export async function discardUnusedCustomerSelfie(
+  db: PrismaClient, storage: StorageProvider, userId: string, fileKey: string, log?: Log,
+): Promise<'ERASED' | 'NOT_OWN' | 'CLAIMED' | 'HELD' | 'PENDING'> {
+  return owed(log, userId, 'unused customer selfie', 'PENDING' as const, () => runAsSystem('customer-id:discard-unused-selfie', () => db.$transaction(async (tx) => {
+    await lockSubject(tx, userId);
+    const name = canonicalSubjectKey(fileKey, userId, 'verification');
+    const own = name ? await tx.encryptedObject.findFirst({ where: { fileKey, createdBy: userId, shreddedAt: null } }) : null;
+    if (!name || !own) return 'NOT_OWN' as const;
+    if (!await censusVisible(tx, ['verification_documents', 'riders', 'drivers', 'account_recoveries', 'encrypted_objects'])) return 'PENDING' as const;
+    const refs = await tx.$queryRaw<Array<{ source: string; owner: string; key: string }>>`
+      SELECT * FROM (
+        SELECT 'document' AS source, "userId" AS owner, "fileUrl" AS key FROM verification_documents WHERE strpos("fileUrl", ${name}) > 0
+        UNION ALL SELECT 'mover', "userId", k FROM riders, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+        UNION ALL SELECT 'mover', "userId", k FROM drivers, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","vehicleInspectionUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+        UNION ALL SELECT 'recovery', "userId", k FROM account_recoveries, unnest(ARRAY["idDocumentUrl","selfieUrl"]) AS k WHERE strpos(k, ${name}) > 0
+        UNION ALL SELECT 'envelope', "createdBy", "fileKey" FROM encrypted_objects WHERE strpos("fileKey", ${name}) > 0
+      ) AS refs WHERE key IS NOT NULL AND key <> ''
+      /* customer-selfie-discard-references */
+    `;
+    const same = refs.filter((r) => sameObject(r.key, fileKey));
+    if (same.some((r) => r.source !== 'envelope' || r.owner !== userId || r.key !== fileKey)) return 'CLAIMED' as const;
+    if (await underLegalHold(tx, userId)) return 'HELD' as const;
+    const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
+    await tx.encryptedObject.updateMany({ where: { fileKey, createdBy: userId, shreddedAt: null }, data: { wrappedDek: null } });
+    if (!await deleteStorageObjectAndConfirmAbsent(storage, fileKey)) return 'PENDING' as const;
+    await tx.encryptedObject.updateMany({ where: { fileKey, createdBy: userId, shreddedAt: null }, data: { shreddedAt: new Date(), sha256: ERASED_FINGERPRINT } });
+    await writeDeletionReceipt(tx, {
+      submissionId: `upload:${digest(fileKey)}`, subjectId: userId, tenantId: user.tenantId, docTypeCode: 'unused_customer_selfie', deletedBy: 'customer-id-intake',
+      evidence: {
+        sha256: /^[a-f0-9]{64}$/i.test(own.sha256) ? Buffer.from(own.sha256, 'hex') : null,
+        bytesDeleted: BigInt(own.sizeBytes),
+        storeLocations: [`storage:${fileKey}`, `encrypted_object:${fileKey}`],
+        probe: 'CONFIRMED_ABSENT',
+      },
+    });
+    return 'ERASED' as const;
+  }, { timeout: 60_000 })));
+}
+
+/**
  * Every encrypted upload this person made that no document and no mover pointer
  * claims: the bytes are deleted, the key shredded, the fingerprint forgotten, and
  * a receipt written. Claimed objects belong to the document and mover passes.

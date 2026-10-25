@@ -11,6 +11,7 @@ import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { Prisma } from '@prisma/client';
+import { assignmentLogWhere } from './store-handover-log';
 import type {
   PrismaClient,
   Order,
@@ -883,7 +884,7 @@ export class OrderService {
       select: RIDER_ASSIGNMENT_SNAPSHOT_SELECT,
     });
     const dispatchAssignmentSequence = await tx.orderStatusLog.count({
-      where: { orderId: input.orderId, status: 'RIDER_ASSIGNED' },
+      where: assignmentLogWhere(input.orderId, 'RIDER_ASSIGNED'),
     });
     return { ...assigned, dispatchAssignmentSequence };
   }

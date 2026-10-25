@@ -94,6 +94,8 @@ import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { resolveAvatarUrls } from '../../utils/avatar-url';
+import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
@@ -122,6 +124,8 @@ const updateVendorProfileSchema = z.object({
   estimatedPrepTime: z.number().int().min(0).max(480).optional(),
   // FUL-004: whether this vendor fulfils its own DELIVERY orders with its own courier.
   selfDeliveryEnabled: z.boolean().optional(),
+  // [O-2 · owner 22 Oct 2026] The takeaway pickup code: off by default; the store may turn it on.
+  requirePickupCode: z.boolean().optional(),
   // FUL-007: kitchen-capacity cap. Positive int caps concurrent in-flight orders;
   // null clears the cap (unlimited intake).
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
@@ -662,6 +666,48 @@ function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{
   return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
 }
 
+export { HANDED_TO_RIDER_NOTE };
+
+/** [O-2] The order is still with the store, so a rider may be handed it (and the card shows who). */
+const STORE_HANDOVER_LIVE_STATUSES: readonly string[] = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
+/**
+ * [O-2] What the store's order card needs for the handover, for a page of its orders:
+ * - pickupCodeRequired: the store's takeaway-code setting (off by default);
+ * - handedToRiderAt: when the store tapped "Handed to rider" (the status-log row), or null;
+ * - rider.photoUrl: the assigned rider's photo, RESOLVED (a signed URL or null, never the raw key),
+ *   next to the first name, vehicle and plate the card already gets.
+ */
+async function storeHandoverFields(
+  app: FastifyInstance,
+  orders: ReadonlyArray<{ id: string; status: string; fulfillment: string; riderId?: string | null; vendor?: { requirePickupCode?: boolean } | null; rider?: object | null }>,
+): Promise<Map<string, { pickupCodeRequired: boolean; handedToRiderAt: string | null; rider?: object | null }>> {
+  // Only a delivery with a Swift rider has a handover to record (a booking, a takeaway: nothing to read).
+  const ids = orders.filter((o) => o.fulfillment === 'DELIVERY' && o.riderId).map((o) => o.id);
+  // [REVIEW-G S3-1 on #2055] The store needs the rider's face only to hand the order over: the photo is
+  // read and given only while the order is still with the store (before Picked up), never on a past order.
+  const handoverLive = (o: { status: string }) => STORE_HANDOVER_LIVE_STATUSES.includes(o.status);
+  const riderIds = [...new Set(orders.filter(handoverLive).map((o) => o.riderId).filter((r): r is string => !!r))];
+  const [handed, riders] = await Promise.all([
+    ids.length ? app.prisma.orderStatusLog.findMany({
+      where: handoverEpisodeRowsWhere(ids), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
+    }) : [],
+    riderIds.length ? app.prisma.rider.findMany({ where: { id: { in: riderIds } }, select: { id: true, user: { select: { avatar: true } } } }) : [],
+  ]);
+  const firstHanded = handedToRiderSinceAssignment(handed);
+  const photos = await resolveAvatarUrls(riders.map((r) => r.user?.avatar));
+  const photoOf = new Map(riders.map((r) => [r.id, r.user?.avatar ? photos.get(r.user.avatar) ?? null : null]));
+  const out = new Map<string, { pickupCodeRequired: boolean; handedToRiderAt: string | null; rider?: object | null }>();
+  for (const order of orders) {
+    out.set(order.id, {
+      pickupCodeRequired: order.vendor?.requirePickupCode === true,
+      handedToRiderAt: order.riderId ? firstHanded.get(order.id)?.toISOString() ?? null : null,
+      ...(order.rider && order.riderId ? { rider: { ...order.rider, photoUrl: handoverLive(order) ? photoOf.get(order.riderId) ?? null : null } } : {}),
+    });
+  }
+  return out;
+}
+
 /** [O-4 · owner 22 Oct 2026] An order with an open "Out of stock" question (a swap or a removal
  *  the customer has not answered yet) is not accepted: the customer agrees to the changed order
  *  first. The refusal names the item and how long the answer can take. An order whose every line
@@ -713,7 +759,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
-      vendor: { select: { vendorType: true, selfDeliveryEnabled: true } },
+      vendor: { select: { vendorType: true, selfDeliveryEnabled: true, requirePickupCode: true } },
     },
   });
   if (!order || !order.vendorId || !vendorIds.includes(order.vendorId)) {
@@ -1613,6 +1659,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
           ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
           ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
+          ...(body.requirePickupCode !== undefined && { requirePickupCode: body.requirePickupCode }),
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
           ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
@@ -1965,7 +2012,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each
           // order needs to say which store it belongs to.
-          vendor: { select: { id: true, name: true, selfDeliveryEnabled: true } },
+          vendor: { select: { id: true, name: true, selfDeliveryEnabled: true, requirePickupCode: true } },
         },
         orderBy: { placedAt: 'desc' },
         skip: pagination.skip,
@@ -1981,11 +2028,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // drains toward the auto-cancel cut-off the server actually enforces.
     const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
     const roles = await storeRoles(app, request.user.userId, access);
+    const handover = await storeHandoverFields(app, orders);
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
     const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
+      ...handover.get(order.id),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       ...storeMmgPayBy(order),
@@ -2007,7 +2056,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    const handover = (await storeHandoverFields(app, [order])).get(order.id);
+    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -2724,11 +2774,68 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
     await assertHandoverRequestBudget(app.redis, order.id);
-    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer', {
+    // [O-2 · owner 22 Oct 2026] With the store's takeaway code OFF (the default) the store hands the
+    // order over without a code (the owner's rule: it checks the first name + order number). A code an
+    // older store build still sends is verified exactly as before; with the setting ON, today's flow.
+    const codeWaived = order.vendor?.requirePickupCode !== true;
+    // [REVIEW-F S3-1 on #2055] The note records only what the server knows: no code was asked for.
+    // (Store builds 11/12's board-card "Mark picked up" sends no code and asked for no name check.)
+    const note = codeWaived && !code
+      ? NO_CODE_HANDOVER_NOTE
+      : 'Picked up by customer';
+    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, note, {
       allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',
-      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId! },
+      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId!, codeWaived },
     });
     return { success: true, data: updated };
+  });
+
+  /** PUT /orders/:id/handed-to-rider — [O-2 · owner 22 Oct 2026] the store's one tap when it hands a
+   *  delivery to the assigned Swift rider (the card shows the rider's photo, first name, vehicle and
+   *  plate). EVIDENCE, not custody: the status is unchanged (the rider's "Picked up" moves it), one
+   *  status-log row is written, and a repeat tap (or one after the pickup) is a 200 with no new row.
+   *  Courier/parcel and taxi are never here (no store); a self-delivery has no Swift rider. */
+  // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
+  app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // [REVIEW-G S4-4 on #2055] Like every other in-flight store action: a closed (or non-billing
+    // suspended) store's staff cannot tap.
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
+    if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY' || order.orderType === 'COURIER' || order.orderType === 'TAXI') {
+      throw new AppError(400, 'NOT_A_RIDER_DELIVERY', 'This order is not handed to a Swift rider.');
+    }
+    const HANDOVER_STATUSES: readonly string[] = ['READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+    // Still with the store and no rider can have taken it yet: the answer is "no rider yet", not a status.
+    const BEFORE_A_RIDER: readonly string[] = ['ACCEPTED', 'PREPARING'];
+    const AFTER_PICKUP: readonly string[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'];
+    const handed = await app.prisma.$transaction(async (tx) => {
+      // The order lock every transition takes: a cancellation or a rider release committing first is seen here.
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      const live = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, riderId: true } });
+      // Idempotent per rider: a tap already made for THIS rider's assignment answers again; one made for a
+      // rider who since handed the order back does not speak for the new one.
+      const episodeRows = await tx.orderStatusLog.findMany({
+        where: handoverEpisodeRowsWhere([order.id]), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
+      });
+      // A rider who handed the order back leaves no current rider: an earlier tap answers nothing then.
+      const already = live.riderId ? handedToRiderSinceAssignment(episodeRows).get(order.id) ?? null : null;
+      if (already || AFTER_PICKUP.includes(live.status)) return { handedToRiderAt: already, wrote: false };
+      if (!live.riderId && (BEFORE_A_RIDER.includes(live.status) || HANDOVER_STATUSES.includes(live.status))) {
+        throw new AppError(409, 'NO_RIDER_YET', 'No Swift rider has taken this order yet. Hand it over when the rider arrives.');
+      }
+      if (!HANDOVER_STATUSES.includes(live.status)) {
+        throw new AppError(409, 'INVALID_STATUS', `This order is ${live.status.toLowerCase().replace(/_/g, ' ')} — nothing to hand over.`);
+      }
+      const row = await tx.orderStatusLog.create({
+        data: { orderId: order.id, status: live.status, changedBy: request.user.userId, note: HANDED_TO_RIDER_NOTE },
+        select: { createdAt: true },
+      });
+      return { handedToRiderAt: row.createdAt, wrote: true };
+    });
+    if (handed.wrote && order.vendorId) {
+      await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:handed_to_rider', { orderId: order.id });
+    }
+    return { success: true, data: { orderId: order.id, handedToRiderAt: handed.handedToRiderAt?.toISOString() ?? null } };
   });
 
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
