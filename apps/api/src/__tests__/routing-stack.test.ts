@@ -63,7 +63,7 @@ describe('[routing] the documented URL is the one that works', () => {
     // [Row 312] The API also joins the scanner's own network to reach clamd; that network is internal
     // (no egress, no host ports), so the API still has no route out through it.
     expect(serviceBlock(MAIN_COMPOSE, 'api')).toContain('networks: [private, scanner]');
-    expect(MAIN_COMPOSE).toMatch(/^  scanner:\n    internal: true$/m);
+    expect(MAIN_COMPOSE).toMatch(/^ {2}scanner:\n {4}internal: true$/m);
     for (const name of ['osrm', 'vroom', 'photon', 'nominatim']) {
       expect(serviceBlock(COMPOSE, name), `${name} is not on the private network`).toContain('networks: [private]');
     }
