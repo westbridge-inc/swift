@@ -623,7 +623,7 @@ describe('[REVIEW-M S3-1 (b)] a week of watching MMG after an automatic close: a
     await service.pollIntents(later(closedAt, 31 * MIN));
     let watches = await watchesOf(row.id);
     expect(watches).toHaveLength(1);
-    expect(bodyOf(watches[0]!)).toMatchObject({ decision: 'WATCH_CLEAR', naming: [] });
+    expect(bodyOf(watches[0]!)).toMatchObject({ decision: 'WATCH_CLEAR', records: [] });
     expect(await intentOf(row.id)).toMatchObject({ status: 'NOT_PAID' });
     // MMG then shows the partner's payment, made two hours after the close on a page MMG kept open, with no reply.
     history.holds(tx('AFTERCLOSE'), Number(row.amount), { external_id: row.merchantTransactionId, modificationDate: mmgTimeOf(later(closedAt, 120 * MIN)) });
@@ -631,14 +631,19 @@ describe('[REVIEW-M S3-1 (b)] a week of watching MMG after an automatic close: a
     watches = await watchesOf(row.id);
     expect(watches).toHaveLength(2);
     expect(bodyOf(watches[1]!)).toMatchObject({ decision: 'LATE_RECORD' });
-    expect(bodyOf(watches[1]!)['naming']).toHaveLength(1);
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_HISTORY_RECORD_AFTER_AUTO_CLOSE', providerPaymentId: null });
+    // Only the parsed fields of the row are kept, never its parties.
+    expect(bodyOf(watches[1]!)['records']).toEqual([{ likely: true, externalIdExact: true, statusText: 'completed', amountMinor: Number(row.amount) * 100,
+      currencyCode: 'GYD', transactionReference: tx('AFTERCLOSE'), modificationDate: expect.any(String) }]);
+    expect(JSON.stringify(watches[1]!.body)).not.toContain('accountid');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE', providerPaymentId: null });
     expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE', reason: 'LATE_POSITIVE_REVIEW' });
     expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
     expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
     expect(await topups(s.subId)).toBe(0);
     expect(await walletOf(s.subId)).toBe(wallet);
-    expect(await pagesAbout(op.id, row.id, 'mmg-checkout-held')).toHaveLength(1);
+    const pages = await pagesAbout(op.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toContain('LATE PAYMENT LIKELY');
     expect(await app.prisma.notification.count({ where: { userId: s.userId, data: { path: ['status'], equals: 'HELD' } } })).toBe(1);
     expect(await app.prisma.auditLog.count({ where: { entityId: row.id, action: 'MMG_AUTO_CLOSED_CHECKOUT_LATE_RECORD' } })).toBe(1);
     // Held: the watch is over.
@@ -679,7 +684,42 @@ describe('[REVIEW-M S3-1 (b)] a week of watching MMG after an automatic close: a
     historyFault = null;
     await service.pollIntents(later(closedAt, 31 * MIN + 6 * 60 * MIN + MIN));
     expect(bodyOf((await watchesOf(row.id))[1]!)).toMatchObject({ decision: 'LATE_RECORD' });
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_HISTORY_RECORD_AFTER_AUTO_CLOSE' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE' });
+  });
+
+  it('a row in which our reference merely appears is still held for a person, labelled a possible match (never credited)', async () => {
+    const op = await operator();
+    const { s, row, closedAt } = await autoClosed();
+    history.holds(tx('MENTION'), 999, { external_id: '991234567890123459', descriptionText: `ref ${row.merchantTransactionId}`, modificationDate: mmgTimeOf(later(closedAt, 10 * MIN)) });
+    await service.pollIntents(later(closedAt, 31 * MIN));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'POSSIBLE_MATCH_AFTER_AUTO_CLOSE' });
+    expect(bodyOf((await watchesOf(row.id))[0]!)['records']).toEqual([expect.objectContaining({ likely: false, externalIdExact: false, amountMinor: 99900 })]);
+    const pages = await pagesAbout(op.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toContain('Possible match, check MMG');
+    expect(await topups(s.subId)).toBe(0);
+  });
+
+  it('a worker stopped past the whole week still decides every automatic close: it catches up, and pages the admins once if MMG cannot be read', async () => {
+    const op = await operator();
+    const caught = await autoClosed();
+    history.holds(tx('DURINGDOWN'), Number(caught.row.amount), { external_id: caught.row.merchantTransactionId, modificationDate: mmgTimeOf(later(caught.closedAt, 3 * DAY)) });
+    let when = later(caught.closedAt, 10 * DAY); // nothing ran for ten days
+    for (let i = 0; i < 40 && (await intentOf(caught.row.id)).status === 'NOT_PAID'; i += 1) {
+      await service.pollIntents(when);
+      when = later(when, 2 * MIN);
+    }
+    expect(await intentOf(caught.row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE' });
+    expect((await watchesOf(caught.row.id)).map((w) => bodyOf(w)['decision'])).toContain('WATCH_BEHIND');
+
+    const blind = await autoClosed();
+    historyFault = () => ({ outcome: 'error', reason: 'MMG history HTTP 502' });
+    await service.pollIntents(later(blind.closedAt, 10 * DAY));
+    expect(bodyOf((await watchesOf(blind.row.id)).at(-1)!)).toMatchObject({ decision: 'WATCH_ENDED_INCOMPLETE' });
+    expect(await pagesAbout(op.id, blind.row.id, 'mmg-auto-close-unwatched')).toHaveLength(1);
+    await service.pollIntents(later(blind.closedAt, 11 * DAY));
+    expect(await pagesAbout(op.id, blind.row.id, 'mmg-auto-close-unwatched')).toHaveLength(1);
+    expect(await intentOf(blind.row.id)).toMatchObject({ status: 'NOT_PAID' });
   });
 
   it('an hour MMG answers only in part (cut at the row limit) is not read as clean: coverage stays, it is read again', async () => {
