@@ -1629,6 +1629,26 @@ model Vendor {
   /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
   /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
   vatRegistrationNumber String?
+  /// [STORE-VAT · owner O-5, 22 Oct 2026] Whether this store's prices carry VAT the STORE charges (VAT Act Cap. 81:05).
+  /// NONE (default) = not VAT-registered: no VAT anywhere, prices as typed. A store that says it is registered
+  /// sends its GRA certificate (a VerificationDocument, docType vat_registration_certificate) and goes PENDING;
+  /// only a PERSON's approval (admin store-VAT decision: certificate checked, number typed from it, name
+  /// matched) makes it APPROVED. VAT shows only while modules/store-vat storeVatEffective() holds:
+  /// STORE_VAT on, APPROVED, a mode chosen, and the typed number still equal to the approved one.
+  vatStatus             StoreVatStatus           @default(NONE)
+  /// How the store's typed prices relate to VAT. Null until the store chooses.
+  vatMode               StoreVatMode?
+  /// The certificate the decision is about (VerificationDocument.id; loose reference, like OrderItem.itemId).
+  vatCertificateDocId   String?
+  /// Frozen by the person who approved: the number they typed from the certificate, the registered name on it,
+  /// and the effective date it states (VAT Act s.12(7)). Receipts show these, never the store-typed number.
+  vatApprovedNumber     String?
+  vatApprovedName       String?
+  vatEffectiveFrom      DateTime?                @db.Date
+  /// Who decided (admin user id), when, and the reason given for a rejection or revocation.
+  vatReviewedBy         String?
+  vatReviewedAt         DateTime?
+  vatReviewNote         String?
   /// [R3 · CAA s.70(3) · legal research D10 + E5 · owner 15 Oct 2026] The store's OWN refund rule, typed by the owner
   /// (plain words, no links, at most 300 characters; checked on write by utils/vendor-refund-rule.ts). Its storefront
   /// shows it with the statutory-rights sentence; null = none on file, and the storefront says "Ask the store".
@@ -1803,6 +1823,10 @@ model Item {
   /// approved — the hash of the judged text — so any edit brings the check back.
   reviewApprovedHash String?
   reviewApprovedAt   DateTime?
+  /// [STORE-VAT · owner O-5] The VAT class the STORE gives this item (it is told it is responsible; help text points
+  /// to the GRA, VAT Act Schedules I-II). Only STANDARD goods carry VAT, and only for a store whose VAT a person
+  /// approved. Default STANDARD: every existing item, and every item an older app creates.
+  vatClass          VatClass          @default(STANDARD)
   dietaryTags       String[]
   allergens         String[]
   totalOrdered      Int               @default(0)
@@ -2049,6 +2073,22 @@ model Order {
   deliveryFee      Decimal @db.Decimal(12, 2)
   serviceFee       Decimal @default(0) @db.Decimal(12, 2)
   taxAmount        Decimal @default(0) @db.Decimal(12, 2)
+  /// [STORE-VAT · owner O-5] The VAT INCLUDED in this order's goods, frozen at checkout and recomputed by
+  /// store-vat/order-vat.ts whenever the goods change (substitution, a removed line). Null = the store was not
+  /// an approved VAT store when the order was placed (every order before this column). Never added to
+  /// totalAmount: VAT-registered stores' prices include VAT (VAT Act s.90), so taxAmount stays 0.
+  vatAmount        Decimal? @db.Decimal(12, 2)
+  /// The rate the VAT was computed at, in basis points (1400 = 14%), frozen with it.
+  vatRateBps       Int?
+  /// Goods by VAT class (VAT Regulations reg. 10(d): zero-rated goods shown separately with their own total),
+  /// and the standard-rated amount the VAT was taken from (after the goods discount).
+  vatStandardGoods Decimal? @db.Decimal(12, 2)
+  vatZeroRatedGoods Decimal? @db.Decimal(12, 2)
+  vatExemptGoods   Decimal? @db.Decimal(12, 2)
+  vatBase          Decimal? @db.Decimal(12, 2)
+  /// The seller's approved VAT number and registered name, frozen at checkout (what the receipt shows).
+  vatSellerNumber  String?
+  vatSellerName    String?
   tipAmount        Decimal @default(0) @db.Decimal(12, 2)
   discount         Decimal @default(0) @db.Decimal(12, 2)
   totalAmount      Decimal @db.Decimal(12, 2)
@@ -2736,8 +2776,37 @@ model OrderItem {
   /// total can't change in-app, the question is withdrawn. NULL = no open
   /// question (or one proposed before this column: the sweep starts its clock).
   substituteDecideBy DateTime?
+  /// [STORE-VAT · owner O-5] SNAPSHOT of the item's VAT class at order time (the substitute's, once a swap is
+  /// approved). Null = the order is not a VAT store's order.
+  vatClass           VatClass?
 
   @@map("order_items")
+}
+
+/// [STORE-VAT · owner O-5] VAT class of a store's item (VAT Act s.17 Schedule I zero-rated, s.18 Schedule II exempt).
+enum VatClass {
+  STANDARD
+  ZERO_RATED
+  EXEMPT
+}
+
+/// [STORE-VAT · owner O-5] Where a store's VAT registration stands. Only APPROVED (a person checked the
+/// certificate) ever shows VAT.
+enum StoreVatStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+/// [STORE-VAT · owner O-5] PRICES_INCLUDE_VAT: the store's typed prices already include VAT (the customer pays
+/// them unchanged; VAT shown = price x 14/114). ADD_VAT_AT_CHECKOUT: the store types prices before VAT and the
+/// server adds 14% INTO the price customers see (never a surprise at checkout; VAT Act s.90(2)) — accepted
+/// once the follow-up server change ships; refused until then.
+enum StoreVatMode {
+  PRICES_INCLUDE_VAT
+  ADD_VAT_AT_CHECKOUT
 }
 
 enum SubstitutionStatus {
