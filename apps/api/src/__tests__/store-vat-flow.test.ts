@@ -392,7 +392,7 @@ describe('4. a PERSON decides', () => {
     // The store is told what changed and what to check (item classes), once, in VAT words; no generic "Document approved".
     const notices = await app.prisma.notification.findMany({ where: { userId: ownerUserId } });
     expect(notices.filter((n) => n.title === 'Your VAT is approved').map((n) => n.body)).toEqual([
-      'A person at Swift checked your GRA VAT certificate. From 2026-01-01, your prices include VAT at 14% and your receipts say '
+      'A person at Swift checked your GRA VAT certificate. From 1 Jan 2026, your prices include VAT at 14% and your receipts say '
       + '“VAT charged by Vat Corner Trading · VAT reg. no. 012345678”. Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
     ]);
     expect(notices.some((n) => n.title === 'Document approved')).toBe(false);

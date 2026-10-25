@@ -6,6 +6,14 @@
  */
 import { STORE_VAT_RATE_PERCENT } from './vat-rate';
 
+/** [REVIEW-F #2102 S4] The certificate's effective date as people read it ("1 Jan 2026"). It is a calendar day (a DATE
+ *  column, midnight UTC), so it is read in UTC: never shifted to the evening before. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+export function calendarDay(date: Date): string {
+  // One fixed month table (not Intl): the web and the phone print the same words ("1 Sep 2026", never "1 Sept 2026").
+  return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+
 /** The reviewer's words as one sentence: trimmed, ending in a full stop. */
 function sentence(reason: string): string {
   const t = reason.trim();
@@ -15,7 +23,7 @@ function sentence(reason: string): string {
 export function storeVatApprovedNotice(v: { registeredName: string; number: string; effectiveFrom: Date; ratePercent?: number }): { title: string; body: string } {
   return {
     title: 'Your VAT is approved',
-    body: `A person at Swift checked your GRA VAT certificate. From ${v.effectiveFrom.toISOString().slice(0, 10)}, your prices include VAT at `
+    body: `A person at Swift checked your GRA VAT certificate. From ${calendarDay(v.effectiveFrom)}, your prices include VAT at `
       + `${v.ratePercent ?? STORE_VAT_RATE_PERCENT}% and your receipts say “VAT charged by ${v.registeredName} · VAT reg. no. ${v.number}”. `
       + 'Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
   };
