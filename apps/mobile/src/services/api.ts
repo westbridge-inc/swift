@@ -624,6 +624,8 @@ export interface RideRequestBody {
   stops?: TaxiStopInput[];
   /** The fare of the chosen class from the latest quote of exactly this itinerary. */
   expectedFare?: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms shown beside that fare, when any were. */
+  waiting?: { chargePerBlock: number; blockMinutes: number };
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */

@@ -181,15 +181,18 @@ IDENTITY_ENV="${IDENTITY#*:}"
 cd "$ROOT"
 [ -z "$(git status --porcelain --untracked-files=normal)" ] ||
   die "checkout has local changes; refusing to build a ceremony image from it"
-git fetch origin main
+git fetch origin main >&2
 git merge-base --is-ancestor "$SHA" origin/main ||
   die "the requested SHA is not on current origin/main"
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "the checkout is not at the requested SHA; run pilot-up.sh <sha> first"
 
 export SWIFT_TAG="$SHA"
-"${COMPOSE[@]}" config --quiet || die "compose configuration is invalid"
+"${COMPOSE[@]}" config --quiet >&2 || die "compose configuration is invalid"
 
 # Build the `build` stage of the exact checkout, then run the seed exactly
 # once. `--rm` removes the ceremony container; `--no-TTY` keeps it a script.
-"${COMPOSE[@]}" build seed || die "the seed ceremony image could not be built"
+# Stdout is the seed's own text only (the plan, the request block the signers
+# read, the approval lines): every build and progress line goes to stderr,
+# so `> request.txt` captures exactly what is signed.
+"${COMPOSE[@]}" build seed >&2 || die "the seed ceremony image could not be built"
 "${COMPOSE[@]}" run --rm --no-TTY seed

@@ -62,6 +62,18 @@ export function waitingDisclosure(source: unknown): string | null {
   return terms.text ?? `Waiting: ${money(terms.chargePerBlock)} per ${terms.blockMinutes} minutes after your driver arrives`;
 }
 
+/**
+ * [TAXI waiting charge · quote proof] The terms to echo with the booking: the
+ * numbers behind the line shown beside the fare (waitingDisclosure), so the
+ * server freezes the terms the passenger saw (409 WAITING_TERMS_CHANGED when
+ * they moved). Null whenever no line is shown: terms never seen are never echoed.
+ */
+export function waitingEcho(source: unknown): { chargePerBlock: number; blockMinutes: number } | null {
+  const terms = termsOf((source as { waiting?: unknown } | null | undefined)?.waiting);
+  if (!terms || !Number.isInteger(terms.chargePerBlock) || !Number.isInteger(terms.blockMinutes)) return null;
+  return { chargePerBlock: terms.chargePerBlock, blockMinutes: terms.blockMinutes };
+}
+
 /** The live wait on a ride (§8.3), present from the driver's arrival on. */
 export function liveWaiting(ride: unknown): WaitingLive | null {
   const raw = (ride as { waiting?: unknown } | null | undefined)?.waiting as Record<string, unknown> | null | undefined;
