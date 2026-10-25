@@ -30,7 +30,8 @@ import { money } from '../../../lib/money';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
-import { openExternal } from '../../../lib/openExternal';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
@@ -819,15 +820,18 @@ export function ActiveJobScreen({ navigation }: any) {
                     {custName ?? 'Customer'}
                   </T>
                 </View>
-                {cust.phone ? (
-                  <Pressable onPress={() => void openExternal(`tel:${cust.phone}`, "Couldn't start the call — dial the customer directly.")} hitSlop={6}>
-                    {({ pressed }) => (
-                      <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed ? 0.7 : 1 }}>
-                        <Feather name="phone" size={17} color={dk.success} />
-                      </View>
-                    )}
-                  </Pressable>
-                ) : null}
+                {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+                <CallParty orderId={job?.id} target="customer" phone={cust.phone} dialFailText="Couldn't start the call — dial the customer directly.">
+                  {(call) => (
+                    <Pressable onPress={call.onPress} disabled={call.busy} hitSlop={6} accessibilityRole="button" accessibilityLabel={call.label} accessibilityHint={call.hint}>
+                      {({ pressed }) => (
+                        <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed || call.busy ? 0.7 : 1 }}>
+                          <Feather name="phone" size={17} color={dk.success} />
+                        </View>
+                      )}
+                    </Pressable>
+                  )}
+                </CallParty>
                 <Pressable onPress={() => navigation.navigate('Conversation', { orderId: job.id, title: custName ?? 'Customer' })} hitSlop={6}>
                   {({ pressed }) => (
                     <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed ? 0.7 : 1 }}>
@@ -837,6 +841,8 @@ export function ActiveJobScreen({ navigation }: any) {
                 </Pressable>
               </DCard>
             ) : null}
+            {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+            {cust ? <SwiftCallNumberTip /> : null}
 
             {/* SOS — anyone alone with a stranger on a cash job needs an
                 emergency path, not just the passenger and not just the driver.

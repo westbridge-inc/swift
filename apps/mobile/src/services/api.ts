@@ -20,6 +20,7 @@ import {
   resolveApiOrigin,
 } from './apiOrigin';
 import { explainDemoEnded, isReviewSessionClosed } from '../lib/reviewSessionClosed';
+import { CALL_BRIDGE_HEADER, CALL_BRIDGE_VERSION, type CallConfig, type CallTarget } from '../lib/callBridge';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Development follows the current Expo/Metro bundle host so
@@ -130,6 +131,9 @@ api.interceptors.request.use((config) => {
     config.timeout = 20000;
   }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
+  // [O-1] This app knows the Swift call bridge. With the bridge on, the server then sends no other
+  // person's personal number; with it off (the launch state) nothing changes (lib/callBridge.ts).
+  config.headers[CALL_BRIDGE_HEADER] = CALL_BRIDGE_VERSION;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
   const authorization = config.headers.get('Authorization');
@@ -1435,6 +1439,12 @@ export const vendorApi = {
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging
+/** [O-1] The Swift call bridge (lib/callBridge.ts). */
+export const callsApi = {
+  config: () => api.get<{ success: boolean; data: CallConfig }>('/calls/config'),
+  bridge: (orderId: string, target: CallTarget) => api.post<{ success: boolean; data: { callId: string; status: string } }>('/calls/bridge', { orderId, target }),
+};
+
 export const chatApi = {
   room: (orderId: string) => api.post('/chat/rooms', { orderId }),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),

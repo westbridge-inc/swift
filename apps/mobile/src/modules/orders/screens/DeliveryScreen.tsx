@@ -1,5 +1,7 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
@@ -1237,26 +1239,34 @@ export function DeliveryScreen() {
               >
                 <Feather name="message-circle" size={18} color={color.white} />
               </Pressable>
-              {rider.phone ? (
-                <Pressable
-                  onPress={() => void openExternal(`tel:${rider.phone}`, "Couldn't start the call — dial your rider directly.")}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Call ${rider.firstName ?? 'your rider'}`}
-                  accessibilityHint="Opens the phone dialer"
-                  style={{
-                    width: space['5xl'],
-                    height: space['5xl'],
-                    borderRadius: radius.full,
-                    backgroundColor: color.brand[500],
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <Feather name="phone" size={18} color={color.white} />
-                </Pressable>
-              ) : null}
+              {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+              <CallParty orderId={o?.id ?? orderId} target="rider" phone={rider.phone} dialFailText="Couldn't start the call — dial your rider directly.">
+                {(call) => (
+                  <Pressable
+                    onPress={call.onPress}
+                    disabled={call.busy}
+                    accessibilityRole="button"
+                    accessibilityLabel={call.viaSwift ? `${call.label}: ${rider.firstName ?? 'your rider'}` : `Call ${rider.firstName ?? 'your rider'}`}
+                    accessibilityHint={call.hint}
+                    style={{
+                      width: space['5xl'],
+                      height: space['5xl'],
+                      borderRadius: radius.full,
+                      backgroundColor: color.brand[500],
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      opacity: call.busy ? 0.7 : 1,
+                    }}
+                  >
+                    <Feather name="phone" size={18} color={color.white} />
+                  </Pressable>
+                )}
+              </CallParty>
             </View>
           ) : null}
+
+          {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+          {!terminal && rider ? <SwiftCallNumberTip /> : null}
 
           {/* EMERGENCY. Above this sits a button to phone the stranger walking
               up your path, and further down one to file a support ticket.
