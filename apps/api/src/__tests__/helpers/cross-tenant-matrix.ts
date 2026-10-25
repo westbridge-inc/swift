@@ -64,6 +64,13 @@ export interface World {
 
 const phone = (run: string, n: number) => `+59210${String(Number.parseInt(run.slice(0, 6), 16) % 100000).padStart(5, '0')}${String(n).padStart(2, '0')}`;
 
+/**
+ * The word an `:kind` / `:queue` URL segment takes. Held in a constant on purpose: the notification
+ * censuses (alert-class-census, mobile notification-router) read every `kind: '<word>'` literal in
+ * apps/api/src as a push kind the API sends, and a URL parameter is not one.
+ */
+const URL_WORD_ORDER = 'order';
+
 /** Production fixtures (every human-readable field carries `mark`) and the attackers' accounts, written by the suite's owner client. */
 export async function seedWorld(owner: PrismaClient): Promise<World> {
   const run = randomBytes(5).toString('hex');
@@ -176,6 +183,13 @@ export async function seedWorld(owner: PrismaClient): Promise<World> {
       await owner.reimbursementClaim.deleteMany({ where: { customerId: { in: all } } }).catch(swallow);
       await owner.booking.deleteMany({ where: { customerId: { in: all } } }).catch(swallow);
       await owner.cart.deleteMany({ where: { customerId: { in: all } } }).catch(swallow);
+      // Ratings (SetNull on the order) and the chat room's participants and messages hold the
+      // users: without these the user delete below failed as ONE statement and stranded every
+      // attacker, both fiction tenants and the victims (tenancy-foundation counts them).
+      await owner.rating.deleteMany({ where: { raterId: { in: all } } }).catch(swallow);
+      await owner.chatMessage.deleteMany({ where: { OR: [{ chatRoomId: room.id }, { senderId: { in: all } }] } }).catch(swallow);
+      await owner.chatRoomParticipant.deleteMany({ where: { OR: [{ chatRoomId: room.id }, { userId: { in: all } }] } }).catch(swallow);
+      await owner.chatRoom.deleteMany({ where: { id: room.id } }).catch(swallow);
       await owner.subscription.deleteMany({ where: { vendor: { ownerId: { in: [vendorOwner.id, bVendorOwner.id] } } } }).catch(swallow);
       await owner.order.deleteMany({ where: { OR: [{ customerId: { in: all } }, { vendor: { ownerId: { in: [vendorOwner.id, bVendorOwner.id] } } }] } }).catch(swallow);
       await owner.verificationDocument.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
@@ -186,10 +200,13 @@ export async function seedWorld(owner: PrismaClient): Promise<World> {
       await owner.vendorOwner.deleteMany({ where: { id: { in: [vendorOwner.id, bVendorOwner.id] } } }).catch(swallow);
       await owner.rider.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
       await owner.driver.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
-      await owner.user.deleteMany({ where: { id: { in: all } } }).catch(swallow);
+      // The last three are not swallowed: a row left behind here outlives the suite and breaks
+      // whole-database checks in later files, so a failure must surface in THIS suite.
+      await owner.user.deleteMany({ where: { id: { in: all } } });
       await owner.reviewSession.deleteMany({ where: { tenantId: review } }).catch(swallow);
-      await owner.tenant.updateMany({ where: { id: review }, data: { purgeProtected: false } }).catch(swallow);
-      await owner.tenant.deleteMany({ where: { id: { in: [review, tenantB] } } }).catch(swallow);
+      await owner.tenant.updateMany({ where: { id: review }, data: { purgeProtected: false } });
+      const tenants = await owner.tenant.deleteMany({ where: { id: { in: [review, tenantB] } } });
+      if (tenants.count !== 2) throw new Error(`matrix cleanup left ${2 - tenants.count} fiction tenant(s) behind`);
     },
   };
 }
@@ -225,7 +242,7 @@ export function materialize(url: string, w: World): string {
     userId: v.customer, vendorId: v.vendor, itemId: v.item, roomId: v.room, caseId: v.sos, docId: v.document, lineId: v.orderItem,
     subscriptionId: v.subscription, sessionId: v.order, cardId: v.order, groupId: v.optionGroup, blockedUserId: v.customer,
     slug: `matrix-${w.run}`, code: 'MATRIX', token: 'matrix-token', key: 'matrix-key', ref: 'MATRIXREF', san: '000000000', format: 'json',
-    kind: 'order', action: 'view', queue: 'order',
+    kind: URL_WORD_ORDER, action: 'view', queue: URL_WORD_ORDER,
   };
   const parts = url.split('/');
   return parts.map((part, i) => {

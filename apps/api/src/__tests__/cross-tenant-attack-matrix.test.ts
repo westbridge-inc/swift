@@ -2,6 +2,7 @@ import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { buildMatrixApp, digestProduction, seedWorld, sweep, type Finding, type World } from './helpers/cross-tenant-matrix';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ beforeAll(async () => {
   vi.stubEnv('RATE_LIMIT_MAX', '1000000'); // the global ceiling is not under test (see buildMatrixApp)
   vi.stubEnv('TEST_CONTROL_ENABLED', '0'); // the load-build control routes never mount here
   vi.stubEnv('RUN_WORKERS', '0'); // requests only: the scheduler would page the seeded SOS itself (see buildMatrixApp)
-  owner = new PrismaClient({ datasourceUrl: TEST_URL });
+  owner = testPrismaClient(TEST_URL);
   ({ app, routes } = await buildMatrixApp());
   world = await seedWorld(owner);
   before = await digestProduction(owner, world);

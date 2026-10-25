@@ -2,6 +2,7 @@ import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { appRoleDdl } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
@@ -44,7 +45,7 @@ beforeAll(async () => {
   vi.stubEnv('RUN_WORKERS', '0'); // requests only: the scheduler would page the seeded SOS itself (see buildMatrixApp)
   for (const k of ENV_KEYS) priorEnv[k] = process.env[k];
   // The fixture writer: the suite's own privileged connection (never the app's client).
-  owner = new PrismaClient({ datasourceUrl: TEST_URL });
+  owner = testPrismaClient(TEST_URL);
   await installDdl(owner, [
     ...appRoleDdl(),
     `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_rls_probe') THEN CREATE ROLE swift_rls_probe NOLOGIN NOBYPASSRLS; END IF; END $$`,
