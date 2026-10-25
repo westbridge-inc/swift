@@ -4,14 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, feeStatusPill, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
-
-/** The dot beside the status word: colour is the second signal, the word is the first. */
-const TONE_DOT: Record<string, string> = {
-  success: 'bg-[var(--swift-success)]', brand: 'bg-[var(--swift-success)]', warning: 'bg-[var(--swift-warning)]', error: 'bg-[var(--swift-error)]',
-};
 
 export function WeeklyFee({ family }: { family: FeeFamily }) {
   const storeId = useStoreId();
@@ -62,13 +57,12 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   // The card choice exists only when the server says CARD is live.
   const card = liveCard(sub.payActions);
   const status = feeStatusOf(sub);
-  const pill = feeStatusPill(status.state);
   return <section className="max-w-3xl space-y-6">
     <h1 className="text-2xl font-extrabold">Weekly fee</h1>
     <div className="space-y-3 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
       {/* [FEE-STATUS · owner 25 Oct] Where the fee stands, in the API's words: it read "Nothing due right now:
           your next bill is 13 Oct 2026" + "Active" on 25 October. Never a passed date as a next bill. */}
-      <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]"><span aria-hidden="true" className={`h-2 w-2 rounded-full ${TONE_DOT[pill.tone] ?? 'bg-[var(--swift-muted)]'}`} />{pill.label}</p>
+      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]">Your weekly fee</p>
       <p className="text-2xl font-extrabold sm:text-3xl" data-testid="weekly-fee-status">{status.headline}</p>
       {status.detail && <p className="text-sm">{status.detail}</p>}
       {checkout && <p role="status">{checkoutWords(checkout, view.returned)}</p>}

@@ -22,7 +22,8 @@ import { openMenuList } from '../menuDoor';
 import { rejectReasonsFor } from '../rejectReasons';
 import { renewalBannerCopy } from '../renewal-banner';
 import { paymentMethodWords, qrStatusWords } from '../storeWords';
-import { feeStatusOf, feeStatusPill } from '../../../lib/weeklyFee';
+import { feeStatusOf } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import {
   BoardFirstRun,
   BoardFirstRunRow,

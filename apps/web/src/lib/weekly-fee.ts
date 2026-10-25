@@ -69,15 +69,6 @@ export function feeStatusOf(sub: FeeSubscription, now = Date.now()): FeeStatus {
   const grace = at(sub.gracePeriodEnd) > now ? ` Pay by ${feeDate(sub.gracePeriodEnd)} to keep receiving work.` : '';
   return word('DUE', due && next ? `Payment due since ${next}` : 'Payment due now', `${amountDue > 0 ? `${feeMoney(amountDue)} to pay.` : ''}${grace}`.trim() || null, due ? sub.nextBillingDate ?? null : null);
 }
-/** The short word for a pill beside the fee, and its tone. Never the code, never "Active" on a week that is due. */
-export function feeStatusPill(state: FeeStatusState): { label: string; tone: 'success' | 'warning' | 'error' | 'brand' | 'neutral' } {
-  return ({
-    TRIAL: { label: 'Free trial', tone: 'brand' }, PAID: { label: 'Paid', tone: 'success' }, COVERED: { label: 'Paid', tone: 'success' },
-    DUE: { label: 'Payment due', tone: 'warning' }, CHECKING: { label: 'Checking payment', tone: 'warning' }, FEE_PAUSED: { label: 'Fee paused', tone: 'neutral' },
-    SUSPENDED: { label: 'Suspended', tone: 'error' }, INACTIVE: { label: 'Inactive', tone: 'error' }, STOPPED: { label: 'Billing stopped', tone: 'neutral' },
-    CLOSED: { label: 'Closed', tone: 'neutral' }, UNKNOWN: { label: 'Status unavailable', tone: 'neutral' },
-  } as const)[state] ?? { label: 'Status unavailable', tone: 'neutral' };
-}
 export function subscriptionWords(status: string): string {
   return ({ TRIAL: 'Free trial', ACTIVE: 'Active', PAST_DUE: 'Weekly fee overdue', SUSPENDED: 'Account suspended', CHURNED: 'Account inactive', PAUSED: 'Weekly billing paused', CANCELLED: 'Subscription closed' } as Record<string, string>)[status] ?? 'Status unavailable';
 }

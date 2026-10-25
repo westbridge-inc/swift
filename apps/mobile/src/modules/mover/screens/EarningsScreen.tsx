@@ -14,7 +14,8 @@ import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 import { weeksCovered } from '../../../lib/billing';
-import { feeStatusOf, feeStatusPill, type FeeSubscription } from '../../../lib/weeklyFee';
+import { feeStatusOf, type FeeSubscription } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,

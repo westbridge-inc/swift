@@ -2,7 +2,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { billingHeadline, billingPill, feeStatusPillWords, subscriptionWords } from './subscription-words';
-import { feeStatusPill, subscriptionWords as weeklyFeeWords, type FeeStatusState } from './weekly-fee';
+import { subscriptionWords as weeklyFeeWords, type FeeStatusState } from './weekly-fee';
+import { feeStatusPill } from '../../../mobile/src/lib/feeStatusPill';
 
 // The Orders home names the subscription state from this small file so the
 // Orders page does not load the whole weekly-fee module (perf-budget). Its
@@ -29,7 +30,7 @@ describe('the subscription state reads the same on the Orders home and the weekl
 
   // [FEE-STATUS · owner 25 Oct 2026] The Billing pill names where the fee stands, in the weekly-fee page's words.
   const states: FeeStatusState[] = ['TRIAL', 'PAID', 'COVERED', 'DUE', 'CHECKING', 'FEE_PAUSED', 'SUSPENDED', 'INACTIVE', 'STOPPED', 'CLOSED', 'UNKNOWN'];
-  it.each(states)('fee status %s has the weekly-fee page\'s pill words', (state) => {
+  it.each(states)('fee status %s has the phone\'s pill words', (state) => {
     expect(feeStatusPillWords(state)).toEqual(feeStatusPill(state));
   });
   it("the tile shows the API's feeStatus, and without it the state's words, never a date", () => {

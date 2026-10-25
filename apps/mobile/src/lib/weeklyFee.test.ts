@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutReferences, checkoutWords, feeStatusOf, feeStatusPill, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
+import { checkoutReferences, checkoutWords, feeStatusOf, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
 const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];
@@ -44,8 +44,6 @@ describe('weekly fee contract', () => {
     expect(feeStatusOf({ status: 'TRIAL', isTrialActive: true, amountDueGyd: 0, trialEndDate: '2026-11-05T15:00:00Z', nextBillingDate: '2026-11-05T15:00:00Z' }, NOW).headline).toBe('Free trial until 5 Nov 2026');
     expect(feeStatusOf({ status: 'TRIAL', isTrialActive: true, amountDueGyd: 15000, trialEndDate: '2026-10-20T15:00:00Z', nextBillingDate: '2026-10-20T15:00:00Z' }, NOW).headline).toBe('Payment due since 20 Oct 2026');
     expect(feeStatusOf({ status: 'CANCELLED' }, NOW).headline).toBe('Subscription closed');
-    expect(feeStatusPill('DUE')).toEqual({ label: 'Payment due', tone: 'warning' });
-    expect(feeStatusPill('COVERED').label).toBe('Paid');
   });
   it.each([
     ['OPEN', 'Finish paying on the MMG page.'], ['CONFIRMING', "Confirming your payment with MMG. Don't pay again."],

@@ -13,7 +13,8 @@
 // ---------------------------------------------------------------------------
 
 import { formatMoney, parseAmount } from './money';
-import { feeStatusOf, feeStatusPill, type FeeSubscription } from './weekly-fee';
+import { feeStatusOf, type FeeSubscription } from './weekly-fee';
+import { feeStatusPillWords } from './subscription-words';
 
 type Sub = Record<string, unknown> | null | undefined;
 
@@ -35,7 +36,7 @@ const statusOf = (sub: Record<string, unknown>) => feeStatusOf(sub as unknown as
 /** The status word, the phone's pill. */
 export function subscriptionStatusWord(sub: Sub): string {
   if (!sub) return 'Not active yet';
-  return feeStatusPill(statusOf(sub).state).label;
+  return feeStatusPillWords(statusOf(sub).state).label;
 }
 
 /** A trial or a paid week is in good standing; everything else needs the partner's attention. */

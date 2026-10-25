@@ -23,7 +23,7 @@ export const subscriptionWords = (status: string): string => SUBSCRIPTION_WORDS[
 
 /**
  * [FEE-STATUS · owner 25 Oct 2026] The Billing tile's pill: where the fee stands, from the API's
- * feeStatus (the web ships with its API). The same words as lib/weekly-fee feeStatusPill
+ * feeStatus (the web ships with its API). The same words as the phone's lib/feeStatusPill
  * (subscription-words.test pins them); an answer without feeStatus names the state in words.
  */
 const FEE_STATUS_PILL: Record<string, { label: string; tone: 'success' | 'warning' | 'error' | 'brand' | 'neutral' }> = {
@@ -40,8 +40,11 @@ export function billingPill(sub: Sub): { label: string; tone: 'success' | 'warni
   const state = sub?.feeStatus?.state;
   return typeof state === 'string' ? feeStatusPillWords(state) : { label: subscriptionWords(String(sub?.status ?? '')), tone: 'neutral' };
 }
-/** The Billing tile's line: the API's feeStatus headline, else the state's words (never a date it cannot vouch for). */
+/** The Billing tile's line: the API's feeStatus headline, else the state's words (never a date it cannot vouch for).
+ *  It replaced vendor-hub billingSummary ("Next bill <date>", the phone VendorOps copy); it lives here so the
+ *  board's shared helpers (vendor-hub, in every dashboard page's first load) stay as small as they were. */
 export function billingHeadline(sub: Sub): string {
-  const headline = sub?.feeStatus?.headline;
-  return typeof headline === 'string' && headline ? headline : subscriptionWords(String(sub?.status ?? ''));
+  if (!sub) return 'Subscription not active';
+  const headline = sub.feeStatus?.headline;
+  return typeof headline === 'string' && headline ? headline : subscriptionWords(String(sub.status ?? ''));
 }
