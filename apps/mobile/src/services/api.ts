@@ -964,7 +964,7 @@ export const verificationApi = {
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
+    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' | 'customer_id_v2' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };

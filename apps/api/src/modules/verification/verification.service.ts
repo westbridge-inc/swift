@@ -1682,7 +1682,8 @@ export class VerificationService {
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         ...(noneStands
-          ? { title: 'Your ID is no longer on file', body: 'Our team withdrew the ID on your account. Taxi rides and orders over the ID limit need a new ID — add it in the app and a person will look at it.' }
+          // [Owner ruling 24 Oct 2026] Nothing locks again at L1 (no taxi or order-size ID gate): no lock is promised.
+          ? { title: 'Your ID is no longer on file', body: 'Our team withdrew the ID on your account. If the app asks for your ID, add it again and a person will look at it.' }
           : { title: 'An ID on your account was withdrawn', body: 'Our team withdrew one of the IDs on your account. Another ID is still on file.' }),
         audience: 'customer',
         data: { kind: 'verification_rejected' },
@@ -3067,10 +3068,10 @@ export class VerificationService {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(basis === 'ON_FILE'
-        // Truthful: the ID unlocks bigger orders and taxi rides. [Owner ruling 16 Oct] A customer never
-        // needs a photo — a ride needs only the ID on file (rides.service assertL2).
-        ? { title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' }
-        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders and taxi rides are unlocked now.' }),
+        // Truthful: [Owner ruling 24 Oct 2026] taxi rides and bigger orders no longer need the ID, so the
+        // notice claims no unlock; it says where the ID is kept. [16 Oct] A customer never needs a photo.
+        ? { title: 'Your ID is on file', body: 'Thanks — it is kept with your account, as the Privacy Policy explains.' }
+        : { title: 'Identity verified', body: 'A person on our team checked your ID. It is kept with your account, as the Privacy Policy explains.' }),
       audience: 'customer',
       data: { kind: 'verification_l2' },
     });

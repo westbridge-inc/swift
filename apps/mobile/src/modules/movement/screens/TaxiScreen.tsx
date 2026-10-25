@@ -38,7 +38,6 @@ import { openExternal } from '../../../lib/openExternal';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
-import { taxiDoorFor } from '../../../lib/taxiDoors';
 import { noDriverView } from '../../../lib/taxiNoDriver';
 import { TaxiSignedOut } from '../TaxiSignedOut';
 import { signInForTaxi } from '../taxiEntry';
@@ -475,16 +474,13 @@ function TaxiBooking({ navigation }: any) {
     : stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
-  // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  // [Owner 16 Oct] Customers take no photos: the ID check is the only door.
-  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
-  const needsL2 = door === 'identity';
+  // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] A ride needs no ID (and, since 16 Oct, no
+  // photo), so the screen opens no "Add your ID" door: the server no longer refuses a ride for it.
   // Joining the queue passes the same account gates as a request (the route
-  // and the queue share one authority boundary), so its refusal must show,
-  // with the same doors — never a silent tap.
+  // and the queue share one authority boundary), so its refusal must show —
+  // never a silent tap.
   const queueErrBody = (joinQueue.error as any)?.response?.data;
   const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
-  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -749,14 +745,6 @@ function TaxiBooking({ navigation }: any) {
               {errMsg}
             </T>
           ) : null}
-          {needsL2 ? (
-            <PillButton
-              label="Add your ID — takes a minute"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('IdentityVerification')}
-            />
-          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -836,14 +824,6 @@ function TaxiBooking({ navigation }: any) {
                 <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
                   {queueErrMsg}
                 </T>
-              ) : null}
-              {queueDoor === 'identity' ? (
-                <PillButton
-                  label="Add your ID — takes a minute"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('IdentityVerification')}
-                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}

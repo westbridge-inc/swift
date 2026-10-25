@@ -81,9 +81,10 @@ describe('[2026-10-21] Privacy Policy: phone crash reports, kept 90 days', () =>
 
 describe('[2026-10-21] one material version: everyone re-accepts once, with the summary', () => {
   // [owner 22 Oct 2026] 2026-10-22 (Terms s.7 one-minute cancel window, NON-material) is served on top of it: the
-  // newest MATERIAL version is still 2026-10-21, so this summary is still the one a re-accept shows.
-  it('2026-10-21 is the newest material version (served under 2026-10-22, non-material)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-22');
+  // newest MATERIAL version is still 2026-10-21, so this summary is still the one a re-accept shows. [owner 24 Oct
+  // 2026] 2026-10-25 (non-material: no customer ID for taxi rides or larger orders) is served on top of both.
+  it('2026-10-21 is the newest material version (served under 2026-10-25, non-material)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-25');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-21');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-21');
