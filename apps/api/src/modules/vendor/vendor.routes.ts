@@ -4330,21 +4330,24 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    if (!subscription) return { success: true, data: null };
+    const fee = await payInfo(app.prisma, subscription);
     return {
       success: true,
-      data: subscription
-        ? {
-            ...subscription,
-            // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-            ...(await sanDisplay(app.prisma, subscription)),
-            ...(await payInfo(app.prisma, subscription)),
-            // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
-            weeklyRate: Number(subscription.weeklyRate),
-            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
-            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
-          }
-        : null,
+      data: {
+        ...subscription,
+        // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
+        ...(await sanDisplay(app.prisma, subscription)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, subscription, fee),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
+        weeklyRate: Number(subscription.weeklyRate),
+        // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+        feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
+      },
     };
   });
 
