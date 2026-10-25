@@ -39,7 +39,8 @@ import { createHash } from 'node:crypto';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
-import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
+import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, OWN_NAME_DECLARATION_VERSION, OWN_NAME_VENDOR_TYPES, renderOwnNamePdf, storeNameIsOwnName } from './own-name';
+import { DECLARATION_DOC_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
@@ -90,6 +91,7 @@ import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { resolveAvatarUrls } from '../../utils/avatar-url';
 import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
@@ -553,7 +555,7 @@ async function requireListingAllowed(
     select: { isVerified: true, vendorType: true, status: true },
   });
   const verified = vendorRecord.isVerified
-    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
+    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType, app.prisma, vendorId);
   if (verified) return;
   const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
   if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
@@ -726,7 +728,7 @@ export function assertNoOpenCustomerQuestion(
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
-async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string) {
+async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string, request: { headers: Record<string, string | string[] | undefined> }) {
   const { vendorIds } = await resolveVendor(app, userId);
   const order = await app.prisma.order.findUnique({
     where: { id: orderId },
@@ -745,6 +747,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       // [COORD 17 Oct] The store order screen's Call button: first name + phone, never the last name.
+      // [O-1] The customer's and rider's phones go only to an installed store build (below).
       customer: { select: { id: true, firstName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
@@ -760,7 +763,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
   if ((order.holdExpiresAt && order.holdExpiresAt > new Date()) || cancelledWhileHeld(order)) {
     throw new NotFoundError('Order', orderId);
   }
-  return order;
+  // [O-1 · owner 19:40Z] A bridge-aware store screen calls through Swift: no personal number.
+  return withCounterpartPhones(request, order);
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +938,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // never "Reopen it from Account": no such control exists (store-hold.ts).
       throw storeHoldRefusal(vendor);
     }
-    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
+    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId));
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
     }
@@ -1466,6 +1470,100 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /**
+   * [ROLE-DOCS · owner ruling 21 Oct 2026] POST /onboarding/own-name — the owner of a store that trades under their
+   * OWN name (Business Names (Registration) Act s.3: their true surname, with nothing added except their first names
+   * or initials) signs the own-name declaration instead of uploading a business registration (vendor/own-name.ts).
+   * Refused when the store's name clearly is not the account's own name, when the store is a service business (no
+   * registration is asked of it) or on the self-declared tier, and when a business registration is already on file.
+   * Records the signature in the consent ledger (words hashed, version pinned), files the signed words as the
+   * `own_name_declaration` document a person reviews against the owner's ID, and marks THIS store — only this one —
+   * as trading under the owner's own name [REVIEW-G #2046 S2-1, COORD 23 Oct: per store, never per type]: another
+   * store of the owner keeps needing its business registration. Owner only.
+   */
+  app.post('/onboarding/own-name', auth, async (request, reply) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const { vendorId } = access;
+    const userId = request.user.userId;
+    const body = z.object({
+      accept: z.literal(true),
+      attestationVersion: z.literal(OWN_NAME_DECLARATION_VERSION),
+      privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
+    }).parse(request.body ?? {});
+    const [vendor, user, registered, existing] = await Promise.all([
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true, ownerId: true, tradesUnderOwnName: true } }),
+      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true } }),
+      validRegistrationRecord(app.prisma, userId),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: OWN_NAME_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
+    ]);
+    if (!(OWN_NAME_VENDOR_TYPES as readonly string[]).includes(vendor.vendorType)) {
+      throw new AppError(400, 'OWN_NAME_NOT_APPLICABLE', 'A service business is not asked for a business registration, so it needs no own-name declaration.');
+    }
+    if (vendor.tier === 'UNREGISTERED') throw new AppError(409, 'OWN_NAME_NOT_APPLICABLE', 'This store is on the self-declared tier. Contact support to change how it is registered.');
+    if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it needs no own-name declaration.');
+    if (existing?.status === 'PENDING' || (existing && vendor.tradesUnderOwnName)) {
+      throw new AppError(409, 'OWN_NAME_DECLARATION_EXISTS', `Your own-name declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'waiting for review'}.`);
+    }
+    // An approval a person gave for the store's name BEFORE the owner switched to a business name (when the store
+    // could be renamed) is not reused for whatever the name is now: a person decides.
+    if (existing) throw new AppError(409, 'OWN_NAME_SUPPORT', 'An earlier own-name declaration is on file. Contact support to trade under your own name again.');
+    if (!storeNameIsOwnName(vendor.name, user.firstName, user.lastName)) {
+      throw new AppError(400, 'OWN_NAME_MISMATCH', `“${vendor.name}” is not just your surname with your first names or initials, so the law asks you to register it as a business name. Upload your business registration instead.`);
+    }
+    // Acquire and wrap the key BEFORE publishing words, changing the store, or recording consent (as the declaration).
+    const dek = generateDek();
+    let wrappedDek: Buffer;
+    try {
+      const keys = getKeyProvider();
+      if (!keys) throw new Error('Envelope encryption unavailable');
+      wrappedDek = await keys.wrapDek(dek);
+    } catch {
+      throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Verification uploads are temporarily unavailable. Try again later.');
+    }
+    await publishLegalDocumentOnce(app.prisma, { documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION, renderedText: OWN_NAME_DECLARATION_V1 });
+    const signedAt = new Date();
+    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
+    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
+    const legalName = `${user.firstName} ${user.lastName}`.trim();
+    await app.prisma.$transaction(async (tx) => {
+      // This store only: its name is the one checked, and the one the PDF and this consent row name.
+      await tx.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: true } });
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: userId, documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION,
+        action: 'granted', surface, ip: request.ip,
+        evidence: { vendorId, storeName: vendor.name, signedAt: signedAt.toISOString() },
+      });
+    });
+    const pdf = await renderOwnNamePdf({ storeName: vendor.name, legalName, signedAt });
+    const storage = getStorageProvider();
+    const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
+    const { url: fileUrl } = await storage.upload({ buffer: ciphertext, filename: `own-name-${OWN_NAME_DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+    await app.prisma.encryptedObject.create({ data: {
+      fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
+      mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
+    } });
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE';
+    const doc = await verification.submitDocument(userId, role, OWN_NAME_DOC_TYPE, fileUrl, body.privacyNoticeVersion, undefined, { ownNameSigned: true });
+    reply.code(201);
+    return { success: true, data: { nameBasis: 'OWN_NAME', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
+   * [ROLE-DOCS · owner ruling 21 Oct 2026] DELETE /onboarding/own-name — the owner uses a business name after all
+   * (or the reviewer rejected the own-name declaration): THIS store goes back to needing a business registration
+   * (per store, as POST). A declaration on file no longer counts for these stores (their checklist asks for the registration
+   * again); it is never reused for a later name (POST refuses then: support decides). Owner only.
+   */
+  app.delete('/onboarding/own-name', auth, async (request) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const userId = request.user.userId;
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { id: true, vendorType: true } });
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: false } });
+    await verification.reprojectVendorActivation(userId);
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+    return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
    * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
    * week's usage, whether promoted placement is open, what would promote the store, and the
    * declaration on file. Everything is the server's; the screen decides nothing.
@@ -1509,8 +1607,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = updateVendorProfileSchema.parse(request.body);
     if (body.name !== undefined) {
       // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
-      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, owner: { select: { user: { select: { phone: true } } } } } });
+      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, tradesUnderOwnName: true, owner: { select: { user: { select: { phone: true } } } } } });
       assertNameNotReserved(body.name, current?.owner.user.phone, current?.name);
+      // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name was checked by a person as THAT name
+      // (Business Names (Registration) Act s.3); a new name is a new legal question, so it is not changed in the app.
+      if (current?.tradesUnderOwnName && body.name.trim() !== current.name) {
+        throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under your own name, which a person checked. To use a different name, register it as a business name first, then switch the store to it under Documents.');
+      }
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
@@ -1784,7 +1887,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // first (this re-read sees the loss and refuses) or this ON write commits
     // first (they simply win afterward).
     const verified = vendor.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED',
         'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
@@ -1815,7 +1918,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // A discovered stale-true is healed post-rollback (a write inside
       // this refusing transaction would roll back with it).
       const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
-      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx, vendorId);
       if (!verifiedOk) {
         if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
@@ -1856,7 +1959,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           });
           if (!still.isVerified) return;
           const nowVerified = await verification.isRoleVerified(
-            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx, vendorId);
           if (!nowVerified) {
             await tx.vendor.updateMany({
               where: { id: vendorId, isVerified: true },
@@ -1898,7 +2001,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ack — explicit acknowledgement without accept/reject. */
   app.put<{ Params: IdParam }>('/orders/:id/ack', auth, async (request) => {
-    await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert. [Q10]
     // Only AFTER the ownership check: it used to run first, so any signed-in
     // account naming an order id stamped that store receipt, then got a 404.
@@ -1965,21 +2068,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
-    const data = orders.map((order) => redactCustomerContact({
+    const data = orders.map((order) => withCounterpartPhones(request, redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       ...handover.get(order.id),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       ...storeMmgPayBy(order),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
-    }));
+    })));
 
     return { success: true, ...paginatedResponse(data, total, pagination) };
   });
 
   /** GET /orders/:id — Full order detail */
   app.get<{ Params: IdParam }>('/orders/:id', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // The takeover polls this read: the response-SLA deadline is computed here,
     // from the same inputs the auto-cancel job was enqueued with.
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
@@ -1997,7 +2100,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  confirms the goods came back. Closes the return (RETURNED) through the
    *  canonical seam, which resolves the case and frees the rider. */
   app.post<{ Params: IdParam }>('/orders/:id/recovery/return-received', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     if (order.orderType === 'COURIER') {
       throw new AppError(409, 'NOT_A_STORE_RETURN', 'A courier parcel goes back to its sender, not to a store.');
     }
@@ -2009,7 +2112,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/accept — Accept an incoming order */
   app.put<{ Params: IdParam }>('/orders/:id/accept', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
@@ -2189,7 +2292,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
     // complete-appointment. Marking it "preparing" sent the customer kitchen
@@ -2218,7 +2321,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
     // that already sits in PREPARING is not reopened into the kitchen path.
@@ -2280,7 +2383,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  = "get a rider instead" — which dispatches a rider if none is assigned yet,
    *  the fallback that stops a self-delivery order dying in the kitchen. */
   app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     const { mode } = fulfillmentModeSchema.parse(request.body);
     if (order.fulfillment !== 'DELIVERY') {
@@ -2355,7 +2458,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/items/:lineId/picked — staff tick a shelf-picked line. */
   app.put('/orders/:id/items/:lineId/picked', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    await resolveOwnedOrder(app, request.user.userId, id, request);
     const { picked } = z.object({ picked: z.boolean() }).parse(request.body);
     const line = await picking.setPicked(id, lineId, picked);
     return { success: true, data: line };
@@ -2365,7 +2468,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
   app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id, request);
     const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
     const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
     await ackPreAcceptQuestion(order, request.user.userId);
@@ -2376,7 +2479,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  comes off the order, totals shrink, stock goes back on the shelf. */
   app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id, request);
     // [O-4] On a waiting order this ASKS the customer (continue without it, or cancel); after the
     // accept it removes the line at once, as before.
     const line = await picking.refundLine(id, lineId, request.user.userId);
@@ -2467,7 +2570,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Swift; this only records confirmation + tells the customer live. MMG orders
    *  only (cash is settled at handover). Idempotent. */
   app.post<{ Params: IdParam }>('/orders/:id/confirm-payment', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER may confirm an MMG
     // payment; STAFF may not. Checked first, before any read-back or write, so
     // a refused tap leaves the order exactly as it was.
@@ -2676,7 +2779,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  holds the order and asks Swift to search again (fresh radius, cleared
    *  decline memory). No-op while an offer is already live. */
   app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
@@ -2697,7 +2800,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
@@ -2730,7 +2833,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Courier/parcel and taxi are never here (no store); a self-delivery has no Swift rider. */
   // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
   app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // [REVIEW-G S4-4 on #2055] Like every other in-flight store action: a closed (or non-billing
     // suspended) store's staff cannot tap.
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
@@ -2774,7 +2877,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
@@ -2801,7 +2904,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
    *  carries the cash-capture gate and the PIN check. */
   app.put<{ Params: IdParam }>('/orders/:id/delivered', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
       throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
@@ -2823,7 +2926,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
   app.put<{ Params: IdParam }>('/orders/:id/reject', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
@@ -4330,21 +4433,24 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    if (!subscription) return { success: true, data: null };
+    const fee = await payInfo(app.prisma, subscription);
     return {
       success: true,
-      data: subscription
-        ? {
-            ...subscription,
-            // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-            ...(await sanDisplay(app.prisma, subscription)),
-            ...(await payInfo(app.prisma, subscription)),
-            // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
-            weeklyRate: Number(subscription.weeklyRate),
-            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
-            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
-          }
-        : null,
+      data: {
+        ...subscription,
+        // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
+        ...(await sanDisplay(app.prisma, subscription)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, subscription, fee),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
+        weeklyRate: Number(subscription.weeklyRate),
+        // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+        feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
+      },
     };
   });
 

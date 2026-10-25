@@ -14,6 +14,7 @@ import {
   feePaidAheadLine,
   weeklyFeeGyd,
   billingStoppedLine,
+  stopBillingConfirmBody,
 } from '../../lib/billing';
 
 // ---------------------------------------------------------------------------
@@ -212,12 +213,9 @@ export function BillingStopControl({
   const status = String(sub.status ?? '').toUpperCase();
   if (status === 'CANCELLED' || status === 'CHURNED') return null;
   const stopped = isBillingStopped(sub);
-  const blocked = isBlocked(sub);
-  const periodEnd = shortDate(sub?.currentPeriodEnd);
   const untilLine = billingStoppedLine(sub, who);
-  const confirmBody = blocked
-    ? `Your ${who} is already paused. Stopping means no more weekly fees will be charged — what you owe still stands until you pay it. You can resume billing anytime.`
-    : `Your ${who} keeps working until ${periodEnd ?? 'the end of the current period'}. After that, the ${who} stops receiving work and no more weekly fees are charged. You can resume billing anytime.`;
+  // [FEE-STATUS] Never "keeps working until" a period end that has passed.
+  const confirmBody = stopBillingConfirmBody(sub, who);
 
   return (
     <>

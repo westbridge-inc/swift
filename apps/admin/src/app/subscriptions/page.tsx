@@ -10,6 +10,7 @@ import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { billDateLabel } from '@/lib/bill-date';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -26,14 +27,14 @@ function holder(s: any): { name: string; kind: string; href?: string } {
 function BillingEvents({ id }: { id: string }) {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
   const events: any[] = data?.data ?? [];
-  if (isLoading) return <p className="text-xs text-[var(--muted)] p-3">Loading billing trail…</p>;
+  if (isLoading) return <p className="text-xs mc-muted p-3">Loading billing trail…</p>;
   if (isError) return <QueryFailed error={error} what="the billing trail" onRetry={() => void refetch()} retrying={isFetching} className="m-3" />;
-  if (events.length === 0) return <p className="text-xs text-[var(--muted)] p-3">No billing events.</p>;
+  if (events.length === 0) return <p className="text-xs mc-muted p-3">No billing events.</p>;
   return (
     <div className="p-3 space-y-1.5">
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
-          <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
+          <span className="mc-muted w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
           <span>{e.type ? label('BillingEventType', e.type) : String(e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
@@ -56,9 +57,9 @@ const QUEUED_COPY = {
 /** What happened to the last refund step on this row: done, queued for a
  *  second admin (with the approval id), or refused with the server's words. */
 function RefundOutcome({ outcome }: { outcome: MoneyActionOutcome }) {
-  if (outcome.kind === 'error') return <p role="alert" className="text-xs text-red-500 mt-2">{outcome.message}</p>;
+  if (outcome.kind === 'error') return <p role="alert" className="text-xs mc-text-bad mt-2">{outcome.message}</p>;
   return (
-    <p role="status" className={`text-xs mt-2 ${outcome.kind === 'queued' ? 'text-amber-500' : 'text-[var(--muted)]'}`}>
+    <p role="status" className={`text-xs mt-2 ${outcome.kind === 'queued' ? 'mc-text-warn' : 'mc-muted'}`}>
       {outcome.message}
       {outcome.approvalId && (
         <>
@@ -168,9 +169,8 @@ export default function SubscriptionsPage() {
   const recordingHeld = (data as any)?.manualFeeRecording === 'held';
 
   return (
-    <div>
+    <div className="mc-page">
       <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-bold">Subscriptions</h1>
         <div className="flex gap-1">
           {FILTERS.map((f) => (
             <button
@@ -178,78 +178,76 @@ export default function SubscriptionsPage() {
               type="button"
               onClick={() => setFilter(f)}
               aria-pressed={filter === f}
-              className={`px-2.5 py-1 rounded-lg text-xs ${
-                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
-              }`}
+              className="mc-tab"
             >
               {f === 'ALL' ? 'All' : f.replaceAll('_', ' ').toLowerCase()}
             </button>
           ))}
         </div>
       </div>
-      <p className="text-[var(--muted)] text-sm mb-6">
+      <p className="mc-muted text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
       {recordingHeld ? (
-        <p className="text-[var(--muted)] text-xs -mt-4 mb-6">
+        <p className="mc-muted text-xs -mt-4 mb-6">
           Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
         </p>
       ) : null}
       {actions.banner}
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="mc-table-wrap">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Holder</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Weekly</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Next bill / trial end</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
+            <tr >
+              <th className="mc-label text-left">Holder</th>
+              <th className="mc-label text-left">Status</th>
+              <th className="mc-label text-right">Weekly</th>
+              <th className="mc-label text-left">Next bill / trial end</th>
+              <th className="mc-label text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={5} className="mc-table-empty">Loading…</td></tr>
             ) : isError ? (
               <tr><td colSpan={5} className="p-4">
                 <QueryFailed error={error} what="the subscriptions" onRetry={() => void refetch()} retrying={isFetching} />
               </td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">No subscriptions match.</td></tr>
+              <tr><td colSpan={5} className="mc-table-empty">No subscriptions match.</td></tr>
             ) : (
               rows.map((s: any) => {
                 const h = holder(s);
-                const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
+                const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? (billDateLabel(s.nextBillingDate) === 'Due since' ? `due since ${new Date(s.nextBillingDate).toLocaleDateString()}` : new Date(s.nextBillingDate).toLocaleDateString()) : '—';
                 const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
                 // [Review S2-1] Every payout record for this set-aside was refused, expired or failed:
                 // record it again; the release stays refused (a payout may have been sent, Q-1527).
                 const payoutNotCompleted = !payoutReported && s.refundPayoutAsk === 'NOT_COMPLETED';
                 return (
                   <Fragment key={s.id}>
-                    <tr className="border-b border-[var(--border)] hover:bg-white/5">
+                    <tr >
                       <td className="p-4">
                         {h.href ? (
-                          <Link href={h.href} className="font-medium hover:text-[var(--accent)] transition-colors">
+                          <Link href={h.href} className="font-medium text-[var(--mc-accent)] font-semibold">
                             {h.name}
                           </Link>
                         ) : (
                           <span className="font-medium">{h.name}</span>
                         )}
-                        <span className="text-xs text-[var(--muted)] ml-2">{h.kind}</span>
+                        <span className="text-xs mc-muted ml-2">{h.kind}</span>
                       </td>
                       <td className="p-4">
                         <StatusPill value={s.status} />
-                        {s.feeWaived ? <span className="ml-2 text-xs text-sky-400">fee waived</span> : null}
+                        {s.feeWaived ? <span className="ml-2 text-xs mc-text-info">fee waived</span> : null}
                       </td>
                       <td className="p-4 text-right">{gyd(s.customRate ?? s.weeklyRate)}</td>
-                      <td className="p-4 text-[var(--muted)]">{when}</td>
+                      <td className="p-4 mc-muted">{when}</td>
                       <td className="p-4 text-right">
                         <div className="flex gap-2 justify-end">
                           <button
                             type="button"
                             onClick={() => setOpenTrail(openTrail === s.id ? null : s.id)}
-                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10"
+                            className="px-3 py-1 rounded-lg text-xs border border-[var(--mc-line)] hover:bg-[var(--mc-surface)]"
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
@@ -269,7 +267,7 @@ export default function SubscriptionsPage() {
                               success: () => `Payment recorded for ${h.name}.`,
                             }).then(lockIfQueued(`${s.id}:fee-payment`))}
                             disabled={topup.isPending || queuedAsks[`${s.id}:fee-payment`] === true}
-                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            className="mc-btn"
                           >
                             {queuedAsks[`${s.id}:fee-payment`] ? 'Payment waiting for approval' : 'Record fee payment'}
                           </button>}
@@ -293,7 +291,7 @@ export default function SubscriptionsPage() {
                                   recordPaid.mutate({ id: s.id, amount: owed, method, reference: String(answer.values['reference']), setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported}
-                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                                className="mc-btn"
                               >
                                 Record payout
                               </button>
@@ -309,7 +307,7 @@ export default function SubscriptionsPage() {
                                   if (answer) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported || payoutNotCompleted}
-                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                                className="mc-btn"
                               >
                                 Release
                               </button>
@@ -327,7 +325,7 @@ export default function SubscriptionsPage() {
                                 if (answer) setAside.mutate({ id: s.id, amount: credit, reason: answer.reason });
                               }}
                               disabled={refundBusy}
-                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              className="mc-btn"
                             >
                               Refund credit
                             </button>
@@ -344,14 +342,14 @@ export default function SubscriptionsPage() {
                                 success: () => `Fee waived for ${h.name} for this period.`,
                               }).then(lockIfQueued(`${s.id}:waive`))}
                               disabled={waive.isPending || queuedAsks[`${s.id}:waive`] === true}
-                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              className="mc-btn"
                             >
                               {queuedAsks[`${s.id}:waive`] ? 'Waiver waiting for approval' : 'Waive fee'}
                             </button>
                           )}
                         </div>
                         {Number(s.refundSetAside ?? 0) > 0 && (
-                          <p className="text-xs text-amber-500 mt-2">{payoutReported
+                          <p className="text-xs mc-text-warn mt-2">{payoutReported
                             ? 'Payment reported; recording awaits approval. Do not pay again or release this refund.'
                             : payoutNotCompleted
                               ? 'The last payout record was not completed (refused, expired or failed). Do not pay again: record it again with the correct reference. This refund cannot be released.'
@@ -361,7 +359,7 @@ export default function SubscriptionsPage() {
                       </td>
                     </tr>
                     {openTrail === s.id && (
-                      <tr className="border-b border-[var(--border)] bg-black/20">
+                      <tr className="border-b border-[var(--mc-line)] bg-[var(--mc-surface)]">
                         <td colSpan={5}>
                           <BillingEvents id={s.id} />
                         </td>

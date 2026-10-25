@@ -1,5 +1,6 @@
 import { courierReceiptKey, openCourierAnswer, sealCourierAnswer } from './courier-receipt';
 import { scanUpload } from '../../lib/malware-scan';
+import { heldFolder, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { checkoutRequestHash, persistCheckoutReceiptInTransaction, persistDispatchCommandInTransaction, drainCheckoutOutbox } from '../order/checkout-outbox';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from '../rides/road-trip-market';
@@ -31,6 +32,7 @@ import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 import { POSTAL_REFUSAL, postalItem } from './postal-items';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -392,7 +394,8 @@ export default async function courierRoutes(app: FastifyInstance) {
     // licence to keep watching the courier.
     // [S1 response-shaping] the sender's past parcel is not a licence to keep
     // the courier's coordinates — nor their personal phone.
-    return { success: true, data: { ...redactCounterpartyPhone(redactLiveLocation(order)), courierTrackingToken: null } };
+    // [O-1] And a bridge-aware client is sent the courier's number not even while live.
+    return { success: true, data: { ...withCounterpartPhones(request, redactCounterpartyPhone(redactLiveLocation(order))), courierTrackingToken: null } };
   });
 
   /** Sender controls rotate/revoke without recovering bearer secrets. */
@@ -525,8 +528,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
-    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}/pickup` });
+    const scan = await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
+    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: heldFolder(scan, `courier-proof/${id}/pickup`) });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'courier-proof', fileKey: url, buffer, storage });
     // The pickup mirror of [REPORT-016 F-016-04]: record the SERVER-issued URL
     // and the rider it was issued to. /pickup-proof exact-matches it, so pickup
     // proof is proof of an actual upload by this rider, not any string that
@@ -846,8 +850,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
 
-    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
-    const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: `courier-proof/${id}/return` });
+    const scan = await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
+    const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: heldFolder(scan, `courier-proof/${id}/return`) });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'courier-proof', fileKey: url, buffer, storage });
 
     const { order: updated } = await orderService.transitionOrderAtomically({
       orderId: id,

@@ -8,7 +8,6 @@ import { z } from '../../lib/zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,
-  assertL2,
   createRideRequest,
   fareChanged,
   replayRideRequestAnswer,
@@ -46,6 +45,8 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
+import { counterpartPhone } from '../calls/counterpart-phone';
+import { withoutPositionEvidence } from '../order/customer-timeline';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -369,8 +370,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     assertHirePassengers(body.passengerCount);
     if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     assertRoadTripInMarket(body);
+    // [Owner ruling 24 Oct 2026] No customer ID gate here either (rides.service assertRideGates).
     const user = await assertRideGates(app, request.user.userId);
-    assertL2(user);
 
     // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
     // passenger saw is checked now and kept with the entry; nothing is queued
@@ -541,7 +542,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     // holds it — never shown while they're still deciding on a driver.
     // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
     // off (the default), the passenger pays the driver directly at drop-off.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
+    // [O-1] The driver's personal number: as today while the call bridge is off; with it on, only to an
+    // installed store build (it dials it) — a bridge-aware client calls through Swift and is sent none.
+    const driver = {
+      ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average,
+      user: { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) },
+    };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
@@ -564,6 +570,10 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    // [REVIEW-F S4-2 on #2055] The driver's recorded position (a step note's ' — gps:…' evidence, kept
+    // for support and appeals) is never the passenger's to read: the same cut as the customer's
+    // order timeline. Every other field of a row is unchanged.
+    ride.statusHistory = ride.statusHistory.map((row) => ({ ...row, note: withoutPositionEvidence(row.note) }));
     if (ride.driver) {
       const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
       Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });

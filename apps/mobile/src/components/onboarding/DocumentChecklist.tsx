@@ -5,13 +5,19 @@ import { color, radius, space } from '@swift/ui';
 import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
+import { OwnNameCard } from './OwnNameCard';
+import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
+import { SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord } from './documentConsentRecord';
+import type { UploadConsentVia } from '../../services/api';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
  *  bar and its fill cannot drift apart. */
 const TRACK_HEIGHT = 6;
+/** [ROLE-DOCS] The signed "I trade under my own name" declaration (the server's OWN_NAME_DOC_TYPE). */
+const OWN_NAME_DOC = 'own_name_declaration';
 
 /**
  * Renders GET /verification/status?role= as the "Required steps" checklist.
@@ -26,15 +32,31 @@ export function DocumentChecklist({
   isLoading,
   isError,
   onRetry,
+  storeName,
 }: {
   role: string;
   status: any;
+  /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
+  storeName?: string | null;
   isLoading?: boolean;
   isError?: boolean;
   onRetry?: () => void;
 }) {
-  // [R17] uploads wait for the consent tick (unticked to start); a hook, so before the early returns
-  const [consented, setConsented] = useState(false);
+  // [R17] uploads wait for the consent tick; a hook, so before the early returns. [DOC-CONSENT · owner 25 Oct 2026]
+  // The tick is the person's own: the one they give on this visit (`choice`), else their grant the consent ledger
+  // already holds (GET /verification/status `documentConsent`). It used to live only on the screen, so every new
+  // visit emptied a tick the server had recorded. With no record and no tick on this visit, it starts empty.
+  const [choice, setChoice] = useState<boolean | null>(null);
+  const record = documentConsentOnRecord(status);
+  const consented = choice ?? record.given;
+  const toggleConsent = () => setChoice((c) => !(c ?? record.given));
+  // Shown only while the box stands on the record, so the person sees the tick is theirs and when they gave it.
+  const recordLine = choice === null && record.given ? documentConsentGivenLine(record.givenAt) : null;
+  // [DPA s.9(1)(a) · research D1] A police clearance is not opened by the record alone: its card asks again.
+  const askConsentFirst = (docType: string) => choice !== true && SENSITIVE_DOC_TYPES.has(docType);
+  // [DOC-CONSENT S4] Each upload tells the ledger how the tick was given: ticked on this visit, or shown from the record
+  // (a card that asks again records its prompt instead).
+  const consentVia: UploadConsentVia = choice === true ? 'checkbox' : 'record';
   if (isLoading) {
     return (
       <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
@@ -99,17 +121,26 @@ export function DocumentChecklist({
         {/* [Owner 15 Oct 2026] no promise faster than the support hours allow */}
         Upload these to activate your account. We review them Monday to Saturday, 8:00–20:00 Guyana time.
       </T>
-      {/* [R17 · legal research D2/B1] an unticked tick before any upload; the API records it in the consent ledger */}
+      {/* [R17 · legal research D2/B1] a tick before any upload; the API records it in the consent ledger.
+          [DOC-CONSENT] ticked only by the person: on this visit, or their own grant on record. */}
       <Pressable
-        onPress={() => setConsented((c) => !c)}
+        onPress={toggleConsent}
         accessibilityRole="checkbox"
         accessibilityState={{ checked: consented }}
         accessibilityLabel={DOCUMENT_CONSENT_TEXT}
+        accessibilityHint={recordLine ?? undefined}
         testID="document-consent-tick"
         style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}
       >
-        <BrandCheckbox checked={consented} onToggle={() => setConsented((c) => !c)} />
-        <T variant="label" tone="muted" style={{ flex: 1 }}>{DOCUMENT_CONSENT_TEXT}</T>
+        <BrandCheckbox checked={consented} onToggle={toggleConsent} />
+        <View style={{ flex: 1 }}>
+          <T variant="label" tone="muted">{DOCUMENT_CONSENT_TEXT}</T>
+          {recordLine ? (
+            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
+              {recordLine}
+            </T>
+          ) : null}
+        </View>
       </Pressable>
       {isTaxiChecklist(checklist) ? (
         <T variant="label" style={{ marginBottom: space.sm }}>
@@ -153,9 +184,25 @@ export function DocumentChecklist({
       </View>
       {checklist.map((docType) => {
         const doc = latestDoc(docType);
+        // [ROLE-DOCS · owner 21 Oct 2026] the own-name declaration is signed in the app, never uploaded
+        if (docType === OWN_NAME_DOC) {
+          return !doc || doc.status === 'REJECTED' ? (
+            <View key={docType}>
+              {doc ? <T variant="caption" tone="error">{doc.reviewNote ?? 'Your own-name declaration was not accepted.'}</T> : null}
+              <OwnNameCard role={role} mode="sign" storeName={storeName} />
+            </View>
+          ) : (
+            <View key={docType} style={{ paddingVertical: space.sm }}>
+              <T variant="label" weight="bold">I trade under my own name</T>
+              <T variant="caption" tone="muted">{doc.status === 'APPROVED' ? 'Checked by a person on our team.' : 'Signed — a person on our team is checking it against your ID.'}</T>
+            </View>
+          );
+        }
         return (
           <DocumentUploadCard
             consented={consented}
+            askConsentFirst={askConsentFirst(docType)}
+            consentVia={consentVia}
             key={docType}
             role={role}
             docType={docType}
@@ -169,6 +216,9 @@ export function DocumentChecklist({
           />
         );
       })}
+      {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
+      {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
+        ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}
       {optional.length > 0 ? (
         <View style={{ marginTop: space.md }}>
           <T variant="heading" style={{ marginBottom: space.xs }}>
@@ -182,6 +232,8 @@ export function DocumentChecklist({
             return (
               <DocumentUploadCard
                 consented={consented}
+                askConsentFirst={askConsentFirst(docType)}
+                consentVia={consentVia}
                 key={docType}
                 role={role}
                 docType={docType}

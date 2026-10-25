@@ -255,21 +255,6 @@ export function financialDeltaLabel(cur: number, prev: number | null) {
   return `Revenue ${pct > 0 ? 'up' : 'down'} ${Math.abs(pct)} percent`;
 }
 
-export function subscriptionTone(sub: any): 'brand' | 'success' | 'neutral' | 'error' | 'warning' {
-  if (sub?.status === 'ACTIVE') return 'success';
-  if (sub?.status === 'PAST_DUE') return 'warning';
-  if (sub?.status === 'SUSPENDED' || sub?.status === 'CHURNED') return 'error';
-  if (sub?.isTrialActive || sub?.status === 'TRIAL') return 'brand';
-  return 'neutral';
-}
-
-export function billingSummary(sub: any) {
-  if (!sub) return 'Subscription not active';
-  if (sub.isInGracePeriod && sub.gracePeriodEnd) return `Pay by ${fmtDate(sub.gracePeriodEnd)}`;
-  const next = sub.nextBillingDate ? `Next bill ${fmtDate(sub.nextBillingDate)}` : null;
-  return next || String(sub.status ?? 'Subscription').toLowerCase();
-}
-
 export type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';
 
 export function safeVendorRole(value: unknown): VendorMemberRole | undefined {

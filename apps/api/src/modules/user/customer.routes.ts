@@ -88,6 +88,7 @@ import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { counterpartPhone } from '../calls/counterpart-phone';
 import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
@@ -930,7 +931,7 @@ export async function customerRoutes(app: FastifyInstance) {
         avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
         // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
-        // truthfully (additive): NONE · ON_FILE (unlocked, no person reviewed it) · CHECKED (a person
+        // truthfully (additive): NONE · ON_FILE (on file, no person reviewed it) · CHECKED (a person
         // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
         // Never fails the profile: an unreadable answer is left out, and the app then claims nothing.
         idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel).catch(() => undefined),
@@ -2968,7 +2969,8 @@ export async function customerRoutes(app: FastifyInstance) {
           // [S1 response-shaping] the mover's personal number is a handover
           // convenience, not a permanent gift: null once the order is closed,
           // exactly like the live coordinates two lines below.
-          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
+          // [O-1] Only an installed store build is sent it (it dials it); a bridge-aware client calls through Swift.
+          phone: liveLocationVisible(order.status) ? counterpartPhone(request, order.rider.user?.phone) : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what

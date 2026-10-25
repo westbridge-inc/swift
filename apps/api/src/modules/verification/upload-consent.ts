@@ -18,14 +18,36 @@ export const UPLOAD_CONSENT = {
     version: 'v1',
     text: 'I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.',
   },
+  // The words phone build 12 shows (its JS at the build cut). Kept so its tick stays anchored to what it showed.
   customer_id_v1: {
     documentType: 'customer_id_consent',
     version: 'v1',
     text: 'I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.',
   },
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] An ID no longer unlocks taxi rides or larger orders,
+  // so the current app shows words that promise no unlock, under their own version.
+  customer_id_v2: {
+    documentType: 'customer_id_consent',
+    version: 'v2',
+    text: 'I agree Swift may keep this ID photo with my account, as the Privacy Policy explains.',
+  },
 } as const satisfies Record<string, { documentType: ConsentDocumentType; version: string; text: string }>;
 
 export type UploadConsentTick = keyof typeof UPLOAD_CONSENT;
+
+/**
+ * [DOC-CONSENT S4 · REVIEW-G2 S4-1] How the person gave the tick for THIS upload, so the ledger's evidence says it
+ * truly: the box ticked on this visit, the box shown from their own grant on record (no new tap; the API checks the
+ * grant is there), or the prompt a police clearance asks before its photo. An upload that names none (builds 9-12,
+ * the website) is the checkbox, as before.
+ */
+export const UPLOAD_CONSENT_VIAS = ['checkbox', 'record', 'prompt'] as const;
+export type UploadConsentVia = (typeof UPLOAD_CONSENT_VIAS)[number];
+const CONTROL_FOR_VIA: Record<UploadConsentVia, string> = {
+  checkbox: 'upload_consent_checkbox',
+  record: 'upload_consent_on_record',
+  prompt: 'upload_consent_prompt',
+};
 export const UPLOAD_CONSENT_TICKS = Object.keys(UPLOAD_CONSENT) as [UploadConsentTick, ...UploadConsentTick[]];
 
 /** The ledger subject for a checklist role: a mover is a driver; a business or a service provider a vendor user. */
@@ -37,7 +59,7 @@ export function consentSubjectForRole(role: string | null): ConsentSubjectType {
 
 export async function recordUploadConsent(
   prisma: PrismaClient,
-  input: { userId: string; tick: UploadConsentTick; subjectType: ConsentSubjectType; surface: ConsentSurface; ip?: string | null; docType: string },
+  input: { userId: string; tick: UploadConsentTick; subjectType: ConsentSubjectType; surface: ConsentSurface; ip?: string | null; docType: string; via?: UploadConsentVia },
 ): Promise<void> {
   const c = UPLOAD_CONSENT[input.tick];
   await publishLegalDocumentOnce(prisma, { documentType: c.documentType, version: c.version, renderedText: c.text });
@@ -49,6 +71,6 @@ export async function recordUploadConsent(
     action: 'granted',
     surface: input.surface,
     ip: input.ip ?? null,
-    evidence: { control: 'upload_consent_checkbox', path: 'verification', docType: input.docType },
+    evidence: { control: CONTROL_FOR_VIA[input.via ?? 'checkbox'], path: 'verification', docType: input.docType },
   }));
 }

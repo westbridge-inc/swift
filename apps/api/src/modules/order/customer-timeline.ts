@@ -5,8 +5,15 @@ import { HANDED_TO_RIDER_NOTE } from './store-handover-log';
  * (" — gps:…", " — no GPS fix on file", the stale/not-geocoded variants all start with one of the
  * two). It is the rider's position, kept for support and appeals; the customer's timeline never
  * shows it.
+ * [REVIEW-G2 S4-1 on #2080] Custody relay handoff notes written before they used gpsEvidence carry
+ * " — GPS 6.80000,-58.15000": cut too (a GPS followed by a number, never the word in a sentence).
  */
-const POSITION_EVIDENCE_SUFFIX = / — (?:gps:-?\d|no GPS fix on file)[\s\S]*$/;
+const POSITION_EVIDENCE_SUFFIX = / — (?:gps:-?\d|GPS -?\d|no GPS fix on file)[\s\S]*$/;
+
+/** [REVIEW-F S4-2 on #2055] A step note as a customer or passenger reads it: the position evidence cut. */
+export function withoutPositionEvidence(note: string | null): string | null {
+  return note ? note.replace(POSITION_EVIDENCE_SUFFIX, '') : note;
+}
 
 /** The customer's view of the order's status log:
  *  - the store's "Handed to rider" row is left out: it carries the order's status at the tap, so it
@@ -17,5 +24,5 @@ export function customerTimeline(
 ): Array<{ status: string; note: string | null; timestamp: Date }> {
   return rows
     .filter((row) => row.note !== HANDED_TO_RIDER_NOTE)
-    .map((row) => ({ status: row.status, note: row.note ? row.note.replace(POSITION_EVIDENCE_SUFFIX, '') : row.note, timestamp: row.createdAt }));
+    .map((row) => ({ status: row.status, note: withoutPositionEvidence(row.note), timestamp: row.createdAt }));
 }

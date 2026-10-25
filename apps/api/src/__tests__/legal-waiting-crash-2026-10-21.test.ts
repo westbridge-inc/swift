@@ -82,13 +82,17 @@ describe('[2026-10-21] Privacy Policy: phone crash reports, kept 90 days', () =>
 describe('[2026-10-21] one material version: everyone re-accepts once, with the summary', () => {
   // [owner 22 Oct 2026] 2026-10-22 (Terms s.7 one-minute cancel window, NON-material) is served on top of it: the
   // newest MATERIAL version is still 2026-10-21, so this summary is still the one a re-accept shows. [ROLE-DOCS]
-  // 2026-10-22.1 (non-material: police clearance for taxi drivers only) is served on top of both.
-  it('2026-10-21 is the newest material version (served under 2026-10-22.1, non-material)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-22.1');
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-21');
+  // 2026-10-22.1 (non-material: police clearance for taxi drivers only) is served on top of both. [owner 24 Oct
+  // 2026] 2026-10-25 (non-material: no customer ID for taxi rides or larger orders) is served on top of those.
+  // [O-1 · COORD 25 Oct] 2026-10-25.1 (material: Swift-bridged calling, Twilio for calls) is served on top of all of
+  // these and is now the newest material version; 2026-10-21 stays material, and stays the newest one below it.
+  it('2026-10-21 is a material version, the newest one below the served 2026-10-25.1 (material: calls)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-25.1');
+    expect(materialVersion('2026-10-25')).toBe('2026-10-21');
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-25.1');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-21');
-    expect(MATERIAL_CHANGES[MATERIAL_CHANGES.length - 1]!.version, 'newest last').toBe('2026-10-21');
+    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-2), 'newest last').toEqual(['2026-10-21', '2026-10-25.1']);
   });
 
   it('the summary names both changes', () => {

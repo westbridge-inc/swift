@@ -5,6 +5,7 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { haversineDistance } from '../../utils/distance';
+import { gpsEvidence } from '../cash/cash-rules.service';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -112,10 +113,6 @@ async function notifyRelayCalledOff(
       : `Swift called off the handoff for order ${orderNumber}. You don't need to meet the other rider.`,
     data: { kind: 'custody_relay_cancelled', caseId: kase.id, reason: why },
   }).catch(() => {});
-}
-
-function gpsText(gps: { lat: number; lng: number }): string {
-  return `GPS ${gps.lat.toFixed(5)},${gps.lng.toFixed(5)}`;
 }
 
 async function lockOrderRow(tx: Prisma.TransactionClient, orderId: string): Promise<void> {
@@ -470,7 +467,9 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
     await tx.orderStatusLog.create({
       data: {
         orderId: order.id, status: order.status, changedBy: input.relayUserId,
-        note: `Custody handed to a relay rider — holder's handoff code verified — ${gpsText(input.gps)}`,
+        // [REVIEW-G2 S4-1 on #2080] The handoff position in the ONE evidence form every mover step uses
+        // (gpsEvidence), so the customer's timeline cut (customer-timeline.ts) removes it.
+        note: `Custody handed to a relay rider — holder's handoff code verified — ${gpsEvidence(input.gps.lat, input.gps.lng)}`,
       },
     });
     // 6. The case resolves; the relay rider is the holder of record.

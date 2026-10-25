@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   submitIdentity: vi.fn(),
   becomePartner: vi.fn(),
   changeVehicle: vi.fn(),
+  signOwnName: vi.fn(),
   uploadCourierProof: vi.fn(),
   confirmCourierProof: vi.fn(),
   uploadCourierPickupProof: vi.fn(),
@@ -101,6 +102,7 @@ vi.mock('../services/api', () => ({
     submitIdentity: mocks.submitIdentity,
   },
   partnerApi: { become: mocks.becomePartner, changeVehicle: mocks.changeVehicle },
+  vendorApi: { signOwnName: mocks.signOwnName },
   courierApi: {
     uploadProof: mocks.uploadCourierProof,
     proof: mocks.confirmCourierProof,
@@ -311,6 +313,25 @@ describe('multi-step authenticated mutation ownership', () => {
 
     await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
     expect(mocks.submitDocument).not.toHaveBeenCalled();
+  });
+
+  it('[DOC-CONSENT S4] a document upload tells the API how its consent was given, and names nothing when the screen did not say', async () => {
+    mocks.uploadVerification.mockResolvedValue({ data: { data: { url: '/private/doc.jpg' } } });
+    mocks.submitDocument.mockResolvedValue({ data: { data: { id: 'doc-1' } } });
+    const mutation = useUploadDocument('MOVER') as unknown as CapturedMutation<{
+      docType: string;
+      file: { uri: string; name: string; type: string };
+      consentVia?: 'checkbox' | 'record' | 'prompt';
+    }>;
+    const file = { uri: 'file://licence.jpg', name: 'licence.jpg', type: 'image/jpeg' };
+    for (const consentVia of ['checkbox', 'record', 'prompt'] as const) {
+      mocks.submitDocument.mockClear();
+      await mutation.mutationFn({ docType: 'drivers_licence', file, consentVia });
+      expect(mocks.submitDocument).toHaveBeenCalledWith(expect.objectContaining({ consentTick: 'document_v1', consentVia }), expect.anything());
+    }
+    mocks.submitDocument.mockClear();
+    await mutation.mutationFn({ docType: 'drivers_licence', file });
+    expect(mocks.submitDocument.mock.calls[0]![0]).not.toHaveProperty('consentVia');
   });
 
   it('rejects a delayed A document picker before uploading as B', async () => {
@@ -616,6 +637,55 @@ describe('business form draft follows the durable store-creation result', () => 
     await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
     expect(store.getState().owner).toEqual({ userId: accountB.userId, generation: accountB.generation });
     expect(store.getState().draft).toMatchObject({ name: 'B Barbers', type: 'SERVICE' });
+  });
+
+  // [ROLE-DOCS · owner 21 Oct 2026 · #2046] The owner ticked the own-name declaration before the store existed. It is
+  // signed from this durable result, never from the screen's per-call callback: creating the store swaps the navigator,
+  // and a callback on an unmounted screen never runs.
+  const ownNameRequest = { ...vendorRequest, business: { ...vendorRequest.business, nameBasis: 'OWN_NAME' as const } };
+  const created = { data: { data: { roles: ['CUSTOMER', 'VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } } };
+
+  it('a store under the owner’s own name signs the declaration once the store exists', async () => {
+    const become = deferred<any>();
+    mocks.becomePartner.mockReturnValue(become.promise);
+    mocks.signOwnName.mockResolvedValue({ data: { data: { signed: true } } });
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof ownNameRequest>;
+
+    const result = mutation.mutationFn(ownNameRequest);
+    expect(mocks.signOwnName).not.toHaveBeenCalled(); // no store yet, nothing to sign for
+    become.resolve(created);
+    await result;
+
+    expect(mocks.signOwnName).toHaveBeenCalledTimes(1);
+  });
+
+  it('a registered name signs nothing; a failed signature never fails the store (Documents offers it again)', async () => {
+    mocks.becomePartner.mockResolvedValue(created);
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof ownNameRequest>;
+    await mutation.mutationFn({ ...vendorRequest, business: { ...vendorRequest.business, nameBasis: 'REGISTERED' } } as never);
+    expect(mocks.signOwnName).not.toHaveBeenCalled();
+
+    const store = await drafts();
+    store.getState().clear();
+    store.getState().update(accountA, typedForm);
+    mocks.signOwnName.mockRejectedValue(Object.assign(new Error('Service unavailable'), { response: { status: 503 } }));
+    await expect(mutation.mutationFn(ownNameRequest)).resolves.toBeDefined();
+    expect(mocks.signOwnName).toHaveBeenCalledTimes(1);
+    expect(store.getState().owner).toBeNull(); // the store exists: its form is done all the same
+  });
+
+  it('a late A result never signs the declaration as B', async () => {
+    const become = deferred<any>();
+    mocks.becomePartner.mockReturnValue(become.promise);
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof ownNameRequest>;
+
+    const result = mutation.mutationFn(ownNameRequest);
+    mocks.current = { ...accountB };
+    mocks.user = { id: accountB.userId, firstName: 'Account', lastName: 'B' };
+    become.resolve(created);
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.signOwnName).not.toHaveBeenCalled();
   });
 
   it('a driver application leaves the business form alone', async () => {

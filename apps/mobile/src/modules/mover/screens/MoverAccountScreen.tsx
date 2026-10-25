@@ -48,6 +48,12 @@ export function MoverAccountScreen({ navigation }: any) {
   const setBilling = useSetMoverBillingMethod(kind, stepUp.withStepUp);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
+  // [Row 312 · REVIEW-F S4-1] While the malware scanner is down a new vehicle photo is stored unscanned and
+  // the server withholds it until its rescan answers clean (vehiclePhotoUrl null + vehiclePhotoScan). Say
+  // what happened instead of "Add photo". An older server sends no vehiclePhotoScan: as before.
+  const photoScan = (profile as { vehiclePhotoScan?: unknown } | null | undefined)?.vehiclePhotoScan;
+  const photoWaiting = !profile?.vehiclePhotoUrl && photoScan === 'AWAITING';
+  const photoFailed = !profile?.vehiclePhotoUrl && photoScan === 'FAILED';
   const qc = useQueryClient();
   // [ALG-34] The MMG pay link is where the money goes: the server asks this
   // session to confirm it holds the phone (the code sheet), then STAGES the
@@ -174,11 +180,19 @@ export function MoverAccountScreen({ navigation }: any) {
                 </T>
               </View>
               <LinkText
-                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl || photoWaiting ? 'Change photo' : photoFailed ? 'Upload again' : 'Add photo'}
                 onPress={pickVehiclePhoto}
               />
             </View>
-            {!profile?.vehiclePhotoUrl ? (
+            {photoWaiting ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Photo waiting for a file check. Customers see it once it clears.
+              </T>
+            ) : photoFailed ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                This photo didn’t pass our file check. Upload a new photo.
+              </T>
+            ) : !profile?.vehiclePhotoUrl ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Add a clear photo of your vehicle — customers see it the moment you accept.
               </T>

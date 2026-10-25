@@ -44,7 +44,8 @@ const rideInProgress = () => new AppError(
 // for the gates and the creation path — the route and the 2-min queue scan
 // both call this. Error PRECEDENCE is preserved exactly as the route has
 // always thrown it (active → banned → availability(flag) → restricted →
-// fare → capacity → L2; the customer photo gate is gone, owner 16 Oct) and is pinned by
+// fare → capacity; the customer photo gate is gone, owner 16 Oct, and the customer ID (L2) gate,
+// owner 24 Oct 2026) and is pinned by
 // taxi-characterization.test.ts.
 // ---------------------------------------------------------------------------
 
@@ -282,32 +283,20 @@ export async function assertRideGates(
   }
 
   // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer is never asked for a
-  // photo, taxi included: a ride needs only the ID on file (assertL2, after this). Partners keep
-  // their selfie rules (go-online). Builds 9-11 show their photo door only on SELFIE_REQUIRED,
-  // which this path no longer sends, so they simply stop asking.
+  // photo, taxi included. Partners keep their selfie rules (go-online). Builds 9-11 show their
+  // photo door only on SELFIE_REQUIRED, which this path no longer sends, so they simply stop asking.
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Nor an ID: the master plan §5 gate
+  // (L2 — the customer's ID on file — before a first ride, 403 ID_VERIFICATION_REQUIRED) is removed.
+  // It was Swift's own 8 Oct choice, not a legal duty. Builds 11/12 and vc7/vc8 open their "Add your
+  // ID" door only on that code, which no ride path sends any more, so they stop asking too. The ID
+  // a customer chooses to add stays optional (and kept as before); STRIKE_RESTRICTED above is a
+  // separate rule after repeated failed payments.
   return user;
 }
 
 /**
- * Master plan §5: a rider reaches Level 2 BEFORE their first taxi ride —
- * getting into a stranger's car is the highest-trust action on Swift.
- * This supersedes the old fare-threshold gate (every ride now needs L2).
- * (Kept separate because the route has always thrown it AFTER fare/capacity.)
- * [Owner ruling 8 Oct 2026 — CUSTOMER ID] L2 now comes the moment a customer's ID goes on file
- * (no admin approval unless an automatic check holds it), so the words say "on file", not
- * "verified" — nobody may be told Swift verified an ID a person never looked at.
- */
-export function assertL2(user: GatedUser): void {
-  if (user.trustLevel === 'L1') {
-    throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-      'Rides need your ID on file first — add it once in the app (it takes a minute) and it covers every future ride.',
-      { reason: 'first_ride_l2' });
-  }
-}
-
-/**
  * Create the ride at the quoted fare and start dispatch — the whole request
- * path minus HTTP: gates, tier fare, capacity, L2, order row + PENDING
+ * path minus HTTP: gates, tier fare, capacity, order row + PENDING
  * history, watch cleanup, dispatch enqueue (queue when up, inline otherwise).
  */
 export async function createRideRequest(
@@ -411,8 +400,6 @@ export async function createRideRequest(
   const waiting = waitingTerms
     ? { terms: { chargePerBlock: waitingTerms.chargePerBlock, blockMinutes: waitingTerms.blockMinutes, currencyCode: estimate.currencyCode }, version: waitingTerms.version }
     : null;
-
-  assertL2(user);
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);

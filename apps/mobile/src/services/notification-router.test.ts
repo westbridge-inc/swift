@@ -311,6 +311,7 @@ const CENSUS: Case[] = [
   { k: 'trip_share_ended', d: { outcome: 'STOPPED_BY_RIDER' }, to: HOME, why: 'HOME: guardian — [L10 §2] the trip someone shared with them ended (stopped, completed, cancelled, or contact lost); they follow a trip, they own no order, so the notice is the whole message' },
   { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
   { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
+  { k: 'ops_alert_drill_failed', d: { opsAlertId: 'a1', opsAlertIds: ['a1'], count: 1 }, to: null, why: 'admins — [DRILL-STORM] a drill nobody acknowledged within its window was closed as FAILED; platform operators are told once; an ops surface' },
   { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: null, why: 'admins — [R19] a child-safety report pages operations; the moderation queue is an ops surface' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
   { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
@@ -428,6 +429,12 @@ const CENSUS: Case[] = [
   { k: 'ops_backup_stale', to: null, why: 'admins' },
   // The upload malware scanner (clamd) stopped answering: uploads are refused until it is back.
   { k: 'ops_malware_scanner_down', d: { failures: 2, reason: 'x' }, to: null, why: 'admins — ops page, acted on from the server (row 312)' },
+  // Uploads stored before a clean scan (row 312 follow-up): the emergency bypass is on, evidence is
+  // held for its scan, or a stored upload was quarantined. Admin-only, acted on from the server.
+  { k: 'ops_malware_scan_bypass', d: { unscannedOpen: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_evidence_unscanned', d: { open: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_evidence_held', d: { held: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_upload_quarantined', d: { surface: 'vehicle-photo', reason: 'bypass', debtId: 'd1', signature: 'x' }, to: null, why: 'admins — ops page (row 312)' },
   { k: 'ops_reaper_stale', d: { ageHours: 50 }, to: null, why: 'admins — the document reaper is behind by two cycles (DOC-1 §9.2)' },
   { k: 'ops_reaper_failed', d: { error: 'x' }, to: null, why: 'admins — the document reaper threw (DOC-1 §9.2)' },
   { k: 'ops_image_policy_failed', d: { error: 'boom' }, to: null, why: 'admins — ops page, admin only' },

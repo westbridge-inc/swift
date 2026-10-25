@@ -120,11 +120,13 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
+    // [DRILL-STORM] a drill nobody acknowledged was closed as FAILED: told to platform operators once
+    'ops_alert_drill_failed',
     // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
     'csae_report',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
     'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
-    'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_reaper_stale', 'ops_reaper_failed',
+    'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held', 'ops_upload_quarantined', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
     'ops_places_failing',
@@ -189,13 +191,21 @@ export function pushOptionsFor(data: Record<string, unknown> | null | undefined)
   const alertClass = alertClassOf(data?.['kind']);
   const policy = POLICY[alertClass];
   const deadlineMs = policy.deadlineField ? deadlineOf(data?.[policy.deadlineField]) : undefined;
+  const collapse = collapseKeyOf(data?.['collapseKey']);
   return {
     alertClass,
     priority: policy.priority,
     ...(policy.sound ? { sound: policy.sound } : {}),
     ...(policy.ttlSeconds !== undefined ? { ttlSeconds: policy.ttlSeconds } : {}),
     ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+    ...(collapse ? { collapseId: collapse, tag: collapse } : {}),
   };
+}
+
+/** [DRILL-STORM] A payload's collapseKey, trusted only as a short plain key:
+ *  anything else is ignored, so a malformed key can never silence a push. */
+function collapseKeyOf(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9:_-]{0,63}$/.test(value) ? value : undefined;
 }
 
 /** [RINGER] The DeviceToken.alertsVersion of the first app build that has the
