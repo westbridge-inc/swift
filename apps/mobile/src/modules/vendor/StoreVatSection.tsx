@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Alert, Linking, Pressable, View } from 'react-native';
+import { Alert, Linking, Pressable, View, type StyleProp, type ViewStyle } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { BrandCheckbox, Card, ChoiceChip, ErrorState, LabeledInput, PillButton, T } from '../../kit';
 import { space } from '@swift/ui';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { storeVatStatusLine } from '../../lib/storeVat';
 import { errorMessage } from '../../lib/apiError';
-import { useSendVatCertificate, useStoreVat, useUpdateStoreVat } from '../../hooks/storeVat';
+import { useStoreVat, useUpdateStoreVat } from '../../hooks/storeVat';
+import { useSendVatCertificate } from '../../hooks/storeVatCertificate';
 
 /** Where the owner reads the GRA's own words on VAT. */
 const GRA_VAT_URL = 'https://www.gra.gov.gy/vat-invoices/';
@@ -18,7 +19,9 @@ const GRA_VAT_URL = 'https://www.gra.gov.gy/vat-invoices/';
  * changed here: they already include VAT ("add VAT at checkout" is not offered yet). Hidden while Swift's VAT switch
  * is off, unless the store already has a VAT record to show. The same words as the web dashboard.
  */
-export function StoreVatSection() {
+/** `style`: the screen's section gap (VendorAccountScreen stacks its cards with marginBottom), on the card itself, so a
+ *  hidden section leaves no gap behind. */
+export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}) {
   const vat = useStoreVat(true);
   const update = useUpdateStoreVat();
   const send = useSendVatCertificate();
@@ -34,7 +37,7 @@ export function StoreVatSection() {
 
   if (vat.isError) {
     return (
-      <Card style={{ marginBottom: space.lg }}>
+      <Card style={style}>
         <T variant="heading">VAT</T>
         <ErrorState message="Your VAT settings did not load." onRetry={() => void vat.refetch()} />
       </Card>
@@ -80,7 +83,7 @@ export function StoreVatSection() {
   };
 
   return (
-    <Card style={{ marginBottom: space.lg, gap: space.sm }}>
+    <Card style={[{ gap: space.sm }, style]}>
       <T variant="heading">VAT</T>
       <T variant="label" tone="muted">
         Only a business registered for VAT with the GRA may charge VAT. If yours is not, keep this at No: your prices stay

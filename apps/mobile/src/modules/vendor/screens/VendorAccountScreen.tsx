@@ -288,7 +288,7 @@ export function VendorAccountScreen() {
         {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
 
         {/* [STORE-VAT · owner O-5] The business's VAT registration is the owner's to give; a sample store has none. */}
-        {isOwner && !samplePreview && store ? <StoreVatSection /> : null}
+        {isOwner && !samplePreview && store ? <StoreVatSection style={{ marginBottom: space.lg }} /> : null}
 
         {isManager ? <StoreQrCard /> : null}
 

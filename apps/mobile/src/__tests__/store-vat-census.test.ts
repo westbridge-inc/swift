@@ -68,7 +68,7 @@ describe('[O-5] the phone’s VAT words', () => {
     const section = read('modules/vendor/StoreVatSection.tsx');
     expect(section).toContain('accessibilityLabel={DOCUMENT_CONSENT_TEXT}');
     expect(section).toContain('disabled={!consented}');
-    const hooks = read('hooks/storeVat.ts');
+    const hooks = read('hooks/storeVatCertificate.ts');
     expect(hooks).toContain("consentTick: 'document_v1'");
     expect(hooks).toMatch(/const PRIVACY_NOTICE_VERSION = 'v1'/);
     expect(read('hooks/verification.ts')).toMatch(/const PRIVACY_NOTICE_VERSION = 'v1'/);
