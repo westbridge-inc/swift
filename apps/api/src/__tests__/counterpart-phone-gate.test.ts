@@ -2,12 +2,18 @@
  * [O-1 · owner 22 Oct 2026] The census of counterpart PERSONAL phones on the
  * real routes, asserted on the SERIALIZED response body.
  *
- * A client that knows the Swift call bridge (it sends `x-swift-call-bridge`)
- * is never sent another person's personal number: not the driver's to the
- * passenger, not the passenger's to the driver, not the rider's to the
- * customer, the sender or the store, not the customer's to the rider or the
- * store. The store builds already installed (no header) keep receiving the
- * number they dial today until COUNTERPART_PHONES_TO_OLD_APPS=0 retires it.
+ * [owner 24 Oct 2026 06:00Z] While the call bridge is OFF (CALL_RELAY, the
+ * launch default) NOTHING changes for anyone: old store builds and new
+ * bridge-aware clients alike are sent the number they can dial today, so no
+ * one is left with no way to call at the door.
+ *
+ * With CALL_RELAY on, a client that knows the Swift call bridge (it sends
+ * `x-swift-call-bridge`) is never sent another person's personal number: not
+ * the driver's to the passenger, not the passenger's to the driver, not the
+ * rider's to the customer, the sender or the store, not the customer's to the
+ * rider or the store. The store builds already installed (no header) keep
+ * receiving the number they dial today until COUNTERPART_PHONES_TO_OLD_APPS=0
+ * retires it.
  *
  * The parcel recipient's number (typed by the sender) is gated the same way
  * on the courier rider's live order: #1694 sends it to the assigned rider for
@@ -136,7 +142,12 @@ beforeAll(async () => {
   await system(() => app.prisma.rider.update({ where: { id: courierRiderId }, data: { currentOrderId: parcelId } }));
 });
 
-afterEach(() => { delete process.env['COUNTERPART_PHONES_TO_OLD_APPS']; });
+afterEach(() => {
+  delete process.env['COUNTERPART_PHONES_TO_OLD_APPS'];
+  delete process.env['CALL_RELAY'];
+});
+/** The call bridge's switch, as an operator would set it. */
+const relay = (on: boolean) => { if (on) process.env['CALL_RELAY'] = '1'; else delete process.env['CALL_RELAY']; };
 
 afterAll(async () => {
   await system(async () => {
@@ -175,9 +186,40 @@ const SURFACES: Surface[] = [
   { name: 'GET /rider/orders/active-legs (courier rider sees parcel recipient)', url: () => '/api/v1/rider/orders/active-legs', token: () => courierP.token, counterpart: () => RECIPIENT },
 ];
 
-describe('[O-1] a bridge-aware client is sent no counterpart personal phone', () => {
+describe('[O-1 · owner 24 Oct 06:00Z] CALL_RELAY off (launch default): every client keeps the number it dials today', () => {
+  for (const s of SURFACES) {
+    for (const [who, extra] of [['bridge-aware client', BRIDGE], ['old store build', {}]] as const) {
+      it(`${s.name}: present for a ${who}`, async () => {
+        relay(false);
+        const res = await get(s.url(), s.token(), { ...(s.headers?.() ?? {}), ...extra });
+        expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+        expect(res.body.includes(s.counterpart()), `${s.name} hid the number from a ${who} while the bridge is off`).toBe(true);
+      });
+    }
+    it(`${s.name}: present even with COUNTERPART_PHONES_TO_OLD_APPS=0 while the bridge is off`, async () => {
+      relay(false);
+      process.env['COUNTERPART_PHONES_TO_OLD_APPS'] = '0';
+      for (const extra of [BRIDGE, {}]) {
+        const res = await get(s.url(), s.token(), { ...(s.headers?.() ?? {}), ...extra });
+        expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+        expect(res.body.includes(s.counterpart()), `${s.name}: no one may be left without a number while the bridge is off`).toBe(true);
+      }
+    });
+    it(`${s.name}: CALL_RELAY at anything but 1 is off (present for a bridge-aware client)`, async () => {
+      for (const v of ['0', '', 'true', 'yes', '2']) {
+        process.env['CALL_RELAY'] = v;
+        const res = await get(s.url(), s.token(), { ...(s.headers?.() ?? {}), ...BRIDGE });
+        expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+        expect(res.body.includes(s.counterpart()), `CALL_RELAY=${JSON.stringify(v)} hid the number`).toBe(true);
+      }
+    });
+  }
+});
+
+describe('[O-1] CALL_RELAY on: a bridge-aware client is sent no counterpart personal phone', () => {
   for (const s of SURFACES) {
     it(`${s.name}: absent with the header`, async () => {
+      relay(true);
       const res = await get(s.url(), s.token(), { ...(s.headers?.() ?? {}), ...BRIDGE });
       expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
       expect(res.body.includes(s.counterpart()), `${s.name} sent the counterpart's number to a bridge-aware client`).toBe(false);
@@ -185,9 +227,10 @@ describe('[O-1] a bridge-aware client is sent no counterpart personal phone', ()
   }
 });
 
-describe('[O-1 · builds 9-12] an installed store build keeps the number it dials today', () => {
+describe('[O-1 · builds 9-12] CALL_RELAY on: an installed store build keeps the number it dials today', () => {
   for (const s of SURFACES) {
     it(`${s.name}: present without the header`, async () => {
+      relay(true);
       const res = await get(s.url(), s.token(), s.headers?.() ?? {});
       expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
       expect(res.body.includes(s.counterpart()), `${s.name} stopped sending an old build its Call number`).toBe(true);
@@ -195,9 +238,10 @@ describe('[O-1 · builds 9-12] an installed store build keeps the number it dial
   }
 });
 
-describe('[O-1 retirement] COUNTERPART_PHONES_TO_OLD_APPS=0: no client is sent one', () => {
+describe('[O-1 retirement] CALL_RELAY on + COUNTERPART_PHONES_TO_OLD_APPS=0: no client is sent one', () => {
   for (const s of SURFACES) {
     it(`${s.name}: absent without the header once retired`, async () => {
+      relay(true);
       process.env['COUNTERPART_PHONES_TO_OLD_APPS'] = '0';
       const res = await get(s.url(), s.token(), s.headers?.() ?? {});
       expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
@@ -206,25 +250,29 @@ describe('[O-1 retirement] COUNTERPART_PHONES_TO_OLD_APPS=0: no client is sent o
   }
 });
 
-describe('[O-1] fields no build reads are gone for every client', () => {
-  for (const headers of [{}, BRIDGE]) {
-    const who = Object.keys(headers).length ? 'bridge-aware' : 'old build';
-    it(`the rider's live parcel is returned and keeps the recipient key (${who})`, async () => {
-      for (const url of ['/api/v1/rider/orders/active', '/api/v1/rider/orders/active-legs']) {
-        const res = await get(url, courierP.token, headers);
-        expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
-        expect(res.body.includes(parcelId), `${url} did not return the parcel at all`).toBe(true);
-        // the key stays (null for a bridge-aware client), so every build's `phone ? <Call> : null` holds
-        expect(res.body.includes('courierRecipientPhone'), `${url} dropped the recipient field`).toBe(true);
-      }
-    });
-    it(`the rider's live store order carries no store account line (${who})`, async () => {
-      for (const url of ['/api/v1/rider/orders/active', '/api/v1/rider/orders/active-legs']) {
-        const res = await get(url, riderP.token, headers);
-        expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
-        expect(res.body.includes(foodId), `${url} did not return the order at all`).toBe(true);
-        expect(res.body.includes(STORE_ACCOUNT_LINE), `${url} sent the store's account/OTP line`).toBe(false);
-      }
-    });
+describe('[O-1] fields no build reads are gone for every client, bridge on or off', () => {
+  for (const on of [false, true]) {
+    for (const headers of [{}, BRIDGE]) {
+      const who = `${Object.keys(headers).length ? 'bridge-aware' : 'old build'}, CALL_RELAY ${on ? 'on' : 'off'}`;
+      it(`the rider's live parcel is returned and keeps the recipient key (${who})`, async () => {
+        relay(on);
+        for (const url of ['/api/v1/rider/orders/active', '/api/v1/rider/orders/active-legs']) {
+          const res = await get(url, courierP.token, headers);
+          expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+          expect(res.body.includes(parcelId), `${url} did not return the parcel at all`).toBe(true);
+          // the key stays (null for a bridge-aware client with the bridge on), so every build's `phone ? <Call> : null` holds
+          expect(res.body.includes('courierRecipientPhone'), `${url} dropped the recipient field`).toBe(true);
+        }
+      });
+      it(`the rider's live store order carries no store account line (${who})`, async () => {
+        relay(on);
+        for (const url of ['/api/v1/rider/orders/active', '/api/v1/rider/orders/active-legs']) {
+          const res = await get(url, riderP.token, headers);
+          expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+          expect(res.body.includes(foodId), `${url} did not return the order at all`).toBe(true);
+          expect(res.body.includes(STORE_ACCOUNT_LINE), `${url} sent the store's account/OTP line`).toBe(false);
+        }
+      });
+    }
   }
 });

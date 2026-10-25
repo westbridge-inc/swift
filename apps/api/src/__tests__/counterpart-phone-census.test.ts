@@ -16,8 +16,10 @@ import {
   COUNTERPART_PHONES_TO_OLD_APPS_ENV,
   counterpartPhone,
   counterpartPhonesAllowed,
+  oldAppsKeepCounterpartPhones,
   withCounterpartPhones,
 } from '../modules/calls/counterpart-phone';
+import { CALL_RELAY_ENV, callRelayEnabled } from '../modules/calls/call-relay-switch';
 import { DARK_FEATURES } from '../modules/ops/dark-features';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -135,57 +137,89 @@ describe('[O-1] fields no build reads are not sent at all', () => {
 
 describe('[O-1] the gate itself', () => {
   const req = (headers: Record<string, string | undefined> = {}) => ({ headers });
+  /** The call bridge on, as an operator sets it. */
+  const ON = { CALL_RELAY: '1' };
 
   it('the wire names are pinned', () => {
     expect(CALL_BRIDGE_CLIENT_HEADER).toBe('x-swift-call-bridge');
     expect(COUNTERPART_PHONES_TO_OLD_APPS_ENV).toBe('COUNTERPART_PHONES_TO_OLD_APPS');
+    expect(CALL_RELAY_ENV).toBe('CALL_RELAY');
   });
 
-  it('an old build (no header) is sent the number while the switch is on (default)', () => {
-    expect(counterpartPhonesAllowed(req(), {})).toBe(true);
-    expect(counterpartPhonesAllowed(req(), { COUNTERPART_PHONES_TO_OLD_APPS: '1' })).toBe(true);
+  it('[owner 24 Oct 06:00Z] CALL_RELAY off (the default): every client is sent the number, whatever else is set', () => {
+    for (const relay of [undefined, '', '0', '01', 'true', 'TRUE', 'yes', '2', '-1', '1.5']) {
+      const env = relay === undefined ? {} : { CALL_RELAY: relay };
+      for (const headers of [{}, BRIDGE_ON, { 'x-swift-call-bridge': '' }]) {
+        expect(counterpartPhonesAllowed(req(headers), env), `CALL_RELAY=${JSON.stringify(relay)}`).toBe(true);
+        expect(counterpartPhonesAllowed(req(headers), { ...env, COUNTERPART_PHONES_TO_OLD_APPS: '0' }), `CALL_RELAY=${JSON.stringify(relay)} + retired`).toBe(true);
+      }
+    }
   });
 
-  it('any value of the header means bridge-aware: never sent one', () => {
-    for (const v of ['1', '0', '', 'yes']) expect(counterpartPhonesAllowed(req({ 'x-swift-call-bridge': v }), {})).toBe(false);
+  it('CALL_RELAY is on only at exactly 1, blanks ignored', () => {
+    for (const v of ['1', ' 1', '1 ', '\t1\n']) expect(callRelayEnabled({ CALL_RELAY: v }), JSON.stringify(v)).toBe(true);
+    for (const v of [undefined, '', '0', '01', '11', 'true', 'on', 'yes', '2']) {
+      expect(callRelayEnabled(v === undefined ? {} : { CALL_RELAY: v }), JSON.stringify(v)).toBe(false);
+    }
   });
 
-  it("retired ('0'): no client is sent one", () => {
-    expect(counterpartPhonesAllowed(req(), { COUNTERPART_PHONES_TO_OLD_APPS: '0' })).toBe(false);
+  it('CALL_RELAY on: an old build (no header) is sent the number while the retirement switch is on (default)', () => {
+    expect(counterpartPhonesAllowed(req(), ON)).toBe(true);
+    expect(counterpartPhonesAllowed(req(), { ...ON, COUNTERPART_PHONES_TO_OLD_APPS: '1' })).toBe(true);
   });
 
-  it('withCounterpartPhones nulls every party phone in place and keeps the keys', () => {
-    const o = {
+  it('CALL_RELAY on: any value of the header means bridge-aware: never sent one', () => {
+    for (const v of ['1', '0', '', 'yes']) expect(counterpartPhonesAllowed(req({ 'x-swift-call-bridge': v }), ON)).toBe(false);
+  });
+
+  it("CALL_RELAY on + retired ('0'): no client is sent one", () => {
+    expect(counterpartPhonesAllowed(req(), { ...ON, COUNTERPART_PHONES_TO_OLD_APPS: '0' })).toBe(false);
+    expect(counterpartPhonesAllowed(req(BRIDGE_ON), { ...ON, COUNTERPART_PHONES_TO_OLD_APPS: '0' })).toBe(false);
+  });
+
+  it('withCounterpartPhones nulls every party phone in place and keeps the keys (bridge on, bridge-aware client)', () => {
+    const make = () => ({
       customer: { firstName: 'A', phone: P1 },
       rider: { phone: P2, user: { firstName: 'B', phone: P3 } },
       driver: { user: { phone: P4 } },
       courierRecipientPhone: P2,
       orderNumber: 'X',
-    };
-    const out = withCounterpartPhones(req(BRIDGE_ON), o);
+    });
+    const o = make();
+    const out = withCounterpartPhones(req(BRIDGE_ON), o, ON);
     expect(out).toBe(o);
     expect(JSON.stringify(out)).not.toMatch(/\+5920/);
     expect(out.customer.phone).toBeNull();
+    expect(out.rider.phone).toBeNull();
     expect(out.rider.user.phone).toBeNull();
     expect('phone' in out.driver.user).toBe(true);
+    expect(out.driver.user.phone).toBeNull();
     expect(out.courierRecipientPhone).toBeNull();
-    const legacy = { customer: { phone: P1 } };
-    expect(withCounterpartPhones(req(), legacy).customer.phone).toBe(P1);
+    // an old build with the bridge on, and EVERY client with the bridge off, keep them all
+    expect(withCounterpartPhones(req(), make(), ON)).toEqual(make());
+    expect(withCounterpartPhones(req(BRIDGE_ON), make(), {})).toEqual(make());
   });
 
-  it('counterpartPhone answers null to a bridge-aware client', () => {
-    expect(counterpartPhone(req(BRIDGE_ON), P1)).toBeNull();
-    expect(counterpartPhone(req(), P1)).toBe(P1);
-    expect(counterpartPhone(req(), undefined)).toBeNull();
+  it('counterpartPhone answers null only to a bridge-aware client with the bridge on', () => {
+    expect(counterpartPhone(req(BRIDGE_ON), P1, ON)).toBeNull();
+    expect(counterpartPhone(req(BRIDGE_ON), P1, {})).toBe(P1);
+    expect(counterpartPhone(req(), P1, ON)).toBe(P1);
+    expect(counterpartPhone(req(), undefined, ON)).toBeNull();
   });
 
-  it('the retirement switch is in the dark-features register (off at 0, blanks ignored)', () => {
+  it('both switches are in the dark-features register, read as the code reads them', () => {
     const entry = DARK_FEATURES.find((f) => f.setting === 'COUNTERPART_PHONES_TO_OLD_APPS');
     expect(entry?.source).toBe('env');
     expect(entry?.enabledWhenPattern?.test('0')).toBe(false);
     expect(entry?.enabledWhenPattern?.test('')).toBe(true);
     expect(entry?.enabledWhenPattern?.test('1')).toBe(true);
-    expect(counterpartPhonesAllowed(req(), { [COUNTERPART_PHONES_TO_OLD_APPS_ENV]: ' 0 ' })).toBe(false);
+    expect(entry?.whileOff).toMatch(/only while CALL_RELAY is on/);
+    expect(oldAppsKeepCounterpartPhones({ [COUNTERPART_PHONES_TO_OLD_APPS_ENV]: ' 0 ' })).toBe(false);
+    expect(counterpartPhonesAllowed(req(), { ...ON, [COUNTERPART_PHONES_TO_OLD_APPS_ENV]: ' 0 ' })).toBe(false);
+    const relay = DARK_FEATURES.find((f) => f.setting === 'CALL_RELAY');
+    expect(relay?.source).toBe('env');
+    expect(relay?.enabledWhenPattern?.test('1')).toBe(true);
+    expect(relay?.enabledWhenPattern?.test('0')).toBe(false);
+    expect(relay?.enabledWhenPattern?.test('')).toBe(false);
   });
 });
-

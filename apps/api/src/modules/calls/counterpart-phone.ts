@@ -3,15 +3,21 @@
  * see each other's PERSONAL phone number. A call between them goes through
  * Swift (the call bridge), so neither side needs the other's number.
  *
- * The store builds already installed (iPhone 9/11/12, Android vc7/vc8) dial
- * the number they are sent and know nothing of the bridge. They keep receiving
- * it until they are retired, so they never lose a way to reach the other side.
- * A client that knows the bridge says so with the header below and is sent no
- * counterpart phone at all.
+ * [owner 24 Oct 2026 06:00Z] All of this applies ONLY while the bridge is on
+ * (CALL_RELAY, modules/calls/call-relay-switch.ts; it ships OFF). While it is
+ * OFF every client, old or new, is sent exactly the numbers it gets today, so
+ * no one is left with no way to call at the door.
  *
- * Retirement: when builds 9-12 / vc7-vc8 are gone, set
- * COUNTERPART_PHONES_TO_OLD_APPS=0 (launch checklist). From then on NO client
- * is sent a counterpart's personal number, whatever headers it sends.
+ * With the bridge on:
+ * - The store builds already installed (iPhone 9/11/12, Android vc7/vc8) dial
+ *   the number they are sent and know nothing of the bridge. They keep
+ *   receiving it until they are retired, so they never lose a way to reach the
+ *   other side.
+ * - A client that knows the bridge says so with the header below and is sent
+ *   no counterpart phone at all.
+ * - Retirement: when builds 9-12 / vc7-vc8 are gone, set
+ *   COUNTERPART_PHONES_TO_OLD_APPS=0 (launch checklist). From then on NO
+ *   client is sent a counterpart's personal number, whatever headers it sends.
  *
  * The header is CLIENT-CONTROLLED: a client that omits it is served like an
  * installed store build. Until the switch below is 0, any authenticated party
@@ -27,6 +33,8 @@
  * the receipt's seller line), and the admin/ops desk (masked + audited reveal).
  */
 
+import { callRelayEnabled } from './call-relay-switch';
+
 /** The wire marker a bridge-aware client (phone JS, website, dashboard) sends. */
 export const CALL_BRIDGE_CLIENT_HEADER = 'x-swift-call-bridge';
 export const CALL_BRIDGE_CLIENT_VERSION = '1';
@@ -36,18 +44,26 @@ export const COUNTERPART_PHONES_TO_OLD_APPS_ENV = 'COUNTERPART_PHONES_TO_OLD_APP
 
 type Headers = Record<string, string | string[] | undefined>;
 
+/** The retirement switch alone: on unless the trimmed value is exactly '0'.
+ *  It takes effect only while CALL_RELAY is on (counterpartPhonesAllowed). */
+export function oldAppsKeepCounterpartPhones(env: Record<string, string | undefined> = process.env): boolean {
+  return env[COUNTERPART_PHONES_TO_OLD_APPS_ENV]?.trim() !== '0';
+}
+
 /**
  * May this request be sent another person's personal phone number?
- * Only an old store build (no bridge header) while the retirement switch is
- * on. Any value of the header counts as bridge-aware: a client that claims to
- * know the bridge is never sent a number.
+ * - Bridge OFF (CALL_RELAY, the launch default): yes, for every client, as today.
+ * - Bridge on: only an old store build (no bridge header) while the retirement
+ *   switch is on. Any value of the header counts as bridge-aware: a client that
+ *   claims to know the bridge is never sent a number.
  */
 export function counterpartPhonesAllowed(
   request: { headers: Headers },
   env: Record<string, string | undefined> = process.env,
 ): boolean {
+  if (!callRelayEnabled(env)) return true;
   if (request.headers[CALL_BRIDGE_CLIENT_HEADER] !== undefined) return false;
-  return env[COUNTERPART_PHONES_TO_OLD_APPS_ENV]?.trim() !== '0';
+  return oldAppsKeepCounterpartPhones(env);
 }
 
 /** The phone itself when this request may have it, else null (the key stays,
@@ -55,8 +71,9 @@ export function counterpartPhonesAllowed(
 export function counterpartPhone(
   request: { headers: Headers },
   phone: string | null | undefined,
+  env: Record<string, string | undefined> = process.env,
 ): string | null {
-  return counterpartPhonesAllowed(request) ? phone ?? null : null;
+  return counterpartPhonesAllowed(request, env) ? phone ?? null : null;
 }
 
 /**
@@ -66,8 +83,12 @@ export function counterpartPhone(
  * shown to the assigned courier rider; the bridge can call the recipient).
  * A no-op when this request may have them.
  */
-export function withCounterpartPhones<T>(request: { headers: Headers }, order: T): T {
-  if (counterpartPhonesAllowed(request) || !order || typeof order !== 'object') return order;
+export function withCounterpartPhones<T>(
+  request: { headers: Headers },
+  order: T,
+  env: Record<string, string | undefined> = process.env,
+): T {
+  if (counterpartPhonesAllowed(request, env) || !order || typeof order !== 'object') return order;
   const row = order as Record<string, unknown>;
   for (const key of ['customer', 'rider', 'driver'] as const) {
     const party = row[key] as Record<string, unknown> | null | undefined;

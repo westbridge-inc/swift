@@ -163,6 +163,19 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'money',
   },
   {
+    // [O-1 · owner 24 Oct 2026] The Swift call bridge. Ships OFF; on only after a real test call
+    // rings and Press 1 connects on Digicel AND GTT.
+    key: 'call_relay',
+    setting: 'CALL_RELAY',
+    source: 'env',
+    // On only at '1' with blanks ignored (modules/calls/call-relay-switch.ts reads it so).
+    enabledWhenPattern: /^1$/,
+    title: 'Calls through Swift (the call bridge)',
+    whileOff:
+      "Calls are not routed through Swift. Every app, old store builds and new, keeps the other party's number on a live order and dials it directly, exactly as before, and in-app chat works as always. Kept OFF until a real Swift test call rings and Press 1 connects on a Digicel phone and a GTT phone (owner, 24 Oct 2026).",
+    impact: 'product',
+  },
+  {
     // [O-1 · owner 22 Oct 2026] ON until store builds 9-12 / vc7-vc8 are retired (launch checklist).
     key: 'counterpart_phones_to_old_apps',
     setting: 'COUNTERPART_PHONES_TO_OLD_APPS',
@@ -171,7 +184,7 @@ export const DARK_FEATURES: DarkFeature[] = [
     enabledWhenPattern: /^(?!0$)/,
     title: "Old app builds still get the other party's number",
     whileOff:
-      "No app is sent another person's personal phone number: phones on store builds 9-12 (iPhone) and vc7-vc8 (Android) show no Call button for the rider, driver, customer or store on a live order and use chat or support instead. Builds that know the Swift call bridge are not affected (they are never sent a number). Set to 0 only when those builds are retired.",
+      "Takes effect only while CALL_RELAY is on; while the call bridge is off every app keeps the other party's number whatever this says. With the bridge on: no app is sent another person's personal phone number, so phones on store builds 9-12 (iPhone) and vc7-vc8 (Android) show no Call button for the rider, driver, customer or store on a live order and use chat or support instead. Builds that know the Swift call bridge are not affected (with the bridge on they are never sent a number). Set to 0 only when those builds are retired.",
     impact: 'product',
   },
   {

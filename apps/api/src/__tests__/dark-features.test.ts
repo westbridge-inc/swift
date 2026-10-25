@@ -10,7 +10,8 @@ import { adsEnabled } from '../modules/ads/ads-enabled';
 import { ownerRlsBindEnabled } from '../lib/owner-rls';
 import { mmgCheckoutEnabled } from '../providers/mmg/mmg-checkout';
 import { webTaxiBookingEnabled } from '../modules/rides/web-taxi-booking';
-import { counterpartPhonesAllowed } from '../modules/calls/counterpart-phone';
+import { oldAppsKeepCounterpartPhones } from '../modules/calls/counterpart-phone';
+import { callRelayEnabled } from '../modules/calls/call-relay-switch';
 
 // ---------------------------------------------------------------------------
 // A capability may ship switched off. It may not ship switched off SILENTLY.
@@ -147,8 +148,9 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/api/src/modules/ads/ads-enabled.ts'),
       read('apps/api/src/lib/owner-rls.ts'),
       read('apps/api/src/providers/mmg/mmg-checkout.ts'),
-      // [O-1] old builds' counterpart phones (retired with builds 9-12)
+      // [O-1] old builds' counterpart phones (retired with builds 9-12) + the call bridge switch
       read('apps/api/src/modules/calls/counterpart-phone.ts'),
+      read('apps/api/src/modules/calls/call-relay-switch.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {
@@ -242,7 +244,8 @@ describe('[SWITCHES] the launch switches are registered and read exactly as the 
     ['OWNER_RLS_BIND', (env) => ownerRlsBindEnabled(env)],
     ['MMG_CHECKOUT_ENABLED', (env) => mmgCheckoutEnabled(env)],
     ['WEB_TAXI_BOOKING', (env) => webTaxiBookingEnabled(env)],
-    ['COUNTERPART_PHONES_TO_OLD_APPS', (env) => counterpartPhonesAllowed({ headers: {} }, env)],
+    ['COUNTERPART_PHONES_TO_OLD_APPS', (env) => oldAppsKeepCounterpartPhones(env)],
+    ['CALL_RELAY', (env) => callRelayEnabled(env)],
   ];
   const VALUES = [undefined, '', '0', '1', ' 1', '1 ', '2', '3', '9', '01', 'true', 'TRUE', 'yes', '-1', '1.5'];
 
