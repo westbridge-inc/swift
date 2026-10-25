@@ -339,11 +339,17 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     omit: {
       logoUrl: 'STORED_FILE', coverImageUrl: 'STORED_FILE', tierNote: 'INTERNAL_NOTE', mmgCheckoutHeldReason: 'INTERNAL_NOTE',
       mmgCheckoutHeldAt: 'FRAUD_SAFETY', suspensionSource: 'SYSTEM', isFeatured: 'SYSTEM', mmgMissesClearedAt: 'SYSTEM', nameReviewApprovedHash: 'SYSTEM',
+      // [STORE-VAT · owner O-5] The staff member who decided the store's VAT.
+      vatReviewedBy: 'OTHER_PERSON',
     },
     fields: [
       'id', 'name', 'slug', 'description', 'vendorType', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
       'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders',
       'deliveryRadius', 'minOrderAmount', 'estimatedPrepTime', 'cuisineTypes', 'tags', 'refundRule', 'vatRegistrationNumber', 'qrSlug',
+      // [STORE-VAT · owner O-5] The store's own VAT record, as its owner sees it on the VAT screen (GET /vendor/vat): its
+      // answer and pricing choice, the certificate it sent, what a person approved (number, registered name, effective
+      // date), when, and the reason the store was given for a refusal or withdrawal (written for the store to read).
+      'vatStatus', 'vatMode', 'vatCertificateDocId', 'vatApprovedNumber', 'vatApprovedName', 'vatEffectiveFrom', 'vatReviewedAt', 'vatReviewNote',
       'mmgNumber', 'mmgNumberPending', 'mmgNumberPendingAt', 'mmgNumberApplyAt', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt',
       'isVerified', 'activationValidUntil', 'tier', 'tierChangedAt', 'status', 'totalOrders', 'nameReviewApprovedAt', 'createdAt', 'updatedAt',
     ],
