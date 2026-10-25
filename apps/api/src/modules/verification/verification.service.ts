@@ -7,6 +7,7 @@ import { hopDocState } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
+import { POLICE_CLEARANCE_WITHDRAWN_NOTE } from './police-clearance-consent';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, OWN_NAME_DOC_TYPE, OWN_NAME_TIER, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
@@ -1665,6 +1666,32 @@ export class VerificationService {
    * the projection, then the mover goes offline / listings suspend like an expiry),
    * and the actor is told the category only.
    */
+  /**
+   * [POLICE-CLEARANCE CONSENT] The person withdraws their police clearance, before it is erased (dsar.eraseDocumentsFor
+   * shreds it next and the purge moves it to PURGED): a committed one is REVOKED first, so its kept record says so and
+   * loses its dates (no "clear" and no issue date survive); every one carries the withdrawal note; eligibility is
+   * recomputed in the same transaction (police-cleared off; a home-visit provider whose list needs it stops being
+   * verified; a business owner's home visits pause through homeVisitsCleared). A held clearance is not passed here.
+   */
+  async markPoliceClearanceWithdrawn(userId: string, docIds: readonly string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    await this.projectionTransaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-decision-authority */`;
+      for (const id of docIds) {
+        const doc = await tx.verificationDocument.findFirst({ where: { id, userId, docType: POLICE_CLEARANCE_DOC_TYPE }, select: { state: true } });
+        if (!doc) continue;
+        const note = { reviewNote: POLICE_CLEARANCE_WITHDRAWN_NOTE, expiresAt: null };
+        if (doc.state === 'COMMITTED') await hopDocState(tx, { id, userId }, 'COMMITTED', 'REVOKED', note);
+        else await tx.verificationDocument.updateMany({ where: { id, userId, legalHoldId: null }, data: note });
+        await tx.documentRecord.updateMany({ where: { submissionId: id }, data: { issuedOn: null, expiresOn: null } });
+      }
+      await projectProviderVerificationLocked(tx, userId);
+      await this.projectVendorActivation(tx, userId);
+    });
+    await this.forceMoverOfflineIfNotLive(userId);
+    await this.suspendListingsIfUnverified(userId);
+  }
+
   async revokeDocument(docId: string, adminId: string, reason: string): Promise<VerificationDocument> {
     const doc = await this.prisma.verificationDocument.findUnique({ where: { id: docId }, select: { id: true, userId: true, docType: true } });
     if (!doc) throw new NotFoundError('VerificationDocument', docId);
@@ -2018,7 +2045,9 @@ export class VerificationService {
     // ("Replaced — waiting for review"). Additive field; older apps ignore it.
     // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
     const replacedNotes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote).map((d) => d.reviewNote));
-    const documents = rows.filter((d) => d.state !== 'SUPERSEDED')
+    // [POLICE-CLEARANCE CONSENT] A police clearance the person withdrew is gone (only a note is kept): the checklist
+    // offers a new one instead of showing it "Rejected".
+    const documents = rows.filter((d) => d.state !== 'SUPERSEDED' && !(d.purgedAt && d.reviewNote === POLICE_CLEARANCE_WITHDRAWN_NOTE))
       .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d))
       // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
       // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as

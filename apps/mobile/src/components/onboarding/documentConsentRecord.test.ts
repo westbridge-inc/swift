@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DOCUMENT_CONSENT_TICK, SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord } from './documentConsentRecord';
+import { DOCUMENT_CONSENT_TICK, SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord, policeClearanceWordsFrom } from './documentConsentRecord';
 
 // ---------------------------------------------------------------------------
 // [DOC-CONSENT] Reading the server's `documentConsent`: only the person's own grant to THESE words counts, and
@@ -62,5 +62,22 @@ describe('documentConsentOnRecord', () => {
     expect(SRC('hooks', 'verification.ts')).toContain(`consentTick: '${DOCUMENT_CONSENT_TICK}'`);
     expect(API('modules', 'verification', 'upload-consent.ts')).toMatch(new RegExp(`${DOCUMENT_CONSENT_TICK}: \\{`));
     expect(API('modules', 'verification', 'document-consent-record.ts')).toContain(`const TICK = '${DOCUMENT_CONSENT_TICK}' as const;`);
+  });
+});
+
+describe('[POLICE-CLEARANCE CONSENT] policeClearanceWordsFrom', () => {
+  const words = { tick: 'police_clearance_v1', version: 'home-v1-30d', text: 'Needed because I will visit customers\' homes.', withdrawConfirm: 'Swift deletes it.' };
+  it('reads the API\'s words and nothing else', () => {
+    expect(policeClearanceWordsFrom({ policeClearanceConsent: { ...words, kind: 'home' } })).toEqual(words);
+  });
+  it('anything else is no words (an older API, another tick, empty or oversized fields)', () => {
+    for (const status of [
+      undefined, null, {}, { policeClearanceConsent: null }, { policeClearanceConsent: 'x' },
+      { policeClearanceConsent: { ...words, tick: 'document_v1' } }, { policeClearanceConsent: { ...words, version: '' } },
+      { policeClearanceConsent: { ...words, version: 'v'.repeat(41) } }, { policeClearanceConsent: { ...words, text: '' } },
+      { policeClearanceConsent: { ...words, text: 'w'.repeat(2001) } }, { policeClearanceConsent: { ...words, withdrawConfirm: '' } },
+    ]) {
+      expect(policeClearanceWordsFrom(status), JSON.stringify(status)?.slice(0, 80)).toBeNull();
+    }
   });
 });
