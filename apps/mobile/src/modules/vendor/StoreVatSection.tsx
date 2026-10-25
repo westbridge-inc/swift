@@ -73,6 +73,15 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
     if (!res.canceled && res.assets?.[0]) sendAsset(res.assets[0]);
   };
+  // [REVIEW-F #2087 S4] Turning off an APPROVED store's VAT ends the approval (a person must check again): ask once.
+  const turnOff = () => {
+    if (update.isPending) return;
+    if (v.status !== 'APPROVED') { update.mutate({ registered: false }); return; }
+    Alert.alert('Turn VAT off?', 'Your prices stop saying “incl. VAT” at once, and a person at Swift must check your certificate again before VAT can come back.', [
+      { text: 'Keep VAT', style: 'cancel' },
+      { text: 'Turn VAT off', style: 'destructive', onPress: () => update.mutate({ registered: false }) },
+    ]);
+  };
   const pick = () => {
     if (!consented || send.isPending) return;
     Alert.alert('Your GRA VAT certificate', 'A clear photo of the whole certificate: the name, the VAT number and the date it starts must be readable.', [
@@ -123,7 +132,8 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
             disabled={!canSave}
             onPress={() => {
               if (update.isPending) return;
-              update.mutate({ registered, vatRegistrationNumber: number.trim() });
+              if (!registered) { turnOff(); return; }
+              update.mutate({ registered: true, vatRegistrationNumber: number.trim() });
             }}
           />
           {update.isError ? <T variant="label" tone="error" accessibilityRole="alert">{errorMessage(update.error)}</T> : null}
@@ -135,10 +145,7 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
             label="Turn VAT off"
             variant="outline"
             loading={update.isPending}
-            onPress={() => {
-              if (update.isPending) return;
-              update.mutate({ registered: false });
-            }}
+            onPress={turnOff}
           />
           {update.isError ? <T variant="label" tone="error" accessibilityRole="alert">{errorMessage(update.error)}</T> : null}
         </View>

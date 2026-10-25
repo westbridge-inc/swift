@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cartVat, cartVatLine, itemVatNote, orderVatLine, storefrontVat, storefrontVatLine } from './storeVat';
+import { cartVat, cartVatLine, itemVatNote, orderVatLine, storefrontVat, storefrontVatLine, vatClassChoices } from './storeVat';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] The phone's VAT words. VAT shows only where the server says a person-approved store's VAT is
@@ -52,5 +52,12 @@ describe('[O-5] cart and order', () => {
     for (const line of [storefrontVatLine(vat), cartVatLine(cartVat({ included: 1, ratePercent: 14 })), orderVatLine({ vatRateBps: 1400, vatAmount: 1, vatSellerName: 'X' })]) {
       expect(String(line).toLowerCase()).not.toContain('invoice');
     }
+  });
+});
+
+describe('[O-5 · REVIEW-F #2087 S4] item classes before and after approval', () => {
+  it('never says VAT is inside the price before a person approved the store; the rate from the API after', () => {
+    expect(vatClassChoices(14, false)[0]!.label).toBe('Standard (VAT once your VAT is approved)');
+    expect(vatClassChoices(14, true)[0]!.label).toBe('Standard (14% VAT inside the price)');
   });
 });

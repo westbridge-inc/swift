@@ -104,9 +104,10 @@ export function storeVatStatusLine(v: StoreVatStatusView): string {
   }
 }
 
-/** The classes a store gives its items (the rate always from the API). */
-export const vatClassChoices = (ratePercent: number): ReadonlyArray<{ value: VatClass; label: string }> => [
-  { value: 'STANDARD', label: `Standard (${ratePercent}% VAT inside the price)` },
+/** The classes a store gives its items (the rate always from the API). Before a person approved the store's VAT, nothing
+ *  carries VAT yet, so the words do not say it does (REVIEW-F #2087 S4). */
+export const vatClassChoices = (ratePercent: number, effective = true): ReadonlyArray<{ value: VatClass; label: string }> => [
+  { value: 'STANDARD', label: effective ? `Standard (${ratePercent}% VAT inside the price)` : 'Standard (VAT once your VAT is approved)' },
   { value: 'ZERO_RATED', label: 'Zero-rated (no VAT)' },
   { value: 'EXEMPT', label: 'Exempt (no VAT)' },
 ];

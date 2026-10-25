@@ -338,6 +338,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const samplePreview = useVendorPreview((st) => st.previewType) != null;
   const storeVat = useStoreVat(myRole === 'OWNER' && !samplePreview);
   const vatRate = storeVat.data && storeVat.data.status !== 'NONE' ? storeVat.data.ratePercent : null;
+  const vatEffective = storeVat.data?.effective === true;
   const [vatClass, setVatClass] = useState<VatClass>((existing?.vatClass as VatClass | undefined) ?? 'STANDARD');
   const existingBooking = (existing?.bookingConfig ?? {}) as any;
   const [duration, setDuration] = useState<number>(existingBooking.durationMinutes ?? 30);
@@ -624,12 +625,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                     VAT on this item
                   </T>
                   <Segmented
-                    options={vatClassChoices(vatRate).map((c) => ({ key: c.value, label: c.value === 'STANDARD' ? 'Standard' : c.value === 'ZERO_RATED' ? 'Zero-rated' : 'Exempt' }))}
+                    options={vatClassChoices(vatRate, vatEffective).map((c) => ({ key: c.value, label: c.value === 'STANDARD' ? 'Standard' : c.value === 'ZERO_RATED' ? 'Zero-rated' : 'Exempt' }))}
                     value={vatClass}
                     onChange={(k) => setVatClass(k as VatClass)}
                   />
                   <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                    {vatClassChoices(vatRate).find((c) => c.value === vatClass)?.label}. You choose each item’s VAT class and
+                    {vatClassChoices(vatRate, vatEffective).find((c) => c.value === vatClass)?.label}. You choose each item’s VAT class and
                     are responsible for it; check with the GRA.
                   </T>
                 </View>
