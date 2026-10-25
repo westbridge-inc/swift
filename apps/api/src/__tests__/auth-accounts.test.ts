@@ -729,7 +729,13 @@ describe('Role-crossing authorization', () => {
     expect(res.json().success).toBe(false);
   });
 
-  it('uses current server role immediately after SUPER_ADMIN switches to customer', async () => {
+  // [ADMIN-ROLE · launch item, 25 Oct 2026] Console authority is the admin role the
+  // account HOLDS, never the phone app's mode: switching the SUPER_ADMIN's app into
+  // customer mode no longer locks the console (it did, with no way back). The
+  // property this case guards is unchanged and now tested on the role itself: the
+  // still-live token's SUPER_ADMIN claim is never authority, so removing the role
+  // refuses the very next protected request, with the session still alive.
+  it('uses the current server-held role on every request: a switch to customer mode keeps the console, removing SUPER_ADMIN refuses the still-live token at once', async () => {
     const user = await app.prisma.user.create({
       data: {
         phone: ROLE_AUTHORITY_PHONE,
@@ -770,8 +776,15 @@ describe('Role-crossing authorization', () => {
     expect(switched.statusCode).toBe(200);
     expect(switched.json().data.activeRole).toBe('CUSTOMER');
 
-    // The same still-live token contains SUPER_ADMIN, but its stale claim is
-    // no longer authority for the very next protected request.
+    // The app's mode is not authority: the account still holds SUPER_ADMIN.
+    const stillAdmin = await inject('GET', '/api/v1/admin/dashboard/overview', undefined, token);
+    expect(stillAdmin.statusCode).toBe(200);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { activeRole: true } })).activeRole).toBe('CUSTOMER');
+
+    // The role is: removed in the database, the same still-live token (its
+    // claim still says SUPER_ADMIN) is no longer authority for the very next
+    // protected request.
+    await app.prisma.user.update({ where: { id: user.id }, data: { roles: { set: ['CUSTOMER'] } } });
     const after = await inject('GET', '/api/v1/admin/dashboard/overview', undefined, token);
     expect(after.statusCode).toBe(403);
     expect(await app.prisma.session.findUnique({ where: { id: session.id } })).not.toBeNull();
