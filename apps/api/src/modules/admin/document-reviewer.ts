@@ -25,6 +25,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { DOCUMENT_REVIEWER_CAPABILITY } from './admin-authority';
+import { consoleRoleOf } from '../auth/console-role';
 
 export { DOCUMENT_REVIEWER_CAPABILITY };
 
@@ -37,8 +38,6 @@ export function documentReviewerRequired(): AppError {
   return new AppError(403, DOCUMENT_REVIEWER_REQUIRED, DOCUMENT_REVIEWER_MESSAGE);
 }
 
-const STAFF_ROLES = ['ADMIN', 'SUPER_ADMIN'] as const;
-
 /** The grant is held only by its exact name — never by `*` or a wildcard. */
 export function holdsDocumentReviewerGrant(permissions: readonly string[] | null | undefined): boolean {
   return Array.isArray(permissions) && permissions.includes(DOCUMENT_REVIEWER_CAPABILITY);
@@ -46,9 +45,11 @@ export function holdsDocumentReviewerGrant(permissions: readonly string[] | null
 
 /**
  * Is this person, right now, an active document reviewer for the owner of the
- * document? Read live on every render: the grant, the staff role they are
- * acting in, an account that has not been cut off, and the same tenant as the
- * person whose document it is.
+ * document? Read live on every render: the grant, a staff role they HOLD
+ * (users.roles; [ADMIN-ROLE] never the phone app's active mode, so a reviewer
+ * whose phone is in rider mode still sees the document, and one whose staff
+ * role is removed does not), an account that has not been cut off, and the
+ * same tenant as the person whose document it is.
  */
 export async function isActiveDocumentReviewer(
   prisma: Pick<PrismaClient, 'user'>,
@@ -57,10 +58,10 @@ export async function isActiveDocumentReviewer(
 ): Promise<boolean> {
   const reviewer = await prisma.user.findUnique({
     where: { id: reviewerUserId },
-    select: { activeRole: true, status: true, tenantId: true, admin: { select: { permissions: true } } },
-  }) as { activeRole: string | null; status: string; tenantId: string; admin: { permissions: string[] } | null } | null;
+    select: { roles: true, status: true, tenantId: true, admin: { select: { permissions: true } } },
+  }) as { roles: string[] | null; status: string; tenantId: string; admin: { permissions: string[] } | null } | null;
   if (!reviewer) return false;
-  if (!(STAFF_ROLES as readonly string[]).includes(reviewer.activeRole ?? '')) return false;
+  if (!consoleRoleOf(reviewer.roles)) return false;
   // Only an ACTIVE account reviews: suspended, banned, deactivated and
   // not-yet-verified accounts are all refused.
   if (reviewer.status !== 'ACTIVE') return false;

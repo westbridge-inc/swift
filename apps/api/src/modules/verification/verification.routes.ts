@@ -15,6 +15,7 @@ import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
+import { documentConsentOnRecord } from './document-consent-record';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { liveDuplicateHolders } from './duplicate-holders';
 
@@ -84,11 +85,16 @@ export async function verificationRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const auth = { preHandler: [app.authenticate] };
 
-  /** GET /status?role= — checklist, submitted docs, what's missing. */
+  /** GET /status?role= — checklist, submitted docs, what's missing. [DOC-CONSENT] `documentConsent` (additive; older
+   *  apps ignore it): whether this person's document-upload tick is on record, so the checklist shows their own
+   *  recorded choice instead of an empty box on every visit (document-consent-record.ts). */
   app.get('/status', auth, async (request) => {
     const { role, vehicleType } = statusQuerySchema.parse(request.query);
-    const status = await verification.getStatus(request.user.userId, role, vehicleType);
-    return { success: true, data: status };
+    const [status, documentConsent] = await Promise.all([
+      verification.getStatus(request.user.userId, role, vehicleType),
+      documentConsentOnRecord(app.prisma, request.user.userId, role),
+    ]);
+    return { success: true, data: { ...status, documentConsent } };
   });
 
   /** POST /appeal — "Think this is a mistake?" (trial-integrity Part 4).
