@@ -1,10 +1,54 @@
-import type { PrismaClient, Advertiser, AdvertiserStatus } from '@prisma/client';
+import type { PrismaClient, Prisma, Advertiser, AdvertiserStatus, AdvertiserMemberRole } from '@prisma/client';
 import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import type Redis from 'ioredis';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+
+/** [MASTER-064] The advertiser role matrix (spec §14.6: the OWNER invites a
+ *  MANAGER, who runs campaigns, and an ANALYST, who reads stats), by named
+ *  capability. Anything that books inventory, issues an invoice or creates a
+ *  refund obligation is the OWNER's alone.
+ *    read     — dashboards, stats, invoices, the team list, the refund preview
+ *    campaign — draft a campaign, upload creatives, pause, resume
+ *    finance  — reserve inventory, check out, cancel (with its refund)
+ *    team     — add or change members */
+export type AdvertiserCapability = 'read' | 'campaign' | 'finance' | 'team';
+export const ADVERTISER_ROLE_MATRIX: Readonly<Record<AdvertiserCapability, readonly AdvertiserMemberRole[]>> = Object.freeze({
+  read: ['OWNER', 'MANAGER', 'ANALYST'],
+  campaign: ['OWNER', 'MANAGER'],
+  finance: ['OWNER'],
+  team: ['OWNER'],
+});
+
+function assertRoleHolds(role: AdvertiserMemberRole | null | undefined, capability: AdvertiserCapability): void {
+  const allowed = ADVERTISER_ROLE_MATRIX[capability];
+  if (!role || !allowed || !allowed.includes(role)) {
+    throw new AppError(403, 'ADVERTISER_ROLE_FORBIDDEN', 'Your role on this advertiser account does not allow this.');
+  }
+}
+
+/** [MASTER-064] The money operations' second check, INSIDE their own
+ *  transaction: the member row is read with FOR SHARE, so a removal, a
+ *  downgrade or a return to an open invitation (acceptedAt NULL, #1995) that
+ *  committed after the route's check is obeyed here, and one
+ *  that arrives while this transaction runs waits for it to finish (the
+ *  action is decided on the role it locked, never on a stale read). */
+export async function assertCapabilityWithin(
+  tx: Prisma.TransactionClient,
+  advertiserId: string,
+  userId: string,
+  capability: AdvertiserCapability,
+): Promise<void> {
+  const rows = await tx.$queryRaw<Array<{ role: AdvertiserMemberRole }>>`
+    SELECT "role" FROM "advertiser_members"
+     WHERE "advertiserId" = ${advertiserId} AND "userId" = ${userId}
+       AND "acceptedAt" IS NOT NULL
+     FOR SHARE`;
+  if (rows.length === 0) throw new AppError(403, 'ADVERTISER_ROLE_FORBIDDEN', 'You are no longer a member of this advertiser account.');
+  assertRoleHolds(rows[0]!.role, capability);
+}
 
 // Advertiser lifecycle (ads-platform spec §4). A logged-in user registers a
 // company and becomes its first OWNER member; the application lands
@@ -101,23 +145,24 @@ export class AdvertiserService {
     return members.map((m) => ({ ...m.advertiser, memberRole: m.role }));
   }
 
-  /** Assert the user may manage this advertiser (any member role can read;
-   *  callers requiring OWNER pass requireOwner). */
-  async assertMember(advertiserId: string, userId: string, requireOwner = false) {
+  /** [MASTER-064] Assert the user is a member of THIS advertiser whose role
+   *  holds the named capability (see ADVERTISER_ROLE_MATRIX). Every caller
+   *  names its capability — there is no permissive default. A non-member, and
+   *  an open invitation (#1995), get the same 404 as a missing account; a member whose role lacks the
+   *  capability gets 403 ADVERTISER_ROLE_FORBIDDEN. */
+  async assertCapability(advertiserId: string, userId: string, capability: AdvertiserCapability) {
     const member = await this.prisma.advertiserMember.findUnique({
       where: { advertiserId_userId: { advertiserId, userId } },
     });
     // [ads security] An open invitation is not a membership: it opens nothing.
     if (!member || member.acceptedAt === null) throw new NotFoundError('Advertiser', advertiserId);
-    if (requireOwner && member.role !== 'OWNER') {
-      throw new AppError(403, 'OWNER_REQUIRED', 'Only the account owner can do this.');
-    }
+    assertRoleHolds(member.role, capability);
     return member;
   }
 
   // ── [ads security] The team grows by invitation and acceptance ───────────────
   // An OWNER invites by phone; the reply never says whether the number has an account. The
-  // invitation grants nothing (assertMember refuses it) until the person accepts it. The team list
+  // invitation grants nothing (assertCapability refuses it) until the person accepts it. The team list
   // names accepted members only.
 
   /** OWNER only. Silent for an unknown number or a demo account; never changes an existing row. */
@@ -125,7 +170,7 @@ export class AdvertiserService {
     deps: { redis: Redis; notifications: NotificationService },
     advertiserId: string, ownerUserId: string, phone: string, role: 'MANAGER' | 'ANALYST',
   ): Promise<void> {
-    await this.assertMember(advertiserId, ownerUserId, true);
+    await this.assertCapability(advertiserId, ownerUserId, 'team');
     // [REVIEW-PARTNER] No membership is granted by a demo account (about the caller alone).
     await refuseReviewAccountRoleGrant(this.prisma, ownerUserId);
     // Every attempt counts against the day, known number or not.
@@ -178,7 +223,7 @@ export class AdvertiserService {
 
   /** The team, for a member: accepted members by name and phone; an open invitation by role only. */
   async teamList(advertiserId: string, viewerUserId: string) {
-    await this.assertMember(advertiserId, viewerUserId);
+    await this.assertCapability(advertiserId, viewerUserId, 'read');
     const members = await this.prisma.advertiserMember.findMany({
       where: { advertiserId, OR: [{ acceptedAt: { not: null } }, { createdAt: { gte: inviteCutoff() } }] }, orderBy: { createdAt: 'asc' },
     });

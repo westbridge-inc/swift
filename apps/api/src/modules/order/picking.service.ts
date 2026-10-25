@@ -7,7 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
+import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, totalFixedCopy, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
 import { storeTeam, ringRecipients } from '../notification/store-team';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 import { recomputeOrderVat } from '../store-vat/order-vat';
@@ -25,11 +25,14 @@ function assertMmgMoneyAdjustable(order: AdjustableOrder): void {
   // yet (the store's number shows only after acceptance; no pay link, no claim):
   // the total may still change, and the customer pays only the total they
   // confirmed. orderTotalAdjustable decides it; an unprojected fact fails closed.
+  // [REVIEW-M S4-1 on #2043] The same rule on every rail but cash (card, bank
+  // transfer: prepaid, both OFF today). The code stays MMG_ADJUSTMENT_UNAVAILABLE
+  // (what clients already handle); the words fit the rail.
   if (orderTotalAdjustable(order)) return;
   throw new AppError(
     409,
     'MMG_ADJUSTMENT_UNAVAILABLE',
-    MMG_SWAP_SETTLES_DIRECTLY,
+    totalFixedCopy(order),
   );
 }
 
