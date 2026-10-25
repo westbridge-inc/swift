@@ -301,11 +301,12 @@ export async function verificationRoutes(app: FastifyInstance) {
 
   /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
    *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
-   *  repeat truthfully: ON_FILE (unlocked now, no person reviewed it), WAITING (a person looks
+   *  repeat truthfully: ON_FILE (on file now, no person reviewed it), WAITING (a person looks
    *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
-    if (body.consentTick && body.consentTick !== 'customer_id_v1') {
+    // v1 = the words build 12 shows; v2 = the current app's (owner ruling 24 Oct 2026: no unlock promised).
+    if (body.consentTick && body.consentTick !== 'customer_id_v1' && body.consentTick !== 'customer_id_v2') {
       throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
     }
     const doc = await verification.submitIdentity(

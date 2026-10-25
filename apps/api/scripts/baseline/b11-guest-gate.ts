@@ -4,9 +4,9 @@
  * Proves: (1) full catalog browsing with ZERO account — public storefronts,
  * storefront detail, discovery categories, search — all 200 tokenless;
  * (2) the wall sits EXACTLY at ordering: cart/checkout mutations demand auth
- * (401), never a browse endpoint; (3) the tier gate is server-side at order
- * creation (an authenticated but tierless probe hits the SERVER check, not a
- * client hint).
+ * (401), never a browse endpoint; (3) [owner ruling 24 Oct 2026 — no customer ID
+ * gate] an authenticated L1 probe (no ID on file) books a ride: the SERVER asks no
+ * ID (it used to refuse it with the L2 tier gate).
  *
  * Run: DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b11-guest-gate.ts
@@ -112,13 +112,11 @@ async function main() {
   }
   if (!probeToken) throw new Error('FAIL: could not authenticate the tierless probe account');
 
-  // [F-026-20] The probe must actually REACH the tier gate. Ride creation
-  // checks the universal signup-selfie prerequisite FIRST — a fresh account
-  // with no selfie is refused SELFIE_REQUIRED and never touches assertL2, so
-  // accepting either code proved only "no photo is blocked", not the L2 gate.
-  // Stamp the selfie (legit rig prep — other baseline fixtures do the same)
-  // and pin the probe to L1, so the request clears the prerequisite and the
-  // ONLY thing left to refuse it is the tier gate. Then require its EXACT code.
+  // [F-026-20] The probe is pinned to L1 with a selfie stamped (legit rig prep — other
+  // baseline fixtures do the same), so nothing but an ID gate could refuse it.
+  // [Owner ruling 24 Oct 2026] There is no such gate any more (and since 16 Oct no
+  // customer photo gate either): the ride must be created, never 403
+  // ID_VERIFICATION_REQUIRED. It is cancelled at once.
   const probeUser = await prisma.user.findFirst({ where: { phone: PROBE_PHONE }, select: { id: true, trustLevel: true } });
   if (!probeUser) throw new Error('FAIL: tier probe account not found after signup');
   await prisma.user.update({
@@ -132,16 +130,18 @@ async function main() {
     passengerCount: 1, rideClass: 'ECONOMY',
   }, probeToken);
   const tierCode = tierProbe.json?.error?.code ?? tierProbe.json?.code;
-  if (tierProbe.status !== 403 || tierCode !== 'ID_VERIFICATION_REQUIRED') {
-    throw new Error(`FAIL tier gate: a selfie-complete L1 account must be refused by the L2 tier gate — expected 403 ID_VERIFICATION_REQUIRED, got ${tierProbe.status} ${tierCode}`);
+  const probeRideId = tierProbe.json?.data?.ride?.id;
+  if (probeRideId) await http('POST', `/rides/${probeRideId}/cancel`, { reason: 'baseline probe cleanup' }, probeToken);
+  if (tierProbe.status !== 201 || tierCode === 'ID_VERIFICATION_REQUIRED') {
+    throw new Error(`FAIL no-ID rule: an L1 account (no ID on file) must book a ride (owner 24 Oct 2026) — expected 201, got ${tierProbe.status} ${tierCode ?? ''}`);
   }
-  log('EVIDENCE L2 tier gate is server-side at order creation (selfie prerequisite already satisfied)', { status: tierProbe.status, code: tierCode });
+  log('EVIDENCE no customer ID gate at ride creation (owner 24 Oct 2026): an L1 probe books', { status: tierProbe.status });
 
   if (failures.length > 0) {
     log('B11 PARTIAL — registered leg failures', { failures });
     throw new Error(`B11 PARTIAL: ${failures.join(' · ')}`);
   }
-  log('B11 COMPLETE — GUEST BROWSE OPEN, ORDER GATE SERVER-SIDE, TIER GATE SERVER-SIDE');
+  log('B11 COMPLETE — GUEST BROWSE OPEN, ORDER GATE SERVER-SIDE, NO CUSTOMER ID GATE (owner 24 Oct 2026)');
 }
 
 main()

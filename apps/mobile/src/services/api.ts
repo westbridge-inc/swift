@@ -967,7 +967,8 @@ export const verificationApi = {
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
     // [ROLE-DOCS · owner 21 Oct 2026] the ID alone: a customer never gives a photo (the server drops build 9's selfieUrl)
-    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
+    // [Owner ruling 24 Oct 2026] the current app sends the customer_id_v2 tick; v1 is build 12's own
+    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' | 'customer_id_v2' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
