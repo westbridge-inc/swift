@@ -41,6 +41,7 @@ import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyR
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 import { isTaxiOrder } from '../../../lib/orderTrackRoute';
+import { pickupWords } from '../pickup-words';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -138,7 +139,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     : 'Live rider tracking appears after assignment and a GPS fix.';
   if (pickup) {
     transitLabel = 'Ready';
-    transitDescription = 'Show the pickup code at the counter.';
+    transitDescription = pickupWords(order.pickupCodeRequired).timeline;
   } else if (appointment) {
     transitLabel = 'In progress';
     transitDescription = 'The booked work is underway.';
@@ -1383,8 +1384,8 @@ export function DeliveryScreen() {
                 }}
               >
                 <T variant="title" tone="deep">It’s ready.</T>
-                <T variant="micro" tone="muted" style={{ marginTop: space.md }}>
-                  Show this code at the counter
+                <T variant="micro" tone="muted" style={{ marginTop: space.md, textAlign: 'center' }}>
+                  {pickupWords(o.pickupCodeRequired).ready}
                 </T>
                 <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
                   {o.pickupCode}
@@ -1420,8 +1421,8 @@ export function DeliveryScreen() {
                   marginTop: space.xl,
                 }}
               >
-                <T variant="micro" tone="muted">
-                  Pickup code — show at the counter
+                <T variant="micro" tone="muted" style={{ textAlign: 'center' }}>
+                  {pickupWords(o.pickupCodeRequired).waiting}
                 </T>
                 <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
                   {o.pickupCode}

@@ -78,7 +78,7 @@ describe('Privacy Policy (Part 4)', () => {
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
     ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and customers' IDs for taxi rides and larger orders, for safety and fraud prevention.</li>"],
     ['¶16 legal obligations', '<li><b>To meet legal obligations:</b> keeping tax and accounting records, and responding to lawful demands from authorities.</li>'],
-    ['¶18 police clearances', '<li><b>With your explicit consent:</b> police clearance certificates (optional for drivers and riders; required for service providers who visit homes).</li>'],
+    ['¶18 police clearances', '<li><b>With your explicit consent:</b> police clearance certificates (optional for taxi drivers; required for service providers who visit homes).</li>'], // [ROLE-DOCS · owner 21 Oct 2026]
     ['¶21 MapTiler cookies (B6)', "MapTiler's own servers may set cookies; Swift does not."],
     ['¶21 where the servers are', "Our servers are with DigitalOcean in Atlanta, United States, and several providers process data in the United States. We use each provider's written data-protection terms and send only what each needs.</p>"],
     ['¶21 Cloudflare, WhatsApp, MMG, Google Places named', 'Cloudflare (runs the domain-name service (DNS)'],
@@ -113,7 +113,7 @@ describe('Mover and Business Agreements (Part 4)', () => {
   });
 
   it('Mover: P1 documents, the selfie, courier goods only, confirmation records, insurance and hire licences', () => {
-    expect(DRIVER_AGREEMENT).toContain("(for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A police clearance is optional: if you upload one and Swift approves it, your account is recorded as police-cleared; it is never needed to go online.");
+    expect(DRIVER_AGREEMENT).toContain("(for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A taxi driver may add a police clearance: if Swift approves it, your account is recorded as police-cleared; it is never needed to go online."); // [ROLE-DOCS · owner 21 Oct 2026]
     expect(DRIVER_AGREEMENT).toContain('You may not let anyone else work under your account; Swift may ask for a selfie, reviewed by a person, to confirm it is you.');
     expect(DRIVER_AGREEMENT).toContain('on courier jobs, carrying goods only — never letters, documents or mail, which in Guyana only the Post Office may carry;');
     expect(DRIVER_AGREEMENT).toContain("The app's confirmation records show what each side has confirmed; Swift does not hold or move this money.");
@@ -165,8 +165,9 @@ describe('one version for the whole batch', () => {
   // The V1b batch shipped as 2026-10-16; the human-only identity + no-customer-photo words follow as 2026-10-17;
   // the customer-ID retention sentence (Privacy s.6) as 2026-10-18; the taxi waiting charge (Terms s.4) and phone
   // crash reports kept 90 days (Privacy) as 2026-10-21 (legal-waiting-crash-2026-10-21.test.ts); the one-minute
-  // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts).
-  it('is 2026-10-22', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-22');
+  // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts); [ROLE-DOCS · owner 21 Oct
+  // 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-22.1.
+  it('is 2026-10-22.1', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-22.1');
   });
 });

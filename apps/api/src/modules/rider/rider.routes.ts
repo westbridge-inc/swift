@@ -222,6 +222,14 @@ const ARRIVAL_TARGET: Record<string, 'pickup' | 'dropoff'> = {
   arrived: 'dropoff',
 };
 
+/** [O-2 · owner 22 Oct 2026] The rungs whose status-log note records the rider's fix and distance:
+ *  the two arrivals, and "Picked up" (how far from the store the rider said they collected it).
+ *  EVIDENCE ONLY, like the arrivals: nothing is refused, a rider without a fix is never stranded. */
+const POSITION_EVIDENCE_TARGET: Record<string, 'pickup' | 'dropoff'> = {
+  ...ARRIVAL_TARGET,
+  'picked-up': 'pickup',
+};
+
 /** How old a fix may be and still describe where someone is standing. Beyond
  *  this the age is recorded instead of a distance — an hour-old ping turned
  *  into "12 m from the door" is a fabricated measurement, and a fabricated one
@@ -250,7 +258,7 @@ type ArrivalRider = { currentLat: number | null; currentLng: number | null; last
  * lacks a distance is indistinguishable from one written before this existed.
  */
 function arrivalEvidence(slug: string, order: ArrivalOrder, rider: ArrivalRider, now = new Date()): string | null {
-  const target = ARRIVAL_TARGET[slug];
+  const target = POSITION_EVIDENCE_TARGET[slug];
   if (!target) return null;
 
   // Pickup point: the order's own coordinates, falling back to the vendor's.
@@ -1549,6 +1557,8 @@ export async function riderRoutes(app: FastifyInstance) {
       // has not set one. What it does is WRITE DOWN what the platform already
       // knew at that moment, so the radius can eventually be chosen from a
       // measured distribution instead of guessed.
+      // [O-2 · owner 22 Oct 2026] "Picked up" records the same evidence (the
+      // distance to the store), and is never refused for it either.
       //
       // The fix is the one already on the rider row — the same persisted fix
       // dispatch reads — so no client sends anything and no rider is stranded
