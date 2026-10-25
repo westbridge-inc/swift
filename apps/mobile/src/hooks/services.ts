@@ -66,7 +66,7 @@ export function useAddServiceQualification() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (data: {
-      type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
+      type: 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
       referenceNumber?: string;
     }) => {
       const owner = requireAuthSessionSnapshot();

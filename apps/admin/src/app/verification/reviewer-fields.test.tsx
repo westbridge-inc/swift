@@ -141,6 +141,27 @@ describe('[R16] business registration kind', () => {
   });
 });
 
+// [ROLE-DOCS · owner 21 Oct 2026] An own-name declaration: approved only on the reviewer's own check of the store name
+// against the owner's ID (Business Names (Registration) Act s.3); the server refuses it otherwise.
+describe('[ROLE-DOCS] own-name declaration', () => {
+  it('approval waits for the reviewer\'s tick, and sends it', async () => {
+    const fetch = fixture('own_name_declaration', ['ownNameConfirmed']);
+    const { user } = renderWithQuery(<VerificationPage />);
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    fireEvent.load(await screen.findByRole('img'));
+    const approve = () => screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve().disabled).toBe(true);
+    await user.click(screen.getByLabelText('Own name checked against the ID'));
+    expect(approve().disabled).toBe(false);
+    await user.click(approve());
+    await user.type(screen.getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({ ownNameConfirmed: true });
+  });
+});
+
 describe('PDF approval requires confirmed inline evidence', () => {
   const settings = (window as unknown as { happyDOM: { settings: { disableIframePageLoading: boolean } } }).happyDOM.settings;
   let previous: boolean;

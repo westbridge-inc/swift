@@ -14,6 +14,7 @@ import {
   qualificationTypeMatchesTrade,
   refreshProviderVerification,
   requireCanonicalServiceTrade,
+  requiredLicenceStatus,
   riskGuidance,
   serviceTradeLabel,
   tradeRiskTier,
@@ -59,8 +60,13 @@ const providerProfileSchema = z.object({
   bio: z.string().trim().max(2000).optional(),
   portfolioPhotos: z.array(z.string().max(2048)).max(20).optional(),
 });
+// [ROLE-DOCS · owner 21 Oct 2026] No GEI_LICENCE here: an electrician's GEI licence is a REQUIRED
+// checklist document (gei_electrical_licence), reviewed by a person with its January re-check. Asking for it
+// again as an optional "qualification" collected the same licence twice. The enum value stays in the
+// database type for history; the API no longer accepts it (QUALIFICATION_RETIRED).
+const RETIRED_QUALIFICATION_TYPES = new Set(['GEI_LICENCE']);
 const qualificationSchema = z.object({
-  type: z.enum(['GEI_LICENCE', 'CVQ', 'GTEE', 'CITY_AND_GUILDS', 'OTHER']),
+  type: z.enum(['CVQ', 'GTEE', 'CITY_AND_GUILDS', 'OTHER']),
   referenceNumber: z.string().trim().max(120).optional(),
 });
 const browseSchema = z.object({
@@ -344,12 +350,19 @@ export async function servicesRoutes(app: FastifyInstance) {
     });
     if (!provider) throw new NotFoundError('ServiceProvider');
     const trade = canonicalServiceTrade(provider.trade);
-    const certified = trade !== null && provider.qualifications.some((q) => (
+    const matching = trade === null ? [] : provider.qualifications.filter((q) => (
       q.status === 'VERIFIED'
       && q.verifiedAt !== null
       && q.trade === trade
       && qualificationTypeMatchesTrade(q.type, trade)
     ));
+    // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person, counts too (and carries its date)
+    const licence = trade === null ? { required: false, checkedOn: null } : await requiredLicenceStatus(app.prisma, request.user.userId);
+    const licenceOn = licence.checkedOn;
+    const certified = matching.length > 0 || licenceOn !== null;
+    const licenceCheckedOn = [licenceOn, ...matching.map((q) => q.verifiedAt)].reduce<Date | null>(
+      (latest, at) => (at && (!latest || at > latest) ? at : latest), null,
+    )?.toISOString() ?? null;
     return {
       success: true,
       data: {
@@ -358,8 +371,11 @@ export async function servicesRoutes(app: FastifyInstance) {
         ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)),
         tradeLabel: serviceTradeLabel(provider.trade),
         categoryUnavailable: trade === null || !isServiceCategoryOperational(trade),
-        selfSkilled: !certified,
+        // [REVIEW-F #2053 S4-2] a trade that requires a licence is never "self-skilled"
+        selfSkilled: !certified && !licence.required,
         certified,
+        // [R7 · ROLE-DOCS PR 3] "Licence on file, checked on [date]": the latest day a person checked one (null = none).
+        licenceCheckedOn,
       },
     };
   });
@@ -376,6 +392,10 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   /** POST /providers/qualifications — add a trade qualification (earns the badge). */
   app.post('/providers/qualifications', auth, async (request) => {
+    const asked = (request.body as { type?: unknown } | null | undefined)?.type;
+    if (typeof asked === 'string' && RETIRED_QUALIFICATION_TYPES.has(asked)) {
+      throw new AppError(400, 'QUALIFICATION_RETIRED', 'Your GEI electrical licence goes in your Documents checklist, where a person checks it. It is not added as a qualification.');
+    }
     const body = qualificationSchema.parse(request.body);
     const userId = request.user.userId;
     const qual = await app.prisma.$transaction(async (tx) => {
@@ -450,10 +470,12 @@ export async function servicesRoutes(app: FastifyInstance) {
       },
     });
     const pageCandidates = candidates.slice(0, query.limit);
-    const live = await Promise.all(pageCandidates.map(async (provider) => ({
-      provider,
-      verified: await isProviderVerified(app.prisma, provider.userId),
-    })));
+    const live = await Promise.all(pageCandidates.map(async (provider) => {
+      const verified = await isProviderVerified(app.prisma, provider.userId);
+      // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person (read only for a listed provider)
+      const licence = verified ? await requiredLicenceStatus(app.prisma, provider.userId) : { required: false, checkedOn: null };
+      return { provider, verified, licenceOn: licence.checkedOn, licenceRequired: licence.required };
+    }));
     // [ALG-31 / L2] The star line comes from THE ONE MAPPER, never from the raw
     // lifetime mean. `rating-surface.ts` is the single definition of what a
     // rating LOOKS like: `displayRating` is null below RATING_MIN_DISPLAY (5),
@@ -464,6 +486,8 @@ export async function servicesRoutes(app: FastifyInstance) {
     // (`totalRatings > 0`) — a THIRD definition of the same rule, and one that
     // let a single 1-star rating brand a provider on the browse page.
     const visible = live.filter(({ verified }) => verified).map(({ provider }) => provider);
+    const licenceOnOf = new Map(live.map(({ provider, licenceOn }) => [provider.id, licenceOn]));
+    const licenceRequiredOf = new Map(live.map(({ provider, licenceRequired }) => [provider.id, licenceRequired]));
     // [COORD 18 Oct, option S] The star a customer (or the provider) sees is from whole groups of 5 only; the
     // ranking below still reads the true mean (display only).
     const shown = await shownRatingsFor(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.userId));
@@ -474,6 +498,8 @@ export async function servicesRoutes(app: FastifyInstance) {
         const qualifications = provider.qualifications.filter((qualification) => (
           qualificationTypeMatchesTrade(qualification.type, trade)
         ));
+        // [ROLE-DOCS · PR 3] a required trade licence a person approved is a licence on file too
+        const licenceOn = licenceOnOf.get(provider.id) ?? null;
         return {
           id: provider.id,
           trade: provider.trade,
@@ -486,12 +512,13 @@ export async function servicesRoutes(app: FastifyInstance) {
           ...shownSurface(shown.get(provider.userId)!),
           averageRating: shown.get(provider.userId)!.average,
           totalRatings: shown.get(provider.userId)!.ratingCount,
-          selfSkilled: qualifications.length === 0,
-          certified: qualifications.length > 0,
+          // [REVIEW-F #2053 S4-2] a trade that requires a licence is never "self-skilled"
+          selfSkilled: qualifications.length === 0 && licenceOn === null && !licenceRequiredOf.get(provider.id),
+          certified: qualifications.length > 0 || licenceOn !== null,
           badges: qualifications.map((qualification) => qualification.type),
           // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
           licenceCheckedOn: qualifications.reduce<Date | null>(
-            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), null,
+            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), licenceOn,
           )?.toISOString() ?? null,
         };
       })

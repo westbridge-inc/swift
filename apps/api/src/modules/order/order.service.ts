@@ -11,6 +11,7 @@ import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { Prisma } from '@prisma/client';
+import { assignmentLogWhere } from './store-handover-log';
 import type {
   PrismaClient,
   Order,
@@ -882,7 +883,7 @@ export class OrderService {
       select: RIDER_ASSIGNMENT_SNAPSHOT_SELECT,
     });
     const dispatchAssignmentSequence = await tx.orderStatusLog.count({
-      where: { orderId: input.orderId, status: 'RIDER_ASSIGNED' },
+      where: assignmentLogWhere(input.orderId, 'RIDER_ASSIGNED'),
     });
     return { ...assigned, dispatchAssignmentSequence };
   }
@@ -1336,8 +1337,8 @@ export class OrderService {
     //     stored totals, receipt, spend ledger) reads this one number;
     //   - [REPORT-012 F-012-01] "tip your rider" is delivery money: it rides
     //     the first DELIVERY plan, and a basket with none (pickup/appointment
-    //     only) carries no tip — nor does grandTotal, which feeds the ID gate
-    //     and customer.totalSpent;
+    //     only) carries no tip — nor does grandTotal, which feeds the store's
+    //     call-to-confirm flag and customer.totalSpent;
     //   - each plan's discount share, tip and total (orderTotal) are the
     //     numbers the orders below are written with.
     const priced = priceBasket({
@@ -1355,26 +1356,26 @@ export class OrderService {
 
     const grandTotal = priced.grandTotal;
 
-    // The ID-gate (locked model): at or above the country's USD-equivalent
-    // threshold, an L1 account must verify identity first. L2/L3 flow through.
+    // The country's USD-equivalent ID-gate threshold. [Owner ruling 24 Oct 2026 ~05:55Z — NO
+    // CUSTOMER ID GATE] An order at or above it no longer needs the customer's ID on file (the old
+    // 403 ID_VERIFICATION_REQUIRED here was Swift's own 8 Oct choice, not a legal duty; builds
+    // 11/12 and vc7/vc8 only ever learnt of it from that refusal, so they stop asking). The number
+    // stays: it still sizes the high-value promo gate below, the store's call-to-confirm flag, and
+    // the rider guarantee cap (cash-rules). Never set it to 0 to switch a gate off: `>= 0` holds
+    // for every amount, so 0 would ask EVERY promo for an ID and cover NO rider claim.
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(user.countryCode);
     // [M-36] The order's currency is the buyer's market's — stamped once here
     // so every money column on the row names its unit.
     const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
-    if (user.trustLevel === 'L1' && grandTotal >= gateLocal) {
-      throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need your ID on file. Add it once in the app to lift this limit.`,
-        { threshold: gateLocal, total: grandTotal });
-    }
 
     // SWIFT-162: high-value promo codes are the multi-account (fresh-SIM) abuse
-    // target — the total-gate above misses a big code redeemed on a small NET
-    // basket (a large discount pulls grandTotal back under the threshold). Gate
-    // the discount itself: an L1 account claiming a discount worth at least the
-    // ID-gate threshold must verify identity first, raising the bar from a
-    // throwaway SIM to a verified ID. L2/L3 and ordinary low-value codes flow
-    // through untouched. The threshold is the same CountryConfig ID-gate value —
-    // one trust boundary, tunable per country, no new magic number.
+    // target (a large discount on a small NET basket). Gate the discount itself:
+    // an L1 account claiming a discount worth at least the ID-gate threshold
+    // must put an ID on file first, raising the bar from a throwaway SIM to an
+    // ID. L2/L3 and ordinary low-value codes flow through untouched. The
+    // threshold is the same CountryConfig ID-gate value — one trust boundary,
+    // tunable per country, no new magic number. [24 Oct 2026] Kept: the owner's
+    // ruling removed the order-size and taxi ID gates, not this abuse guard.
     if (user.trustLevel === 'L1' && discount >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
         `This promo needs your ID on file. Add it once in the app and it's yours to keep.`,
@@ -1439,7 +1440,7 @@ export class OrderService {
 
       // [REPORT-013 F-013-01 / REPORT-016 F-016-01] Bind the priced snapshot
       // to the LOCKED cart AGGREGATE, not the parent timestamp. Pricing, the
-      // ID gate, and promo math all ran on a pre-transaction read; any cart
+      // promo ID gate, and promo math all ran on a pre-transaction read; any cart
       // mutation that committed since makes that math a lie about a different
       // basket. `Cart.updatedAt` was an INCOMPLETE token — deleting a
       // CartItem while others remain never touches the parent row, so a

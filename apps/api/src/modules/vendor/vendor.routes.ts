@@ -39,7 +39,8 @@ import { createHash } from 'node:crypto';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
-import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
+import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, OWN_NAME_DECLARATION_VERSION, OWN_NAME_VENDOR_TYPES, renderOwnNamePdf, storeNameIsOwnName } from './own-name';
+import { DECLARATION_DOC_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
@@ -90,6 +91,8 @@ import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { resolveAvatarUrls } from '../../utils/avatar-url';
+import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
@@ -118,6 +121,8 @@ const updateVendorProfileSchema = z.object({
   estimatedPrepTime: z.number().int().min(0).max(480).optional(),
   // FUL-004: whether this vendor fulfils its own DELIVERY orders with its own courier.
   selfDeliveryEnabled: z.boolean().optional(),
+  // [O-2 · owner 22 Oct 2026] The takeaway pickup code: off by default; the store may turn it on.
+  requirePickupCode: z.boolean().optional(),
   // FUL-007: kitchen-capacity cap. Positive int caps concurrent in-flight orders;
   // null clears the cap (unlimited intake).
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
@@ -549,7 +554,7 @@ async function requireListingAllowed(
     select: { isVerified: true, vendorType: true, status: true },
   });
   const verified = vendorRecord.isVerified
-    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
+    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType, app.prisma, vendorId);
   if (verified) return;
   const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
   if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
@@ -652,6 +657,48 @@ function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{
   return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
 }
 
+export { HANDED_TO_RIDER_NOTE };
+
+/** [O-2] The order is still with the store, so a rider may be handed it (and the card shows who). */
+const STORE_HANDOVER_LIVE_STATUSES: readonly string[] = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
+/**
+ * [O-2] What the store's order card needs for the handover, for a page of its orders:
+ * - pickupCodeRequired: the store's takeaway-code setting (off by default);
+ * - handedToRiderAt: when the store tapped "Handed to rider" (the status-log row), or null;
+ * - rider.photoUrl: the assigned rider's photo, RESOLVED (a signed URL or null, never the raw key),
+ *   next to the first name, vehicle and plate the card already gets.
+ */
+async function storeHandoverFields(
+  app: FastifyInstance,
+  orders: ReadonlyArray<{ id: string; status: string; fulfillment: string; riderId?: string | null; vendor?: { requirePickupCode?: boolean } | null; rider?: object | null }>,
+): Promise<Map<string, { pickupCodeRequired: boolean; handedToRiderAt: string | null; rider?: object | null }>> {
+  // Only a delivery with a Swift rider has a handover to record (a booking, a takeaway: nothing to read).
+  const ids = orders.filter((o) => o.fulfillment === 'DELIVERY' && o.riderId).map((o) => o.id);
+  // [REVIEW-G S3-1 on #2055] The store needs the rider's face only to hand the order over: the photo is
+  // read and given only while the order is still with the store (before Picked up), never on a past order.
+  const handoverLive = (o: { status: string }) => STORE_HANDOVER_LIVE_STATUSES.includes(o.status);
+  const riderIds = [...new Set(orders.filter(handoverLive).map((o) => o.riderId).filter((r): r is string => !!r))];
+  const [handed, riders] = await Promise.all([
+    ids.length ? app.prisma.orderStatusLog.findMany({
+      where: handoverEpisodeRowsWhere(ids), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
+    }) : [],
+    riderIds.length ? app.prisma.rider.findMany({ where: { id: { in: riderIds } }, select: { id: true, user: { select: { avatar: true } } } }) : [],
+  ]);
+  const firstHanded = handedToRiderSinceAssignment(handed);
+  const photos = await resolveAvatarUrls(riders.map((r) => r.user?.avatar));
+  const photoOf = new Map(riders.map((r) => [r.id, r.user?.avatar ? photos.get(r.user.avatar) ?? null : null]));
+  const out = new Map<string, { pickupCodeRequired: boolean; handedToRiderAt: string | null; rider?: object | null }>();
+  for (const order of orders) {
+    out.set(order.id, {
+      pickupCodeRequired: order.vendor?.requirePickupCode === true,
+      handedToRiderAt: order.riderId ? firstHanded.get(order.id)?.toISOString() ?? null : null,
+      ...(order.rider && order.riderId ? { rider: { ...order.rider, photoUrl: handoverLive(order) ? photoOf.get(order.riderId) ?? null : null } } : {}),
+    });
+  }
+  return out;
+}
+
 /** [O-4 · owner 22 Oct 2026] An order with an open "Out of stock" question (a swap or a removal
  *  the customer has not answered yet) is not accepted: the customer agrees to the changed order
  *  first. The refusal names the item and how long the answer can take. An order whose every line
@@ -703,7 +750,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
-      vendor: { select: { vendorType: true, selfDeliveryEnabled: true } },
+      vendor: { select: { vendorType: true, selfDeliveryEnabled: true, requirePickupCode: true } },
     },
   });
   if (!order || !order.vendorId || !vendorIds.includes(order.vendorId)) {
@@ -888,7 +935,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // never "Reopen it from Account": no such control exists (store-hold.ts).
       throw storeHoldRefusal(vendor);
     }
-    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
+    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId));
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
     }
@@ -1420,6 +1467,100 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /**
+   * [ROLE-DOCS · owner ruling 21 Oct 2026] POST /onboarding/own-name — the owner of a store that trades under their
+   * OWN name (Business Names (Registration) Act s.3: their true surname, with nothing added except their first names
+   * or initials) signs the own-name declaration instead of uploading a business registration (vendor/own-name.ts).
+   * Refused when the store's name clearly is not the account's own name, when the store is a service business (no
+   * registration is asked of it) or on the self-declared tier, and when a business registration is already on file.
+   * Records the signature in the consent ledger (words hashed, version pinned), files the signed words as the
+   * `own_name_declaration` document a person reviews against the owner's ID, and marks THIS store — only this one —
+   * as trading under the owner's own name [REVIEW-G #2046 S2-1, COORD 23 Oct: per store, never per type]: another
+   * store of the owner keeps needing its business registration. Owner only.
+   */
+  app.post('/onboarding/own-name', auth, async (request, reply) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const { vendorId } = access;
+    const userId = request.user.userId;
+    const body = z.object({
+      accept: z.literal(true),
+      attestationVersion: z.literal(OWN_NAME_DECLARATION_VERSION),
+      privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
+    }).parse(request.body ?? {});
+    const [vendor, user, registered, existing] = await Promise.all([
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true, ownerId: true, tradesUnderOwnName: true } }),
+      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true } }),
+      validRegistrationRecord(app.prisma, userId),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: OWN_NAME_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
+    ]);
+    if (!(OWN_NAME_VENDOR_TYPES as readonly string[]).includes(vendor.vendorType)) {
+      throw new AppError(400, 'OWN_NAME_NOT_APPLICABLE', 'A service business is not asked for a business registration, so it needs no own-name declaration.');
+    }
+    if (vendor.tier === 'UNREGISTERED') throw new AppError(409, 'OWN_NAME_NOT_APPLICABLE', 'This store is on the self-declared tier. Contact support to change how it is registered.');
+    if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it needs no own-name declaration.');
+    if (existing?.status === 'PENDING' || (existing && vendor.tradesUnderOwnName)) {
+      throw new AppError(409, 'OWN_NAME_DECLARATION_EXISTS', `Your own-name declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'waiting for review'}.`);
+    }
+    // An approval a person gave for the store's name BEFORE the owner switched to a business name (when the store
+    // could be renamed) is not reused for whatever the name is now: a person decides.
+    if (existing) throw new AppError(409, 'OWN_NAME_SUPPORT', 'An earlier own-name declaration is on file. Contact support to trade under your own name again.');
+    if (!storeNameIsOwnName(vendor.name, user.firstName, user.lastName)) {
+      throw new AppError(400, 'OWN_NAME_MISMATCH', `“${vendor.name}” is not just your surname with your first names or initials, so the law asks you to register it as a business name. Upload your business registration instead.`);
+    }
+    // Acquire and wrap the key BEFORE publishing words, changing the store, or recording consent (as the declaration).
+    const dek = generateDek();
+    let wrappedDek: Buffer;
+    try {
+      const keys = getKeyProvider();
+      if (!keys) throw new Error('Envelope encryption unavailable');
+      wrappedDek = await keys.wrapDek(dek);
+    } catch {
+      throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Verification uploads are temporarily unavailable. Try again later.');
+    }
+    await publishLegalDocumentOnce(app.prisma, { documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION, renderedText: OWN_NAME_DECLARATION_V1 });
+    const signedAt = new Date();
+    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
+    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
+    const legalName = `${user.firstName} ${user.lastName}`.trim();
+    await app.prisma.$transaction(async (tx) => {
+      // This store only: its name is the one checked, and the one the PDF and this consent row name.
+      await tx.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: true } });
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: userId, documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION,
+        action: 'granted', surface, ip: request.ip,
+        evidence: { vendorId, storeName: vendor.name, signedAt: signedAt.toISOString() },
+      });
+    });
+    const pdf = await renderOwnNamePdf({ storeName: vendor.name, legalName, signedAt });
+    const storage = getStorageProvider();
+    const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
+    const { url: fileUrl } = await storage.upload({ buffer: ciphertext, filename: `own-name-${OWN_NAME_DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+    await app.prisma.encryptedObject.create({ data: {
+      fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
+      mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
+    } });
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE';
+    const doc = await verification.submitDocument(userId, role, OWN_NAME_DOC_TYPE, fileUrl, body.privacyNoticeVersion, undefined, { ownNameSigned: true });
+    reply.code(201);
+    return { success: true, data: { nameBasis: 'OWN_NAME', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
+   * [ROLE-DOCS · owner ruling 21 Oct 2026] DELETE /onboarding/own-name — the owner uses a business name after all
+   * (or the reviewer rejected the own-name declaration): THIS store goes back to needing a business registration
+   * (per store, as POST). A declaration on file no longer counts for these stores (their checklist asks for the registration
+   * again); it is never reused for a later name (POST refuses then: support decides). Owner only.
+   */
+  app.delete('/onboarding/own-name', auth, async (request) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const userId = request.user.userId;
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { id: true, vendorType: true } });
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: false } });
+    await verification.reprojectVendorActivation(userId);
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+    return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
    * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
    * week's usage, whether promoted placement is open, what would promote the store, and the
    * declaration on file. Everything is the server's; the screen decides nothing.
@@ -1463,8 +1604,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = updateVendorProfileSchema.parse(request.body);
     if (body.name !== undefined) {
       // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
-      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, owner: { select: { user: { select: { phone: true } } } } } });
+      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, tradesUnderOwnName: true, owner: { select: { user: { select: { phone: true } } } } } });
       assertNameNotReserved(body.name, current?.owner.user.phone, current?.name);
+      // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name was checked by a person as THAT name
+      // (Business Names (Registration) Act s.3); a new name is a new legal question, so it is not changed in the app.
+      if (current?.tradesUnderOwnName && body.name.trim() !== current.name) {
+        throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under your own name, which a person checked. To use a different name, register it as a business name first, then switch the store to it under Documents.');
+      }
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
@@ -1548,6 +1694,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
           ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
           ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
+          ...(body.requirePickupCode !== undefined && { requirePickupCode: body.requirePickupCode }),
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
           ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
@@ -1737,7 +1884,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // first (this re-read sees the loss and refuses) or this ON write commits
     // first (they simply win afterward).
     const verified = vendor.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED',
         'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
@@ -1768,7 +1915,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // A discovered stale-true is healed post-rollback (a write inside
       // this refusing transaction would roll back with it).
       const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
-      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx, vendorId);
       if (!verifiedOk) {
         if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
@@ -1809,7 +1956,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           });
           if (!still.isVerified) return;
           const nowVerified = await verification.isRoleVerified(
-            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx, vendorId);
           if (!nowVerified) {
             await tx.vendor.updateMany({
               where: { id: vendorId, isVerified: true },
@@ -1898,7 +2045,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each
           // order needs to say which store it belongs to.
-          vendor: { select: { id: true, name: true, selfDeliveryEnabled: true } },
+          vendor: { select: { id: true, name: true, selfDeliveryEnabled: true, requirePickupCode: true } },
         },
         orderBy: { placedAt: 'desc' },
         skip: pagination.skip,
@@ -1914,11 +2061,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // drains toward the auto-cancel cut-off the server actually enforces.
     const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
     const roles = await storeRoles(app, request.user.userId, access);
+    const handover = await storeHandoverFields(app, orders);
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
     const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
+      ...handover.get(order.id),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       ...storeMmgPayBy(order),
@@ -1940,7 +2089,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    const handover = (await storeHandoverFields(app, [order])).get(order.id);
+    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -2698,11 +2848,68 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
     await assertHandoverRequestBudget(app.redis, order.id);
-    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer', {
+    // [O-2 · owner 22 Oct 2026] With the store's takeaway code OFF (the default) the store hands the
+    // order over without a code (the owner's rule: it checks the first name + order number). A code an
+    // older store build still sends is verified exactly as before; with the setting ON, today's flow.
+    const codeWaived = order.vendor?.requirePickupCode !== true;
+    // [REVIEW-F S3-1 on #2055] The note records only what the server knows: no code was asked for.
+    // (Store builds 11/12's board-card "Mark picked up" sends no code and asked for no name check.)
+    const note = codeWaived && !code
+      ? NO_CODE_HANDOVER_NOTE
+      : 'Picked up by customer';
+    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, note, {
       allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',
-      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId! },
+      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId!, codeWaived },
     });
     return { success: true, data: updated };
+  });
+
+  /** PUT /orders/:id/handed-to-rider — [O-2 · owner 22 Oct 2026] the store's one tap when it hands a
+   *  delivery to the assigned Swift rider (the card shows the rider's photo, first name, vehicle and
+   *  plate). EVIDENCE, not custody: the status is unchanged (the rider's "Picked up" moves it), one
+   *  status-log row is written, and a repeat tap (or one after the pickup) is a 200 with no new row.
+   *  Courier/parcel and taxi are never here (no store); a self-delivery has no Swift rider. */
+  // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
+  app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // [REVIEW-G S4-4 on #2055] Like every other in-flight store action: a closed (or non-billing
+    // suspended) store's staff cannot tap.
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
+    if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY' || order.orderType === 'COURIER' || order.orderType === 'TAXI') {
+      throw new AppError(400, 'NOT_A_RIDER_DELIVERY', 'This order is not handed to a Swift rider.');
+    }
+    const HANDOVER_STATUSES: readonly string[] = ['READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+    // Still with the store and no rider can have taken it yet: the answer is "no rider yet", not a status.
+    const BEFORE_A_RIDER: readonly string[] = ['ACCEPTED', 'PREPARING'];
+    const AFTER_PICKUP: readonly string[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'];
+    const handed = await app.prisma.$transaction(async (tx) => {
+      // The order lock every transition takes: a cancellation or a rider release committing first is seen here.
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      const live = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, riderId: true } });
+      // Idempotent per rider: a tap already made for THIS rider's assignment answers again; one made for a
+      // rider who since handed the order back does not speak for the new one.
+      const episodeRows = await tx.orderStatusLog.findMany({
+        where: handoverEpisodeRowsWhere([order.id]), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
+      });
+      // A rider who handed the order back leaves no current rider: an earlier tap answers nothing then.
+      const already = live.riderId ? handedToRiderSinceAssignment(episodeRows).get(order.id) ?? null : null;
+      if (already || AFTER_PICKUP.includes(live.status)) return { handedToRiderAt: already, wrote: false };
+      if (!live.riderId && (BEFORE_A_RIDER.includes(live.status) || HANDOVER_STATUSES.includes(live.status))) {
+        throw new AppError(409, 'NO_RIDER_YET', 'No Swift rider has taken this order yet. Hand it over when the rider arrives.');
+      }
+      if (!HANDOVER_STATUSES.includes(live.status)) {
+        throw new AppError(409, 'INVALID_STATUS', `This order is ${live.status.toLowerCase().replace(/_/g, ' ')} — nothing to hand over.`);
+      }
+      const row = await tx.orderStatusLog.create({
+        data: { orderId: order.id, status: live.status, changedBy: request.user.userId, note: HANDED_TO_RIDER_NOTE },
+        select: { createdAt: true },
+      });
+      return { handedToRiderAt: row.createdAt, wrote: true };
+    });
+    if (handed.wrote && order.vendorId) {
+      await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:handed_to_rider', { orderId: order.id });
+    }
+    return { success: true, data: { orderId: order.id, handedToRiderAt: handed.handedToRiderAt?.toISOString() ?? null } };
   });
 
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
@@ -3687,16 +3894,18 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /option-groups/:id — Update an option group */
-  // [Row 300 matrix] Under the tenant wall another tenant's item is invisible, so the
-  // group (or option) can come back with no item: that is "not yours", a 404 like the
-  // owner login answers, never a TypeError. Same check on every option route below.
+  // [Row 300 matrix] Ownership is part of the LOOKUP: the row is found only through
+  // an unarchived item of this store. Under the tenant wall another tenant's item is
+  // invisible, and including that REQUIRED relation failed the read itself (a 500 on
+  // the walled login, T3); asking for it in the where makes any other store's id
+  // simply not found, a 404 on both logins. Same lookup on every option route below.
   app.put<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.optionGroup.findUnique({
-      where: { id: request.params.id },
-      include: { item: { select: { vendorId: true, archivedAt: true } } },
+    const existing = await app.prisma.optionGroup.findFirst({
+      where: { id: request.params.id, item: { vendorId, archivedAt: null } },
+      select: { id: true, itemId: true },
     });
-    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing) throw new NotFoundError('OptionGroup', request.params.id);
     await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
@@ -3720,11 +3929,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** DELETE /option-groups/:id — Delete an option group and its options */
   app.delete<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.optionGroup.findUnique({
-      where: { id: request.params.id },
-      include: { item: { select: { vendorId: true, archivedAt: true } } },
+    const existing = await app.prisma.optionGroup.findFirst({
+      where: { id: request.params.id, item: { vendorId, archivedAt: null } },
+      select: { id: true, itemId: true },
     });
-    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3739,11 +3948,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /option-groups/:groupId/options — Add an option to a group */
   app.post<{ Params: GroupIdParam }>('/option-groups/:groupId/options', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const group = await app.prisma.optionGroup.findUnique({
-      where: { id: request.params.groupId },
-      include: { item: { select: { vendorId: true, archivedAt: true } } },
+    const group = await app.prisma.optionGroup.findFirst({
+      where: { id: request.params.groupId, item: { vendorId, archivedAt: null } },
+      select: { id: true, itemId: true },
     });
-    if (!group || !group.item || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
@@ -3776,11 +3985,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /options/:id — Update an option */
   app.put<{ Params: IdParam }>('/options/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.option.findUnique({
-      where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
+    const existing = await app.prisma.option.findFirst({
+      where: { id: request.params.id, optionGroup: { item: { vendorId, archivedAt: null } } },
+      select: { id: true, optionGroup: { select: { itemId: true } } },
     });
-    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
@@ -3803,11 +4012,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** DELETE /options/:id — Delete an option */
   app.delete<{ Params: IdParam }>('/options/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.option.findUnique({
-      where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
+    const existing = await app.prisma.option.findFirst({
+      where: { id: request.params.id, optionGroup: { item: { vendorId, archivedAt: null } } },
+      select: { id: true, optionGroup: { select: { itemId: true } } },
     });
-    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 

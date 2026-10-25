@@ -81,9 +81,8 @@ export default function ClaimsPage() {
   const m: any = metricsQ.data?.data ?? {};
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Guarantee claims</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
+    <div className="mc-page">
+      <p className="mc-muted text-sm mb-6">
         Failed cash handovers under the company guarantee — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payout done.
       </p>
 
@@ -94,34 +93,34 @@ export default function ClaimsPage() {
         <QueryFailed error={metricsQ.error} what="the claim numbers" onRetry={() => void metricsQ.refetch()} retrying={metricsQ.isFetching} className="mb-6" />
       ) : (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Failed-payment rate (30d)</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Failed-payment rate (30d)</p>
           <p className="text-3xl font-bold mt-1">
             {metricsQ.isLoading ? '—' : m.failedPaymentPct != null ? `${Number(m.failedPaymentPct).toFixed(1)}%` : '—'}
           </p>
-          <p className="text-[var(--muted)] text-xs mt-1">failed handovers vs completed</p>
+          <p className="mc-muted text-xs mt-1">failed handovers vs completed</p>
         </div>
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Guarantee payouts (7d)</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Guarantee payouts (7d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
+          <p className="mc-muted text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
         </div>
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Riders with claims (30d)</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Riders with claims (30d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : Number((m.claimsByRider ?? []).length).toLocaleString()}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">repeat filers surface first</p>
+          <p className="mc-muted text-xs mt-1">repeat filers surface first</p>
         </div>
       </div>
       )}
 
       {/* [DOC-1 §31.4] The reserve line: a claim is paid from it or not at all. */}
-      <div className={`rounded-xl border p-5 mb-6 ${reserve?.low ? 'border-amber-500/60 bg-amber-500/5' : 'border-[var(--border)] bg-[var(--panel)]'}`} data-testid="rlp-reserve">
+      <div className={`rounded-[var(--mc-radius)] border p-5 mb-6 ${reserve?.low ? 'border-[var(--mc-warn)] bg-[var(--mc-warn-soft)]' : 'border-[var(--mc-line)] bg-[var(--mc-card)]'}`} data-testid="rlp-reserve">
         <div className="flex flex-wrap items-center gap-4">
           <div>
-            <p className="text-[var(--muted)] text-sm">Loss-protection reserve (GY)</p>
+            <p className="mc-muted text-sm">Loss-protection reserve (GY)</p>
             <p className="text-2xl font-bold">{reserveQ.isLoading ? '—' : reserve ? gyd(reserve.balance) : '—'}</p>
             {reserve ? (
-              <p className="text-xs text-[var(--muted)]">
+              <p className="mc-muted text-xs">
                 floor {gyd(reserve.floor)} · {reserve.provisionedThisPeriod ? 'provisioned this month' : 'not yet provisioned this month'}
                 {reserve.low ? ' · BELOW FLOOR — payouts refuse once the line is empty' : ''}
               </p>
@@ -130,7 +129,7 @@ export default function ClaimsPage() {
           <button
             type="button"
             onClick={adjust}
-            className="ml-auto px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+            className="ml-auto px-4 py-2 rounded-lg text-sm border border-[var(--mc-line)] hover:bg-[var(--mc-surface)] disabled:opacity-50"
           >
             Adjust reserve
           </button>
@@ -140,7 +139,7 @@ export default function ClaimsPage() {
         ) : null}
         <div className="mt-3">{reserveActions.banner}</div>
         {reserve?.entries?.length ? (
-          <ul className="mt-3 text-xs text-[var(--muted)] space-y-1">
+          <ul className="mt-3 text-xs mc-muted space-y-1">
             {reserve.entries.slice(0, 5).map((e: any) => (
               <li key={e.id}>{new Date(e.createdAt).toLocaleString()} · {String(e.kind).toLowerCase()} · {gyd(e.amount)}{e.note ? ` · ${e.note}` : ''}</li>
             ))}
@@ -155,9 +154,7 @@ export default function ClaimsPage() {
             type="button"
             onClick={() => setFilter(f)}
             aria-pressed={filter === f}
-            className={`px-2.5 py-1 rounded-lg text-xs ${
-              filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
-            }`}
+            className="mc-tab"
           >
             {f.replaceAll('_', ' ').toLowerCase()}
           </button>
@@ -166,38 +163,38 @@ export default function ClaimsPage() {
 
       <div className="space-y-3">
         {claimsQ.isLoading ? (
-          <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+          <div className="mc-loading h-24" />
         ) : claimsQ.isError ? (
           <QueryFailed error={claimsQ.error} what="the claims" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
         ) : rows.length === 0 ? (
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
+          <div className="mc-empty">
             No {filter.replaceAll('_', ' ').toLowerCase()} claims.
           </div>
         ) : (
           rows.map((c: any) => (
-            <div key={c.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
+            <div key={c.id} className="mc-card">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-xl font-bold">{gyd(c.amount)}</span>
                 <StatusPill value={c.status} />
-                <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
+                <span className="px-2.5 py-1 rounded-full text-xs bg-[var(--mc-surface)] mc-muted">
                   {String(c.reason).replaceAll('_', ' ')}
                 </span>
                 {(c.flags ?? []).map((f: string) => (
-                  <span key={f} className="px-2.5 py-1 rounded-full text-xs bg-red-500/15 text-red-400">
+                  <span key={f} className="px-2.5 py-1 rounded-full text-xs bg-[var(--mc-bad-soft)] mc-text-bad">
                     {f.replaceAll('_', ' ')}
                   </span>
                 ))}
-                <span className="text-xs text-[var(--muted)] ml-auto">{new Date(c.createdAt).toLocaleString()}</span>
+                <span className="text-xs mc-muted ml-auto">{new Date(c.createdAt).toLocaleString()}</span>
               </div>
-              <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[var(--muted)]">
-                <Link href={`/orders/${c.orderId}`} className="hover:text-[var(--accent)] transition-colors">
+              <div className="flex flex-wrap items-center gap-4 mt-3 text-sm mc-muted">
+                <Link href={`/orders/${c.orderId}`} className="text-[var(--mc-accent)] font-semibold">
                   View order →
                 </Link>
                 <a
                   href={`https://maps.google.com/?q=${c.gpsLat},${c.gpsLng}`}
                   target="_blank"
                   rel="noreferrer"
-                  className="hover:text-white transition-colors"
+                  className="hover:text-[var(--mc-accent)] transition-colors"
                 >
                   GPS evidence ({Number(c.gpsLat).toFixed(4)}, {Number(c.gpsLng).toFixed(4)})
                 </a>
@@ -210,18 +207,18 @@ export default function ClaimsPage() {
                   {c.evidence.items.map((it: { key: string; present: boolean; required: boolean }) => (
                     <span
                       key={it.key}
-                      className={`px-2 py-0.5 rounded text-xs ${it.present ? 'bg-emerald-500/15 text-emerald-300' : it.required ? 'bg-red-500/15 text-red-300' : 'bg-white/5 text-[var(--muted)]'}`}
+                      className={`px-2 py-0.5 rounded text-xs ${it.present ? 'bg-[var(--mc-good-soft)] mc-text-good' : it.required ? 'bg-[var(--mc-bad-soft)] mc-text-bad' : 'bg-[var(--mc-surface)] mc-muted'}`}
                     >
                       {it.key.replaceAll('_', ' ')}{it.present ? ' ✓' : it.required ? ' — missing' : ' (optional)'}
                     </span>
                   ))}
                   {c.evidenceComplete ? null : (
-                    <span className="text-xs text-red-300">bundle incomplete — a payout is refused until a person approves with the missing items on record</span>
+                    <span className="text-xs mc-text-bad">bundle incomplete — a payout is refused until a person approves with the missing items on record</span>
                   )}
                 </div>
               ) : null}
               {queuedRows[c.id] ? (
-                <p role="status" className="mt-3 text-xs text-amber-500">
+                <p role="status" className="mt-3 text-xs mc-text-warn">
                   Waiting for a second admin&apos;s approval. Do not ask again: once approved, apply it from{' '}
                   <Link href="/approvals" className="underline">Approvals</Link>.
                 </p>
@@ -234,7 +231,7 @@ export default function ClaimsPage() {
                         type="button"
                         onClick={() => approve(c)}
                         disabled={queuedRows[c.id] === true}
-                        className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                        className="mc-btn"
                       >
                         Approve
                       </button>
@@ -242,7 +239,7 @@ export default function ClaimsPage() {
                         type="button"
                         onClick={() => reject(c)}
                         disabled={queuedRows[c.id] === true}
-                        className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                        className="mc-btn"
                       >
                         Reject
                       </button>
@@ -253,7 +250,7 @@ export default function ClaimsPage() {
                       type="button"
                       onClick={() => pay(c)}
                       disabled={queuedRows[c.id] === true}
-                      className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                      className="mc-btn mc-btn-primary"
                     >
                       Mark paid
                     </button>

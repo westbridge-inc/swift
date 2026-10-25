@@ -1,5 +1,7 @@
+import { discardUnusedCustomerSelfie } from '../user/upload-erasure';
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
+import { documentScanState, uploadScanRefusal, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -68,11 +70,12 @@ const submitDocumentSchema = z.object({
   ...consentFields,
 });
 
-// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match: the selfie is optional. Store build 9
-// still sends one (it must be the caller's own upload); a newer app sends the ID alone.
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match. [ROLE-DOCS · owner 21 Oct 2026] No selfie
+// either: store build 9 still sends `selfieUrl`; the schema no longer names it, so zod's default
+// (strip) DROPS it here and the old app keeps working — it never reaches the intake. The upload it
+// names is erased after the intake when it is the caller's own (below). A newer app sends the ID alone.
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048).optional(),
   ...consentFields,
 });
 
@@ -181,7 +184,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
     const sealedType = photo?.mimeType ?? file.mimetype;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
-    await scanUpload(buffer, { surface: 'verification', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
@@ -226,6 +229,8 @@ export async function verificationRoutes(app: FastifyInstance) {
           createdBy: request.user.userId,
         },
       });
+      // [Row 312] Stored sealed: the rescan opens it with this key row (found by the same fileKey).
+      await recordUnscannedUpload(app.prisma, scan, { surface: 'verification', fileKey: url, buffer, sealed: true, storage });
 
       if (dup) {
         // Global correlation is a platform review signal. Tenant-local
@@ -279,6 +284,9 @@ export async function verificationRoutes(app: FastifyInstance) {
       throw documentReviewerRequired();
     }
     const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
+    // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
+    // staff before its rescan answers CLEAN, whatever link was minted.
+    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 
@@ -299,22 +307,28 @@ export async function verificationRoutes(app: FastifyInstance) {
 
   /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
    *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
-   *  repeat truthfully: ON_FILE (unlocked now, no person reviewed it), WAITING (a person looks
+   *  repeat truthfully: ON_FILE (on file now, no person reviewed it), WAITING (a person looks
    *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
-    if (body.consentTick && body.consentTick !== 'customer_id_v1') {
+    // v1 = the words build 12 shows; v2 = the current app's (owner ruling 24 Oct 2026: no unlock promised).
+    if (body.consentTick && body.consentTick !== 'customer_id_v1' && body.consentTick !== 'customer_id_v2') {
       throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
     }
     const doc = await verification.submitIdentity(
       request.user.userId,
       body.idDocumentUrl,
-      body.selfieUrl,
       body.privacyNoticeVersion,
     );
     // [R17 · in-app ¶15] the customer's tick to keep the ID photo
     if (body.consentTick) {
       await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: 'customer', surface: consentSurfaceOf(request), ip: request.ip, docType: 'customer_id' });
+    }
+    // [ROLE-DOCS · REVIEW-F #2001 S3-1] Build 9 uploaded a selfie before calling here; nothing reads it, so the face
+    // is erased now (only the caller's own, unclaimed, unheld upload: user/upload-erasure discardUnusedCustomerSelfie).
+    const selfieUrl = (request.body as { selfieUrl?: unknown } | null | undefined)?.selfieUrl;
+    if (typeof selfieUrl === 'string' && selfieUrl.length > 0 && selfieUrl.length <= 2048 && selfieUrl !== body.idDocumentUrl) {
+      await discardUnusedCustomerSelfie(app.prisma, getStorageProvider(), request.user.userId, selfieUrl, request.log);
     }
     reply.code(201);
     const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
