@@ -33,6 +33,9 @@ const typed = {
   agree: true,
   // [Q8] The store pin the owner confirmed on the map travels with the rest of the form.
   pin: { latitude: 6.0123, longitude: -58.3045, address: '12 Regent Street, Linden' },
+  // [ROLE-DOCS · owner 21 Oct 2026] the store's name basis and the own-name declaration tick
+  nameBasis: 'OWN_NAME' as const,
+  ownNameTick: true,
 };
 
 beforeEach(() => {
@@ -49,6 +52,8 @@ describe('the List-your-business draft', () => {
       city: 'Georgetown',
       agree: false,
       pin: null,
+      nameBasis: 'REGISTERED',
+      ownNameTick: false,
     });
   });
 
@@ -129,11 +134,14 @@ describe('the List-your-business draft', () => {
       city: 'Georgetown',
       agree: false,
       pin: null,
+      nameBasis: 'REGISTERED',
+      ownNameTick: false,
     });
   });
 
-  it('holds the six form fields and the store pin only, in memory only', () => {
-    expect(Object.keys(EMPTY_BUSINESS_SETUP_DRAFT).sort()).toEqual(['addr', 'agree', 'city', 'name', 'phone', 'pin', 'type']);
+  it('holds the six form fields, the store pin and the own-name choice only, in memory only', () => {
+    // [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] + the name basis and the own-name tick
+    expect(Object.keys(EMPTY_BUSINESS_SETUP_DRAFT).sort()).toEqual(['addr', 'agree', 'city', 'name', 'nameBasis', 'ownNameTick', 'phone', 'pin', 'type']);
     // A business phone, street address and store pin must not be written to
     // disk, and the agreement tick must never outlive the process that showed the terms.
     const src = readFileSync(new URL('./businessSetupDraft.ts', import.meta.url), 'utf8');

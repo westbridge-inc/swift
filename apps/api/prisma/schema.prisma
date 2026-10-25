@@ -1548,6 +1548,10 @@ model Vendor {
   /// signed self-declaration; set to REGISTERED only by a VALID registration record.
   tier                    VendorTier               @default(REGISTERED)
   tierChangedAt           DateTime?
+  /// [ROLE-DOCS · owner 21 Oct 2026] The store trades under its owner's own name (Business Names (Registration)
+  /// Act s.3: a true surname with only first names or initials needs no registration): its checklist asks for the
+  /// signed own-name declaration (vendor/own-name.ts) instead of a business registration. Set only by that signature.
+  tradesUnderOwnName      Boolean                  @default(false)
   tierNote                String?
   // [REPORT-013 F-013-07] WHO suspended the store: 'BILLING' (non-payment,
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT

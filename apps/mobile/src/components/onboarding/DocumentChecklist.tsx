@@ -5,6 +5,8 @@ import { color, radius, space } from '@swift/ui';
 import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
+import { OwnNameCard } from './OwnNameCard';
+import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
@@ -12,6 +14,8 @@ import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalD
  *  theme maps no numeric spacing, so it was never a token. Named here so the
  *  bar and its fill cannot drift apart. */
 const TRACK_HEIGHT = 6;
+/** [ROLE-DOCS] The signed "I trade under my own name" declaration (the server's OWN_NAME_DOC_TYPE). */
+const OWN_NAME_DOC = 'own_name_declaration';
 
 /**
  * Renders GET /verification/status?role= as the "Required steps" checklist.
@@ -26,9 +30,12 @@ export function DocumentChecklist({
   isLoading,
   isError,
   onRetry,
+  storeName,
 }: {
   role: string;
   status: any;
+  /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
+  storeName?: string | null;
   isLoading?: boolean;
   isError?: boolean;
   onRetry?: () => void;
@@ -153,6 +160,20 @@ export function DocumentChecklist({
       </View>
       {checklist.map((docType) => {
         const doc = latestDoc(docType);
+        // [ROLE-DOCS · owner 21 Oct 2026] the own-name declaration is signed in the app, never uploaded
+        if (docType === OWN_NAME_DOC) {
+          return !doc || doc.status === 'REJECTED' ? (
+            <View key={docType}>
+              {doc ? <T variant="caption" tone="error">{doc.reviewNote ?? 'Your own-name declaration was not accepted.'}</T> : null}
+              <OwnNameCard role={role} mode="sign" storeName={storeName} />
+            </View>
+          ) : (
+            <View key={docType} style={{ paddingVertical: space.sm }}>
+              <T variant="label" weight="bold">I trade under my own name</T>
+              <T variant="caption" tone="muted">{doc.status === 'APPROVED' ? 'Checked by a person on our team.' : 'Signed — a person on our team is checking it against your ID.'}</T>
+            </View>
+          );
+        }
         return (
           <DocumentUploadCard
             consented={consented}
@@ -169,6 +190,9 @@ export function DocumentChecklist({
           />
         );
       })}
+      {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
+      {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
+        ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}
       {optional.length > 0 ? (
         <View style={{ marginTop: space.md }}>
           <T variant="heading" style={{ marginBottom: space.xs }}>
