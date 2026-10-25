@@ -237,7 +237,7 @@ export async function safetyRoutes(app: FastifyInstance) {
   // SUPER_ADMIN lists or acknowledges them (coordinator ruling, 5 Oct 2026). A
   // tenant's ADMIN sees and acknowledges their own tenant's alerts, named
   // explicitly by tenant, never by whatever scope the request happens to carry.
-  const { acknowledgeOpsAlert, runOpsAlertDrillIfDue } = await import('./ops-alert');
+  const { acknowledgeOpsAlert, runOpsAlertDrillIfDue, drillBody, DRILL_FAILED_REASON } = await import('./ops-alert');
   const opsAlertInclude = { recipients: { select: { userId: true, deliveredAt: true, seenAt: true, ackedAt: true } } } as const;
   app.get('/ops-alerts', auth, async (request) => {
     const role = request.user.role;
@@ -249,6 +249,17 @@ export async function safetyRoutes(app: FastifyInstance) {
     const tenantId = request.tenantId;
     if (!tenantId) throw new ForbiddenError('Platform alerts are for platform operators.');
     const rows = await app.prisma.opsAlert.findMany({ where: { tenantId, acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: opsAlertInclude });
+    return { success: true, data: rows };
+  });
+  // [DRILL-STORM] A drill nobody acknowledged is closed as FAILED and stops paging; it stays
+  // visible here — it is evidence the paging path or the on-call rota failed. Platform operators only.
+  app.get('/ops-alerts/failed-drills', auth, async (request) => {
+    if (!isPlatformResponder(request.user.role)) throw new ForbiddenError('Failed drills are for platform operators.');
+    const rows = await runWithoutTenant(() => app.prisma.opsAlert.findMany({
+      where: { kind: 'DRILL', closeReason: DRILL_FAILED_REASON },
+      orderBy: { createdAt: 'desc' }, take: 50,
+      select: { id: true, title: true, createdAt: true, ackDeadlineAt: true, closedAt: true, closeReason: true, escalationLevel: true, recipients: { select: { userId: true, deliveredAt: true, seenAt: true } } },
+    }));
     return { success: true, data: rows };
   });
   app.post<{ Params: { id: string } }>('/ops-alerts/:id/ack', auth, async (request) => {
@@ -269,7 +280,7 @@ export async function safetyRoutes(app: FastifyInstance) {
     if (!isPlatformResponder(request.user.role)) throw new ForbiddenError('Only platform operators can run a drill.');
     process.env['OPS_ALERT_DRILL_INTERVAL_DAYS'] ??= '7';
     const { openOpsAlert } = await import('./ops-alert');
-    const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: 'Ops alert drill — acknowledge now', body: 'A manual drill of the SOS paging path. Acknowledge it before the deadline; unacknowledged, it escalates like a real SOS.', data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });
+    const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: 'Ops alert drill — acknowledge now', body: drillBody(true), data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });
     void runOpsAlertDrillIfDue;
     return { success: true, data: res };
   });
