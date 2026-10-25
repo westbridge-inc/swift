@@ -11,9 +11,9 @@ export type NameBasis = 'REGISTERED' | 'OWN_NAME';
 export function OwnNameChoice({ storeName, nameBasis, onNameBasis, tick, onTick }: {
   storeName: string;
   nameBasis: NameBasis;
-  onNameBasis: (basis: NameBasis) => void;
+  onNameBasis: (_basis: NameBasis) => void;
   tick: boolean;
-  onTick: (ticked: boolean) => void;
+  onTick: (_ticked: boolean) => void;
 }) {
   return (
     <fieldset className={styles.field}>
