@@ -43,7 +43,7 @@ export function subscriptionStatusWord(sub: Sub): string {
 export function subscriptionInGoodStanding(sub: Sub): boolean {
   if (!sub) return false;
   const state = statusOf(sub).state;
-  return state === 'TRIAL' || state === 'PAID' || state === 'COVERED';
+  return state === 'TRIAL' || state === 'PAID' || state === 'UPCOMING' || state === 'COVERED';
 }
 
 /** The phone's one line under the status: the rate and where the fee stands. */

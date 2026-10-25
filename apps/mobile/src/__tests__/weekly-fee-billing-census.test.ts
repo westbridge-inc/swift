@@ -69,9 +69,10 @@ describe('rendered partner Billing tile census [AX316 R1]', () => {
     const billing = elements(tiles).find((node) => node.props.label === 'Billing');
     expect(billing).toBeDefined();
     const text = renderedText(billing);
-    expect(text).toContain(`Paid until ${new Date(ahead).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' })}`);
-    // [UI-SWEEP U72] The status shows in the Billing screen's words, never the code.
-    expect(text).toContain('Paid');
+    expect(text).toContain(`Next weekly fee due on ${new Date(ahead).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' })}`);
+    // [UI-SWEEP U72] The status shows in the Billing screen's words, never the code; a date is never read as paid.
+    expect(text).toContain('Active');
+    expect(text).not.toMatch(/paid/i);
     expect(text).not.toContain('ACTIVE');
     expect(text).not.toMatch(/\bcash\b|\bagent\b|Swift[\s-]+Number|account[\s-]+number|coming soon|\bMMG\b/i);
   });

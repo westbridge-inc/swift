@@ -37,7 +37,7 @@ export function liveMmg(sub?: FeeSubscription | null) {
  *  bill is 13 Oct 2026" and "Active" on 25 October. The API now words it (GET /{family}/subscription feeStatus);
  *  for an API from before that, the same rules run here on the row, minus the holds only the server can see
  *  (a checkout being checked still reads as checking). A date that has passed is never a next bill or an "until". */
-export type FeeStatusState = 'TRIAL' | 'PAID' | 'COVERED' | 'DUE' | 'CHECKING' | 'FEE_PAUSED' | 'SUSPENDED' | 'INACTIVE' | 'STOPPED' | 'CLOSED' | 'UNKNOWN';
+export type FeeStatusState = 'TRIAL' | 'PAID' | 'UPCOMING' | 'COVERED' | 'DUE' | 'CHECKING' | 'FEE_PAUSED' | 'SUSPENDED' | 'INACTIVE' | 'STOPPED' | 'CLOSED' | 'UNKNOWN';
 export interface FeeStatus { state: FeeStatusState; headline: string; detail: string | null; date: string | null }
 export function feeStatusOf(sub: FeeSubscription, now = Date.now()): FeeStatus {
   const sent = sub.feeStatus;
@@ -63,7 +63,8 @@ export function feeStatusOf(sub: FeeSubscription, now = Date.now()): FeeStatus {
   const trialEnd = at(sub.trialEndDate) > now ? sub.trialEndDate : !due ? sub.nextBillingDate : null;
   if ((sub.isTrialActive === true || status === 'TRIAL') && trialEnd) return word('TRIAL', `Free trial until ${feeDate(trialEnd)}`, null, trialEnd);
   const behind = status === 'PAST_DUE' || sub.isInGracePeriod === true;
-  if (!due && !behind) return word('PAID', `Paid until ${next}`, sub.autoRenew === false ? `Weekly billing is stopped: you receive no work after ${next}.` : null, sub.nextBillingDate ?? null);
+  // Only the API can say "Paid until" (on a captured payment's word): here a date is the next fee's, never proof of payment.
+  if (!due && !behind) return word('UPCOMING', `Next weekly fee due on ${next}`, sub.autoRenew === false ? `Weekly billing is stopped: you receive no work after ${next}.` : null, sub.nextBillingDate ?? null);
   if (!Number.isFinite(amountDue)) return word('UNKNOWN', 'Amount due unavailable.');
   if (!behind && amountDue <= 0) return word('COVERED', next ? `Nothing to pay for the week from ${next}` : 'Nothing to pay right now');
   const grace = at(sub.gracePeriodEnd) > now ? ` Pay by ${feeDate(sub.gracePeriodEnd)} to keep receiving work.` : '';

@@ -23,7 +23,10 @@ describe('weekly fee contract', () => {
     const owner = feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-14T00:26:00Z' }, NOW);
     expect(owner).toMatchObject({ state: 'COVERED', headline: 'Nothing to pay for the week from 13 Oct 2026' });
     expect(JSON.stringify(owner)).not.toMatch(/next bill|active until|nothing due right now/i);
-    expect(feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-11-01T00:26:00Z' }, NOW)).toMatchObject({ state: 'PAID', headline: 'Paid until 31 Oct 2026' });
+    // A date still ahead is the next fee's: only the API says "Paid until" (on a captured payment's word).
+    const ahead = feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-11-01T00:26:00Z' }, NOW);
+    expect(ahead).toMatchObject({ state: 'UPCOMING', headline: 'Next weekly fee due on 31 Oct 2026' });
+    expect(JSON.stringify(ahead)).not.toMatch(/paid/i);
     expect(feeStatusOf({ status: 'ACTIVE', amountDueGyd: 15000, nextBillingDate: '2026-10-14T00:26:00Z' }, NOW))
       .toMatchObject({ state: 'DUE', headline: 'Payment due since 13 Oct 2026', detail: 'GY$15,000 to pay.' });
     expect(feeStatusOf({ status: 'PAST_DUE', amountDueGyd: '1200.50', nextBillingDate: '2026-10-24T12:00:00Z', gracePeriodEnd: '2026-10-26T12:00:00Z' }, NOW).detail)

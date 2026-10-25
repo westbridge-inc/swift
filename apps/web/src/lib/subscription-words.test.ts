@@ -29,7 +29,7 @@ describe('the subscription state reads the same on the Orders home and the weekl
   });
 
   // [FEE-STATUS · owner 25 Oct 2026] The Billing pill names where the fee stands, in the weekly-fee page's words.
-  const states: FeeStatusState[] = ['TRIAL', 'PAID', 'COVERED', 'DUE', 'CHECKING', 'FEE_PAUSED', 'SUSPENDED', 'INACTIVE', 'STOPPED', 'CLOSED', 'UNKNOWN'];
+  const states: FeeStatusState[] = ['TRIAL', 'PAID', 'UPCOMING', 'COVERED', 'DUE', 'CHECKING', 'FEE_PAUSED', 'SUSPENDED', 'INACTIVE', 'STOPPED', 'CLOSED', 'UNKNOWN'];
   it.each(states)('fee status %s has the phone\'s pill words', (state) => {
     expect(feeStatusPillWords(state)).toEqual(feeStatusPill(state));
   });

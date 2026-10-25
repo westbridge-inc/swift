@@ -13,7 +13,7 @@ const base: FeeStatusFacts = {
   status: 'ACTIVE', nextBillingDate: new Date('2026-11-01T00:26:00Z'),
   isTrialActive: false, trialEndDate: null, isInGracePeriod: false, gracePeriodEnd: null,
   autoRenew: true, feeWaived: false, currencyCode: 'GYD',
-  amountDue: 15_000, weeklyFee: 15_000, paidAhead: 0, checking: null, feePaused: false,
+  amountDue: 15_000, weeklyFee: 15_000, paidAhead: 0, paidThroughProven: true, checking: null, feePaused: false,
 };
 const words = (facts: Partial<FeeStatusFacts>) => feeStatusWords({ ...base, ...facts }, NOW);
 // The owner's store on staging at 16:52Z: due 14 Oct 00:26Z (13 Oct in Guyana), ACTIVE, two weeks' money received.
@@ -27,9 +27,15 @@ describe('fee status words [FEE-STATUS]', () => {
     expect(`${s.headline} ${s.detail}`).not.toMatch(/next bill|active until|nothing due/i);
   });
 
-  it('a future paid-through date reads "Paid until <date>" in Guyana time', () => {
+  it('a future paid-through date reads "Paid until <date>" in Guyana time, only on a captured payment\'s word', () => {
     const s = words({});
     expect(s).toMatchObject({ state: 'PAID', headline: 'Paid until 31 Oct 2026', date: '2026-11-01T00:26:00.000Z' });
+    // A date alone never proves payment (UI-SWEEP U46): a waived week, a reactivation after a fee pause.
+    const unproven = words({ paidThroughProven: false });
+    expect(unproven).toMatchObject({ state: 'UPCOMING', headline: 'Next weekly fee due on 31 Oct 2026' });
+    expect(`${unproven.headline} ${unproven.detail ?? ''}`).not.toMatch(/paid/i);
+    expect(words({ paidThroughProven: false, checking: { kind: 'PAYMENT', amount: 15_000, beganAt: new Date('2026-10-24T21:20:43Z') } }).detail)
+      .toBe("Don't pay again while we check.");
   });
 
   it('past the paid-through date and not paid: "Payment due since <date>" with the amount', () => {
@@ -114,6 +120,7 @@ describe('fee status facts read from the database [FEE-STATUS]', () => {
       cardSession: { findFirst: async () => (opts.lateCard ? { id: 'c' } : null) },
       mmgFeeReversal: { findFirst: async () => (opts.reversal ? { id: 'r' } : null) },
       platformConfig: { findUnique: async () => null, findMany: async () => [] },
+      subscriptionPayment: { findFirst: async () => null },
       feePaused: opts.paused ?? false,
     };
   }

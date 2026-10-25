@@ -23,7 +23,7 @@ import { feePauseHoldsBilling } from './mmg-pause';
 // ---------------------------------------------------------------------------
 
 export type FeeStatusState =
-  | 'TRIAL' | 'PAID' | 'COVERED' | 'DUE' | 'CHECKING' | 'FEE_PAUSED' | 'SUSPENDED' | 'INACTIVE' | 'STOPPED' | 'CLOSED';
+  | 'TRIAL' | 'PAID' | 'UPCOMING' | 'COVERED' | 'DUE' | 'CHECKING' | 'FEE_PAUSED' | 'SUSPENDED' | 'INACTIVE' | 'STOPPED' | 'CLOSED';
 
 export interface FeeStatus {
   state: FeeStatusState;
@@ -54,6 +54,9 @@ export interface FeeStatusFacts {
   weeklyFee: number;
   /** Money received for a week that has not been applied yet (payInfo's walletBalanceGyd). */
   paidAhead: number;
+  /** A captured payment of more than 0 bought the week that runs to nextBillingDate. A date alone
+   *  never proves payment (a trial, a waived week, a reactivation after a fee pause all set one). */
+  paidThroughProven: boolean;
   /** A payment (or the fee) held for a person's check, or null. */
   checking: FeeCheck | null;
   /** No partner can pay right now, so no weekly fee is charged (mmg-pause.ts). */
@@ -78,7 +81,7 @@ export function feeStatusWords(f: FeeStatusFacts, now: Date): FeeStatus {
     const headline = c.kind === 'REVIEW'
       ? 'Swift is reviewing your weekly fee'
       : `Checking your payment${c.amount != null && c.amount > 0 ? ` of ${money(c.amount)}` : ''}${c.beganAt ? ` (began ${day(c.beganAt)})` : ''}`;
-    const paidUntil = !due && (status === 'ACTIVE' || status === 'PAST_DUE') && !f.isTrialActive ? `Paid until ${day(f.nextBillingDate)}. ` : '';
+    const paidUntil = !due && f.paidThroughProven && (status === 'ACTIVE' || status === 'PAST_DUE') && !f.isTrialActive ? `Paid until ${day(f.nextBillingDate)}. ` : '';
     return { state: 'CHECKING', headline, detail: `${paidUntil}Don't pay again while we check.`, date: c.beganAt?.toISOString() ?? null };
   }
 
@@ -110,7 +113,10 @@ export function feeStatusWords(f: FeeStatusFacts, now: Date): FeeStatus {
           // [OWNER RULING 8 Oct, NO "WALLET" · owner #62] never a wallet, a balance or "paid ahead".
           ? 'Your next weekly fee is already paid.'
           : null;
-    return { state: 'PAID', headline: `Paid until ${day(f.nextBillingDate)}`, detail, date: dueDate };
+    // "Paid until" only on a captured payment's word; otherwise the date is the next fee's, nothing more.
+    return f.paidThroughProven
+      ? { state: 'PAID', headline: `Paid until ${day(f.nextBillingDate)}`, detail, date: dueDate }
+      : { state: 'UPCOMING', headline: `Next weekly fee due on ${day(f.nextBillingDate)}`, detail, date: dueDate };
   }
 
   // The week is due (or a charge for it failed). With no live way to pay, no
@@ -135,7 +141,7 @@ export function feeStatusWords(f: FeeStatusFacts, now: Date): FeeStatus {
   };
 }
 
-type StatusDb = Pick<PrismaClient, 'paymentConfirmationHold' | 'billingDunningClock' | 'moverFeeAuthority' | 'cardSession' | 'mmgFeeReversal' | 'platformConfig'>;
+type StatusDb = Pick<PrismaClient, 'paymentConfirmationHold' | 'billingDunningClock' | 'moverFeeAuthority' | 'cardSession' | 'mmgFeeReversal' | 'platformConfig' | 'subscriptionPayment'>;
 type StatusSub = Pick<Subscription, 'id' | 'status' | 'nextBillingDate' | 'isTrialActive' | 'trialEndDate' | 'isInGracePeriod' | 'gracePeriodEnd' | 'autoRenew' | 'feeWaived' | 'currencyCode'>;
 
 /**
@@ -174,14 +180,20 @@ export async function feeStatusFor(
   now = new Date(),
   deps: { feePaused?: (_db: StatusDb, _subscriptionId: string) => Promise<boolean> } = {},
 ): Promise<FeeStatus> {
-  const [checking, feePaused] = await Promise.all([
+  const [checking, feePaused, paid] = await Promise.all([
     feeCheck(db, sub),
     (deps.feePaused ?? ((d, id) => feePauseHoldsBilling(d as PrismaClient, id)))(db, sub.id),
+    // The week that runs to nextBillingDate was bought by a captured payment (billing.service books
+    // every paid week as one CAPTURED row whose periodEnd becomes nextBillingDate; a waived week is 0).
+    db.subscriptionPayment.findFirst({
+      where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 }, periodEnd: { gte: sub.nextBillingDate } },
+      select: { id: true },
+    }),
   ]);
   return feeStatusWords({
     status: sub.status, nextBillingDate: sub.nextBillingDate, isTrialActive: sub.isTrialActive, trialEndDate: sub.trialEndDate,
     isInGracePeriod: sub.isInGracePeriod, gracePeriodEnd: sub.gracePeriodEnd, autoRenew: sub.autoRenew, feeWaived: sub.feeWaived,
     currencyCode: sub.currencyCode, amountDue: fee.amountDueGyd, weeklyFee: fee.weeklyFeeGyd, paidAhead: fee.walletBalanceGyd,
-    checking, feePaused,
+    paidThroughProven: !!paid, checking, feePaused,
   }, now);
 }
