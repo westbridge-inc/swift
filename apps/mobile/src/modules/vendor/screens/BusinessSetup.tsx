@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
+import { BUSINESS_NAME_CHOICE, OWN_NAME_CHOICE, OWN_NAME_DECLARATION_V1, OWN_NAME_HINT, OWN_NAME_QUESTION, OWN_NAME_TICK, ownNameApplies, ownNameSigningFor } from '../../../lib/ownNameCopy';
 import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { Card, LabeledInput, PillButton, T } from '../../../kit';
+import { BrandCheckbox, Card, LabeledInput, PillButton, T } from '../../../kit';
 import { GUTTER } from '../shared';
 import { API_URL, vendorApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
@@ -106,7 +107,7 @@ export function BusinessSetup() {
   const owner = userId ? { userId, generation } : null;
   // [DCR-1] `agree` is the Business Agreement consent — recorded in the ledger
   // with the exact version at store creation, the same way signup records the Terms.
-  const { name, type, phone, addr, city, agree, pin } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
+  const { name, type, phone, addr, city, agree, pin, nameBasis, ownNameTick } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
   const edit = (patch: Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>)) => {
     editBusinessSetupDraft(getAuthSessionSnapshot(), owner, patch);
   };
@@ -120,7 +121,7 @@ export function BusinessSetup() {
   // position goes to that map as a place to START, and is never submitted.
   const deviceSuggestion = grantedLocationFix(latitude, longitude, locationStatus);
   const hasPin = pin !== null;
-  const form = { name, type, phone, addr, city, agree, pin };
+  const form = { name, type, phone, addr, city, agree, pin, nameBasis, ownNameTick };
   const blocker = businessSetupBlocker(form);
   // [PR1270-S2-04] The price on the door is a condition of the door: the store
   // is created only against a weekly fee that was fetched successfully, is the
@@ -152,6 +153,9 @@ export function BusinessSetup() {
     // no confirmed pin, no payload.
     const business = vendorBusinessPayload(form);
     if (!business) return;
+    // [ROLE-DOCS · owner 21 Oct 2026] An own-name declaration ticked here is signed by the durable store-created
+    // result (hooks/verification useBecomePartner), never by a callback on this screen, which unmounts once the
+    // store exists.
     become.mutate({ role: 'VENDOR', business, acceptAgreement: agree, ...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack }) }, {
       // A refused tick (the fee changed since it was read) reads the price again: the new amount shows, the tick clears.
       onError: (e) => { if (feeTickError(e)) void refetchPricing(); },
@@ -204,6 +208,31 @@ export function BusinessSetup() {
             <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => edit({ type: t.key })} />
           ))}
         </View>
+
+        {/* [ROLE-DOCS · owner 21 Oct 2026] The first question for a store asked for a business registration: the
+            law (Business Names (Registration) Act s.3) does not ask one person trading under their own name to
+            register it, so they sign a declaration instead. The server checks the name; a person checks the ID. */}
+        {ownNameApplies(type) ? (
+          <Card style={{ marginTop: space.xl, gap: space.sm }}>
+            <T variant="heading">{OWN_NAME_QUESTION}</T>
+            {(['OWN_NAME', 'REGISTERED'] as const).map((basis) => (
+              <BrandCheckbox
+                key={basis}
+                checked={nameBasis === basis}
+                onToggle={() => edit({ nameBasis: basis, ownNameTick: false })}
+                label={basis === 'OWN_NAME' ? OWN_NAME_CHOICE : BUSINESS_NAME_CHOICE}
+              />
+            ))}
+            {nameBasis === 'OWN_NAME' ? (
+              <>
+                <T variant="caption" tone="muted">{OWN_NAME_HINT}</T>
+                {ownNameSigningFor(form.name) ? <T variant="caption" weight="bold">{ownNameSigningFor(form.name)}</T> : null}
+                <T variant="caption">{OWN_NAME_DECLARATION_V1}</T>
+                <BrandCheckbox checked={ownNameTick} onToggle={() => edit((draft) => ({ ownNameTick: !draft.ownNameTick }))} label={OWN_NAME_TICK} />
+              </>
+            ) : null}
+          </Card>
+        ) : null}
 
         <Card style={{ marginTop: space.xl, gap: space.md }}>
           <LabeledInput value={name} onChangeText={(value) => edit({ name: value })} placeholder="Business name" />
@@ -353,7 +382,7 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
             <PublicCallNumberCard value={store.publicPhone} saving={savePhone.isPending} error={phoneError} onSave={(p) => savePhone.mutate(p)} />
           </>
         ) : null}
-        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
         <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={onPreview} />

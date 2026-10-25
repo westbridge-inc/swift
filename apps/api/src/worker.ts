@@ -64,6 +64,8 @@ async function main() {
   // [S3-L1] Only on a database of this process's own kind (its
   // deployment_identity), before any job runs; a refusal exits 1 (below).
   await assertDeploymentIdentityMatchesMode(prisma);
+  // [Row 312 · COORD 22 Oct] The rescan job's payload failures start the same shared cool-down the API reads.
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(redis)); }
 
   const io = new Server();
   const adapterConns: Redis[] = [];
