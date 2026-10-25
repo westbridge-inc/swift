@@ -667,6 +667,12 @@ export const safetyApi = {
   /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
    *  the driver pending identity review, opens the incident. */
   notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
+  /** [DRILL-STORM · S-19] The pages (SOS, operations pages, drills) waiting for a responder to
+   *  acknowledge them, and the acknowledgement that stops their re-pages. The server decides who
+   *  may — the admin role the account HOLDS, whatever mode the app is in — and the phone shows
+   *  what it is given. */
+  opsAlerts: () => api.get('/safety/ops-alerts'),
+  acknowledgeOpsAlert: (id: string) => api.post(`/safety/ops-alerts/${encodeURIComponent(id)}/ack`, {}),
   /**
    * §7.1 shift identity check — multipart selfie in, the outcome ladder out
    * ({ outcome: PASS|BORDERLINE|FAIL|…, allowedOnline, attemptsLeft? }).
