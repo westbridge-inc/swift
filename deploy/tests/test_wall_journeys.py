@@ -677,10 +677,14 @@ class JourneysLayerRendered(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr[:600])
             model = json.loads(result.stdout)
         self.assertEqual(model['name'], 'swift-rehearsal')
-        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True}})
+        # [Row 312] Plus the copy's own internal scanner network: the instance (the API) scans its uploads
+        # with the copy's clamd there; the runner never joins it. Both are internal: no route out.
+        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True},
+                                             'scanner': {'name': 'swift-rehearsal_scanner', 'ipam': {}, 'internal': True}})
         instance, runner = model['services']['api-journeys'], model['services']['journeys-copy']
+        self.assertEqual(sorted(instance['networks']), ['private', 'scanner'])
+        self.assertEqual(list(runner['networks']), ['private'])
         for service in (instance, runner):
-            self.assertEqual(list(service['networks']), ['private'])
             self.assertFalse(service.get('ports'))
         # Uploads go to a store that dies with the container, never a volume or the live bucket.
         self.assertEqual(instance['tmpfs'], ['/srv/swift/uploads:uid=1000,gid=1000,mode=0700'])

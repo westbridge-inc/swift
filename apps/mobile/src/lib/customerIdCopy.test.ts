@@ -34,30 +34,30 @@ describe('the words stay truthful', () => {
   it('nothing says "verified"', () => {
     for (const line of [...all, ...rows]) expect(line).not.toMatch(/verif/i);
   });
-  // [Owner ruling 16 Oct 2026 — customers take no photos] The ID on file unlocks bigger orders AND taxi
-  // rides (the server's ride gate is the ID alone); no line asks a customer for a photo.
-  it('on file says bigger orders and taxi rides are unlocked, with no photo; waiting says a person looks first and promises no time', () => {
-    expect(submittedCopy('ON_FILE')).toEqual({ title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' });
-    expect(submittedCopy('CHECKED')).toEqual({ title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' });
-    expect(profileIdRowSub('ON_FILE')).toBe('On file — bigger orders and taxi rides unlocked');
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Taxi rides and bigger orders no longer need
+  // the ID, so on file says where it is kept and nothing claims an unlock. [16 Oct] No line asks a
+  // customer for a photo.
+  it('on file says the ID is kept, with no unlock and no photo; waiting says a person looks first and promises no time', () => {
+    expect(submittedCopy('ON_FILE')).toEqual({ title: 'Your ID is on file', body: 'Thanks — it is kept with your account, as the Privacy Policy explains.' });
+    expect(submittedCopy('CHECKED')).toEqual({ title: 'Your ID is on file', body: 'Thanks — it is kept with your account, as the Privacy Policy explains.' });
+    expect(profileIdRowSub('ON_FILE')).toBe('On file');
     for (const line of [...all, ...rows]) expect(line).not.toMatch(/profile photo|selfie/i);
+    for (const line of [...all, ...rows]) expect(line).not.toMatch(/unlock|taxi|bigger orders/i);
     expect(submittedCopy('WAITING').title).toMatch(/person/);
     expect(submittedCopy('WAITING').body).not.toMatch(/\d+\s*hours?/);
   });
   it('only a person-reviewed ID is "checked" on the Profile row', () => {
     expect(profileIdRowSub('CHECKED')).toBe('Checked by our team');
     expect(profileIdRowSub('ON_FILE')).toMatch(/^On file/);
-    // NONE also reaches an account already above L1 with no customer ID on record: say what the ID
-    // is for, never that this account needs one.
-    expect(profileIdRowSub(undefined)).toBe('For bigger orders and taxi rides');
-    expect(profileIdRowSub('NONE')).toBe('For bigger orders and taxi rides');
+    // NONE also reaches an account already above L1 with no customer ID on record. [24 Oct 2026] The ID
+    // is optional, and the row says so — never that this account needs one.
+    expect(profileIdRowSub(undefined)).toBe('Optional');
+    expect(profileIdRowSub('NONE')).toBe('Optional');
     for (const line of rows) expect(line).not.toMatch(/needed|you need/i);
   });
-  // [Owner ruling 16 Oct 2026] The ID on file is now the whole ride gate (no photo), so the short line
-  // says it unlocks taxi rides too — and only the ON_FILE line claims an unlock.
-  it('the short line says the ID on file unlocks bigger orders and taxi rides; no other row claims an unlock', () => {
-    expect(profileIdRowSub('ON_FILE')).toBe('On file — bigger orders and taxi rides unlocked');
-    for (const c of ['CHECKED', 'WAITING', 'NOT_ACCEPTED', 'NONE', undefined]) expect(profileIdRowSub(c)).not.toMatch(/unlocked/i);
+  // [Owner ruling 24 Oct 2026] No row claims an unlock any more: the ID unlocks no taxi ride and no order size.
+  it('no row claims an unlock', () => {
+    for (const c of ['ON_FILE', 'CHECKED', 'WAITING', 'NOT_ACCEPTED', 'NONE', undefined]) expect(profileIdRowSub(c)).not.toMatch(/unlock/i);
   });
 });
 
@@ -77,12 +77,19 @@ describe('the screens ask for the ID alone and repeat the server', () => {
   it('the Profile row line comes from the server idCheck', () => {
     expect(src('modules/profile/screens/ProfileScreen.tsx')).toMatch(/sub=\{profileIdRowSub\(p\?\.idCheck\)\}/);
   });
-  it('the taxi doors and the FAQ say "add your ID", not "verify"', () => {
+  // [Owner ruling 24 Oct 2026] The taxi screen has no ID door any more (taxiDoors.test.ts); the FAQ and the ID
+  // screen say the ID is optional and never that a ride or a bigger order needs it.
+  it('the taxi screen has no ID door; the FAQ and the ID screen call the ID optional, never "verify"', () => {
     const taxi = src('modules/movement/screens/TaxiScreen.tsx');
-    expect(taxi.match(/label="Add your ID — takes a minute"/g)?.length).toBe(2);
-    expect(taxi).not.toMatch(/Verify your ID/);
-    expect(src('modules/profile/screens/FaqScreen.tsx')).not.toMatch(/verified ID|plus a selfie/);
+    expect(taxi).not.toMatch(/Add your ID|Verify your ID/);
+    const faq = src('modules/profile/screens/FaqScreen.tsx');
+    expect(faq).not.toMatch(/verified ID|plus a selfie/);
     // [Owner 16 Oct] The FAQ asks a customer for no photo, taxi included.
-    expect(src('modules/profile/screens/FaqScreen.tsx')).not.toMatch(/profile photo/);
+    expect(faq).not.toMatch(/profile photo/);
+    expect(faq).not.toMatch(/Bigger orders and taxi rides need your ID/);
+    expect(faq).toMatch(/You don’t need an ID to order or to take a taxi/);
+    const screen = src('modules/account/screens/IdentityVerificationScreen.tsx');
+    expect(screen).not.toMatch(/Needed once for taxi rides and bigger orders/);
+    expect(screen).toMatch(/Optional — you don’t need an ID to order or to take a taxi/);
   });
 });
