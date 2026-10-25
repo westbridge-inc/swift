@@ -475,7 +475,7 @@ function TaxiBooking({ navigation }: any) {
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
   // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] A ride needs no ID (and, since 16 Oct, no
-  // photo), so the screen opens no "Add your ID" door: the server no longer refuses a ride for it.
+  // photo), so the screen opens no ID door: the server no longer refuses a ride for it.
   // Joining the queue passes the same account gates as a request (the route
   // and the queue share one authority boundary), so its refusal must show —
   // never a silent tap.
