@@ -17,6 +17,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CallStep } from '../providers/voice/call-provider';
 
+/** fetch's own init type (the DOM name is not a lint global here). */
+type FetchInit = NonNullable<Parameters<typeof fetch>[1]>;
+
 // ---------------------------------------------------------------------------
 // [O-1] The call bridge's pure parts: the documents Twilio runs, the request
 // that places a call, the signature, the settings, the boot guard, and which
@@ -77,8 +80,8 @@ describe('[O-1] the documents Twilio runs', () => {
 
 describe('[O-1] placing a call', () => {
   it('posts To, From, the answer and status URLs, the ring and time limits, and Record=false; returns the call id', async () => {
-    const seen: Array<{ url: string; init: RequestInit }> = [];
-    const http = (async (url: string, init: RequestInit) => {
+    const seen: Array<{ url: string; init: FetchInit }> = [];
+    const http = (async (url: string, init: FetchInit) => {
       seen.push({ url, init });
       return new Response(JSON.stringify({ sid: `CA${'c'.repeat(32)}` }), { status: 201 });
     }) as unknown as typeof fetch;
@@ -226,7 +229,7 @@ describe('[O-1] calls are never recorded', () => {
 
   it('placing a call says Record=false and asks for no recording callback', async () => {
     let form = new URLSearchParams();
-    const http = (async (_url: string, init: RequestInit) => {
+    const http = (async (_url: string, init: FetchInit) => {
       form = new URLSearchParams(String(init.body));
       return new Response(JSON.stringify({ sid: `CA${'f'.repeat(32)}` }), { status: 201 });
     }) as unknown as typeof fetch;
