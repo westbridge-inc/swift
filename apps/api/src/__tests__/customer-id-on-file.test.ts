@@ -179,17 +179,47 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
   // Store builds 9 and 10 (iPhone 9.1, release 14a8cf3b) send exactly { idDocumentUrl, selfieUrl,
   // consent: true, privacyNoticeVersion: 'v1' } after POST /verification/upload; the build reads only
   // success. That payload must keep working (the build under review talks to staging).
-  it('store builds 9 and 10 still send a selfie: their own selfie is accepted (never compared); someone else’s is refused', async () => {
-    const c = await customer();
-    const other = await customer();
-    const foreign = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(other.token, readable()) });
-    expect(foreign.statusCode).toBe(400);
-    expect(foreign.json().error.code).toBe('VERIFICATION_OBJECT_UNAVAILABLE');
-    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  // [ROLE-DOCS · owner ruling 21 Oct 2026 — a DELIBERATE change] The selfie they send is now DROPPED by the
+  // route before the intake: never compared, stored or linked to the ID (a customer never gives a photo). [REVIEW-F
+  // #2001 S3-1] The upload it names is then ERASED when it is the caller's own (crypto-shred + delete + receipt);
+  // anyone else's is never touched. Either way the payload keeps working.
+  it('store builds 9 and 10 still send a selfie: their own is erased after the intake, anyone else’s is untouched, and the ID goes on file', async () => {
+    for (const whose of ['own', 'foreign'] as const) {
+      const c = await customer();
+      const other = await customer();
+      const selfieUrl = await upload(whose === 'own' ? c.token : other.token, readable());
+      const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+      expect(res.json().data.fileUrl).not.toBe(selfieUrl);
+      // nothing anywhere points at the selfie: no document, record or review case was made from it
+      expect(await app.prisma.verificationDocument.count({ where: { fileUrl: selfieUrl } })).toBe(0);
+      const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: selfieUrl } });
+      if (whose === 'own') {
+        expect([envelope.wrappedDek, envelope.shreddedAt instanceof Date]).toEqual([null, true]);
+        expect(await app.prisma.deletionReceipt.count({ where: { subjectId: c.id, docTypeCode: 'unused_customer_selfie' } })).toBe(1);
+      } else {
+        expect([envelope.wrappedDek === null, envelope.shreddedAt]).toEqual([false, null]);
+      }
+    }
+  });
 
-    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(c.token, readable()) });
+  // [REVIEW-G #2001 S3-1] The erase needs more than "the caller's own upload": nothing else may name it. An old app
+  // that sends one of the person's OWN submitted documents as the "selfie" (their own key, their own envelope) must
+  // never erase that document's file — the intake still succeeds, the document keeps its bytes, no receipt is written.
+  it('an old app naming one of the person’s own submitted documents as the selfie never erases that document', async () => {
+    const c = await customer();
+    const licence = await upload(c.token, readable());
+    const doc = await runWithoutTenant(() => app.prisma.verificationDocument.create({
+      data: { userId: c.id, role: 'DRIVER', docType: 'drivers_licence', fileUrl: licence },
+    }));
+    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: licence });
     expect(res.statusCode, res.body).toBe(201);
     expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+    const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: licence } });
+    expect([envelope.wrappedDek === null, envelope.shreddedAt]).toEqual([false, null]);
+    expect(await app.prisma.deletionReceipt.count({ where: { subjectId: c.id, docTypeCode: 'unused_customer_selfie' } })).toBe(0);
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).fileUrl).toBe(licence);
   });
 
   it('a second ID on an account already on file is refused in plain words', async () => {
@@ -288,7 +318,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
   it('PROCESSOR_REFERRED: an engine that reads documents and refers one to a person is not overruled', async () => {
     const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
     const c = await customer();
-    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), undefined, 'v1');
+    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), 'v1');
     expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect(String(((await audit(doc.id)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason)).toContain('PROCESSOR_REFERRED');
@@ -303,7 +333,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
     };
     const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), down);
     const c = await customer();
-    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), undefined, 'v1');
+    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), 'v1');
     expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect(String(((await audit(doc.id)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason)).toContain('CHECKS_UNAVAILABLE');
