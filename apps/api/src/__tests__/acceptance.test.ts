@@ -262,8 +262,10 @@ afterAll(async () => {
 });
 
 describe('Spec §I — acceptance conformance baseline', () => {
-  // 1. Threshold gate — OrderService.checkout blocks an L1 cart at/over the gate.
-  it('1. an L1 customer over the ID threshold is blocked at checkout (ID_VERIFICATION_REQUIRED)', async () => {
+  // 1. Threshold gate — REMOVED by owner ruling 24 Oct 2026 ~05:55Z (no customer ID for orders at or over the
+  //    ID-gate threshold; Swift's own 8 Oct choice, not a legal duty). OrderService.checkout used to refuse an L1
+  //    cart at/over the gate; it now places it like any other.
+  it('1. an L1 customer over the old ID threshold checks out — no ID asked (owner 24 Oct 2026)', async () => {
     const category = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
     const item = await app.prisma.item.create({
       data: { vendorId, categoryId: category.id, name: 'Big Combo', basePrice: 60000 }, // well over the ~$50 (GYD) gate
@@ -275,7 +277,10 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const orders = new OrderService(app.prisma, app.io);
     await expect(
       orders.checkout({ userId: customer.id, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' }, now: new Date() }),
-    ).rejects.toMatchObject({ code: 'ID_VERIFICATION_REQUIRED' });
+    ).resolves.toBeTruthy();
+    const placed = await app.prisma.order.findMany({ where: { customerId: customer.id }, select: { totalAmount: true, status: true } });
+    expect(placed.map((o) => [Number(o.totalAmount), o.status])).toEqual([[60000, 'PENDING']]);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.id } })).trustLevel).toBe('L1');
   });
 
   // 2. Float gate — D.3, now LIVE. A rider without enough free float to front the

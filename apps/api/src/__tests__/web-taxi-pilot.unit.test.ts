@@ -23,7 +23,7 @@ vi.mock('../modules/order/order.service', () => ({ OrderService: class {} }));
 vi.mock('../modules/safety/sos.service', () => ({ SosService: class {} }));
 vi.mock('../modules/dispatch/dispatch.service', () => ({ makeDispatchService: () => ({}) }));
 vi.mock('../modules/rides/rides.service', () => ({
-  createRideRequest: fakes.createRide, assertRideGates: fakes.gates, assertL2: vi.fn(),
+  createRideRequest: fakes.createRide, assertRideGates: fakes.gates,
 }));
 vi.mock('../modules/rides/queue.service', () => ({
   getSupplySnapshot: vi.fn(), queueStatusFor: vi.fn().mockResolvedValue({ id: 'queue-test' }),

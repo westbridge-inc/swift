@@ -46,8 +46,9 @@ export const SERVICE_TRADE_CATALOG = {
     label: 'Appliance & electronics repair', riskTier: 'LOW',
     aliases: ['appliance repair', 'electronics repair', 'appliance and electronics repair'],
   },
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI licence, the electrician's risk group
   solar_generator_inverter_installer: {
-    label: 'Solar / generator / inverter installer', riskTier: 'LOW',
+    label: 'Solar / generator / inverter installer', riskTier: 'HIGH',
     aliases: ['solar installer', 'generator installer', 'inverter installer', 'solar generator inverter installer'],
   },
   tiler: { label: 'Tiler', riskTier: 'LOW', aliases: ['tiler', 'tiling', 'tile installer'] },
@@ -125,9 +126,12 @@ export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
 // [owner 16 Oct 2026] The heavy-equipment operator is held again: the licence
 // rules for its machines are not confirmed. Tutors and photographers stay open
 // (their home visits need the police clearance).
+// [ROLE-DOCS · owner ruling 21 Oct 2026 "not clear = held" · PR 3] The AC & refrigeration technician (NOAU
+// retrofitter licences exist; their legal basis was not found) and the mover (a goods vehicle for reward needs the
+// MVRTA s.87 goods licence: a counsel item) are held until their rules are confirmed.
 const PENDING_CATEGORIES = new Set<ServiceTradeId>([
   'lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant',
-  'heavy_equipment_operator',
+  'heavy_equipment_operator', 'ac_refrigeration', 'mover',
 ]);
 
 export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
@@ -155,6 +159,8 @@ const TRADE_NOTES: Partial<Record<ServiceTradeId, readonly string[]>> = {
   chef: ['Georgetown only for now. Your food handler’s certificate must be this year’s, from the Mayor and City Council of Georgetown. It is checked again every January.'],
   caterer: ['Georgetown only for now. Your food handler’s certificate and eating-house registration must be this year’s, from the Mayor and City Council of Georgetown. They are checked again every January.'],
   pest_control: ['Your Pesticides and Toxic Chemicals Control Board licence is checked again every January.'],
+  // [ROLE-DOCS · PR 3] the same yearly re-check as an electrician's GEI licence (R16)
+  solar_generator_inverter_installer: ['Your GEI electrical licence is checked again every January.'],
 };
 
 function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] {
@@ -191,6 +197,9 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
     accountant: 'Professional credentials and authority for the services offered',
     // [owner 16 Oct] held until the licence rules for its machines are confirmed
     heavy_equipment_operator: 'Equipment competency and applicable licence requirements',
+    // [ROLE-DOCS · owner 21 Oct] held until their licence rules are confirmed
+    ac_refrigeration: 'Refrigerant handling and applicable licence requirements',
+    mover: 'Goods vehicle licence requirements for moving goods for payment',
   };
   if (pending[trade]) documents.push({
     key: `POLICY_${trade.toUpperCase()}`, label: pending[trade]!, status: 'POLICY_REVIEW_REQUIRED',
@@ -315,8 +324,10 @@ export function profileOffersDroneWork(bio: string | null | undefined): boolean 
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.
- * GEI is specifically an electrician credential; generic qualifications still
- * require a trusted reviewer and remain bound to their submitted trade. */
-export function qualificationTypeMatchesTrade(type: QualificationType, trade: ServiceTradeId): boolean {
-  return type !== 'GEI_LICENCE' || trade === 'electrician';
+ * Generic qualifications still require a trusted reviewer and remain bound to
+ * their submitted trade. [ROLE-DOCS · owner 21 Oct 2026] A GEI_LICENCE
+ * qualification badges nothing, for any trade: the electrician's GEI licence is
+ * the required checklist document, never a second, optional copy. */
+export function qualificationTypeMatchesTrade(type: QualificationType, _trade: ServiceTradeId): boolean {
+  return type !== 'GEI_LICENCE';
 }

@@ -16,6 +16,9 @@ import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { isProduction } from '../../utils/runtime-mode';
 
 export const REGISTRY_TIER = 'STANDARD';
+/** [ROLE-DOCS · owner 21 Oct 2026] Lists retired by the owner (country-config RETIRED_LIST_KEYS says the same; a test
+ *  keeps them equal). Kept here too so the registry never imports the country service. */
+export const RETIRED_REGISTRY_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
 export const REGISTRY_EFFECTIVE_FROM = new Date('2026-06-01T00:00:00.000Z');
 /** [R24 · research C4] A persisted (vehicle / business) image is kept while the relationship is
@@ -75,10 +78,15 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   // Hire Car Driver's Licence (s.80) and the CAR's yearly hire licence (s.79, exhibited on the car).
   hire_car_driver_licence: 'PERSONAL', hire_car_vehicle_licence: 'VEHICLE',
   // [DOC-1 §18.1] the addendum's Guyana types (seeded by EXTRA_DOC_TYPES, not by any checklist)
-  liquor_licence: 'BUSINESS', sanitary_certificate: 'BUSINESS', trade_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS',
-  nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
+  sanitary_certificate: 'BUSINESS', trade_licence: 'BUSINESS', digital_id: 'PERSONAL',
+  // [ROLE-DOCS · owner 21 Oct 2026] RETIRED: nothing asks for these any more (alcohol and every medicine are
+  // banned outright, GUARDRAILS §8; NIS registration is not Swift's concern). The bucket stays so a copy
+  // already stored keeps its retention class until the migration's clock deletes it.
+  liquor_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS', nis_employer_reg: 'BUSINESS',
   // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
   self_declaration_unregistered: 'BUSINESS',
+  // [ROLE-DOCS · owner 21 Oct 2026] the signed "I trade under my own name" declaration (vendor/own-name.ts)
+  own_name_declaration: 'BUSINESS',
   // [TRADES · 13 Oct 2026; R15] service-trade documents: a person's licence is PERSONAL; a premises
   // certificate is BUSINESS and always reviewed by a person (ALWAYS_REVIEW_LEGACY_CODES).
   pest_control_operator_licence: 'PERSONAL', pesticide_applicator_certificate: 'PERSONAL',
@@ -107,7 +115,6 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   food_handler_cert: 365,  // annual Food Handler's Permit (Food Safety Act 2019 s.54) — a permit, never a medical certificate
   gra_restaurant_licence: 365,
   // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
-  liquor_licence: 365,
   sanitary_certificate: 365,
   trade_licence: 365,
   // [VERIFY-DOCS · ruling 8] A Guyana driver's licence is valid 5 years (GRA).
@@ -140,6 +147,13 @@ export const CERTIFICATE_YEAR_DOC_TYPES: ReadonlySet<string> = new Set([
   'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
   'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
 ]);
+/**
+ * [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The documents a trade may require that are LICENCES issued for the trade:
+ * the GEI electrical licence (electrician, solar / generator / inverter installer) and the Pesticides and Toxic
+ * Chemicals Control Board's operator licence (pest control). An ID, a police clearance, a food handler's certificate or
+ * a premises registration is never called a licence. A registry fact (DOC-INV-2): services reads it, never re-types it.
+ */
+export const TRADE_LICENCE_DOC_TYPES: ReadonlySet<string> = new Set(['gei_electrical_licence', 'pest_control_operator_licence']);
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
  * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):
@@ -152,6 +166,9 @@ export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set([
   'vehicle_insurance', 'fitness_cert',
   // [TRADES] which council issued a premises certificate, and for which premises, is a person's judgement
   'eating_house_registration',
+  // [ROLE-DOCS · owner 21 Oct 2026 · security review] whether a store's name is its owner's true surname (BNA s.3)
+  // is read from the owner's ID by a person, never by a machine
+  'own_name_declaration',
 ]);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
@@ -161,8 +178,12 @@ export const registryCode = (countryCode: string, legacyCode: string) => `${coun
  * plate photo (merged into the car photo), the TIN certificate (dropped) and the single hire-car permit
  * (split into the person's and the car's licences). Documents of them already exist, so the registry
  * keeps describing them — never as a requirement.
+ * [ROLE-DOCS · owner 21 Oct 2026] The liquor licence, pharmacy authorisation and NIS employer registration
+ * joined them: no list or gate asks for them, but stored copies wait out their retention clock, and staging
+ * and production already hold their rows from the earlier seed. The seed rewrites such a row's expiry facts
+ * from the code (the liquor licence's annual printed expiry is gone), so the registry never carries recall.
  */
-export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit'];
+export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit', 'liquor_licence', 'pharmacy_authorisation', 'nis_employer_reg'];
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
 
 export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number; extraDocTypes: number; categoryGates: number }
@@ -236,11 +257,8 @@ export interface ExtraDocType {
  */
 export const EXTRA_DOC_TYPES: readonly ExtraDocType[] = [
   { legacyCode: 'self_declaration_unregistered', displayName: 'Unregistered trader self-declaration', bucket: 'BUSINESS', issuer: 'The trader (signed in-app; attestation version + content hash in the consent ledger)', hasExpiry: true, defaultValidityDays: 365, expirySource: 'DEFAULT', needsSpecimen: false, note: '§3.2/§3.6 · P3-2: blocking for the MICRO_VENDOR set; 365 d; fields trading_name, activity_class, declared_address, signed_at, attestation_version' },
-  { legacyCode: 'liquor_licence', displayName: 'Liquor licence', bucket: 'BUSINESS', issuer: 'GRA / District Licensing Board', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_class decides the permitted sale mode' },
   { legacyCode: 'sanitary_certificate', displayName: 'Sanitary certificate', bucket: 'BUSINESS', issuer: 'Public health / local authority', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: printed expiry, else 365 days' },
   { legacyCode: 'trade_licence', displayName: 'Trade licence', bucket: 'BUSINESS', issuer: 'GRA', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_type per the GRA schedule' },
-  { legacyCode: 'pharmacy_authorisation', displayName: 'Pharmacy authorisation', bucket: 'BUSINESS', issuer: 'Pharmacy regulator (NEEDS_RESEARCH)', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: true, note: 'FD-DOC-15: regime not researched — do not guess' },
-  { legacyCode: 'nis_employer_reg', displayName: 'NIS employer registration', bucket: 'BUSINESS', issuer: 'National Insurance Scheme', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: false, note: '§18.1: non-blocking; relevant only where the vendor has staff' },
   { legacyCode: 'digital_id', displayName: 'Guyana digital ID', bucket: 'PERSONAL', issuer: 'Government of Guyana', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: true, note: '§18.1: stub until a specimen is reviewed (Digital Identity Card Act 2023, commenced 31 Mar 2026)' },
 ];
 export const EXTRA_DOC_TYPES_COUNTRY = 'GY';
@@ -251,16 +269,15 @@ export interface GateSeed {
 }
 /**
  * [DOC-1 §18.3] Seed rules, mapped onto the discovery taxonomy: a slug for one
- * category, a kind for a family. Alcohol gets both listing and ordering.
- * Rulings: grocery / general shop is WARN until the vendor tier signal (P3-2)
- * can make it BLOCK_LISTING at the registered tier; the `alcohol` slug is not
- * in the seeded taxonomy yet — the gate binds the moment it is; the
- * licence_class check waits for the field to be extracted or corrected by a
- * reviewer (recorded gap) — until then any VALID liquor licence satisfies it.
+ * category, a kind for a family. Rulings: grocery / general shop is WARN until
+ * the vendor tier signal (P3-2) can make it BLOCK_LISTING at the registered tier.
+ * [ROLE-DOCS · owner 21 Oct 2026] No alcohol or pharmacy gate: alcohol and every
+ * medicine are banned outright (GUARDRAILS §8, compliance/prohibited-items), so
+ * no licence can unlock them and none is collected. seedCategoryGates removes
+ * the two rows a database already holds, and with them the liquor licence's
+ * last way in (a gate document type is submittable: category-gate.ts).
  */
 export const CATEGORY_GATES: readonly GateSeed[] = [
-  { code: 'GY:slug:alcohol:liquor_licence', categorySlug: 'alcohol', docType: 'liquor_licence', enforcement: 'BLOCK_ORDER', requiredField: 'licence_class', requiredValues: ['LIQUOR_RESTAURANT', 'OFF_LICENCE', 'SPIRIT_SHOP', 'MEMBERS_CLUB', 'HOTEL', 'MALT_AND_WINE', 'TAVERN'], note: '§18.3: alcohol gets both — when the licence expires at midnight, alcohol stops being orderable' },
-  { code: 'GY:slug:pharmacy:pharmacy_authorisation', categorySlug: 'pharmacy', docType: 'pharmacy_authorisation', enforcement: 'BLOCK_LISTING', note: 'FD-DOC-15: disabled platform-wide — no valid authorisation can exist while the type needs a specimen' },
   { code: 'GY:slug:meat-poultry:sanitary_certificate', categorySlug: 'meat-poultry', docType: 'sanitary_certificate', enforcement: 'BLOCK_LISTING', note: '§18.3: meat / butcher' },
   { code: 'GY:kind:CUISINE:gra_restaurant_licence', categoryKind: 'CUISINE', docType: 'gra_restaurant_licence', enforcement: 'BLOCK_LISTING', note: '§18.3: prepared food' },
   { code: 'GY:kind:DISH:gra_restaurant_licence', categoryKind: 'DISH', docType: 'gra_restaurant_licence', enforcement: 'BLOCK_LISTING', note: '§18.3: prepared food' },
@@ -402,7 +419,9 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   let docTypes = 0; let requirementSets = 0; let requirementItems = 0;
   for (const c of countries) {
     // Code defaults under the stored JSON (P3-2): a list added in code is seeded everywhere; an edited stored list wins.
-    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
+    const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
+    // [ROLE-DOCS · owner 21 Oct 2026] a retired list in a stored copy from an older seed declares nothing
+    for (const key of RETIRED_REGISTRY_LIST_KEYS) delete lists[key];
     // [VERIFY-DOCS] A type no list asks for any more keeps its registry row: documents of it already
     // exist (approved permits, TIN certificates) and their bucket and retention still have to be read.
     // A never-accepted type (a medical document) is never minted, whatever a stored list says.
@@ -420,7 +439,11 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
           extractionProfile: 'UNPROFILED', externalProcessingAllowed: false, legalFactsSourceNote: PROVISIONAL_NOTE, isActive: false,
           alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
         },
-        update: { legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode) },
+        update: {
+          legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
+          // a retired type's row is the code's description only: its expiry source follows the same truth as on create
+          ...(RETIRED_DOC_TYPES.includes(legacyCode) && { expirySource: validity !== undefined ? 'PRINTED' : 'NONE' }),
+        },
       });
       docTypes += 1;
     }
@@ -462,6 +485,16 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
         requirementItems += 1;
       }
       await prisma.requirementItem.deleteMany({ where: { requirementSetId: set.id, docTypeCode: { notIn: [...items.keys()] } } });
+    }
+    // [ROLE-DOCS · owner 21 Oct 2026] A seeded set whose list no longer exists goes too (CUSTOMER_L2): the
+    // registry never keeps a requirement nobody asks for. Only the seed's own sets (REGISTRY_EFFECTIVE_FROM)
+    // are judged; a set a migration inserted with verified facts is never touched here.
+    const declaredKeys = new Set([...declared.values()].map((d) => `${d.actorRole}|${d.tier}`));
+    const seeded = await prisma.requirementSet.findMany({ where: { countryCode: c.code, effectiveFrom: REGISTRY_EFFECTIVE_FROM }, select: { id: true, actorRole: true, tier: true } });
+    const stale = seeded.filter((set) => !declaredKeys.has(`${set.actorRole}|${set.tier}`)).map((set) => set.id);
+    if (stale.length > 0) {
+      await prisma.requirementItem.deleteMany({ where: { requirementSetId: { in: stale } } });
+      await prisma.requirementSet.deleteMany({ where: { id: { in: stale } } });
     }
   }
   const extraDocTypes = await seedExtraDocTypes(prisma);
@@ -527,6 +560,12 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   // A photo declares no EXTRACTED fields: its capture metadata (captured_at, geo_point, device_attestation —
   // §3.2) is recorded by the capture attestation (P22), not read from the image. Photo types stay field-less.
   storefront_photo: [],
+  // [ROLE-DOCS] the own-name declaration: the store name it was signed for, when, which words
+  own_name_declaration: [
+    { fieldCode: 'trading_name', dataType: 'text', identifier: true },
+    { fieldCode: 'signed_at', dataType: 'date' },
+    { fieldCode: 'attestation_version', dataType: 'text' },
+  ],
   food_handler_cert: [
     { fieldCode: 'permit_number', dataType: 'text', isPii: true, blind: true, identifier: true },
     { fieldCode: 'holder_name', dataType: 'text', isPii: true },
@@ -607,14 +646,6 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   vehicle_plate_photo: [],
   vehicle_exterior_photo: [],
   selfie: [],
-  liquor_licence: [
-    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
-    { fieldCode: 'licence_class', dataType: 'enum', enumValues: ['LIQUOR_RESTAURANT', 'OFF_LICENCE', 'SPIRIT_SHOP', 'MEMBERS_CLUB', 'HOTEL', 'MALT_AND_WINE', 'TAVERN'] },
-    { fieldCode: 'licensee_name', dataType: 'text', isPii: true },
-    { fieldCode: 'premises_address', dataType: 'text' },
-    { fieldCode: 'year', dataType: 'number' },
-    { fieldCode: 'district', dataType: 'text' },
-  ],
   sanitary_certificate: [
     { fieldCode: 'certificate_ref', dataType: 'text', blind: true, identifier: true },
     { fieldCode: 'premises_address', dataType: 'text' },
@@ -627,11 +658,6 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'holder_name', dataType: 'text', isPii: true },
     { fieldCode: 'premises_address', dataType: 'text' },
     { fieldCode: 'year', dataType: 'number' },
-  ],
-  pharmacy_authorisation: [], // NEEDS_SPECIMEN — do not guess (§18.1)
-  nis_employer_reg: [
-    { fieldCode: 'employer_number', dataType: 'text', blind: true, identifier: true },
-    { fieldCode: 'registered_name', dataType: 'text' },
   ],
   gei_electrical_licence: [
     { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
@@ -715,6 +741,9 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
  */
 export const UNREGISTERED_TIER = 'UNREGISTERED';
 export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
+/** [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name: `<ROLE>_OWN_NAME`, the registry's OWN_NAME tier. */
+export const OWN_NAME_TIER = 'OWN_NAME';
+export const OWN_NAME_LIST_SUFFIX = '_OWN_NAME';
 /** [VERIFY-DOCS] `<KEY>_OPTIONAL` names documents the same role MAY add: never a gate. */
 export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
 /** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; MOVER_OPTIONAL → { actorRole: 'MOVER', optional };
@@ -722,9 +751,9 @@ export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
 export function splitChecklistKey(listKey: string): { actorRole: string; tier: string; optional: boolean } {
   const optional = listKey.endsWith(OPTIONAL_LIST_SUFFIX);
   const key = optional ? listKey.slice(0, -OPTIONAL_LIST_SUFFIX.length) : listKey;
-  return key.endsWith(UNREGISTERED_LIST_SUFFIX)
-    ? { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional }
-    : { actorRole: key, tier: REGISTRY_TIER, optional };
+  if (key.endsWith(UNREGISTERED_LIST_SUFFIX)) return { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional };
+  if (key.endsWith(OWN_NAME_LIST_SUFFIX)) return { actorRole: key.slice(0, -OWN_NAME_LIST_SUFFIX.length), tier: OWN_NAME_TIER, optional };
+  return { actorRole: key, tier: REGISTRY_TIER, optional };
 }
 
 export async function registryChecklist(prisma: Pick<PrismaClient, 'requirementSet'>, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
@@ -767,6 +796,8 @@ export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration
 export const REGISTRATION_KINDS = ['BUSINESS_NAME', 'COMPANY'] as const;
 export type RegistrationKind = (typeof REGISTRATION_KINDS)[number];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
+/** [ROLE-DOCS · owner 21 Oct 2026] The signed "I trade under my own name" declaration. Registry text (DOC-INV-2). */
+export const OWN_NAME_DOC_TYPE = 'own_name_declaration';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 /** [VERIFY-DOCS · owner rulings 1–3, 6 Oct 2026] The character document: optional for movers (an approved, current one is
@@ -792,7 +823,7 @@ export const SERVICE_DOCUMENT_WORDS: Readonly<Record<string, string>> = {
   eating_house_registration: 'This year’s eating-house registration from the Town Clerk in Georgetown',
 };
 
-export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
+export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence'];
 
 /** [L06 · #1551] The vehicle's registration — the document a vehicle subject is resolved from. Registry text (DOC-INV-2). */
 export const VEHICLE_REGISTRATION_DOC_TYPE = 'vehicle_registration';

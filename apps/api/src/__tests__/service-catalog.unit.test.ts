@@ -86,7 +86,10 @@ describe('service catalogue authority', () => {
     expect(documents('lawyer').some((doc) => doc.label.includes('Right to practise'))).toBe(true);
     expect(documents('tutor').some((doc) => doc.label.includes('tutors work with children'))).toBe(true);
     expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'barber')).toBe(false);
-    expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'electrician')).toBe(true);
+    // [ROLE-DOCS · owner 21 Oct 2026] a GEI_LICENCE qualification badges no trade, electrician included:
+    // the GEI licence is the electrician's required checklist document
+    expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'electrician')).toBe(false);
+    expect(qualificationTypeMatchesTrade('CVQ', 'electrician')).toBe(true);
     expect(catalog.categories.every((category) => !category.appointmentsEnabled)).toBe(true);
   });
 
@@ -95,9 +98,10 @@ describe('service catalogue authority', () => {
       category.documents.some((document) => document.status === 'POLICY_REVIEW_REQUIRED'));
     // [TRADES · 13 Oct; R15 · 15 Oct 2026] pest control, chef, caterer, tutor and photographer opened with
     // their checks; the trades the research marks UNSURE stay held with the lawyer, and [owner 16 Oct] the
-    // heavy-equipment operator is held again (licence rules unconfirmed).
+    // heavy-equipment operator is held again (licence rules unconfirmed); [ROLE-DOCS · owner 21 Oct] the AC &
+    // refrigeration technician and the mover are held (not clear = held).
     expect(held.map((category) => category.id)).toEqual([
-      'gas_fitter', 'heavy_equipment_operator', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant',
+      'gas_fitter', 'ac_refrigeration', 'heavy_equipment_operator', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant', 'mover',
     ]);
     for (const category of held) {
       expect(category.quoteRequestsEnabled, category.id).toBe(false);

@@ -30,17 +30,19 @@ import { reviewerTypedFields } from '../modules/verification/identity-signal-pol
 
 const BASE = ['national_id', 'police_clearance'];
 
-/** The per-trade checklist of every trade opened at launch (owner 13 + 15 + 16 Oct). */
+/** The per-trade checklist of every trade opened at launch with its own floor (owner 13 + 15 + 16 + 21 Oct). */
 const EXPECTED: Record<string, string[]> = {
   pest_control: [...BASE, 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
   chef: [...BASE, 'food_handler_cert'],
   caterer: [...BASE, 'food_handler_cert', 'eating_house_registration'],
   photographer: [...BASE],
   tutor: [...BASE],
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI electrical licence, like an electrician
+  solar_generator_inverter_installer: [...BASE, 'gei_electrical_licence'],
 };
 const OPENED = Object.keys(EXPECTED) as ServiceTradeId[];
-/** [R15] research A9: UNSURE — held, with the lawyer. [owner 16 Oct] the heavy-equipment operator too. */
-const HELD: ServiceTradeId[] = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant', 'heavy_equipment_operator'];
+/** [R15] research A9: UNSURE — held, with the lawyer. [owner 16 Oct] the heavy-equipment operator too. [owner 21 Oct] AC & refrigeration + mover. */
+const HELD: ServiceTradeId[] = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant', 'heavy_equipment_operator', 'ac_refrigeration', 'mover'];
 /** [owner 16 Oct 2026] A store's yearly licences, checked again every January like a business name (R16). */
 const STORE_LICENCES = ['gra_restaurant_licence', 'sanitary_certificate', 'trade_licence'];
 const NEW_DOC_TYPES = ['pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration'];
@@ -59,8 +61,8 @@ function fakeDb(trade: string, lists: Record<string, string[]>, bio: string | nu
 }
 
 describe('[TRADES · R15] the research-confirmed trades open with their own checks; the UNSURE ones stay held', () => {
-  it('exactly the five decided trades open', () => {
-    expect(OPENED).toHaveLength(5);
+  it('exactly the six decided trades open with their own floor', () => {
+    expect(OPENED).toHaveLength(6);
     for (const trade of OPENED) {
       expect(isServiceCategoryOperational(trade), trade).toBe(true);
       expect(requireCanonicalServiceTrade(trade), trade).toBe(trade);

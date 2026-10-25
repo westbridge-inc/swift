@@ -192,7 +192,8 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
     await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: {
       ...stored,
       MOVER: [medical], MOVER_NO_LICENCE: ['national_id', medical],
-      MOVER_OPTIONAL: ['police_clearance', medical],
+      // [ROLE-DOCS · owner 21 Oct 2026] the movers' optional list is the taxi profile's (a stored MOVER_OPTIONAL is retired)
+      MOVER_TAXI_EXTRA_OPTIONAL: ['police_clearance', medical],
       VENDOR: ['business_registration', medical], VENDOR_UNREGISTERED: ['owner_national_id', medical],
       VENDOR_OPTIONAL: ['police_clearance', medical],
       SERVICE_PROVIDER: ['national_id', 'police_clearance', medical],
@@ -206,12 +207,13 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
       expect(await country.getDocumentChecklist('GY', 'VENDOR', 'UNREGISTERED')).toEqual(['owner_national_id']);
       expect(await country.getOptionalDocuments('GY', 'VENDOR', ['business_registration'])).toEqual(['police_clearance']);
       expect(await country.getMoverChecklist('GY', 'BICYCLE')).toEqual(['national_id']);
-      expect(await country.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual(['police_clearance']);
+      expect(await country.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual([]);
+      expect(await country.getMoverOptionalDocuments('GY', 'CAR')).toEqual(['police_clearance']);
       expect(await providerChecklist(app.prisma, m.userId)).toEqual(['national_id', 'police_clearance', 'gei_electrical_licence']);
       const status = await app.inject({ method: 'GET', url: '/api/v1/verification/status?role=MOVER', headers: { authorization: `Bearer ${m.token}` } });
       expect(status.statusCode).toBe(200);
       expect(status.json().data.checklist).toEqual(['national_id']);
-      expect(status.json().data.optional).toEqual(['police_clearance']);
+      expect(status.json().data.optional).toEqual([]);
     } finally {
       await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } });
     }
@@ -264,17 +266,18 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
     // at every boot — the API would not start.
     const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
     const stored = gy.documentChecklists as Record<string, string[]>;
-    const optional = [...(stored['MOVER_OPTIONAL'] ?? DEFAULT_DOCUMENT_CHECKLISTS['MOVER_OPTIONAL'] ?? [])];
-    expect(optional.length, 'the movers keep an optional list to add the medical type to').toBeGreaterThan(0);
+    // [ROLE-DOCS · owner 21 Oct 2026] the movers' optional list is the taxi profile's now (MOVER_TAXI_EXTRA_OPTIONAL)
+    const optional = [...(stored['MOVER_TAXI_EXTRA_OPTIONAL'] ?? DEFAULT_DOCUMENT_CHECKLISTS['MOVER_TAXI_EXTRA_OPTIONAL'] ?? [])];
+    expect(optional.length, 'the taxi profile keeps an optional list to add the medical type to').toBeGreaterThan(0);
     const medical = registryCode('GY', 'medical_certificate');
-    await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: { ...stored, MOVER_OPTIONAL: [...optional, 'medical_certificate'] } } });
+    await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: { ...stored, MOVER_TAXI_EXTRA_OPTIONAL: [...optional, 'medical_certificate'] } } });
     try {
       await expect(system(() => seedDocRegistry(app.prisma))).resolves.toMatchObject({ docTypes: expect.any(Number) });
       expect(await app.prisma.docType.count({ where: { code: medical } })).toBe(0);
       expect(await app.prisma.requirementItem.count({ where: { docTypeCode: medical } })).toBe(0);
       // ... while every other document of that optional list is still in the movers' set.
       const items = await app.prisma.requirementItem.findMany({
-        where: { requirementSet: { countryCode: 'GY', actorRole: 'MOVER', tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
+        where: { requirementSet: { countryCode: 'GY', actorRole: 'MOVER_TAXI_EXTRA', tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
         select: { docTypeCode: true },
       });
       for (const code of optional) expect(items.map((i) => i.docTypeCode), code).toContain(registryCode('GY', code));

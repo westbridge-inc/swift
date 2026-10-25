@@ -604,7 +604,6 @@ describe('Axios auth interceptor integration', () => {
       }, accountA),
       verificationApi.submitIdentity({
         idDocumentUrl: '/a-id.jpg',
-        selfieUrl: '/a-selfie.jpg',
         consent: true,
         privacyNoticeVersion: 'v1',
       }, accountA),

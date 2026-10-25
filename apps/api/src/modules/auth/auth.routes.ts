@@ -163,7 +163,8 @@ export async function authRoutes(app: FastifyInstance) {
   /** [Legal research G2 · R26] POST /legal-acceptance { version, accept: true } — the fresh tick, recorded in the
    *  consent ledger for the Terms, the Privacy Policy and the person's partner agreements at the served version. */
   app.post('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
-    const body = z.object({ version: z.string().min(10).max(10), accept: z.literal(true) }).parse(request.body);
+    // [ROLE-DOCS · COORD rulings 21 Oct 2026 + 23 Oct] a same-day second stamp carries a suffix (2026-10-22.1)
+    const body = z.object({ version: z.string().regex(/^\d{4}-\d{2}-\d{2}(\.\d{1,3})?$/), accept: z.literal(true) }).parse(request.body);
     if (body.version !== LEGAL_VERSION) {
       throw new AppError(409, 'LEGAL_VERSION_CHANGED', 'The Terms changed again while you were reading. Please read the new version.', { currentVersion: LEGAL_VERSION });
     }

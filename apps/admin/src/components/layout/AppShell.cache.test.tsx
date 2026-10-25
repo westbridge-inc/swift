@@ -58,7 +58,7 @@ it('sign-out then sign-in as another admin: the cached restricted answer is gone
   await verifyOtpLogin('synthetic-phone', 'synthetic-code');
   nav.pathname = '/integrity';
   view.rerender(<Providers><AppShell><IntegrityPage /></AppShell></Providers>);
-  await waitFor(() => expect(screen.getByRole('heading', { name: 'Integrity' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('group', { name: 'Algorithm' })).toBeTruthy());
   await waitFor(() => expect(state.flags, 'the second account asked the server itself').toBe(2));
   expect(state.me).toBe(2);
   expect(screen.queryByText('Synthetic restricted flag')).toBeNull();
@@ -73,7 +73,7 @@ it('another account signed in from a different tab (no visit to /login): the nex
   state.actor = 'ADMIN';
   nav.pathname = '/integrity/';
   view.rerender(<Providers><AppShell><IntegrityPage /></AppShell></Providers>);
-  await waitFor(() => expect(screen.getByRole('heading', { name: 'Integrity' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('group', { name: 'Algorithm' })).toBeTruthy());
   await waitFor(() => expect(state.flags).toBe(2));
   expect(screen.queryByText('Synthetic restricted flag')).toBeNull();
 });

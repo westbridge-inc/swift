@@ -75,8 +75,17 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  photographer and tutor keep theirs.
  *  2026-10-16.1 [owner 16 Oct]: 2026-10-15.2 with the heavy-equipment operator
  *  HELD again (licence rules unconfirmed): its list is gone; pest control,
- *  chef, caterer, photographer and tutor keep theirs. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-16.1';
+ *  chef, caterer, photographer and tutor keep theirs.
+ *  2026-10-21.1 [ROLE-DOCS · owner 21 Oct]: 2026-10-16.1 with the optional
+ *  national ID gone for every mover, the optional police clearance kept for
+ *  taxi drivers only (MOVER_TAXI_EXTRA_OPTIONAL; MOVER_OPTIONAL removed), and
+ *  the unused CUSTOMER_L2 list removed.
+ *  2026-10-21.2 [ROLE-DOCS · owner 21 Oct]: 2026-10-21.1 plus the own-name
+ *  store lists (RESTAURANT_OWN_NAME, SUPERMARKET_OWN_NAME, STORE_OWN_NAME).
+ *  2026-10-22.1 [ROLE-DOCS PR 3 · owner 21 Oct]: 2026-10-21.2 plus the solar /
+ *  generator / inverter installer's GEI electrical licence
+ *  (SERVICE_PROVIDER_TRADE_SOLAR_GENERATOR_INVERTER_INSTALLER). */
+export const PLATFORM_CONFIG_VERSION = '2026-10-22.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -150,15 +159,19 @@ const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // Movers: the base list holds what EVERY vehicle needs — nothing on its own since the
     // owner's rulings of 6 Oct 2026; each vehicle adds its profiles (config/vehicle-classes).
-    //  - Police clearance is OPTIONAL for every mover (rulings 1, 2): no Guyana law found
-    //    requires it of drivers or riders; an approved one is the "Police-cleared" flag.
-    //  - A driver's licence is photo ID, so a motorised mover's national ID is OPTIONAL;
-    //    a bicycle rider holds no licence and keeps the national ID (ruling 4).
+    //  - Police clearance is never REQUIRED of a mover (rulings 1, 2): no Guyana law found
+    //    requires it of drivers or riders. [owner 21 Oct] Only a taxi driver may add one.
+    //  - A driver's licence is photo ID, so a motorised mover is not asked for a national ID
+    //    at all [owner 21 Oct; was optional]; a bicycle rider holds no licence and keeps the
+    //    national ID (ruling 4).
     //  - The taxi's separate plate photo is merged into the car photo, which shows the
     //    plate (ruling 5). Nothing read the plate photo; the plate cross-check is the
     //    insurance review's, unchanged.
     MOVER: [],
-    MOVER_OPTIONAL: ['national_id', 'police_clearance'],
+    // [ROLE-DOCS · owner 21 Oct 2026] No mover is offered a second ID: a driver's licence is photo ID, so
+    // the optional national ID is gone for every vehicle partner (a bicycle rider keeps it REQUIRED, below).
+    // The optional police clearance stays for TAXI drivers only (MOVER_TAXI_EXTRA_OPTIONAL); delivery riders
+    // are not offered it (no Guyana law asks it of them, and it is criminal-record data, DPA 2023 s.2).
     MOVER_NO_LICENCE: ['national_id'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
@@ -166,6 +179,9 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // with the plate showing, and the certificate of fitness. The two licences replace the single
     // hire-car permit; [owner 15 Oct 2026] the permit never counts as either (no grace: verification/hire-permit-grace).
     MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
+    // [ROLE-DOCS · owner 21 Oct 2026] A taxi driver MAY add a police clearance (an approved, current one is
+    // the "Police-cleared" flag); it never gates. Not offered to delivery riders.
+    MOVER_TAXI_EXTRA_OPTIONAL: ['police_clearance'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
     // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
     // pairs a person's name and address with their tax-account login. A VAT-registered store may type its
@@ -176,6 +192,12 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
     // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
     // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
+    // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's OWN name (Business Names (Registration) Act,
+    // Cap. 90:05, s.3: a true surname with only first names or initials needs no registration) gives the signed own-name
+    // declaration in place of the business registration; everything else is unchanged (vendor/own-name.ts).
+    RESTAURANT_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    SUPERMARKET_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
+    STORE_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
     RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
     SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
@@ -188,12 +210,16 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
+    // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] A solar / generator / inverter installer does electrical installation
+    // work, so it holds the same GEI electrical licence as an electrician (GPL's grid-tie certificate is applied for by
+    // the licensed electrician or contractor). Also a floor below (SERVICE_TRADE_LAUNCH_FLOOR).
+    SERVICE_PROVIDER_TRADE_SOLAR_GENERATOR_INVERTER_INSTALLER: ['gei_electrical_licence'],
     // [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct, research A9/D9] The trades
     // opened at launch, each with the documents Guyana law ties to it. The base SERVICE_PROVIDER list
     // (national ID + police clearance) applies to every one of them; SERVICE_TRADE_LAUNCH_FLOOR below
     // keeps both halves required whatever a stored list says. Gas fitters, the barber group,
-    // accountants and [owner 16 Oct] heavy-equipment operators are HELD (services/service-catalog)
-    // and have no list here.
+    // accountants, [owner 16 Oct] heavy-equipment operators and [ROLE-DOCS · owner 21 Oct] AC & refrigeration
+    // technicians and movers are HELD (services/service-catalog) and have no list here.
     // Pesticides and Toxic Chemicals Control Act s.21 (operator licence) and regulation 89
     // (commercial applicator certificate, two years).
     SERVICE_PROVIDER_TRADE_PEST_CONTROL: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
@@ -207,7 +233,9 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER_TRADE_PHOTOGRAPHER: ['police_clearance'],
     // Works with children, often in their homes: the police clearance is required, never optional.
     SERVICE_PROVIDER_TRADE_TUTOR: ['police_clearance'],
-    CUSTOMER_L2: ['national_id', 'selfie'],
+    // [ROLE-DOCS · owner 21 Oct 2026] No CUSTOMER_L2 list: a customer's ID is `identity_l2` on its own
+    // (verification.service submitIdentity) and a customer never gives a photo (owner 16 Oct). The list
+    // was read by nothing but the registry seed, which minted a selfie requirement from it.
 };
 
 /**
@@ -215,8 +243,8 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
  * police clearance and the trade's own documents. The provider checklist is always a superset
  * of it — a stored CountryConfig edit can add documents but never take one of these away — so
  * an opened trade can never go live on identity documents alone. A trade without an entry here
- * (a held trade: the lawyer, gas fitter, barber group, accountant, heavy-equipment operator) gains
- * nothing from it.
+ * (a held trade: the lawyer, gas fitter, barber group, accountant, heavy-equipment operator and
+ * [ROLE-DOCS · owner 21 Oct 2026] the AC & refrigeration technician and the mover) gains nothing from it.
  */
 export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string[]>> = {
   pest_control: ['national_id', 'police_clearance', 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
@@ -224,6 +252,8 @@ export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string
   caterer: ['national_id', 'police_clearance', 'food_handler_cert', 'eating_house_registration'],
   photographer: ['national_id', 'police_clearance'],
   tutor: ['national_id', 'police_clearance'],
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI electrical licence, like an electrician
+  solar_generator_inverter_installer: ['national_id', 'police_clearance', 'gei_electrical_licence'],
 };
 
 /**

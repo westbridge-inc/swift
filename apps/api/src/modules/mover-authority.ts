@@ -21,6 +21,7 @@ import {
 } from './rides/passenger-custody';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
 import { disconnectUserSockets } from '../utils/socket-revocation';
+import { consoleRoleOf } from './auth/console-role';
 
 /**
  * Serialize every server-side role-authority transition on the User row.
@@ -604,7 +605,9 @@ export type UserStatusRestriction = 'SUSPENDED' | 'BANNED';
 
 /** The pure rule. `transitionUserStatusAuthority` applies it inside the
  *  transaction with the actor's role read from the database, never from the
- *  request, so a caller cannot feed it a stale or forged role. Acting on your
+ *  request, so a caller cannot feed it a stale or forged role. [ADMIN-ROLE]
+ *  That role is the admin role the actor HOLDS (users.roles), never the phone
+ *  app's active mode; an actor holding none acts at no rank. Acting on your
  *  own account is refused by the same comparison: your own highest role is
  *  never below the role you act under. */
 export function assertAccountActionAuthority(
@@ -671,10 +674,10 @@ export async function transitionUserStatusAuthority(
     if (auditEvidence) {
       const actor = await tx.user.findUnique({
         where: { id: auditEvidence.actorUserId },
-        select: { activeRole: true },
+        select: { roles: true },
       });
       if (!actor) throw new ForbiddenError('Acting account not found');
-      assertAccountActionAuthority({ role: actor.activeRole }, { roles: authority.roles }, { targetStatus, lifts });
+      assertAccountActionAuthority({ role: consoleRoleOf(actor.roles) ?? '' }, { roles: authority.roles }, { targetStatus, lifts });
     }
 
     if (targetStatus === 'SUSPENDED') {
