@@ -311,6 +311,7 @@ const CENSUS: Case[] = [
   { k: 'trip_share_ended', d: { outcome: 'STOPPED_BY_RIDER' }, to: HOME, why: 'HOME: guardian — [L10 §2] the trip someone shared with them ended (stopped, completed, cancelled, or contact lost); they follow a trip, they own no order, so the notice is the whole message' },
   { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
   { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
+  { k: 'ops_checkin_link_flood', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [COORD R1] the texted check-in link got a flood of wrong answers from one address; an ops surface' },
   { k: 'ops_alert_drill_failed', d: { opsAlertId: 'a1', opsAlertIds: ['a1'], count: 1 }, to: null, why: 'admins — [DRILL-STORM] a drill nobody acknowledged within its window was closed as FAILED; platform operators are told once; an ops surface' },
   { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: null, why: 'admins — [R19] a child-safety report pages operations; the moderation queue is an ops surface' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
