@@ -23,7 +23,6 @@ let app: FastifyInstance;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 let vendorToken = '';
-let vendorId = '';
 let subscriptionId = '';
 const DAY = 86_400_000;
 const authed = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -41,7 +40,7 @@ beforeAll(async () => {
 
   // The owner's case: the paid week ended 11 days ago and nothing moved the row on.
   const store = await makeStore('Fee Status Test Store', new Date(Date.now() - 11 * DAY));
-  vendorToken = store.token; vendorId = store.vendorId; subscriptionId = store.subscriptionId;
+  vendorToken = store.token; subscriptionId = store.subscriptionId;
 });
 
 /** A store owner with a session, a store and its weekly-fee subscription due at `due`. */
