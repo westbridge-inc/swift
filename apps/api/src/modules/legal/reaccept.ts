@@ -66,10 +66,28 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
   },
 ];
 
+/**
+ * [REVIEW-G S4 on #2001] How two legal versions order. A version is 'YYYY-MM-DD', or 'YYYY-MM-DD.N' for the
+ * N-th later bump that day. Compared as plain strings, '2026-10-25.10' sorted before '2026-10-25.9', so a
+ * tenth same-day bump could skip someone's fresh tick. The day compares as a date, the bump as a number (none
+ * = 0). A stored version of any other shape counts as older than every real one, so that person is asked
+ * again (the safe direction); two of them compare equal.
+ */
+const LEGAL_VERSION_SHAPE = /^(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d{0,3}))?$/;
+export function compareLegalVersions(a: string, b: string): number {
+  const x = LEGAL_VERSION_SHAPE.exec(a);
+  const y = LEGAL_VERSION_SHAPE.exec(b);
+  if (!x || !y) return (x ? 1 : 0) - (y ? 1 : 0);
+  if (x[1] !== y[1]) return x[1]! < y[1]! ? -1 : 1;
+  return Number(x[2] ?? 0) - Number(y[2] ?? 0);
+}
+
+type MaterialChange = { version: string; summary: readonly string[] };
+
 /** The newest material version that is already being served, or null. */
-export function materialVersion(current: string = LEGAL_VERSION): string | null {
-  const live = MATERIAL_CHANGES.filter((c) => c.version <= current);
-  return live.length ? live[live.length - 1]!.version : null;
+export function materialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
+  const live = changes.filter((c) => compareLegalVersions(c.version, current) <= 0);
+  return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
 }
 
 type Agreement = { documentType: ConsentDocumentType; subjectType: ConsentSubjectType; renderedText: string };
@@ -93,14 +111,19 @@ export interface AcceptanceStatus {
   agreements: Array<'driver_agreement' | 'vendor_agreement'>;
 }
 
-export function acceptanceStatus(user: { tosVersion: string | null; roles: readonly UserRole[] }, current: string = LEGAL_VERSION): AcceptanceStatus {
-  const material = materialVersion(current);
+export function acceptanceStatus(
+  user: { tosVersion: string | null; roles: readonly UserRole[] },
+  current: string = LEGAL_VERSION,
+  changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES,
+): AcceptanceStatus {
+  const material = materialVersion(current, changes);
   const accepted = user.tosVersion;
-  const needsAcceptance = accepted === null || (material !== null && accepted < material);
+  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0);
   // Every material change since the version this person accepted, oldest first — someone who skipped
   // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest.
   const summary = accepted !== null
-    ? MATERIAL_CHANGES.filter((c) => c.version > accepted && c.version <= current).flatMap((c) => c.summary)
+    ? changes.filter((c) => compareLegalVersions(c.version, accepted) > 0 && compareLegalVersions(c.version, current) <= 0)
+      .sort((a, b) => compareLegalVersions(a.version, b.version)).flatMap((c) => c.summary)
     : [];
   return {
     currentVersion: current,

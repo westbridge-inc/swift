@@ -378,6 +378,8 @@ const approveDocSchema = z.object({
   certificateYear: z.coerce.number().int().min(1900).max(9999).optional(),
   // [R16] a business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation
   registrationKind: z.enum(REGISTRATION_KINDS).optional(),
+  // [ROLE-DOCS · owner 21 Oct 2026] an own-name declaration: the reviewer confirms the store name against the owner's ID
+  ownNameConfirmed: z.boolean().optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -724,6 +726,20 @@ export async function adminRoutes(app: FastifyInstance) {
   // founder-only: SUPER_ADMIN is otherwise deliberately tenant-local.
   const platformControlGuard = async (request: any, reply: any) => {
     await founderGuard(request, reply);
+    if (reply.sent) return;
+    if (requireTenantId() !== 'swift-default') {
+      throw new ForbiddenError('Platform controls require the default tenant');
+    }
+  };
+
+  // [REVIEW-M S3-2 on #2069] Platform money that is not a founder control: the
+  // rider loss-protection reserve is a COUNTRY ledger (rlp_reserve_entries has
+  // no tenant; production's claim payouts draw on it). Only the canonical
+  // tenant's admins read it or post an entry; their ordinary capability and
+  // the second person still apply. Another operator's admin is refused before
+  // anything is read or written.
+  const canonicalTenantGuard = async (request: any, reply: any) => {
+    await adminGuard(request, reply);
     if (reply.sent) return;
     if (requireTenantId() !== 'swift-default') {
       throw new ForbiddenError('Platform controls require the default tenant');
@@ -1790,7 +1806,7 @@ export async function adminRoutes(app: FastifyInstance) {
         const refusedNow = again === 'CAN_REINSTATE' ? null
           : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         if (refusedNow) throw refusedNow;
-        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx);
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx, id);
         // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
         // suspension source survives it for a later heal or payment to act on. The CAS names the exact
         // suspension decided above, under the lock.
@@ -6090,6 +6106,7 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
       ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
       ...(body.registrationKind !== undefined ? { registrationKind: body.registrationKind } : {}),
+      ...(body.ownNameConfirmed !== undefined ? { ownNameConfirmed: body.ownNameConfirmed } : {}),
     }, {
       // [S2-29 · KYC-DECISION-ATOMIC] The trail commits with the decision, in its transaction: the
       // action row and the canonical admin row. A decision cannot commit without them.
@@ -6593,13 +6610,13 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── [DOC-1 §31.4 · P31-1] Rider loss protection: the reserve line and suspension ──
 
   /** The named reserve line for a country: balance, floor, this month's provisioning, latest entries. */
-  app.get('/cash-rules/rlp/reserve', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/cash-rules/rlp/reserve', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     return { success: true, data: await cashRules.lossProtectionReserve(country.toUpperCase()) };
   });
 
   /** A manual entry on the reserve line — a top-up or a correction. Money: audited with the resulting balance. */
-  app.post('/cash-rules/rlp/reserve/adjust', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/cash-rules/rlp/reserve/adjust', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const body = z.object({
       countryCode: z.string().length(2),
       amount: z.number().finite(),
