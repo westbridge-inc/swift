@@ -337,6 +337,8 @@ afterAll(async () => {
   await isolated(async () => {
     // [#1393] The shared confirmation clock's evidence (holds, notices, transitions, clocks) names the checkouts: it goes first.
     await cleanupBillingClocks(app.prisma, subIds);
+    // A fee return names its checkout (onDelete: Restrict): the 'main pauses' case's return goes before the checkouts.
+    await app.prisma.mmgFeeReversal.deleteMany({ where: { subscriptionId: { in: subIds } } });
     const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
     await app.prisma.mmgCheckoutObservation.deleteMany({ where: { OR: [{ intentId: { in: intents.map((i) => i.id) } }, { intentId: null, createdAt: { gte: startedAt } }] } });
     await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
