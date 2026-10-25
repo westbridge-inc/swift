@@ -12,6 +12,7 @@ import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } 
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
 import { StorePhotosCard } from './store-photos-card';
+import { VatCard } from './vat-card';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -283,6 +284,7 @@ export default function SettingsPage() {
 
       <StorePhotosCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
+      <VatCard storeId={storeId} />
       <SubscriptionCard isOwner={isOwner} />
       <SettlementsCard />
       <HoursEditor />
