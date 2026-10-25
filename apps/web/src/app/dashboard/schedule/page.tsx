@@ -2,7 +2,7 @@
 
 import { Suspense, useState } from 'react';
 import Link from 'next/link';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ban, Calendar, X } from 'lucide-react';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
@@ -104,13 +104,19 @@ export default function SchedulePage() {
   const blocks = useQuery({ queryKey: storeKey(storeId, 'booking-exceptions'), queryFn: getBookingExceptions, enabled, staleTime: 30_000 });
   // A label only: while it is out or if it fails, a one-listing block says 'One listing'.
   const listingNames = useQuery({ queryKey: storeKey(storeId, 'listing-names'), queryFn: getListingNames, enabled, staleTime: 60_000 });
-  const removeBlock = useMutation({
-    mutationFn: (id: string) => deleteBookingException(id),
-    onSuccess: () => {
+  // [size budget] A plain call with the same states, not useMutation: react-query's
+  // mutation code then stays out of this tab's first load (the Block time dialog,
+  // loaded on tap, brings its own).
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<unknown>(null);
+  const removeBlock = (id: string) => {
+    setRemoving(true);
+    setRemoveError(null);
+    deleteBookingException(id).then(() => {
       void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'booking-exceptions') });
       void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'bookings') });
-    },
-  });
+    }, setRemoveError).finally(() => setRemoving(false));
+  };
   const [dayKey, setDayKey] = useState(() => appointmentDayKey(new Date()));
   const [blocking, setBlocking] = useState(false);
 
@@ -168,7 +174,7 @@ export default function SchedulePage() {
         <div className="sw-empty" role="status"><span className="sw-skeleton h-24 w-full" />Loading your schedule…</div>
       ) : (
         <div className="space-y-3">
-          <MutationNotice errors={[removeBlock.error]} />
+          <MutationNotice errors={[removeError]} />
           {dayBlocks.length > 0 && (
             <ul className="space-y-3" aria-label="Blocked time">
               {dayBlocks.map((e) => (
@@ -178,8 +184,8 @@ export default function SchedulePage() {
                     <p className="text-sm font-semibold">{blockTitle(e, listingNames.data)}</p>
                     {e.reason && <p className="truncate text-xs text-[var(--swift-muted)]">{e.reason}</p>}
                   </div>
-                  <button type="button" className="sw-icon-btn" aria-label={`Remove block, ${blockSpoken(e, listingNames.data)}`} disabled={removeBlock.isPending}
-                    onClick={() => removeBlock.mutate(e.id)}>
+                  <button type="button" className="sw-icon-btn" aria-label={`Remove block, ${blockSpoken(e, listingNames.data)}`} disabled={removing}
+                    onClick={() => removeBlock(e.id)}>
                     <X size={18} aria-hidden />
                   </button>
                 </li>
