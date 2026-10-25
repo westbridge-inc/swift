@@ -700,6 +700,30 @@ describe('[REVIEW-M S3-1 (b)] a week of watching MMG after an automatic close: a
     expect(await topups(s.subId)).toBe(0);
   });
 
+  it('a record found but not held (a failing hold) is tried again at once, then the admins are paged and the watch ends', async () => {
+    const op = await operator();
+    const { row, closedAt } = await autoClosed();
+    history.holds(tx('UNHELD'), Number(row.amount), { external_id: row.merchantTransactionId, modificationDate: mmgTimeOf(later(closedAt, 10 * MIN)) });
+    const target = service as unknown as { hold: (...args: unknown[]) => Promise<string> };
+    const realHold = target.hold;
+    target.hold = async () => 'NOT_PAID';
+    try {
+      await service.pollIntents(later(closedAt, 31 * MIN));
+      expect((await watchesOf(row.id)).map((w) => bodyOf(w)['decision'])).toEqual(['LATE_RECORD']);
+      expect(await pagesAbout(op.id, row.id, 'mmg-auto-close-late-record-unheld')).toHaveLength(0);
+      await service.pollIntents(later(closedAt, 33 * MIN));
+      expect((await watchesOf(row.id)).map((w) => bodyOf(w)['decision'])).toEqual(['LATE_RECORD', 'LATE_RECORD', 'LATE_RECORD_UNHELD']);
+      const pages = await pagesAbout(op.id, row.id, 'mmg-auto-close-late-record-unheld');
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.body).toContain('LATE PAYMENT LIKELY');
+      await service.pollIntents(later(closedAt, 2 * DAY));
+      expect(await watchesOf(row.id)).toHaveLength(3);
+    } finally {
+      target.hold = realHold;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'NOT_PAID' });
+  });
+
   it('a worker stopped past the whole week still decides every automatic close: it catches up, and pages the admins once if MMG cannot be read', async () => {
     const op = await operator();
     const caught = await autoClosed();

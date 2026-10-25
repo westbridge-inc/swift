@@ -442,9 +442,10 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
     const lastDecision = (lastBody?.['decision'] ?? null) as WatchDecision | null;
     if (lastDecision && WATCH_TERMINAL.includes(lastDecision)) continue;
     const covered = typeof lastBody?.['coveredUntilMs'] === 'number' ? lastBody['coveredUntilMs'] as number : closedAt - NO_REPLY_SETTLE_MARGIN_MS;
-    // A watch behind (a slow or stopped worker) reads again at once; otherwise every six hours.
+    // A watch behind (a slow or stopped worker), or a record found but not yet
+    // held, is read again at once; otherwise every six hours.
     const due = !last ? closedAt + AUTO_CLOSE_WATCH_FIRST_MS
-      : lastDecision === 'WATCH_BEHIND' ? last.createdAt.getTime() : last.createdAt.getTime() + AUTO_CLOSE_WATCH_EVERY_MS;
+      : lastDecision === 'WATCH_BEHIND' || lastDecision === 'LATE_RECORD' ? last.createdAt.getTime() : last.createdAt.getTime() + AUTO_CLOSE_WATCH_EVERY_MS;
     if (due > now.getTime()) continue;
     reads += 1;
     try {
