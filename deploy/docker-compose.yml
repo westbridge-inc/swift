@@ -25,7 +25,7 @@ name: swift
 
 services:
   postgres:
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-swift}
@@ -45,7 +45,7 @@ services:
     networks: [private]
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes:
@@ -58,7 +58,7 @@ services:
     networks: [private]
 
   meilisearch:
-    image: getmeili/meilisearch:v1.9
+    image: getmeili/meilisearch:v1.9@sha256:2e540df681bfab567d449c8d7a2c5e513eb10a7aa87b13cc88da84a963a2490e
     restart: unless-stopped
     # The image has no *_FILE support and its only alternatives are an
     # environment value or a --master-key argument (argv, visible in ps). So
@@ -301,7 +301,7 @@ services:
     networks: [private]
 
   caddy:
-    image: caddy:2.10
+    image: caddy:2.10@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
     restart: unless-stopped
     environment:
       API_HOST: ${API_HOST:-localhost}
