@@ -1113,6 +1113,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       {modalItem && itemSheetModule ? (
         <itemSheetModule.ItemSheet
           item={modalItem}
+          // [P35 · board 4b] This page is the public storefront, which exists only for a store a person verified
+          // (GET /public/storefronts/:slug, PUBLIC_WHERE isVerified: true), so the sheet may say so.
+          seller={{ name: store.name, city: store.city, verified: true }}
           vendorType={catalog.vendorType}
           selectedOptions={selectedOptions}
           onChoose={chooseOption}
