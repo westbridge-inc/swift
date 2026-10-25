@@ -87,6 +87,7 @@ export const GRANDCHILD_OF: Record<string, string> = {
 
 /** Platform-wide by design — the reason a reviewer can check. */
 export const PLATFORM_WIDE: Record<string, string> = {
+  UploadScanDebt: 'the malware-rescan ledger of uploads stored unscanned (row 312): no person or tenant id, only an object key, a digest and the outcome; the scanner and its rescan job are platform infrastructure, like the scanner itself',
   ErasureLedgerEntry: 'the off-site erasure ledger: one platform-wide append-only sequence written by triggers, ids and de-identified columns only, shipped by the host unit',
   ErasureLedgerShipment: 'the shipment record of the off-site erasure ledger (one row per shipped entry)',
   ProviderPaymentAlias: 'immutable provider-reference reservations must remain visible when RLS hides the historical identity, so another tenant cannot create a second credit; the RESTRICT parent FK preserves the reservation, and no public API exposes it',

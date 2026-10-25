@@ -1413,6 +1413,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
         return;
       }
+      if (job.name === 'upload-rescan') {
+        // [Row 312 · COORD 21 Oct] Uploads stored unscanned (safety evidence while the scanner was down,
+        // or MALWARE_SCAN_BYPASS=1): scanned once clamd answers; a positive or an unscannable one is
+        // quarantined and paged. Nothing happens while the scanner is down or dark.
+        const { rescanUploadDebt } = await import('../lib/upload-scan-debt');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getStorageProvider } = await import('../providers/storage/storage-provider');
+        const result = await rescanUploadDebt({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io), storage: getStorageProvider() });
+        if (result.scanned || result.quarantined || result.failed || result.closedWithoutScan) ctx.log.info({ ...result }, 'upload rescan pass');
+        return;
+      }
       if (job.name === 'backup-freshness') {
         // [75] A platform page: durable OpsAlert, SUPER_ADMINs in-app + push,
         // on-call phones texted, escalated until acknowledged.
@@ -2878,6 +2889,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // failed ask in a row pages ops. Nothing is dialled while MALWARE_SCAN is dark.
   await queues.verificationQueue.add('malware-scanner-watch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Row 312] Uploads stored unscanned: rescanned every five minutes once the scanner answers.
+  await queues.verificationQueue.add('upload-rescan', {}, {
+    repeat: { pattern: '*/5 * * * *' },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

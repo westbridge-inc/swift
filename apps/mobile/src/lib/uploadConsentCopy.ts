@@ -4,4 +4,6 @@
  * uploadConsentCopy.test.ts holds the two together.
  */
 export const DOCUMENT_CONSENT_TEXT = 'I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.';
-export const CUSTOMER_ID_CONSENT_TEXT = 'I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.';
+// [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] An ID no longer unlocks taxi rides or larger orders: the words
+// are the API's customer_id_v2 (build 12's own JS still shows v1's words and sends customer_id_v1).
+export const CUSTOMER_ID_CONSENT_TEXT = 'I agree Swift may keep this ID photo with my account, as the Privacy Policy explains.';

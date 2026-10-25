@@ -98,9 +98,10 @@ describe('service catalogue authority', () => {
       category.documents.some((document) => document.status === 'POLICY_REVIEW_REQUIRED'));
     // [TRADES · 13 Oct; R15 · 15 Oct 2026] pest control, chef, caterer, tutor and photographer opened with
     // their checks; the trades the research marks UNSURE stay held with the lawyer, and [owner 16 Oct] the
-    // heavy-equipment operator is held again (licence rules unconfirmed).
+    // heavy-equipment operator is held again (licence rules unconfirmed); [ROLE-DOCS · owner 21 Oct] the AC &
+    // refrigeration technician and the mover are held (not clear = held).
     expect(held.map((category) => category.id)).toEqual([
-      'gas_fitter', 'heavy_equipment_operator', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant',
+      'gas_fitter', 'ac_refrigeration', 'heavy_equipment_operator', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant', 'mover',
     ]);
     for (const category of held) {
       expect(category.quoteRequestsEnabled, category.id).toBe(false);

@@ -515,7 +515,11 @@ describe('7b. who paid for a discount decides the store’s VAT', () => {
     promoIds.push(row.id);
     return row;
   };
+  // Promo codes are not offered on CASH delivery (PROMO_UNAVAILABLE_CASH_DELIVERY): these orders pay the store's own
+  // MMG number directly, as a promo order does today.
+  const MMG = { paymentMethod: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER' } as const;
   const quoteWith = async (promoId: string) => {
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgNumber: '+5926001288' } });
     await fillCart([{ itemId: soapId, quantity: 1 }]);
     const cart = await app.prisma.cart.findUniqueOrThrow({ where: { customerId: customer.userId } });
     await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: promoId } });
@@ -529,7 +533,7 @@ describe('7b. who paid for a discount decides the store’s VAT', () => {
     const quote = await quoteWith(code.id);
     expect(quote.discount).toBe(200);
     expect(quote.vendors[0]!.vat).toMatchObject({ included: 123, standardGoods: 1000 });
-    const order = await checkout({ promoCode: code.code });
+    const order = await checkout({ ...MMG, promoCode: code.code });
     expect(Number(order.discount)).toBe(200);
     expect(Number(order.totalAmount)).toBe(quote.totalAmount);
     expect((await app.prisma.promoRedemption.findUniqueOrThrow({ where: { orderId: order.id } })).funder).toBe('PLATFORM');
@@ -547,7 +551,7 @@ describe('7b. who paid for a discount decides the store’s VAT', () => {
     const quote = await quoteWith(code.id);
     expect(quote.discount).toBe(200);
     expect(quote.vendors[0]!.vat).toMatchObject({ included: 98, standardGoods: 1000 });
-    const order = await checkout({ promoCode: code.code });
+    const order = await checkout({ ...MMG, promoCode: code.code });
     expect((await app.prisma.promoRedemption.findUniqueOrThrow({ where: { orderId: order.id } })).funder).toBe('VENDOR');
     expect(Number(order.vatBase)).toBe(800);
     expect(Number(order.vatAmount)).toBe(98);
