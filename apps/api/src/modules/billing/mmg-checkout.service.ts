@@ -899,7 +899,7 @@ export class MmgCheckoutService {
       // is closed as not paid only when MMG's own records show no payment for
       // it (mmg-expired-hold-check.ts); anything less leaves it to the admins.
       try {
-        await checkExpiredNoReplyHolds(this.prisma, { lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()) }, clock());
+        await checkExpiredNoReplyHolds(this.prisma, { lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject }, clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the expired-checkout check failed; it is retried on the next poll');
       }

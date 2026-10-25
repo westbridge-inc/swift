@@ -365,6 +365,15 @@ describe('the read itself must be healthy: a control, or nothing is decided', ()
     expect(bodyOf((await checksOf(row.id))[0]!)).toMatchObject({ decision: 'CONTROL_FAILED', control: { found: false } });
   });
 
+  it('a control whose MMG record does not name its own checkout proves nothing: untouched', async () => {
+    const control = await confirmedControl();
+    const { row } = await abandoned();
+    history.holds(control.txn, 2100, { external_id: '123456789012345678' });
+    await service.pollIntents(at(row, FIRST_CHECK + MIN));
+    expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE' });
+    expect(bodyOf((await checksOf(row.id))[0]!)).toMatchObject({ decision: 'CONTROL_FAILED', control: { found: false } });
+  });
+
   it('MMG’s times read in the wrong zone fail the control: untouched', async () => {
     const control = await confirmedControl();
     const { row } = await abandoned();

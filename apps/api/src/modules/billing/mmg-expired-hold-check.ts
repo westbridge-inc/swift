@@ -196,7 +196,14 @@ type Due = { holdId: string; checkout: CheckoutFacts; attempts: number };
  * without a configured creation zone (no MMG time can be read).
  */
 export async function checkExpiredNoReplyHolds(
-  db: PrismaClient, deps: { lookup: MmgCheckoutLookupClient; zone: MmgCreationZone | null }, now: Date,
+  db: PrismaClient,
+  deps: {
+    lookup: MmgCheckoutLookupClient;
+    zone: MmgCreationZone | null;
+    /** The checkout verifier's own redaction for what is written down (keys that may carry a secret, size). */
+    redact: (value: Record<string, unknown>) => Prisma.InputJsonValue;
+  },
+  now: Date,
 ): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
   if (!deps.zone) return out;
@@ -236,7 +243,7 @@ export async function checkExpiredNoReplyHolds(
       // not asked, nothing is written, the hold stays with the admins.
       if (!control.ok && control.reason === 'NO_CONTROL') continue;
       out.checked += 1;
-      if (await checkOne(db, deps.lookup, zone, item, control, now)) out.closed += 1;
+      if (await checkOne(db, deps, zone, item, control, now)) out.closed += 1;
     } catch (err) {
       log().error({ err, checkoutId: item.checkout.id }, '[MMG checkout] the expired-checkout check failed; the hold is unchanged and checked again later');
     }
@@ -244,7 +251,10 @@ export async function checkExpiredNoReplyHolds(
   return out;
 }
 
-async function checkOne(db: PrismaClient, lookup: MmgCheckoutLookupClient, zone: MmgCreationZone, item: Due, control: Control, now: Date): Promise<boolean> {
+async function checkOne(
+  db: PrismaClient, deps: { lookup: MmgCheckoutLookupClient; redact: (value: Record<string, unknown>) => Prisma.InputJsonValue },
+  zone: MmgCreationZone, item: Due, control: Control, now: Date,
+): Promise<boolean> {
   const c = item.checkout;
   const query = noReplyQueryFor(c, zone, now);
   const controlFacts = control.ok
@@ -256,7 +266,7 @@ async function checkOne(db: PrismaClient, lookup: MmgCheckoutLookupClient, zone:
     decision = 'CONTROL_FAILED';
     body = { purpose: NO_REPLY_CHECK_PURPOSE, decision, attempt: item.attempts + 1, control: controlFacts };
   } else {
-    const answer = await lookup.transactionHistoryRows(query);
+    const answer = await deps.lookup.transactionHistoryRows(query);
     mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
     if (answer.outcome !== 'rows') {
       decision = 'HISTORY_FAILED';
@@ -277,7 +287,7 @@ async function checkOne(db: PrismaClient, lookup: MmgCheckoutLookupClient, zone:
   // [I9] Written down before anything is decided on it, at the check's own
   // time: the schedule above is read from these times.
   const observation = await db.mmgCheckoutObservation.create({ data: {
-    tenantId: c.tenantId, intentId: c.id, source: 'HISTORY', detail: null, body: body as Prisma.InputJsonValue, createdAt: now,
+    tenantId: c.tenantId, intentId: c.id, source: 'HISTORY', detail: null, body: deps.redact(body), createdAt: now,
     failure: decision === 'NO_PAYMENT' ? 'HISTORY_NOT_FOUND' : decision === 'PAYMENT_MAY_MATCH' ? null : 'HISTORY_FAILED',
   }, select: { id: true } });
   if (decision !== 'NO_PAYMENT' || !control.ok) {
