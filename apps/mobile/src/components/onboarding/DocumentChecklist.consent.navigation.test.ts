@@ -19,7 +19,7 @@ import { createRoot } from 'react-dom/client';
 // ---------------------------------------------------------------------------
 
 const fx = vi.hoisted(() => ({
-  cards: {} as Record<string, { consented?: boolean; askConsentFirst?: boolean }>,
+  cards: {} as Record<string, { consented?: boolean; askConsentFirst?: boolean; consentVia?: string }>,
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 vi.mock('react-native', async () => {
@@ -49,8 +49,8 @@ vi.mock('./OwnNameCard', () => ({ OwnNameCard: () => null }));
 vi.mock('./DocumentUploadCard', async () => {
   const R = await import('react');
   return {
-    DocumentUploadCard: (p: { docType: string; consented?: boolean; askConsentFirst?: boolean }) => {
-      fx.cards[p.docType] = { consented: p.consented, askConsentFirst: p.askConsentFirst };
+    DocumentUploadCard: (p: { docType: string; consented?: boolean; askConsentFirst?: boolean; consentVia?: string }) => {
+      fx.cards[p.docType] = { consented: p.consented, askConsentFirst: p.askConsentFirst, ...(p.consentVia === undefined ? {} : { consentVia: p.consentVia }) };
       return R.createElement('div', { 'data-doc': p.docType });
     },
   };
@@ -142,14 +142,26 @@ describe('[DOC-CONSENT] the document tick shows the person\'s own recorded choic
 
   it('a police clearance (sensitive data) is not unlocked by the record alone: its card asks again; a tick on this visit needs no second ask', async () => {
     await mount(statusWith(onRecord, ['police_clearance']));
-    expect(fx.cards['police_clearance']).toEqual({ consented: true, askConsentFirst: true });
+    expect(fx.cards['police_clearance']).toMatchObject({ consented: true, askConsentFirst: true });
     for (const d of REQUIRED) expect(fx.cards[d]?.askConsentFirst, d).toBe(false);
     await press(); // untick
     await press(); // a fresh tick, on this visit
-    expect(fx.cards['police_clearance']).toEqual({ consented: true, askConsentFirst: false });
+    expect(fx.cards['police_clearance']).toMatchObject({ consented: true, askConsentFirst: false });
     await unmount();
     await mount(statusWith(undefined, ['police_clearance']));
     await press();
-    expect(fx.cards['police_clearance']).toEqual({ consented: true, askConsentFirst: false });
+    expect(fx.cards['police_clearance']).toMatchObject({ consented: true, askConsentFirst: false });
+  });
+
+  it('[S4 · REVIEW-G2] every card is told how the tick was given, so the upload records its true source', async () => {
+    await mount(statusWith(onRecord, ['police_clearance']));
+    for (const d of [...REQUIRED, 'police_clearance']) expect(fx.cards[d]?.consentVia, d).toBe('record');
+    await press(); // untick
+    await press(); // ticked on this visit
+    for (const d of [...REQUIRED, 'police_clearance']) expect(fx.cards[d]?.consentVia, d).toBe('checkbox');
+    await unmount();
+    await mount(statusWith());
+    await press();
+    for (const d of REQUIRED) expect(fx.cards[d]?.consentVia, d).toBe('checkbox');
   });
 });
