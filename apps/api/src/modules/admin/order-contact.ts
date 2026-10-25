@@ -41,15 +41,18 @@ type OrderWithParties = {
 const masked = (phone: string | null | undefined) => (phone ? maskPhone(phone) : phone ?? null);
 
 /** The order with every party phone masked. A new object; the input is untouched. */
-export function maskOrderPartyPhones<T extends OrderWithParties>(order: T): T {
-  const out: OrderWithParties = { ...order };
-  if (order.customer && 'phone' in order.customer) out.customer = { ...order.customer, phone: masked(order.customer.phone) };
-  if (order.vendor && 'phone' in order.vendor) out.vendor = { ...order.vendor, phone: masked(order.vendor.phone) };
+// Any order-shaped row: a select may leave a party out, or select it without a phone (the list's
+// `vendor: { id, name }`), so the parties are narrowed here, not in the signature.
+export function maskOrderPartyPhones<T extends object>(order: T): T {
+  const src = order as unknown as OrderWithParties;
+  const out: OrderWithParties = { ...src };
+  if (src.customer && 'phone' in src.customer) out.customer = { ...src.customer, phone: masked(src.customer.phone) };
+  if (src.vendor && 'phone' in src.vendor) out.vendor = { ...src.vendor, phone: masked(src.vendor.phone) };
   for (const key of ['rider', 'driver'] as const) {
-    const mover = order[key];
+    const mover = src[key];
     if (mover?.user && 'phone' in mover.user) out[key] = { ...mover, user: { ...mover.user, phone: masked(mover.user.phone) } };
   }
-  return out as T;
+  return out as unknown as T;
 }
 
 export interface OrderContactDeps {
