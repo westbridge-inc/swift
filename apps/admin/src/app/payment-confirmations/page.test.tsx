@@ -303,7 +303,23 @@ describe('weekly-fee payment confirmations', () => {
     const fetch=serve();const {user}=renderWithQuery(<Page />);const form=await open(user);
     const input=within(form).getByLabelText('Evidence reference');await user.clear(input);await user.type(input,'bad ref');
     await user.click(within(form).getByRole('button',{name:'Request approval'}));
-    expect(await within(form).findByText(/8–128 characters/)).toBeTruthy();expect(requestsByMethod(fetch,'POST')).toHaveLength(0);
+    expect(await within(form).findByText(/8–200 characters/)).toBeTruthy();expect(requestsByMethod(fetch,'POST')).toHaveLength(0);
+  });
+  // [Owner, admin-staging 25 Oct] A normal human reference — spaces, brackets, a hash — is accepted, trimmed, and sent as is;
+  // the server applies the same rule (@swift/types evidenceReferenceProblem).
+  it('accepts a normal human reference with spaces and brackets, and sends it trimmed', async () => {
+    const fetch=serve();const {user}=renderWithQuery(<Page />);const form=await open(user);
+    const input=within(form).getByLabelText('Evidence reference');await user.clear(input);await user.type(input,'  MMG ref 4417 (statement #3, 24 Oct)  ');
+    await user.click(within(form).getByRole('button',{name:'Request approval'}));
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
+    const sent = requestsByMethod(fetch,'POST');expect(sent).toHaveLength(1);
+    expect(JSON.parse(String(sent[0]![1]?.body)).evidenceReference).toBe('MMG ref 4417 (statement #3, 24 Oct)');
+  });
+  it('still refuses a reference with characters a reference never needs, before creating an approval', async () => {
+    const fetch=serve();const {user}=renderWithQuery(<Page />);const form=await open(user);
+    const input=within(form).getByLabelText('Evidence reference');await user.clear(input);await user.type(input,'<script>alert(1)</script>');
+    await user.click(within(form).getByRole('button',{name:'Request approval'}));
+    expect(await within(form).findByText(/letters, numbers, spaces/)).toBeTruthy();expect(requestsByMethod(fetch,'POST')).toHaveLength(0);
   });
   it('PAID cannot be requested without a recorded MMG transaction', async () => {
     const fetch=serve(undefined,[{...row,settlementPayments:[]}]);const {user}=renderWithQuery(<Page />);const form=await open(user,'Mark PAID');
