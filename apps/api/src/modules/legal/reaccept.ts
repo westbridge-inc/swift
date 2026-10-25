@@ -43,6 +43,14 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
       'Privacy: if the Swift app crashes, it sends a crash report (phone model, app version and the error; never your messages or location) to Swift’s own server. Crash and error reports are kept for 90 days.',
     ],
   },
+  {
+    // [O-1 · owner rulings 22-24 Oct 2026 · COORD 25 Oct 15:20Z: MATERIAL — a new processor flow (Twilio, for calls)]
+    version: '2026-10-25.1',
+    summary: [
+      'Privacy: when Swift’s call service is switched on, you call the other people on an order through Swift. Swift rings your phone from its own number, the person you call presses 1 to connect, and neither of you sees the other’s number. Twilio connects these calls.',
+      'Privacy: calls through Swift are never recorded. For each call Swift keeps who asked for it (as a role on the order), when, and whether it connected, never a phone number; the record of a call you asked for is deleted with your account.',
+    ],
+  },
 ];
 
 /**
