@@ -28,7 +28,9 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
     version: '2026-10-17',
     summary: [
       'Identity checks are done by people on Swift’s verification team: no outside identity-verification provider and no automated face-matching receives your documents or selfie.',
-      'Customers never need a photo, taxi rides included — a ride needs only your ID on file — and a mover or business is never shown a photo of a customer.',
+      // [Owner ruling 24 Oct 2026] "a ride needs only your ID on file" is gone from this line: from 2026-10-25 a ride
+      // needs no ID either, and this summary is still shown to anyone asked to re-accept from before 2026-10-17.
+      'Customers never need a photo, taxi rides included, and a mover or business is never shown a photo of a customer.',
       'Privacy: if a business takes MMG, the MMG payment details it gives Swift are shown to its customer on the order, so the customer pays the business directly.',
       'Privacy: a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name.',
     ],
@@ -64,12 +66,35 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-22.1',
     why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
   },
+  {
+    // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · non-material: it removes a requirement]
+    version: '2026-10-25',
+    why: 'Swift asks for less: taxi rides and larger orders no longer need a customer\u2019s ID on file. The Terms, the Privacy Policy and the Child Safety page now say so, and say when the app still asks for an ID (after repeated failed deliveries or payments, or for a high-value promotion). No one loses anything and no one is asked for more.',
+  },
 ];
 
+/**
+ * [REVIEW-G S4 on #2001] How two legal versions order. A version is 'YYYY-MM-DD', or 'YYYY-MM-DD.N' for the
+ * N-th later bump that day. Compared as plain strings, '2026-10-25.10' sorted before '2026-10-25.9', so a
+ * tenth same-day bump could skip someone's fresh tick. The day compares as a date, the bump as a number (none
+ * = 0). A stored version of any other shape counts as older than every real one, so that person is asked
+ * again (the safe direction); two of them compare equal.
+ */
+const LEGAL_VERSION_SHAPE = /^(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d{0,3}))?$/;
+export function compareLegalVersions(a: string, b: string): number {
+  const x = LEGAL_VERSION_SHAPE.exec(a);
+  const y = LEGAL_VERSION_SHAPE.exec(b);
+  if (!x || !y) return (x ? 1 : 0) - (y ? 1 : 0);
+  if (x[1] !== y[1]) return x[1]! < y[1]! ? -1 : 1;
+  return Number(x[2] ?? 0) - Number(y[2] ?? 0);
+}
+
+type MaterialChange = { version: string; summary: readonly string[] };
+
 /** The newest material version that is already being served, or null. */
-export function materialVersion(current: string = LEGAL_VERSION): string | null {
-  const live = MATERIAL_CHANGES.filter((c) => c.version <= current);
-  return live.length ? live[live.length - 1]!.version : null;
+export function materialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
+  const live = changes.filter((c) => compareLegalVersions(c.version, current) <= 0);
+  return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
 }
 
 type Agreement = { documentType: ConsentDocumentType; subjectType: ConsentSubjectType; renderedText: string };
@@ -93,14 +118,19 @@ export interface AcceptanceStatus {
   agreements: Array<'driver_agreement' | 'vendor_agreement'>;
 }
 
-export function acceptanceStatus(user: { tosVersion: string | null; roles: readonly UserRole[] }, current: string = LEGAL_VERSION): AcceptanceStatus {
-  const material = materialVersion(current);
+export function acceptanceStatus(
+  user: { tosVersion: string | null; roles: readonly UserRole[] },
+  current: string = LEGAL_VERSION,
+  changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES,
+): AcceptanceStatus {
+  const material = materialVersion(current, changes);
   const accepted = user.tosVersion;
-  const needsAcceptance = accepted === null || (material !== null && accepted < material);
+  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0);
   // Every material change since the version this person accepted, oldest first — someone who skipped
   // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest.
   const summary = accepted !== null
-    ? MATERIAL_CHANGES.filter((c) => c.version > accepted && c.version <= current).flatMap((c) => c.summary)
+    ? changes.filter((c) => compareLegalVersions(c.version, accepted) > 0 && compareLegalVersions(c.version, current) <= 0)
+      .sort((a, b) => compareLegalVersions(a.version, b.version)).flatMap((c) => c.summary)
     : [];
   return {
     currentVersion: current,

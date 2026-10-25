@@ -96,18 +96,24 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('L2 before the first taxi ride (§5)', () => {
+// [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] A taxi ride no longer needs the customer's ID on
+// file: it was Swift's own 8 Oct choice, not a legal duty. This replaces master plan §5 ("L2 before the
+// first taxi ride"): an L1 account rides exactly like an L2 one and is never answered ID_VERIFICATION_REQUIRED.
+describe('No customer ID before a taxi ride (owner 24 Oct 2026; replaces §5 L2-before-first-ride)', () => {
   const body = {
     pickup: CENTRAL, dropoff: SOUTH,
     pickupAddress: 'Tier Street 1', dropoffAddress: 'Tier Street 2',
   };
 
-  it('an L1 account cannot request ANY ride, however cheap', async () => {
+  it('an L1 account (no ID on file) requests a ride and is never asked for an ID', async () => {
     const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const res = await inject('POST', '/api/v1/rides/request', body, u.token);
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    expect(res.json().error.details?.reason).toBe('first_ride_l2');
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(res.body).not.toContain('first_ride_l2');
+    // The account is not raised to L2 on the way: nothing about the ID changed, the gate is simply gone.
+    const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { trustLevel: true } });
+    expect(after.trustLevel).toBe('L1');
   });
 
   it('an L2 account rides', async () => {

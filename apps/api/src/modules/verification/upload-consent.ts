@@ -18,10 +18,18 @@ export const UPLOAD_CONSENT = {
     version: 'v1',
     text: 'I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.',
   },
+  // The words phone build 12 shows (its JS at the build cut). Kept so its tick stays anchored to what it showed.
   customer_id_v1: {
     documentType: 'customer_id_consent',
     version: 'v1',
     text: 'I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.',
+  },
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] An ID no longer unlocks taxi rides or larger orders,
+  // so the current app shows words that promise no unlock, under their own version.
+  customer_id_v2: {
+    documentType: 'customer_id_consent',
+    version: 'v2',
+    text: 'I agree Swift may keep this ID photo with my account, as the Privacy Policy explains.',
   },
 } as const satisfies Record<string, { documentType: ConsentDocumentType; version: string; text: string }>;
 

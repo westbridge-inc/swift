@@ -28,9 +28,8 @@ export default function ZonesPage() {
   const zones = data?.data?.zones ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Taxi zones and fares</h1>
-      <p className="text-[var(--muted)] text-sm mb-6 max-w-3xl">
+    <div className="mc-page">
+      <p className="mc-muted text-sm mb-6 max-w-3xl">
         A taxi trip is priced by the market&apos;s formula. A zone can set its own rate per kilometre for trips that
         start or end there (the airports do). A fixed fare for a pair of zones replaces both for a trip from one to
         the other. Changes apply to new quotes only — a ride already requested keeps its fare — and each one needs a
@@ -54,27 +53,27 @@ export default function ZonesPage() {
 function ZoneTable({ zones, loading }: { zones: FareZone[]; loading: boolean }) {
   return (
     <section className="mb-8">
-      <h2 className="text-lg font-semibold mb-3">Zones</h2>
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-x-auto">
-        <table className="w-full text-sm">
+      <h2 className="mc-section-title">Zones</h2>
+      <div className="mc-table-wrap overflow-x-auto">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Zone</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Market</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Taxi rate per km</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+            <tr >
+              <th className="mc-label text-left">Zone</th>
+              <th className="mc-label text-left">Market</th>
+              <th className="mc-label text-right">Taxi rate per km</th>
+              <th className="mc-label text-left">Status</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">Loading…</td></tr>
             ) : zones.length === 0 ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">No zones yet.</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">No zones yet.</td></tr>
             ) : zones.map((z) => (
-              <tr key={z.id} className="border-b border-[var(--border)]">
-                <td className="p-4 font-medium">{z.name} <span className="text-xs text-[var(--muted)] font-mono ml-1">{z.id}</span></td>
+              <tr key={z.id} >
+                <td className="p-4 font-medium">{z.name} <span className="text-xs mc-muted font-mono ml-1">{z.id}</span></td>
                 <td className="p-4">{z.countryCode}</td>
-                <td className="p-4 text-right">{z.taxiPerKm == null ? <span className="text-[var(--muted)]">market rate</span> : gyd(z.taxiPerKm)}</td>
+                <td className="p-4 text-right">{z.taxiPerKm == null ? <span className="mc-muted">market rate</span> : gyd(z.taxiPerKm)}</td>
                 <td className="p-4">{z.isActive ? 'Active' : 'Inactive'}</td>
               </tr>
             ))}
@@ -120,12 +119,12 @@ function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZ
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold">Fixed fares</h2>
+        <h2 className="mc-section-title mb-0">Fixed fares</h2>
         <button
           type="button"
           onClick={() => { actions.clear(); setEditing(null); setAdding(true); }}
           disabled={zones.length === 0}
-          className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-50"
+          className="mc-btn mc-btn-primary"
         >
           Add fixed fare
         </button>
@@ -133,32 +132,32 @@ function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZ
 
       {actions.banner}
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-x-auto">
-        <table className="w-full text-sm">
+      <div className="mc-table-wrap overflow-x-auto">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">From</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">To</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Fare</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
+            <tr >
+              <th className="mc-label text-left">From</th>
+              <th className="mc-label text-left">To</th>
+              <th className="mc-label text-right">Fare</th>
+              <th className="mc-label text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">Loading…</td></tr>
             ) : fares.length === 0 ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">No fixed fares. Every taxi trip is priced by the formula and the zones&apos; rates.</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">No fixed fares. Every taxi trip is priced by the formula and the zones&apos; rates.</td></tr>
             ) : fares.map((f) => (
-              <tr key={f.id} className="border-b border-[var(--border)]">
+              <tr key={f.id} >
                 <td className="p-4">{f.fromZoneName}</td>
-                <td className="p-4">{f.toZoneName}{f.fromZoneId === f.toZoneId ? <span className="text-xs text-[var(--muted)] ml-1">(within the zone)</span> : null}</td>
+                <td className="p-4">{f.toZoneName}{f.fromZoneId === f.toZoneId ? <span className="text-xs mc-muted ml-1">(within the zone)</span> : null}</td>
                 <td className="p-4 text-right font-medium">
                   {gyd(f.fare)}
-                  {!f.zonesActive && <span className="block text-xs text-amber-500">a zone is inactive — this prices nothing</span>}
+                  {!f.zonesActive && <span className="block text-xs mc-text-warn">a zone is inactive — this prices nothing</span>}
                 </td>
                 <td className="p-4 text-right whitespace-nowrap">
-                  <button type="button" onClick={() => { actions.clear(); setAdding(false); setEditing(f); }} aria-label={`Edit the fixed fare ${f.fromZoneName} to ${f.toZoneName}`} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50 mr-2">Edit</button>
-                  <button type="button" onClick={() => onDelete(f)} aria-label={`Delete the fixed fare ${f.fromZoneName} to ${f.toZoneName}`} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50">Delete</button>
+                  <button type="button" onClick={() => { actions.clear(); setAdding(false); setEditing(f); }} aria-label={`Edit the fixed fare ${f.fromZoneName} to ${f.toZoneName}`} className="mc-btn mr-2">Edit</button>
+                  <button type="button" onClick={() => onDelete(f)} aria-label={`Delete the fixed fare ${f.fromZoneName} to ${f.toZoneName}`} className="mc-btn">Delete</button>
                 </td>
               </tr>
             ))}
@@ -206,9 +205,9 @@ function FareForm({ zones, editing, onCancel, onSubmit }: {
   };
 
   return (
-    <div className="mt-4 bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 max-w-xl">
+    <div className="mt-4 bg-[var(--mc-card)] rounded-[var(--mc-radius)] border border-[var(--mc-line)] p-6 max-w-xl">
       <h3 className="font-semibold mb-1">{editing ? 'Change fixed fare' : 'New fixed fare'}</h3>
-      <p className="text-xs text-[var(--muted)] mb-4">One direction only: add the return trip as its own fare.</p>
+      <p className="text-xs mc-muted mb-4">One direction only: add the return trip as its own fare.</p>
       <div className="space-y-3">
         <Field label="From zone">
           <select value={fromZoneId} onChange={(e) => setFrom(e.target.value)} disabled={!!editing} className={inputCls}>
@@ -229,10 +228,10 @@ function FareForm({ zones, editing, onCancel, onSubmit }: {
           <input type="number" inputMode="numeric" step={1} min={ZONE_FARE_MIN} max={ZONE_FARE_MAX} value={fare} onChange={(e) => setFare(e.target.value)} className={inputCls} />
         </Field>
       </div>
-      {problem && (fromZoneId || toZoneId || fare) ? <p className="mt-3 text-xs text-amber-500">{problem}</p> : null}
+      {problem && (fromZoneId || toZoneId || fare) ? <p className="mt-3 text-xs mc-text-warn">{problem}</p> : null}
       <div className="flex justify-end gap-3 mt-5">
-        <button type="button" onClick={onCancel} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
-        <button type="button" onClick={submit} disabled={!!problem} className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
+        <button type="button" onClick={onCancel} className="mc-btn mc-btn-quiet">Cancel</button>
+        <button type="button" onClick={submit} disabled={!!problem} className="mc-btn mc-btn-primary">
           Send for approval
         </button>
       </div>
@@ -241,13 +240,13 @@ function FareForm({ zones, editing, onCancel, onSubmit }: {
 }
 
 const inputCls =
-  'mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-60';
+  'mc-input mt-1';
 
 function Field({ label, children }: { label: string; children: React.ReactElement<{ id?: string }> }) {
   const id = useId();
   return (
     <div>
-      <label htmlFor={id} className="text-xs text-[var(--muted)]">{label}</label>
+      <label htmlFor={id} className="mc-muted text-xs">{label}</label>
       {cloneElement(children, { id })}
     </div>
   );

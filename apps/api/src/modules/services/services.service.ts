@@ -1,4 +1,4 @@
-import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, TRADE_LICENCE_DOC_TYPES } from '../verification/doc-registry';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
@@ -140,7 +140,9 @@ async function providerLists(prisma: ProviderVerificationDb, userId: string) {
  * base (identity + character) PLUS any trade-mandated extension from
  * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
  * Electrical work is illegal without a GEI Electrical Contractor Licence, so
- * electricians carry `gei_electrical_licence` as a GATE, never a badge.
+ * electricians carry `gei_electrical_licence` as a GATE. [ROLE-DOCS · PR 3] Once a
+ * person has approved it, it is also the licence line ("Licence on file, checked
+ * on [date]", requiredLicenceCheckedOn) — never a badge of its own.
  *
  * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
  * floor (identity, police clearance and its own licences), which no stored
@@ -205,6 +207,53 @@ export async function isProviderVerified(
   return checklist.every((docType) => have.has(docType));
 }
 
+/** [ROLE-DOCS · PR 3] The trade licences (a registry fact, DOC-INV-2: verification/doc-registry). */
+export { TRADE_LICENCE_DOC_TYPES };
+
+/** The licences among a checklist, in checklist order. */
+export function tradeLicencesOf(checklist: readonly string[]): string[] {
+  return checklist.filter((docType) => TRADE_LICENCE_DOC_TYPES.has(docType));
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · R7 · GUARDRAILS §7(4)] "Licence on file, checked on [date]" from the licence the provider's trade
+ * REQUIRES: the latest day a PERSON approved one, or null. Fail closed: every licence the checklist names must be
+ * approved and current under THE evidence rule, each by a person — the approver must be a user of Swift, never an
+ * engine marker ('system', 'kyc:auto', 'auto:…'). An engine's approval still lets the provider work (the gate reads the
+ * record) but is never shown as a licence a person checked.
+ */
+export async function requiredLicenceCheckedOn(prisma: ProviderVerificationDb, userId: string, now = new Date()): Promise<Date | null> {
+  return (await requiredLicenceStatus(prisma, userId, now)).checkedOn;
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] Whether the provider's trade REQUIRES a licence, and the day a person checked
+ * it (requiredLicenceCheckedOn). A trade that requires a licence is never "self-skilled": with no person's check the
+ * line reads "No trade credential shown", never "Self-skilled".
+ */
+export async function requiredLicenceStatus(
+  prisma: ProviderVerificationDb, userId: string, now = new Date(),
+): Promise<{ required: boolean; checkedOn: Date | null }> {
+  const licences = tradeLicencesOf(await providerChecklist(prisma, userId));
+  if (licences.length === 0) return { required: false, checkedOn: null };
+  return { required: true, checkedOn: await personCheckedOn(prisma, userId, licences, now) };
+}
+
+async function personCheckedOn(prisma: ProviderVerificationDb, userId: string, licences: string[], now: Date): Promise<Date | null> {
+  const rows = (await approvedEvidenceFor(prisma, userId, licences, now)).filter((row) => row.userId === userId);
+  const approvers = [...new Set(rows.map((row) => row.approvedBy).filter((by) => !/^(system$|kyc:|auto:|engine:)/.test(by)))];
+  const people = approvers.length === 0
+    ? new Set<string>()
+    : new Set((await prisma.user.findMany({ where: { id: { in: approvers } }, select: { id: true } })).map((u) => u.id));
+  let latest: Date | null = null;
+  for (const docType of licences) {
+    const checked = rows.filter((row) => row.docType === docType && people.has(row.approvedBy));
+    if (checked.length === 0) return null;
+    for (const row of checked) if (!latest || row.approvedAt > latest) latest = row.approvedAt;
+  }
+  return latest;
+}
+
 /** Optional observation seam for deterministic concurrency certification.
  * Production callers omit it; it never changes the transaction's decisions. */
 export interface ProviderVerificationRefreshObserver {
@@ -243,7 +292,8 @@ export async function projectProviderVerificationLocked(
         },
       })
     : 0;
-  const selfSkilled = matchingQualificationCount === 0;
+  // [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] A trade that requires a licence is never "self-skilled".
+  const selfSkilled = matchingQualificationCount === 0 && !(await requiredLicenceStatus(tx, userId)).required;
 
   await observer?.afterSnapshot?.({
     providerId: provider.id,
