@@ -43,7 +43,8 @@ import { createHash } from 'node:crypto';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
-import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
+import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, OWN_NAME_DECLARATION_VERSION, OWN_NAME_VENDOR_TYPES, renderOwnNamePdf, storeNameIsOwnName } from './own-name';
+import { DECLARATION_DOC_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
@@ -561,7 +562,7 @@ async function requireListingAllowed(
     select: { isVerified: true, vendorType: true, status: true },
   });
   const verified = vendorRecord.isVerified
-    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
+    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType, app.prisma, vendorId);
   if (verified) return;
   const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
   if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
@@ -944,7 +945,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // never "Reopen it from Account": no such control exists (store-hold.ts).
       throw storeHoldRefusal(vendor);
     }
-    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
+    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId));
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
     }
@@ -1531,6 +1532,100 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /**
+   * [ROLE-DOCS · owner ruling 21 Oct 2026] POST /onboarding/own-name — the owner of a store that trades under their
+   * OWN name (Business Names (Registration) Act s.3: their true surname, with nothing added except their first names
+   * or initials) signs the own-name declaration instead of uploading a business registration (vendor/own-name.ts).
+   * Refused when the store's name clearly is not the account's own name, when the store is a service business (no
+   * registration is asked of it) or on the self-declared tier, and when a business registration is already on file.
+   * Records the signature in the consent ledger (words hashed, version pinned), files the signed words as the
+   * `own_name_declaration` document a person reviews against the owner's ID, and marks THIS store — only this one —
+   * as trading under the owner's own name [REVIEW-G #2046 S2-1, COORD 23 Oct: per store, never per type]: another
+   * store of the owner keeps needing its business registration. Owner only.
+   */
+  app.post('/onboarding/own-name', auth, async (request, reply) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const { vendorId } = access;
+    const userId = request.user.userId;
+    const body = z.object({
+      accept: z.literal(true),
+      attestationVersion: z.literal(OWN_NAME_DECLARATION_VERSION),
+      privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
+    }).parse(request.body ?? {});
+    const [vendor, user, registered, existing] = await Promise.all([
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true, ownerId: true, tradesUnderOwnName: true } }),
+      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true } }),
+      validRegistrationRecord(app.prisma, userId),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: OWN_NAME_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
+    ]);
+    if (!(OWN_NAME_VENDOR_TYPES as readonly string[]).includes(vendor.vendorType)) {
+      throw new AppError(400, 'OWN_NAME_NOT_APPLICABLE', 'A service business is not asked for a business registration, so it needs no own-name declaration.');
+    }
+    if (vendor.tier === 'UNREGISTERED') throw new AppError(409, 'OWN_NAME_NOT_APPLICABLE', 'This store is on the self-declared tier. Contact support to change how it is registered.');
+    if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it needs no own-name declaration.');
+    if (existing?.status === 'PENDING' || (existing && vendor.tradesUnderOwnName)) {
+      throw new AppError(409, 'OWN_NAME_DECLARATION_EXISTS', `Your own-name declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'waiting for review'}.`);
+    }
+    // An approval a person gave for the store's name BEFORE the owner switched to a business name (when the store
+    // could be renamed) is not reused for whatever the name is now: a person decides.
+    if (existing) throw new AppError(409, 'OWN_NAME_SUPPORT', 'An earlier own-name declaration is on file. Contact support to trade under your own name again.');
+    if (!storeNameIsOwnName(vendor.name, user.firstName, user.lastName)) {
+      throw new AppError(400, 'OWN_NAME_MISMATCH', `“${vendor.name}” is not just your surname with your first names or initials, so the law asks you to register it as a business name. Upload your business registration instead.`);
+    }
+    // Acquire and wrap the key BEFORE publishing words, changing the store, or recording consent (as the declaration).
+    const dek = generateDek();
+    let wrappedDek: Buffer;
+    try {
+      const keys = getKeyProvider();
+      if (!keys) throw new Error('Envelope encryption unavailable');
+      wrappedDek = await keys.wrapDek(dek);
+    } catch {
+      throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Verification uploads are temporarily unavailable. Try again later.');
+    }
+    await publishLegalDocumentOnce(app.prisma, { documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION, renderedText: OWN_NAME_DECLARATION_V1 });
+    const signedAt = new Date();
+    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
+    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
+    const legalName = `${user.firstName} ${user.lastName}`.trim();
+    await app.prisma.$transaction(async (tx) => {
+      // This store only: its name is the one checked, and the one the PDF and this consent row name.
+      await tx.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: true } });
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: userId, documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION,
+        action: 'granted', surface, ip: request.ip,
+        evidence: { vendorId, storeName: vendor.name, signedAt: signedAt.toISOString() },
+      });
+    });
+    const pdf = await renderOwnNamePdf({ storeName: vendor.name, legalName, signedAt });
+    const storage = getStorageProvider();
+    const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
+    const { url: fileUrl } = await storage.upload({ buffer: ciphertext, filename: `own-name-${OWN_NAME_DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+    await app.prisma.encryptedObject.create({ data: {
+      fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
+      mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
+    } });
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE';
+    const doc = await verification.submitDocument(userId, role, OWN_NAME_DOC_TYPE, fileUrl, body.privacyNoticeVersion, undefined, { ownNameSigned: true });
+    reply.code(201);
+    return { success: true, data: { nameBasis: 'OWN_NAME', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
+   * [ROLE-DOCS · owner ruling 21 Oct 2026] DELETE /onboarding/own-name — the owner uses a business name after all
+   * (or the reviewer rejected the own-name declaration): THIS store goes back to needing a business registration
+   * (per store, as POST). A declaration on file no longer counts for these stores (their checklist asks for the registration
+   * again); it is never reused for a later name (POST refuses then: support decides). Owner only.
+   */
+  app.delete('/onboarding/own-name', auth, async (request) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const userId = request.user.userId;
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { id: true, vendorType: true } });
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: false } });
+    await verification.reprojectVendorActivation(userId);
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+    return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
    * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
    * week's usage, whether promoted placement is open, what would promote the store, and the
    * declaration on file. Everything is the server's; the screen decides nothing.
@@ -1574,8 +1669,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = updateVendorProfileSchema.parse(request.body);
     if (body.name !== undefined) {
       // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
-      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, owner: { select: { user: { select: { phone: true } } } } } });
+      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, tradesUnderOwnName: true, owner: { select: { user: { select: { phone: true } } } } } });
       assertNameNotReserved(body.name, current?.owner.user.phone, current?.name);
+      // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name was checked by a person as THAT name
+      // (Business Names (Registration) Act s.3); a new name is a new legal question, so it is not changed in the app.
+      if (current?.tradesUnderOwnName && body.name.trim() !== current.name) {
+        throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under your own name, which a person checked. To use a different name, register it as a business name first, then switch the store to it under Documents.');
+      }
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
@@ -1851,7 +1951,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // first (this re-read sees the loss and refuses) or this ON write commits
     // first (they simply win afterward).
     const verified = vendor.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED',
         'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
@@ -1882,7 +1982,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // A discovered stale-true is healed post-rollback (a write inside
       // this refusing transaction would roll back with it).
       const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
-      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx, vendorId);
       if (!verifiedOk) {
         if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
@@ -1923,7 +2023,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           });
           if (!still.isVerified) return;
           const nowVerified = await verification.isRoleVerified(
-            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx, vendorId);
           if (!nowVerified) {
             await tx.vendor.updateMany({
               where: { id: vendorId, isVerified: true },

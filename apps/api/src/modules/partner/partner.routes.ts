@@ -1,3 +1,4 @@
+import { OWN_NAME_VENDOR_TYPES, storeNameIsOwnName } from '../vendor/own-name';
 import { assertHirePlate } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
@@ -35,6 +36,10 @@ const businessSchema = z.object({
   region: z.string().trim().max(80).optional(),
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
+  // [ROLE-DOCS · owner 21 Oct 2026] The sign-up's first question: does the store trade under the owner's OWN name
+  // (no business registration needed: Business Names (Registration) Act s.3) or a business name? Absent = a business
+  // name, as every older client. OWN_NAME is only checked here; the owner signs the declaration after the store exists.
+  nameBasis: z.enum(['OWN_NAME', 'REGISTERED']).optional(),
 });
 
 const becomeSchema = z.object({
@@ -98,8 +103,17 @@ export async function partnerRoutes(app: FastifyInstance) {
     assertWeeklyFeeAck(weeklyFeeAckRequired(request, body), body.weeklyFeeAck);
     if (body.business?.name) {
       // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only.
-      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true, firstName: true, lastName: true } });
       assertNameNotReserved(body.business.name, me?.phone);
+      // [ROLE-DOCS] An own-name store is refused before it exists when its name clearly is not the owner's own name.
+      if (body.business.nameBasis === 'OWN_NAME') {
+        if (!(OWN_NAME_VENDOR_TYPES as readonly string[]).includes(body.business.vendorType)) {
+          throw new AppError(400, 'OWN_NAME_NOT_APPLICABLE', 'A service business is not asked for a business registration, so it needs no own-name declaration.');
+        }
+        if (!me || !storeNameIsOwnName(body.business.name, me.firstName, me.lastName)) {
+          throw new AppError(400, 'OWN_NAME_MISMATCH', `“${body.business.name}” is not just your surname with your first names or initials, so the law asks you to register it as a business name.`);
+        }
+      }
     }
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,

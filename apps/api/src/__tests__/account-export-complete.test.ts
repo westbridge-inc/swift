@@ -357,7 +357,7 @@ describe('the account export', () => {
     const theirs = await store(otherOwner);
     await app.prisma.vendor.update({ where: { id: mine.id }, data: {
       email: `owner-${MARK}@example.test`, addressLine2: `Back Room ${MARK}`, publicPhone: '+5926001299', mmgNumber: '+5926001288',
-      refundRule: `Refunds within a day ${MARK}`, tierNote: `staff note ${MARK}`, mmgCheckoutHeldReason: `held for review ${MARK}`, mmgCheckoutHeldAt: new Date(),
+      refundRule: `Refunds within a day ${MARK}`, tradesUnderOwnName: true, tierNote: `staff note ${MARK}`, mmgCheckoutHeldReason: `held for review ${MARK}`, mmgCheckoutHeldAt: new Date(),
     } });
     await app.prisma.vendor.update({ where: { id: theirs.id }, data: { addressLine1: `Their Street ${MARK}`, email: `theirs-${MARK}@example.test` } });
     await app.prisma.vendorStaff.create({ data: { vendorId: mine.id, userId: worker, role: 'STAFF', invitedBy: owner } });
@@ -367,6 +367,8 @@ describe('the account export', () => {
       id: mine.id, name: mine.name, vendorType: 'SUPERMARKET', phone: '+5926001234', publicPhone: '+5926001299', email: `owner-${MARK}@example.test`,
       addressLine1: '1 Store Street', addressLine2: `Back Room ${MARK}`, city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
       mmgNumber: '+5926001288', refundRule: `Refunds within a day ${MARK}`,
+      // [ROLE-DOCS #2046 · second merger] the owner's own declared name basis is their own setting
+      tradesUnderOwnName: true,
     })]);
     expect(data.coverage['storesOwned']).toEqual({ rows: 1, complete: true });
     const text = JSON.stringify(data);

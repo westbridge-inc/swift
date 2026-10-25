@@ -50,7 +50,7 @@ describe('the operator, from one constant', () => {
 describe('Terms of Service (Part 4)', () => {
   it.each([
     ['¶1 who the agreement is with, Guyana only, the tick, binding', `<p>These Terms of Service are a binding agreement between you and ${ID} ("<b>Swift</b>", "we", "us"), which operates the Swift app, websites and related services in Guyana (the "<b>Platform</b>"). By creating an account and ticking the acceptance box, you accept these Terms and confirm you have read our Privacy Policy. Your electronic acceptance forms a binding contract. If you do not agree, do not use the Platform.</p>`],
-    ['¶4 P5 ID wording + the 18+ box', 'You must be at least 18 years old and capable of forming a binding contract. By creating an account you confirm that you are 18 or older; where the sign-up shows the "I am 18 or older" box, you confirm it by ticking that box. An account requires a phone number verified by SMS code; higher-value Orders and all taxi rides additionally require a government-issued ID on file, requested in the app when it becomes necessary. A customer never needs a photo.'], // [owner 16 Oct: customers take no photos; 2026-10-17]
+    ['¶4 P5 ID wording + the 18+ box', 'You must be at least 18 years old and capable of forming a binding contract. By creating an account you confirm that you are 18 or older; where the sign-up shows the "I am 18 or older" box, you confirm it by ticking that box. An account requires a phone number verified by SMS code. A customer needs no ID to place an Order or take a taxi ride; the app asks for a government-issued ID on file only after repeated failed deliveries or payments, or to use a high-value promotion. A customer never needs a photo.'], // [owner 16 Oct: customers take no photos; 2026-10-17] [owner 24 Oct 2026: no customer ID gate; 2026-10-25]
     ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>"],
     ['¶8 problems + statutory rights', "If something goes wrong with a fulfilled Order, report it from the Order screen within 7 days. Swift reviews it with GPS and photo evidence and asks the Business to put it right; any refund of Order money is made by the Business that received it. Nothing in this section affects your rights under the Consumer Affairs Act 2011, including returning goods to, and getting refunds from, the Business.</p>"],
     ['¶9 (h) the prohibited list, letters or documents, legal services', '(h) order, sell, send or carry anything Swift prohibits: alcohol, tobacco and vapes, medicines and drugs, 18+ items, cooking gas and fuel, weapons and ammunition, fireworks and explosives, pesticides and controlled chemicals, protected wildlife, raw gold and precious minerals, lottery and gambling products, counterfeit goods, currency and payment cards, and letters or documents; or offer legal services.'],
@@ -74,9 +74,10 @@ describe('Terms of Service (Part 4)', () => {
 
 describe('Privacy Policy (Part 4)', () => {
   it.each([
-    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 22 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
+    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 25 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
-    ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and customers' IDs for taxi rides and larger orders, for safety and fraud prevention.</li>"],
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] taxi rides and larger orders no longer need a customer's ID.
+    ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and the ID a customer adds (asked for only after repeated failed deliveries or payments, or for a high-value promotion), for safety and fraud prevention.</li>"],
     ['¶16 legal obligations', '<li><b>To meet legal obligations:</b> keeping tax and accounting records, and responding to lawful demands from authorities.</li>'],
     ['¶18 police clearances', '<li><b>With your explicit consent:</b> police clearance certificates (optional for taxi drivers; required for service providers who visit homes).</li>'], // [ROLE-DOCS · owner 21 Oct 2026]
     ['¶21 MapTiler cookies (B6)', "MapTiler's own servers may set cookies; Swift does not."],
@@ -156,7 +157,9 @@ describe('Child Safety (Part 4)', () => {
   it('Child Safety: report + email until every live app has the reason; the authorities named; P5', () => {
     expect(CHILD_SAFETY).toContain('use the <b>Report</b> action and email <b>childsafety@swiftgy.com</b>.');
     expect(CHILD_SAFETY).toContain('we report to the Guyana Police Force and the Childcare and Protection Agency and,');
-    expect(CHILD_SAFETY).toContain('<p>Every account is phone-verified, higher-trust actions (taxi rides and larger orders) need a government ID on file, which our team can withdraw at any time, and partners\' profile photos deter fake partner accounts.'); // [owner 16 Oct: customers take no photos]
+    // [owner 16 Oct: customers take no photos] [owner 24 Oct 2026: no customer ID for taxi rides or larger orders]
+    expect(CHILD_SAFETY).toContain('<p>Every account is phone-verified, and partners\' profile photos deter fake partner accounts.');
+    expect(CHILD_SAFETY).not.toMatch(/government ID on file|taxi rides and larger orders/);
     expect(CHILD_SAFETY).not.toMatch(/live registration selfie|the relevant authorities/);
   });
 });
@@ -166,8 +169,9 @@ describe('one version for the whole batch', () => {
   // the customer-ID retention sentence (Privacy s.6) as 2026-10-18; the taxi waiting charge (Terms s.4) and phone
   // crash reports kept 90 days (Privacy) as 2026-10-21 (legal-waiting-crash-2026-10-21.test.ts); the one-minute
   // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts); [ROLE-DOCS · owner 21 Oct
-  // 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-22.1.
-  it('is 2026-10-22.1', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-22.1');
+  // 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-22.1; [owner 24 Oct
+  // 2026] no customer ID for taxi rides or larger orders (Terms s.2, Privacy ¶15 + s.2, Child Safety) as 2026-10-25.
+  it('is 2026-10-25', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-25');
   });
 });

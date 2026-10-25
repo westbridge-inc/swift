@@ -85,6 +85,8 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   liquor_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS', nis_employer_reg: 'BUSINESS',
   // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
   self_declaration_unregistered: 'BUSINESS',
+  // [ROLE-DOCS · owner 21 Oct 2026] the signed "I trade under my own name" declaration (vendor/own-name.ts)
+  own_name_declaration: 'BUSINESS',
   // [TRADES · 13 Oct 2026; R15] service-trade documents: a person's licence is PERSONAL; a premises
   // certificate is BUSINESS and always reviewed by a person (ALWAYS_REVIEW_LEGACY_CODES).
   pest_control_operator_licence: 'PERSONAL', pesticide_applicator_certificate: 'PERSONAL',
@@ -145,6 +147,13 @@ export const CERTIFICATE_YEAR_DOC_TYPES: ReadonlySet<string> = new Set([
   'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
   'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
 ]);
+/**
+ * [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The documents a trade may require that are LICENCES issued for the trade:
+ * the GEI electrical licence (electrician, solar / generator / inverter installer) and the Pesticides and Toxic
+ * Chemicals Control Board's operator licence (pest control). An ID, a police clearance, a food handler's certificate or
+ * a premises registration is never called a licence. A registry fact (DOC-INV-2): services reads it, never re-types it.
+ */
+export const TRADE_LICENCE_DOC_TYPES: ReadonlySet<string> = new Set(['gei_electrical_licence', 'pest_control_operator_licence']);
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
  * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):
@@ -157,6 +166,9 @@ export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set([
   'vehicle_insurance', 'fitness_cert',
   // [TRADES] which council issued a premises certificate, and for which premises, is a person's judgement
   'eating_house_registration',
+  // [ROLE-DOCS · owner 21 Oct 2026 · security review] whether a store's name is its owner's true surname (BNA s.3)
+  // is read from the owner's ID by a person, never by a machine
+  'own_name_declaration',
 ]);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
@@ -548,6 +560,12 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   // A photo declares no EXTRACTED fields: its capture metadata (captured_at, geo_point, device_attestation —
   // §3.2) is recorded by the capture attestation (P22), not read from the image. Photo types stay field-less.
   storefront_photo: [],
+  // [ROLE-DOCS] the own-name declaration: the store name it was signed for, when, which words
+  own_name_declaration: [
+    { fieldCode: 'trading_name', dataType: 'text', identifier: true },
+    { fieldCode: 'signed_at', dataType: 'date' },
+    { fieldCode: 'attestation_version', dataType: 'text' },
+  ],
   food_handler_cert: [
     { fieldCode: 'permit_number', dataType: 'text', isPii: true, blind: true, identifier: true },
     { fieldCode: 'holder_name', dataType: 'text', isPii: true },
@@ -723,6 +741,9 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
  */
 export const UNREGISTERED_TIER = 'UNREGISTERED';
 export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
+/** [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name: `<ROLE>_OWN_NAME`, the registry's OWN_NAME tier. */
+export const OWN_NAME_TIER = 'OWN_NAME';
+export const OWN_NAME_LIST_SUFFIX = '_OWN_NAME';
 /** [VERIFY-DOCS] `<KEY>_OPTIONAL` names documents the same role MAY add: never a gate. */
 export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
 /** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; MOVER_OPTIONAL → { actorRole: 'MOVER', optional };
@@ -730,9 +751,9 @@ export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
 export function splitChecklistKey(listKey: string): { actorRole: string; tier: string; optional: boolean } {
   const optional = listKey.endsWith(OPTIONAL_LIST_SUFFIX);
   const key = optional ? listKey.slice(0, -OPTIONAL_LIST_SUFFIX.length) : listKey;
-  return key.endsWith(UNREGISTERED_LIST_SUFFIX)
-    ? { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional }
-    : { actorRole: key, tier: REGISTRY_TIER, optional };
+  if (key.endsWith(UNREGISTERED_LIST_SUFFIX)) return { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional };
+  if (key.endsWith(OWN_NAME_LIST_SUFFIX)) return { actorRole: key.slice(0, -OWN_NAME_LIST_SUFFIX.length), tier: OWN_NAME_TIER, optional };
+  return { actorRole: key, tier: REGISTRY_TIER, optional };
 }
 
 export async function registryChecklist(prisma: Pick<PrismaClient, 'requirementSet'>, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
@@ -775,6 +796,8 @@ export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration
 export const REGISTRATION_KINDS = ['BUSINESS_NAME', 'COMPANY'] as const;
 export type RegistrationKind = (typeof REGISTRATION_KINDS)[number];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
+/** [ROLE-DOCS · owner 21 Oct 2026] The signed "I trade under my own name" declaration. Registry text (DOC-INV-2). */
+export const OWN_NAME_DOC_TYPE = 'own_name_declaration';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 /** [VERIFY-DOCS · owner rulings 1–3, 6 Oct 2026] The character document: optional for movers (an approved, current one is

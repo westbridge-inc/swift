@@ -343,7 +343,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       vatReviewedBy: 'OTHER_PERSON',
     },
     fields: [
-      'id', 'name', 'slug', 'description', 'vendorType', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
+      'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
       'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders',
       'deliveryRadius', 'minOrderAmount', 'estimatedPrepTime', 'cuisineTypes', 'tags', 'refundRule', 'vatRegistrationNumber', 'qrSlug',
       // [STORE-VAT · owner O-5] The store's own VAT record, as its owner sees it on the VAT screen (GET /vendor/vat): its
