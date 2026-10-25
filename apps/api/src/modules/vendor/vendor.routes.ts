@@ -3646,16 +3646,18 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /option-groups/:id — Update an option group */
-  // [Row 300 matrix] Under the tenant wall another tenant's item is invisible, so the
-  // group (or option) can come back with no item: that is "not yours", a 404 like the
-  // owner login answers, never a TypeError. Same check on every option route below.
+  // [Row 300 matrix] Ownership is part of the LOOKUP: the row is found only through
+  // an unarchived item of this store. Under the tenant wall another tenant's item is
+  // invisible, and including that REQUIRED relation failed the read itself (a 500 on
+  // the walled login, T3); asking for it in the where makes any other store's id
+  // simply not found, a 404 on both logins. Same lookup on every option route below.
   app.put<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.optionGroup.findUnique({
-      where: { id: request.params.id },
-      include: { item: { select: { vendorId: true, archivedAt: true } } },
+    const existing = await app.prisma.optionGroup.findFirst({
+      where: { id: request.params.id, item: { vendorId, archivedAt: null } },
+      select: { id: true, itemId: true },
     });
-    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing) throw new NotFoundError('OptionGroup', request.params.id);
     await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
@@ -3679,11 +3681,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** DELETE /option-groups/:id — Delete an option group and its options */
   app.delete<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.optionGroup.findUnique({
-      where: { id: request.params.id },
-      include: { item: { select: { vendorId: true, archivedAt: true } } },
+    const existing = await app.prisma.optionGroup.findFirst({
+      where: { id: request.params.id, item: { vendorId, archivedAt: null } },
+      select: { id: true, itemId: true },
     });
-    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3698,11 +3700,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /option-groups/:groupId/options — Add an option to a group */
   app.post<{ Params: GroupIdParam }>('/option-groups/:groupId/options', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const group = await app.prisma.optionGroup.findUnique({
-      where: { id: request.params.groupId },
-      include: { item: { select: { vendorId: true, archivedAt: true } } },
+    const group = await app.prisma.optionGroup.findFirst({
+      where: { id: request.params.groupId, item: { vendorId, archivedAt: null } },
+      select: { id: true, itemId: true },
     });
-    if (!group || !group.item || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
@@ -3735,11 +3737,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /options/:id — Update an option */
   app.put<{ Params: IdParam }>('/options/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.option.findUnique({
-      where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
+    const existing = await app.prisma.option.findFirst({
+      where: { id: request.params.id, optionGroup: { item: { vendorId, archivedAt: null } } },
+      select: { id: true, optionGroup: { select: { itemId: true } } },
     });
-    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
@@ -3762,11 +3764,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** DELETE /options/:id — Delete an option */
   app.delete<{ Params: IdParam }>('/options/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.option.findUnique({
-      where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
+    const existing = await app.prisma.option.findFirst({
+      where: { id: request.params.id, optionGroup: { item: { vendorId, archivedAt: null } } },
+      select: { id: true, optionGroup: { select: { itemId: true } } },
     });
-    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 

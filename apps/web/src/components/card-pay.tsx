@@ -6,7 +6,7 @@ import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { cardFrameEnabled, cardFrameSrc } from '@/lib/card-frame';
 import {
-  CARD_CONSENT_VERSION, CARD_IDLE, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
+  CARD_CONSENT_VERSION, CARD_IDLE, adoptableCardSession, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
   cardRemovedWords, cardSessionOf, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
 } from '@/lib/card-fee';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -55,10 +55,12 @@ const TONE = {
  * that on and the page is on the API origin, otherwise opened in this tab. This page has no card
  * field at all.
  */
-export function CardPay({ family, storeId, card, otherPaymentPending, refresh, onPaymentPending }: {
+export function CardPay({ family, storeId, card, latestSession, otherPaymentPending, refresh, onPaymentPending }: {
   family: CardFamily;
   storeId: string | null;
   card?: LiveCard;
+  /** The subscription's latestCardSession: followed when this tab holds no card session of its own. */
+  latestSession?: unknown;
   /** An MMG payment is being confirmed: no second payment is offered. */
   otherPaymentPending: boolean;
   refresh: () => void;
@@ -110,6 +112,8 @@ export function CardPay({ family, storeId, card, otherPaymentPending, refresh, o
     }, (e) => (e instanceof ApiRequestError ? { status: e.status, code: e.code } : {}));
   }, [base, family, storeId, refresh]);
   useEffect(() => { session.activate(); session.resume(); return () => { session.dispose(); frameDone.current?.(); }; }, [session]);
+  const latestShown = adoptableCardSession(latestSession);
+  useEffect(() => { session.adopt(latestSession); }, [session, latestShown?.sessionId, latestShown?.status]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const focus = () => session.focus();
     window.addEventListener('focus', focus);
