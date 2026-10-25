@@ -4,6 +4,7 @@
 -- recipient and texts on-call on every escalation (no backoff, no per-person cap).
 SET lock_timeout = '10s';
 DROP INDEX IF EXISTS "ops_alert_recipients_userId_lastPagedAt_idx";
+DROP INDEX IF EXISTS "ops_alerts_oncallTextedList_oncallTextedAt_idx";
 ALTER TABLE "ops_alert_recipients" DROP COLUMN IF EXISTS "lastPagedAt";
 ALTER TABLE "ops_alert_recipients" DROP COLUMN IF EXISTS "pagedLevel";
 ALTER TABLE "ops_alerts" DROP COLUMN IF EXISTS "oncallTextedList";

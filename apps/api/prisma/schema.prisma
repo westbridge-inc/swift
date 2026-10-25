@@ -5527,6 +5527,7 @@ model OpsAlert {
   @@index([acknowledgedAt, closedAt, ackDeadlineAt])
   @@index([tenantId, createdAt])
   @@index([sosAlertId])
+  @@index([oncallTextedList, oncallTextedAt])
   @@map("ops_alerts")
 }
 
