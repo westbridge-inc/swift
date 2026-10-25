@@ -11,6 +11,7 @@ import { withoutForwardWorkWhilePaused } from '../../../mobile/src/modules/vendo
 import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
 import { canVendorConfirmDelivered } from '../../../mobile/src/modules/vendor/screens/delivery-owner';
 import { addAppointmentDays, appointmentDayKey } from '../../../mobile/src/lib/appointmentTime';
+import { billingHeadline } from './subscription-words';
 
 export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
@@ -255,19 +256,12 @@ export function financialDeltaLabel(cur: number, prev: number | null) {
   return `Revenue ${pct > 0 ? 'up' : 'down'} ${Math.abs(pct)} percent`;
 }
 
-export function subscriptionTone(sub: any): 'brand' | 'success' | 'neutral' | 'error' | 'warning' {
-  if (sub?.status === 'ACTIVE') return 'success';
-  if (sub?.status === 'PAST_DUE') return 'warning';
-  if (sub?.status === 'SUSPENDED' || sub?.status === 'CHURNED') return 'error';
-  if (sub?.isTrialActive || sub?.status === 'TRIAL') return 'brand';
-  return 'neutral';
-}
-
+// [FEE-STATUS · owner 25 Oct 2026] The Billing tile says where the fee stands, in the API's words
+// (lib/subscription-words billingHeadline): it read "Next bill 13 Oct" on 25 October. The phone's tile
+// (VendorOps billingSummary) works the same words out for an older API; the web ships with its API.
 export function billingSummary(sub: any) {
   if (!sub) return 'Subscription not active';
-  if (sub.isInGracePeriod && sub.gracePeriodEnd) return `Pay by ${fmtDate(sub.gracePeriodEnd)}`;
-  const next = sub.nextBillingDate ? `Next bill ${fmtDate(sub.nextBillingDate)}` : null;
-  return next || String(sub.status ?? 'Subscription').toLowerCase();
+  return billingHeadline(sub);
 }
 
 export type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';

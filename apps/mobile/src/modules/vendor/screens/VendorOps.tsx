@@ -21,7 +21,8 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { openMenuList } from '../menuDoor';
 import { rejectReasonsFor } from '../rejectReasons';
 import { renewalBannerCopy } from '../renewal-banner';
-import { paymentMethodWords, qrStatusWords, subscriptionPillWords } from '../storeWords';
+import { paymentMethodWords, qrStatusWords } from '../storeWords';
+import { feeStatusOf, feeStatusPill } from '../../../lib/weeklyFee';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -30,7 +31,6 @@ import {
   FulfillmentTag,
   GUTTER,
   OrderStatusPill,
-  fmtDate,
   fmtClock as fmtLocalClock,
   fmtWhen,
   formatSlot,
@@ -687,19 +687,11 @@ function financialDeltaLabel(cur: number, prev: number | null) {
   return `Revenue ${pct > 0 ? 'up' : 'down'} ${Math.abs(pct)} percent`;
 }
 
-function subscriptionTone(sub: any): 'brand' | 'success' | 'neutral' | 'error' | 'warning' {
-  if (sub?.status === 'ACTIVE') return 'success';
-  if (sub?.status === 'PAST_DUE') return 'warning';
-  if (sub?.status === 'SUSPENDED' || sub?.status === 'CHURNED') return 'error';
-  if (sub?.isTrialActive || sub?.status === 'TRIAL') return 'brand';
-  return 'neutral';
-}
-
+// [FEE-STATUS · owner 25 Oct] The Billing tile says where the fee stands (the API's feeStatus,
+// lib/weeklyFee feeStatusOf): it read "Next bill 13 Oct" + "Active" on 25 October.
 function billingSummary(sub: any) {
   if (!sub) return 'Subscription not active';
-  if (sub.isInGracePeriod && sub.gracePeriodEnd) return `Pay by ${fmtDate(sub.gracePeriodEnd)}`;
-  const next = sub.nextBillingDate ? `Next bill ${fmtDate(sub.nextBillingDate)}` : null;
-  return next || String(sub.status ?? 'Subscription').toLowerCase();
+  return feeStatusOf(sub).headline;
 }
 
 function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyticsStale, analyticsUpdatedAt }: any) {
@@ -720,6 +712,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
   const revenueKnown = revenueQ.isSuccess && !analyticsStale && !revenueBehindAnalytics && !!analytics && hasTrailingGuyanaDays(daily, 7);
   const schedule = hoursSummary(hoursQ.data ?? store?.operatingHours);
   const sub = subQ.data ?? store?.subscription;
+  const billingPill = sub ? feeStatusPill(feeStatusOf(sub).state) : null;
   const rollingOrders = analyticsStale ? null : numericFact(analytics?.week?.orders);
   const menuStale = menuQ.isError && !!menuQ.data;
   const hoursStale = hoursQ.isError && !!hoursQ.data;
@@ -800,8 +793,8 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           icon={isOwner ? 'cash-check' : 'account-cog-outline'}
           label={isOwner ? 'Billing' : 'Account'}
           detail={isOwner ? (subQ.isError && !sub ? 'Billing unavailable' : `${billingSummary(sub)}${subStale ? ' · last loaded' : ''}`) : 'Store settings & promos'}
-          badge={isOwner && sub ? <TonePill label={subscriptionPillWords(sub.status)} tone={subscriptionTone(sub)} /> : undefined}
-          badgeLabel={isOwner && sub ? `Subscription: ${subscriptionPillWords(sub.status)}` : undefined}
+          badge={isOwner && billingPill ? <TonePill label={billingPill.label} tone={billingPill.tone} /> : undefined}
+          badgeLabel={isOwner && billingPill ? `Subscription: ${billingPill.label}` : undefined}
           onPress={() => navigation.navigate('Account')}
         />
       </View>

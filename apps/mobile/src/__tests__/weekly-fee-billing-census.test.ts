@@ -58,7 +58,10 @@ function renderedText(node: unknown): string {
 
 describe('rendered partner Billing tile census [AX316 R1]', () => {
   it.each(['CASH', 'MOBILE_MONEY'])('%s subscription renders the date/status with no passive payment rail', (billingMethod) => {
-    fx.sub = { status: 'ACTIVE', billingMethod, nextBillingDate: '2026-10-06T12:00:00Z' };
+    // [FEE-STATUS] A paid-through date still ahead (it was a fixed 6 Oct, which has passed: the tile then
+    // read "Next bill 6 Oct", the very line the owner saw on 25 Oct).
+    const ahead = new Date(Date.now() + 6 * 86_400_000).toISOString();
+    fx.sub = { status: 'ACTIVE', billingMethod, nextBillingDate: ahead, amountDueGyd: 0 };
     const board = VendorOps({ store: { id: 'store-A', name: 'Test store', status: 'ACTIVE' }, navigation: { navigate: vi.fn() } });
     const grid = elements(board).find((node) => typeof node.type === 'function' && node.type.name === 'VendorManagerManageGrid');
     expect(grid).toBeDefined();
@@ -66,10 +69,20 @@ describe('rendered partner Billing tile census [AX316 R1]', () => {
     const billing = elements(tiles).find((node) => node.props.label === 'Billing');
     expect(billing).toBeDefined();
     const text = renderedText(billing);
-    expect(text).toContain('Next bill 2026-10-06');
+    expect(text).toContain(`Paid until ${new Date(ahead).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' })}`);
     // [UI-SWEEP U72] The status shows in the Billing screen's words, never the code.
-    expect(text).toContain('Active');
+    expect(text).toContain('Paid');
     expect(text).not.toContain('ACTIVE');
     expect(text).not.toMatch(/\bcash\b|\bagent\b|Swift[\s-]+Number|account[\s-]+number|coming soon|\bMMG\b/i);
+  });
+
+  it('[FEE-STATUS] a week past its date never reads as a next bill or Active on the tile', () => {
+    fx.sub = { status: 'ACTIVE', billingMethod: 'CASH', nextBillingDate: '2026-10-14T00:26:00Z', amountDueGyd: 15000 };
+    const board = VendorOps({ store: { id: 'store-A', name: 'Test store', status: 'ACTIVE' }, navigation: { navigate: vi.fn() } });
+    const grid = elements(board).find((node) => typeof node.type === 'function' && node.type.name === 'VendorManagerManageGrid');
+    const billing = elements((grid!.type as (_props: unknown) => unknown)(grid!.props)).find((node) => node.props.label === 'Billing');
+    const text = renderedText(billing);
+    expect(text).toContain('Payment due since 13 Oct 2026');
+    expect(text).not.toMatch(/next bill|\bActive\b/i);
   });
 });

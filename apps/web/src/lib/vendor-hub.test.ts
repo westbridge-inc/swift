@@ -26,7 +26,10 @@ const line = (src: string, start: string) => {
 };
 
 const FROM_SHARED = ['safeVendorRole', 'orderActions', 'statusActions', 'timeAgo', 'clock', 'fmtWhen', 'fmtDate', 'numericFact', 'guyanaDate', 'guyanaDayKey', 'hasTrailingGuyanaDays', 'normalizeRevenueDays', 'reconciledRevenueDays', 'windowTotals'];
-const FROM_OPS = ['formatBusinessTime', 'normalizeHours', 'hoursSummary', 'storeStatusEyebrow', 'financialDeltaLabel', 'subscriptionTone', 'billingSummary'];
+// [FEE-STATUS · owner 25 Oct 2026] billingSummary and the tile's tone left this list on purpose: the phone's
+// tile works the API's feeStatus words out itself for an older API (lib/weeklyFee feeStatusOf), while the web
+// ships with its API and shows feeStatus as sent (subscription-words billingHeadline). Both are pinned below.
+const FROM_OPS = ['formatBusinessTime', 'normalizeHours', 'hoursSummary', 'storeStatusEyebrow', 'financialDeltaLabel'];
 
 describe('the web board helpers are the app\'s, word for word', () => {
   it.each(FROM_SHARED)('%s matches apps/mobile/src/modules/vendor/shared.tsx', (name) => {
@@ -60,6 +63,11 @@ describe('the web board helpers are the app\'s, word for word', () => {
     expect(hoursSummary([])).toBeNull();
     expect(storeStatusEyebrow({ isCurrentlyOpen: false }, false).label).toBe('CLOSED');
     expect(billingSummary(null)).toBe('Subscription not active');
+    // [FEE-STATUS] The tile read "Next bill 13 Oct" on 25 October: it now says what the API says, and
+    // without the API's words names the state, never a date it cannot vouch for.
+    expect(billingSummary({ status: 'ACTIVE', nextBillingDate: '2026-10-14T00:26:00Z', feeStatus: { state: 'DUE', headline: 'Payment due since 13 Oct 2026', detail: null, date: null } })).toBe('Payment due since 13 Oct 2026');
+    expect(billingSummary({ status: 'ACTIVE', nextBillingDate: '2026-10-14T00:26:00Z' })).toBe('Active');
+    expect(billingSummary({ status: 'ACTIVE', nextBillingDate: '2026-10-14T00:26:00Z' })).not.toMatch(/next bill/i);
     expect(windowTotals([], 7).prev).toBeNull();
   });
 });
