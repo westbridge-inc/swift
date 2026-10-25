@@ -309,6 +309,15 @@ describe('3. the certificate: filed for a PERSON, never a machine', () => {
   });
 });
 
+describe('3b. one door for a VAT certificate decision', () => {
+  it('the generic document decisions refuse a VAT certificate: only Store VAT decides it (the reviewer types what it shows)', async () => {
+    await expect(verification.approveDocument(certificateDocId, reviewerId)).rejects.toMatchObject({ code: 'DECIDE_IN_STORE_VAT' });
+    await expect(verification.rejectDocument(certificateDocId, reviewerId, 'The photo is not readable')).rejects.toMatchObject({ code: 'DECIDE_IN_STORE_VAT' });
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: certificateDocId } })).status).toBe('PENDING');
+    expect((await vendorRow()).vatStatus).toBe('PENDING');
+  });
+});
+
 describe('4. a PERSON decides', () => {
   const approveBody = (over: Record<string, unknown> = {}) => ({
     certificateDocId, vatNumber: VAT_NUMBER, registeredName: 'Vat Corner Trading', effectiveFrom: '2026-01-01', nameMatchesStore: true, ...over,
@@ -380,6 +389,13 @@ describe('4. a PERSON decides', () => {
     const doc = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: certificateDocId } });
     expect(doc).toMatchObject({ status: 'APPROVED', reviewedBy: reviewerId });
     expect(await app.prisma.auditLog.count({ where: { action: 'APPROVE_STORE_VAT', entityId: vendorId, userId: reviewerId } })).toBe(1);
+    // The store is told what changed and what to check (item classes), once, in VAT words; no generic "Document approved".
+    const notices = await app.prisma.notification.findMany({ where: { userId: ownerUserId } });
+    expect(notices.filter((n) => n.title === 'Your VAT is approved').map((n) => n.body)).toEqual([
+      'A person at Swift checked your GRA VAT certificate. From 2026-01-01, your prices include VAT at 14% and your receipts say '
+      + '“VAT charged by Vat Corner Trading · VAT reg. no. 012345678”. Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
+    ]);
+    expect(notices.some((n) => n.title === 'Document approved')).toBe(false);
   });
 });
 
@@ -592,6 +608,24 @@ describe('9. VAT stops for NEW orders at once; placed orders keep what they froz
     expect(after.vatRateBps).toBe(placed.vatRateBps);
     expect(after.vatSellerNumber).toBe(VAT_NUMBER);
     expect(String(after.vatAmount)).toBe(String(placed.vatAmount));
+    const withdrawn = await app.prisma.notification.findMany({ where: { userId: ownerUserId, title: 'Your VAT was withdrawn' } });
+    expect(withdrawn.map((n) => n.body)).toEqual([
+      'GRA cancelled the registration. New orders carry no VAT and your prices no longer say “incl. VAT”. Orders already placed keep their VAT.',
+    ]);
+    expect(await app.prisma.notification.count({ where: { userId: ownerUserId, title: 'Document rejected' } })).toBe(0);
+  });
+
+  it('withdrawing VAT through Store VAT tells the store why', async () => {
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: {
+      vatRegistrationNumber: VAT_NUMBER, vatStatus: 'APPROVED', vatApprovedNumber: VAT_NUMBER, vatApprovedName: 'Vat Corner Trading',
+      vatEffectiveFrom: new Date('2026-01-01T00:00:00Z'), vatReviewedBy: reviewerId, vatReviewedAt: new Date(),
+    } });
+    const res = await adminCall(`/store-vat/${vendorId}/revoke`, { reason: 'The GRA cancelled the registration this month.' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.status).toBe('REVOKED');
+    const notice = await app.prisma.notification.findFirst({ where: { userId: ownerUserId, title: 'Your VAT was withdrawn', body: { contains: 'this month' } } });
+    expect(notice?.body).toBe('The GRA cancelled the registration this month. New orders carry no VAT and your prices no longer say “incl. VAT”. Orders already placed keep their VAT.');
+    expect(await app.prisma.auditLog.count({ where: { action: 'REVOKE_STORE_VAT', entityId: vendorId } })).toBe(1);
   });
 
   it('a reviewer rejects a new claim with a reason the store reads; "no" clears everything', async () => {
@@ -605,6 +639,11 @@ describe('9. VAT stops for NEW orders at once; placed orders keep what they froz
     expect(rejected.json().data).toMatchObject({ status: 'REJECTED', reviewNote: 'The certificate photo is unreadable' });
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: docId } })).status).toBe('REJECTED');
     expect(await app.prisma.auditLog.count({ where: { action: 'REJECT_STORE_VAT', entityId: vendorId } })).toBe(1);
+    const refused = await app.prisma.notification.findMany({ where: { userId: ownerUserId, title: 'Your VAT was not approved' } });
+    expect(refused.map((n) => n.body)).toEqual([
+      'The certificate photo is unreadable. Correct it and send your GRA VAT certificate again. Nothing changed for your customers.',
+    ]);
+    expect(await app.prisma.notification.count({ where: { userId: ownerUserId, title: 'Document rejected' } })).toBe(0);
     const no = await vendorCall('PUT', '/vat', { registered: false });
     expect(no.json().data).toMatchObject({ status: 'NONE', mode: null, vatRegistrationNumber: null, certificate: null });
   });

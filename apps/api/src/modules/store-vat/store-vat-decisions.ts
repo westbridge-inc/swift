@@ -21,11 +21,28 @@ import {
   STORE_VAT_MODES_OFFERED, STORE_VAT_SELECT, VAT_CERTIFICATE_DOC_TYPE, inEffectOn, storeVatEffective, storeVatEnabled,
 } from './store-vat';
 import { STORE_VAT_RATE_PERCENT, STORE_VAT_SOURCES } from './vat-rate';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
+import { storeVatApprovedNotice, storeVatRejectedNotice, storeVatWithdrawnNotice } from './store-vat-notices';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 type Tx = Prisma.TransactionClient;
 
 export const STORE_VAT_OFF_CODE = 'STORE_VAT_OFF';
+
+/** Publishes a stored notice (push) after the decision commits; the admin route passes NotificationService.publishPersisted. */
+export type NoticePublisher = (noticeId: string) => Promise<unknown>;
+const noPublish: NoticePublisher = async () => undefined;
+
+/** [REVIEW-F #2085 S4] The store owner's VAT notice, written in the decision's transaction (it commits with it). */
+async function noticeStore(tx: Tx, ownerUserId: string, vendorId: string, kind: string, words: { title: string; body: string }): Promise<string> {
+  const notice = await insertNoticeFor(tx, { userId: ownerUserId, type: 'SYSTEM_ANNOUNCEMENT', ...words, data: { kind, vendorId, audience: 'business' } });
+  return notice.id;
+}
+
+/** A published push that fails never turns a committed, audited decision into an error (the notice is on file). */
+async function publishAll(publish: NoticePublisher, ids: readonly string[]): Promise<void> {
+  for (const id of ids) await publish(id).catch(() => undefined);
+}
 
 function refuseWhileOff(env: Record<string, string | undefined>): void {
   if (!storeVatEnabled(env)) {
@@ -176,8 +193,9 @@ export interface StoreVatApprovalInput {
 
 /** Minimal surface of VerificationService the decisions use (the admin route passes its instance). */
 export interface DocumentDecider {
-  approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: undefined, typed?: Record<string, never>, decision?: { within?: (tx: Tx, decided: VerificationDocument) => Promise<void> }): Promise<VerificationDocument>;
-  rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: undefined, decision?: { within?: (tx: Tx, decided: VerificationDocument) => Promise<void> }): Promise<VerificationDocument>;
+  /** `storeVatDecision`: the ONE door that may decide a VAT certificate (verification.service refuses every other). */
+  approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: undefined, typed?: Record<string, never>, decision?: { within?: (tx: Tx, decided: VerificationDocument) => Promise<void>; storeVatDecision?: true }): Promise<VerificationDocument>;
+  rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: undefined, decision?: { within?: (tx: Tx, decided: VerificationDocument) => Promise<void>; storeVatDecision?: true }): Promise<VerificationDocument>;
 }
 
 function startOfUtcDay(d: Date): Date {
@@ -195,6 +213,7 @@ function startOfUtcDay(d: Date): Date {
 export async function approveStoreVat(
   db: PrismaClient, verification: DocumentDecider, vendorId: string, adminId: string, input: StoreVatApprovalInput,
   audit: (tx: Tx, facts: Record<string, unknown>) => Promise<void>, env: Record<string, string | undefined> = process.env, now: Date = new Date(),
+  publish: NoticePublisher = noPublish,
 ) {
   refuseWhileOff(env);
   if (input.nameMatchesStore !== true) throw new AppError(400, 'VAT_NAME_NOT_CONFIRMED', 'Confirm the registered name on the certificate is this store’s business.');
@@ -225,12 +244,15 @@ export async function approveStoreVat(
       },
     });
     await audit(tx, { vendorId, certificateDocId: input.certificateDocId, effectiveFrom: effectiveFrom.toISOString().slice(0, 10) });
+    noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_approved',
+      storeVatApprovedNotice({ registeredName, number: typed, effectiveFrom })));
   };
+  const noticeIds: string[] = [];
 
   const doc = await certificateFor(db, vendorId, input.certificateDocId);
   await assertNotRecused(db, adminId, doc.userId);
   if (doc.status === 'PENDING') {
-    await verification.approveDocument(doc.id, adminId, undefined, undefined, {}, { within: async (tx) => apply(tx) });
+    await verification.approveDocument(doc.id, adminId, undefined, undefined, {}, { within: async (tx) => apply(tx), storeVatDecision: true });
   } else if (doc.status === 'APPROVED' && doc.state === 'COMMITTED' && doc.reviewedBy && !doc.reviewedBy.startsWith('kyc:')) {
     await db.$transaction(async (tx) => {
       // The person's approval must still stand at the moment this commits.
@@ -241,6 +263,7 @@ export async function approveStoreVat(
   } else {
     throw new AppError(409, 'VAT_CERTIFICATE_NOT_STANDING', 'That certificate cannot back a VAT approval (rejected, withdrawn, or not checked by a person). Ask the store to send its certificate again.');
   }
+  await publishAll(publish, noticeIds);
   return storeVatView(db, vendorId, env);
 }
 
@@ -260,14 +283,17 @@ async function certificateFor(db: Db, vendorId: string, docId: string) {
 export async function rejectStoreVat(
   db: PrismaClient, verification: DocumentDecider, vendorId: string, adminId: string, reason: string,
   audit: (tx: Tx, facts: Record<string, unknown>) => Promise<void>, env: Record<string, string | undefined> = process.env, now: Date = new Date(),
+  publish: NoticePublisher = noPublish,
 ) {
   const note = reason.trim();
   if (note.length < 3) throw new AppError(400, 'REASON_REQUIRED', 'Say why, in words the store will read.');
+  const noticeIds: string[] = [];
   const apply = async (tx: Tx) => {
     const vendor = await lockVendor(tx, vendorId);
     if (vendor.vatStatus !== 'PENDING') throw new AppError(409, 'VAT_NOT_PENDING', 'This store is not waiting for a VAT decision. Reload and look again.');
     await tx.vendor.update({ where: { id: vendorId }, data: { vatStatus: 'REJECTED', ...CLEARED_APPROVAL, vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: note } });
     await audit(tx, { vendorId, certificateDocId: vendor.vatCertificateDocId });
+    noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_rejected', storeVatRejectedNotice(note)));
   };
   const current = await db.vendor.findUnique({ where: { id: vendorId }, select: { vatCertificateDocId: true, owner: { select: { userId: true } } } });
   if (!current) throw new NotFoundError('Vendor', vendorId);
@@ -276,10 +302,11 @@ export async function rejectStoreVat(
     ? await db.verificationDocument.findUnique({ where: { id: current.vatCertificateDocId }, select: { id: true, status: true } })
     : null;
   if (doc?.status === 'PENDING') {
-    await verification.rejectDocument(doc.id, adminId, note, undefined, { within: async (tx) => apply(tx) });
+    await verification.rejectDocument(doc.id, adminId, note, undefined, { within: async (tx) => apply(tx), storeVatDecision: true });
   } else {
     await db.$transaction(async (tx) => apply(tx));
   }
+  await publishAll(publish, noticeIds);
   return storeVatView(db, vendorId, env);
 }
 
@@ -288,33 +315,41 @@ export async function rejectStoreVat(
 export async function revokeStoreVat(
   db: PrismaClient | Tx, vendorId: string, adminId: string, reason: string,
   audit: (tx: Tx, facts: Record<string, unknown>) => Promise<void>, now: Date = new Date(),
+  publish: NoticePublisher = noPublish,
 ) {
   const note = reason.trim();
   if (note.length < 3) throw new AppError(400, 'REASON_REQUIRED', 'Say why, in words the store will read.');
+  const noticeIds: string[] = [];
   const run = async (tx: Tx) => {
     const vendor = await lockVendor(tx, vendorId);
     if (vendor.vatStatus !== 'APPROVED') throw new AppError(409, 'VAT_NOT_APPROVED', 'This store’s VAT is not approved, so there is nothing to withdraw.');
     await tx.vendor.update({ where: { id: vendorId }, data: { vatStatus: 'REVOKED', vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: note } });
     await audit(tx, { vendorId });
+    noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_withdrawn', storeVatWithdrawnNotice(note)));
   };
   if ('$transaction' in db) await (db as PrismaClient).$transaction(async (tx) => run(tx));
   else await run(db);
+  await publishAll(publish, noticeIds);
 }
 
 /**
  * [called from VerificationService.revokeDocument, inside its transaction] A withdrawn VAT certificate withdraws
- * the VAT of every store whose approval rests on it. Never throws for a store that is not APPROVED.
+ * the VAT of every store whose approval rests on it, and tells each one (returns the stored notices for the caller to
+ * publish after its commit). Never throws for a store that is not APPROVED.
  */
-export async function revokeStoreVatForCertificate(tx: Tx, docId: string, adminId: string, reason: string, now: Date = new Date()): Promise<number> {
+export async function revokeStoreVatForCertificate(tx: Tx, docId: string, adminId: string, reason: string, now: Date = new Date()): Promise<string[]> {
   const stores = await tx.vendor.findMany({ where: { vatCertificateDocId: docId, vatStatus: 'APPROVED' }, select: { id: true } });
+  const noticeIds: string[] = [];
   for (const store of stores) {
-    await lockVendor(tx, store.id);
-    await tx.vendor.updateMany({
+    const vendor = await lockVendor(tx, store.id);
+    const withdrawn = await tx.vendor.updateMany({
       where: { id: store.id, vatStatus: 'APPROVED' },
       data: { vatStatus: 'REVOKED', vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: `Certificate withdrawn: ${reason}` },
     });
+    // [REVIEW-F #2085 S4] The store is told in VAT words (the caller publishes after its commit).
+    if (withdrawn.count === 1) noticeIds.push(await noticeStore(tx, vendor.owner.userId, store.id, 'store_vat_withdrawn', storeVatWithdrawnNotice(reason)));
   }
-  return stores.length;
+  return noticeIds;
 }
 
 /** The admin queue: stores waiting for a VAT decision, oldest certificate first. */
