@@ -54,6 +54,7 @@ vi.mock('../stores/locationStore', () => ({ useLocationStore: vi.fn() }));
 vi.mock('../services/backgroundLocation', () => ({ startMoverLocation: vi.fn(), stopMoverLocation: vi.fn() }));
 vi.mock('../services/socket', () => ({ connectSocket: vi.fn(), getSocket: vi.fn() }));
 vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
+vi.mock('../lib/uploadImage', () => ({ prepareUploadImage: vi.fn() }));
 vi.mock('../lib/deviceLocation', () => ({
   commitLiveDeviceLocation: vi.fn(),
   createLiveDeviceLocationLease: vi.fn(),

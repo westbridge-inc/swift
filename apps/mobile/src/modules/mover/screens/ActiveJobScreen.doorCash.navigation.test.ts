@@ -105,6 +105,8 @@ vi.mock('../../../hooks', () => ({
   useCourierPickupProof: () => ({ mutate: vi.fn(), isPending: false }),
   useCourierReturn: () => ({ mutate: vi.fn(), isPending: false }),
   useCourierReturnProof: () => ({ mutate: vi.fn(), isPending: false }),
+  // [TAXI route line] main's screen reads it; a goods door draws no road line.
+  useDriverRouteLine: () => ({ data: null }),
 }));
 vi.mock('../../../hooks/mover', () => ({ uploadHandoverPhoto: vi.fn(), useTaxiStopAction: () => ({ mutate: vi.fn(), isPending: false }) }));
 vi.mock('../CustodyRecoverySection', async () => {
