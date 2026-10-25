@@ -247,9 +247,9 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
   // carrying VAT at once; orders already placed keep the VAT they froze.
   const withdrawVat = async () => show(await dialog.run({
     title: `Withdraw VAT for ${v.name}?`,
-    body: <p>Its new orders stop carrying VAT at once, and its prices stop saying &ldquo;incl. VAT&rdquo;. Orders already placed keep their VAT. The owner reads your reason.</p>,
+    body: <p>Its new orders stop carrying VAT at once, and its prices stop saying &ldquo;incl. VAT&rdquo;. Orders already placed keep their VAT. Your reason shows on the store&apos;s VAT settings.</p>,
     confirmLabel: 'Withdraw VAT',
-    reason: { hint: 'The owner reads this, and it is kept on the permanent record.' },
+    reason: { hint: 'The store sees this on its VAT settings, and it is kept on the permanent record.' },
     context,
     submit: ({ reason }) => revokeStoreVat(id, reason),
     success: () => `${v.name}'s VAT is withdrawn. New orders carry no VAT.`,

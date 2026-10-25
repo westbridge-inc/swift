@@ -66,6 +66,8 @@ describe('[O-5] Store VAT queue', () => {
 
     await user.click(screen.getByRole('button', { name: 'Approve VAT' }));
     const dialog = screen.getByRole('dialog', { name: 'Approve VAT for Sample Shop?' });
+    // [REVIEW-G #2087 S4-2] The reviewer types what the certificate says; the store's own number is not shown to copy.
+    expect(within(dialog).queryByText(/012345678/)).toBeNull();
     await user.type(within(dialog).getByLabelText('VAT registration number on the certificate'), '012345678');
     await user.type(within(dialog).getByLabelText('Registered name on the certificate'), 'Sample Shop Ltd');
     await user.type(within(dialog).getByLabelText('Date it takes effect (YYYY-MM-DD)'), '2026-01-01');

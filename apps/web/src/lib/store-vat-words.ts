@@ -5,9 +5,10 @@ import type { VatClass } from './vendor-api';
 /** Where the owner reads the GRA's own words on VAT (the API cites the Act and the GRA policies it follows). */
 export const GRA_VAT_URL = 'https://www.gra.gov.gy/vat-invoices/';
 
-/** The classes a store gives its items. The rate always comes from the API, never a literal on a screen. */
-export const vatClassWords = (ratePercent: number): ReadonlyArray<{ value: VatClass; label: string }> => [
-  { value: 'STANDARD', label: `Standard (${ratePercent}% VAT inside the price)` },
+/** The classes a store gives its items. The rate always comes from the API, never a literal on a screen. Before a person
+ *  approved the store's VAT, nothing carries VAT yet, so the words do not say it does (REVIEW-F #2087 S4). */
+export const vatClassWords = (ratePercent: number, effective = true): ReadonlyArray<{ value: VatClass; label: string }> => [
+  { value: 'STANDARD', label: effective ? `Standard (${ratePercent}% VAT inside the price)` : 'Standard (VAT once your VAT is approved)' },
   { value: 'ZERO_RATED', label: 'Zero-rated (no VAT)' },
   { value: 'EXEMPT', label: 'Exempt (no VAT)' },
 ];

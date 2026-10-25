@@ -98,7 +98,7 @@ function PriceEdit({ item, onDone }: { item: CatalogItem; onDone: () => void }) 
  * items as the same objects), not every row of the catalogue. Off-screen rows also skip
  * layout and paint until scrolled to (content-visibility), which long catalogues need.
  */
-const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPrice, onToggle, onAdjust, onEditPrice, onSaved, vatRate, vatPending, onVatClass }: {
+const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPrice, onToggle, onAdjust, onEditPrice, onSaved, vatRate, vatEffective, vatPending, onVatClass }: {
   item: CatalogItem;
   pending: boolean;
   adjusting: boolean;
@@ -109,6 +109,7 @@ const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPric
   onSaved: () => void;
   /** Set only when the owner's store has told Swift it is VAT-registered: the item's VAT class is shown and can change. */
   vatRate: number | null;
+  vatEffective: boolean;
   vatPending: boolean;
   onVatClass: (_id: string, _vatClass: VatClass) => void;
 }) {
@@ -138,7 +139,7 @@ const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPric
           onChange={(e) => onVatClass(i.id, e.target.value as VatClass)}
           className="min-h-8 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-2 text-[13px]"
         >
-          {vatClassWords(vatRate).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          {vatClassWords(vatRate, vatEffective).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
         </select>
       )}
     </div>
@@ -165,6 +166,7 @@ export default function InventoryPage() {
   const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
   const vat = useQuery({ queryKey: storeKey(storeId, 'vat'), queryFn: getStoreVat, enabled: isOwner });
   const vatRate = vat.data && vat.data.status !== 'NONE' ? vat.data.ratePercent : null;
+  const vatEffective = vat.data?.effective === true;
   const vatMut = useMutation({
     mutationFn: (v: { id: string; vatClass: VatClass }) => updateItem(v.id, { vatClass: v.vatClass }),
     onSettled: () => void refresh(),
@@ -263,7 +265,7 @@ export default function InventoryPage() {
       <div className="grid gap-x-8 wide:grid-cols-2">
         {list.map(i => <ItemRow key={i.id} item={i} pending={availPending.has(i.id)} adjusting={adjusting === i.id} editingPrice={editingPrice === i.id}
           onToggle={onToggle} onAdjust={setAdjusting} onEditPrice={setEditingPrice} onSaved={refresh}
-          vatRate={vatRate} vatPending={vatMut.isPending && vatMut.variables?.id === i.id} onVatClass={onVatClass} />)}
+          vatRate={vatRate} vatEffective={vatEffective} vatPending={vatMut.isPending && vatMut.variables?.id === i.id} onVatClass={onVatClass} />)}
       </div>
       <p className="text-xs text-[var(--swift-muted)]">
         Photos, descriptions, options and new single items are managed in the Swift app — you can edit prices, stock and availability here.

@@ -44,10 +44,13 @@ describe('[O-5] who sees the VAT card', () => {
     expect(screen.queryByRole('heading', { name: 'VAT' })).toBeNull();
   });
 
-  it('switch off with a record: the status shows and the owner can still turn VAT off', async () => {
+  it('switch off with a record: the status shows and the owner can still turn VAT off (asked once for an approved store)', async () => {
     setup(owner, view({ available: false, status: 'APPROVED', effective: false, vatRegistrationNumber: '012345678' }));
     vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view({ available: false }));
     await userEvent.click(await screen.findByRole('button', { name: 'Turn VAT off' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/ends your approval/);
+    expect(vendorApi.updateStoreVat).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
     await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
     expect(screen.queryByText('Is your business VAT-registered with the GRA?')).toBeNull();
   });
@@ -73,6 +76,19 @@ describe('[O-5] the owner’s answer', () => {
     setup(owner, view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
     vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view());
     await userEvent.click(await screen.findByRole('radio', { name: 'No' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
+    await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
+  });
+
+  // [REVIEW-F #2087 S4] Re-approval needs a person: turning off an APPROVED store's VAT asks once, in words.
+  it('No on an APPROVED store asks once before turning VAT off', async () => {
+    setup(owner, view({ status: 'APPROVED', effective: true, mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678',
+      approved: { number: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01T00:00:00.000Z', reviewedAt: null } }));
+    vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view());
+    await userEvent.click(await screen.findByRole('radio', { name: 'No' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/a person at Swift must check your certificate again/);
+    expect(vendorApi.updateStoreVat).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
     await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
   });

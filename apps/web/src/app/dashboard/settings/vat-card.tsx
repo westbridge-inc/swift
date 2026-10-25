@@ -48,6 +48,8 @@ export function VatCard({ storeId }: { storeId: string | null }) {
   const [registered, setRegistered] = useState<boolean>(false);
   const [number, setNumber] = useState('');
   const [consent, setConsent] = useState(false);
+  // [REVIEW-F #2087 S4] Turning off an APPROVED store's VAT ends the approval (a person must check again): ask once.
+  const [confirmOff, setConfirmOff] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!v) return;
@@ -63,7 +65,7 @@ export function VatCard({ storeId }: { storeId: string | null }) {
     mutationFn: (answer: boolean) => updateStoreVat(answer
       ? { registered: true, vatRegistrationNumber: number.trim(), mode: 'PRICES_INCLUDE_VAT' }
       : { registered: false }),
-    onSuccess: settle,
+    onSuccess: (data) => { setConfirmOff(false); settle(data); },
   });
   const send = useMutation({
     mutationFn: (file: File) => sendVatCertificate(file),
@@ -74,6 +76,14 @@ export function VatCard({ storeId }: { storeId: string | null }) {
   const claimed = v.status !== 'NONE';
   const numberChanged = number.trim() !== (v.vatRegistrationNumber ?? '');
   const canSave = registered ? number.trim().length > 0 && (!claimed || numberChanged) : claimed;
+  const approved = v.status === 'APPROVED';
+  const turnOff = () => (approved && !confirmOff ? setConfirmOff(true) : save.mutate(false));
+  const confirmLine = confirmOff ? (
+    <p role="alert" className="mt-2 text-sm">
+      Turning VAT off ends your approval: your prices stop saying &ldquo;incl. VAT&rdquo; at once, and a person at Swift must
+      check your certificate again before VAT can come back. Press the button again to turn it off.
+    </p>
+  ) : null;
   const needsCertificate = v.available && (v.status === 'PENDING' || v.status === 'REJECTED' || v.status === 'REVOKED')
     && (!v.certificate || v.certificate.status !== 'PENDING');
 
@@ -96,7 +106,7 @@ export function VatCard({ storeId }: { storeId: string | null }) {
               No
             </label>
             <label className="flex items-center gap-2">
-              <input type="radio" name="vat-registered" checked={registered} onChange={() => setRegistered(true)} className="accent-[var(--swift-red)]" />
+              <input type="radio" name="vat-registered" checked={registered} onChange={() => { setRegistered(true); setConfirmOff(false); }} className="accent-[var(--swift-red)]" />
               Yes
             </label>
           </div>
@@ -119,12 +129,13 @@ export function VatCard({ storeId }: { storeId: string | null }) {
           )}
           <button
             type="button"
-            onClick={() => save.mutate(registered)}
+            onClick={() => (registered ? save.mutate(true) : turnOff())}
             disabled={!canSave || save.isPending}
             className="mt-3 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
           >
             {save.isPending ? 'Saving…' : registered ? 'Save and send for checking' : 'Turn VAT off'}
           </button>
+          {!registered && confirmLine}
           {save.isError && <p role="alert" className="mt-2 text-sm text-[var(--swift-red)]">{(save.error as Error).message}</p>}
         </fieldset>
       ) : (
@@ -133,12 +144,13 @@ export function VatCard({ storeId }: { storeId: string | null }) {
             <p className="text-sm text-[var(--swift-muted)]">VAT settings are not available on Swift right now. Your prices stay exactly as you typed them.</p>
             <button
               type="button"
-              onClick={() => save.mutate(false)}
+              onClick={turnOff}
               disabled={save.isPending}
               className="mt-2 rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
             >
               Turn VAT off
             </button>
+            {confirmLine}
           </div>
         )
       )}

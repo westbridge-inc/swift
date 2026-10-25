@@ -42,12 +42,21 @@ describe('[O-5] item VAT class on the inventory', () => {
     const rice = await screen.findByRole('combobox', { name: 'VAT class: Rice' });
     expect((rice as HTMLSelectElement).value).toBe('ZERO_RATED');
     const soap = screen.getByRole('combobox', { name: 'VAT class: Soap' });
-    expect(within(soap).getByRole('option', { name: 'Standard (14% VAT inside the price)' })).toBeTruthy();
+    // Before a person approved the store's VAT, nothing carries VAT yet, and the words do not say it does.
+    expect(within(soap).getByRole('option', { name: 'Standard (VAT once your VAT is approved)' })).toBeTruthy();
+    expect(within(soap).queryByRole('option', { name: /14%/ })).toBeNull();
     expect(screen.getByText(/you are responsible for it/)).toBeTruthy();
     await user.selectOptions(soap, 'EXEMPT');
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]!.url.pathname).toBe('/api/v1/vendor/items/item-1');
     expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ vatClass: 'EXEMPT' });
+  });
+
+  it('an APPROVED store’s standard items say the rate the API sends', async () => {
+    serve('OWNER', 'APPROVED');
+    renderWithQuery(<InventoryPage />);
+    const soap = await screen.findByRole('combobox', { name: 'VAT class: Soap' });
+    expect(within(soap).getByRole('option', { name: 'Standard (14% VAT inside the price)' })).toBeTruthy();
   });
 
   it('a store that never claimed VAT shows no VAT control', async () => {

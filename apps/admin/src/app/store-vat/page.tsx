@@ -50,8 +50,9 @@ export default function StoreVatPage() {
     title: `Approve VAT for ${row.name}?`,
     body: (
       <p>
-        Type what the certificate says. The number must be the one the store gave ({row.vatRegistrationNumber ?? 'none'}).
-        Once approved, the store&apos;s prices say &ldquo;incl. VAT&rdquo; and its receipts name it as the one charging VAT.
+        Type what the certificate says. The server checks the number against the one the store gave and refuses a
+        mismatch. Once approved, the store&apos;s prices say &ldquo;incl. VAT&rdquo; and its receipts name it as the one
+        charging VAT.
       </p>
     ),
     confirmLabel: 'Approve VAT',
@@ -74,23 +75,21 @@ export default function StoreVatPage() {
 
   const reject = async (row: StoreVatPendingRow) => show(await dialog.run({
     title: `Do not approve VAT for ${row.name}?`,
-    body: <p>The store reads your reason. Nothing changes for its customers; it can correct it and send its certificate again.</p>,
+    body: <p>Your reason shows on the store&apos;s VAT settings. Nothing changes for its customers; it can correct it and send its certificate again.</p>,
     confirmLabel: 'Reject',
-    reason: { label: 'What the store must fix', hint: 'The store owner reads this.' },
+    reason: { label: 'What the store must fix', hint: 'The store sees this on its VAT settings.' },
     submit: ({ reason }) => rejectStoreVat(row.vendorId, reason),
-    success: () => `${row.name} was told why its VAT was not approved.`,
+    success: () => `${row.name}'s VAT was not approved. The store sees your reason on its VAT settings.`,
   }));
 
   const rows = pending.data ?? [];
   return (
     <div className="mc-page">
-      <header className="mb-5">
-        <h1 className="text-2xl font-bold mb-1">Store VAT</h1>
-        <p className="text-sm" style={{ color: 'var(--mc-muted)' }}>
-          Stores that say they are VAT-registered with the GRA, waiting for a person to check the certificate. A withdrawal
-          of an approved store&apos;s VAT is on the store&apos;s own page.
-        </p>
-      </header>
+      {/* The shell's header names the page (REVIEW-F #2087 S4: no second h1). */}
+      <p className="text-sm mb-5" style={{ color: 'var(--mc-muted)' }}>
+        Stores that say they are VAT-registered with the GRA, waiting for a person to check the certificate. A withdrawal
+        of an approved store&apos;s VAT is on the store&apos;s own page.
+      </p>
       {result && <ActionResult outcome={result} onDismiss={() => setResult(null)} />}
       {pending.isError ? (
         <QueryFailed error={pending.error} what="the stores waiting for a VAT decision" onRetry={() => void pending.refetch()} retrying={pending.isFetching} />
