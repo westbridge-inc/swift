@@ -14,8 +14,9 @@
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
-import { haversineDistance } from '../../utils/distance';
+import { admittedHandoverEvidence } from './handover-evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -81,6 +82,7 @@ export function isDeliveryRail(orderType: string): boolean {
 
 export type EvidenceKey =
   | 'handover_not_completed'
+  | 'elapsed_wait'
   | 'rider_at_door'
   | 'customer_contacted'
   | 'door_photo'
@@ -111,12 +113,15 @@ export interface ClaimEvidence {
  * It becomes required when the masked-call rail exists (deferred clause, register).
  */
 export function requiredEvidenceFor(rail: ClaimEvidence['rail']): EvidenceKey[] {
-  if (rail === 'DELIVERY') return ['handover_not_completed', 'rider_at_door', 'door_photo', 'pickup_proof', 'cart_snapshot'];
+  if (rail === 'DELIVERY') return ['handover_not_completed', 'rider_at_door', 'elapsed_wait', 'door_photo', 'pickup_proof', 'cart_snapshot'];
   if (rail === 'COURIER') return ['handover_not_completed', 'rider_at_door', 'door_photo'];
-  return ['rider_at_door'];
+  return ['handover_not_completed', 'rider_at_door', 'elapsed_wait', 'door_photo'];
 }
 
 export interface ClaimForEvidence {
+  handoverEvidenceId?: string | null;
+  customerId?: string;
+  reason?: string;
   id?: string;
   orderId: string;
   riderId: string | null;
@@ -139,10 +144,7 @@ export async function assembleClaimEvidence(
 ): Promise<ClaimEvidence> {
   const order = await db.order.findUnique({
     where: { id: claim.orderId },
-    select: {
-      orderType: true, status: true, deliveredAt: true, deliveryLat: true, deliveryLng: true, courierProofPhotoUrl: true,
-      _count: { select: { items: true } },
-    },
+    include: { _count: { select: { items: true } } },
   });
   if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'The claim names an order that does not exist.');
   const rail: ClaimEvidence['rail'] = order.orderType === 'TAXI' ? 'TAXI' : order.orderType === 'COURIER' ? 'COURIER' : 'DELIVERY';
@@ -152,13 +154,10 @@ export async function assembleClaimEvidence(
     select: { status: true, createdAt: true },
     orderBy: { createdAt: 'asc' },
   });
-  const arrival = logs.find((l) => l.status === 'ARRIVED');
   const pickup = logs.find((l) => l.status === 'PICKED_UP');
-  const distanceKm = order.deliveryLat != null && order.deliveryLng != null
-    ? haversineDistance(claim.gpsLat, claim.gpsLng, order.deliveryLat, order.deliveryLng)
-    : null;
-  const withinRadius = distanceKm != null && distanceKm <= opts.maxHandoverDistanceKm;
-  const dwellMinutes = arrival ? Math.max(0, Math.round((filedAt.getTime() - arrival.createdAt.getTime()) / 60_000)) : null;
+  const admitted = await admittedHandoverEvidence(db, order, claim);
+  const withinRadius = admitted.location && admitted.distanceKm != null
+    && admitted.distanceKm <= opts.maxHandoverDistanceKm;
 
   // The mover's own messages on the order's chat room, before the claim.
   const moverUserId = await moverUserIdOf(db, claim);
@@ -170,14 +169,13 @@ export async function assembleClaimEvidence(
   const item = (key: EvidenceKey, present: boolean, source: string, detail?: Record<string, unknown>): EvidenceItem =>
     ({ key, present, required: required.has(key), source, ...(detail ? { detail } : {}) });
   const items: EvidenceItem[] = [
-    item('handover_not_completed', order.deliveredAt == null && order.status !== 'DELIVERED', 'order row: never delivered, no handover completed', { status: order.status }),
-    // A taxi has no ARRIVED row at the destination (the fare outcome is recorded with the
-    // passenger aboard) and a courier job is closed from custody at the drop-off — on those
-    // rails the artefact is the mover's GPS at the drop-off point. A delivery marks ARRIVED.
-    item('rider_at_door', (rail !== 'DELIVERY' || Boolean(arrival)) && withinRadius, rail === 'DELIVERY' ? 'status log ARRIVED + claim GPS within the handover radius of the delivery point' : 'claim GPS within the handover radius of the drop-off point',
-      { arrivedAt: arrival?.createdAt.toISOString() ?? null, dwellMinutes, distanceM: distanceKm == null ? null : Math.round(distanceKm * 1000) }),
-    item('customer_contacted', contacted > 0, 'in-app chat messages from the mover on this order (a direct phone call leaves no artefact)', { messages: contacted }),
-    item('door_photo', Boolean(claim.photoUrl ?? (rail === 'COURIER' ? order.courierProofPhotoUrl : null)), 'photo taken at the door by the mover app'),
+    item('handover_not_completed', admitted.bound, 'immutable filing bound to the current unpaid failed order', { status: order.status }),
+    item('rider_at_door', withinRadius, 'server-recorded device location at filing; device-reported, not independent event proof',
+      { fixAgeMs: admitted.fixAge, distanceKm: admitted.distanceKm }),
+    item('elapsed_wait', admitted.wait, rail === 'TAXI' ? 'taxi destination wait policy unresolved' : 'stored arrival event and exact elapsed wait where required',
+      { waitedMs: admitted.evidence?.waitedMs ?? null }),
+    item('customer_contacted', contacted > 0, 'in-app chat messages (direct calls may leave no artifact)', { messages: contacted }),
+    item('door_photo', admitted.photo, 'server-issued order/tenant/mover-bound image; provenance does not establish refusal'),
     item('pickup_proof', Boolean(pickup), 'status log PICKED_UP — the rider took custody, having paid the vendor', { pickedUpAt: pickup?.createdAt.toISOString() ?? null }),
     item('cart_snapshot', order._count.items > 0, 'order items as placed', { items: order._count.items }),
   ];
@@ -275,7 +273,7 @@ export async function adjustReserve(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance + input.amount < 0) {
-    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (balance ${balance.toLocaleString()}).`);
+    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (it holds ${balance.toLocaleString()}).`);
   }
   const row = await tx.rlpReserveEntry.create({ data: { countryCode: input.countryCode, kind: 'ADJUSTMENT', amount: input.amount, createdById: input.byId, note: input.note } });
   return { id: row.id, balanceAfter: balance + input.amount };
@@ -461,10 +459,11 @@ export async function sweepLossProtection(
 }
 
 async function noticedToday(prisma: PrismaClient, kind: string, today: string): Promise<boolean> {
-  const already = await prisma.notification.findFirst({
+  // [item 20] Any admin's notice today, looked up by the reserve job: the named capability under the owner wall.
+  const already = await ownerWallSystem('rlp:noticed-today', () => prisma.notification.findFirst({
     where: { data: { path: ['kind'], equals: kind }, createdAt: { gte: new Date(`${today}T00:00:00Z`) } },
     select: { id: true },
-  });
+  }));
   return Boolean(already);
 }
 

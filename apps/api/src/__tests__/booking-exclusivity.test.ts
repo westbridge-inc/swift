@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { BookingService } from '../modules/booking/booking.service';
 import { AppError } from '../utils/errors';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 
 // The founder's question, answered as tests: when one person books a time,
 // nobody else can hold the same time — not by UI politeness but by the live
@@ -55,13 +56,14 @@ async function makeBookableItem() {
   return item;
 }
 
-/** Tomorrow 10:00 UTC — always inside the window, always in the future. */
-function tomorrowAt10(): Date {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + 1);
-  d.setUTCHours(10, 0, 0, 0);
-  return d;
+/** Tomorrow at a Guyana wall-clock hour, as the TRUE instant the slot happens
+ *  (10:00 local is 14:00Z) — inside the 09:00–17:00 window, always in the
+ *  future, whatever zone the host runs in. */
+function tomorrowAt(hour: number): Date {
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  return instantOfGuyanaWallClock(new Date(Date.UTC(y!, m! - 1, d! + 1, hour)));
 }
+const tomorrowAt10 = () => tomorrowAt(10);
 
 beforeAll(async () => { await prisma.$connect(); });
 
@@ -119,12 +121,12 @@ describe('one slot, one person — the exclusivity law', () => {
     await svc.reserveSlot(item.id, a.id, slot);
 
     // The same candidate math the customer slots endpoint runs: generate the
-    // day's aligned starts, subtract non-cancelled bookings.
-    const day = slot.toISOString().slice(0, 10);
-    const [y, m, d] = day.split('-').map(Number);
+    // day's aligned starts on the slot's GUYANA date as true instants,
+    // subtract non-cancelled bookings.
+    const [y, m, d] = guyanaDayKey(slot).split('-').map(Number);
     const candidates: Date[] = [];
     for (let t = 9 * 60; t + 60 <= 17 * 60; t += 60) {
-      candidates.push(new Date(Date.UTC(y!, m! - 1, d!, Math.floor(t / 60), t % 60)));
+      candidates.push(instantOfGuyanaWallClock(new Date(Date.UTC(y!, m! - 1, d!, Math.floor(t / 60), t % 60))));
     }
     const taken = new Set(
       (await prisma.booking.findMany({
@@ -141,8 +143,7 @@ describe('one slot, one person — the exclusivity law', () => {
     const svc = new BookingService(prisma);
     const item = await makeBookableItem();
     const a = await makeCustomer();
-    const late = tomorrowAt10();
-    late.setUTCHours(20, 0, 0, 0); // 20:00 — outside 09:00–17:00
+    const late = tomorrowAt(20); // 20:00 in Guyana — outside 09:00–17:00
     await expect(svc.reserveSlot(item.id, a.id, late)).rejects.toThrow('not offered');
   });
 });

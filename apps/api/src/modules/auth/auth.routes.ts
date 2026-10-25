@@ -1,16 +1,36 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { scanUpload } from '../../lib/malware-scan';
+import { z } from '../../lib/zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
+import { partnerPriceList } from '../country/partner-pricing';
+import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
-import { recordStorageOrphan } from '../../lib/storage-orphans';
+import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
+import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
-import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
+import { consentSurfaceOf } from '../legal/consent-surface';
+import { acceptanceStatus, recordReacceptance } from '../legal/reaccept';
+import { LEGAL_VERSION } from '../legal/legal.routes';
+import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { browserClientOf, clearSessionCookies, refreshCredentialOf, setSessionCookies, withoutTokens } from './browser-session';
+import {
+  browserClientOf,
+  clearSessionCookies,
+  clearSignupContinuationCookie,
+  refreshCredentialOf,
+  setSessionCookies,
+  setSignupContinuationCookie,
+  signupContinuationOf,
+  withoutTokens,
+} from './browser-session';
 import { browserSessionCounter } from '../../plugins/observability';
+import { isPublicLaunchCountry, PUBLIC_LAUNCH_COUNTRY_CODES } from './launch-market';
+import { AGE_CONFIRMATION_MESSAGE, ageConfirmationRequired } from './age-declaration';
 
 const sendOtpSchema = z.object({
   phone: zPhone,
@@ -26,11 +46,15 @@ const registerSchema = z.object({
   firstName: z.string().min(1).max(50),
   lastName: z.string().min(1).max(50),
   email: z.string().email().optional(),
+  registrationProof: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
   role: z.enum(['CUSTOMER', 'MOVER', 'VENDOR']).default('CUSTOMER'),
   countryCode: z.string().length(2).default('GY'),
   /// SWIFT-AUD-D9-03: recorded consent. Optional so shipped clients keep
   /// working; CONSENT_REQUIRED=1 enforces it once updated clients are out.
   acceptTerms: z.boolean().optional(),
+  /// [Owner ruling 15 Oct 2026] the "I am 18 or older" tick. Required from the website and from any
+  /// client that sends it (phone build 12+); builds 9-11 omit it (auth/age-declaration.ts).
+  ageConfirmed: z.boolean().optional(),
 });
 
 const refreshSchema = z.object({
@@ -77,12 +101,22 @@ const otpRateLimit = {
   },
 };
 
+// The storage adapters preserve the supplied filename extension. Avatar
+// authority deliberately accepts only the exact server-issued
+// nanoid-plus-alphanumeric-extension shape, so never let a multipart filename
+// choose that extension. The validated MIME type is the authority here.
+const SELFIE_FILENAME_BY_MIME: Readonly<Record<string, string>> = {
+  'image/jpeg': 'swift-selfie.jpg',
+  'image/png': 'swift-selfie.png',
+  'image/webp': 'swift-selfie.webp',
+};
+
 export async function authRoutes(app: FastifyInstance) {
   const authService = new AuthService(app);
 
   app.post('/send-otp', otpRateLimit, async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
-    const result = await authService.sendOtp(body.phone);
+    const result = await authService.sendOtp(body.phone, request.ip);
     return reply.send({ success: true, data: result });
   });
 
@@ -94,8 +128,16 @@ export async function authRoutes(app: FastifyInstance) {
       ipAddress: request.ip,
       userAgent: request.headers['user-agent'] || '',
     });
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    if (browserClientOf(request) && 'registrationProof' in result && typeof result.registrationProof === 'string') {
+      setSignupContinuationCookie(reply, result.registrationProof);
+      const { registrationProof: _proof, ...safeResult } = result;
+      void _proof;
+      return reply.send({ success: true, data: safeResult });
+    }
     // [A-01 / W-01] A browser client gets its session as HttpOnly cookies and no credential in the body.
     if (browserClientOf(request) && 'tokens' in result && result.tokens) {
+      clearSignupContinuationCookie(reply);
       setSessionCookies(reply, result.tokens);
       return reply.send({ success: true, data: withoutTokens(result) });
     }
@@ -109,8 +151,34 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true, data: { user, sessionId: request.authSessionId, client: browserClientOf(request) } };
   });
 
+  /** [Legal research G2 · R26] GET /legal-acceptance — whether this person must accept the served legal texts
+   *  with a fresh tick (a material change since they last accepted, or never accepted), and what changed in short.
+   *  The website asks at sign-in; phone build 12 will too. Builds 9-11 never call it and are never blocked. */
+  app.get('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
+    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
+    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    return { success: true, data: acceptanceStatus(user) };
+  });
+
+  /** [Legal research G2 · R26] POST /legal-acceptance { version, accept: true } — the fresh tick, recorded in the
+   *  consent ledger for the Terms, the Privacy Policy and the person's partner agreements at the served version. */
+  app.post('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
+    // [ROLE-DOCS · COORD rulings 21 Oct 2026 + 23 Oct] a same-day second stamp carries a suffix (2026-10-22.1)
+    const body = z.object({ version: z.string().regex(/^\d{4}-\d{2}-\d{2}(\.\d{1,3})?$/), accept: z.literal(true) }).parse(request.body);
+    if (body.version !== LEGAL_VERSION) {
+      throw new AppError(409, 'LEGAL_VERSION_CHANGED', 'The Terms changed again while you were reading. Please read the new version.', { currentVersion: LEGAL_VERSION });
+    }
+    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
+    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    await recordReacceptance(app.prisma, { userId: request.user.userId, roles: user.roles, hadAccepted: user.tosVersion !== null, surface: consentSurfaceOf(request), ip: request.ip });
+    const after = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
+    return { success: true, data: acceptanceStatus(after ?? user) };
+  });
+
   app.post('/register', authRateLimit, async (request, reply) => {
     const body = registerSchema.parse(request.body);
+    // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only — checked before the signup proof is spent.
+    assertNameNotReserved(body.firstName, body.phone);
     // Read at request time so the flag flips without a restart (tsx watch) and
     // tests can exercise both modes.
     // [REPORT-021 F-021-05] Fail CLOSED: consent is required unless the
@@ -119,11 +187,24 @@ export async function authRoutes(app: FastifyInstance) {
     if (process.env['CONSENT_REQUIRED'] !== '0' && body.acceptTerms !== true) {
       throw new AppError(400, 'CONSENT_REQUIRED', 'You must accept the Terms of Service and Privacy Policy to create an account');
     }
+    // [Owner ruling 15 Oct 2026] refused before the one-use signup proof is spent, so ticking and retrying works.
+    if (ageConfirmationRequired(request, body) && body.ageConfirmed !== true) {
+      throw new AppError(400, 'AGE_CONFIRMATION_REQUIRED', AGE_CONFIRMATION_MESSAGE);
+    }
+    const registrationProof = signupContinuationOf(request);
+    if (!registrationProof) {
+      throw new AppError(403, 'REGISTRATION_PROOF_REQUIRED', 'Verify your phone again to continue registration');
+    }
+    if (browserClientOf(request)) clearSignupContinuationCookie(reply);
     const result = await authService.register({
       ...body,
+      registrationProof,
+      // [F-021-21] The Terms and Privacy consent is recorded on the surface it was given on.
+      surface: consentSurfaceOf(request),
       deviceId: (request.headers['x-device-id'] as string) || null,
       ipAddress: request.ip || null,
     });
+    reply.header('Cache-Control', 'no-store, max-age=0');
     // [W-01] Registration issues a session exactly as verify-otp does, so a
     // browser must receive it exactly as verify-otp gives it: HttpOnly cookies
     // and no credential in the body. Without this the web app's signup handed
@@ -207,7 +288,8 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/selfie', { preHandler: [app.authenticate], ...authRateLimit }, async (request, reply) => {
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a selfie image');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+    const canonicalFilename = SELFIE_FILENAME_BY_MIME[file.mimetype];
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype) || !canonicalFilename) {
       throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
     }
 
@@ -216,9 +298,11 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    const { url } = await getStorageProvider().upload({
+    await scanUpload(buffer, { surface: 'avatar', log: request.log });
+    const storage = getStorageProvider();
+    const { url } = await storage.upload({
       buffer,
-      filename: file.filename,
+      filename: canonicalFilename,
       mimeType: file.mimetype,
       folder: `avatars/${request.user.userId}`,
     });
@@ -232,39 +316,77 @@ export async function authRoutes(app: FastifyInstance) {
     // [F-026-02] Capture the PRIOR pointer before it is overwritten: the old
     // selfie object must be purged (or censused) — a replacement upload used
     // to strand it with no discoverable key.
-    const prior = await app.prisma.user.findUnique({
-      where: { id: request.user.userId },
-      select: { avatar: true, tenantId: true },
-    });
-    let selfieWrite: { count: number };
+    let observedTenant: string | undefined;
+    let swap: {
+      count: number;
+      cleanupOrphanId: string | null;
+    };
     try {
-      selfieWrite = await app.prisma.user.updateMany({
-        where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
-        data: { avatar: url, selfieCapturedAt: new Date() },
+      swap = await app.prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${request.user.userId}
+          FOR UPDATE /* signup-selfie-pointer-authority */
+        `;
+        if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+        const prior = await tx.user.findUniqueOrThrow({
+          where: { id: request.user.userId },
+          select: { avatar: true, tenantId: true },
+        });
+        observedTenant = prior.tenantId;
+        const selfieWrite = await tx.user.updateMany({
+          where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
+          data: { avatar: url, selfieCapturedAt: new Date() },
+        });
+        if (selfieWrite.count === 0) {
+          const orphan = await queueStorageOrphan(tx, {
+            key: url,
+            reason: isOwnedAvatarKey(url, request.user.userId)
+              ? 'SELFIE_UNWIND_DELETE_PENDING'
+              : 'SELFIE_UNWIND_AUTHORITY_UNPROVEN',
+            userId: request.user.userId,
+            tenantId: prior.tenantId,
+          });
+          return { count: 0, cleanupOrphanId: orphan.id };
+        }
+        const oldKey = prior.avatar;
+        if (!oldKey || oldKey === url) return { count: 1, cleanupOrphanId: null };
+        const orphan = await queueStorageOrphan(tx, {
+          key: oldKey,
+          reason: isOwnedAvatarKey(oldKey, request.user.userId)
+            ? 'REPLACED_SELFIE_DELETE_PENDING'
+            : 'REPLACED_SELFIE_AUTHORITY_UNPROVEN',
+          userId: request.user.userId,
+          tenantId: prior.tenantId,
+        });
+        return { count: 1, cleanupOrphanId: orphan.id };
       });
     } catch (err) {
-      await getStorageProvider().delete(url).catch(async (cleanupErr) => {
-        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after failed write also failed — orphaned key');
-        // [F-026-02] A log line is not a census — the sweep needs the key.
-        await recordStorageOrphan(app.prisma, app.log, { key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
+      // A transaction error is ambiguous at the client boundary. Queue the
+      // just-uploaded object; the retry authority will delete it only if no
+      // committed User pointer references it. If the DB is also unavailable,
+      // preserve the original error and emit the last-resort census failure.
+      await queueStorageOrphan(app.prisma, {
+        key: url,
+        reason: isOwnedAvatarKey(url, request.user.userId)
+          ? 'SELFIE_UNWIND_DELETE_FAILED'
+          : 'SELFIE_UNWIND_AUTHORITY_UNPROVEN',
+        userId: request.user.userId,
+        tenantId: observedTenant,
+      }).then(async (orphan) => {
+        await retryStorageOrphan(app.prisma, storage, app.log, orphan.id);
+      }).catch(async (cleanupErr) => {
+        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup census failed after pointer transaction error');
+        await recordStorageOrphan(app.prisma, app.log, {
+          key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: observedTenant,
+        });
       });
       throw err;
     }
-    if (selfieWrite.count === 0) {
-      await getStorageProvider().delete(url).catch(async (cleanupErr) => {
-        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after inactive-account refusal failed — orphaned key');
-        await recordStorageOrphan(app.prisma, app.log, { key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
-      });
-      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+    if (swap.cleanupOrphanId) {
+      await retryStorageOrphan(app.prisma, storage, app.log, swap.cleanupOrphanId);
     }
-    // [F-026-02] The write landed — purge the replaced selfie object. Same
-    // legacy-URL guard as account deletion: absolute URLs aren't our keys.
-    const oldKey = prior?.avatar;
-    if (oldKey && oldKey !== url && !oldKey.startsWith('http://') && !oldKey.startsWith('https://')) {
-      await getStorageProvider().delete(oldKey).catch(async (purgeErr) => {
-        app.log.error({ err: purgeErr, userId: request.user.userId, key: oldKey }, '[F-026-02] replaced selfie purge failed — censused');
-        await recordStorageOrphan(app.prisma, app.log, { key: oldKey, reason: 'REPLACED_SELFIE_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
-      });
+    if (swap.count === 0) {
+      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
     }
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
@@ -296,23 +418,46 @@ export async function authRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'] || '',
       },
     );
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    // [L04 · MASTER-041] A browser receives its session exactly as SMS-code
+    // sign-in gives it: HttpOnly cookies and no credential in the body.
+    if (browserClientOf(request)) {
+      clearSignupContinuationCookie(reply);
+      setSessionCookies(reply, result.tokens);
+      return reply.send({ success: true, data: withoutTokens(result) });
+    }
     return reply.send({ success: true, data: result });
   });
 
   app.post('/password/set', { preHandler: [app.authenticate] }, async (request, reply) => {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is never set or changed.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
+    // [L04 · MASTER-003] A password is a permanent second way in. A session
+    // alone (stolen, or left signed in) must not be able to add or change one:
+    // the same fresh step-up a money surface needs — a code verified on THIS
+    // session within its window — gates it. 403 STEP_UP_REQUIRED tells the
+    // client how to earn it. This is the repo's one step-up, not a second.
+    await requireStepUp(app, request);
     const body = setPasswordSchema.parse(request.body);
     const sessionId = request.authSessionId;
     if (!sessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
-    await authService.setPassword(request.user.userId, sessionId, body.password);
-    return reply.send({ success: true });
+    const tokens = await authService.setPassword(request.user.userId, sessionId, body.password);
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    // The old credentials of this session no longer work; hand over the new pair.
+    if (browserClientOf(request)) {
+      setSessionCookies(reply, tokens);
+      return reply.send({ success: true, data: { session: 'cookie' } });
+    }
+    return reply.send({ success: true, data: { tokens } });
   });
 
-  // Reset request = just the normal OTP send; reset proves ownership again
+  // Reset request = the normal OTP send, for the reset purpose only: this code
+  // resets a password and cannot sign in [L04 · AUTH-2]
   app.post('/password/reset-request', otpRateLimit, async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
-    const result = await authService.sendOtp(body.phone);
+    const result = await authService.sendOtp(body.phone, request.ip, 'password-reset');
     return reply.send({ success: true, data: result });
   });
 
@@ -325,16 +470,17 @@ export async function authRoutes(app: FastifyInstance) {
   // ── Country picker (public — used before signup) ───────────────────────
 
   app.get('/countries', async (_request, reply) => {
-    // Public picker: list ALL Caribbean markets, live ones first. Live (isActive) →
-    // full signup; others show "coming soon"/waitlist. Only picker-safe fields are
-    // exposed (no tiers/checklists/cash-rules — OWASP API3). Dial codes are static
-    // reference data kept here rather than as a DB column (no migration).
+    // V1 is Guyana-only. Future CountryConfig rows remain available to admin
+    // policy tooling, but an inactive/future market must never become a signup
+    // option merely because its row exists. Only picker-safe fields are exposed
+    // (no tiers/checklists/cash-rules — OWASP API3).
     const DIAL_CODES: Record<string, string> = {
       GY: '+592', TT: '+1868', JM: '+1876', BB: '+1246', BS: '+1242', SR: '+597',
       BZ: '+501', GD: '+1473', LC: '+1758', AG: '+1268', VC: '+1784', KN: '+1869', DM: '+1767',
     };
     const countries = await app.prisma.countryConfig.findMany({
-      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+      where: { code: { in: [...PUBLIC_LAUNCH_COUNTRY_CODES] }, isActive: true },
+      orderBy: { name: 'asc' },
       select: { code: true, name: true, currencyCode: true, currencySymbol: true, isActive: true },
     });
     return reply.send({
@@ -346,15 +492,23 @@ export async function authRoutes(app: FastifyInstance) {
   /** Public price list — SaaS sells with the price on the door: partners see
    *  "14 days free, then X/week" BEFORE committing. Customers never pay, so
    *  nothing here concerns them. Weekly tiers only; checklists/cash-rules
-   *  stay internal (OWASP API3). */
+   *  stay internal (OWASP API3). Every rate is resolved by `partnerRateFor`,
+   *  the function signup and the weekly re-tier bill through; a market that
+   *  cannot be priced is an error, never a zero or a partial list. Every
+   *  store pays its own tier by its own catalogue — there is no multi-store
+   *  pricing (owner, 13 Oct 2026) — and a vehicle Swift does not take on yet
+   *  is listed with `offered: false`, so no client shows it a price. */
   app.get('/pricing', async (request, reply) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
+    const countryCode = country.toUpperCase();
+    if (!isPublicLaunchCountry(countryCode)) {
+      throw new AppError(404, 'COUNTRY_NOT_FOUND', 'Swift is currently available in Guyana only');
+    }
     const config = await app.prisma.countryConfig.findUnique({
-      where: { code: country.toUpperCase() },
+      where: { code: countryCode },
       select: { code: true, currencyCode: true, currencySymbol: true, subscriptionTiers: true, isActive: true },
     });
-    if (!config) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'No such market');
-    const tiers = (config.subscriptionTiers ?? {}) as Record<string, number>;
+    if (!config || !config.isActive) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'Swift is currently available in Guyana only');
     return reply.send({
       success: true,
       data: {
@@ -363,27 +517,10 @@ export async function authRoutes(app: FastifyInstance) {
         currencySymbol: config.currencySymbol,
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
-        weekly: {
-          // `mover` = STANDARD band (bike, motorbike, car, wagon car);
-          // `moverHeavy` = HEAVY band (buses, canters, box trucks). A market
-          // that has not set a heavy rate reports null, and every surface
-          // renders one mover price — never a free or a guessed one.
-          mover: tiers['mover'] ?? null,
-          moverHeavy: tiers['moverHeavy'] ?? null,
-          serviceVendor: tiers['serviceVendor'] ?? null,
-          smallVendor: tiers['smallVendor'] ?? null,
-          largeVendor: tiers['largeVendor'] ?? null,
-          departmentVendor: tiers['departmentVendor'] ?? null,
-        },
-        // The franchise is a discount on each location's own rate, not a
-        // separate price, so it is quoted as the rule rather than a number.
-        franchise:
-          tiers['franchiseMinLocations'] != null && tiers['franchiseDiscountPct'] != null
-            ? {
-                minLocations: tiers['franchiseMinLocations'],
-                discountPct: tiers['franchiseDiscountPct'],
-              }
-            : null,
+        ...partnerPriceList(config.subscriptionTiers),
+        // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
+        // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
+        feeTerms: weeklyFeeTerms(),
       },
     });
   });

@@ -20,6 +20,7 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
 grantSuiteCapability('unscoped-mutation');
@@ -88,6 +89,7 @@ function failNextTransactionAfterAdEventCreate(failure: Error | string) {
 }
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   await prisma.$connect();
   httpApp = Fastify({ logger: false });
   registerErrorHandler(httpApp);
@@ -101,6 +103,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await prisma.adEvent.deleteMany({ where: { campaignId: { in: campaignIds } } });
   await prisma.adEventDedupe.deleteMany({ where: {} }).catch(() => {});
   await prisma.adFreqCounter.deleteMany({ where: {} }).catch(() => {});
@@ -138,7 +141,7 @@ async function makePlacement(base: string, freqCap?: number, tenantId = tenant) 
 async function makeHttpUser(sessionCount = 1) {
   const user = await httpApp.prisma.user.create({
     data: {
-      phone: `+592${Math.floor(1_000_000 + Math.random() * 8_999_999)}`,
+      phone: testPhone(),
       firstName: 'Ad', lastName: `Principal${nanoid(4)}`,
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
     },

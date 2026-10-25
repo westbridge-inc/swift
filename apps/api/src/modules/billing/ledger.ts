@@ -20,6 +20,8 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CLEARING_MMG: { name: 'MMG clearing — confirmed, not yet bank-settled', type: 'ASSET' },
   CLEARING_CARD: { name: 'Card provider clearing', type: 'ASSET' },
   BANK_LOCAL: { name: 'Local bank deposits', type: 'ASSET' },
+  // [owner Q-1654-BOOKS A] MMG returned money that had already paid for a week: that week's fee is owed again.
+  FEE_RECEIVABLE: { name: 'Weekly fees a partner owes again (MMG returned the money that paid them; subledger = subscriptionId)', type: 'ASSET' },
   WALLET_LIABILITY: { name: 'Payer fee-wallet balances (subledger = subscriptionId)', type: 'LIABILITY' },
   DEFERRED_REVENUE: { name: 'Paid-through service not yet delivered', type: 'LIABILITY' },
   FEE_REVENUE: { name: 'Earned weekly fees', type: 'REVENUE' },
@@ -28,6 +30,7 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CHARGEBACK_RESERVE: { name: 'Card dispute reserve', type: 'LIABILITY' },
   CHARGEBACK_LOSS: { name: 'Lost chargebacks', type: 'EXPENSE' },
   SUSPENSE_LIABILITY: { name: 'Unmatched money held — never rejected (SO-6)', type: 'LIABILITY' },
+  REFUND_PAYABLE: { name: 'Fee credit set aside for a refund, not yet paid back (subledger = subscriptionId)', type: 'LIABILITY' },
   FX_VARIANCE: { name: 'Settlement-vs-conversion FX differences', type: 'REVENUE' },
   OPENING_BALANCES: { name: 'Ledger-epoch opening balances', type: 'CONTRA' },
 };
@@ -42,11 +45,45 @@ export interface LedgerPosting {
 
 const cents = (n: number) => Math.round(n * 100);
 
+/** One posting's entries as a comparable multiset: account, subledger, and
+ *  each side in integer cents (the description is free text, never compared). */
+function entryKeys(entries: ReadonlyArray<{ account: string; subledgerId?: string | null; debit?: unknown; credit?: unknown }>): string {
+  return entries
+    .map((e) => `${e.account}|${e.subledgerId ?? ''}|${cents(Number(e.debit ?? 0))}|${cents(Number(e.credit ?? 0))}`)
+    .sort()
+    .join('\n');
+}
+
+/** [row 163 · DB-04] A posting already stored under this key: the same
+ *  entries are a replay (null, metered); anything else is a different money
+ *  event under a used key and is refused, never swallowed. */
+async function replayOf(db: Db, input: { idempotencyKey: string; entries: LedgerPosting[] }): Promise<null | 'ABSENT'> {
+  const stored = await db.ledgerTransaction.findUnique({
+    where: { idempotencyKey: input.idempotencyKey },
+    select: { entries: { select: { accountCode: true, subledgerId: true, debit: true, credit: true } } },
+  });
+  if (!stored) return 'ABSENT';
+  const storedKeys = entryKeys(stored.entries.map((e) => ({ account: e.accountCode, subledgerId: e.subledgerId, debit: e.debit, credit: e.credit })));
+  if (storedKeys !== entryKeys(input.entries)) {
+    throw new Error(`LEDGER_REPLAY_MISMATCH: ${input.idempotencyKey} is already posted with different entries`);
+  }
+  log().info({ idempotencyKey: input.idempotencyKey }, 'ledger: duplicate posting is a replay (no-op)');
+  return null;
+}
+
 /**
  * Post one balanced transaction. Call INSIDE the same database transaction as
  * the money mutation it describes — atomicity is the whole point. Returns null
- * on idempotency replay (already posted — swallowed, metered). Throws on an
- * unbalanced or malformed posting: that is a code bug and must never ship.
+ * on idempotency replay (the same entries already posted under the key —
+ * metered no-op). Throws on an unbalanced or malformed posting (a code bug
+ * that must never ship) and on a different posting under a used key.
+ *
+ * [row 163 · DB-04] The replay is decided by READING the stored posting
+ * first, never by catching the unique violation: in PostgreSQL that error
+ * aborts the caller's transaction, so swallowing it broke the rest of the
+ * money mutation. A violation can still happen when two writers race for one
+ * key; inside a transaction it is rethrown (that transaction is dead and must
+ * fail and retry), outside one the stored posting is compared.
  */
 export async function postLedger(
   db: Db,
@@ -73,6 +110,7 @@ export async function postLedger(
     throw new Error(`LEDGER_UNBALANCED: ${debits} vs ${credits} cents (${input.idempotencyKey})`);
   }
 
+  if ((await replayOf(db, input)) === null) return null;
   try {
     return await db.ledgerTransaction.create({
       data: {
@@ -91,9 +129,9 @@ export async function postLedger(
       select: { id: true },
     });
   } catch (error) {
-    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-      log().info({ idempotencyKey: input.idempotencyKey }, 'ledger: duplicate posting swallowed');
-      return null;
+    // A root client is no transaction: the racing writer's posting is stored, compare it.
+    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002' && '$transaction' in db) {
+      if ((await replayOf(db, input)) === null) return null;
     }
     throw error;
   }
@@ -107,10 +145,57 @@ export async function postLedger(
 // ---------------------------------------------------------------------------
 
 /** Money arrived from outside and credited a payer's wallet. */
-export function topupPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+export function topupPostings(subscriptionId: string, amount: number, rail: 'EXTERNAL' | 'CARD' = 'EXTERNAL'): LedgerPosting[] {
   return [
-    { account: 'CLEARING_MMG', debit: amount },
+    { account: rail === 'CARD' ? 'CLEARING_CARD' : 'CLEARING_MMG', debit: amount },
     { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** Unused wallet credit set aside for a refund: it is no longer the payer's
+ *  to spend on fees, and is owed back to them until it is paid or released. */
+export function refundSetAsidePostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** A set-aside refund paid back outside Swift. Swift never moves the money: an
+ *  admin pays it and records the reference, so it leaves the account it would
+ *  have come from (MMG clearing, or the bank). */
+export function refundPaidPostings(subscriptionId: string, amount: number, method: 'MMG' | 'BANK_TRANSFER'): LedgerPosting[] {
+  return [
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
+    { account: method === 'BANK_TRANSFER' ? 'BANK_LOCAL' : 'CLEARING_MMG', credit: amount },
+  ];
+}
+
+/** A set-aside refund that could not be paid goes back to the payer's wallet. */
+export function refundReleasePostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** [MMG REVERSAL] MMG returned a weekly-fee payment to the payer: the exact
+ *  reverse of its MMG top-up — the wallet owes the payer less, and the MMG
+ *  clearing account holds less. */
+export function walletReversalPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
+  ];
+}
+
+/** [owner Q-1654-BOOKS A] MMG returned a payment whose money had already paid
+ *  for a week ("returned, not booked"): the partner owes that week's fee again,
+ *  and the MMG clearing account holds less. */
+export function returnedNotBookedPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'FEE_RECEIVABLE', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
   ];
 }
 

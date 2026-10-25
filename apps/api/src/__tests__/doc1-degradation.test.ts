@@ -9,6 +9,7 @@
  * key service is a precondition for intake and approvals; without it the door is closed.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -54,10 +55,11 @@ async function owner(n: number) {
     phone: `+59264${NUM}${n}`, firstName: 'Deg', lastName: `Rade${n}`, activeRole: 'VENDOR_OWNER', roles: ['VENDOR_OWNER'], countryCode: 'GY', avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 const submit = (service: VerificationService, userId: string, docType = 'business_registration') =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const runOf = (docId: string) => system(() => app.prisma.extractionRun.findFirstOrThrow({ where: { submissionId: docId }, include: { fields: true } }));
 const docOf = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { state: true, status: true, record: { select: { status: true } } } }));
 
@@ -115,13 +117,14 @@ describe('[DOC-1 P21] the ladder', () => {
 
   it('the breaker: more than 10% schema violations over the last 100 runs disables the model leg for that type — manual keying, no fields taken, admins told once', async () => {
     const u = await owner(3);
-    const code = registryCode('GY', 'tin_certificate');
+    // [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the restaurant licence is the second BUSINESS type here
+    const code = registryCode('GY', 'gra_restaurant_licence');
     const profileCode = `BREAKER_${RUN}`;
     await system(() => app.prisma.docType.update({ where: { code }, data: { extractionProfile: profileCode } }));
     // declare the field the processor returns, so a NON-degraded run would store it — the degraded run must not
     await system(() => app.prisma.docField.deleteMany({ where: { docTypeCode: code, fieldCode: 'doc_number' } }));
     await system(() => app.prisma.docField.create({ data: { docTypeCode: code, fieldCode: 'doc_number', dataType: 'text', isRequired: false, isPii: true, isBlindIndexed: false, displayOrder: 1 } }));
-    const seed = await submit(svc(new ApprovingKyc()), u, 'tin_certificate'); // establishes a run on the profile
+    const seed = await submit(svc(new ApprovingKyc()), u, 'gra_restaurant_licence'); // establishes a run on the profile
     const healthy = await runOf(seed.id);
     expect(healthy.fields.map((f) => f.fieldCode).filter((c) => c === 'doc_number')).toEqual(['doc_number']) // the suite's own declared field; the registry seeds the type's others (P4-1);
     expect(healthy.fields.find((f) => f.fieldCode === 'doc_number')!.valueCt).not.toBeNull(); // the healthy path stores the value (encrypted)
@@ -131,7 +134,7 @@ describe('[DOC-1 P21] the ladder', () => {
     })) }));
     expect((await system(() => l3BreakerOpen(app.prisma, profileCode))).open).toBe(true);
     const u2 = await owner(4);
-    const doc = await submit(svc(new ApprovingKyc()), u2, 'tin_certificate');
+    const doc = await submit(svc(new ApprovingKyc()), u2, 'gra_restaurant_licence');
     expect(await docOf(doc.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
     const run = await runOf(doc.id);
     expect(run).toMatchObject({ outcome: 'FAILED', errorClass: L3_DISABLED });
@@ -139,7 +142,7 @@ describe('[DOC-1 P21] the ladder', () => {
     const pages = () => system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, body: { contains: profileCode } } }));
     expect(await pages()).toBeGreaterThanOrEqual(1);
     const before = await pages();
-    await submit(svc(new ApprovingKyc()), u2, 'tin_certificate').catch(() => undefined);
+    await submit(svc(new ApprovingKyc()), u2, 'gra_restaurant_licence').catch(() => undefined);
     expect(await pages()).toBe(before);
     await system(() => app.prisma.docType.update({ where: { code }, data: { extractionProfile: 'UNPROFILED' } }));
     await system(() => app.prisma.docField.deleteMany({ where: { docTypeCode: code, fieldCode: 'doc_number' } }));

@@ -41,6 +41,9 @@ async function purgeFixtures() {
     where: { OR: [{ customerId: { in: ids } }, { rider: { userId: { in: ids } } }] },
     select: { id: true },
   });
+  // [ALG-01] Riders tied at one spot make the fairness band record decisions
+  // about these orders; they outlive the orders unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orders.map((o) => o.id) } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orders.map((o) => o.id) } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
@@ -297,6 +300,142 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect(mine).toHaveLength(1);
   });
 
+  it('an old empty-ring worker cannot exhaust or delete a newer delivery generation', async () => {
+    await parkAllRiders();
+    const order = await makeOrder();
+    const internal = dispatch as any;
+    const originalAcquire = internal.acquireExhaustLock.bind(dispatch);
+    let entered!: () => void;
+    let resume!: () => void;
+    const atExhaustion = new Promise<void>((resolve) => { entered = resolve; });
+    const released = new Promise<void>((resolve) => { resume = resolve; });
+    const lockSpy = vi.spyOn(internal, 'acquireExhaustLock').mockImplementationOnce(async (...args: any[]) => {
+      entered();
+      await released;
+      return originalAcquire(...args);
+    });
+
+    try {
+      const oldWorker = dispatch.dispatchOrder(order.id);
+      await atExhaustion;
+
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'VENDOR_DELIVERY', fulfillmentModeVersion: { increment: 1 } },
+      });
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: { increment: 1 } },
+      });
+      expect(await dispatch.prepareForPlatformDelivery(order.id, 2)).toBe(true);
+
+      const currentRider = await makeRider();
+      const currentAttempt = 'new-generation-card~fv2';
+      const currentSearch = await app.prisma.dispatchSearch.create({
+        data: {
+          subjectId: order.id,
+          subjectType: 'ORDER',
+          status: 'SEARCHING',
+          vertical: 'DELIVERY',
+          radiusKm: 5,
+          deliveryAuthorityVersion: 2,
+        },
+      });
+      await app.redis.set(offerKey(order.id), `${currentRider.riderId}:${currentAttempt}`, 'EX', 40);
+      await app.redis.set(moverOfferKey(currentRider.riderId), `${order.id}:${currentAttempt}`, 'EX', 40);
+      await app.redis.sadd(`dispatch:declined:${order.id}:fv2`, 'already-declined');
+      await app.redis.set(`dispatch:round:${order.id}:fv2`, '2', 'EX', 3600);
+      await app.redis.set(`dispatch:exhausts:${order.id}:fv2`, '2', 'EX', 3600);
+
+      resume();
+      expect(await oldWorker).toEqual({ offered: currentRider.riderId });
+      expect(await app.redis.get(offerKey(order.id))).toBe(`${currentRider.riderId}:${currentAttempt}`);
+      expect(await app.redis.get(moverOfferKey(currentRider.riderId))).toBe(`${order.id}:${currentAttempt}`);
+      expect(await app.redis.smembers(`dispatch:declined:${order.id}:fv2`)).toEqual(['already-declined']);
+      expect(await app.redis.get(`dispatch:round:${order.id}:fv2`)).toBe('2');
+      expect(await app.redis.get(`dispatch:exhausts:${order.id}:fv2`)).toBe('2');
+      expect((await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: currentSearch.id } })).status).toBe('SEARCHING');
+      const notices = await app.prisma.notification.findMany({ where: { userId: customerId } });
+      expect(notices.some((notice) => {
+        const data = notice.data as { orderId?: string; kind?: string } | null;
+        return data?.orderId === order.id
+          && (data.kind === 'dispatch_exhausted' || data.kind === 'dispatch_retrying');
+      })).toBe(false);
+
+      const claimed = await dispatch.acceptOffer(order.id, currentRider.userId, undefined, currentAttempt);
+      expect(claimed.riderId).toBe(currentRider.riderId);
+      expect(claimed.fulfillmentModeVersion).toBe(2);
+    } finally {
+      resume();
+      lockSpy.mockRestore();
+      await app.redis.del(
+        offerKey(order.id),
+        `dispatch:round:${order.id}:fv2`,
+        `dispatch:declined:${order.id}:fv2`,
+        `dispatch:exhausts:${order.id}:fv2`,
+        `dispatch:generation-init:${order.id}:fv2`,
+        `dispatch:exhaust-lock:${order.id}`,
+      );
+    }
+  });
+
+  it.each(['EXHAUSTED', 'ASSIGNED', 'CANCELLED'] as const)(
+    'a stale generation-zero journal worker cannot rewrite or reopen a generation-two %s row',
+    async (status) => {
+      const order = await makeOrder();
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentModeVersion: 2 },
+      });
+      const later = await app.prisma.dispatchSearch.create({
+        data: {
+          subjectId: order.id,
+          subjectType: 'ORDER',
+          status,
+          vertical: 'DELIVERY',
+          radiusKm: 5,
+          deliveryAuthorityVersion: 2,
+          ...(status === 'EXHAUSTED' ? { exhaustedAt: new Date() } : {}),
+        },
+      });
+
+      await (dispatch as any).journalOpenSearch(
+        { id: order.id, orderType: order.orderType, fulfillmentModeVersion: 0 },
+        0,
+        5,
+      );
+
+      const after = await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: later.id } });
+      expect(after.status).toBe(status);
+      expect(after.resolution).toBeNull();
+      expect(await app.prisma.dispatchSearch.count({
+        where: {
+          subjectId: order.id,
+          status: 'SEARCHING',
+          OR: [{ deliveryAuthorityVersion: 0 }, { deliveryAuthorityVersion: null }],
+        },
+      })).toBe(0);
+    },
+  );
+
+  it('serializes concurrent journal openers into one generation-zero search row', async () => {
+    const order = await makeOrder();
+    const snapshot = { id: order.id, orderType: order.orderType, fulfillmentModeVersion: 0 };
+
+    await Promise.all([
+      (dispatch as any).journalOpenSearch(snapshot, 0, 5),
+      (dispatch as any).journalOpenSearch(snapshot, 1, 8),
+    ]);
+
+    expect(await app.prisma.dispatchSearch.count({
+      where: {
+        subjectId: order.id,
+        status: 'SEARCHING',
+        OR: [{ deliveryAuthorityVersion: 0 }, { deliveryAuthorityVersion: null }],
+      },
+    })).toBe(1);
+  });
+
   it('a timeout with NO evidence row spares the acceptance rate — absence is not proof of delivery [REPORT-014 F-014-10]', async () => {
     await parkAllRiders();
     const r = await makeRider();
@@ -313,8 +452,14 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
 
     const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
     expect(Number(after.acceptanceRate)).toBe(100); // spared — no render proof
-    // The cascade still advanced honestly.
-    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, r.riderId)).toBe(1);
+    // The sole candidate timed out: exhaustion retires this wave's decline
+    // set, but retains the attempt outcome and terminal search evidence.
+    expect(await app.redis.get(offerKey(order.id))).toBeNull();
+    expect(await app.redis.get(moverOfferKey(r.riderId))).toBeNull();
+    expect(await app.redis.smembers(`dispatch:declined:${order.id}`)).toEqual([]);
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe('1');
+    expect(await app.redis.zscore(`dispatch:offer-expiries:${r.riderId}`, `${order.id}:${job.attemptId}`)).not.toBeNull();
+    expect(await app.prisma.dispatchSearch.count({ where: { subjectId: order.id, status: 'EXHAUSTED' } })).toBe(1);
   });
 
   it('a release racing the publish tail retires the attempt: no ghost card, no stale timeout, no unfair miss [REPORT-014 F-014-10]', async () => {
@@ -401,13 +546,50 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
 
     // B grabs O1 off the open board (bypassing A's offer): retirement must
     // retire A's pair — and must NOT touch B's reverse pointer for O2.
-    await dispatch.retireAfterAssignment(o1.id, b.riderId);
+    await app.prisma.order.update({
+      where: { id: o1.id },
+      data: { riderId: b.riderId, status: 'RIDER_ASSIGNED' },
+    });
+    await dispatch.retireAfterAssignment(o1.id, b.riderId, 0, 0);
 
     expect(await app.redis.get(offerKey(o1.id))).toBeNull();          // O1 offer gone
     expect(await app.redis.get(moverOfferKey(a.riderId))).toBeNull(); // A's pointer gone (was dangling before)
     expect((await app.redis.get(moverOfferKey(b.riderId)))!.split(':')[0]).toBe(o2.id); // B's O2 pointer INTACT
     expect((await app.redis.get(offerKey(o2.id)))!.split(':')[0]).toBe(b.riderId);      // O2 offer INTACT
   });
+
+  it.each([0, 2])(
+    'a delayed assignment cleanup cannot delete a post-handback offer in generation %i',
+    async (generation) => {
+      await parkAllRiders();
+      const prior = await makeRider();
+      const next = await makeRider({ lat: PICKUP.lat + 0.01 });
+      const order = await makeOrder();
+
+      // The first assignment committed, then was handed back before its
+      // post-commit Redis cleanup resumed.
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { riderId: prior.riderId, status: 'RIDER_ASSIGNED', fulfillmentModeVersion: generation },
+      });
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { riderId: null, status: 'READY_FOR_PICKUP' },
+      });
+
+      const attempt = generation === 0 ? 'same-generation-reoffer' : `new-generation-reoffer~fv${generation}`;
+      await app.redis.set(offerKey(order.id), `${next.riderId}:${attempt}`, 'EX', 40);
+      await app.redis.set(moverOfferKey(next.riderId), `${order.id}:${attempt}`, 'EX', 40);
+
+      try {
+        await dispatch.retireAfterAssignment(order.id, prior.riderId, generation, 0);
+        expect(await app.redis.get(offerKey(order.id))).toBe(`${next.riderId}:${attempt}`);
+        expect(await app.redis.get(moverOfferKey(next.riderId))).toBe(`${order.id}:${attempt}`);
+      } finally {
+        await app.redis.del(offerKey(order.id), moverOfferKey(next.riderId));
+      }
+    },
+  );
 
   it('a redispatch scheduling failure releases the exhaust lock so the queue retry can finish the job [REPORT-021 F-021-03]', async () => {
     await parkAllRiders();
@@ -445,7 +627,182 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
 
     expect(await app.redis.get(offerKey(order.id))).toBeNull();
     expect(await app.redis.get(moverOfferKey(a.riderId))).toBeNull();
-    const declined = await app.redis.smembers(`dispatch:declined:${order.id}`);
-    expect(declined).toContain(a.riderId);
+    // A legacy timeout also exhausts the sole-candidate wave and clears its
+    // exclusions; durable expiry evidence still records the bare attempt.
+    expect(await app.redis.smembers(`dispatch:declined:${order.id}`)).toEqual([]);
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe('1');
+    expect(await app.redis.zscore(`dispatch:offer-expiries:${a.riderId}`, `${order.id}:`)).not.toBeNull();
+    expect(await app.prisma.dispatchSearch.count({ where: { subjectId: order.id, status: 'EXHAUSTED' } })).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [AX323 RR2-1] An acknowledgment is evidence about ONE attempt, and the offer
+// timeout reads it as proof that the card reached the mover. A stale decline or
+// accept (its own attempt lapsed, the same order re-offered to the same mover
+// since) must stamp nothing: the successor may never have reached the screen,
+// and its lapse must not cost the mover acceptance rate. A current action
+// stamps exactly the attempt it consumed.
+// ---------------------------------------------------------------------------
+describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', () => {
+  const evidenceOf = (orderId: string, attemptId: string) => app.prisma.alertDelivery.findFirstOrThrow({
+    where: { kind: 'MOVER_OFFER', subjectId: orderId, offerAttemptId: attemptId },
+    select: { seenAt: true, acknowledgedAt: true },
+  });
+  const rateOf = async (riderId: string) =>
+    Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { acceptanceRate: true } })).acceptanceRate);
+
+  /** A1 lapses (unseen and spared, or displayed and charged once: 100 -> 80);
+   *  a vendor retry offers A2 for the SAME order to the SAME mover, and A2
+   *  never reaches their screen. */
+  async function lapsedThenReoffered(opts: { a1Displayed?: boolean } = {}) {
+    await parkAllRiders();
+    const mover = await makeRider();
+    const order = await makeOrder();
+    const lastJob = () => scheduled.filter((j) => j.orderId === order.id).at(-1)!;
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(mover.riderId);
+    const a1 = lastJob().attemptId!;
+    if (opts.a1Displayed) await dispatch.markOfferSeen(order.id, mover.userId, a1);
+    await dispatch.handleOfferTimeout(order.id, mover.riderId, a1);
+    expect((await dispatch.retryDispatch(order.id)).offered).toBe(mover.riderId);
+    const a2 = lastJob().attemptId!;
+    expect(a2).not.toBe(a1);
+    expect(await evidenceOf(order.id, a1)).toEqual({ seenAt: opts.a1Displayed ? expect.any(Date) : null, acknowledgedAt: null });
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect(await rateOf(mover.riderId)).toBe(opts.a1Displayed ? 80 : 100);
+    return { mover, order, a1, a2 };
+  }
+
+  /** A2 is still the mover's live card, and its timeout really judges it. */
+  async function successorLapses(order: { id: string }, riderId: string, a2: string) {
+    expect(await app.redis.get(offerKey(order.id))).toBe(`${riderId}:${a2}`);
+    await dispatch.handleOfferTimeout(order.id, riderId, a2);
+    expect(await app.redis.zscore(`dispatch:offer-expiries:${riderId}`, `${order.id}:${a2}`)).not.toBeNull();
+  }
+
+  it('a delayed decline naming the lapsed attempt stamps nothing, and the unseen successor lapses free', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await expect(dispatch.declineOffer(order.id, mover.userId, a1)).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+    await successorLapses(order, mover.riderId, a2);
+    expect(await rateOf(mover.riderId)).toBe(100);
+  });
+
+  it('a delayed accept naming the lapsed attempt stamps nothing, and the unseen successor lapses free', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await expect(dispatch.acceptOffer(order.id, mover.userId, undefined, a1)).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+    await successorLapses(order, mover.riderId, a2);
+    expect(await rateOf(mover.riderId)).toBe(100);
+  });
+
+  it('a current decline acknowledges exactly the attempt it consumed, never the lapsed one before it', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await dispatch.declineOffer(order.id, mover.userId, a2);
+
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  it('a current accept naming its attempt acknowledges exactly that attempt, never the lapsed one before it', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    const claimed = await dispatch.acceptOffer(order.id, mover.userId, undefined, a2);
+
+    expect(claimed.riderId).toBe(mover.riderId);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  // [AX358] An action that names NO attempt (an older app build) never counts
+  // against a generated card: it may be a delayed one meant for an earlier card
+  // of the same order. It still releases or takes the live card.
+  it('[AX358] a decline naming no attempt releases the unseen successor but never charges it: 100 -> 80, never 64', async () => {
+    const { mover, order, a2 } = await lapsedThenReoffered({ a1Displayed: true });
+
+    await dispatch.declineOffer(order.id, mover.userId);
+
+    expect(await rateOf(mover.riderId)).toBe(80);
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    // Operationally the card is still released: the cascade moved on.
+    expect(await app.redis.get(offerKey(order.id))).not.toBe(`${mover.riderId}:${a2}`);
+    expect(await app.redis.get(moverOfferKey(mover.riderId))).toBeNull();
+  });
+
+  // [AX364] Render proof follows the same rule: a ping naming no attempt (an
+  // older app) may be a delayed one for an earlier card of the same order.
+  it('[AX364] a delayed render ping naming no attempt never stamps the unseen successor, and its lapse costs nothing', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await dispatch.markOfferSeen(order.id, mover.userId);
+    await successorLapses(order, mover.riderId, a2);
+
+    expect(await rateOf(mover.riderId)).toBe(100);
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect((await evidenceOf(order.id, a1)).seenAt).toBeNull();
+  });
+
+  it('[AX364] nor does that ping make the unseen successor chargeable when the mover goes offline', async () => {
+    const { mover, order, a2 } = await lapsedThenReoffered();
+
+    await dispatch.markOfferSeen(order.id, mover.userId);
+    await dispatch.releaseHeldOffer(mover.riderId);
+
+    expect(await app.redis.get(offerKey(order.id))).not.toBe(`${mover.riderId}:${a2}`);
+    expect(await app.redis.get(moverOfferKey(mover.riderId))).toBeNull();
+    expect(await rateOf(mover.riderId)).toBe(100);
+  });
+
+  it('[AX358] an accept naming no attempt still takes the live card, but acknowledges no generated attempt', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    const claimed = await dispatch.acceptOffer(order.id, mover.userId);
+
+    expect(claimed.riderId).toBe(mover.riderId);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeNull();
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  it('an accept refused because delivery custody moved on still acknowledges the card it consumed, and only that one', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: 1 } });
+
+    await expect(dispatch.acceptOffer(order.id, mover.userId, undefined, a2)).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    expect(await app.redis.get(offerKey(order.id))).not.toBe(`${mover.riderId}:${a2}`);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  it('a legacy bare card (pre-attempt deploy): render proof and acknowledgment reach its own legacy row only, never an attempt-era one', async () => {
+    await parkAllRiders();
+    const mover = await makeRider();
+    const order = await makeOrder();
+    // An attempt-era card of this order lapsed unseen; then a pre-attempt
+    // instance installed a bare card, with a legacy evidence row of its own.
+    await app.prisma.alertDelivery.create({ data: { kind: 'MOVER_OFFER', subjectId: order.id, recipientId: mover.userId, offerAttemptId: 'lapsed~fv0' } });
+    await app.prisma.alertDelivery.create({ data: { kind: 'MOVER_OFFER', subjectId: order.id, recipientId: mover.userId } });
+    await app.redis.set(offerKey(order.id), mover.riderId, 'EX', 30);
+    await app.redis.set(moverOfferKey(mover.riderId), order.id, 'EX', 30);
+
+    await dispatch.markOfferSeen(order.id, mover.userId); // [AX364]
+    await dispatch.declineOffer(order.id, mover.userId);
+
+    const rows = await app.prisma.alertDelivery.findMany({
+      where: { kind: 'MOVER_OFFER', subjectId: order.id },
+      select: { offerAttemptId: true, seenAt: true, acknowledgedAt: true },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.offerAttemptId === null)!.acknowledgedAt).toBeInstanceOf(Date);
+    expect(rows.find((r) => r.offerAttemptId === 'lapsed~fv0')!.acknowledgedAt).toBeNull();
+    expect(rows.find((r) => r.offerAttemptId === null)!.seenAt).toBeInstanceOf(Date);
+    expect(rows.find((r) => r.offerAttemptId === 'lapsed~fv0')!.seenAt).toBeNull();
   });
 });

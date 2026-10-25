@@ -1,6 +1,8 @@
 /** @jsxImportSource react */
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { StepUpSheet } from '../components/StepUpSheet';
+import { requireAuthSessionSnapshot, requireAuthSessionForPrincipal, useAuthStore } from '../stores/authStore';
+import type { AuthSessionSnapshot } from '../lib/authSession';
 import { isStepUpRequired, StepUpDismissed } from '../lib/stepUp';
 
 /**
@@ -15,41 +17,65 @@ import { isStepUpRequired, StepUpDismissed } from '../lib/stepUp';
  */
 export type MutationGuard = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => (...args: A) => Promise<R>;
 
-type Pending = { retry: () => void; dismiss: () => void };
+type Pending = { id: number; session: AuthSessionSnapshot; retry: () => void; dismiss: () => void };
 
 export function useStepUp(): { withStepUp: MutationGuard; sheet: React.ReactElement; active: boolean } {
   const [pending, setPending] = useState<Pending | null>(null);
   const pendingRef = useRef<Pending | null>(null);
+  const sequence = useRef(0);
+  const busy = useRef(false);
+  const mounted = useRef(true);
   const set = (p: Pending | null) => {
     pendingRef.current = p;
-    setPending(p);
+    if (mounted.current) setPending(p);
   };
 
+  useEffect(() => {
+    mounted.current = true;
+    const unsubscribe = useAuthStore.subscribe(() => {
+      const active = pendingRef.current;
+      if (!active) return;
+      try { requireAuthSessionForPrincipal(active.session); } catch { active.dismiss(); }
+    });
+    return () => { unsubscribe(); mounted.current = false; pendingRef.current?.dismiss(); };
+  }, []);
+
   const withStepUp = useCallback(<A extends unknown[], R>(fn: (...args: A) => Promise<R>) => {
-    return (...args: A): Promise<R> =>
-      fn(...args).catch((e: unknown) => {
-        if (!isStepUpRequired(e)) throw e;
-        return new Promise<R>((resolve, reject) => {
-          set({
-            // ONE retry, only after the sheet verified this session.
-            retry: () => {
-              set(null);
-              fn(...args).then(resolve, reject);
-            },
-            dismiss: () => {
-              set(null);
-              reject(new StepUpDismissed());
-            },
+    return async (...args: A): Promise<R> => {
+      if (busy.current || !mounted.current) throw new StepUpDismissed();
+      const session = requireAuthSessionSnapshot();
+      busy.current = true;
+      try {
+        try { return await fn(...args); } catch (e: unknown) {
+          if (!isStepUpRequired(e)) throw e;
+          requireAuthSessionForPrincipal(session);
+          if (!mounted.current) throw new StepUpDismissed();
+          return await new Promise<R>((resolve, reject) => {
+            const id = ++sequence.current;
+            set({ id, session,
+              retry: () => {
+                if (pendingRef.current?.id !== id) return;
+                set(null);
+                try {
+                  requireAuthSessionForPrincipal(session);
+                  fn(...args).then(resolve, reject);
+                } catch (error) { reject(error); }
+              },
+              dismiss: () => { if (pendingRef.current?.id === id) set(null); reject(new StepUpDismissed()); },
+            });
           });
-        });
-      });
+        }
+      } finally { busy.current = false; }
+    };
   }, []);
 
   const sheet = (
     <StepUpSheet
+      key={pending?.id ?? 'closed'}
       visible={!!pending}
-      onVerified={() => pendingRef.current?.retry()}
-      onClose={() => pendingRef.current?.dismiss()}
+      session={pending?.session}
+      onVerified={() => pending?.retry()}
+      onClose={() => pending?.dismiss()}
     />
   );
 

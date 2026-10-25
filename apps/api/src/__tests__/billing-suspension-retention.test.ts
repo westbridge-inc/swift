@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // PINV-8 [PAY-1 §10.2] — WHAT SUSPENSION MUST NEVER TAKE AWAY.
 //
@@ -59,7 +60,7 @@ beforeAll(async () => {
   // Unique phone prefix per file — shared ranges collide across parallel files.
   const owner = await app.prisma.user.create({
     data: {
-      phone: `+59200941${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Retention', lastName: 'Owner',
       roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
     },
@@ -131,7 +132,7 @@ describe('PINV-8 — suspension takes earning, never the way back in', () => {
     expect(res.statusCode).toBe(200);
 
     const { data } = res.json() as {
-      data: { san: string; sanFormatted: string; amountDueGyd: number; weeklyFeeGyd: number; payCashSteps: string[] };
+      data: { san: string; sanFormatted: string; amountDueGyd: number; weeklyFeeGyd: number; payCashSteps?: string[] };
     };
 
     // The SAN is how money finds this account at an MMG counter. It is issued at
@@ -152,9 +153,11 @@ describe('PINV-8 — suspension takes earning, never the way back in', () => {
     expect(data.weeklyFeeGyd).toBe(10_000);
     expect(typeof data.amountDueGyd).toBe('number');
 
-    // And the cash rail stays spelled out — card is never the only door (PINV-10).
-    expect(Array.isArray(data.payCashSteps)).toBe(true);
-    expect(data.payCashSteps.length).toBeGreaterThan(0);
+    // No agent or cash steps are served (the owner, 29 Sep): partners pay the
+    // weekly fee on the checkout page, with MMG — card is still never the only
+    // door (PINV-10). An app build from before the checkout page renders any
+    // steps this payload carries, so it carries none.
+    expect(data).not.toHaveProperty('payCashSteps');
   });
 
   it('the SAN is stable across suspension — the number an agent already has still works', async () => {

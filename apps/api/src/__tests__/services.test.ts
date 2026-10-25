@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -15,6 +19,7 @@ import {
 } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { ownedVerificationFixture } from './helpers/verification-object';
 
 // ---------------------------------------------------------------------------
 // Services (spec §4.6). Provider profile + qualification badge +
@@ -77,8 +82,18 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
   });
+}
+
+async function commandState(jobId: string) {
+  const job = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: jobId } }));
+  return {
+    expectedUpdatedAt: job.updatedAt.toISOString(),
+    expectedScheduledFor: job.scheduledFor?.toISOString(),
+    expectedQuoteAmount: Number(job.quoteAmount),
+  };
 }
 
 async function purgeFixtures() {
@@ -171,8 +186,37 @@ describe('Services — provider verification + qualification badge', () => {
 
     const mine = await inject('GET', '/api/v1/services/providers/me', undefined, owner.token);
     expect(mine.json().data.id).toBe(first.json().data.id);
+    expect(mine.json().data.categoryUnavailable).toBe(false);
     const notMine = await inject('GET', '/api/v1/services/providers/me', undefined, other.token);
     expect(notMine.statusCode).toBe(404);
+  });
+
+  // [R4 · research A8] Advertising legal services is barred to "any person whatsoever": a profile whose own words
+  // offer them is refused whatever trade it names, and nothing is saved; an ordinary profile still saves.
+  it('refuses a profile that offers legal services, whatever trade it names', async () => {
+    const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const bio of ['Carpentry and legal advice', 'Also: Legal-Consultation for land deeds', 'Conveyancing on request', 'Attorney-at-law and handyman']) {
+      const res = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio }, owner.token);
+      expect(res.statusCode, bio).toBe(409);
+      expect(res.json().error, bio).toMatchObject({ code: 'SERVICE_NOT_ALLOWED', message: 'Swift doesn\'t list legal services. Remove them from your profile to continue.' });
+    }
+    expect(await app.prisma.serviceProvider.count({ where: { userId: owner.userId } })).toBe(0);
+    const plain = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio: 'Built-ins, shelves and cabinets.' }, owner.token);
+    expect(plain.statusCode, plain.body).toBe(200);
+  });
+
+  it('marks a stored held-category profile unavailable after refreshing its live verification', async () => {
+    const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    await runWithoutTenant(() => app.prisma.serviceProvider.create({
+      // [TRADES · 13 Oct 2026] the lawyer is the category still held
+      data: { userId: owner.userId, trade: 'lawyer', portfolioPhotos: [], isVerified: true },
+    }));
+
+    const mine = await inject('GET', '/api/v1/services/providers/me', undefined, owner.token);
+    expect(mine.statusCode).toBe(200);
+    expect(mine.json().data).toMatchObject({
+      trade: 'lawyer', isVerified: false, categoryUnavailable: true,
+    });
   });
 
   it('fails closed on the first electrician save until the trade-specific legal gate is met', async () => {
@@ -212,9 +256,13 @@ describe('Services — provider verification + qualification badge', () => {
     expect(res.json().data.isVerified).toBe(true);
   });
 
-  it('never turns an applicant-supplied GEI-shaped reference into a verified badge', async () => {
+  it('[ROLE-DOCS] refuses a GEI licence as a qualification (it is the electrician\'s required document) and never verifies a supplied reference', async () => {
     const p = await makeVerifiedProvider('electrician');
-    const qual = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-44821' }, p.token);
+    const gei = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-44821' }, p.token);
+    expect(gei.statusCode).toBe(400);
+    expect(gei.json().error.code).toBe('QUALIFICATION_RETIRED');
+    expect(await app.prisma.serviceQualification.count({ where: { provider: { userId: p.userId }, type: 'GEI_LICENCE' } })).toBe(0);
+    const qual = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'CVQ-44821' }, p.token);
     expect(qual.statusCode).toBe(200);
     expect(qual.json().data.status).toBe('PENDING');
     expect(qual.json().data.trade).toBe('electrician');
@@ -222,17 +270,20 @@ describe('Services — provider verification + qualification badge', () => {
 
     const me = await inject('GET', '/api/v1/services/providers/me', undefined, p.token);
     expect(me.json().data.certified).toBe(false);
-    expect(me.json().data.selfSkilled).toBe(true);
+    // [REVIEW-F #2053 S4-2] the electrician's trade requires the GEI licence, so it is never "Self-skilled": with no
+    // person's check of that licence on record here, the line reads "No trade credential shown".
+    expect(me.json().data.selfSkilled).toBe(false);
+    expect(me.json().data.licenceCheckedOn).toBeNull();
   });
 
-  it('binds credentials to the canonical current trade and rejects a mismatched GEI claim', async () => {
+  it('binds credentials to the canonical current trade and refuses a GEI claim from any trade', async () => {
     const plumber = await makeVerifiedProvider('plumber');
     const mismatch = await inject('POST', '/api/v1/services/providers/qualifications', {
       type: 'GEI_LICENCE',
       referenceNumber: 'GEI-PLUMBER-1',
     }, plumber.token);
     expect(mismatch.statusCode).toBe(400);
-    expect(mismatch.json().error.code).toBe('QUALIFICATION_TRADE_MISMATCH');
+    expect(mismatch.json().error.code).toBe('QUALIFICATION_RETIRED');
 
     const pending = await inject('POST', '/api/v1/services/providers/qualifications', {
       type: 'CVQ',
@@ -318,7 +369,7 @@ describe('Services — provider verification + qualification badge', () => {
       const submitted = await inject('POST', '/api/v1/verification/documents', {
         role: 'SERVICE_PROVIDER',
         docType,
-        fileUrl: `storage://test/auto-approve-${docType}.jpg`,
+        fileUrl: await ownedVerificationFixture(app.prisma, provider.userId, `auto-approve-${docType}`),
         consent: true,
         privacyNoticeVersion: 'v1',
       }, provider.token);
@@ -400,14 +451,14 @@ describe('Services — risk-tiered browse', () => {
 
   it('bounds anonymous pages at 50 and uses a stable opaque tenant/trade-bound cursor', async () => {
     const providers = await Promise.all([
-      makeVerifiedProvider('tutor'),
-      makeVerifiedProvider('tutoring'),
-      makeVerifiedProvider('Tutor'),
+      makeVerifiedProvider('cleaner'),
+      makeVerifiedProvider('cleaning'),
+      makeVerifiedProvider('house cleaner'),
     ]);
-    const oversized = await inject('GET', '/api/v1/services/providers?trade=tutor&limit=51');
+    const oversized = await inject('GET', '/api/v1/services/providers?trade=cleaner&limit=51');
     expect(oversized.statusCode).toBe(400);
 
-    const first = await inject('GET', '/api/v1/services/providers?trade=tutor&limit=2');
+    const first = await inject('GET', '/api/v1/services/providers?trade=cleaner&limit=2');
     expect(first.statusCode).toBe(200);
     const firstData = first.json().data;
     expect(firstData.providers).toHaveLength(2);
@@ -415,13 +466,13 @@ describe('Services — risk-tiered browse', () => {
     expect(firstData.page.nextCursor).toEqual(expect.any(String));
     expect(firstData.page.nextCursor).not.toContain(providers[0]!.providerId);
 
-    const replay = await inject('GET', '/api/v1/services/providers?trade=tutoring&limit=2');
+    const replay = await inject('GET', '/api/v1/services/providers?trade=cleaning&limit=2');
     expect(replay.json().data.page.nextCursor).toBe(firstData.page.nextCursor);
     expect(replay.json().data.providers.map((row: { id: string }) => row.id))
       .toEqual(firstData.providers.map((row: { id: string }) => row.id));
 
     const cursor = encodeURIComponent(firstData.page.nextCursor);
-    const second = await inject('GET', `/api/v1/services/providers?trade=tutor&limit=2&cursor=${cursor}`);
+    const second = await inject('GET', `/api/v1/services/providers?trade=cleaner&limit=2&cursor=${cursor}`);
     expect(second.statusCode).toBe(200);
     expect(second.json().data.providers).toHaveLength(1);
     const allIds = [
@@ -434,27 +485,106 @@ describe('Services — risk-tiered browse', () => {
     // decodes to the same HMAC bytes unless the route rejects non-canonical
     // encodings before its timing-safe comparison.
     const tampered = `${firstData.page.nextCursor}=`;
-    expect((await inject('GET', `/api/v1/services/providers?trade=tutor&limit=2&cursor=${encodeURIComponent(tampered)}`)).statusCode)
+    expect((await inject('GET', `/api/v1/services/providers?trade=cleaner&limit=2&cursor=${encodeURIComponent(tampered)}`)).statusCode)
       .toBe(400);
     expect((await inject('GET', `/api/v1/services/providers?trade=mason&limit=2&cursor=${cursor}`)).statusCode)
       .toBe(400);
+
+    // A held trade and its alias cannot enter the browse/cursor population.
+    for (const trade of ['lawyer', 'attorney']) {
+      const held = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
+      expect(held.statusCode).toBe(409);
+      expect(held.json().error.code).toBe('SERVICE_CATEGORY_UNAVAILABLE');
+    }
   });
 
-  it('marks high-risk trades and recommends a licensed provider', async () => {
+  // [R7 · GUARDRAILS §7(4) · owner 15 Oct 2026] The browse page says only what a person on our team checked: the ID and
+  // the current police clearance every listed provider needs, and a licence only with the date a person checked it.
+  // Never "police-cleared" or "background-checked", never a promise of "licensed (Certified)" providers.
+  const HIGH_RISK_GUIDANCE = 'Higher-risk work — every provider here has their ID and a current police clearance on file, checked by a person on our team. A licence shows on a provider only after a person on our team checked it, and those providers are listed first.';
+  const LOW_RISK_GUIDANCE = 'Every provider here has their ID and a current police clearance on file, checked by a person on our team — choose by ratings and reviews.';
+
+  it('marks high-risk trades, says only what a person checked, and dates the licence check', async () => {
     const p = await makeVerifiedProvider('electrician');
-    const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-90011' }, p.token);
+    // [ROLE-DOCS] a CVQ: a GEI licence is the electrician's required document, never a qualification
+    const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'CVQ-90011' }, p.token);
+    const checkedAt = new Date('2026-10-12T15:30:00.000Z');
     await app.prisma.serviceQualification.update({
       where: { id: submitted.json().data.id },
-      data: { status: 'VERIFIED', verifiedAt: new Date() },
+      data: { status: 'VERIFIED', verifiedAt: checkedAt },
     }); // trusted-review authority is emulated directly; applicants cannot do this
 
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const res = await inject('GET', '/api/v1/services/providers?trade=electrician', undefined, customer.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.riskTier).toBe('HIGH');
-    expect(res.json().data.guidance).toMatch(/licensed|certified/i);
+    expect(res.json().data.guidance).toBe(HIGH_RISK_GUIDANCE);
+    expect(res.json().data.guidance).not.toMatch(/police-cleared|background|licensed \(Certified\)/i);
     expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
     expect(res.json().data.providers[0].certified).toBe(true); // licensed listed first
+    // The licence label carries the day a person checked it ("licence on file, checked on [date]").
+    expect(res.json().data.providers[0].licenceCheckedOn).toBe(checkedAt.toISOString());
+  });
+
+  it('a low-risk trade says the same checked facts, and a provider with no checked licence carries no licence date', async () => {
+    await makeVerifiedProvider('cleaner');
+    const res = await inject('GET', '/api/v1/services/providers?trade=cleaner');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.riskTier).toBe('LOW');
+    expect(res.json().data.guidance).toBe(LOW_RISK_GUIDANCE);
+    expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
+    for (const row of res.json().data.providers) expect(row.licenceCheckedOn).toBeNull();
+  });
+
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The licence line also comes from the trade's REQUIRED licence (the GEI licence
+  // of an electrician or a solar installer): "Licence on file, checked on [date]" with the day a PERSON approved it.
+  // An engine's approval (kyc:auto) still lets the provider work (the gate reads the record) but is never shown as a
+  // licence a person checked (GUARDRAILS §7(4)). [REVIEW-F #2053 S4-2] A trade that REQUIRES a licence is never
+  // "Self-skilled" either: an engine-approved licence reads "No trade credential shown" (selfSkilled false, certified
+  // false). [REVIEW-G #2053 S4-2] The approver must be a user of Swift: a marker outside the engine pattern
+  // ('review-pack-v1') is no person. [REVIEW-G #2053 S4-1] The stored selfSkilled column follows the same rule.
+  it('[ROLE-DOCS] a solar installer works only with a GEI licence, and the licence a person approved shows with its date', async () => {
+    const trade = 'solar_generator_inverter_installer';
+    const reviewer = await makeUserWithSession(['ADMIN'], 'ADMIN');
+    const checkedAt = new Date('2026-10-20T14:00:00.000Z');
+    const licensed = async (reviewedBy: string, reviewedAt: Date) => {
+      const u = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(await providerChecklist(app.prisma, u.userId)).toEqual(['national_id', 'police_clearance', 'gei_electrical_licence']);
+      await approveProviderDocs(u.userId);
+      const before = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(before.json().data.isVerified).toBe(false); // no licence, no work
+      await app.prisma.verificationDocument.create({
+        data: { userId: u.userId, role: 'CUSTOMER', docType: 'gei_electrical_licence', fileUrl: 'storage://t/gei.jpg', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1', reviewedBy, reviewedAt },
+      });
+      const after = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(after.json().data.isVerified).toBe(true);
+      return { ...u, providerId: after.json().data.id as string };
+    };
+    const byPerson = await licensed(reviewer.userId, checkedAt);
+    const byEngine = await licensed('kyc:auto', new Date('2026-10-21T09:00:00.000Z'));
+    const byPack = await licensed('review-pack-v1', new Date('2026-10-21T10:00:00.000Z'));
+
+    const res = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.riskTier).toBe('HIGH');
+    const rows = res.json().data.providers as Array<{ id: string; certified: boolean; selfSkilled: boolean; licenceCheckedOn: string | null }>;
+    expect(rows.find((r) => r.id === byPerson.providerId)).toMatchObject({ certified: true, selfSkilled: false, licenceCheckedOn: checkedAt.toISOString() });
+    expect(rows.find((r) => r.id === byEngine.providerId)).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    expect(rows.find((r) => r.id === byPack.providerId)).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    expect(rows[0]!.id).toBe(byPerson.providerId); // a licence a person checked is listed first
+
+    const me = await inject('GET', '/api/v1/services/providers/me', undefined, byPerson.token);
+    expect(me.json().data).toMatchObject({ certified: true, selfSkilled: false });
+    expect(me.json().data.licenceCheckedOn).toBe(checkedAt.toISOString());
+    const engineMe = await inject('GET', '/api/v1/services/providers/me', undefined, byEngine.token);
+    expect(engineMe.json().data).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    const packMe = await inject('GET', '/api/v1/services/providers/me', undefined, byPack.token);
+    expect(packMe.json().data).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    // the stored projection (read by the data export) says the same
+    for (const p of [byPerson, byEngine, byPack]) {
+      expect((await app.prisma.serviceProvider.findUnique({ where: { id: p.providerId } }))!.selfSkilled, p.providerId).toBe(false);
+    }
   });
 
   it('the verified-first promise holds mechanically: unverified never list, a CLAIM is not a badge, real certs outrank ratings', async () => {
@@ -561,7 +691,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(hired.tenantId).toBe(TENANT_B);
   });
 
-  it('runs request → quote → schedule → complete → both parties rate', async () => {
+  it('runs request → quote → schedule → confirm → start → complete → both parties rate', async () => {
     const provider = await makeVerifiedProvider('carpenter');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
 
@@ -574,14 +704,33 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(created.json().data.status).toBe('REQUESTED');
     expect(created.json().data.chatRoomId).toBeTruthy(); // quote-via-chat room opened
 
-    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 15000 }, provider.token);
+    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+      amount: 15000,
+      ...await commandState(jobId),
+    }, provider.token);
     expect(quoted.json().data.status).toBe('QUOTED');
     expect(Number(quoted.json().data.quoteAmount)).toBe(15000);
 
-    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(),
+      ...await commandState(jobId),
+    }, customer.token);
     expect(scheduled.json().data.status).toBe('SCHEDULED');
 
-    const completed = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+    const confirmed = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token);
+    expect(confirmed.statusCode).toBe(200);
+    // Move only this synthetic fixture's agreed instant into the past. The
+    // production start route still proves that the exact command-bound slot is
+    // due; local product Postgres integration execution remains held.
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId },
+      data: { scheduledFor: new Date(Date.now() - 60_000) },
+    }));
+    const started = await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token);
+    expect(started.statusCode).toBe(200);
+    expect(started.json().data.status).toBe('IN_PROGRESS');
+
+    const completed = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, await commandState(jobId), provider.token);
     expect(completed.json().data.status).toBe('COMPLETED');
 
     // Two-way ratings.
@@ -593,6 +742,94 @@ describe('Services — job lifecycle + two-way rating', () => {
     const updated = await app.prisma.serviceProvider.findUniqueOrThrow({ where: { id: provider.providerId } });
     expect(updated.totalRatings).toBe(1);
     expect(updated.averageRating).toBe(5);
+  });
+
+  it('[owner #50 · coordinator rulings 14 Oct · Terms §7] the customer cancels free while the job is a request; once it is booked or in progress the app refuses and names who to contact — never a fee', async () => {
+    const provider = await makeVerifiedProvider('carpenter');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const job = async () => {
+      const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
+      expect(created.statusCode, created.body).toBe(201);
+      const jobId = created.json().data.id as string;
+      // (Merged with #1483: lifecycle commands carry the job's last-seen version.)
+      await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
+      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
+      expect(scheduled.json().data.status).toBe('SCHEDULED');
+      return jobId;
+    };
+
+    // A request (quoted, no slot agreed yet): free.
+    const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
+    const request = created.json().data.id as string;
+    await inject('POST', `/api/v1/services/jobs/${request}/quote`, { amount: 8000, ...await commandState(request) }, provider.token);
+    const freed = await inject('POST', `/api/v1/services/jobs/${request}/cancel`, await commandState(request), customer.token);
+    expect(freed.statusCode, freed.body).toBe(200);
+    expect(freed.json().data.status).toBe('CANCELLED');
+    expect(freed.body).not.toMatch(/fee/i);
+
+    // [TRANSFORMED, coordinator ruling 14 Oct: the server matches the Terms] Booked, not
+    // started: this case used to cancel free. Once a slot is booked the app refuses and the
+    // customer contacts the provider; nothing is written.
+    const booked = await job();
+    const refusedBooked = await inject('POST', `/api/v1/services/jobs/${booked}/cancel`, await commandState(booked), customer.token);
+    expect(refusedBooked.statusCode, refusedBooked.body).toBe(409);
+    expect(refusedBooked.json().error).toMatchObject({
+      code: 'SERVICE_JOB_BOOKED',
+      message: 'This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.',
+    });
+    expect(refusedBooked.body).not.toMatch(/fee/i);
+    const bookedRow = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: booked } }), 'services-test-fixture');
+    expect({ status: bookedRow.status, cancelledAt: bookedRow.cancelledAt }).toEqual({ status: 'SCHEDULED', cancelledAt: null });
+
+    // Started: refused, nothing written.
+    const started = await job();
+    await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: started }, data: { status: 'IN_PROGRESS' } }), 'services-test-fixture');
+    const refused = await inject('POST', `/api/v1/services/jobs/${started}/cancel`, await commandState(started), customer.token);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toMatchObject({
+      code: 'SERVICE_JOB_STARTED',
+      message: 'Your provider has started this job, so it can no longer be cancelled in the app. Contact your provider, or Swift support, to change or stop it.',
+    });
+    expect(refused.body).not.toMatch(/fee/i);
+    const row = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: started } }), 'services-test-fixture');
+    expect({ status: row.status, cancelledAt: row.cancelledAt }).toEqual({ status: 'IN_PROGRESS', cancelledAt: null });
+  });
+
+  it('refuses a slot that is not in the future; the job stays QUOTED and the customer can pick a real time', async () => {
+    const provider = await makeVerifiedProvider('carpenter');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = await inject('POST', '/api/v1/services/jobs', {
+      providerId: provider.providerId,
+      description: 'Fix a sagging cupboard door in the kitchen.',
+    }, customer.token);
+    expect(created.statusCode).toBe(201);
+    const jobId = created.json().data.id;
+    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
+    expect(quoted.json().data.status).toBe('QUOTED');
+
+    const askedToConfirm = async () => (await runWithoutTenant(() =>
+      app.prisma.notification.findMany({ where: { userId: provider.userId }, select: { data: true } })))
+      .filter((n) => {
+        const data = n.data as Record<string, unknown> | null;
+        return data?.['kind'] === 'booking_to_confirm' && data?.['jobId'] === jobId;
+      }).length;
+
+    // Three days ago, and one minute ago: neither is a time anyone can keep.
+    for (const scheduledFor of [new Date(Date.now() - 3 * DAY), new Date(Date.now() - 60_000)]) {
+      const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: scheduledFor.toISOString(), ...await commandState(jobId) }, customer.token);
+      expect(refused.statusCode).toBe(400);
+      expect(refused.json().error.code).toBe('SLOT_IN_PAST');
+    }
+    const unchanged = await app.prisma.serviceJob.findUniqueOrThrow({ where: { id: jobId } });
+    expect(unchanged.status).toBe('QUOTED');
+    expect(unchanged.scheduledFor).toBeNull();
+    expect(await askedToConfirm(), 'the provider must never be asked to confirm a time that has passed').toBe(0);
+
+    // The refusal is not a dead end: a future time books normally.
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
+    expect(scheduled.statusCode).toBe(200);
+    expect(scheduled.json().data.status).toBe('SCHEDULED');
+    expect(await askedToConfirm()).toBe(1);
   });
 
   it('blocks hiring an unverified provider', async () => {
@@ -626,7 +863,10 @@ describe('Services — job lifecycle + two-way rating', () => {
       data: { expiresAt: new Date(Date.now() - 60_000) },
     });
 
-    const quote = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 12000 }, provider.token);
+    const quote = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+      amount: 12000,
+      ...await commandState(jobId),
+    }, provider.token);
     expect(quote.statusCode).toBe(409);
     expect(quote.json().error.code).toBe('PROVIDER_NOT_VERIFIED');
 
@@ -635,9 +875,15 @@ describe('Services — job lifecycle + two-way rating', () => {
       where: { userId: provider.userId },
       data: { expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000) },
     });
-    const quoteOk = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 12000 }, provider.token);
+    const quoteOk = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+      amount: 12000,
+      ...await commandState(jobId),
+    }, provider.token);
     expect(quoteOk.statusCode).toBe(200);
-    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(),
+      ...await commandState(jobId),
+    }, customer.token);
     expect(scheduled.statusCode).toBe(200);
 
     // Lapse again before slot confirmation — the last acceptance gate holds too.
@@ -645,7 +891,7 @@ describe('Services — job lifecycle + two-way rating', () => {
       where: { userId: provider.userId },
       data: { expiresAt: new Date(Date.now() - 60_000) },
     });
-    const confirm = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token);
+    const confirm = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token);
     expect(confirm.statusCode).toBe(409);
     expect(confirm.json().error.code).toBe('PROVIDER_NOT_VERIFIED');
   });

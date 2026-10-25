@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import crypto from 'node:crypto';
 import { log } from '../../utils/logger';
 import { getKeyProvider, generateDek, encryptBuffer, decryptBuffer } from '../../providers/storage/envelope';
+import { isOwnNumber } from './emergency-contact.service';
 
 /**
  * [AG-XF-013] Erasure and a live emergency, at the same time.
@@ -488,7 +489,20 @@ export function escrowProof(payload: EscrowPayload): string {
 export interface ResponseAuthority {
   who: string | null;
   contacts: EscrowContact[];
+  /** [Q9] Verified rows left out because the number is the person's own. */
+  ownNumberContactIds: string[];
   fromEscrow: boolean;
+}
+
+/**
+ * [Q9] A contact holding the person's own number is never texted, whether it
+ * was verified before the own-number rule existed or the person's phone has
+ * changed to match it since. `ownPhone` is the phone they hold now, or the
+ * escrowed one once the account row is a tombstone.
+ */
+function withoutOwnNumber(contacts: EscrowContact[], ownPhone: string | null): Pick<ResponseAuthority, 'contacts' | 'ownNumberContactIds'> {
+  const own = new Set(contacts.filter((c) => isOwnNumber(c.phoneE164, ownPhone)).map((c) => c.id));
+  return { contacts: contacts.filter((c) => !own.has(c.id)), ownNumberContactIds: [...own] };
 }
 
 export async function responseAuthorityFor(
@@ -512,13 +526,13 @@ export async function responseAuthorityFor(
     name: c.name ?? null,
     priority: c.priority,
   }));
-  if (!erased) return { who: user.firstName?.trim() || null, contacts: liveContacts, fromEscrow: false };
+  if (!erased) return { who: user.firstName?.trim() || null, ...withoutOwnNumber(liveContacts, user.phone), fromEscrow: false };
 
   const escrow = await escrowedResponseAuthority(prisma, userId);
-  if (!escrow) return { who: null, contacts: liveContacts, fromEscrow: false };
+  if (!escrow) return { who: null, contacts: liveContacts, ownNumberContactIds: [], fromEscrow: false };
   return {
     who: escrow.firstName?.trim() || null,
-    contacts: liveContacts.length > 0 ? liveContacts : escrow.emergencyContacts,
+    ...withoutOwnNumber(liveContacts.length > 0 ? liveContacts : escrow.emergencyContacts, escrow.phone),
     fromEscrow: true,
   };
 }

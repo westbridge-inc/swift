@@ -9,6 +9,7 @@ import { LoadingBlock, Screen, T } from '../../kit';
 import { ConversationScreen } from '../chat/screens/ConversationScreen';
 import { useActiveJob, useBroadcastLocation, useMoverKind, useVerificationStatus } from '../../hooks';
 import { shouldTrackMoverLocation } from '../../lib/moverLocation';
+import { useMoverJobFeed } from '../../hooks/moverJobFeed';
 import { useMoverPreview } from '../../stores/moverPreview';
 import { useAuthStore } from '../../stores/authStore';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -19,11 +20,13 @@ import { ClaimsScreen } from './screens/ClaimsScreen';
 import { JobHistoryScreen } from './screens/JobHistoryScreen';
 import { MoverAccountScreen } from './screens/MoverAccountScreen';
 import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
-import { MoverSwiftNumberScreen } from './screens/MoverSwiftNumberScreen';
+import { MoverVehicleScreen } from './screens/MoverVehicleScreen';
+import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
 // mover stack simply never registered it — an earner mid-shift had NO route
 // to a human. Registration, not a rewrite.
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 // [E12 §7.1] The shift identity check — go-online's 428 and the mid-shift
 // push both land here.
@@ -71,6 +74,9 @@ function MoverLocationSupervisor() {
     kind,
     !preview && shouldTrackMoverLocation(!!profile?.isOnline, active.data),
   );
+  // [PERF partner #1] Above every mover screen, like the GPS stream: a live
+  // job's change (passenger cancel, order ready) reaches the screen at once.
+  useMoverJobFeed(kind);
   return null;
 }
 
@@ -117,7 +123,9 @@ export function MoverStack() {
         <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
         <Stack.Screen name="Account" component={MoverAccountScreen} />
         <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
-        <Stack.Screen name="MySwiftNumber" component={MoverSwiftNumberScreen} />
+        {/* [VEHICLES] Change the vehicle: offline until the new one's papers are approved. */}
+        <Stack.Screen name="MoverVehicle" component={MoverVehicleScreen} />
+        <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
         <Stack.Screen name="Conversation" component={ConversationScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />
@@ -125,6 +133,7 @@ export function MoverStack() {
             asks for it used to route to Delivery — a screen this stack never
             mounts — so a safety question had nowhere to be answered. */}
         <Stack.Screen name="GuardianDriverConfirm" component={GuardianDriverConfirmScreen} />
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>

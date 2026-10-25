@@ -13,9 +13,19 @@ export type NormalizedFailure =
   | 'LIMIT_EXCEEDED'
   | 'PROVIDER_DOWN'
   | 'TIMEOUT_UNKNOWN'
+  | 'DISPATCH_REVOKED'
+  | 'PROVIDER_NOT_FOUND'
   | 'AMOUNT_MISMATCH'
+  | 'SETTLEMENT_MISMATCH'
   | 'DUPLICATE'
-  | 'UNSUPPORTED';
+  | 'UNSUPPORTED'
+  /** [PT-1 · C4] The bank wants the cardholder present (off-session 3-D
+   *  Secure). Not a decline: never a strike; the partner confirms their card. */
+  | 'REQUIRES_ACTION'
+  /** [PT-1 · AX297 F2] A card capture whose issuing record (its Pay-now
+   *  session or weekly attempt) cannot vouch for its currency: held, never
+   *  booked in a guessed one. */
+  | 'CURRENCY_UNPINNED';
 
 /** What the scheduler may do about a failure — dunning reads this, not the code. */
 export type RetryClass = 'RETRY_LATER' | 'NO_AUTO_RETRY' | 'NO_RETRY' | 'RETRY_BACKOFF' | 'POLLER_OWNED' | 'HELD_FOR_HUMAN';
@@ -29,9 +39,14 @@ export const RETRY_CLASS: Record<NormalizedFailure, RetryClass> = {
   LIMIT_EXCEEDED: 'NO_RETRY',
   PROVIDER_DOWN: 'RETRY_BACKOFF',
   TIMEOUT_UNKNOWN: 'POLLER_OWNED',
+  DISPATCH_REVOKED: 'NO_RETRY',
+  PROVIDER_NOT_FOUND: 'HELD_FOR_HUMAN',
   AMOUNT_MISMATCH: 'HELD_FOR_HUMAN',
+  SETTLEMENT_MISMATCH: 'HELD_FOR_HUMAN',
   DUPLICATE: 'NO_RETRY',
   UNSUPPORTED: 'NO_RETRY',
+  REQUIRES_ACTION: 'NO_AUTO_RETRY',
+  CURRENCY_UNPINNED: 'HELD_FOR_HUMAN',
 };
 
 /** MMG merchant-initiated: map a terminal lookup/initiate outcome to the

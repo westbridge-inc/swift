@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantStepUp } from './helpers/step-up';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Staff & roles (master plan §4.1). Failure paths first: STAFF is refused on
@@ -92,7 +93,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vendorOwner.id,
-      name: `Team Bistro ${nanoid(4)}`,
+      name: `Team Bistro ${wordFreeTag(8)}`,
       slug: `team-bistro-${nanoid(6)}`,
       vendorType: 'SUPERMARKET',
       phone: '+5920029900',
@@ -123,7 +124,7 @@ beforeAll(async () => {
   const other = await app.prisma.vendor.create({
     data: {
       ownerId: otherVo.id,
-      name: `Other Store ${nanoid(4)}`,
+      name: `Other Store ${wordFreeTag(8)}`,
       slug: `other-store-${nanoid(6)}`,
       vendorType: 'STORE',
       phone: '+5920029901',
@@ -145,10 +146,13 @@ afterAll(async () => {
 });
 
 describe('Owner manages the team', () => {
-  it('adding an unknown phone fails with a friendly 404', async () => {
+  // [Row 55] An unknown phone and a duplicate add get the same reply as a real
+  // add (no "no account" 404, no "already on the team" 409) and create nothing.
+  it('adding an unknown phone answers like any add and creates nothing', async () => {
     const res = await inject('POST', '/api/v1/vendor/staff', { phone: '+5920000000099', role: 'STAFF' }, owner.token);
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('USER_NOT_FOUND');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('SENT_IF_ACCOUNT');
+    expect(await app.prisma.vendorStaff.count({ where: { vendorId } })).toBe(0);
   });
 
   it('owner adds a manager and a staff member by phone', async () => {
@@ -160,8 +164,8 @@ describe('Owner manages the team', () => {
     expect(s.statusCode).toBe(200);
 
     const dupe = await inject('POST', '/api/v1/vendor/staff', { phone: staffUser.phone, role: 'STAFF' }, owner.token);
-    expect(dupe.statusCode).toBe(409);
-    expect(dupe.json().error.code).toBe('ALREADY_STAFF');
+    expect(dupe.statusCode).toBe(200);
+    expect(dupe.body).toBe(s.body);
 
     const list = await inject('GET', '/api/v1/vendor/staff', undefined, owner.token);
     expect(list.json().data).toHaveLength(2);
@@ -238,5 +242,86 @@ describe('Role gates hold', () => {
 
     const after = await inject('GET', '/api/v1/vendor/profile', undefined, staffUser.token);
     expect(after.statusCode).toBe(403); // outsider again — authz answers, not existence
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] A floor STAFF member could page through the store's
+// whole history and read every past customer's phone, the rider's phone, and
+// the delivery street address + GPS — `resolveOwnedOrder` returned the full
+// row for every status. Contact is now gated on liveness: the live order keeps
+// what the handover needs; the terminal order keeps none of it.
+// ---------------------------------------------------------------------------
+
+describe('past orders keep no customer contact for floor staff', () => {
+  it('a terminal order redacts customer phone, rider phone and the delivery destination; the live order keeps them', async () => {
+    const customerUser = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const riderUser = await makeUser(['RIDER'], 'RIDER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: riderUser.userId, riderType: 'DELIVERY', vehicleType: 'BICYCLE', documentsVerified: true },
+    });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SW-STAFF-PII-${nanoid(8).toUpperCase()}`,
+        orderType: 'FOOD_DELIVERY',
+        vendorId,
+        customerId: customerUser.userId,
+        riderId: rider.id,
+        status: 'DELIVERED',
+        deliveryAddress: '77 Private Street, Georgetown',
+        deliveryLat: 6.7913, deliveryLng: -58.1617,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 500, totalAmount: 1500,
+        paymentMethod: 'CASH',
+      },
+    });
+    let liveOrderId: string | undefined;
+    try {
+      // The role suite above removes the staff member at the end; make the
+      // membership explicit so this test stands on its own.
+      await app.prisma.vendorStaff.upsert({
+        where: { vendorId_userId: { vendorId, userId: staffUser.userId } },
+        update: {},
+        create: { vendorId, userId: staffUser.userId, role: 'STAFF', invitedBy: owner.userId },
+      });
+
+      const closed = await inject('GET', `/api/v1/vendor/orders/${order.id}`, undefined, staffUser.token, vendorId);
+      expect(closed.statusCode).toBe(200);
+      expect(closed.json().data.customer.phone).toBeNull();
+      expect(closed.json().data.rider.user.phone).toBeNull();
+      expect(closed.json().data.deliveryLat).toBeNull();
+      expect(closed.json().data.deliveryLng).toBeNull();
+      expect(closed.json().data.deliveryAddress).toBeNull();
+
+      // The board is the drain path — history pages grade the same way.
+      const board = await inject('GET', '/api/v1/vendor/orders', undefined, staffUser.token, vendorId);
+      expect(board.statusCode).toBe(200);
+      const row = board.json().data.find((o: any) => o.id === order.id);
+      expect(row, 'the terminal order should be on the board').toBeTruthy();
+      expect(row.rider.user.phone).toBeNull();
+      expect(row.deliveryLat).toBeNull();
+      expect(row.deliveryLng).toBeNull();
+      expect(row.deliveryAddress).toBeNull();
+
+      // Live control: the same order, still open, keeps what the handover needs.
+      // [row 264] A DELIVERED order never goes back to PENDING (the database refuses
+      // it), so the open control is its twin, born PENDING.
+      liveOrderId = (await app.prisma.order.create({
+        data: {
+          orderNumber: `${order.orderNumber}-LIVE`, orderType: 'FOOD_DELIVERY', vendorId, customerId: customerUser.userId, riderId: rider.id,
+          status: 'PENDING', deliveryAddress: '77 Private Street, Georgetown', deliveryLat: 6.7913, deliveryLng: -58.1617,
+          subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
+        },
+      })).id;
+      const live = await inject('GET', `/api/v1/vendor/orders/${liveOrderId}`, undefined, staffUser.token, vendorId);
+      expect(live.statusCode).toBe(200);
+      expect(live.json().data.customer.phone).toBe(customerUser.phone);
+      expect(live.json().data.deliveryAddress).toBe('77 Private Street, Georgetown');
+      expect(live.json().data.rider.user.phone).toBe(riderUser.phone);
+    } finally {
+      if (liveOrderId) await app.prisma.order.delete({ where: { id: liveOrderId } }).catch(() => {});
+      await app.prisma.order.delete({ where: { id: order.id } }).catch(() => {});
+      await app.prisma.rider.delete({ where: { id: rider.id } }).catch(() => {});
+    }
   });
 });

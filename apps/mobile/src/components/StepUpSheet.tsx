@@ -1,9 +1,11 @@
 /** @jsxImportSource react */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
 import { space } from '@swift/ui';
 import { CodeInput, IconChip, PillButton, PopupCard, PopupTitle, T } from '../kit';
+import { requireAuthSessionForPrincipal } from '../stores/authStore';
+import type { AuthSessionSnapshot } from '../lib/authSession';
 import { authApi } from '../services/api';
 import { serverMessage } from '../lib/stepUp';
 
@@ -17,21 +19,26 @@ const CODE_LEN = 6;
  * Every error line is the server's sentence: the server owns the lock, the
  * cooldown and the budget, so the sheet never guesses a reason.
  */
-export function StepUpSheet({ visible, onVerified, onClose }: { visible: boolean; onVerified: () => void; onClose: () => void }) {
+export function StepUpSheet({ visible, session, onVerified, onClose }: { visible: boolean; session?: AuthSessionSnapshot; onVerified: () => void; onClose: () => void }) {
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const pinned = () => { if (!session) throw new Error('Account confirmation expired.'); return requireAuthSessionForPrincipal(session); };
   const [code, setCode] = useState('');
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [cooldown, setCooldown] = useState(0);
 
   const send = useMutation({
-    mutationFn: async () => (await authApi.stepUp()).data?.data as { sentTo?: string } | undefined,
+    mutationFn: async () => (await authApi.stepUp(pinned())).data?.data as { sentTo?: string } | undefined,
     onSuccess: (d) => {
       setSentTo(d?.sentTo ?? null);
       setCooldown(RESEND_COOLDOWN_S);
     },
   });
   const verify = useMutation({
-    mutationFn: (c: string) => authApi.verifyStepUp(c),
+    mutationFn: (c: string) => authApi.verifyStepUp(c, pinned()),
     onSuccess: () => {
+      if (!mounted.current) return;
+      try { pinned(); } catch { onClose(); return; }
       setCode('');
       onVerified();
     },
@@ -71,8 +78,8 @@ export function StepUpSheet({ visible, onVerified, onClose }: { visible: boolean
       </PopupTitle>
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
         {sentTo
-          ? `This changes where your money goes, so we texted a code to ${sentTo}.`
-          : 'This changes where your money goes, so we’re texting a code to the phone on this account.'}
+          ? `To confirm this account change, we texted a code to ${sentTo}.`
+          : 'To confirm this account change, we’re texting a code to the phone on this account.'}
       </T>
       <View style={{ marginTop: space.lg, alignSelf: 'stretch' }} testID="step-up-code-entry">
         <CodeInput

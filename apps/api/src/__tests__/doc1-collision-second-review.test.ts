@@ -8,6 +8,7 @@
  * (the control), and a bad document is still rejected.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
@@ -35,7 +36,7 @@ class ApprovingKyc implements KycProvider {
   async getStatus(): Promise<'approved'> { return 'approved'; }
 }
 
-const fileKeyFor = (who: string) => `/uploads/verification/${who}-${RUN}/id.jpg.enc`;
+const fileKeyFor = (who: 'A' | 'B' | 'C') => `/uploads/verification/${ids[who]}/id-${RUN}.enc`;
 async function envelope(who: 'A' | 'B' | 'C', sha256: string) {
   await app.prisma.encryptedObject.create({ data: { fileKey: fileKeyFor(who), iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: 1000, sha256, createdBy: ids[who] } });
 }
@@ -56,6 +57,7 @@ beforeAll(async () => {
       phone: `+59271${NUM}${i}`, firstName: 'Dup', lastName: who, activeRole: 'VENDOR_OWNER', countryCode: 'GY', avatar: `avatars/${RUN}/${who}.jpg`, selfieCapturedAt: new Date(),
     } }));
     ids[who] = u.id;
+    await signupSelfieFixture(app.prisma, u.id);
   }
 });
 

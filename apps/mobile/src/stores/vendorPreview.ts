@@ -1,6 +1,14 @@
 import { create } from 'zustand';
 
-export type VendorPreviewType = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+/** The four business types the sample dashboard can show — the same four as
+ *  the List-your-business picker. */
+export const VENDOR_PREVIEW_TYPES = ['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE'] as const;
+
+export type VendorPreviewType = (typeof VENDOR_PREVIEW_TYPES)[number];
+
+export function isVendorPreviewType(value: unknown): value is VendorPreviewType {
+  return typeof value === 'string' && (VENDOR_PREVIEW_TYPES as readonly string[]).includes(value);
+}
 
 interface VendorPreviewState {
   /** Gated-trials spec §B: a pending vendor may LOOK at their dashboard-to-be
@@ -24,7 +32,13 @@ export const useVendorPreview = create<VendorPreviewState>((set) => ({
   previewType: null,
   // No arg = the original pending-vendor peek (real data). A type = the new
   // unauthenticated sample-data walk-through of that business type.
-  enterPreview: (type) => set({ preview: true, previewType: type ?? null }),
-  setPreviewType: (type) => set({ previewType: type }),
+  // Anything that is not one of the four types — a press event from a button
+  // bound straight to this action, a missing or unknown type — is the peek.
+  // A stored type swaps every vendor hook to canned data and lets the root
+  // navigator skip sign-in, so only one of the four types ever sets it.
+  enterPreview: (type) => set({ preview: true, previewType: isVendorPreviewType(type) ? type : null }),
+  setPreviewType: (type) => {
+    if (isVendorPreviewType(type)) set({ previewType: type });
+  },
   exitPreview: () => set({ preview: false, previewType: null }),
 }));

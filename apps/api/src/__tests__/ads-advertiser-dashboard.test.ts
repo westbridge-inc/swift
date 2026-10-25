@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AdsRefundService } from '../modules/ads/refund.service';
+import { mondayOf } from '../modules/ads/ads-weeks';
 
 // Ads §14 — the advertiser-dashboard API. The load-bearing law: the refund
 // PREVIEW must equal what the cancel actually EXECUTES (same assembly, same
@@ -22,9 +23,10 @@ const campaignIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_840_000_000 + Math.floor(Math.random() * 150_000_000);
 
-// A future Monday relative to the anchor dates used across the ads suite.
-const WEEK_FUTURE = new Date('2026-11-02T00:00:00Z'); // Monday, weeks out
-const NOW = new Date('2026-10-05T12:00:00Z');
+// Both injected service calls and the HTTP preview's live clock must see a
+// Monday at least seven days ahead, preserving the full-refund assertion.
+const NOW = new Date();
+const WEEK_FUTURE = new Date(mondayOf(NOW).getTime() + 28 * 86_400_000);
 
 async function makeUser(roles: 'CUSTOMER'[] = ['CUSTOMER']) {
   seq += 1;
@@ -40,7 +42,7 @@ async function makeUser(roles: 'CUSTOMER'[] = ['CUSTOMER']) {
 async function seedAdvertiser(ownerUserId: string) {
   const a = await app.prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000004', createdByUserId: ownerUserId, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER' } });
+  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER', acceptedAt: new Date() } });
   return a;
 }
 
@@ -59,6 +61,7 @@ const post = (url: string, payload: unknown, token: string) =>
   app.inject({ method: 'POST', url, payload: payload as Record<string, unknown>, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
@@ -73,6 +76,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   // [R045-ADS] a cancel now leaves a durable refund intent that references the invoice
   // The refund outbox, intents and items are IMMUTABLE by trigger (deletes are refused) and they RESTRICT
@@ -146,7 +150,7 @@ describe('§14.2/§14.5 member-gated reads', () => {
 });
 
 describe('§14.6 team', () => {
-  it('OWNER adds a MANAGER by phone; MANAGER cannot add; unknown phone 404', async () => {
+  it('OWNER adds a MANAGER by phone; MANAGER cannot add; an unknown phone gets the same reply as a known one [row 55]', async () => {
     const owner = await makeUser();
     const manager = await makeUser();
     const analyst = await makeUser();
@@ -156,6 +160,10 @@ describe('§14.6 team', () => {
     const added = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: managerPhone, role: 'MANAGER' }, owner.token);
     expect(added.statusCode).toBe(200);
     expect(added.json().data.role).toBe('MANAGER');
+
+    // [SWITCHES · ads security] An add is an invitation: the person accepts it before they are a member.
+    expect((await get(`/api/v1/ads/advertiser/${a.id}/members`, manager.token)).statusCode).toBe(404);
+    expect((await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, manager.token)).statusCode).toBe(200);
 
     // The new MANAGER can read the team…
     const list = await get(`/api/v1/ads/advertiser/${a.id}/members`, manager.token);
@@ -167,7 +175,11 @@ describe('§14.6 team', () => {
     const denied = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: analystPhone, role: 'ANALYST' }, manager.token);
     expect(denied.statusCode).toBe(403);
 
-    const unknown = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: '+5926999999', role: 'ANALYST' }, owner.token);
-    expect(unknown.statusCode).toBe(404);
+    // [Row 55] No "no account" 404 and no user id: a known and an unknown
+    // number answer byte-identically, so the add is not a phone lookup.
+    const unknown = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: '+5926999999', role: 'MANAGER' }, owner.token);
+    expect(unknown.statusCode).toBe(200);
+    expect(unknown.body).toBe(added.body);
+    expect(added.body).not.toContain(manager.userId);
   });
 });

@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useRef, useState } from 'react';
 import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -117,6 +118,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
         <T variant="label" tone="muted" center>
           Move the map to place the pin, then confirm.
         </T>
+        <MapCredits />
         <PillButton label="Confirm location" loading={confirming} onPress={confirm} />
       </View>
     </View>

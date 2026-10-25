@@ -320,13 +320,14 @@ describe('Order Flow — Full Lifecycle', () => {
     const body = res.json();
     expect(res.statusCode).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.data.status).toBe('ACCEPTED');
+    expect(body.data.status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
   });
 
   // -----------------------------------------------------------------------
   // Step 7: Vendor starts preparing
   // -----------------------------------------------------------------------
 
+  // [O-3] An older store build still shows "Start preparing" after Accept: its tap is a 200 no-op.
   it('Step 7: Vendor marks order as preparing', async () => {
     const res = await inject('PUT', `/api/v1/vendor/orders/${createdOrderId}/preparing`, vendorToken);
     const body = res.json();
@@ -424,9 +425,15 @@ describe('Order Flow — Full Lifecycle', () => {
   });
 
   it('Step 11b: Rider captures the cash via /handover, which completes the delivery', async () => {
+    // [MKT-F057] The customer reads the door PIN on their order screen and gives it to the rider.
+    const detail = await inject('GET', `/api/v1/customer/orders/${createdOrderId}`, customerToken);
+    expect(detail.statusCode).toBe(200);
+    const ridePin: string = detail.json().data.ridePin;
+    expect(ridePin).toMatch(/^\d{6}$/);
     const res = await inject('POST', `/api/v1/rider/orders/${createdOrderId}/handover`, riderToken, {
       outcome: 'paid',
       gps: { lat: 6.8, lng: -58.15 },
+      ridePin,
     });
     const body = res.json();
     expect(res.statusCode).toBe(200);

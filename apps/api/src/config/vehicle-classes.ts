@@ -17,7 +17,7 @@ import type { VehicleType, PackageSize, RideClass } from '@prisma/client';
 export type MoverService = 'RIDE' | 'COURIER' | 'DELIVERY';
 
 /**
- * Which weekly-fee band a mover bills on.
+ * Which weekly-fee band a mover's vehicle falls in.
  *
  * STANDARD is the everyday fleet — bicycle, motorbike, car, wagon car — the
  * riders, delivery drivers and taxi drivers who make up most of the platform.
@@ -26,7 +26,9 @@ export type MoverService = 'RIDE' | 'COURIER' | 'DELIVERY';
  *
  * This is a CLASSIFICATION, not a price. The rate each band pays lives in
  * `CountryConfig.subscriptionTiers` (`mover` / `moverHeavy`) so it stays
- * config per market, exactly like every other number in this system.
+ * config per market, exactly like every other number in this system. A market
+ * that sets `taxiDriver` prices every taxi Driver by role instead; the band
+ * then decides only what a Rider pays.
  */
 export type MoverFeeBand = 'STANDARD' | 'HEAVY';
 
@@ -45,7 +47,8 @@ export interface VehicleClass {
   /** Services this vehicle is eligible to perform. */
   services: MoverService[];
   /** Extra document-checklist keys beyond the base MOVER list (keys into
-   *  CountryConfig.documentChecklists — unseeded keys resolve to no extra docs). */
+   *  CountryConfig.documentChecklists — unseeded keys resolve to no extra docs).
+   *  A key's `<KEY>_OPTIONAL` list, when present, names documents that vehicle MAY add. */
   docProfiles: string[];
   /** Display / capability order, small → large. */
   order: number;
@@ -64,8 +67,10 @@ const SIZE_RANK: Record<string, number> = { SMALL: 1, MEDIUM: 2, LARGE: 3, EXTRA
  */
 export const VEHICLE_CLASSES: Record<VehicleType, VehicleClass> = {
   BICYCLE: {
+    // [VERIFY-DOCS · ruling 4] No driver's licence on a bicycle, so the national ID is the
+    // rider's photo ID and stays required; every motorised class proves identity by licence.
     type: 'BICYCLE', label: 'Bicycle', maxPackageSize: 'MEDIUM', seats: 0,
-    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: [], order: 1, feeBand: 'STANDARD',
+    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: ['MOVER_NO_LICENCE'], order: 1, feeBand: 'STANDARD',
   },
   MOTORCYCLE: {
     type: 'MOTORCYCLE', label: 'Motorbike', maxPackageSize: 'LARGE', seats: 0,
@@ -119,6 +124,50 @@ export const VEHICLE_TYPES_IN_ORDER: VehicleType[] = Object.values(VEHICLE_CLASS
   .map((v) => v.type);
 
 /**
+ * [Owner decision 2026-09-24 · the launch vehicle list] The heavy freight classes
+ * (canters and box trucks) are NOT offered at launch. They stay in the taxonomy and
+ * the enum, so switching them on later is this one set, but no one can register,
+ * switch to, or go online with one until they are offered. Everything else is
+ * offered: bicycle and motorbike for delivery riders; car and wagon (estate) car for
+ * drivers (buses hidden too since the owner's ruling of 6 Oct 2026). The mobile picker mirrors this set
+ * (apps/mobile/src/lib/vehicleOffer.ts; a test keeps the two equal) and follows
+ * each quote's `offered` flag once the price list has loaded.
+ */
+export const LAUNCH_HIDDEN_VEHICLE_TYPES: ReadonlySet<VehicleType> = new Set<VehicleType>([
+  'CANTER_SHORT', 'CANTER_LONG', 'BOX_TRUCK_SHORT', 'BOX_TRUCK_LONG',
+  // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026] Buses (Group rides) are hidden at launch: a hired
+  // 9- or 15-seater may be neither a hire car nor a route bus (B plates fail the taxi H-plate rule),
+  // so they come back only after the lawyer confirms the licence. Airport trips at launch use cars and
+  // wagon cars (up to 7 passengers, hired as a whole).
+  'BUS_9', 'BUS_15',
+]);
+
+/** Error code for a vehicle Swift does not take on yet (registration, change, GO). */
+export const VEHICLE_NOT_OFFERED = 'VEHICLE_NOT_OFFERED';
+
+/**
+ * [Owner research R9, 15 Oct 2026 · legal A1/D5] A hire carries at most 7 passengers. A 9- or 15-seat bus is
+ * neither a hire car nor a licensed route bus on Swift, and a party of more than 7 is not one hire. So a
+ * passenger vehicle with more seats is never offered (taxi registration, vehicle change, GO, dispatch, the
+ * claim), whatever the launch list says, and no ride is booked for more passengers. Group rides, shared
+ * fares and airport shuttles at separate fares stay OFF (no such product exists; the Group tier is served
+ * only by buses, so it never reaches the riders' tiers).
+ */
+export const MAX_HIRE_PASSENGERS = 7;
+
+/** Can a mover register, switch to, or operate this vehicle today? */
+export function isVehicleOffered(vehicleType: VehicleType): boolean {
+  if (!(vehicleType in VEHICLE_CLASSES) || LAUNCH_HIDDEN_VEHICLE_TYPES.has(vehicleType)) return false;
+  const vehicle = VEHICLE_CLASSES[vehicleType];
+  return vehicle.rideClass == null || vehicle.seats <= MAX_HIRE_PASSENGERS;
+}
+
+/** [R9] The passenger vehicles a hire (taxi) may be offered to and claimed by today. */
+export function hireVehicleTypes(): VehicleType[] {
+  return VEHICLE_TYPES_IN_ORDER.filter((type) => VEHICLE_CLASSES[type].rideClass != null && isVehicleOffered(type));
+}
+
+/**
  * Vehicle types that can carry a parcel of the given size — every vehicle whose
  * max capacity is at least the parcel's size. An unknown/absent size (non-courier
  * orders such as food or rides) is carriable by any vehicle.
@@ -126,6 +175,42 @@ export const VEHICLE_TYPES_IN_ORDER: VehicleType[] = Object.values(VEHICLE_CLASS
 export function vehicleTypesForPackageSize(size: string | null | undefined): VehicleType[] {
   const need = (size && SIZE_RANK[size]) || 0;
   return VEHICLE_TYPES_IN_ORDER.filter((t) => (SIZE_RANK[VEHICLE_CLASSES[t].maxPackageSize] ?? 0) >= need);
+}
+
+/**
+ * [Owner ruling 15 Oct 2026 ~04:25Z, criminal-liability decisions] TAXI CARS = PASSENGERS ONLY until
+ * counsel confirms the hire-car licence conditions cover goods. This reverses the 8 Oct "cars can deliver"
+ * for H-plate taxis: deliveries go to riders. The server switch CAR_DELIVERIES re-enables car deliveries
+ * later; only exactly '1' turns it on (default OFF), like the other launch switches.
+ */
+export const CAR_DELIVERIES_SWITCH = 'CAR_DELIVERIES';
+export function carDeliveriesEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env[CAR_DELIVERIES_SWITCH] === '1';
+}
+
+/**
+ * May this vehicle carry goods (a store delivery or a parcel) today? A passenger vehicle (car, wagon car,
+ * bus: every vehicle a taxi Driver works) only while CAR_DELIVERIES is on; every other vehicle always.
+ * The ONE answer every goods door reads: dispatch, the rider board, the grab, every claim, checkout, courier.
+ */
+export function carriesGoods(vehicleType: string, env: Record<string, string | undefined> = process.env): boolean {
+  if (!(vehicleType in VEHICLE_CLASSES)) return false;
+  return !isPassengerVehicle(vehicleType as VehicleType) || carDeliveriesEnabled(env);
+}
+
+/** The vehicles that may carry goods of this size today (any size when unknown): capacity AND the switch. */
+export function goodsVehicleTypesForPackageSize(size: string | null | undefined, env: Record<string, string | undefined> = process.env): VehicleType[] {
+  return vehicleTypesForPackageSize(size).filter((type) => carriesGoods(type, env));
+}
+
+/**
+ * Can any vehicle Swift takes on today carry goods of this size? False means no mover on Swift could ever be
+ * offered it right now (e.g. a bulky order while car deliveries are off: only cars, vans and the heavy fleet
+ * carry the largest class, and the heavy fleet is not taken on yet), so it must be refused before it is placed,
+ * never accepted and stranded.
+ */
+export function goodsSizeCarriableToday(size: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  return goodsVehicleTypesForPackageSize(size, env).some((type) => isVehicleOffered(type));
 }
 
 /** The document-checklist keys a given vehicle adds on top of the base MOVER list. */
@@ -153,6 +238,25 @@ export function isPassengerVehicle(vehicleType: VehicleType): boolean {
   return VEHICLE_CLASSES[vehicleType]?.rideClass != null;
 }
 
+/** [R13] A vehicle with a motor: every class whose documents include the motor-vehicle set (licence,
+ *  registration, insurance). Only the bicycle has none. */
+export function isMotorVehicle(vehicleType: VehicleType): boolean {
+  return VEHICLE_CLASSES[vehicleType]?.docProfiles.includes('MOVER_MOTOR') ?? true;
+}
+
+/** Which operational entity a mover is: a taxi Driver or a delivery/courier Rider. */
+export type MoverRole = 'DRIVER' | 'RIDER';
+
+/**
+ * The role onboarding provisions for a vehicle — the same passenger-vehicle
+ * rule PartnerService applies: a vehicle with a ride class becomes a taxi
+ * Driver, every other vehicle a delivery/courier Rider. The public price list
+ * quotes each vehicle at the rate of the role it will actually be billed as.
+ */
+export function moverRoleFor(vehicleType: VehicleType): MoverRole {
+  return isPassengerVehicle(vehicleType) ? 'DRIVER' : 'RIDER';
+}
+
 /**
  * [Founder decision XL-vehicle-gap · delegated ruling 2026-09-06] A ride tier is
  * OFFERED only when some vehicle class in the fleet serves it. Nothing maps to XL
@@ -165,7 +269,12 @@ export function servedRideClassesOf(table: Record<string, Pick<VehicleClass, 'ri
   for (const v of Object.values(table)) if (v.rideClass) set.add(v.rideClass);
   return set;
 }
-export const SERVED_RIDE_CLASSES: ReadonlySet<RideClass> = servedRideClassesOf(VEHICLE_CLASSES);
+// [VERIFY-DOCS · ruling 9] Served by an OFFERED vehicle: a class only hidden vehicles serve (GROUP, while
+// buses are hidden) leaves the riders' tiers and the fare estimate with them.
+// [R9] …and only by a vehicle within the hire seat limit, so the Group tier (buses only) stays off for good.
+export const SERVED_RIDE_CLASSES: ReadonlySet<RideClass> = servedRideClassesOf(
+  Object.fromEntries(Object.entries(VEHICLE_CLASSES).filter(([type]) => isVehicleOffered(type as VehicleType))),
+);
 export function isRideClassServed(rideClass: RideClass): boolean {
   return SERVED_RIDE_CLASSES.has(rideClass);
 }

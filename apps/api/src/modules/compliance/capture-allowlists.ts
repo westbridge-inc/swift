@@ -31,12 +31,17 @@ export const CAPTURE_ALLOWLISTS = {
     'selfie', 'liveLocation.lat', 'liveLocation.lng',
     'documents.identity', 'documents.licence', 'documents.insurance',
     'vehicle.plate', 'vehicle.model', 'mmgPayUrl',
+    // [R18] the background-location disclosure answer, kept as consent proof (DPA s.7(1))
+    'consent.backgroundLocation',
   ],
   vendor_user: [
     'phone', 'firstName', 'lastName', 'email',
     'business.name', 'business.address', 'business.phone',
     'documents.ownerId', 'documents.registration', 'documents.operating',
     'mmgPayUrl', 'staff.invitePhone',
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] the store's MMG number (a +592 mobile), shown only to
+    // that order's customer after the store accepts, so the customer can pay the store directly.
+    'mmgNumber',
   ],
   advertiser: [
     'companyName', 'registrationNo', 'contactName', 'contactPhone',

@@ -1,10 +1,17 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { CustodyRecoveryState, Prisma, TaxiStopStatus } from '@prisma/client';
 import {
   TERMINAL_ORDER_STATUSES,
   LIVE_ORDER_STATUSES,
   isTerminalOrderStatus,
+  TAXI_STOP_LAW,
+  TAXI_STOP_OPEN_STATUSES,
+  TAXI_STOP_TRANSITIONS,
+  isTaxiStopOpen,
+  CUSTODY_CASE_LAW,
+  CUSTODY_CASE_OPEN_STATES,
 } from '../modules/order/order-status';
 
 // ---------------------------------------------------------------------------
@@ -34,8 +41,8 @@ import {
 const SRC = join(process.cwd(), 'src');
 const OWNER = join('modules', 'order', 'order-status.ts');
 
-/** The five statuses, in any order, as they appear in a literal list. */
-const TERMINAL_NAMES = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+/** The six statuses, in any order, as they appear in a literal list. */
+const TERMINAL_NAMES = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'RETURNED'];
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -65,7 +72,7 @@ describe('terminal order statuses have ONE definition', () => {
     expect(files.some((f) => f.endsWith(OWNER))).toBe(true);
   });
 
-  it('the exported set is exactly the five terminal statuses', () => {
+  it('the exported set is exactly the six terminal statuses', () => {
     expect([...TERMINAL_ORDER_STATUSES].sort()).toEqual([...TERMINAL_NAMES].sort());
   });
 
@@ -81,7 +88,7 @@ describe('terminal order statuses have ONE definition', () => {
   });
 
   it('no file re-declares the set as a TypeScript literal', () => {
-    // A literal array containing all five names, in any order, on one line.
+    // A literal array containing all six names, in any order, on one line.
     const offenders: string[] = [];
     for (const file of files) {
       if (file.endsWith(OWNER)) continue;
@@ -103,7 +110,7 @@ describe('terminal order statuses have ONE definition', () => {
     for (const file of files) {
       if (file.endsWith(OWNER)) continue;
       const code = stripComments(readFileSync(file, 'utf8'));
-      // A SQL IN-list: the five names quoted inside a NOT IN (...) / IN (...).
+      // A SQL IN-list: the six names quoted inside a NOT IN (...) / IN (...).
       const sqlLists = code.match(/\bIN\s*\([^)]*\)/gi) ?? [];
       for (const list of sqlLists) {
         const quoted = list.match(/'[A-Z_]+'/g)?.map((q) => q.slice(1, -1)) ?? [];
@@ -132,5 +139,128 @@ describe('terminal order statuses have ONE definition', () => {
     // And the terminal list must stay DERIVED — never a second hand-written
     // array smuggled back into the owner itself.
     expect(stripComments(owner)).not.toMatch(/TERMINAL_ORDER_STATUSES[^=\n]*=\s*\[\s*'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [TAXI multi-stop] A taxi stop's states are the TENTH member of this family,
+// and they get the same two guarantees. The law is a Record keyed by the
+// Prisma enum (a new stop state fails the BUILD until it is classified), and
+// no other file may re-declare a stop list or a stop edge, in TypeScript or
+// in SQL. Three of the four names (PENDING, ARRIVED, SKIPPED) also belong to
+// other enums, so the scan is precise rather than loud: a list is a stop list
+// when it carries a name no other enum uses (DEPARTED), or when it sits in a
+// file that handles taxi stops and holds nothing but stop states.
+// ---------------------------------------------------------------------------
+
+describe('[TAXI multi-stop] the stop law has ONE definition', () => {
+  const files = walk(SRC);
+  const rel = (f: string) => f.replace(SRC, 'src');
+  const STOP_STATES = Object.values(TaxiStopStatus) as string[];
+  const OTHER_ENUM_VALUES = new Set(Prisma.dmmf.datamodel.enums
+    .filter((e) => e.name !== 'TaxiStopStatus')
+    .flatMap((e) => e.values.map((v) => v.name)));
+  /** Names only the stop enum uses: a list holding one can only be a stop list. */
+  const STOP_ONLY = STOP_STATES.filter((s) => !OTHER_ENUM_VALUES.has(s));
+  const STOP_FILE = /TaxiStopStatus|TaxiTripStop|taxiTripStop|taxi_trip_stops|taxiStops/;
+  const STOP_ALT = STOP_STATES.join('|');
+  const STOP_EDGE = new RegExp(`\\b(${STOP_ALT})\\s*:\\s*\\[\\s*'(${STOP_ALT})'`);
+  // Guarded: were no name unique to stops, an empty alternation would match every `: [`.
+  const STOP_ONLY_EDGE = STOP_ONLY.length > 0 ? new RegExp(`\\b(${STOP_ONLY.join('|')})\\s*:\\s*\\[`) : null;
+  const TYPED_STOP_LITERAL = /TaxiStopStatus\[\]\s*=\s*\[|Set<TaxiStopStatus>\(\s*\[|satisfies\s+(readonly\s+)?TaxiStopStatus\[\]/;
+
+  it('classifies every TaxiStopStatus the database defines, in both tables — none unclassified, no stray key', () => {
+    expect([...STOP_STATES].sort()).toEqual(['ARRIVED', 'DEPARTED', 'PENDING', 'SKIPPED']);
+    expect(Object.keys(TAXI_STOP_LAW).sort()).toEqual([...STOP_STATES].sort());
+    expect(Object.keys(TAXI_STOP_TRANSITIONS).sort()).toEqual([...STOP_STATES].sort());
+    for (const s of STOP_STATES as TaxiStopStatus[]) expect(['OPEN', 'RESOLVED']).toContain(TAXI_STOP_LAW[s]);
+  });
+
+  it('the open set is exactly a stop not yet reached, or reached and not yet left', () => {
+    expect([...TAXI_STOP_OPEN_STATUSES].sort()).toEqual(['ARRIVED', 'PENDING']);
+    for (const s of STOP_STATES as TaxiStopStatus[]) {
+      expect(isTaxiStopOpen(s)).toBe(TAXI_STOP_LAW[s] === 'OPEN');
+      expect(isTaxiStopOpen(s)).toBe(TAXI_STOP_OPEN_STATUSES.includes(s));
+    }
+  });
+
+  it('the owner derives the open list from an exhaustive Record rather than hand-writing it', () => {
+    const owner = readFileSync(join(SRC, OWNER), 'utf8');
+    expect(owner).toMatch(/Record<TaxiStopStatus,/);
+    expect(stripComments(owner)).toMatch(/TAXI_STOP_OPEN_STATUSES[^=\n]*=[^;]*\.filter\(/);
+    expect(stripComments(owner)).not.toMatch(/TAXI_STOP_OPEN_STATUSES[^=\n]*=\s*\[\s*'/);
+  });
+
+  it('the scan has something to recognise: DEPARTED belongs to no other enum', () => {
+    expect(STOP_ONLY).toEqual(['DEPARTED']);
+  });
+
+  it('no file re-declares a stop-status list or a stop edge, in TypeScript or in SQL', () => {
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file.endsWith(OWNER)) continue;
+      const code = stripComments(readFileSync(file, 'utf8'));
+      const stopFile = STOP_FILE.test(code);
+      const lists = [...(code.match(/\[[^[\]]*\]/g) ?? []), ...(code.match(/\bIN\s*\([^)]*\)/gi) ?? [])];
+      for (const list of lists) {
+        const names = list.match(/'[A-Z_]+'/g)?.map((q) => q.slice(1, -1)) ?? [];
+        const stops = names.filter((n) => STOP_STATES.includes(n));
+        const unmistakable = stops.length >= 2 && stops.some((n) => STOP_ONLY.includes(n));
+        const inAStopFile = stopFile && stops.length >= 2 && stops.length === names.length;
+        if (unmistakable || inAStopFile) offenders.push(`${rel(file)}: ${list.replace(/\s+/g, ' ').slice(0, 90)}`);
+      }
+      if ((stopFile && STOP_EDGE.test(code)) || STOP_ONLY_EDGE?.test(code)) offenders.push(`${rel(file)}: a stop transition table`);
+      if (TYPED_STOP_LITERAL.test(code)) offenders.push(`${rel(file)}: a literal typed as TaxiStopStatus`);
+    }
+    expect(offenders, 'import TAXI_STOP_OPEN_STATUSES / TAXI_STOP_TRANSITIONS from modules/order/order-status instead').toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [AF-MOB-006] A custody recovery case's states are the ELEVENTH member of
+// this family, with the same two guarantees: an exhaustive Record in the owner
+// (a new state fails the BUILD), and no other file re-declaring a case-state
+// list or a case edge. A list is a case list when it carries two or more names
+// that no other enum uses (SUPPORT_HOLD, RELAY_REQUIRED, ...). The migration
+// SQL is history and is graded against the law by custody-recovery-schema.
+// ---------------------------------------------------------------------------
+
+describe('[AF-MOB-006] the custody case law has ONE definition', () => {
+  const files = walk(SRC);
+  const rel = (f: string) => f.replace(SRC, 'src');
+  const CASE_STATES = Object.values(CustodyRecoveryState) as string[];
+  const OTHER_ENUM_VALUES = new Set(Prisma.dmmf.datamodel.enums
+    .filter((e) => e.name !== 'CustodyRecoveryState')
+    .flatMap((e) => e.values.map((v) => v.name)));
+  const CASE_ONLY = CASE_STATES.filter((s) => !OTHER_ENUM_VALUES.has(s));
+  const CASE_EDGE = new RegExp(`\\b(${CASE_STATES.join('|')})\\s*:\\s*\\[\\s*'(${CASE_ONLY.join('|')})'`);
+  const TYPED_CASE_LITERAL = /CustodyRecoveryState\[\]\s*=\s*\[|Set<CustodyRecoveryState>\(\s*\[|satisfies\s+(readonly\s+)?CustodyRecoveryState\[\]/;
+
+  it('the scan has something to recognise: the open states belong to no other enum', () => {
+    expect(CASE_ONLY).toEqual(expect.arrayContaining(['SUPPORT_HOLD', 'RETURN_REQUIRED', 'RELAY_REQUIRED', 'TRANSFER_IN_PROGRESS']));
+  });
+
+  it('the owner derives the open list from an exhaustive Record rather than hand-writing it', () => {
+    const owner = readFileSync(join(SRC, OWNER), 'utf8');
+    expect(owner).toMatch(/Record<CustodyRecoveryState,/);
+    expect(stripComments(owner)).toMatch(/CUSTODY_CASE_OPEN_STATES[^=\n]*=[^;]*\.filter\(/);
+    expect(Object.keys(CUSTODY_CASE_LAW).sort()).toEqual([...CASE_STATES].sort());
+    expect(CUSTODY_CASE_OPEN_STATES.length).toBeGreaterThan(0);
+  });
+
+  it('no file re-declares a case-state list or a case edge, in TypeScript or in SQL', () => {
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file.endsWith(OWNER)) continue;
+      const code = stripComments(readFileSync(file, 'utf8'));
+      const lists = [...(code.match(/\[[^[\]]*\]/g) ?? []), ...(code.match(/\bIN\s*\([^)]*\)/gi) ?? [])];
+      for (const list of lists) {
+        const names = list.match(/'[A-Z_]+'/g)?.map((q) => q.slice(1, -1)) ?? [];
+        if (names.filter((n) => CASE_ONLY.includes(n)).length >= 2) offenders.push(`${rel(file)}: ${list.replace(/\s+/g, ' ').slice(0, 90)}`);
+      }
+      if (CASE_EDGE.test(code)) offenders.push(`${rel(file)}: a case transition table`);
+      if (TYPED_CASE_LITERAL.test(code)) offenders.push(`${rel(file)}: a literal typed as CustodyRecoveryState`);
+    }
+    expect(offenders, 'import CUSTODY_CASE_OPEN_STATES / CUSTODY_CASE_TRANSITIONS from modules/order/order-status instead').toEqual([]);
   });
 });

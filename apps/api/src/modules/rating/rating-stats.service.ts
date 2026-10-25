@@ -46,7 +46,31 @@ export const TYPES_FOR_ROLE: Record<SubjectRef['role'], string[]> = {
 };
 
 export class RatingStatsService {
-  constructor(private prisma: PrismaClient) {}
+  constructor(
+    private prisma: PrismaClient,
+    /** [E26] Called AFTER a vendor aggregate commits (any rating create /
+     *  exclude / remove / moderate path). The caller wires the search re-sync
+     *  here; the service itself never fails a rating write on it. */
+    private onVendorAggregateChanged?: (vendorId: string) => void,
+  ) {}
+
+  /**
+   * [E26] The search document mirrors vendor.averageRating/totalRatings, so
+   * every rating write that re-levels a VENDOR aggregate must schedule that
+   * vendor's search re-sync. Best-effort by design — a throw here must never
+   * fail the rating write, and a missed schedule self-heals at the next write
+   * / boot / admin full sync, the same contract as scheduleVendorSearchSync.
+   * Mover/driver/service-provider subjects have no search document: nothing
+   * fires for them.
+   */
+  private notifyVendorAggregateChanged(subject: SubjectRef): void {
+    if (subject.role !== 'VENDOR' || !this.onVendorAggregateChanged) return;
+    try {
+      this.onVendorAggregateChanged(subject.id);
+    } catch {
+      // best-effort — a search side effect must never fail the rating write
+    }
+  }
 
   /**
    * Full recompute for one subject from rows — the reference implementation.
@@ -55,7 +79,7 @@ export class RatingStatsService {
    * queries anyway; the nightly job re-runs it across all subjects so
    * RAT-H's three answers stay one value by construction).
    */
-  async recompute(subject: SubjectRef, tenantId = 'swift-default'): Promise<void> {
+  async recompute(subject: SubjectRef, tenantId = 'swift-default'): Promise<boolean> {
     const where = {
       type: { in: TYPES_FOR_ROLE[subject.role] as never },
       state: 'ACTIVE' as const,
@@ -132,7 +156,14 @@ export class RatingStatsService {
       totalRatings: lifetimeCount,
     };
     if (subject.role === 'VENDOR') {
-      await this.prisma.vendor.updateMany({ where: { id: subject.id }, data: legacy });
+      // [E26] Written only when the stored stars differ, so the count answers
+      // whether the store's search stars must re-sync: the nightly sweep
+      // re-syncs exactly the stores it healed (normally none), not every store.
+      const moved = await this.prisma.vendor.updateMany({
+        where: { id: subject.id, OR: [{ averageRating: { not: legacy.averageRating } }, { totalRatings: { not: legacy.totalRatings } }] },
+        data: legacy,
+      });
+      return moved.count > 0;
     } else if (subject.role === 'RIDER') {
       await this.prisma.rider.updateMany({ where: { userId: subject.id }, data: legacy });
     } else if (subject.role === 'DRIVER') {
@@ -140,12 +171,16 @@ export class RatingStatsService {
     } else if (subject.role === 'SERVICE_PROVIDER') {
       await this.prisma.serviceProvider.updateMany({ where: { userId: subject.id }, data: legacy });
     }
+    return false;
   }
 
   /** Incremental hook: recompute the subject a rating row touches. */
   async applyRating(rating: Pick<Rating, 'type' | 'vendorId' | 'rateeId'>): Promise<void> {
     const subject = subjectOf(rating);
-    if (subject) await this.recompute(subject);
+    if (subject) {
+      await this.recompute(subject);
+      this.notifyVendorAggregateChanged(subject);
+    }
   }
 
   /** Nightly sweep across every subject with any rating (RAT-H's third leg
@@ -159,7 +194,15 @@ export class RatingStatsService {
       const s = subjectOf(r);
       if (s) subjects.set(`${s.role}:${s.id}`, s);
     }
-    for (const s of subjects.values()) await this.recompute(s, tenantId);
+    for (const s of subjects.values()) {
+      // [E26] The sweep is also a HEALER: a store whose persisted stars had
+      // drifted is re-written here, and only then must its search stars
+      // re-sync (the same debounced, best-effort schedule a rating write
+      // fires). A store already in sync schedules nothing, so the nightly run
+      // is not a per-store queue flood. Mover/driver/provider subjects have
+      // no search document and never fire.
+      if (await this.recompute(s, tenantId)) this.notifyVendorAggregateChanged(s);
+    }
     return subjects.size;
   }
 
@@ -181,6 +224,7 @@ export class RatingStatsService {
       if (s && !seen.has(`${s.role}:${s.id}`)) {
         seen.add(`${s.role}:${s.id}`);
         await this.recompute(s);
+        this.notifyVendorAggregateChanged(s);
       }
     }
     return targets.length;

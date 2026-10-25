@@ -36,7 +36,7 @@ let owner: { userId: string; token: string };
 let customer: { userId: string; token: string };
 const userIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_611_000_000 + Math.floor(Math.random() * 800_000_000);
+const phoneBase = 592_611_000_000 + Math.floor(Math.random() * 300_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
 
 async function makeUser(roles: string[], activeRole: string) {
   seq += 1;
@@ -166,11 +166,14 @@ describe('[W-28] settled is not fulfilled', () => {
     const open = { picked: false, subStatus: 'NONE' };
     const pending = { picked: false, subStatus: 'PENDING' };
 
-    for (const line of [picked, approved, refunded, rejected]) expect(PickingService.lineResolved(line)).toBe(true);
-    for (const line of [open, pending]) expect(PickingService.lineResolved(line)).toBe(false);
+    // [O-4 · owner 22 Oct 2026] A tick is a tool, never a gate: an unticked line the store did not take
+    // off is settled AND fulfilled; only an open customer question is unsettled. W-28 is unchanged: a
+    // refunded or rejected line is settled but never fulfilled.
+    for (const line of [picked, approved, refunded, rejected, open]) expect(PickingService.lineResolved(line)).toBe(true);
+    for (const line of [pending]) expect(PickingService.lineResolved(line)).toBe(false);
 
-    for (const line of [picked, approved]) expect(PickingService.lineFulfilled(line)).toBe(true);
-    for (const line of [refunded, rejected, open, pending]) expect(PickingService.lineFulfilled(line)).toBe(false);
+    for (const line of [picked, approved, open]) expect(PickingService.lineFulfilled(line)).toBe(true);
+    for (const line of [refunded, rejected, pending]) expect(PickingService.lineFulfilled(line)).toBe(false);
   });
 });
 
@@ -233,11 +236,8 @@ describe('[W-28] an emptied order cannot be marked ready', () => {
     const [keep, drop] = order.items;
 
     expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${drop!.id}/refund-line`, owner.token)).statusCode).toBe(200);
-    // still blocked: the surviving line has not been picked yet
-    const early = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, owner.token);
-    expect(early.statusCode).toBe(409);
-    expect(early.json().error.code).toBe('PICKING_INCOMPLETE');
-
+    // [O-4] The surviving line counts without a tick (ticking is optional); the tick still works.
+    expect(await new PickingService(app.prisma, app.io).readiness(order.id)).toMatchObject({ total: 2, unresolved: 0, fulfilled: 1, removed: 1, ready: true });
     expect((await inject('PUT', `/api/v1/vendor/orders/${order.id}/items/${keep!.id}/picked`, owner.token, { picked: true })).statusCode).toBe(200);
     const state = await new PickingService(app.prisma, app.io).readiness(order.id);
     expect(state).toMatchObject({ total: 2, unresolved: 0, fulfilled: 1, removed: 1, ready: true });

@@ -2,7 +2,6 @@ import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   PARTNER_SUBSCRIPTION_TYPES,
-  fetchAgentApprovals,
   fetchCompliance,
   fetchModerationQueue,
   fetchOpsLive,
@@ -21,7 +20,6 @@ type ModuleKey =
   | 'support'
   | 'money'
   | 'ops'
-  | 'agent'
   | 'compliance';
 
 type FeedState = 'loading' | 'error' | 'ready';
@@ -371,11 +369,6 @@ export default function Home({ go }: { go: (module: ModuleKey) => void }) {
     queryFn: () => fetchSupport('OPEN'),
     refetchInterval: 60_000,
   });
-  const agent = useQuery({
-    queryKey: ['agent-approvals'],
-    queryFn: fetchAgentApprovals,
-    refetchInterval: 20_000,
-  });
   const compliance = useQuery({
     queryKey: ['compliance'],
     queryFn: fetchCompliance,
@@ -451,9 +444,6 @@ export default function Home({ go }: { go: (module: ModuleKey) => void }) {
   const reportCount = reports.data?.pendingTotal ?? 0;
   const ticketState = stateWhen(tickets, finite(tickets.data?.total));
   const ticketCount = tickets.data?.total ?? 0;
-  const agentState = stateWhen(agent, Array.isArray(agent.data));
-  const agentRows = Array.isArray(agent.data) ? agent.data : [];
-  const agentDisplay = agentRows.length === 100 ? '100+' : count(agentRows.length);
 
   // ── Compliance: the liability shield, checked daily ──────────────────────
   const complianceRuns: ComplianceRun[] = Array.isArray(compliance.data?.runs) ? compliance.data.runs : [];
@@ -501,7 +491,7 @@ export default function Home({ go }: { go: (module: ModuleKey) => void }) {
 
   // ── The headline pill ────────────────────────────────────────────────────
   // Six queues, six different tables, every one an exact server total — the
-  // capped feeds (SLA scan, exhausted searches, agent proposals) are deliberately
+  // capped feeds (SLA scan, exhausted searches) are deliberately
   // left out rather than added in as an under-count.
   const attentionFeeds = [
     { state: documentState, value: documentTotal ?? 0 },
@@ -598,17 +588,6 @@ export default function Home({ go }: { go: (module: ModuleKey) => void }) {
       tone: 'warn' as const,
       to: 'support' as const,
     },
-    {
-      label: 'Agent proposals',
-      detail: agentRows.length === 100
-        ? 'At least this many waiting; the feed is capped'
-        : 'Machine-proposed actions waiting for a person',
-      value: agentDisplay,
-      raw: agentRows.length,
-      state: agentState,
-      tone: 'calm' as const,
-      to: 'agent' as const,
-    },
   ];
   const visibleFireSignals = fireSignals.filter((signal) =>
     signal.state !== 'ready' || signal.raw > 0 || ('incomplete' in signal && signal.incomplete),
@@ -618,10 +597,10 @@ export default function Home({ go }: { go: (module: ModuleKey) => void }) {
   const refreshAll = () => {
     void Promise.all([
       overview.refetch(), documents.refetch(), live.refetch(), stuck.refetch(), reports.refetch(),
-      tickets.refetch(), agent.refetch(), compliance.refetch(), pastDue.refetch(),
+      tickets.refetch(), compliance.refetch(), pastDue.refetch(),
     ]);
   };
-  const refreshing = [overview, documents, live, stuck, reports, tickets, agent, compliance, pastDue]
+  const refreshing = [overview, documents, live, stuck, reports, tickets, compliance, pastDue]
     .some((query) => query.isFetching);
 
   return (

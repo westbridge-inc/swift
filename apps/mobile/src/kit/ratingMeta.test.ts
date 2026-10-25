@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-native', () => ({ View: 'View', Pressable: 'Pressable' }));
 vi.mock('expo-image', () => ({ Image: 'Image' }));
+vi.mock('react-native-reanimated', () => ({ useReducedMotion: () => false }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 // Deliberately NOT the real brand values. These tests assert text and segment
 // counts, never colour, so the palette here is inert placeholder — and the UI

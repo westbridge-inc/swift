@@ -10,6 +10,7 @@
  * decision, so every decision has a case.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
@@ -18,12 +19,14 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
-import { VerificationService, REJECTION_REASON_CODES, ACTOR_FACING_CATEGORY, REVIEW_SLA_HOURS } from '../modules/verification/verification.service';
+import { VerificationService, REJECTION_REASON_CODES, RETIRED_REJECTION_REASON_CODES, ACTOR_FACING_CATEGORY, REVIEW_SLA_HOURS } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 
-/** DOC-1 §8.5 actor-facing table, pinned FROM the spec as literals (the test must not import the thing it grades). */
-const SPEC_8_5_CATEGORY: Record<(typeof REJECTION_REASON_CODES)[number], string> = {
+/** DOC-1 §8.5 actor-facing table, pinned FROM the spec as literals (the test must not import the thing it grades).
+ *  NOT_YELLOW is retired (owner ruling 2026-10-01): never offered or applied again, but its row stays so the
+ *  decisions recorded under it keep their category. */
+const SPEC_8_5_CATEGORY: Record<(typeof REJECTION_REASON_CODES)[number] | (typeof RETIRED_REJECTION_REASON_CODES)[number], string> = {
   UNREADABLE: 'QUALITY', INCOMPLETE: 'QUALITY',
   EXPIRED: 'EXPIRED',
   WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
@@ -51,10 +54,11 @@ async function owner(n: number) {
     phone: `+59270${NUM}${n}`, firstName: 'Rev', lastName: `Case${n}`, activeRole: 'VENDOR_OWNER', countryCode: 'GY', avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
-const submit = (userId: string, docType = 'business_registration', fileKey = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, fileKey, 'v1'));
+const submit = (userId: string, docType = 'business_registration', fileKey?: string) =>
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, fileKey ?? await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const openCase = (docId: string) => system(() => app.prisma.reviewCase.findFirst({ where: { submissionId: docId }, orderBy: { createdAt: 'desc' }, include: { decisions: true } }));
 
 beforeAll(async () => {
@@ -101,8 +105,8 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
     const a = await owner(2);
     const b = await owner(3);
     const sha = crypto.createHash('sha256').update(`dup-${RUN}`).digest('hex');
-    const keyA = `/uploads/verification/${RUN}/a.enc`;
-    const keyB = `/uploads/verification/${RUN}/b.enc`;
+    const keyA = `/uploads/verification/${a}/${nanoid(16)}.enc`;
+    const keyB = `/uploads/verification/${b}/${nanoid(16)}.enc`;
     for (const [k, who] of [[keyA, a], [keyB, b]] as const) {
       await app.prisma.encryptedObject.create({ data: { fileKey: k, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: 10, sha256: sha, createdBy: who } });
     }
@@ -127,7 +131,7 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
   });
 
   it('the reason → category table is the one in §8.5 — pinned as literals, so a lie in the map cannot satisfy itself', () => {
-    expect(Object.keys(ACTOR_FACING_CATEGORY).sort()).toEqual([...REJECTION_REASON_CODES].sort());
+    expect(Object.keys(ACTOR_FACING_CATEGORY).sort()).toEqual([...REJECTION_REASON_CODES, ...RETIRED_REJECTION_REASON_CODES].sort());
     expect(ACTOR_FACING_CATEGORY).toEqual(SPEC_8_5_CATEGORY);
     // §8.5: the fraud class reads IDENTICALLY — never tell a fraudster which signal caught them.
     const fraudClass = (['SUSPECTED_TAMPERING', 'DUPLICATE', 'FACE_MISMATCH'] as const).map((c) => ACTOR_FACING_CATEGORY[c]);

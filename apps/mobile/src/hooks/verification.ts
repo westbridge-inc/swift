@@ -1,7 +1,9 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, vendorApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
+import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
 import {
   AuthSessionBoundaryError,
@@ -11,6 +13,9 @@ import {
 } from '../stores/authStore';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import { verificationRefetchInterval } from './verificationPolling';
+import type { MutationGuard } from './useStepUp';
+import type { WeeklyFeeAck } from '../lib/partnerPricing';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -30,26 +35,14 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
     // Onboarding screens poll so an approval flips the app to "live" within
     // seconds, not on the next cold refetch. Stops itself once verified.
     refetchInterval: opts?.poll
-      ? (query) => ((query.state.data as any)?.roleVerified ? false : 15000)
+      ? (query) => verificationRefetchInterval(query.state.data as { roleVerified?: boolean; categoryUnavailable?: boolean } | undefined)
       : undefined,
   });
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
 /** Public weekly price list for the partner pitch ("N days free, then X/week"). */
-export function usePartnerPricing(countryCode?: string) {
-  return useQuery({
-    queryKey: ['pricing', countryCode ?? 'GY'],
-    queryFn: () => unwrap<{
-      countryCode: string;
-      currencyCode: string;
-      currencySymbol: string;
-      trialDays: number;
-      weekly: { mover: number | null; moverHeavy: number | null; serviceVendor: number | null; smallVendor: number | null; largeVendor: number | null; departmentVendor: number | null };
-    }>(authApi.pricing(countryCode)),
-    staleTime: 60 * 60 * 1000,
-  });
-}
+export { usePartnerPricing } from './partnerPricing';
 
 export function useBecomePartner() {
   const qc = useQueryClient();
@@ -61,6 +54,8 @@ export function useBecomePartner() {
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
       /** [DCR-1] The role-agreement checkbox, recorded in the consent ledger. */
       acceptAgreement?: boolean;
+      /** [Row 628] The "I understand the weekly fee" tick: the words' version and the fee on screen. */
+      weeklyFeeAck?: WeeklyFeeAck;
       business?: {
         name: string;
         vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -68,6 +63,8 @@ export function useBecomePartner() {
         addressLine1: string;
         city: string;
         region?: string;
+        /** [ROLE-DOCS · owner 21 Oct 2026] the store trades under its owner's own name (checked by the server) */
+        nameBasis?: 'OWN_NAME' | 'REGISTERED';
         latitude: number;
         longitude: number;
       };
@@ -98,6 +95,19 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // [ROLE-DOCS · owner 21 Oct 2026] The owner ticked the own-name declaration before the store existed: it is
+      // signed now, in the same turn as the session check above, so it is this account's. Here, not on the screen:
+      // the store's creation swaps the navigator, and a callback on an unmounted screen never runs. A failure never
+      // fails the store; its Documents checklist offers the same signature again.
+      if (data.role === 'VENDOR' && data.business?.nameBasis === 'OWN_NAME') {
+        let signing: Promise<unknown>;
+        try { signing = Promise.resolve(vendorApi.signOwnName()); } catch { signing = Promise.resolve(); }
+        await signing.catch(() => undefined);
+      }
+      // The store exists: its List-your-business draft is done. Cleared here,
+      // not by the screen — a per-call observer callback never runs once the
+      // screen has unmounted — and only for the account that submitted it.
+      if (data.role === 'VENDOR') useBusinessSetupDraft.getState().clearIfOwner(owner);
       void qc.invalidateQueries({ queryKey: ['verification'] });
       void qc.invalidateQueries({ queryKey: ['vendor'] });
       void qc.invalidateQueries({ queryKey: ['mover'] });
@@ -107,6 +117,52 @@ export function useBecomePartner() {
       return result;
     },
   });
+}
+
+/**
+ * [VEHICLES] Change the vehicle a mover works with (PUT /partner/vehicle). The server
+ * takes the mover offline, retires the papers about the old vehicle and may move them
+ * between delivery and taxi work, so the session's roles and mover pointer are
+ * re-read from its answer exactly as "Save vehicle" does. `guard` is the step-up
+ * wrapper (hooks/useStepUp): a verified mover confirms it is them first.
+ */
+export function useChangeVehicle(guard?: MutationGuard) {
+  const qc = useQueryClient();
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  const run = async (data: {
+    vehicleType: VehicleKind;
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }) => {
+    const owner = requireAuthSessionSnapshot();
+    const user = useAuthStore.getState().user as (Parameters<
+      typeof setUserIfCurrent
+    >[1] & { lastMoverRole?: string | null; roles?: string[] }) | null;
+    if (!user || user.id !== owner.userId) throw new AuthSessionBoundaryError();
+    const result = await unwrap<{
+      kind: 'RIDER' | 'DRIVER';
+      vehicleType: VehicleKind;
+      changed: boolean;
+      activeRole?: string | null;
+      lastMoverRole?: 'DRIVER' | 'RIDER' | null;
+    }>(partnerApi.changeVehicle(data, owner));
+    requireAuthSessionForPrincipal(owner);
+    if (result.changed && result.activeRole) {
+      // A move between delivery and taxi work adds that role; the pointer follows the server.
+      const roles = Array.from(new Set([...(user.roles ?? []), 'MOVER', result.kind]));
+      const canonical = canonicalMoverAuthority(
+        { roles, activeRole: result.activeRole, lastMoverRole: result.lastMoverRole ?? null },
+        result.activeRole,
+        user.lastMoverRole,
+      );
+      if (!setUserIfCurrent(owner, { ...user, roles, ...canonical } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
+        throw new AuthSessionBoundaryError();
+      }
+    }
+    void qc.invalidateQueries({ queryKey: ['verification'] });
+    void qc.invalidateQueries({ queryKey: ['mover'] });
+    return result;
+  };
+  return useMutation({ mutationFn: guard ? guard(run) : run });
 }
 
 /** Upload a single picked file to storage; resolves to its fileUrl. */
@@ -122,7 +178,8 @@ export function useUploadFile() {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const up = await unwrap<{ url: string }>(verificationApi.upload(form, current));
       requireAuthSessionForPrincipal(owner);
       return up.url;
@@ -130,18 +187,24 @@ export function useUploadFile() {
   });
 }
 
-/** Consumer L2: submit a government ID + selfie (manual KYC review). */
+/** Consumer L2: submit a government ID. [Owner ruling 8 Oct 2026] It goes on file at once unless the
+ *  server's automatic checks hold it for a person; no selfie, no face match. The result carries
+ *  `idCheck` (ON_FILE · WAITING · NOT_ACCEPTED) — read it through lib/customerIdCopy. */
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl: string }) => {
+    mutationFn: async (data: { idDocumentUrl: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
+        // [R17 · in-app ¶15] the screen's tick is recorded in the consent ledger. [Owner ruling 24 Oct 2026]
+        // v2 = the words that promise no unlock (the API accepts v1 from build 12's own JS as well).
+        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v2' },
         owner,
       ));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['verification'] });
+      // The Profile row reads the new idCheck from /customer/profile.
+      void qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
       return result;
     },
   });
@@ -159,7 +222,8 @@ export function useUploadDocument(role: string) {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form, initial));
       const current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(
@@ -169,6 +233,8 @@ export function useUploadDocument(role: string) {
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
+          // [R17] the checklist's tick (build 12) is recorded in the consent ledger
+          consentTick: 'document_v1',
         }, current),
       );
       requireAuthSessionForPrincipal(owner);

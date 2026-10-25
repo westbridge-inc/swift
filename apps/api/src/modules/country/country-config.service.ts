@@ -1,129 +1,259 @@
-import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
-import { registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
-import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
-import { NotFoundError } from '../../utils/errors';
+import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER, OWN_NAME_LIST_SUFFIX, OWN_NAME_TIER } from '../verification/doc-registry';
+import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
+import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
-import { docProfilesFor, feeBandFor } from '../../config/vehicle-classes';
+import { docProfilesFor, feeBandFor, type MoverRole } from '../../config/vehicle-classes';
+
+type Db = PrismaClient | Prisma.TransactionClient;
 
 /** Weekly subscription tiers in local currency. */
 export interface SubscriptionTiers {
-  /** STANDARD fee band — bicycle, motorbike, car, wagon car. */
+  /**
+   * `'complete'` declares the full partner card: every rate and both catalogue
+   * boundaries are present and valid, and NO fallback below applies — a
+   * missing key refuses the whole market rather than quietly pricing it as a
+   * different card. Absent in a legacy market, which keeps the documented
+   * fallbacks exactly as before.
+   */
+  card?: typeof COMPLETE_CARD;
+  /** STANDARD fee band — a delivery/courier Rider on a bicycle or motorbike
+   *  (and, where `taxiDriver` is absent, a Driver on a car or wagon car). */
   mover: number;
-  /** HEAVY fee band — buses, canters, box trucks. Absent in a market that has
-   *  not set it, which `moverRateFor` resolves back to `mover`. */
+  /** HEAVY fee band — heavy delivery on a canter or box truck (and, where
+   *  `taxiDriver` is absent, a Driver on a bus). A LEGACY market may leave it
+   *  unset, which resolves back to `mover`. */
   moverHeavy?: number;
-  /** Services with no catalogue — a plumber, electrician or barber. Falls back
-   *  to `smallVendor` in a market that has not priced services separately. */
+  /** Every taxi Driver, whatever the vehicle. A LEGACY market may leave it
+   *  unset, where a Driver pays the band rate like everyone else. */
+  taxiDriver?: number;
+  /** Services with no catalogue — a plumber, electrician or barber. A LEGACY
+   *  market may leave it unset, falling back to `smallVendor`. */
   serviceVendor?: number;
   /** Standard catalogue, below `largeCatalogueThreshold` items. */
   smallVendor: number;
   /** At or above `largeCatalogueThreshold` items. */
   largeVendor: number;
-  /** Department-store scale — at or above `departmentCatalogueThreshold`. */
+  /** Department-store scale — at or above `departmentCatalogueThreshold`. A
+   *  LEGACY market may leave it unset, which removes that step. */
   departmentVendor?: number;
   largeCatalogueThreshold?: number;
   departmentCatalogueThreshold?: number;
-  /** Franchise: from `franchiseMinLocations` stores under one owner, every
-   *  location takes `franchiseDiscountPct` off ITS OWN rate. Both must be set
-   *  for franchise pricing to apply at all. */
-  franchiseMinLocations?: number;
-  franchiseDiscountPct?: number;
-  [tier: string]: number | undefined;
+  /* [Owner, 13 Oct 2026 — decision 49] There is no multi-store pricing: every
+   * store is its own account and pays its own tier by its own catalogue. A
+   * stored card written before that ruling may still carry the old
+   * `franchiseMinLocations` / `franchiseDiscountPct` keys until its settings
+   * are re-seeded; nothing reads them, so they never discount a store and
+   * never refuse a market. */
+  [tier: string]: number | string | undefined;
 }
 
 export const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 1000;
 export const DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD = 10000;
 
-/** What a vendor's weekly rate is decided from. */
+/** What a vendor's weekly rate is decided from: THIS store alone. How many
+ *  other stores its owner has never enters into it (owner, 13 Oct 2026). */
 export interface VendorRateBasis {
   /** SERVICE vendors have no catalogue to count. */
   isService: boolean;
   /** Active listings on this store. */
   activeListings: number;
-  /** How many stores this owner holds — the franchise basis. */
-  ownedStores: number;
 }
 
-/** Which tier a vendor's rate is built from, before any franchise discount. */
+/** Which tier a vendor's rate is built from. */
 export type VendorRateReason = 'department' | 'large' | 'service' | 'small';
 
-export interface VendorRate {
-  /** What this store owes per week, discount already applied. */
+/** Which tier a mover's rate is built from: a taxi Driver, or a Rider on a
+ *  standard or heavy vehicle. */
+export type MoverTier = 'taxi' | 'courier' | 'courierHeavy';
+
+/** Every tier a partner's weekly fee can be built from. */
+export type PartnerTier = MoverTier | VendorRateReason;
+
+/** Who is being priced. The role decides first; the vehicle or the catalogue
+ *  decides within it. There is deliberately no sales figure anywhere in here:
+ *  the fee is flat and partners keep every sale, fare and tip. */
+export type PartnerSubject =
+  | { kind: MoverRole; vehicleType: VehicleType }
+  | ({ kind: 'VENDOR' } & VendorRateBasis);
+
+export interface PartnerRate {
+  /** What this partner owes per week — the full rate of its tier. */
   rate: number;
   /** The tier the rate was built from. */
-  reason: VendorRateReason;
-  /** Whether the franchise discount was applied. */
-  franchised: boolean;
+  tier: PartnerTier;
 }
 
 /**
- * The weekly rate a vendor pays. ONE definition, shared by signup and the
- * weekly re-tier, for the same reason `moverRateFor` is: a rate quoted at
- * signup that disagrees with the rate billing later decides is a support
- * incident, not a rounding difference.
- *
- * TIER first, then DISCOUNT:
- *   1. The store's own rate — service (no catalogue), else department, large
- *      or small by active listing count. The threshold count itself qualifies.
- *   2. If the owner holds `franchiseMinLocations` or more stores, take
- *      `franchiseDiscountPct` off THAT rate.
- *
- * The discount is deliberately applied to each store's own tier rather than
- * replacing it with a flat bundle. At the standard shop rate the two are
- * identical — five shops at 20,000 less 50% is the 50,000-for-five bundle —
- * but a flat bundle would also let a chain of five department stores pay less
- * than a single one, which is not a volume discount, it is a loophole.
- *
- * Every threshold, price and percentage is config. A market that has set none
- * of the optional keys behaves exactly as it did before they existed.
+ * A market whose tier config cannot price a partner — a missing, zero,
+ * negative, fractional or non-numeric rate, or a nonsensical catalogue
+ * boundary. Signup
+ * refuses, activation refuses, the re-tier holds the current rate, and the
+ * public list refuses to quote: an unknown price is an error, never a free
+ * subscription.
  */
-export function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): VendorRate {
-  let rate: number;
-  let reason: VendorRateReason;
-
-  if (basis.isService) {
-    rate = tiers.serviceVendor ?? tiers.smallVendor;
-    reason = 'service';
-  } else {
-    const deptFloor = tiers.departmentCatalogueThreshold ?? DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD;
-    const largeFloor = tiers.largeCatalogueThreshold ?? DEFAULT_LARGE_CATALOGUE_THRESHOLD;
-    if (tiers.departmentVendor != null && basis.activeListings >= deptFloor) {
-      rate = tiers.departmentVendor;
-      reason = 'department';
-    } else if (basis.activeListings >= largeFloor) {
-      rate = tiers.largeVendor;
-      reason = 'large';
-    } else {
-      rate = tiers.smallVendor;
-      reason = 'small';
-    }
+export class PricingConfigError extends AppError {
+  constructor(key: string) {
+    super(500, 'PRICING_CONFIG_INVALID', `Weekly-fee config "${key}" is missing or is not a whole positive amount`, { key });
+    this.name = 'PricingConfigError';
   }
-
-  const { franchiseMinLocations: minStores, franchiseDiscountPct: pct } = tiers;
-  const franchised =
-    minStores != null && pct != null && minStores > 0 && pct > 0 && basis.ownedStores >= minStores;
-
-  // Round to whole currency units: a weekly fee is a number a shop owner reads
-  // off an invoice, and 787.7 is not one. GYD has no subunit in practice, and
-  // the column is Decimal(10,2), so this never loses money to rounding drift.
-  if (franchised) rate = Math.round(rate * (1 - pct / 100));
-
-  return { rate, reason, franchised };
 }
 
 /**
- * The weekly rate a mover pays, given the vehicle they registered.
- *
- * ONE definition. Signup (SubscriptionService) and the weekly re-tier
- * (BillingService) must both come through here, or a mover's rate at signup
- * can drift from the rate the billing run later decides they owe.
- *
- * A market that has not set `moverHeavy` falls back to the standard rate —
- * never to zero, and never to a code constant.
+ * A configured rate: a whole number of currency units above zero, or the
+ * config is refused. Whole because a weekly fee is a number a partner reads
+ * off an invoice and a client renders through a whole-unit formatter, and
+ * because the columns that hold it are Decimal(10,2) and Decimal(12,2): a
+ * 0.001 would be quoted as one thing, rendered as $0 and persisted as 0.00.
  */
-export function moverRateFor(tiers: SubscriptionTiers, vehicleType: VehicleType): number {
-  return feeBandFor(vehicleType) === 'HEAVY' ? (tiers.moverHeavy ?? tiers.mover) : tiers.mover;
+function requiredRate(tiers: SubscriptionTiers, key: string): number {
+  const value: unknown = tiers[key];
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new PricingConfigError(key);
+  return value;
+}
+
+/** A rate a LEGACY market may leave unset ("not priced apart"); the complete
+ *  card may not. Present must be valid either way. */
+function optionalRate(tiers: SubscriptionTiers, key: string, complete: boolean): number | undefined {
+  if (tiers[key] == null) {
+    if (complete) throw new PricingConfigError(key);
+    return undefined;
+  }
+  return requiredRate(tiers, key);
+}
+
+/** A catalogue boundary is a whole number of items above zero. A LEGACY market
+ *  may leave it to the default; the complete card states it. */
+function catalogueFloor(tiers: SubscriptionTiers, key: string, fallback: number, complete: boolean): number {
+  const value: unknown = tiers[key];
+  if (value == null) {
+    if (complete) throw new PricingConfigError(key);
+    return fallback;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new PricingConfigError(key);
+  return value;
+}
+
+/**
+ * Whether the market declares the complete card (`card: 'complete'`). A
+ * declaration this code does not know is a broken market, not a legacy one:
+ * the only way to be priced with fallbacks is to declare nothing at all.
+ */
+export function isCompleteCard(tiers: SubscriptionTiers): boolean {
+  const card: unknown = tiers.card;
+  if (card == null) return false;
+  if (card !== COMPLETE_CARD) throw new PricingConfigError('card');
+  return true;
+}
+
+/** One catalogue step: from `minItems` active items, `rate` per week. */
+export interface CatalogueStep {
+  minItems: number;
+  tier: Exclude<VendorRateReason, 'service'>;
+  rate: number;
+}
+
+/**
+ * The catalogue ladder a market bills — small from 0 items, large from its
+ * floor, department from its floor where the market prices one — validated
+ * as ONE shape, so the biller and the public list read the same steps. A
+ * department step at or below the large one would leave the large tier
+ * unreachable and the ladder out of order.
+ */
+export function catalogueStepsFor(tiers: SubscriptionTiers): CatalogueStep[] {
+  const complete = isCompleteCard(tiers);
+  const largeFloor = catalogueFloor(tiers, 'largeCatalogueThreshold', DEFAULT_LARGE_CATALOGUE_THRESHOLD, complete);
+  const department = optionalRate(tiers, 'departmentVendor', complete);
+  const deptFloor = catalogueFloor(tiers, 'departmentCatalogueThreshold', DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD, complete);
+  if (department != null && deptFloor <= largeFloor) throw new PricingConfigError('departmentCatalogueThreshold');
+  const steps: CatalogueStep[] = [
+    { minItems: 0, tier: 'small', rate: requiredRate(tiers, 'smallVendor') },
+    { minItems: largeFloor, tier: 'large', rate: requiredRate(tiers, 'largeVendor') },
+  ];
+  if (department != null) steps.push({ minItems: deptFloor, tier: 'department', rate: department });
+  return steps;
+}
+
+/** Every rate the complete card carries. */
+const CARD_RATE_KEYS = ['mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor'] as const;
+
+/**
+ * A complete card is validated WHOLE before any partner is priced from it:
+ * one missing or broken key refuses every quote, signup, activation and
+ * re-tier in the market, never just the partner it happened to concern. An
+ * incomplete card is not a smaller card; it is no card.
+ */
+function assertCompleteCard(tiers: SubscriptionTiers): void {
+  for (const key of CARD_RATE_KEYS) requiredRate(tiers, key);
+  catalogueStepsFor(tiers);
+}
+
+/**
+ * The weekly rate a vendor pays: the full rate of THIS store's tier — service
+ * (no catalogue), else department, large or small by its own active listing
+ * count. The threshold count itself qualifies.
+ *
+ * [Owner, 13 Oct 2026 — decision 49] "No franchises — they pay per store and
+ * each store has to have its own account and pay per size of catalogue." No
+ * discount applies for owning several stores: an owner's fifth store pays
+ * exactly what it would pay alone.
+ *
+ * Every threshold and price is config. A LEGACY market that has set none of
+ * the optional keys behaves exactly as it did before they existed.
+ */
+function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): { rate: number; reason: VendorRateReason } {
+  if (basis.isService) {
+    return { rate: optionalRate(tiers, 'serviceVendor', isCompleteCard(tiers)) ?? requiredRate(tiers, 'smallVendor'), reason: 'service' };
+  }
+  const steps = catalogueStepsFor(tiers);
+  let step = steps[0]!;
+  for (const candidate of steps) if (basis.activeListings >= candidate.minItems) step = candidate;
+  return { rate: step.rate, reason: step.tier };
+}
+
+/**
+ * The weekly rate a mover pays. The ROLE decides first: a market that sets
+ * `taxiDriver` charges every taxi Driver that rate, car or bus. A Rider — and a
+ * Driver in a LEGACY market that has not priced taxis apart — pays the band of
+ * the vehicle they registered: `moverHeavy` for the heavy fleet, falling back
+ * (legacy only) to `mover`, never to zero and never to a code constant.
+ */
+function moverRateFor(tiers: SubscriptionTiers, role: MoverRole, vehicleType: VehicleType): { rate: number; tier: MoverTier } {
+  const complete = isCompleteCard(tiers);
+  const heavy = feeBandFor(vehicleType) === 'HEAVY';
+  const bandRate = () => (heavy ? optionalRate(tiers, 'moverHeavy', complete) : undefined) ?? requiredRate(tiers, 'mover');
+  if (role === 'DRIVER') return { rate: optionalRate(tiers, 'taxiDriver', complete) ?? bandRate(), tier: 'taxi' };
+  return { rate: bandRate(), tier: heavy ? 'courierHeavy' : 'courier' };
+}
+
+/**
+ * THE weekly fee a partner pays — ONE definition. Signup (SubscriptionService),
+ * activation preflight, the weekly re-tier (BillingService) and the public
+ * price list every app renders all come through here, so the rate a partner
+ * is quoted is the rate they are born on and the rate they are billed. A
+ * second copy of this logic anywhere is how a quote and a bill drift apart.
+ *
+ * Throws PricingConfigError rather than ever returning zero, NaN or a guess.
+ * A negotiated custom rate or a waived fee is a human decision recorded on the
+ * subscription; callers leave those alone and never reach this function for
+ * them.
+ */
+export function partnerRateFor(tiers: SubscriptionTiers, subject: PartnerSubject): PartnerRate {
+  if (tiers == null || typeof tiers !== 'object' || Array.isArray(tiers)) throw new PricingConfigError('subscriptionTiers');
+  if (isCompleteCard(tiers)) assertCompleteCard(tiers);
+  if (subject.kind === 'VENDOR') {
+    const { rate, reason } = vendorRateFor(tiers, subject);
+    return { rate, tier: reason };
+  }
+  return moverRateFor(tiers, subject.kind, subject.vehicleType);
+}
+
+/** Shared tariff read for services and already-locked money transactions. */
+export async function subscriptionTiersIn(db: Db, code: string): Promise<SubscriptionTiers> {
+  const config = await db.countryConfig.findUnique({ where: { code } });
+  if (!config) throw new NotFoundError('CountryConfig', code);
+  return config.subscriptionTiers as unknown as SubscriptionTiers;
 }
 
 /**
@@ -134,8 +264,9 @@ export function moverRateFor(tiers: SubscriptionTiers, vehicleType: VehicleType)
 export class CountryConfigService {
   constructor(private prisma: PrismaClient) {}
 
-  async getByCode(code: string): Promise<CountryConfig> {
-    const config = await this.prisma.countryConfig.findUnique({ where: { code } });
+  /** `db` may be a caller's transaction, so a read inside one rides its locks. */
+  async getByCode(code: string, db: Db = this.prisma): Promise<CountryConfig> {
+    const config = await db.countryConfig.findUnique({ where: { code } });
     if (!config) throw new NotFoundError('CountryConfig', code);
     return config;
   }
@@ -149,9 +280,15 @@ export class CountryConfigService {
     });
   }
 
-  async getSubscriptionTiers(code: string): Promise<SubscriptionTiers> {
-    const config = await this.getByCode(code);
-    return config.subscriptionTiers as unknown as SubscriptionTiers;
+  async getSubscriptionTiers(code: string, db: Db = this.prisma): Promise<SubscriptionTiers> {
+    return subscriptionTiersIn(db, code);
+  }
+
+  /** The ISO-4217 currency a market bills in — the CountryConfig value, never
+   *  the country code itself ('GY' is a country; 'GYD' is its currency). */
+  async getCurrencyCode(code: string, db: Db = this.prisma): Promise<string> {
+    const config = await this.getByCode(code, db);
+    return config.currencyCode;
   }
 
   /** The L2 ID-gate threshold converted to local currency. */
@@ -171,7 +308,7 @@ export class CountryConfigService {
   }
 
   /** Required-document checklist for a role key (drives verification). */
-  async getDocumentChecklist(code: string, roleKey: string, tier?: string): Promise<string[]> {
+  async getDocumentChecklist(code: string, roleKey: string, tier?: string, db: Db = this.prisma): Promise<string[]> {
     // [DOC-1 §4.2] The registry speaks first — but only for a requirement set
     // whose every document type is ACTIVE (legal facts verified). Until then
     // the answer is the JSON these lists have always come from: same
@@ -179,13 +316,29 @@ export class CountryConfigService {
     // [DOC-1 §3.6 · P3-2] At the UNREGISTERED tier the same role reads its
     // <ROLE>_UNREGISTERED list (the registry set at that tier, else the JSON key);
     // a role with no such list is not offered the tier and keeps its standard set.
+    // [ROLE-DOCS · owner 21 Oct 2026] At the OWN_NAME tier (a store trading under its owner's own name) the role
+    // reads its <ROLE>_OWN_NAME list the same way; a role with no such list keeps its standard set.
     const unregistered = tier === UNREGISTERED_TIER;
-    const fromRegistry = await registryChecklist(this.prisma, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
-    if (fromRegistry) return fromRegistry;
+    const ownName = tier === OWN_NAME_TIER;
+    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : ownName ? OWN_NAME_TIER : undefined);
+    if (fromRegistry) return fromRegistry.filter((docType) => !isNeverAcceptedDocType(docType));
+    const config = await this.getByCode(code, db);
+    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
+    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    if (ownName && lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]) return lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    return (lists[roleKey] ?? []).filter((docType) => !isNeverAcceptedDocType(docType));
+  }
+
+  /**
+   * Optional documents for a role key: the `<ROLE>_OPTIONAL` list, never a type the
+   * role already requires (`required`: the caller's checklist for this person — a
+   * required type is never shown twice). Display and upload only — no gate reads it.
+   * [VERIFY-DOCS]
+   */
+  async getOptionalDocuments(code: string, roleKey: string, required: readonly string[]): Promise<string[]> {
     const config = await this.getByCode(code);
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
-    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!;
-    return lists[roleKey] ?? [];
+    return optionalFrom(lists, [roleKey], required);
   }
 
   /**
@@ -195,18 +348,59 @@ export class CountryConfigService {
    * (config/vehicle-classes) — the single source of truth — so the base three
    * keep their exact lists while new vehicles (buses, box trucks) pull their
    * own profiles (e.g. MOVER_COMMERCIAL) on top of the base:
-   *   BICYCLE    → MOVER base (identity + police clearance — master plan §3.2)
+   *   BICYCLE    → MOVER base + MOVER_NO_LICENCE (the national ID)
    *   MOTORCYCLE → base + MOVER_MOTOR (licence, registration, insurance)
-   *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, plate photo,
-   *                exterior car photo, fitness — master plan §3.1)
+   *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, the car photo with
+   *                the plate showing, fitness — master plan §3.1)
+   * [VERIFY-DOCS · owner rulings 6 Oct 2026] the base itself is empty: police
+   * clearance is never required of a mover. [ROLE-DOCS · owner 21 Oct 2026] Only a
+   * taxi driver may add one, and a licence holder is not asked for a national ID
+   * (getMoverOptionalDocuments).
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
-  async getMoverChecklist(code: string, vehicleType: VehicleType): Promise<string[]> {
-    const config = await this.getByCode(code);
-    const lists = config.documentChecklists as Record<string, string[]>;
-    const base = lists['MOVER'] ?? [];
-    const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
-    return [...new Set([...base, ...extra])];
+  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+    const config = await this.getByCode(code, db);
+    return moverRequiredFrom(moverListsFrom(config.documentChecklists), vehicleType);
   }
+
+  /** The documents a mover on this vehicle MAY add (the `_OPTIONAL` lists of the base and
+   *  of each profile), minus what the vehicle requires. Display and upload only. [VERIFY-DOCS] */
+  async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+    const config = await this.getByCode(code, db);
+    const lists = moverListsFrom(config.documentChecklists);
+    return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType)], moverRequiredFrom(lists, vehicleType));
+  }
+}
+
+/**
+ * [ROLE-DOCS · owner ruling 21 Oct 2026] Lists the owner retired. A stored copy written by an older seed (production
+ * holds the 2026-10-14.5 seed) never brings them back: no optional document for EVERY mover (the optional national ID
+ * and the riders' police clearance are gone) and no customer ID + selfie list.
+ */
+export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
+
+/** The mover lists: the code's lists UNDER the stored (signed) ones, minus the retired keys. FAIL CLOSED (security
+ *  review, COORD 21 Oct): a key the stored row lacks — a profile added in code, or a row seeded before the key existed —
+ *  takes the code's list, never "no documents". A key the stored row HAS wins, an explicit [] included: that is a signed
+ *  decision (the MOVER base itself is [] by the owner's rulings of 6 Oct). Production's 2026-10-14.5 row holds every
+ *  profile key a vehicle asks for today (MOVER_NO_LICENCE, MOVER_MOTOR, MOVER_TAXI_EXTRA, MOVER_COMMERCIAL); from the
+ *  code it gains only MOVER_TAXI_EXTRA_OPTIONAL. */
+export function moverListsFrom(stored: unknown): Record<string, string[]> {
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
+  for (const key of RETIRED_LIST_KEYS) delete lists[key];
+  return lists;
+}
+
+/** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */
+export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType): string[] {
+  const base = lists['MOVER'] ?? [];
+  const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
+  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+}
+
+/** The union of the keys' `_OPTIONAL` lists, without anything already required. */
+export function optionalFrom(lists: Record<string, string[]>, keys: readonly string[], required: readonly string[]): string[] {
+  const optional = keys.flatMap((key) => lists[`${key}${OPTIONAL_LIST_SUFFIX}`] ?? []);
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }

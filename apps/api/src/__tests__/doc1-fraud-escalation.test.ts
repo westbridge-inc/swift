@@ -11,6 +11,7 @@
  * plain rejection, as before.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -53,7 +54,7 @@ async function session(userId: string, role: string, n: number) {
 async function admin(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59275${NUM}${n}`, firstName: 'Fraud', lastName: `Reviewer${n}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   users.push(u.id); await session(u.id, 'SUPER_ADMIN', n); return u.id;
 }
@@ -65,7 +66,8 @@ async function subject(n: number) {
   users.push(u.id); await session(u.id, 'VENDOR_OWNER', n); return u.id;
 }
 async function pendingCase(userId: string) {
-  const doc = await runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  await signupSelfieFixture(app.prisma, userId);
+  const doc = await runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', await ownedVerificationFixture(app.prisma, userId), 'v1'));
   const kase = await system(() => app.prisma.reviewCase.findFirstOrThrow({ where: { submissionId: doc.id, closedAt: null } }));
   return { doc, kase };
 }

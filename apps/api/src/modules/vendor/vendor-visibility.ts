@@ -1,8 +1,11 @@
-import type { Prisma } from '@prisma/client';
+import type { FeePausePredicate } from '../billing/mmg-pause';
+import type { Prisma, SubscriptionStatus } from '@prisma/client';
+import { inoperableSubscriptionWhere, subscriptionOperability } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
+import { PRODUCTION_TENANT } from '../../lib/production-only';
 // ---------------------------------------------------------------------------
 // THE customer-facing vendor-visibility predicate — ONE implementation
-// [B2/#790]. A store is visible to customers only when all three hold:
+// [B2/#790]. A store is visible to customers only when all of these hold:
 //
 //   status ACTIVE        — not suspended/rejected,
 //   isVerified           — a human approved its papers,
@@ -11,6 +14,9 @@ import { getTenantId } from '../../plugins/tenant-context';
 //                          (no tenant context in the Prisma extension), so this
 //                          relational predicate is the only wall between a
 //                          shut-off operator and public surfaces.
+//
+//   subscription operates — including grace expiry; missing legacy rows
+//                           follow the vendor operate gate (grandfathered).
 //
 // History, which is why this file exists: the Home popular rail shipped with
 // status alone (a deactivated operator's DISH sat above the fold while their
@@ -25,14 +31,37 @@ import { getTenantId } from '../../plugins/tenant-context';
 // ---------------------------------------------------------------------------
 
 /** Spread into a `vendor.findMany` where. */
-export const VISIBLE_VENDOR = {
+const VENDOR_FACTS = {
   status: 'ACTIVE',
   isVerified: true,
   tenant: { isActive: true },
 } as const;
 
+/** Fresh hold state is required: a sync getter cannot read repair records. */
+export function VISIBLE_VENDOR(feePause: FeePausePredicate) {
+  return { ...VENDOR_FACTS, subscription: { isNot: inoperableSubscriptionWhere(feePause) } };
+}
+
 /** Spread into an ITEM query's `vendor:` relation filter. */
 export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
+
+/** The tenant part of guest visibility, also used by public slug lookups. */
+export const PUBLIC_VENDOR_TENANT = {
+  tenant: { ...VENDOR_FACTS.tenant, ...PRODUCTION_TENANT.tenant },
+} as const;
+
+/**
+ * DL-7: direct links retain their existing paused-store behavior, but never
+ * bypass the tenant wall. Reuse the browse rule without its store-status or
+ * subscription conditions. Pin a bound caller explicitly so nested relation
+ * reads (favorites and item slots) have the same wall as top-level vendors.
+ */
+export function vendorTenantForCaller(): Prisma.VendorWhereInput {
+  const tenantId = getTenantId();
+  return tenantId
+    ? { tenantId, tenant: VENDOR_FACTS.tenant }
+    : PUBLIC_VENDOR_TENANT;
+}
 
 /**
  * [STA-1 RLS-N3 / DL-7] The visible-vendor relation filter, pinned to the
@@ -41,9 +70,9 @@ export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
  * tenant reaches every tenant's vendors — a reviewer would see real menus and
  * a real customer the fiction's. Anonymous callers get the production tenant.
  */
-export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
+export function visibleVendorRelForCaller(feePause: FeePausePredicate): Prisma.VendorWhereInput {
   const tenantId = getTenantId();
-  return tenantId ? { ...visibleVendorForCaller(), tenantId } : visibleVendorForCaller();
+  return tenantId ? { ...visibleVendorForCaller(feePause), tenantId } : visibleVendorForCaller(feePause);
 }
 
 /**
@@ -55,10 +84,8 @@ export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
  * is deliberately cross-operator (home-popular-rail.test.ts) — cross-operator,
  * not cross-kind.
  */
-export function visibleVendorForCaller(): Prisma.VendorWhereInput {
-  return getTenantId()
-    ? VISIBLE_VENDOR
-    : { ...VISIBLE_VENDOR, tenant: { isActive: true, kind: 'PRODUCTION' } };
+export function visibleVendorForCaller(feePause: FeePausePredicate): Prisma.VendorWhereInput {
+  return { ...VISIBLE_VENDOR(feePause), ...vendorTenantForCaller() };
 }
 
 /**
@@ -78,7 +105,7 @@ export function visibleVendorForCaller(): Prisma.VendorWhereInput {
  * could still drift.
  *
  * Pass a row selected with at least `status`, `isVerified`, and
- * `tenant: { select: { isActive: true } }`. A missing tenant relation is
+ * `tenant` and `subscription` via VISIBLE_VENDOR_SELECT. A missing tenant relation is
  * treated as NOT visible — failing closed, because the tenant clause is the
  * only wall between a shut-off operator and an unscoped guest request.
  */
@@ -86,11 +113,14 @@ export function isVendorVisible(vendor: {
   status: string;
   isVerified: boolean;
   tenant?: { isActive: boolean } | null;
-}): boolean {
+  subscription?: { id: string; status: SubscriptionStatus; gracePeriodEnd: Date | null; billingConfirmationPausedAt: Date | null; billingEnforcementDueAt: Date | null; autoSuspendEnabled: boolean; autoRenew: boolean; currentPeriodEnd: Date } | null;
+}, feePause: FeePausePredicate): boolean {
   return (
-    vendor.status === VISIBLE_VENDOR.status &&
-    vendor.isVerified === VISIBLE_VENDOR.isVerified &&
-    vendor.tenant?.isActive === VISIBLE_VENDOR.tenant.isActive
+    vendor.status === VENDOR_FACTS.status &&
+    vendor.isVerified === VENDOR_FACTS.isVerified &&
+    vendor.tenant?.isActive === VENDOR_FACTS.tenant.isActive &&
+    vendor.subscription !== undefined &&
+    subscriptionOperability(vendor.subscription, { missingRow: 'GRANDFATHER' }, feePause).operable
   );
 }
 
@@ -101,13 +131,43 @@ export const VISIBLE_VENDOR_SELECT = {
   status: true,
   isVerified: true,
   tenant: { select: { isActive: true } },
+  subscription: { select: { id: true, status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true } },
 } as const;
 
 /** [R048-003] The visibility predicate INSIDE one tenant — for relation
  *  filters (`item.vendor`), which the tenant-scoping extension does not reach.
  *  A public catalogue or search query names its tenant here, or it is not one
  *  tenant's query. */
-export function visibleVendorInTenant(tenantId: string) {
+export function visibleVendorInTenant(tenantId: string, feePause: FeePausePredicate) {
   if (!tenantId) throw new Error('[R048-003] visibleVendorInTenant needs a tenant');
-  return { ...VISIBLE_VENDOR, tenantId } as const;
+  return { ...VISIBLE_VENDOR_REL(feePause), tenantId } as const;
+}
+
+/** [DL-7 · SX397 F3] The visibility predicate for an actual catalogue read.
+ *  A PUBLIC request (the resolver bound `request.publicTenantId`) re-states the
+ *  public requirements — an ACTIVE, PRODUCTION operator — at the read itself,
+ *  so a tenant reclassified (REVIEW, CRAWLER) or switched off after the
+ *  resolver admitted it is never read for a guest. A bound caller keeps its
+ *  own tenant's semantics: a REVIEW or CRAWLER customer still sees its own
+ *  operator's catalogue. */
+export function catalogueVendorInTenant(tenantId: string, publicMode: boolean, feePause: FeePausePredicate) {
+  const inTenant = visibleVendorInTenant(tenantId, feePause);
+  return publicMode ? { ...inTenant, tenant: { ...VENDOR_FACTS.tenant, ...PRODUCTION_TENANT.tenant } } : inTenant;
+}
+
+/**
+ * [GUARDRAILS §8 · owner #54] Stores filed under a banned platform category
+ * (Pharmacy, a liquor category), and stores whose own words are waiting for a
+ * person ("X Liquor Store"; owner, 14 Oct), are not listed anywhere a customer
+ * browses. Spread beside the visibility predicate on a vendor list:
+ *
+ *     where: { ...visibleVendorForCaller(feePause), ...notProhibitedStore(await prohibitedStoreIds(db, tenantId)) }
+ *
+ * The ids come from compliance/prohibited-gate (`prohibitedStoreIds`), which
+ * decides what "banned" means; this only applies it. `NOT`, so a caller's own
+ * `id` filter is never replaced. A storefront opened directly is judged exactly
+ * (`storeHiddenFromCustomers`).
+ */
+export function notProhibitedStore(prohibitedIds: readonly string[]): Prisma.VendorWhereInput {
+  return prohibitedIds.length > 0 ? { NOT: { id: { in: [...prohibitedIds] } } } : {};
 }

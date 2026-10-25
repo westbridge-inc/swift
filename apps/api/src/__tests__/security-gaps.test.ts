@@ -11,6 +11,9 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { looksLikeDocument } from '../utils/images';
+import { resetKeyProviderForTests } from '../providers/storage/envelope';
+import { getStorageProvider } from '../providers/storage/storage-provider';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Security-spec gaps (task #16): uploads sniff content, checkout is idempotent.
@@ -22,11 +25,14 @@ let userId: string;
 let ownerUserId: string;
 let vendorId: string;
 let itemId: string;
-const marker = nanoid(6).toLowerCase();
+const marker = wordFreeTag(8);
 const createdOrderIds: string[] = [];
+const previousMasterKek = process.env['MASTER_KEK'];
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
+  process.env['MASTER_KEK'] = Buffer.alloc(32, 7).toString('base64');
+  resetKeyProviderForTests();
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['LIFECYCLE_V2'] = '0';
@@ -45,7 +51,7 @@ beforeAll(async () => {
 
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59265${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Sec', lastName: 'Gap',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, selfieCapturedAt: new Date(),
@@ -68,7 +74,7 @@ beforeAll(async () => {
   // rows = always open; cheap item stays under the L2 ID gate.
   const ownerUser = await app.prisma.user.create({
     data: {
-      phone: `+59264${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Sec', lastName: 'Vendor',
       roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never,
       isPhoneVerified: true,
@@ -112,6 +118,8 @@ afterAll(async () => {
     await app.prisma.cartItem.deleteMany({ where: { cart: { customerId: userId } } });
     await app.prisma.cart.deleteMany({ where: { customerId: userId } });
     await app.prisma.address.deleteMany({ where: { userId } });
+    const encryptedObjects = await app.prisma.encryptedObject.findMany({ where: { createdBy: userId }, select: { fileKey: true } });
+    for (const { fileKey } of encryptedObjects) await getStorageProvider().delete(fileKey).catch(() => {});
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: userId } });
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
@@ -127,6 +135,9 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: ownerUserId } });
   }
   await app.close();
+  if (previousMasterKek === undefined) delete process.env['MASTER_KEK'];
+  else process.env['MASTER_KEK'] = previousMasterKek;
+  resetKeyProviderForTests();
 });
 
 function uploadBytes(bytes: Buffer, mime: string) {

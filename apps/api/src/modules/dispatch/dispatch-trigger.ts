@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import type { OrderStatus, Prisma } from '@prisma/client';
+import { ORDER_TRANSITIONS } from '../order/order-status';
 import { log } from '../../utils/logger';
 
 /**
@@ -49,6 +51,39 @@ export function dispatchTrigger(): DispatchTrigger {
     return 'ON_ACCEPT';
   }
   return requested;
+}
+
+/** The status, not a milestone timestamp or client flag, grants readiness.
+ * Courier/taxi have no vendor preparation phase. Unknown types fail closed. */
+export function riderDispatchableStatusesFor(
+  orderType: string | null | undefined,
+  trigger: DispatchTrigger = dispatchTrigger(),
+): OrderStatus[] {
+  return trigger === 'ON_READY' && !['COURIER', 'TAXI'].includes(orderType ?? '')
+    ? ['READY_FOR_PICKUP'] : [...ORDER_TRANSITIONS.RIDER_ASSIGNED];
+}
+
+export function withheldAwaitingReadiness(
+  order: { status: string; orderType: string | null | undefined },
+  trigger: DispatchTrigger = dispatchTrigger(),
+): boolean {
+  return ORDER_TRANSITIONS.RIDER_ASSIGNED.includes(order.status as OrderStatus)
+    && !riderDispatchableStatusesFor(order.orderType, trigger).includes(order.status as OrderStatus);
+}
+
+/** Compose in AND so the caller's ownership/hold OR cannot be overwritten. */
+export function riderDispatchReadinessFilter(trigger: DispatchTrigger = dispatchTrigger()): Prisma.OrderWhereInput {
+  return trigger === 'ON_READY'
+    ? { OR: [{ orderType: { in: ['COURIER', 'TAXI'] } }, { status: 'READY_FOR_PICKUP' }] } : {};
+}
+
+/** A null hold is released; equality is the first legal dispatch instant. */
+export function dispatchHoldExpired(order: { holdExpiresAt: Date | null }, now = new Date()): boolean {
+  return order.holdExpiresAt == null || order.holdExpiresAt <= now;
+}
+
+export function dispatchHoldExpiredFilter(now = new Date()): Prisma.OrderWhereInput {
+  return { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: now } }] };
 }
 
 /**

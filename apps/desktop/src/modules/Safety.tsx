@@ -7,7 +7,7 @@ import {
 } from '../lib/api';
 import {
   availableActions, clocksFor, worstSla, queueOrder, reasonProblem, evidenceActions,
-  sosUrgency, pretty, DECISION_CODES, SOS_RESOLUTION_CODES, SEAL_WARNING, EXPORT_WARNING,
+  sosUrgency, sosNotes, sosPressesNotShown, pretty, DECISION_CODES, SOS_RESOLUTION_CODES, SEAL_WARNING, EXPORT_WARNING,
   INCIDENT_CATEGORIES, SEVERITIES, defaultSeverityFor, intakeProblem,
   type IncidentRow, type SosRow, type DecisionCode, type IncidentSeverity,
   type SosResolutionCode, type IncidentAction, type EvidenceAction, type SlaState,
@@ -252,6 +252,8 @@ function SosCard({ a, onDone }: { a: SosRow; onDone: () => void }) {
   const [notes, setNotes] = useState('');
   const [error, setError] = useState<string | null>(null);
   const urgency = sosUrgency(a);
+  const said = sosNotes(a);
+  const notShown = sosPressesNotShown(a);
 
   const ack = useMutation({ mutationFn: () => ackSosAlert(a.id), onSuccess: onDone, onError: (e) => setError((e as Error).message) });
   const resolve = useMutation({
@@ -282,6 +284,36 @@ function SosCard({ a, onDone }: { a: SosRow; onDone: () => void }) {
         <p className="mt-2 rounded-lg border border-amber-500 bg-amber-50 px-2 py-1.5 text-xs text-neutral-800">
           They tapped “I’m safe”. That does not close this — call back and verify before resolving.
         </p>
+      )}
+
+      {/* [PRIV2-S1] What they typed. The note lives in ops-only records — the
+          alert and each repeat press's own row — and never on the order
+          timeline the other person on the ride reads; this card is the only
+          screen a responder has, so if the words are not here they are
+          nowhere. Rendered as text (React escapes it): a note is testimony,
+          never markup. The words come BEFORE the position — what happened,
+          then where. */}
+      {said.length > 0 ? (
+        <section aria-label="What they said" className="mt-2 rounded-lg border border-[var(--swift-red)] bg-white p-2.5">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--swift-red)]">What they said</p>
+          <ol className="mt-1 flex flex-col gap-1">
+            {said.map((n) => (
+              <li key={n.seq} className="text-sm text-neutral-900">
+                <span className="whitespace-pre-wrap break-words font-medium">{n.text}</span>
+                <span className="ml-2 whitespace-nowrap text-[11px] text-neutral-500">
+                  {n.seq === 0 ? 'when they pressed' : `press ×${n.seq}`} · {new Date(n.at).toLocaleTimeString()}
+                </span>
+              </li>
+            ))}
+          </ol>
+          {notShown > 0 && (
+            <p className="mt-1 text-[11px] text-neutral-500">
+              {notShown} earlier repeat press{notShown === 1 ? ' is' : 'es are'} not shown here.
+            </p>
+          )}
+        </section>
+      ) : (
+        <p className="mt-2 text-xs text-neutral-500">No message was typed.</p>
       )}
 
       <p className="mt-2 text-sm text-neutral-800">

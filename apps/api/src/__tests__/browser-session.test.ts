@@ -10,9 +10,10 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { requestOtp } from './helpers/otp';
 import {
-  ACCESS_COOKIE, ACCESS_COOKIE_PATH, REFRESH_COOKIE, REFRESH_COOKIE_PATH, allowedBrowserOrigins, parseCookies, resetBrowserOriginsForTests, setSessionCookies,
+  ACCESS_COOKIE, ACCESS_COOKIE_PATH, REFRESH_COOKIE, REFRESH_COOKIE_PATH, SIGNUP_CONTINUATION_COOKIE, allowedBrowserOrigins, parseCookies, resetBrowserOriginsForTests, setSessionCookies,
 } from '../modules/auth/browser-session';
 import { browserSessionCounter } from '../plugins/observability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [A-01 / W-01] A browser session is credentials a script can never read.
@@ -31,7 +32,7 @@ let app: FastifyInstance;
 const ORIGIN = 'http://localhost:3001';
 const EVIL = 'https://evil.example';
 const RUN = nanoid(6).toLowerCase();
-const phone = `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = testPhone();
 const userIds: string[] = [];
 const BROWSER = { 'x-swift-client': 'admin-web', origin: ORIGIN } as const;
 
@@ -90,15 +91,18 @@ async function browserLogin(): Promise<{ jar: Jar; raw: string[]; body: Record<s
 }
 
 describe('[A-01] the sign-in response carries the session as HttpOnly cookies and no credential', () => {
-  it('a browser client gets two HttpOnly SameSite=Strict cookies, the refresh cookie scoped to the auth path, and a body without tokens; a native client still gets tokens in the body and no cookie', async () => {
+  it('a browser client gets the session pair plus an explicit stale-signup deletion, and a body without tokens; a native client still gets tokens in the body and no cookie', async () => {
     const { jar, raw, body } = await browserLogin();
-    expect(raw).toHaveLength(2);
+    expect(raw).toHaveLength(3);
     for (const line of raw) {
       expect(line).toMatch(/HttpOnly/);
       expect(line).toMatch(/SameSite=Strict/);
     }
+    const signupLine = raw.find((l) => l.startsWith(`${SIGNUP_CONTINUATION_COOKIE}=`))!;
     const accessLine = raw.find((l) => l.startsWith(`${ACCESS_COOKIE}=`))!;
     const refreshLine = raw.find((l) => l.startsWith(`${REFRESH_COOKIE}=`))!;
+    expect(signupLine).toContain('Path=/api/v1/auth;');
+    expect(signupLine).toContain('Max-Age=0');
     expect(accessLine).toContain('Path=/api/v1;');
     // the refresh cookie travels ONLY to the auth routes — a literal, so a widened constant cannot pass by tautology
     expect(refreshLine).toContain('Path=/api/v1/auth;');
@@ -178,11 +182,16 @@ describe('[A-01] refresh rotates from the cookie; logout clears and revokes', ()
     expect(await count('cookie_refreshed')).toBe(before + 1);
     const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...BROWSER, cookie: cookieHeader(jar) } });
     expect(me.statusCode).toBe(200);
-    // the rotated-away cookie replayed INSIDE the reuse grace (a retried request): the current cookies are re-issued, nothing rotates
+    // the rotated-away cookie replayed INSIDE the reuse grace (a retried request) is not theft: the session
+    // lives on and the browser receives a FRESH pair — [Row 231] the row holds only digests, so the
+    // pair that answered the first call cannot be re-issued; the earlier pair is superseded, not revoked
+    const superseded = jar[REFRESH_COOKIE]!;
     const graced = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', headers: { ...BROWSER, cookie: `${REFRESH_COOKIE}=${encodeURIComponent(oldRefresh)}` } });
     expect(graced.statusCode).toBe(200);
-    const regraced: Jar = {}; applySetCookies(regraced, graced);
-    expect(regraced[REFRESH_COOKIE]).toBe(jar[REFRESH_COOKIE]);
+    applySetCookies(jar, graced);
+    expect(jar[REFRESH_COOKIE]).not.toBe(superseded);
+    expect(jar[REFRESH_COOKIE]).not.toBe(oldRefresh);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...BROWSER, cookie: cookieHeader(jar) } })).statusCode).toBe(200);
     // ...and replayed OUTSIDE the grace: refused, and the whole family is revoked — the live cookies stop working too
     const restoreGrace = process.env['REFRESH_REUSE_GRACE_MS'];
     process.env['REFRESH_REUSE_GRACE_MS'] = '0';
@@ -279,7 +288,11 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
   /** The Set-Cookie strings the API would send under a given environment. */
   const issued = (env: Record<string, string | undefined>): string[] => {
     let sent: string[] = [];
-    const reply = { header: (_name: string, value: string[]) => { sent = value; } } as unknown as Parameters<typeof setSessionCookies>[0];
+    const reply = {
+      getHeader: (_name: string) => sent.length ? sent : undefined,
+      header: (_name: string, value: string | string[]) => { sent = ([] as string[]).concat(value); return reply; },
+      removeHeader: (_name: string) => { sent = []; return reply; },
+    } as unknown as Parameters<typeof setSessionCookies>[0];
     setSessionCookies(reply, { accessToken: 'a.a.a', refreshToken: 'r.r.r' }, env);
     return sent;
   };
@@ -313,31 +326,40 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
 // Signing up and signing in must hand a browser the same thing.
 // ---------------------------------------------------------------------------
 describe('[W-01] a browser that registers is signed in by cookie, like one that logs in', () => {
-  const newPhone = `+59278${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const newPhone = testPhone();
   const WEB = { 'x-swift-client': 'web', origin: ORIGIN } as const;
 
   it('register answers a browser with the same HttpOnly cookie pair and no tokens — and the cookies authenticate immediately', async () => {
     const code = await requestOtp(app, newPhone);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', headers: WEB, payload: { phone: newPhone, code } });
     expect(verified.statusCode, verified.body).toBe(200);
+    expect(verified.headers['cache-control']).toContain('no-store');
     expect(verified.json().data.isNewUser).toBe(true);
+    expect(verified.json().data.registrationProof).toBeUndefined();
+    const jar: Jar = {};
+    const verifiedCookies = applySetCookies(jar, verified).raw;
+    expect(verifiedCookies).toHaveLength(1);
+    expect(verifiedCookies[0]).toMatch(/^swift_signup=.*Path=\/api\/v1\/auth; Max-Age=600; HttpOnly; SameSite=Strict/);
 
     const res = await app.inject({
-      method: 'POST', url: '/api/v1/auth/register', headers: WEB,
-      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true },
+      method: 'POST', url: '/api/v1/auth/register', headers: { ...WEB, cookie: cookieHeader(jar) },
+      // [Owner ruling 15 Oct 2026] the website sends the ticked 18+ declaration with the Terms consent.
+      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true, ageConfirmed: true },
     });
     expect(res.statusCode, res.body).toBe(201);
+    expect(res.headers['cache-control']).toContain('no-store');
     const created = res.json().data.user;
     userIds.push(created.id);
 
-    const jar: Jar = {};
     const { raw } = applySetCookies(jar, res);
-    expect(raw).toHaveLength(2);
+    expect(raw).toHaveLength(3);
     for (const line of raw) {
       expect(line, line).toMatch(/HttpOnly/);
       expect(line, line).toMatch(/SameSite=Strict/);
     }
     expect(raw.find((l) => l.startsWith(`${REFRESH_COOKIE}=`))).toContain('Path=/api/v1/auth;');
+    expect(raw.find((l) => l.startsWith(`${SIGNUP_CONTINUATION_COOKIE}=`))).toContain('Max-Age=0');
+    expect(jar[SIGNUP_CONTINUATION_COOKIE]).toBeUndefined();
     // nothing a script can read: no tokens in the body, and neither cookie's
     // value appears anywhere in it
     expect(res.json().data.tokens).toBeUndefined();
@@ -351,19 +373,50 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
     expect(me.statusCode, me.body).toBe(200);
     expect(me.json().data.user.id).toBe(created.id);
     expect(me.json().data.client).toBe('web');
+
+    // The Terms and Privacy consent is recorded as given on the web — the
+    // surface it was given on, as the partner agreement's is.
+    expect(await consentSurfaces(created.id)).toEqual(['web', 'web']);
   });
 
   it('a native client registering still gets tokens in the body and no cookie — the apps are untouched', async () => {
-    const nativePhone = `+59279${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const nativePhone = testPhone();
     const code = await requestOtp(app, nativePhone);
-    await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
+    const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
+    expect(verified.headers['cache-control']).toContain('no-store');
+    const registrationProof = verified.json().data.registrationProof;
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/register',
-      payload: { phone: nativePhone, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true },
+      payload: { phone: nativePhone, registrationProof, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     userIds.push(res.json().data.user.id);
+    expect(res.headers['cache-control']).toContain('no-store');
     expect(res.json().data.tokens.accessToken).toBeTruthy();
     expect(res.headers['set-cookie']).toBeUndefined();
+    // An app that does not name its platform is recorded as the app.
+    expect(await consentSurfaces(res.json().data.user.id)).toEqual(['mobile', 'mobile']);
+  });
+
+  it('an app that names its platform has its Terms and Privacy consent recorded on that platform', async () => {
+    const iosPhone = testPhone();
+    const code = await requestOtp(app, iosPhone);
+    const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: iosPhone, code } });
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/auth/register', headers: { 'x-client-platform': 'ios' },
+      payload: { phone: iosPhone, registrationProof: verified.json().data.registrationProof, firstName: 'New', lastName: `Ios${RUN}`, acceptTerms: true },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    userIds.push(res.json().data.user.id);
+    expect(await consentSurfaces(res.json().data.user.id)).toEqual(['ios', 'ios']);
   });
 });
+
+/** The surfaces the account's Terms and Privacy consent rows were recorded on. */
+async function consentSurfaces(userId: string): Promise<string[]> {
+  const rows = await runWithoutTenant(() => app.prisma.consentRecord.findMany({
+    where: { subjectId: userId, documentType: { in: ['privacy_policy', 'terms_of_service'] }, action: 'granted' },
+    select: { surface: true }, orderBy: { documentType: 'asc' },
+  }), 'test-read:consent-surface');
+  return rows.map((r) => r.surface);
+}

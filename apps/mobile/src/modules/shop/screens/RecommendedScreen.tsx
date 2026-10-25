@@ -4,11 +4,12 @@ import { Dimensions, FlatList } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorPhoto } from '../../../lib/images';
-import { EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
+import { CartBar, useCartBarClearance, EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -16,12 +17,15 @@ const CARD_W = (SCREEN_W - GUTTER * 2 - space.lg) / 2;
 
 // Kit frame 12 — the full "Recommended Restaurant" grid.
 export function RecommendedScreen() {
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const { latitude, longitude, status } = useLocationStore();
   const locationFix = grantedLocationFix(latitude, longitude, status);
   const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
+  const holdRow = useRowHold(); // [BUG-GUARDS C2] one request per store's heart; another store's heart still goes
 
   const featured: any[] = home.data?.featured ?? [];
   const open: any[] = home.data?.openVendors ?? [];
@@ -43,7 +47,7 @@ export function RecommendedScreen() {
           keyExtractor={(v) => v.id}
           numColumns={2}
           columnWrapperStyle={{ gap: space.lg, paddingHorizontal: GUTTER }}
-          contentContainerStyle={{ gap: space.lg, paddingTop: space.md, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{ gap: space.lg, paddingTop: space.md, paddingBottom: space['3xl'] + cartClearance }}
           renderItem={({ item: v }) => (
             <FoodCard
               width={CARD_W}
@@ -55,13 +59,15 @@ export function RecommendedScreen() {
               meta={v.etaMin ? `${v.etaMin} min` : undefined}
               favorite={v.isFavorite}
               onToggleFavorite={() =>
-                isAuthenticated ? toggleFav.mutate({ vendorId: v.id, isFavorite: !!v.isFavorite }) : promptLogin()
+                isAuthenticated ? holdRow(v.id, () => toggleFav.mutateAsync({ vendorId: v.id, isFavorite: !!v.isFavorite })) : promptLogin()
               }
               onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
             />
           )}
         />
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }

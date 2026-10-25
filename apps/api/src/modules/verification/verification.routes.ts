@@ -1,14 +1,49 @@
+import { discardUnusedCustomerSelfie } from '../user/upload-erasure';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { scanUpload } from '../../lib/malware-scan';
+import { documentScanState, uploadScanRefusal, recordUnscannedUpload } from '../../lib/upload-scan-debt';
+import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
+import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
-import { looksLikeDocument } from '../../utils/images';
+import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
+import { consentSurfaceOf } from '../legal/consent-surface';
+import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
+import { documentConsentOnRecord } from './document-consent-record';
+import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
+
+/** How long an identical re-send counts as a retry of the same upload. */
+export const UPLOAD_RETRY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * [#1449 S4-1] The same person's identical file (same bytes, same type), stored in the
+ * last few minutes and not yet claimed by anything, IS the upload a lost reply hid: its
+ * key is the answer. Anything already claimed (a document, a mover or recovery pointer)
+ * or erased is never reused: a deliberate re-submission gets its own upload.
+ */
+export async function retriedUpload(
+  db: FastifyInstance['prisma'], userId: string, sha256: string, mimeType: string, now = Date.now(),
+): Promise<string | null> {
+  const recent = await db.encryptedObject.findMany({
+    where: { createdBy: userId, sha256, mimeType, shreddedAt: null, wrappedDek: { not: null }, createdAt: { gte: new Date(now - UPLOAD_RETRY_WINDOW_MS) } },
+    orderBy: { createdAt: 'desc' }, select: { fileKey: true }, take: 5,
+  });
+  for (const { fileKey } of recent) {
+    const claimed = await db.verificationDocument.count({ where: { fileUrl: fileKey } })
+      + await db.rider.count({ where: { OR: [{ nationalIdUrl: fileKey }, { driverLicenseUrl: fileKey }, { vehicleInsuranceUrl: fileKey }, { profilePhotoUrl: fileKey }, { vehiclePhotoUrl: fileKey }] } })
+      + await db.driver.count({ where: { OR: [{ nationalIdUrl: fileKey }, { driverLicenseUrl: fileKey }, { vehicleInsuranceUrl: fileKey }, { vehicleInspectionUrl: fileKey }, { profilePhotoUrl: fileKey }, { vehiclePhotoUrl: fileKey }] } })
+      + await db.accountRecovery.count({ where: { OR: [{ idDocumentUrl: fileKey }, { selfieUrl: fileKey }] } });
+    if (claimed === 0) return fileKey;
+  }
+  return null;
+}
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
@@ -24,6 +59,8 @@ const statusQuerySchema = z.object({
 const consentFields = {
   consent: z.literal(true),
   privacyNoticeVersion: z.string().min(1).max(20),
+  /** [R17] the tick the client showed (website, phone build 12); recorded in the consent ledger. Builds 9-11 omit it. */
+  consentTick: z.enum(UPLOAD_CONSENT_TICKS).optional(),
 };
 
 const submitDocumentSchema = z.object({
@@ -34,9 +71,12 @@ const submitDocumentSchema = z.object({
   ...consentFields,
 });
 
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match. [ROLE-DOCS · owner 21 Oct 2026] No selfie
+// either: store build 9 still sends `selfieUrl`; the schema no longer names it, so zod's default
+// (strip) DROPS it here and the old app keeps working — it never reaches the intake. The upload it
+// names is erased after the intake when it is the caller's own (below). A newer app sends the ID alone.
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048),
   ...consentFields,
 });
 
@@ -45,11 +85,16 @@ export async function verificationRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const auth = { preHandler: [app.authenticate] };
 
-  /** GET /status?role= — checklist, submitted docs, what's missing. */
+  /** GET /status?role= — checklist, submitted docs, what's missing. [DOC-CONSENT] `documentConsent` (additive; older
+   *  apps ignore it): whether this person's document-upload tick is on record, so the checklist shows their own
+   *  recorded choice instead of an empty box on every visit (document-consent-record.ts). */
   app.get('/status', auth, async (request) => {
     const { role, vehicleType } = statusQuerySchema.parse(request.query);
-    const status = await verification.getStatus(request.user.userId, role, vehicleType);
-    return { success: true, data: status };
+    const [status, documentConsent] = await Promise.all([
+      verification.getStatus(request.user.userId, role, vehicleType),
+      documentConsentOnRecord(app.prisma, request.user.userId, role),
+    ]);
+    return { success: true, data: { ...status, documentConsent } };
   });
 
   /** POST /appeal — "Think this is a mistake?" (trial-integrity Part 4).
@@ -100,13 +145,21 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);
+    if (body.consentTick && body.consentTick !== 'document_v1') {
+      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to a document upload.');
+    }
     const doc = await verification.submitDocument(
       request.user.userId,
       body.role,
       body.docType,
       body.fileUrl,
       body.privacyNoticeVersion,
+      request.user.role,
     );
+    // [R17] the tick the person gave, after the document is on file (a refused upload records no consent)
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: consentSubjectForRole(body.role), surface: consentSurfaceOf(request), ip: request.ip, docType: body.docType });
+    }
     reply.code(201);
     return { success: true, data: doc };
   });
@@ -128,28 +181,45 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
+    // [Row 108 · Row 238 · GUARDRAILS §2] The storage seam only ever sees this file ENCRYPTED, so the
+    // photo is cleaned here, before it is sealed, by the seam's own helper: the metadata a phone camera
+    // writes (GPS, capture time, device, serial) removed failing closed, then the clean bytes read by the
+    // real decoder. What the bytes ARE decides it (a PDF passed the sniff above as a PDF: not a photo).
+    const photo = await cleanStoredPhoto(buffer, file.mimetype);
+    const sealedBytes = photo?.buffer ?? buffer;
+    // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
+    const sealedType = photo?.mimeType ?? file.mimetype;
+    // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
+    const scan = await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
     // bucket only ever holds AES-256-GCM ciphertext; the wrapped per-file DEK
-    // lands in encrypted_objects. Without one, behavior is unchanged
-    // (private object + provider-side SSE) — encryption is config, not code.
+    // lands in encrypted_objects. Without it no ownership metadata can be
+    // proved at submission, so refuse instead of handing back an unusable file.
     const keys = getKeyProvider();
     if (keys) {
+      // The fingerprint of the file AS SUBMITTED: the duplicate-document and retry identity, comparable
+      // with every row stored before [Row 238]. A one-way digest keeps nothing of the removed metadata.
       const sha256 = createHash('sha256').update(buffer).digest('hex');
+      // [#1449 S4-1] A retry after a lost reply sends the same file again: answer with the
+      // upload already stored, so no second copy of an ID document is kept (and no second review signal).
+      const retried = await retriedUpload(app.prisma, request.user.userId, sha256, sealedType);
+      if (retried) return { success: true, data: { url: retried } };
       // SWIFT-078: the SAME physical document already on ANOTHER account is a
       // fraud signal — one person opening several accounts, or a reused/forged
       // ID. Flag it to the reviewers; it must never quietly auto-progress.
-      const dup = await app.prisma.encryptedObject.findFirst({
-        where: { sha256, createdBy: { not: request.user.userId } },
-        select: { createdBy: true },
-      });
+      // [Row 331 (c)] Only a LIVE account counts: an erased one is never a duplicate holder.
+      const dup = (await liveDuplicateHolders(app.prisma, sha256, request.user.userId)).length > 0;
 
       const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
+      const { ciphertext, iv, authTag } = encryptBuffer(sealedBytes, dek);
       const { url } = await storage.upload({
         buffer: ciphertext,
-        filename: `${file.filename}.enc`,
+        // Multipart normalizes empty/path-only names to ''. Appending .enc
+        // would then make a dotfile, which adapters name .bin. The envelope
+        // extension is server-owned and must satisfy object authority.
+        filename: 'verification.enc',
         mimeType: 'application/octet-stream',
         folder: `verification/${request.user.userId}`,
       });
@@ -159,33 +229,31 @@ export async function verificationRoutes(app: FastifyInstance) {
           iv: new Uint8Array(iv),
           authTag: new Uint8Array(authTag),
           wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-          mimeType: file.mimetype,
-          sizeBytes: buffer.length,
+          mimeType: sealedType,
+          sizeBytes: sealedBytes.length, // what is stored (and what a deletion receipt destroys)
           sha256,
           createdBy: request.user.userId,
         },
       });
+      // [Row 312] Stored sealed: the rescan opens it with this key row (found by the same fileKey).
+      await recordUnscannedUpload(app.prisma, scan, { surface: 'verification', fileKey: url, buffer, sealed: true, storage });
 
       if (dup) {
-        // The hash, not the document, goes to admins — never the PII itself.
+        // Global correlation is a platform review signal. Tenant-local
+        // administrators and applicants must not learn another account's
+        // membership, identifier, or document hash from upload completion.
         await notifyAdmins(app.prisma, notifications, {
-          // Follows the uploader [NOC-A F45].
-          tenantId: await tenantOfUser(app.prisma, request.user.userId),
-          title: 'Duplicate verification document',
-          body: 'A document just uploaded is byte-identical to one already on another account. Review both before approving — possible multi-accounting or a reused/forged document.',
-          data: { kind: 'dup_doc', sha256, uploader: request.user.userId, matchesUser: dup.createdBy },
+          // notifyAdmins(null) selects SUPER_ADMIN only, never tenant admins.
+          tenantId: null,
+          title: 'Verification upload needs review',
+          body: 'Review this applicant’s verification submission before approval.',
+          data: { kind: 'dup_doc', uploader: request.user.userId },
         }).catch(() => {});
       }
-      return { success: true, data: { url, duplicate: !!dup } };
+      return { success: true, data: { url } };
     }
 
-    const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `verification/${request.user.userId}`,
-    });
-    return { success: true, data: { url } };
+    throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Document upload is temporarily unavailable. Try again later.');
   });
 
   /**
@@ -196,32 +264,46 @@ export async function verificationRoutes(app: FastifyInstance) {
    */
   app.get<{ Params: { docId: string } }>('/render/:docId', async (request, reply) => {
     const { docId } = request.params;
-    const { expires, sig } = z.object({ expires: z.coerce.number(), sig: z.string().min(16) }).parse(request.query);
+    const { expires, sig, reviewer } = z.object({
+      expires: z.coerce.number(), sig: z.string().min(16), reviewer: z.string().min(1).max(64).optional(),
+    }).parse(request.query);
     if (expires < Math.floor(Date.now() / 1000)) {
       throw new AppError(410, 'LINK_EXPIRED', 'This view link has expired — reopen the document.');
     }
-    if (!verifyRenderToken(docId, expires, sig)) {
+    // [VERIFY-DOCS V3] A link names the reviewer it was minted for, inside the
+    // signature: a link without one, or re-aimed at someone else, is refused.
+    if (!reviewer || !verifyRenderToken(docId, expires, reviewer, sig)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'Invalid view link.');
     }
 
     const doc = await app.prisma.verificationDocument.findUnique({
       where: { id: docId },
-      select: { fileUrl: true, purgedAt: true },
+      select: { userId: true, fileUrl: true, purgedAt: true },
     });
     if (!doc || doc.purgedAt || !doc.fileUrl) {
       throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
     }
-    const meta = await app.prisma.encryptedObject.findUnique({ where: { fileKey: doc.fileUrl } });
-    if (!meta) throw new AppError(404, 'NOT_ENCRYPTED', 'No encrypted object for this document.');
-    if (!meta.wrappedDek || meta.shreddedAt) {
-      throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered.');
+    // [VERIFY-DOCS V3] ...and that reviewer must STILL be one, on every load:
+    // revoking the grant, suspending or demoting the reviewer kills links that
+    // are already open. Same tenant as the person whose document it is.
+    if (!(await isActiveDocumentReviewer(app.prisma, reviewer, doc.userId))) {
+      throw documentReviewerRequired();
     }
+    const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
+    // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
+    // staff before its rescan answers CLEAN, whatever link was minted.
+    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 
-    const ciphertext = await getStorageProvider().getObject(doc.fileUrl);
-    const dek = await keys.unwrapDek(Buffer.from(meta.wrappedDek));
-    const plaintext = decryptBuffer(ciphertext, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag));
+    let plaintext: Buffer;
+    try {
+      const ciphertext = await getStorageProvider().getObject(doc.fileUrl);
+      const dek = await keys.unwrapDek(Buffer.from(meta.wrappedDek!));
+      plaintext = decryptBuffer(ciphertext, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag));
+    } catch {
+      throw verificationObjectUnavailable();
+    }
     reply
       .type(meta.mimeType)
       .header('Cache-Control', 'no-store, max-age=0')
@@ -229,16 +311,33 @@ export async function verificationRoutes(app: FastifyInstance) {
     return reply.send(plaintext);
   });
 
-  /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
+  /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
+   *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
+   *  repeat truthfully: ON_FILE (on file now, no person reviewed it), WAITING (a person looks
+   *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
+    // v1 = the words build 12 shows; v2 = the current app's (owner ruling 24 Oct 2026: no unlock promised).
+    if (body.consentTick && body.consentTick !== 'customer_id_v1' && body.consentTick !== 'customer_id_v2') {
+      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
+    }
     const doc = await verification.submitIdentity(
       request.user.userId,
       body.idDocumentUrl,
-      body.selfieUrl,
       body.privacyNoticeVersion,
     );
+    // [R17 · in-app ¶15] the customer's tick to keep the ID photo
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: 'customer', surface: consentSurfaceOf(request), ip: request.ip, docType: 'customer_id' });
+    }
+    // [ROLE-DOCS · REVIEW-F #2001 S3-1] Build 9 uploaded a selfie before calling here; nothing reads it, so the face
+    // is erased now (only the caller's own, unclaimed, unheld upload: user/upload-erasure discardUnusedCustomerSelfie).
+    const selfieUrl = (request.body as { selfieUrl?: unknown } | null | undefined)?.selfieUrl;
+    if (typeof selfieUrl === 'string' && selfieUrl.length > 0 && selfieUrl.length <= 2048 && selfieUrl !== body.idDocumentUrl) {
+      await discardUnusedCustomerSelfie(app.prisma, getStorageProvider(), request.user.userId, selfieUrl, request.log);
+    }
     reply.code(201);
-    return { success: true, data: doc };
+    const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
+    return { success: true, data: { ...doc, idCheck } };
   });
 }

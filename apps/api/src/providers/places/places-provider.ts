@@ -1,3 +1,5 @@
+import { assertPlacesConfig } from './places-config';
+import { classifyGeocodeStatus, classifyGoogleApiFailure, PlacesProviderError } from './places-failure';
 import type { PrismaClient } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,13 @@ export interface PlacesQueryContext {
   userId?: string;
 }
 
+/**
+ * [PLACES-LOUD] Each method answers "no matches" with [] / null. A provider that
+ * could not answer rejects with a PlacesProviderError (places-failure.ts) rather
+ * than disguising the failure as an empty answer: GooglePlacesProvider (production)
+ * does. The OSM stack, by design, folds a failed Photon / Nominatim call into the
+ * local suggestions (zones and saved addresses), so its answers stay real ones.
+ */
 export interface PlacesProvider {
   autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]>;
   // ctx carries the caller's identity: resolving an `addr:` placeId (a saved
@@ -161,90 +170,161 @@ export class LocalPlacesProvider implements PlacesProvider {
 }
 
 // ---------------------------------------------------------------------------
-// GooglePlacesProvider — Places Autocomplete + Details + Geocoding. Same
-// hot-path discipline as the maps seam: never throws, degrades to empty/null
-// on any network error, timeout, !ok, or non-OK status. Key is server-only.
+// GooglePlacesProvider — Places API (New) Autocomplete + Place Details, and the
+// Geocoding API for reverse lookups. The owner's Google project offers only
+// Places API (New); the legacy Places endpoints cannot be enabled there.
+// [PLACES-LOUD 22 Oct 2026] "No matches" and FAILURE are different answers:
+// Google answering with nothing is [] / null, exactly as before; every failure
+// (a non-2xx, an auth / quota / permission error body, a timeout, a network
+// error, an unreadable body) is a PlacesProviderError with its class and
+// Google's status words (places-failure.ts). It used to degrade to [] / null,
+// which the apps showed as "No matches": a refused key was invisible. The
+// route makes the failure an honest 503, a log line, a metric and a page. The
+// key is server-only: Places (New) carries it in the X-Goog-Api-Key header,
+// never in a URL; the Geocoding URL that carries it is never logged, and no
+// error or failure record holds it.
 // ---------------------------------------------------------------------------
 
 const GOOGLE_TIMEOUT_MS = 4000;
-const AUTOCOMPLETE_URL = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
-const DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
+const AUTOCOMPLETE_URL = 'https://places.googleapis.com/v1/places:autocomplete';
+const PLACE_DETAILS_URL = 'https://places.googleapis.com/v1/places/';
 const GEOCODE_URL = 'https://maps.googleapis.com/maps/api/geocode/json';
+// Places (New) bills by the fields asked for: ask only for what we map.
+const AUTOCOMPLETE_FIELD_MASK =
+  'suggestions.placePrediction.placeId,suggestions.placePrediction.text,suggestions.placePrediction.structuredFormat';
+const DETAILS_FIELD_MASK = 'id,displayName,formattedAddress,location';
+const AUTOCOMPLETE_REGION_CODES = ['gy'];
+const LOCATION_BIAS_RADIUS_M = 50000;
+// A Google place id is a URL-safe token. The id comes from the client and
+// becomes a URL path segment here, so anything else (a `/`, `..`, `?`, or one
+// of our own `addr:`/`zone:` ids) is refused before a request is made.
+const GOOGLE_PLACE_ID = /^[A-Za-z0-9_-]+$/;
 
 interface GoogleAutocompleteResponse {
-  status?: string;
-  predictions?: Array<{
-    place_id?: string;
-    structured_formatting?: { main_text?: string; secondary_text?: string };
-    description?: string;
-  }>;
+  suggestions?: unknown;
 }
 
-interface GoogleDetailsResponse {
-  status?: string;
-  result?: {
-    name?: string;
-    formatted_address?: string;
-    geometry?: { location?: { lat?: number; lng?: number } };
+interface GoogleAutocompleteSuggestion {
+  placePrediction?: {
+    placeId?: string;
+    text?: { text?: string };
+    structuredFormat?: { mainText?: { text?: string }; secondaryText?: { text?: string } };
   };
 }
 
+interface GooglePlaceResponse {
+  displayName?: { text?: string };
+  formattedAddress?: string;
+  location?: { latitude?: unknown; longitude?: unknown };
+}
+
 interface GoogleGeocodeResponse {
-  status?: string;
+  status?: unknown;
   results?: Array<{ formatted_address?: string }>;
+}
+
+/** One Google answer: the HTTP status and the parsed JSON body (undefined when it was not JSON). */
+interface GoogleAnswer {
+  ok: boolean;
+  status: number;
+  body: unknown;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
 }
 
 export class GooglePlacesProvider implements PlacesProvider {
   constructor(private apiKey: string) {}
 
-  private async getJson<T>(url: URL): Promise<T | null> {
+  /** Fetch with the timeout. Throws PlacesProviderError for no answer (timeout / network); otherwise
+   *  returns the status and the body, which each caller judges (a 404 is an answer for details). */
+  private async request(url: string | URL, init: NonNullable<Parameters<typeof fetch>[1]> = {}): Promise<GoogleAnswer> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GOOGLE_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) return null;
-      return (await res.json()) as T;
-    } catch {
-      return null;
+      let res: Response;
+      try {
+        res = await fetch(url, { ...init, signal: controller.signal });
+      } catch {
+        // The thrown error is dropped on purpose: its text can quote the URL (the
+        // Geocoding URL carries the key). Only the class survives.
+        throw new PlacesProviderError({ reason: controller.signal.aborted ? 'timeout' : 'network' });
+      }
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        if (controller.signal.aborted) throw new PlacesProviderError({ reason: 'timeout' });
+        body = undefined;
+      }
+      return { ok: res.ok, status: res.status, body };
     } finally {
       clearTimeout(timer);
     }
   }
 
+  /** A Places (New) answer that must be a JSON object: anything else is a classified failure. */
+  private placesBody(answer: GoogleAnswer): Record<string, unknown> {
+    if (!answer.ok || (isObject(answer.body) && 'error' in answer.body)) {
+      throw new PlacesProviderError(classifyGoogleApiFailure(answer.status, answer.body));
+    }
+    if (!isObject(answer.body)) throw new PlacesProviderError({ reason: 'bad_response', httpStatus: answer.status });
+    return answer.body;
+  }
+
+  private placesHeaders(fieldMask: string): Record<string, string> {
+    return { 'X-Goog-Api-Key': this.apiKey, 'X-Goog-FieldMask': fieldMask };
+  }
+
   async autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]> {
     if (query.trim().length === 0) return [];
-    const url = new URL(AUTOCOMPLETE_URL);
-    url.searchParams.set('input', query);
-    url.searchParams.set('key', this.apiKey);
+    const body: Record<string, unknown> = { input: query, includedRegionCodes: AUTOCOMPLETE_REGION_CODES };
     if (ctx?.near) {
-      url.searchParams.set('location', `${ctx.near.lat},${ctx.near.lng}`);
-      url.searchParams.set('radius', '50000');
+      body['locationBias'] = {
+        circle: { center: { latitude: ctx.near.lat, longitude: ctx.near.lng }, radius: LOCATION_BIAS_RADIUS_M },
+      };
     }
-    const data = await this.getJson<GoogleAutocompleteResponse>(url);
-    if (!data || data.status !== 'OK') return [];
-    return (data.predictions ?? [])
-      .filter((p) => p.place_id)
-      .slice(0, MAX_SUGGESTIONS)
-      .map((p) => ({
-        placeId: p.place_id!,
-        primary: p.structured_formatting?.main_text ?? p.description ?? '',
-        secondary: p.structured_formatting?.secondary_text,
-      }));
+    const answer = await this.request(AUTOCOMPLETE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.placesHeaders(AUTOCOMPLETE_FIELD_MASK) },
+      body: JSON.stringify(body),
+    });
+    const data = this.placesBody(answer) as GoogleAutocompleteResponse;
+    // Google answers {} when nothing matches: that is "no matches", not a failure.
+    if (data.suggestions === undefined) return [];
+    if (!Array.isArray(data.suggestions)) throw new PlacesProviderError({ reason: 'bad_response', httpStatus: answer.status });
+    const out: PlaceSuggestion[] = [];
+    for (const s of data.suggestions as GoogleAutocompleteSuggestion[]) {
+      const p = s?.placePrediction;
+      if (!p?.placeId) continue;
+      out.push({
+        placeId: p.placeId,
+        primary: p.structuredFormat?.mainText?.text ?? p.text?.text ?? '',
+        secondary: p.structuredFormat?.secondaryText?.text,
+      });
+      if (out.length >= MAX_SUGGESTIONS) break;
+    }
+    return out;
   }
 
   async details(placeId: string, _ctx?: PlacesQueryContext): Promise<PlaceDetail | null> {
-    const url = new URL(DETAILS_URL);
-    url.searchParams.set('place_id', placeId);
-    url.searchParams.set('fields', 'name,formatted_address,geometry');
-    url.searchParams.set('key', this.apiKey);
-    const data = await this.getJson<GoogleDetailsResponse>(url);
-    const loc = data?.result?.geometry?.location;
-    if (!data || data.status !== 'OK' || loc?.lat == null || loc?.lng == null) return null;
+    if (!GOOGLE_PLACE_ID.test(placeId)) return null;
+    const answer = await this.request(`${PLACE_DETAILS_URL}${encodeURIComponent(placeId)}`, {
+      headers: this.placesHeaders(DETAILS_FIELD_MASK),
+    });
+    // Google saying it does not know this id (its own NOT_FOUND status, not any 404 page) is
+    // an answer: there is no such place. Everything else that is not a place is a failure.
+    if (answer.status === 404 && classifyGoogleApiFailure(answer.status, answer.body).googleStatus === 'NOT_FOUND') return null;
+    const data = this.placesBody(answer) as GooglePlaceResponse;
+    const lat = data.location?.latitude;
+    const lng = data.location?.longitude;
+    if (typeof lat !== 'number' || typeof lng !== 'number') return null;
     return {
       placeId,
-      label: data.result?.name ?? data.result?.formatted_address ?? 'Selected place',
-      lat: loc.lat,
-      lng: loc.lng,
+      label: data.displayName?.text ?? data.formattedAddress ?? 'Selected place',
+      lat,
+      lng,
     };
   }
 
@@ -252,12 +332,16 @@ export class GooglePlacesProvider implements PlacesProvider {
     const url = new URL(GEOCODE_URL);
     url.searchParams.set('latlng', `${point.lat},${point.lng}`);
     url.searchParams.set('key', this.apiKey);
-    const data = await this.getJson<GoogleGeocodeResponse>(url);
-    if (!data || data.status !== 'OK') return null;
+    const answer = await this.request(url);
+    if (!answer.ok) throw new PlacesProviderError(classifyGoogleApiFailure(answer.status, answer.body));
+    if (!isObject(answer.body)) throw new PlacesProviderError({ reason: 'bad_response', httpStatus: answer.status });
+    const data = answer.body as GoogleGeocodeResponse;
+    // ZERO_RESULTS: Google answered, there is no address for this point.
+    if (data.status === 'ZERO_RESULTS') return null;
+    if (data.status !== 'OK') throw new PlacesProviderError(classifyGeocodeStatus(answer.status, data.status));
     return data.results?.[0]?.formatted_address ?? null;
   }
 }
-
 
 // --- OSM stack: Photon (autocomplete) + Nominatim (reverse) -----------------
 // Self-hosted, no per-call cost (the build kit's discovery engines). Guyana's
@@ -369,6 +453,7 @@ export class OsmPlacesProvider implements PlacesProvider {
 
 /** Provider selection is config, not code. Defaults to local so CI needs no key. */
 export function getPlacesProvider(prisma: PrismaClient): PlacesProvider {
+  assertPlacesConfig();
   const provider = process.env['PLACES_PROVIDER'] ?? 'local';
   switch (provider) {
     case 'local':

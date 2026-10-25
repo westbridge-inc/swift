@@ -10,10 +10,14 @@ import { haversineDistance } from '../../utils/distance';
  * cash-rules refuses to auto-pay a claim raised from across town — so the money
  * moment was guarded and the clock-starting moment was not.
  *
- * THIS DOES NOT REFUSE ANYTHING. It composes the immutable status-log note. The
- * philosophy is cash-rules': flag into human review, never refuse a money
- * outcome outright. A driver standing at the door under a tin roof with no GPS
- * fix must still be able to say they have arrived.
+ * `arrivalEvidence` below still refuses nothing: it composes the immutable
+ * status-log note (cash-rules' philosophy — flag into human review, never
+ * refuse a money outcome outright). The E19 gate built on top of it
+ * (`arrivalGate`) refuses the driver's *status claim* when the server-side fix
+ * cannot support it, and that refusal always carries a one-tap escape — the
+ * passenger, who can see the car, confirms via
+ * POST /rides/:id/confirm-driver-arrival. A driver standing at the door under a
+ * tin roof with no GPS fix is therefore never stranded.
  *
  * THE EVIDENCE FORMAT IS NOT DEFINED HERE. `gpsEvidence` in cash-rules is its
  * one author and `kerb-anti-fork.test.ts` enforces that by name, because one
@@ -26,6 +30,11 @@ import { haversineDistance } from '../../utils/distance';
  *  minutes is generous for a phone that has just been put down, and short
  *  enough that a fix from the other side of the trip cannot pass as current. */
 export const MAX_ARRIVAL_FIX_AGE_MS = 2 * 60 * 1000;
+
+/** How close the driver must be to declare arrival. Tighter than the 750 m
+ *  handover guard (cash-rules.service.ts:49): this starts the customer's
+ *  clock; the handover guard decides money. */
+export const ARRIVAL_GATE_MAX_DISTANCE_KM = 0.3;
 
 export type ArrivalVerdict =
   /** The fix is recent and near the pickup point. */
@@ -55,6 +64,17 @@ export interface ArrivalEvidence {
    *  nothing here penalises anyone. */
   needsReview: boolean;
 }
+
+/** The refusal copy for each non-passing verdict. `at-pickup` is unreachable
+ *  here — `arrivalGate.allowed` is exactly that verdict — but the map stays
+ *  total so a verdict rename cannot silently 500 the driver. */
+export const ARRIVAL_GATE_COPY: Record<ArrivalVerdict, string> = {
+  'at-pickup': 'The driver is at the pickup point.',
+  far: "You're too far from the pickup point to confirm arrival. Drive closer and try again, or ask the passenger to confirm your arrival.",
+  stale: "Your location is out of date. Open the app and try again once your GPS updates, or ask the passenger to confirm your arrival.",
+  'no-fix': "Swift can't verify your location right now. Ask the passenger to confirm your arrival, or contact support.",
+  'no-pickup': "Swift can't verify your location right now. Ask the passenger to confirm your arrival, or contact support.",
+};
 
 export function arrivalEvidence(
   fix: { lat: number | null; lng: number | null; at: Date | null },
@@ -124,4 +144,18 @@ export function arrivalEvidence(
     note: `${base} — ${where}, ${distanceM}m from the pickup point`,
     needsReview: false,
   };
+}
+
+/** [E19] The arrival gate: refuse a driver-reported arrival whose server-side
+ *  fix cannot support the claim. Delegates to `arrivalEvidence` with the
+ *  tighter 300 m radius — the evidence format keeps its single author
+ *  (`kerb-anti-fork.test.ts` enforces that), and the refusal is of a status
+ *  claim only, with a passenger-confirm override one tap away. */
+export function arrivalGate(
+  fix: { lat: number | null; lng: number | null; at: Date | null },
+  pickup: { lat: number | null; lng: number | null },
+  declaredAt: Date,
+): ArrivalEvidence & { allowed: boolean } {
+  const evidence = arrivalEvidence(fix, pickup, declaredAt, ARRIVAL_GATE_MAX_DISTANCE_KM);
+  return { ...evidence, allowed: evidence.verdict === 'at-pickup' };
 }

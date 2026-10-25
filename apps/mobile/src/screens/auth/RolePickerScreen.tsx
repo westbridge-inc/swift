@@ -12,6 +12,7 @@ import { SwiftMark } from '../../components/SwiftLogo';
 import { Pictogram, Screen, T, type PictogramName } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { haptic } from '../../lib/haptics';
+import { useAdsEnabled } from '../../hooks/useAdsEnabled';
 
 // FIRST OPEN [first-open spec 2.1]: one screen, the TRIO, zero carousel —
 // the same three options, pictograms and copy family as the in-app switcher
@@ -46,9 +47,9 @@ const TRIO: {
     intent: 'mover',
     pictogram: 'wheel',
     tint: 'taxi',
-    title: 'Swift Driver',
-    sub: 'Deliveries and taxi trips — you keep 100%',
-    hint: 'Continue to driver setup',
+    title: 'Become a Swift Driver',
+    sub: 'Sign up to deliver orders or drive taxi trips — you keep 100%',
+    hint: 'Start driver sign-up',
   },
   {
     intent: 'vendor',
@@ -111,11 +112,11 @@ function QuietRow({
 }
 
 export function RolePickerScreen() {
+  const adsEnabled = useAdsEnabled();
   const insets = useSafeAreaInsets();
   const setIntent = useAuthStore((s) => s.setIntent);
   const setMoverPreset = useAuthStore((s) => s.setMoverPreset);
   const setCountry = useAuthStore((s) => s.setCountry);
-  const countryCode = useAuthStore((s) => s.countryCode);
   const promptLogin = useAuthStore((s) => s.promptLogin);
   const enterPreview = useMoverPreview((s) => s.enterPreview);
   const enterVendorPreview = useVendorPreview((s) => s.enterPreview);
@@ -123,9 +124,9 @@ export function RolePickerScreen() {
   const pick = (intent: 'customer' | 'mover' | 'vendor') => {
     haptic.select();
     setMoverPreset(null); // the driver application picks the vehicle kind
-    // Customer picks role → straight to browsing. Seed a market so Home is
-    // never empty; useCustomerCountry then refines it from device location.
-    if (intent === 'customer' && !countryCode) setCountry(DEFAULT_COUNTRY);
+    // V1 is Guyana-only. Seed the released market synchronously so no entry
+    // path flashes or blocks on a country-selection screen.
+    setCountry(DEFAULT_COUNTRY);
     setIntent(intent);
   };
 
@@ -236,7 +237,7 @@ export function RolePickerScreen() {
             testID="role-picker-sign-in"
             onPress={() => {
               haptic.select();
-              if (!countryCode) setCountry(DEFAULT_COUNTRY);
+              setCountry(DEFAULT_COUNTRY);
               setIntent(null);
               promptLogin();
             }}
@@ -287,6 +288,7 @@ export function RolePickerScreen() {
               hint="Open a read-only sample driver dashboard"
               testID="role-picker-preview-driver"
               onPress={() => {
+                setCountry(DEFAULT_COUNTRY);
                 setMoverPreset('taxi');
                 enterPreview('DRIVER');
                 setIntent('mover');
@@ -298,17 +300,21 @@ export function RolePickerScreen() {
               hint="Open a read-only sample business dashboard"
               testID="role-picker-preview-business"
               onPress={() => {
+                setCountry(DEFAULT_COUNTRY);
                 enterVendorPreview('RESTAURANT');
                 setIntent('vendor');
               }}
             />
-            <QuietRow
+            {adsEnabled && <QuietRow
               icon="tv"
               label="Advertise on Swift"
               hint="Open Swift advertising"
               testID="role-picker-advertiser"
-              onPress={() => setIntent('advertiser')}
-            />
+              onPress={() => {
+                setCountry(DEFAULT_COUNTRY);
+                setIntent('advertiser');
+              }}
+            />}
           </View>
         </View>
       </ScrollView>

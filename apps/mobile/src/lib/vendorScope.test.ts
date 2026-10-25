@@ -20,7 +20,7 @@ describe('the vendor family, and only the vendor family, is store-scoped', () =>
   it('resolves the API-relative path for relative and absolute URLs, dropping query and fragment', () => {
     expect(apiPathOf('/vendor/items')).toBe('/vendor/items');
     expect(apiPathOf('vendor/items?x=1')).toBe('/vendor/items');
-    expect(apiPathOf('https://api.swift.gy/api/v1/vendor/items?x=1#f')).toBe('/vendor/items');
+    expect(apiPathOf('https://api.swiftgy.com/api/v1/vendor/items?x=1#f')).toBe('/vendor/items');
     expect(apiPathOf('http://10.0.2.2:3000/api/v1/customer/home')).toBe('/customer/home');
     expect(apiPathOf('/api/v1/vendor')).toBe('/vendor');
     expect(apiPathOf('/api/v1')).toBe('/');
@@ -31,14 +31,14 @@ describe('the vendor family, and only the vendor family, is store-scoped', () =>
   });
 
   it('scopes the vendor family and nothing that merely looks like it', () => {
-    for (const url of ['/vendor', '/vendor/', '/vendor/items', '/vendor/orders/1/accept', 'vendor/items', '/api/v1/vendor/items', 'https://api.swift.gy/api/v1/vendor/items?a=1']) {
+    for (const url of ['/vendor', '/vendor/', '/vendor/items', '/vendor/orders/1/accept', 'vendor/items', '/api/v1/vendor/items', 'https://api.swiftgy.com/api/v1/vendor/items?a=1']) {
       expect(isVendorScopedUrl(url), url).toBe(true);
       expect(apiFamilyOf(url), url).toBe('vendor');
     }
     for (const url of [
       '/auth/me', '/customer/home', '/rider/online', '/driver/trips', '/ads/serve', '/services/bookings', '/rides/quote', '/safety/sos', '/courier/quote',
       '/verification/documents', '/search', '/chat/threads', '/blocks', '/places/autocomplete', '/reports', '/partner/apply', '/market/items', '/discovery/home',
-      '/vendor-discovery/nearby', '/vendors/abc', '/vendorx/items', '/public/storefronts/x', '/', '', '/api/v1', 'https://api.swift.gy/api/v1/customer/home?vendor=1',
+      '/vendor-discovery/nearby', '/vendors/abc', '/vendorx/items', '/public/storefronts/x', '/', '', '/api/v1', 'https://api.swiftgy.com/api/v1/customer/home?vendor=1',
       '/customer/vendor/items', // vendor as a LATER segment is not the family
     ]) {
       expect(isVendorScopedUrl(url), url).toBe(false);

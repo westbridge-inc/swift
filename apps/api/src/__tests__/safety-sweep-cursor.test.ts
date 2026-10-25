@@ -213,9 +213,9 @@ describe('[S-05] the sweep primitive: keyset pages, a persisted cursor, poison i
 
 describe('[S-05] the real sweeps walk their populations in pages', () => {
   it('Guardian open: three live rides in two tenants, page size two, the earliest poisoned — both others get sessions within two ticks and the pass completes', async () => {
-    const passenger = await makeUser(['CUSTOMER']);
     const rides = [];
-    for (let i = 0; i < 3; i += 1) { const { driver } = await makeDriver(); rides.push(await makeRide(driver.id, passenger.userId, new Date(Date.now() - 300_000))); }
+    // A passenger per ride, as the evidence sweep below does: one customer holds one live taxi.
+    for (let i = 0; i < 3; i += 1) { const passenger = await makeUser(['CUSTOMER']); const { driver } = await makeDriver(); rides.push(await makeRide(driver.id, passenger.userId, new Date(Date.now() - 300_000))); }
     const other = await app.prisma.tenant.create({ data: { name: `Sweep Operator ${nanoid(4)}`, slug: `sweep-${nanoid(8).toLowerCase()}`, isActive: false } });
     tenantIds.push(other.id);
     await app.prisma.order.update({ where: { id: rides[1]!.id }, data: { tenantId: other.id } });
@@ -238,11 +238,12 @@ describe('[S-05] the real sweeps walk their populations in pages', () => {
   });
 
   it('Guardian reconcile: page size two over three open sessions, one poisoned — the pass completes and names it', async () => {
-    const passenger = await makeUser(['CUSTOMER']);
     const opener = new GuardianService(app.prisma, io, { cursorKey: `open-${nanoid(6)}` });
     cursorKeys.push(`guardian.open:${opener['sweepOpts'].cursorKey}`, `guardian.reconcile:${opener['sweepOpts'].cursorKey}`);
     const sessionIds: string[] = [];
     for (let i = 0; i < 3; i += 1) {
+      // A passenger per ride: one customer holds one live taxi.
+      const passenger = await makeUser(['CUSTOMER']);
       const { driver } = await makeDriver();
       const ride = await makeRide(driver.id, passenger.userId, new Date(Date.now() - 300_000));
       await opener.sweep(new Date());

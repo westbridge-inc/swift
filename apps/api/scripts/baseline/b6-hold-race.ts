@@ -19,6 +19,7 @@
  *      npx tsx scripts/baseline/b6-hold-race.ts
  */
 import { PrismaClient } from '@prisma/client';
+import { sessionCredentialDigest } from '../../src/lib/session-credential';
 
 const API = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const prisma = new PrismaClient();
@@ -85,8 +86,15 @@ async function ensureRoster() {
   let v = await http('POST', '/auth/verify-otp', { phone: CUSTOMER_PHONE, code: '000000' });
   let token = pickToken(v.json);
   if (!token && v.json?.data?.isNewUser) {
+    const registrationProof = v.json?.data?.registrationProof;
+    if (typeof registrationProof !== 'string') throw new Error('missing signup continuation for baseline customer');
     const r = await http('POST', '/auth/register', {
-      phone: CUSTOMER_PHONE, firstName: 'ELV1', lastName: 'Customer', role: 'CUSTOMER', acceptTerms: true,
+      phone: CUSTOMER_PHONE,
+      registrationProof,
+      firstName: 'ELV1',
+      lastName: 'Customer',
+      role: 'CUSTOMER',
+      acceptTerms: true,
     });
     token = pickToken(r.json);
     if (!token) {
@@ -136,10 +144,13 @@ async function ensureRoster() {
         currentLat: 6.8, currentLng: -58.15, averageRating: 5, acceptanceRate: 100,
       },
     });
+    // [Row 231] a bare client bypasses the API's digest extension and the
+    // database refuses a plaintext credential: store the digest explicitly.
+    // This session only anchors locationSessionId; its credential is never presented.
     const session = await prisma.session.create({
       data: {
-        userId: riderUser.id, token: `elv1-rider-${Date.now()}`,
-        refreshToken: `elv1-rider-r-${Date.now()}`, deviceId: 'elv1-baseline',
+        userId: riderUser.id, token: sessionCredentialDigest(`elv1-rider-${Date.now()}`),
+        refreshToken: sessionCredentialDigest(`elv1-rider-r-${Date.now()}`), deviceId: 'elv1-baseline',
         deviceType: 'script', expiresAt: new Date(Date.now() + 86_400_000),
       },
     });

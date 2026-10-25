@@ -1,9 +1,15 @@
 'use client';
 
-import Link from 'next/link';
+import OrderDetailSkeleton from './loading';
+
+import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
+// [UI-SWEEP U14] Cancellation codes read through the one shared plain-words map.
+import { cancellationReasonWords, ORDER_CANCELLED_WORDS } from '@swift/types';
+import { orderStatusLabel, presentedVertical } from '@/lib/order-words';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  ArrowLeft,
   Banknote,
   CircleX,
   Clock3,
@@ -14,9 +20,25 @@ import {
   Star,
   Truck,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { activeRide, cancelOrder, getOrder, getRide, money } from '@/lib/customer';
+import { Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { money } from '@/lib/customer';
+import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';
+import { validPoint } from '@/lib/live-tracking';
+import type { TaxiSafetyFacts } from '@/components/taxi-trip-safety';
+import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } from '@/lib/taxi-waiting';
+import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
+import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
+import { lineDisplayAmount } from '@/lib/money';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
+import { pickupCodeWords } from './pickup-words';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [Row 117] A taxi ride's code, driver position and SOS — only while the server
+// says web booking is on; its code (and the map's) loads only for such a ride.
+const TaxiTripSafety = lazyRetry(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
+// [WEB-TAXI · E4] The live waiting count, only for a ride the server says is waiting.
+const TaxiWaitingCard = lazyRetry(() => import('@/components/taxi-waiting-card').then((module) => ({ default: module.TaxiWaitingCard })));
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -26,6 +48,11 @@ type OrderLine = {
   quantity: number;
   lineTotal?: number;
   customerPrice?: number;
+  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v2 since O-4: the removal question too). */
+  subStatus?: string | null;
+  substituteName?: string | null;
+  substitutePrice?: number | null;
+  substitution?: SwapView | null;
 };
 
 type TimelineEvent = {
@@ -61,9 +88,21 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [O-2] false = the store does not ask for the code (it asks for the first name and order number);
+   *  absent on an older server = today's words. */
+  pickupCodeRequired?: boolean;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
+  ridePin?: string | null;
+  /** [R14] Set (verbatim) while the store delivers this order with its own rider; null otherwise. */
+  ownRiderNotice?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
+  /** [Row 117] The ride's own code and the driver's last position (GET /rides/:id, /rides/active). */
+  taxiSafety?: TaxiSafetyFacts | null;
+  /** [WEB-TAXI · TAXI waiting charge §8.3/§8.4] The ride's live wait, and a finished ride's itemised fare (GET /rides/:id). */
+  taxiWaiting?: WaitingLive | null;
+  fareBreakdown?: FareBreakdown | null;
   rider?: {
     firstName?: string;
     lastName?: string;
@@ -78,9 +117,18 @@ type OrderDetail = {
   timeline?: TimelineEvent[];
   holdExpiresAt?: string | null;
   freeCancellationExpiresAt?: string | null;
+  appointmentSlot?: string | null;
   canCancel?: boolean;
-  cancellationFee?: number;
+  /** [owner #46/#50/#52] Why a cancel is free right now, in the server's words. */
+  cancellationMessage?: string | null;
+  /** [owner #46/#50] Why there is no Cancel, and who to contact instead. */
+  cancelUnavailable?: { code: string; message: string; contactPhone?: string | null } | null;
   cancellationReason?: string | null;
+  /** [owner 18 Oct 2026] Why an unpaid MMG order closed by itself, in the customer's words (null otherwise). */
+  cancellationNotice?: string | null;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Where to send MMG on an ACCEPTED order: the store's number and the
+   *  exact total (only this customer, only until the store marks it "Paid by MMG"). Parsed, never trusted raw. */
+  mmgPayment?: unknown;
 };
 
 type Stage = { label: string; statuses: string[] };
@@ -106,6 +154,14 @@ const appointmentStages: Stage[] = [
   { label: 'Completed', statuses: ['COMPLETED', 'DELIVERED'] },
 ];
 
+/** [E17 · DS202 D6] A courier parcel sent back to its sender. */
+const returnStages: Stage[] = [
+  { label: 'Placed', statuses: ['PENDING', 'ACCEPTED'] },
+  { label: 'Picked up', statuses: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] },
+  { label: 'Coming back to you', statuses: ['RETURNING'] },
+  { label: 'Returned', statuses: ['RETURNED'] },
+];
+
 const taxiStages: Stage[] = [
   { label: 'Requested', statuses: ['PENDING'] },
   { label: 'Driver assigned', statuses: ['ACCEPTED', 'DRIVER_ASSIGNED'] },
@@ -116,9 +172,18 @@ const taxiStages: Stage[] = [
 
 function stagesFor(order: OrderDetail): Stage[] {
   if (order.orderType === 'TAXI') return taxiStages;
+  if (order.status === 'RETURNING' || order.status === 'RETURNED') return returnStages;
   if (order.fulfillment === 'PICKUP') return pickupStages;
   if (order.fulfillment === 'APPOINTMENT') return appointmentStages;
   return deliveryStages;
+}
+
+/** The order's first step is named like the status card above it ("Placed",
+ *  "Booked", "Requested"), never the raw PENDING; later steps keep their own words. */
+function timelineLabel(status: string, order: OrderDetail): string {
+  if (status === 'PENDING') return stagesFor(order)[0]!.label;
+  // [UI-SWEEP U14] The phone's words by the order's own vertical, never a code.
+  return orderStatusLabel(status, presentedVertical(order));
 }
 
 function stageIndex(status: string, stages: Stage[]): number {
@@ -130,6 +195,10 @@ function statusHeading(order: OrderDetail): string {
   if (order.status === 'CANCELLED') return order.orderType === 'TAXI' ? 'Ride cancelled' : 'Order cancelled';
   if (order.status === 'REFUNDED') return order.orderType === 'TAXI' ? 'Ride refunded' : 'Order refunded';
   if (order.status === 'FAILED') return order.orderType === 'TAXI' ? 'Ride could not be completed' : 'Order could not be completed';
+  // [E17 · DS231 F4] A courier parcel on its way back, and back: the heading
+  // agrees with the stage rail below instead of falling to "Order placed".
+  if (order.status === 'RETURNING') return 'Your parcel is coming back to you';
+  if (order.status === 'RETURNED') return 'Parcel returned to you';
   if (['DELIVERED', 'COMPLETED'].includes(order.status)) {
     if (order.orderType === 'TAXI') return 'Ride completed';
     if (order.fulfillment === 'APPOINTMENT') return 'Appointment completed';
@@ -170,14 +239,11 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
 
-function cancellationPayload(value: unknown): { message: string | null; fee: number | null } {
+function cancellationPayload(value: unknown): { message: string | null } {
   const root = record(value);
   const first = record(root?.['data']) ?? root;
   const payload = record(first?.['data']) ?? first;
-  return {
-    message: typeof payload?.['message'] === 'string' ? payload['message'] : null,
-    fee: typeof payload?.['cancellationFee'] === 'number' ? payload['cancellationFee'] : null,
-  };
+  return { message: typeof payload?.['message'] === 'string' ? payload['message'] : null };
 }
 
 function verifiedMmgAction(order: OrderDetail): NonNullable<OrderDetail['paymentAction']> | null {
@@ -199,14 +265,28 @@ function verifiedMmgAction(order: OrderDetail): NonNullable<OrderDetail['payment
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [order, setOrder] = useState<OrderDetail | null>(null);
+  // [Row 117] Whether the server offers web taxi booking (and so the trip's
+  // safety tools here); anything but a yes keeps the page pointing to the app.
+  const [webTaxi, setWebTaxi] = useState(false);
+  const orderIsTaxi = order?.orderType === 'TAXI';
+  useEffect(() => {
+    setWebTaxi(false);
+    if (!orderIsTaxi) return;
+    let live = true;
+    rideCapabilities()
+      .then((capabilities) => { if (live) setWebTaxi(capabilities?.webBooking === true); })
+      .catch(() => undefined);
+    return () => { live = false; };
+  }, [id, orderIsTaxi]);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<string | null>(null);
-  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [openingPayment, setOpeningPayment] = useState(false);
+  const [swapBusy, setSwapBusy] = useState<string | null>(null);
+  const [swapError, setSwapError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const expiredHold = useRef<string | null>(null);
   const loadSequence = useRef(0);
@@ -230,6 +310,14 @@ export default function OrderDetailPage() {
         const active = activeResult.status === 'fulfilled' ? activeResult.value : null;
         const activeDriver = active?.id === id ? active.driver : null;
         const driver = ride?.driver ?? activeDriver;
+        nextOrder.taxiSafety = {
+          ridePin: typeof ride?.ridePin === 'string' && ride.ridePin ? ride.ridePin : null,
+          ridePinVerified: ride?.ridePinVerified === true,
+          driverAt: validPoint(activeDriver?.currentLat, activeDriver?.currentLng),
+          driverName: typeof driver?.user?.firstName === 'string' ? driver.user.firstName : null,
+        };
+        nextOrder.taxiWaiting = liveWaiting(ride);
+        nextOrder.fareBreakdown = fareBreakdownOf(ride);
         if (driver) {
           // Customer order detail omits taxi drivers; normalize the dedicated
           // ride contract into the existing counterparty shape used below.
@@ -256,13 +344,27 @@ export default function OrderDetailPage() {
     }
   }, [id]);
 
+  // [SUBSTITUTION · owner 17 Oct 2026] The customer answers the store's swap
+  // question here too; the page then reloads the server's truth either way.
+  const decideSwap = useCallback(async (lineId: string, approve: boolean) => {
+    setSwapBusy(lineId);
+    setSwapError(null);
+    try {
+      await decideSubstitution(id, lineId, approve);
+    } catch (decideError) {
+      setSwapError(decideError instanceof Error ? decideError.message : 'That did not go through. Try again.');
+    } finally {
+      setSwapBusy(null);
+      await load();
+    }
+  }, [id, load]);
+
   useEffect(() => {
     setOrder(null);
     setTrackingError(null);
     setLastUpdatedAt(null);
     setError(null);
     setCancelResult(null);
-    setCancelFee(null);
     setConfirmingCancel(false);
     setCancelling(false);
     setOpeningPayment(false);
@@ -314,7 +416,7 @@ export default function OrderDetailPage() {
     );
   }
 
-  if (!order) return <div className={styles.loading} aria-label="Loading order tracking" />;
+  if (!order) return <OrderDetailSkeleton />;
 
   const cancelled = order.status === 'CANCELLED';
   const refunded = order.status === 'REFUNDED';
@@ -340,7 +442,6 @@ export default function OrderDetailPage() {
   const vehicle = [order.rider?.vehicleColor, order.rider?.vehicleMake, order.rider?.vehicleModel, order.rider?.vehicleType]
     .filter(Boolean)
     .join(' ');
-  const effectiveCancelFee = cancelFee ?? Number(order.cancellationFee ?? 0);
   const paymentCaptured = order.paymentStatus === 'CAPTURED';
   const paymentRefunded = order.paymentStatus === 'REFUNDED';
   const paymentFailed = order.paymentStatus === 'FAILED';
@@ -348,6 +449,10 @@ export default function OrderDetailPage() {
   const mmgAction = verifiedMmgAction(order);
   const payableMmgAction = !trackingError && !stopped && !paymentCaptured && !paymentRefunded && order.paymentStatus === 'PENDING'
     ? mmgAction
+    : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number, on the same terms as the server sends it.
+  const storeMmgPayment = !trackingError && !stopped && !paymentCaptured && !paymentRefunded && order.paymentStatus === 'PENDING'
+    ? parseMmgStorePayment(order.mmgPayment)
     : null;
 
   // [W-32] The refetch is a positive control, and it was only half of one: it
@@ -409,7 +514,6 @@ export default function OrderDetailPage() {
     setError(null);
     try {
       const latest = (await getOrder(id)) as OrderDetail;
-      const latestFee = Number(latest.cancellationFee ?? 0);
       setOrder({ ...latest, rider: latest.rider ?? order.rider });
       setLastUpdatedAt(new Date());
       const latestTaxiCancellationUnknown = latest.orderType === 'TAXI'
@@ -420,15 +524,8 @@ export default function OrderDetailPage() {
         window.requestAnimationFrame(() => statusHeadingRef.current?.focus());
         return;
       }
-      if (latestFee !== effectiveCancelFee) {
-        setCancelFee(latestFee);
-        setError(`The server’s cancellation quote changed to ${money(latestFee)}. Review the updated cash-only marker, then confirm again if you still want to cancel.`);
-        window.requestAnimationFrame(() => cancelConfirmButton.current?.focus());
-        return;
-      }
       const result = cancellationPayload(await cancelOrder(id, 'changed my mind'));
       setCancelResult(result.message);
-      setCancelFee(result.fee);
       setConfirmingCancel(false);
       await load();
       window.requestAnimationFrame(() => statusHeadingRef.current?.focus());
@@ -446,11 +543,7 @@ export default function OrderDetailPage() {
 
   return (
     <div className={styles.page}>
-      <Link href="/orders" className={styles.backLink}>
-        <ArrowLeft size={18} aria-hidden="true" />
-        All orders
-      </Link>
-
+      {/* [Q7b] The way back is the app's own back button, in the top bar. */}
       <section className={styles.hero} aria-labelledby="order-status-heading">
         <div className={styles.heroIcon} aria-hidden="true">
           {stopped ? <CircleX size={28} /> : completed ? <PackageCheck size={28} /> : order.rider ? <Truck size={28} /> : <Clock3 size={28} />}
@@ -459,18 +552,41 @@ export default function OrderDetailPage() {
           <p className={styles.eyebrow}>{vendorName} · {order.orderNumber}</p>
           <h1 ref={statusHeadingRef} tabIndex={-1} id="order-status-heading" className={styles.title}>{statusHeading(order)}</h1>
           <p className={styles.updateNote}>
-            {stopped ? cancelResult ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
+            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? cancellationReasonWords(order.cancellationReason, 'customer') ?? (cancelled ? ORDER_CANCELLED_WORDS : 'This order is closed.') : 'This page checks Swift for updates every few seconds.'}
           </p>
         </div>
         <span className={`${styles.statusPill} ${completed ? styles.statusComplete : refunded ? styles.statusRefunded : cancelled || failed ? styles.statusCancelled : ''}`}>
-          {order.status.replaceAll('_', ' ').toLowerCase()}
+          {orderStatusLabel(order.status, presentedVertical(order))}
         </span>
       </section>
+
+      {isTaxi && webTaxi ? (
+        <Suspense fallback={null}>
+          <TaxiTripSafety rideId={id} status={order.status} facts={order.taxiSafety ?? null} />
+        </Suspense>
+      ) : isTaxi ? (
+        <section className={styles.moneyNotice} aria-labelledby="taxi-app-title">
+          <h2 id="taxi-app-title" className={styles.cardTitle}>Open the Swift app for your safety PIN and SOS</h2>
+          <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
+          <OpenSwiftApp />
+        </section>
+      ) : null}
+
+      {isTaxi && order.taxiWaiting ? (
+        <Suspense fallback={null}>
+          <TaxiWaitingCard waiting={order.taxiWaiting} />
+        </Suspense>
+      ) : null}
+
+      {/* [R14 · legal research D12] The server's words, shown while the store delivers with its own rider. */}
+      {order.ownRiderNotice ? (
+        <div className={styles.moneyNotice} role="note">{order.ownRiderNotice}</div>
+      ) : null}
 
       {trackingError ? (
         <div className={styles.trackingNotice} role="alert">
           <span>
-            The last update failed; Swift keeps retrying. {lastUpdatedAt ? `Showing the last server result from ${lastUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}. ` : ''}
+            Updates are taking longer than usual. Swift keeps trying. {lastUpdatedAt ? `Last checked at ${lastUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. ` : ''}
             {trackingError}
           </span>
           <button type="button" className={styles.secondaryButton} onClick={() => void load()}>Try updates again</button>
@@ -478,11 +594,8 @@ export default function OrderDetailPage() {
       ) : null}
 
       {cancelResult ? (
-        <div className={`${styles.cancelOutcome} ${Number(cancelFee ?? 0) > 0 ? styles.cancelWarning : ''}`} role="status">
+        <div className={styles.cancelOutcome} role="status">
           <strong>{cancelResult}</strong>
-          {typeof cancelFee === 'number' ? (
-            <span>{cancelFee > 0 ? `${money(cancelFee)} cash-only late-cancellation marker recorded; Swift does not collect it.` : 'No cancellation fee recorded by the server.'}</span>
-          ) : null}
         </div>
       ) : null}
 
@@ -495,7 +608,7 @@ export default function OrderDetailPage() {
       {holdActive ? (
         <section className={styles.holdCard} aria-labelledby="hold-title">
           <div>
-            <p className={styles.eyebrow}>Server-set order hold</p>
+            <p className={styles.eyebrow}>A short hold on your order</p>
             <h2 id="hold-title" className={styles.cardTitle}>A short window before the store sees it</h2>
             <p className={styles.mutedCopy}>
               {mmgAmbiguous
@@ -503,12 +616,83 @@ export default function OrderDetailPage() {
                 : 'You can cancel without a fee while this hold is active. Swift is holding the order, not your money.'}
             </p>
           </div>
-          <div className={styles.timer} role="timer" aria-label={`${formatRemaining(holdExpiryMs - now)} remains in the server order hold`}>
+          <div className={styles.timer} role="timer" aria-label={`${formatRemaining(holdExpiryMs - now)} remains in the order hold`}>
             <span>{formatRemaining(holdExpiryMs - now)}</span>
             <small>remaining</small>
           </div>
         </section>
       ) : null}
+
+      {/* [SUBSTITUTION · owner 17 Oct 2026] The store's swap question: the
+          customer is always told, and answers from the server's own permitted
+          decisions, price change and deadline. */}
+      {!stopped ? (order.items ?? []).filter((item) => item.subStatus === 'PENDING' && item.id).map((item) => {
+        const view = item.substitution;
+        const allowed = swapPermissions(view);
+        const change = swapChangeText(view);
+        const deadline = swapDeadlineText(view);
+        const lineId = item.id as string;
+        if (isRemovalQuestion(view)) {
+          // [O-4 · owner 22 Oct 2026] Asked before the store accepted, nothing to swap: the customer
+          // agrees to the changed order before paying, or cancels it.
+          const lower = removalChangeText(view);
+          return (
+            <section key={`swap-${lineId}`} className={styles.holdCard} aria-labelledby={`swap-title-${lineId}`}>
+              <div>
+                <p className={styles.eyebrow}>The store asks</p>
+                <h2 id={`swap-title-${lineId}`} className={styles.cardTitle}>{item.name} is out of stock</h2>
+                <p className={styles.mutedCopy}>{view?.lastItem ? `${vendorName} can’t supply it.` : `${vendorName} can’t supply it. Continue without it, or cancel the order. Nothing has been charged.`}</p>
+                {lower ? <p className={styles.mutedCopy}><strong>{lower}</strong></p> : null}
+                {view?.settlementGuidance ? <p className={styles.mutedCopy}>{view.settlementGuidance}</p> : null}
+                {deadline ? <p className={styles.mutedCopy}><strong>{deadline}</strong></p> : null}
+                {swapError ? <p className={styles.mutedCopy} role="alert">{swapError}</p> : null}
+                <div className={styles.confirmActions}>
+                  {view?.lastItem ? null : (
+                    <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
+                      Continue without it
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    disabled={!canOfferCancellation}
+                    onClick={(event) => {
+                      cancelReturnFocus.current = event.currentTarget;
+                      setConfirmingCancel(true);
+                      window.requestAnimationFrame(() => cancelConfirmButton.current?.focus());
+                    }}
+                  >
+                    Cancel order
+                  </button>
+                </div>
+              </div>
+            </section>
+          );
+        }
+        return (
+          <section key={`swap-${lineId}`} className={styles.holdCard} aria-labelledby={`swap-title-${lineId}`}>
+            <div>
+              <p className={styles.eyebrow}>The store asks</p>
+              <h2 id={`swap-title-${lineId}`} className={styles.cardTitle}>Swap {item.name} for {item.substituteName ?? 'another item'}?</h2>
+              <p className={styles.mutedCopy}>
+                {item.name} is out of stock. {vendorName} suggests {item.substituteName ?? 'another item'} ({money(Number(item.substitutePrice ?? 0))}{item.quantity > 1 ? ` × ${item.quantity}` : ''}) instead.{allowed.reject ? ' Declining removes the item and lowers your total.' : ''}
+              </p>
+              {change ? <p className={styles.mutedCopy}><strong>{change}</strong></p> : null}
+              {view?.settlementGuidance ? <p className={styles.mutedCopy}>{view.settlementGuidance}</p> : null}
+              {deadline ? <p className={styles.mutedCopy}><strong>{deadline}</strong></p> : null}
+              {swapError ? <p className={styles.mutedCopy} role="alert">{swapError}</p> : null}
+              <div className={styles.confirmActions}>
+                <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
+                  Approve swap
+                </button>
+                <button type="button" className={styles.secondaryButton} disabled={swapBusy !== null || !allowed.reject} onClick={() => void decideSwap(lineId, false)}>
+                  Decline
+                </button>
+              </div>
+            </div>
+          </section>
+        );
+      }) : null}
 
       {!stopped ? (
         <section className={styles.progressCard} aria-labelledby="progress-title">
@@ -582,8 +766,14 @@ export default function OrderDetailPage() {
               </div>
               {order.pickupCode ? (
                 <div className={styles.pickupCode}>
-                  <span>Show this pickup code</span>
+                  <span>{pickupCodeWords(order.pickupCodeRequired)}</span>
                   <strong>{order.pickupCode}</strong>
+                </div>
+              ) : null}
+              {order.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status) ? (
+                <div className={styles.pickupCode}>
+                  <span>Show this delivery code to your rider at the door</span>
+                  <strong>{order.ridePin}</strong>
                 </div>
               ) : null}
             </section>
@@ -591,14 +781,14 @@ export default function OrderDetailPage() {
 
           {(order.timeline?.length ?? 0) > 0 ? (
             <section className={styles.card} aria-labelledby="timeline-title">
-              <p className={styles.eyebrow}>Server history</p>
+              <p className={styles.eyebrow}>Order updates</p>
               <h2 id="timeline-title" className={styles.cardTitle}>{isTaxi ? 'Ride timeline' : 'Order timeline'}</h2>
               <ol className={styles.timeline}>
                 {order.timeline?.map((event, index) => (
                   <li key={`${event.status}-${event.timestamp}-${index}`}>
                     <span className={styles.timelineDot} aria-hidden="true" />
                     <div>
-                      <strong>{event.status.replaceAll('_', ' ').toLowerCase()}</strong>
+                      <strong>{timelineLabel(event.status, order)}</strong>
                       <time dateTime={event.timestamp}>{formatEventTime(event.timestamp)}</time>
                       {event.note ? <p>{event.note}</p> : null}
                     </div>
@@ -615,17 +805,28 @@ export default function OrderDetailPage() {
           <div className={styles.orderLines}>
             {(order.items ?? []).map((item, index) => (
               <div key={item.id ?? `${item.name}-${index}`} className={styles.line}>
-                <span>{item.quantity}× {item.name}</span>
-                <strong>{money(item.lineTotal ?? Number(item.customerPrice ?? 0) * item.quantity)}</strong>
+                <span>{item.quantity}× {item.name}{lineRemoved(item) ? ' (removed, not charged)' : ''}</span>
+                <strong>{money(lineRemoved(item) ? 0 : lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
               </div>
             ))}
           </div>
           <div className={styles.breakdown}>
-            {typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
-            {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? <div className={styles.line}><span>Appointment</span><strong>{formatAppointmentSlot(order.appointmentSlot)}</strong></div> : null}
+            {isTaxi && order.fareBreakdown ? (
+              // [TAXI waiting charge §8.4 · E4] The phone's receipt (RidePostTripSheet): trip + waiting = total.
+              <>
+                <div className={styles.line}><span>Trip</span><strong>{money(order.fareBreakdown.routeFare)}</strong></div>
+                <div className={styles.line}><span>Waiting {order.fareBreakdown.waitingMinutes} min</span><strong>{money(order.fareBreakdown.waitingCharge)}</strong></div>
+              </>
+            ) : typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
+            {!isTaxi && typeof order.deliveryFee === 'number'
+              ? order.fulfillment === 'PICKUP' && order.deliveryFee === 0
+                ? <div className={styles.line}><span>Pickup</span><strong>No delivery fee</strong></div>
+                : <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div>
+              : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
             {Number(order.tipAmount ?? 0) > 0 ? <div className={styles.line}><span>{isTaxi ? 'Driver tip' : 'Rider tip'}</span><strong>{money(Number(order.tipAmount))}</strong></div> : null}
-            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total ?? 0)}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{money(isTaxi && order.fareBreakdown ? order.fareBreakdown.total : order.totalAmount ?? order.total)}</strong></div>
           </div>
           {showPaymentTruth ? (
             <div className={styles.cashTruth}>
@@ -664,9 +865,13 @@ export default function OrderDetailPage() {
                         ? 'Swift records the MMG payment as received and the order as refunded. The business handles that refund directly; Swift never held the money.'
                         : paymentCaptured
                           ? 'The business confirmed it received your MMG transfer directly. No additional payment is due through Swift.'
+                          : storeMmgPayment
+                            ? `${storeMmgPayment.instruction} ${mmgStorePaymentNote(storeMmgPayment)}`
                           : payableMmgAction
                             ? `Swift does not hold this payment. This verified link sends ${money(payableMmgAction.amount)} directly to ${payableMmgAction.recipientName}.`
-                            : 'Swift does not hold this payment. No verified MMG payment link is available on this order; do not pay from unverified details.'
+                          : order.status === 'PENDING'
+                            ? 'When the business accepts, this page shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. Swift does not hold this payment.'
+                            : 'Swift does not hold this payment. No verified MMG payment details are on this order; do not pay from unverified details.'
                       : order.paymentMethod === 'CASH'
                         ? paymentCaptured
                           ? refunded
@@ -679,8 +884,11 @@ export default function OrderDetailPage() {
                           : completed
                             ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete, but this order does not yet show confirmed cash receipt.`
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
-                        : `The server reports ${order.paymentStatus?.toLowerCase() ?? 'an unknown payment state'} for this order.`}
+                        : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
+                {storeMmgPayment && mmgStorePaymentDeadline(storeMmgPayment) ? (
+                  <p><strong>{mmgStorePaymentDeadline(storeMmgPayment)}</strong></p>
+                ) : null}
                 {payableMmgAction ? (
                   <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment(payableMmgAction)}>
                     {openingPayment ? 'Rechecking payment…' : `Pay ${payableMmgAction.recipientName} by MMG`}
@@ -692,6 +900,19 @@ export default function OrderDetailPage() {
           ) : null}
 
           {error ? <p className={styles.alert} role="alert">{error}</p> : null}
+
+          {/* [owner #46/#50] The server's reason there is no Cancel, and who to
+              contact instead — the store's (or provider's) published number. */}
+          {!stopped && !order.canCancel && order.cancelUnavailable ? (
+            <div className={styles.cancelConfirm} role="note">
+              <p>{order.cancelUnavailable.message}</p>
+              {order.cancelUnavailable.contactPhone ? (
+                <a className={styles.secondaryButton} href={`tel:${order.cancelUnavailable.contactPhone}`}>
+                  Call {order.cancelUnavailable.contactPhone}
+                </a>
+              ) : null}
+            </div>
+          ) : null}
 
           {canOfferCancellation && !confirmingCancel ? (
             <button
@@ -708,11 +929,10 @@ export default function OrderDetailPage() {
           ) : null}
 
           {confirmingCancel && canOfferCancellation ? (
-            <div className={`${styles.cancelConfirm} ${effectiveCancelFee > 0 ? styles.cancelWarning : ''}`}>
+            <div className={styles.cancelConfirm}>
               <p id="cancellation-quote">
-                {effectiveCancelFee > 0
-                  ? `Swift’s last server quote shows a ${money(effectiveCancelFee)} cash-only late-cancellation marker. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect the marker; the server confirms it when you cancel.`
-                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
+                {/* [DS1141 S1] Only the server's own words say "free"; with none, the copy stays neutral. */}
+                {`${order.cancellationMessage ? `${order.cancellationMessage} ` : ''}${order.freeCancellationExpiresAt ? `You can cancel until ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}. ` : ''}${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling and shows the final result.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>
@@ -724,6 +944,12 @@ export default function OrderDetailPage() {
               </div>
             </div>
           ) : null}
+
+          {/* [UI-SWEEP U16] Something wrong with this order: a support request
+              tied to it, as on the phone ("Report a problem"). */}
+          <Link href={`/account/help?orderId=${encodeURIComponent(order.id)}`} className={`${styles.secondaryButton} ${styles.reportProblem}`}>
+            Report a problem
+          </Link>
         </aside>
       </div>
     </div>

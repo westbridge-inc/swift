@@ -25,6 +25,10 @@ export interface BatchingConfig {
 }
 
 export const DEFAULT_BATCHING_CONFIG: BatchingConfig = {
+  // The SHADOW scan default (BatchingSettings.maxOrdersPerRun overrides it).
+  // It is NOT the live rider limit: live stacking passes the founder knob
+  // `stacking.riderCapacity` in as R2's limit (dispatch/stack-eligibility.ts,
+  // STK-3). Two numbers meaning one thing is how the owner's 3 stopped at 2.
   maxOrdersPerRun: 2,
   dropoffCorridorM: 1500,
   pickupProximityM: 400,

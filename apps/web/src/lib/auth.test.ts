@@ -25,7 +25,11 @@ import { mockApi, API_ORIGIN } from '@/test/test-utils';
 // ---------------------------------------------------------------------------
 
 const SOURCE = readFileSync(join(process.cwd(), 'src', 'lib', 'auth.ts'), 'utf8');
-const CUSTOMER_SOURCE = readFileSync(join(process.cwd(), 'src', 'lib', 'customer.ts'), 'utf8');
+// lib/customer and the per-page customer modules split out of it (sign-up,
+// orders, search, courier, places, rides, market): one rule for every customer request module.
+const CUSTOMER_SOURCE = ['customer.ts', 'customer-account.ts', 'customer-orders.ts', 'customer-search.ts', 'customer-courier.ts', 'customer-places.ts', 'customer-rides.ts', 'customer-market.ts']
+  .map((file) => readFileSync(join(process.cwd(), 'src', 'lib', file), 'utf8'))
+  .join('\n');
 
 /** Source with comments removed: a claim about what the code does must not be
  *  satisfiable, or breakable, by prose that names what the code no longer has. */
@@ -43,9 +47,37 @@ async function loadCustomer() {
   vi.resetModules();
   return import('@/lib/customer');
 }
+async function loadAccount() {
+  vi.resetModules();
+  return import('@/lib/customer-account');
+}
 
 const signedInAs = (id: string) => ({
   body: { success: true, data: { user: { id, roles: ['CUSTOMER'], activeRole: 'CUSTOMER' }, client: 'web' } },
+});
+
+describe('plain error fallback', () => {
+  it('uses a helpful message for missing 5xx errors while retaining the status for callers', async () => {
+    const auth = await loadAuth();
+    mockApi(() => ({ status: 503, body: {} }));
+    await expect(auth.apiFetch('/api/v1/customer/home')).rejects.toMatchObject({
+      message: 'Something went wrong on our side. Please try again.', status: 503,
+    });
+  });
+
+  it('does not blame Swift for an unexplained 4xx error', async () => {
+    const auth = await loadAuth();
+    mockApi(() => ({ status: 400, body: {} }));
+    await expect(auth.apiFetch('/api/v1/customer/home')).rejects.toMatchObject({
+      message: 'We couldn’t complete that. Please try again.', status: 400,
+    });
+  });
+
+  it('uses the same plain fallback for public customer reads', async () => {
+    const customer = await loadCustomer();
+    mockApi(() => ({ status: 500, body: {} }));
+    await expect(customer.getMarketDepth()).rejects.toThrow('Something went wrong on our side. Please try again.');
+  });
 });
 
 describe('[W-01] nothing a script can read', () => {
@@ -64,11 +96,12 @@ describe('[W-01] nothing a script can read', () => {
   });
 
   it('a customer sign-in and a brand-new sign-up write no credential either — and both are credentialed, named requests', async () => {
-    const customer = await loadCustomer();
+    vi.resetModules();
+    const { verifyCustomerLogin } = await import('@/lib/customer-login');
     const login = mockApi(() => ({
       body: { success: true, data: { isNewUser: false, user: { id: 'c1', roles: ['CUSTOMER'] }, session: 'cookie' } },
     }));
-    await customer.verifyCustomerLogin('+5926001001', '246810');
+    await verifyCustomerLogin('+5926001001', '246810');
     expect(Object.keys(localStorage)).toEqual([]);
     expect(document.cookie).toBe('');
     const [, loginInit] = login.mock.calls[0]!;
@@ -79,22 +112,24 @@ describe('[W-01] nothing a script can read', () => {
       status: 201,
       body: { success: true, data: { user: { id: 'c2', roles: ['CUSTOMER'] }, onboarding: null, session: 'cookie' } },
     }));
-    const created = await customer.registerAccount({ phone: '+5926001002', firstName: 'New', lastName: 'Customer', role: 'CUSTOMER', acceptTerms: true });
+    const { registerAccount } = await import('@/lib/customer-account');
+    const created = await registerAccount({ phone: '+5926001002', firstName: 'New', lastName: 'Customer', role: 'CUSTOMER', acceptTerms: true });
     expect(created.user.id).toBe('c2');
     expect(Object.keys(localStorage)).toEqual([]);
     expect(document.cookie).toBe('');
     const [, signupInit] = signup.mock.calls[0]!;
     expect(signupInit?.credentials).toBe('include');
     expect((signupInit?.headers as Record<string, string>)['X-Swift-Client']).toBe('web');
+    expect(JSON.parse(String(signupInit?.body))).not.toHaveProperty('registrationProof');
   });
 
   it('a sign-up the server answers with a user but no tokens still signs the person in — the body carries no credential by design', async () => {
-    const customer = await loadCustomer();
-    // the SAME module graph customer.ts bound to — a second reset would hand
+    const account = await loadAccount();
+    // the SAME module graph customer-account.ts bound to — a second reset would hand
     // back a different auth instance and the assertion would grade nothing
     const auth = await import('@/lib/auth');
     mockApi(() => ({ status: 201, body: { success: true, data: { user: { id: 'c9' }, session: 'cookie' } } }));
-    await customer.registerAccount({ phone: '+5926001009', firstName: 'A', lastName: 'B', role: 'CUSTOMER' });
+    await account.registerAccount({ phone: '+5926001009', firstName: 'A', lastName: 'B', role: 'CUSTOMER' });
     // the app's own record of who it is comes from the SERVER's user, not a token
     expect(auth.getSessionPrincipal()).toBe('c9');
   });
@@ -113,8 +148,8 @@ describe('[W-01] nothing a script can read', () => {
   });
 
   it('no page in the app reads a credential out of storage or attaches a bearer', () => {
-    const pages = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'layout.tsx'), 'utf8')
-      + readFileSync(join(process.cwd(), 'src', 'app', 'portal', 'layout.tsx'), 'utf8')
+    const pages = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'dashboard-shell.tsx'), 'utf8')
+      + readFileSync(join(process.cwd(), 'src', 'app', 'portal', 'portal-shell.tsx'), 'utf8')
       + readFileSync(join(process.cwd(), 'src', 'app', '(app)', 'layout.tsx'), 'utf8')
       + readFileSync(join(process.cwd(), 'src', 'app', 'selfie', 'page.tsx'), 'utf8')
       + readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'inventory', 'import', 'page.tsx'), 'utf8')
@@ -170,7 +205,7 @@ describe('[W-01] every request carries the client name and the cookies; a 401 re
       value: { pathname: '/dashboard/orders', search: '?status=NEW', set href(v: string) { assign(v); } },
       configurable: true,
     });
-    await expect(auth.apiFetch('/api/v1/vendor/orders')).rejects.toThrow(/Session expired/);
+    await expect(auth.apiFetch('/api/v1/vendor/orders')).rejects.toThrow(/You were signed out\. Please sign in again\./);
     expect(assign).toHaveBeenCalledWith('/login?next=%2Fdashboard%2Forders%3Fstatus%3DNEW');
   });
 
@@ -198,7 +233,62 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
 
     const auth3 = await loadAuth();
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    expect(await auth3.sessionProbe()).toEqual({ ok: false });
+    // [UI-SWEEP U23] Not signed in, and also not known to be signed out: the console says Swift can't be reached.
+    expect(await auth3.sessionProbe()).toEqual({ ok: false, unreachable: true });
+  });
+
+  it('[UI-SWEEP U23] a server failure while checking is "unreachable", never a sign-out, and keeps the person', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    // [REVIEW-F2 #1968 S4-2 / REVIEW-M S4-1] A timeout (408) or a rate limit (429) says nothing about the session either.
+    for (const status of [500, 502, 503, 408, 429]) {
+      mockApi(() => ({ status, body: { success: false } }));
+      expect(await auth.sessionProbe(), String(status)).toEqual({ ok: false, unreachable: true });
+      expect(auth.getSessionPrincipal(), String(status)).toBe('u1');
+    }
+    // A real "no session" still forgets.
+    mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(auth.getSessionPrincipal()).toBeNull();
+  });
+
+  // [REVIEW-F2 #1968 S4-4] The refresh step is rate limited per address and can
+  // fail for reasons that say nothing about the session. Only the server saying
+  // no (401/403, or another plain 4xx) is a sign-out; a 5xx, a timeout, a rate
+  // limit or a dropped connection is "unreachable" and keeps the person signed in.
+  it('a restore whose refresh could not reach Swift is "unreachable", never a sign-out', async () => {
+    for (const status of [500, 503, 408, 429]) {
+      const auth = await loadAuth();
+      mockApi(({ url }) => (url.pathname.endsWith('/auth/refresh') ? { status, body: { success: false } } : { status: 401, body: {} }));
+      expect(await auth.restoreSession(), String(status)).toEqual({ ok: false, unreachable: true });
+    }
+    const offline = await loadAuth();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    expect(await offline.restoreSession()).toEqual({ ok: false, unreachable: true });
+    vi.unstubAllGlobals();
+    for (const status of [401, 403]) {
+      const auth = await loadAuth();
+      mockApi(({ url }) => (url.pathname.endsWith('/auth/refresh') ? { status, body: { success: false } } : { status: 401, body: {} }));
+      expect(await auth.restoreSession(), String(status)).toEqual({ ok: false });
+    }
+  });
+
+  it('a 401 whose refresh could not reach Swift does not sign the person out or leave the page', async () => {
+    const auth = await loadAuth();
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me') ? signedInAs('u1') : url.pathname.endsWith('/auth/refresh') ? { status: 503, body: { success: false } } : { status: 401, body: {} }));
+    await auth.sessionProbe();
+    const assign = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { pathname: '/dashboard/orders', search: '', set href(v: string) { assign(v); } },
+      configurable: true,
+    });
+    const failure = await auth.apiFetch('/api/v1/vendor/orders').catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(auth.ApiRequestError);
+    expect((failure as InstanceType<typeof auth.ApiRequestError>).status).toBe(503);
+    expect((failure as Error).message).not.toMatch(/signed out/i);
+    expect(assign).not.toHaveBeenCalled();
+    expect(auth.getSessionPrincipal()).toBe('u1');
   });
 
   it('a 200 that names nobody is not a session — a shape change must not read as signed in', async () => {
@@ -268,13 +358,25 @@ describe('[W-01] signing out is a server act, because only the server can expire
   });
 
   it('no sign-out button clears local state alone — every one of them asks the server', () => {
+    // Every sign-out now goes through the one shared ask, SignOutButton, and
+    // only its "Sign out" ends the session: through logout(), the server act.
+    const confirm = readFileSync(join(process.cwd(), 'src', 'components', 'sign-out-button.tsx'), 'utf8');
+    expect(code(confirm), 'components/sign-out-button.tsx').toMatch(/logout\(\)/);
+    expect(code(confirm), 'components/sign-out-button.tsx').not.toMatch(/clearSession/);
     for (const file of [
-      ['src', 'app', 'portal', 'layout.tsx'],
-      ['src', 'app', 'dashboard', 'layout.tsx'],
+      ['src', 'components', 'console-shell.tsx'],
       ['src', 'app', '(app)', 'account', 'page.tsx'],
     ]) {
       const source = readFileSync(join(process.cwd(), ...file), 'utf8');
-      expect(source, file.join('/')).toMatch(/logout\(\)/);
+      expect(source, file.join('/')).toMatch(/<SignOutButton\b/);
+      expect(code(source), file.join('/')).not.toMatch(/clearSession/);
+    }
+    for (const file of [
+      ['src', 'app', 'portal', 'portal-shell.tsx'],
+      ['src', 'app', 'dashboard', 'dashboard-shell.tsx'],
+    ]) {
+      const source = readFileSync(join(process.cwd(), ...file), 'utf8');
+      expect(source, file.join('/')).toMatch(/<ConsoleShell\b/);
       expect(code(source), file.join('/')).not.toMatch(/clearSession/);
     }
   });
@@ -361,5 +463,124 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
     auth.clearSession();
     expect(auth.getSessionPrincipal()).toBeNull();
     expect(auth.getSelectedStore()).toBeNull();
+  });
+});
+
+describe('[Row 225] the server holds a write to the account this tab is showing', () => {
+  const expectedOf = (init?: RequestInit) => (init?.headers as Record<string, string> | undefined)?.['X-Swift-Expected-Principal'];
+
+  it('once the server has named the person, every request names them — a write the shared cookie no longer matches is refused there', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const seen: Array<string | undefined> = [];
+    mockApi(({ init }) => { seen.push(expectedOf(init)); return { body: { success: true, data: { ok: true } } }; });
+    await auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: JSON.stringify({ firstName: 'A' }) });
+    await auth.apiFetch('/api/v1/customer/orders');
+    expect(seen).toEqual(['u1', 'u1']);
+  });
+
+  it('a request sent before anyone is known names nobody — the first paint is not refused for it', async () => {
+    const auth = await loadAuth();
+    const seen: Array<string | undefined> = [];
+    mockApi(({ init }) => { seen.push(expectedOf(init)); return { body: { success: true, data: { ok: true } } }; });
+    await auth.apiFetch('/api/v1/customer/home');
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('when the server answers SESSION_CHANGED, the write fails as a session change AND the tab learns who the cookie names now', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const heard = vi.fn();
+    auth.subscribeSession(heard);
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me')
+      ? signedInAs('u2')
+      : { status: 409, body: { success: false, error: { code: 'SESSION_CHANGED', message: 'The signed-in account changed in another tab.' } } }));
+    await expect(auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: '{}' }))
+      .rejects.toMatchObject({ status: 409, code: 'SESSION_CHANGED' });
+    await vi.waitFor(() => expect(auth.getSessionPrincipal()).toBe('u2'));
+    expect(heard).toHaveBeenCalled();
+  });
+
+  it('the refusal says what happened — nothing was saved and the page now shows who is signed in — and never asks for a reload the tab does by itself', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me')
+      ? signedInAs('u2')
+      : { status: 409, body: { success: false, error: { code: 'SESSION_CHANGED', message: 'Nothing was saved — reload to continue as the account now signed in.' } } }));
+    const refused = await auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: '{}' }).catch((e: Error) => e);
+    expect(refused.message).toContain('Nothing was saved');
+    expect(refused.message).toContain('now shows');
+    expect(refused.message.toLowerCase()).not.toContain('reload');
+  });
+
+  it('Sign out in a stale tab signs this browser out, whoever the shared cookie names now: it declares no expectation, and the tab stays signed out', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const calls: Array<{ path: string; expected: string | undefined }> = [];
+    mockApi(({ url, init }) => {
+      calls.push({ path: url.pathname, expected: expectedOf(init) });
+      return url.pathname.endsWith('/auth/me') ? signedInAs('u2') : { body: { success: true, data: { ok: true } } };
+    });
+    await auth.logout();
+    expect(calls.find((c) => c.path.endsWith('/auth/logout'))).toEqual({ path: '/api/v1/auth/logout', expected: undefined });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(auth.getSessionPrincipal()).toBeNull();
+    expect(calls.some((c) => c.path.endsWith('/auth/me'))).toBe(false);
+  });
+});
+
+describe('[Q7b] a returning customer is restored, and the app shell hears every change', () => {
+  const trail = (fetchMock: ReturnType<typeof mockApi>) =>
+    fetchMock.mock.calls.map(([url, init]) => `${(init?.method ?? 'GET').toUpperCase()} ${new URL(String(url)).pathname}`);
+
+  it('restoreSession spends the thirty-day refresh cookie once, then asks the server who this is', async () => {
+    const auth = await loadAuth();
+    const fetchMock = mockApi(({ url }) => (url.pathname === '/api/v1/auth/refresh'
+      ? { body: { success: true, data: { session: 'cookie' } } }
+      : signedInAs('c1')));
+    expect(await auth.restoreSession()).toMatchObject({ ok: true, user: { id: 'c1' } });
+    expect(trail(fetchMock)).toEqual(['POST /api/v1/auth/refresh', 'GET /api/v1/auth/me']);
+    expect(auth.getSessionPrincipal()).toBe('c1');
+  });
+
+  it('a refused refresh is "not signed in", and nothing more is asked', async () => {
+    const auth = await loadAuth();
+    const fetchMock = mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.restoreSession()).toEqual({ ok: false });
+    expect(trail(fetchMock)).toEqual(['POST /api/v1/auth/refresh']);
+  });
+
+  it('the probe itself never spends a refresh: guests must not use up the per-address refresh limit on every page', async () => {
+    const auth = await loadAuth();
+    const fetchMock = mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(trail(fetchMock)).toEqual(['GET /api/v1/auth/me']);
+  });
+
+  it('tells subscribers when a session starts, changes or ends — only then — and stops when they leave', async () => {
+    const auth = await loadAuth();
+    const heard = vi.fn();
+    const stop = auth.subscribeSession(heard);
+    auth.adoptSession('c1');
+    expect(heard).toHaveBeenCalledTimes(1);
+    auth.clearSession();
+    expect(heard).toHaveBeenCalledTimes(2);
+    mockApi(() => signedInAs('c2'));
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(3);
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(3);
+    mockApi(() => ({ status: 401, body: { success: false } }));
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(4);
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(4);
+    stop();
+    auth.adoptSession('c3');
+    expect(heard).toHaveBeenCalledTimes(4);
   });
 });

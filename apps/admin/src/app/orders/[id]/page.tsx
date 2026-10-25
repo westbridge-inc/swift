@@ -1,21 +1,41 @@
 'use client';
 
-import { use } from 'react';
+import { use, useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Phone } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
-import { statusClass } from '@/lib/status';
-import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { StatusBadge } from '@/components/mc/StatusBadge';
+import { label } from '@/lib/labels';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { PaymentDispute } from '@/components/mc/PaymentDispute';
+import { HeldDoorCash } from '@/components/mc/HeldDoorCash';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
+const clock = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+
+/** [TAXI multi-stop 8/8] One stop of a ride, as the server reports it. */
+type RideStop = {
+  sequence: number; address: string; status: 'PENDING' | 'ARRIVED' | 'DEPARTED' | 'SKIPPED';
+  arrivedAt: string | null; departedAt: string | null; skippedAt: string | null; skipReason: string | null;
+  evidenceNote: string | null;
+};
+
+/** Where the ride stands at a stop, in plain words, with the server's times. */
+function stopProgress(stop: RideStop, next: number | null): string {
+  if (stop.status === 'ARRIVED') return `Waiting here since ${clock(stop.arrivedAt)}`;
+  if (stop.status === 'DEPARTED') return `Arrived ${clock(stop.arrivedAt)} · left ${clock(stop.departedAt)}`;
+  if (stop.status === 'SKIPPED') return `Skipped ${clock(stop.skippedAt)}${stop.skipReason ? ` — ${stop.skipReason}` : ''}`;
+  return stop.sequence === next ? 'Next stop' : 'Not reached yet';
+}
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
-      <h2 className="text-sm font-semibold text-[var(--muted)] tracking-widest mb-4">{title.toUpperCase()}</h2>
+    <div className="mc-card">
+      <h2 className="mc-label mb-3">{title}</h2>
       {children}
     </div>
   );
@@ -24,23 +44,19 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Party({ label, name, phone, href }: { label: string; name?: string | null; phone?: string | null; href?: string }) {
   if (!name) return null;
   return (
-    <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
+    <div className="flex items-center justify-between rounded-[var(--mc-radius-sm)] bg-[var(--mc-surface)] p-3">
       <div>
-        <p className="text-xs text-[var(--muted)]">{label}</p>
+        <p className="mc-muted text-xs">{label}</p>
         {href ? (
-          <Link href={href} className="text-sm font-medium hover:text-[var(--accent)] transition-colors">
+          <Link href={href} className="text-sm font-medium text-[var(--mc-accent)] font-semibold">
             {name}
           </Link>
         ) : (
           <p className="text-sm font-medium">{name}</p>
         )}
       </div>
-      {phone ? (
-        <a href={`tel:${phone}`} className="flex items-center gap-1.5 text-xs text-[var(--muted)] hover:text-white">
-          <Phone size={13} />
-          {phone}
-        </a>
-      ) : null}
+      {/* [MC shell] No click-to-call: calls are not a console feature (owner ruling, 6 Oct). */}
+      {phone ? <span className="mc-muted text-xs">{phone}</span> : null}
     </div>
   );
 }
@@ -48,38 +64,30 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const queryClient = useQueryClient();
-  const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
-  const cancelMutation = useMutation({
-    // [ADM-006] the operator's words, not a template
-    mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { reason, refund }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['order', id] });
-      queryClient.invalidateQueries({ queryKey: ['orders'] });
-    },
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
+  const actions = useActionRunner(() => {
+    void queryClient.invalidateQueries({ queryKey: ['order', id] });
+    void queryClient.invalidateQueries({ queryKey: ['orders'] });
   });
-  // [A-14] Closing a refund is a separate act from deciding one is owed, and it
-  // needs what a refund actually is: a reference and the amount handed back.
-  const settleRefundMutation = useMutation({
-    mutationFn: ({ reference, amount }: { reference: string; amount: string }) =>
-      settleOrderRefund(id, reference, amount),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['order', id] });
-      queryClient.invalidateQueries({ queryKey: ['orders'] });
-    },
-  });
-
+  // [U28] Cancelling, recording a refund owed and closing a refund each ask in
+  // the panel: the order is named, a refusal stays in the panel with what was
+  // typed, and a 202 (a refund close is C4) reads as queued, never a failure.
+  const [refundCloseQueued, setRefundCloseQueued] = useState(false);
   const o: any = data?.data;
+  // [TAXI waiting charge] The ride's frozen breakdown, when the server sends one.
+  const waiting: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null =
+    o?.fareBreakdown && typeof o.fareBreakdown.total === 'number' ? o.fareBreakdown : null;
 
   if (isLoading) {
-    return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
+    return <div className="mc-page"><div className="mc-loading" aria-busy="true">Loading the order…</div></div>;
   }
   if (isError || !o) {
     return (
-      <div>
-        <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
+      <div className="mc-page">
+        <Link href="/orders" className="mc-back mb-2">
           <ArrowLeft size={16} /> Orders
         </Link>
-        <p className="text-[var(--muted)]">Order not found.</p>
+        <QueryFailed error={error ?? new Error('The order response was empty.')} what="this order" onRetry={() => void refetch()} retrying={isFetching} />
       </div>
     );
   }
@@ -92,58 +100,63 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const timeline: any[] = o.statusHistory ?? [];
 
   return (
-    <div>
-      <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
+    <div className="mc-page">
+      <Link href="/orders" className="mc-back mb-2">
         <ArrowLeft size={16} /> Orders
       </Link>
 
+      {actions.banner}
+      <PaymentDispute order={o} actions={actions} />
+      <HeldDoorCash order={o} actions={actions} />
+
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
-        <h1 className="text-2xl font-bold font-mono">#{o.orderNumber}</h1>
-        <span className={`px-2.5 py-1 rounded-full text-xs ${statusClass(o.status)}`}>{o.status}</span>
-        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
-          {String(o.orderType).replaceAll('_', ' ').toLowerCase()}
+        <h2 className="mc-numbers text-2xl font-semibold" style={{ letterSpacing: '-0.02em' }}>#{o.orderNumber}</h2>
+        <StatusBadge group="OrderStatus" value={o.status} />
+        <span className="mc-badge">
+          {label('OrderType', o.orderType)}
         </span>
         {isMmg ? (
           o.paymentStatus === 'CAPTURED' ? (
-            <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">MMG paid</span>
+            <span className="mc-badge mc-tone-good">MMG paid</span>
           ) : (
-            <span className="px-2.5 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">MMG awaiting confirmation</span>
+            <span className="mc-badge mc-tone-warn">MMG awaiting confirmation</span>
           )
         ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">cash</span>
+          <span className="mc-badge">cash</span>
         )}
         <div className="ml-auto flex gap-2">
           {!TERMINAL.includes(o.status) && (
             <>
               <button
-                onClick={() => {
-                  const mmgNote = isMmg
-                    ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${refundingStore}; Swift cannot refund it.`
-                    : '';
-                  if (!window.confirm(`Cancel order ${o.orderNumber}?${mmgNote}`)) return;
-                  const reason = askReason({ action: 'cancel this order', subject: o.orderNumber });
-                  if (reason) cancelMutation.mutate({ refund: false, reason });
-                }}
-                disabled={cancelMutation.isPending}
-                className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                type="button"
+                onClick={() => void actions.run({
+                  title: `Cancel order ${o.orderNumber}?`,
+                  body: isMmg
+                    ? <p>MMG payment stays between customer and store. If paid, it is refunded by {refundingStore}; Swift cannot refund it.</p>
+                    : <p>The customer, the store and any mover on it are told.</p>,
+                  confirmLabel: 'Cancel order',
+                  dismissLabel: 'Keep the order',
+                  // [ADM-006] the operator's words, not a template
+                  submit: ({ reason }) => cancelOrder(id, { refund: false }, reason),
+                  success: () => `Order ${o.orderNumber} cancelled.`,
+                })}
+                className="mc-btn"
               >
                 Cancel order
               </button>
               {o.paymentMethod === 'CASH' && (
                 <button
-                  onClick={() => {
-                    if (window.confirm(
-                      `Cancel ${o.orderNumber} and record that ${refundingStore} OWES the customer a refund?`
-                      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
-                      + ' list until someone records the reference and the amount actually handed back.',
-                    )) {
-                      const reason = askReason({ action: 'cancel this order and record a refund owed', subject: o.orderNumber });
-                      if (reason) cancelMutation.mutate({ refund: true, reason });
-                    }
-                  }}
-                  disabled={cancelMutation.isPending}
-                  className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                  type="button"
+                  onClick={() => void actions.run({
+                    title: `Cancel ${o.orderNumber} and record that ${refundingStore} owes the customer a refund?`,
+                    body: <p>This does not mark anything refunded. The order stays in the outstanding list until someone records the reference and the amount actually handed back.</p>,
+                    confirmLabel: 'Cancel and record refund owed',
+                    dismissLabel: 'Keep the order',
+                    submit: ({ reason }) => cancelOrder(id, { refund: true }, reason),
+                    success: () => `Order ${o.orderNumber} cancelled; a refund is recorded as owed.`,
+                  })}
+                  className="mc-btn mc-btn-primary"
                 >
                   Record refund owed
                 </button>
@@ -156,52 +169,46 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       {/* [A-14] An obligation nobody has settled is money the customer is still
           waiting for. It says so, with its age, until evidence closes it. */}
       {o.refundOwedAt && !o.refundSettledAt && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
-          <p className="text-sm text-amber-300 font-medium">Refund owed — not yet settled</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
+        <div className="rounded-[var(--mc-radius)] border border-[var(--mc-warn)]/30 bg-[var(--mc-warn-soft)] p-4">
+          <p className="text-sm mc-text-warn font-medium">Refund owed — not yet settled</p>
+          <p className="mt-1 text-sm mc-muted">
             GY${Number(o.refundOwedAmount ?? 0).toLocaleString()} recorded as owed on{' '}
             {new Date(o.refundOwedAt).toLocaleString()}. Nothing here says the money moved.
           </p>
           <button
-            onClick={() => {
-              const reference = window.prompt(
-                'Reference for the refund that was handed back (receipt or handover number):',
-              );
-              if (!reference) return;
-              const amount = window.prompt(
-                `Amount actually handed back (the order owes GY$${Number(o.refundOwedAmount ?? 0).toLocaleString()}):`,
-              );
-              if (!amount) return;
-              settleRefundMutation.mutate({ reference, amount });
-            }}
-            disabled={settleRefundMutation.isPending}
-            className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+            type="button"
+            onClick={() => void actions.run({
+              title: `Record the refund handed back for order ${o.orderNumber}?`,
+              body: <p>The order owes GY${Number(o.refundOwedAmount ?? 0).toLocaleString()}. Type the amount actually handed back and the receipt or handover reference.</p>,
+              confirmLabel: 'Record refund handed back',
+              fields: [
+                { kind: 'reference', name: 'reference', label: 'Receipt or handover reference' },
+                { kind: 'amount', name: 'amount', label: 'Amount actually handed back (GYD)', cents: true },
+              ],
+              // [A-14] Closing a refund is a separate act from deciding one is owed, and it
+              // needs what a refund actually is: a reference and the amount handed back.
+              submit: ({ reason, values }) => settleOrderRefund(id, String(values['reference']), Number(values['amount']), reason),
+              success: () => 'Refund recorded as handed back.',
+            }).then((outcome) => { if (outcome?.tone === 'queued') setRefundCloseQueued(true); })}
+            disabled={refundCloseQueued}
+            className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--mc-accent)] disabled:opacity-50"
           >
-            Record refund handed back
+            {refundCloseQueued ? 'Waiting for approval' : 'Record refund handed back'}
           </button>
-          {settleRefundMutation.isError && (
-            <p className="mt-2 text-sm text-red-400" role="alert">
-              {(settleRefundMutation.error as Error).message}
-            </p>
-          )}
         </div>
       )}
 
       {o.refundSettledAt && (
-        <div className="rounded-xl border border-[var(--border)] p-4">
+        <div className="rounded-[var(--mc-radius)] border border-[var(--mc-line)] p-4">
           <p className="text-sm font-medium">Refund settled</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
+          <p className="mt-1 text-sm mc-muted">
             GY${Number(o.refundPaidAmount ?? 0).toLocaleString()} — reference {o.refundRef} —{' '}
             {new Date(o.refundSettledAt).toLocaleString()}
           </p>
         </div>
       )}
 
-      {cancelMutation.error && (
-        <div className="mb-4">
-          <MutationError error={cancelMutation.error} label="Order cancellation failed" />
-        </div>
-      )}
+
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left column — what + who */}
@@ -210,55 +217,67 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             {isRide ? (
               <div className="space-y-2 text-sm">
                 <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full border-2 border-[var(--muted)]" />
+                  <span className="w-2.5 h-2.5 rounded-full border-2 border-[var(--mc-muted)]" />
                   <span>{o.pickupAddress ?? '—'}</span>
                 </div>
+                {/* [TAXI multi-stop 8/8] The stops in the passenger's order, each with where the ride stands. */}
+                {Array.isArray(o.stops) &&
+                  (o.stops as RideStop[]).map((stop) => (
+                    <div key={stop.sequence} className="flex items-start gap-2" data-testid={`ride-stop-${stop.sequence}`}>
+                      <span className="mt-0.5 w-4 text-center text-xs font-semibold mc-muted">{stop.sequence}</span>
+                      <div>
+                        <p>{stop.address}</p>
+                        <p className="mc-muted text-xs">{stopProgress(stop, o.nextStopSequence ?? null)}</p>
+                        {stop.evidenceNote ? <p className="mc-muted text-xs">{stop.evidenceNote}</p> : null}
+                      </div>
+                    </div>
+                  ))}
                 <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-[var(--accent)]" />
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[var(--mc-accent)]" />
                   <span>{o.deliveryAddress ?? '—'}</span>
                 </div>
-                {o.rideClass ? <p className="text-[var(--muted)] text-xs pt-1">Class: {o.rideClass}</p> : null}
+                {o.rideClass ? <p className="mc-muted text-xs pt-1">Class: {o.rideClass}</p> : null}
               </div>
             ) : (
               <div className="space-y-2">
                 {(o.items ?? []).map((it: any) => (
-                  <div key={it.id} className="flex items-start justify-between p-3 rounded-lg bg-white/5 text-sm">
+                  <div key={it.id} className="flex items-start justify-between p-3 rounded-lg bg-[var(--mc-surface)] text-sm">
                     <div>
                       <p>
                         {it.quantity}× {it.name}
                       </p>
                       {(it.selectedOptions ?? []).length > 0 && (
-                        <p className="text-xs text-[var(--muted)] mt-0.5">
+                        <p className="text-xs mc-muted mt-0.5">
                           {(it.selectedOptions ?? []).map((op: any) => op.optionName ?? op.name).filter(Boolean).join(', ')}
                         </p>
                       )}
                       {it.specialInstructions ? (
-                        <p className="text-xs text-amber-400/90 mt-0.5">“{it.specialInstructions}”</p>
+                        <p className="text-xs mc-text-warn mt-0.5">“{it.specialInstructions}”</p>
                       ) : null}
                     </div>
                     <span className="font-medium">{gyd(it.totalCustomer)}</span>
                   </div>
                 ))}
-                {(o.items ?? []).length === 0 && <p className="text-sm text-[var(--muted)]">No items.</p>}
+                {(o.items ?? []).length === 0 && <p className="text-sm mc-muted">No items.</p>}
               </div>
             )}
           </Section>
 
           <Section title="Timeline">
             {timeline.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No events recorded.</p>
+              <p className="text-sm mc-muted">No events recorded.</p>
             ) : (
               <div className="space-y-0">
                 {timeline.map((ev: any, i: number) => (
                   <div key={ev.id ?? i} className="flex gap-3">
                     <div className="flex flex-col items-center">
-                      <span className={`w-2.5 h-2.5 rounded-full mt-1 ${i === 0 ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'}`} />
-                      {i < timeline.length - 1 && <span className="w-px flex-1 bg-[var(--border)]" />}
+                      <span className={`w-2.5 h-2.5 rounded-full mt-1 ${i === 0 ? 'bg-[var(--mc-accent)]' : 'bg-[var(--mc-line-strong)]'}`} />
+                      {i < timeline.length - 1 && <span className="w-px flex-1 bg-[var(--mc-line-strong)]" />}
                     </div>
                     <div className={`pb-4 ${i === 0 ? '' : 'opacity-80'}`}>
-                      <p className="text-sm font-medium">{String(ev.status).replaceAll('_', ' ')}</p>
-                      {ev.note ? <p className="text-xs text-[var(--muted)] mt-0.5">{ev.note}</p> : null}
-                      <p className="text-xs text-[var(--muted)]/70 mt-0.5">{new Date(ev.createdAt).toLocaleString()}</p>
+                      <p className="text-sm font-medium">{label('OrderStatus', ev.status)}</p>
+                      {ev.note ? <p className="text-xs mc-muted mt-0.5">{ev.note}</p> : null}
+                      <p className="text-xs mc-muted mt-0.5">{new Date(ev.createdAt).toLocaleString()}</p>
                     </div>
                   </div>
                 ))}
@@ -282,7 +301,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 name={mover ? [mover.firstName, mover.lastName].filter(Boolean).join(' ') : null}
                 phone={mover?.phone}
               />
-              {!o.vendor && !mover && !o.customer && <p className="text-sm text-[var(--muted)]">—</p>}
+              {!o.vendor && !mover && !o.customer && <p className="text-sm mc-muted">—</p>}
             </div>
           </Section>
 
@@ -290,34 +309,47 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <div className="space-y-1.5 text-sm">
               {!isRide && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Subtotal</span>
+                  <span className="mc-muted">Subtotal</span>
                   <span>{gyd(o.subtotalCustomer ?? o.subtotalBase)}</span>
                 </div>
               )}
               {Number(o.deliveryFee) > 0 && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Delivery fee</span>
+                  <span className="mc-muted">Delivery fee</span>
                   <span>{gyd(o.deliveryFee)}</span>
                 </div>
               )}
               {Number(o.tipAmount) > 0 && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Tip</span>
+                  <span className="mc-muted">Tip</span>
                   <span>{gyd(o.tipAmount)}</span>
                 </div>
               )}
               {Number(o.discount) > 0 && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Discount{o.promoCode?.code ? ` (${o.promoCode.code})` : ''}</span>
+                  <span className="mc-muted">Discount{o.promoCode?.code ? ` (${o.promoCode.code})` : ''}</span>
                   <span>-{gyd(o.discount)}</span>
                 </div>
               )}
-              <div className="flex justify-between pt-2 mt-1 border-t border-[var(--border)] font-semibold">
+              {/* [TAXI waiting charge] A ride charged for waiting: the frozen line, read-only. */}
+              {waiting && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="mc-muted">Trip fare</span>
+                    <span>{gyd(waiting.routeFare)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="mc-muted">Waiting ({waiting.waitingMinutes} min)</span>
+                    <span>{gyd(waiting.waitingCharge)}</span>
+                  </div>
+                </>
+              )}
+              <div className="flex justify-between pt-2 mt-1 border-t border-[var(--mc-line)] font-semibold">
                 <span>Total</span>
-                <span>{gyd(isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
+                <span>{gyd(waiting ? waiting.total : isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
               </div>
-              <p className="text-xs text-[var(--muted)] pt-1">
-                {isMmg ? 'Paid to the vendor’s MMG wallet — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
+              <p className="text-xs mc-muted pt-1">
+                {isMmg ? 'Paid to the vendor’s MMG account — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
               </p>
             </div>
           </Section>
@@ -325,18 +357,18 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <Section title="Details">
             <div className="space-y-1.5 text-sm">
               <div className="flex justify-between">
-                <span className="text-[var(--muted)]">Placed</span>
+                <span className="mc-muted">Placed</span>
                 <span>{o.placedAt ? new Date(o.placedAt).toLocaleString() : '—'}</span>
               </div>
               {o.deliveredAt && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Delivered</span>
+                  <span className="mc-muted">Delivered</span>
                   <span>{new Date(o.deliveredAt).toLocaleString()}</span>
                 </div>
               )}
               {o.fulfillment && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Fulfillment</span>
+                  <span className="mc-muted">Fulfillment</span>
                   <span>{o.fulfillment}</span>
                 </div>
               )}
@@ -347,24 +379,37 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   order has been locked out by wrong guesses. */}
               {o.handover?.pickupCodeIssued && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Pickup code</span>
-                  <span className={o.handover.locked ? 'text-[var(--danger)]' : ''}>
+                  <span className="mc-muted">Pickup code</span>
+                  <span className={o.handover.locked ? 'mc-text-bad' : ''}>
                     {o.handover.locked
                       ? `Locked — ${o.handover.attempts} wrong tries`
                       : `Issued to the customer${o.handover.attempts > 0 ? ` · ${o.handover.attempts} wrong tries` : ''}`}
                   </span>
                 </div>
               )}
+              {/* [MKT-F057] The delivery PIN: the customer holds it, the rider enters it at
+                  the door. Same rule as the pickup code: never the value, only whether it
+                  exists and whether wrong tries have locked the door (support reset). */}
+              {o.handover?.ridePinIssued && !isRide && (
+                <div className="flex justify-between">
+                  <span className="mc-muted">Delivery PIN</span>
+                  <span className={o.handover.ridePinLocked ? 'mc-text-bad' : ''}>
+                    {o.handover.ridePinLocked
+                      ? `Locked — ${o.handover.ridePinAttempts} wrong tries (support reset)`
+                      : `Issued to the customer${(o.handover.ridePinAttempts ?? 0) > 0 ? ` · ${o.handover.ridePinAttempts} wrong tries` : ''}`}
+                  </span>
+                </div>
+              )}
               {o.deliveryAddress && !isRide && (
                 <div className="flex justify-between gap-4">
-                  <span className="text-[var(--muted)] shrink-0">Address</span>
+                  <span className="mc-muted shrink-0">Address</span>
                   <span className="text-right">{o.deliveryAddress}</span>
                 </div>
               )}
               {o.cancellationReason && (
                 <div className="flex justify-between gap-4">
-                  <span className="text-[var(--muted)] shrink-0">Cancelled</span>
-                  <span className="text-right text-red-400">{o.cancellationReason}</span>
+                  <span className="mc-muted shrink-0">Cancelled</span>
+                  <span className="text-right mc-text-bad">{o.cancellationReason}</span>
                 </div>
               )}
             </div>

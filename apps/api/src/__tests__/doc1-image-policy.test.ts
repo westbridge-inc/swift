@@ -12,6 +12,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import { createHash } from 'node:crypto';
+import type { PrismaClient } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
@@ -41,6 +43,12 @@ let service: VerificationService;
 const users: string[] = [];
 const activated: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-image-policy-test');
+/** [R24] The sweep also purges every partner's personal image 30 days after its decision, so in
+ *  the shared test database it may only ever see this suite's documents: the counts below are
+ *  this suite's, not whatever another suite left behind. */
+const scoped = (): PrismaClient => app.prisma.$extends({ query: { verificationDocument: { async findMany({ args, query }) {
+  return query({ ...args, where: { AND: [args.where ?? {}, { userId: { in: [...users] } }] } });
+} } } }) as unknown as PrismaClient;
 
 async function owner(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
@@ -53,7 +61,12 @@ async function owner(n: number) {
 /** A committed submission with bytes in storage (a real object, so the probe can confirm absence). */
 async function committed(userId: string, docType: string, extra: Record<string, unknown> = {}) {
   const { getStorageProvider } = await import('../providers/storage/storage-provider');
-  const { url } = await getStorageProvider().upload({ buffer: Buffer.from(`image ${RUN}`), filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${RUN}` });
+  const bytes = Buffer.from(`image ${RUN}`);
+  const { url } = await getStorageProvider().upload({ buffer: bytes, filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+  await app.prisma.encryptedObject.create({ data: {
+    fileKey: url, createdBy: userId, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(60, 3),
+    mimeType: 'image/jpeg', sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+  } });
   return system(() => app.prisma.verificationDocument.create({ data: {
     userId, role: 'VENDOR_OWNER', docType, fileUrl: url, status: 'APPROVED', reviewedBy: 'policy-test', reviewedAt: new Date(), expiresAt: new Date(Date.now() + 100 * DAY), ...extra,
   } }));
@@ -86,6 +99,7 @@ afterAll(async () => {
     await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
     await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
     await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   });
@@ -123,12 +137,12 @@ describe('[DOC-1 P1-3] the bucket drives the image policy', () => {
     const held = await committed(u4, PERSONAL, { legalHoldId: hold.id }); await extractedOk(held.id);
 
     // inactive type: nothing happens
-    const before = await system(() => applyImagePolicy(app.prisma, service));
+    const before = await system(() => applyImagePolicy(scoped(), service));
     expect((await docOf(target.id)).imagePurgedAt).toBeNull();
     expect(before.purged).toBe(0);
 
     await activate(PERSONAL);
-    const run = await system(() => applyImagePolicy(app.prisma, service));
+    const run = await system(() => applyImagePolicy(scoped(), service));
     expect(run.purged).toBeGreaterThanOrEqual(1);
     expect(await docOf(target.id)).toMatchObject({ purgedAt: null, fileUrl: '', state: 'COMMITTED' });
     expect((await docOf(target.id)).imagePurgedAt).not.toBeNull();
@@ -138,7 +152,7 @@ describe('[DOC-1 P1-3] the bucket drives the image policy', () => {
     expect(await system(() => service.isVerifiedForList(u, [PERSONAL]))).toBe(true);
     for (const d of [unextracted, partial, business, held]) expect((await docOf(d.id)).imagePurgedAt, d.docType).toBeNull();
 
-    const again = await system(() => applyImagePolicy(app.prisma, service));
+    const again = await system(() => applyImagePolicy(scoped(), service));
     expect(again.purged).toBe(0);
   });
 });

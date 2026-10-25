@@ -1,5 +1,5 @@
-import { screen, waitFor } from '@testing-library/react';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import FinancePage from './page';
 import {
   API_ORIGIN,
@@ -134,10 +134,6 @@ describe('daily revenue renders the GUYANA day, not the browser day [DASH-06]', 
 
 describe('finance settlement mutation', () => {
   it('collects a note, confirms, and acknowledges the digest through the exact endpoint and payload — never a payout', async () => {
-    const prompt = vi.fn().mockReturnValue('BANK-TEST-1');
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
-    vi.stubGlobal('prompt', prompt);
-    vi.stubGlobal('confirm', confirm);
     const fetchMock = mockApi(
       financeHandler((request) => {
         if (
@@ -153,21 +149,19 @@ describe('finance settlement mutation', () => {
     const paidButton = await screen.findByRole('button', { name: 'Acknowledge' });
 
     await user.click(paidButton);
-    expect(prompt).toHaveBeenNthCalledWith(
-      1,
-      'Note for Test Vendor (optional):',
-    );
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.');
+    let panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Test Vendor');
+    expect(panel.textContent).toContain('Swift moves no money');
+    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     await user.click(paidButton);
+    panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByLabelText('Note'), 'BANK-TEST-1');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Acknowledged against the weekly settlement report');
+    await user.click(within(panel).getByRole('button', { name: 'Acknowledge' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
-    expect(prompt).toHaveBeenNthCalledWith(
-      2,
-      'Note for Test Vendor (optional):',
-    );
-    expect(confirm).toHaveBeenNthCalledWith(2, 'Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.');
     expect(url).toBe(
       `${API_ORIGIN}/api/v1/admin/finance/settlements/settlement-1/process`,
     );
@@ -176,8 +170,6 @@ describe('finance settlement mutation', () => {
   });
 
   it('renders a settlement failure and keeps the pending settlement visible', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('BANK-TEST-2'));
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
     const fetchMock = mockApi(
       financeHandler((request) => {
         if (
@@ -199,10 +191,11 @@ describe('finance settlement mutation', () => {
     const paidButton = await screen.findByRole('button', { name: 'Acknowledge' });
 
     await user.click(paidButton);
+    const panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Acknowledged against the weekly settlement report');
+    await user.click(within(panel).getByRole('button', { name: 'Acknowledge' }));
 
-    expect((await screen.findByRole('alert')).textContent).toContain(
-      'Settlement update failed: This sales digest has already been acknowledged',
-    );
+    expect((await within(panel).findByRole('alert')).textContent).toContain('This sales digest has already been acknowledged');
     expect(screen.getByText('Test Vendor')).toBeTruthy();
     expect((paidButton as HTMLButtonElement).disabled).toBe(false);
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
@@ -210,5 +203,25 @@ describe('finance settlement mutation', () => {
       String(url).includes('/api/v1/admin/finance/settlements?'),
     );
     expect(settlementReads).toHaveLength(1);
+  });
+
+  it('[U28] a 202 is shown as waiting for a second admin, never as a failure, and the row is locked', async () => {
+    const fetchMock = mockApi(
+      financeHandler((request) => {
+        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/finance/settlements/settlement-1/process') {
+          return { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_f1' } } } };
+        }
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      }),
+    );
+    const { user } = renderWithQuery(<FinancePage />);
+    await user.click(await screen.findByRole('button', { name: 'Acknowledge' }));
+    const panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Acknowledged against the weekly settlement report');
+    await user.click(within(panel).getByRole('button', { name: 'Acknowledge' }));
+    expect((await screen.findByRole('status')).textContent).toContain("Sent for a second admin's approval");
+    expect(screen.queryByText(/failed/i)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Waiting for approval' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
   });
 });

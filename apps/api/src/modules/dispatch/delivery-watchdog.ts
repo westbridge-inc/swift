@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { OrderStatus, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -6,6 +7,8 @@ import { FloatService, riderFloatForOrder } from './float.service';
 import { settleRiderLegs } from './concurrency-policy';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { log } from '../../utils/logger';
+import { dispatchDeclinedKey } from './dispatch-generation-keys';
+import { openCaseInTransaction } from '../custody/custody-case';
 import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES,
@@ -139,7 +142,7 @@ export async function recoverStrandedDeliveries(
         select: {
           tenantId: true, // the ops page follows the order's tenant [NOC-A F45]
           id: true, status: true, orderType: true, customerId: true, orderNumber: true,
-          riderId: true, paymentMethod: true, subtotalBase: true,
+          riderId: true, paymentMethod: true, subtotalBase: true, fulfillmentModeVersion: true,
           preparingAt: true, readyAt: true, vendorId: true,
         },
       });
@@ -150,7 +153,15 @@ export async function recoverStrandedDeliveries(
         && !TERMINAL.includes(order.status);
 
       if (assignedLiveDelivery && IN_CUSTODY.includes(order.status)) {
-        return { kind: 'FLAGGED' as const, order };
+        // [AF-MOB-006] Goods in hand and the rider gone dark is an incident:
+        // the order's ONE recovery case opens here, on this lock (or the open
+        // one is kept), so the page below is about an owned, timed case
+        // rather than a message nobody is accountable for.
+        const { kase, created } = await openCaseInTransaction(tx, {
+          order, reason: 'MOVER_SIGNAL_LOST', actor: { userId: null, role: 'SYSTEM' },
+          note: 'Rider GPS went dark after pickup', state: order.status === 'RETURNING' ? 'RETURN_REQUIRED' : 'SUPPORT_HOLD',
+        });
+        return { kind: 'FLAGGED' as const, order, caseId: kase.id, caseCreated: created };
       }
 
       // Raced away between the select and the lock (completed, cancelled,
@@ -187,8 +198,8 @@ export async function recoverStrandedDeliveries(
             // Scoped to the order [NOC-A F45].
             tenantId: order.tenantId ?? null,
             title: 'Delivery rider lost signal with the goods',
-            body: `Order ${order.orderNumber}: the rider's GPS went dark AFTER pickup — they hold the goods${order.paymentMethod === 'CASH' ? ' and fronted the vendor cash' : ''}. Contact both parties — do NOT auto-cancel.`,
-            data: { kind: 'ops_delivery_rider_dropped', orderId },
+            body: `Order ${order.orderNumber}: the rider's GPS went dark AFTER pickup — they hold the goods${order.paymentMethod === 'CASH' ? ' and fronted the vendor cash' : ''}. A custody recovery case is open: claim it and decide hold, return or relay — do NOT auto-cancel.`,
+            data: { kind: 'ops_delivery_rider_dropped', orderId, caseId: decision.caseId },
           });
         } catch {
           await redis.del(pageKey).catch(() => {}); // failed page → let the next sweep re-page
@@ -198,7 +209,7 @@ export async function recoverStrandedDeliveries(
         userId: order.customerId,
         type: 'ORDER_UPDATE',
         title: 'Your rider lost signal',
-        body: 'We’ve lost your rider’s live location after pickup. We’re reaching out to them — contact support if your order doesn’t arrive shortly.',
+        body: 'We’ve lost your rider’s live location after pickup. Swift support has opened a case for your order and will show the next step on your order screen.',
         data: { orderId, status: order.status },
       }).catch(() => {});
       flagged.push(orderId);
@@ -207,9 +218,10 @@ export async function recoverStrandedDeliveries(
 
     // Exclude the dark rider from the re-cascade (same key the cascade reads;
     // module-private there, mirrored here by contract).
-    await redis.sadd(`dispatch:declined:${orderId}`, r.id).catch(() => {});
-    await redis.expire(`dispatch:declined:${orderId}`, 3600).catch(() => {});
-    io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: decision.reopenStatus, reason: 'rider_dropped' });
+    const declinedKey = dispatchDeclinedKey(orderId, order.fulfillmentModeVersion);
+    await redis.sadd(declinedKey, r.id).catch(() => {});
+    await redis.expire(declinedKey, 3600).catch(() => {});
+    await emitToOrderRoom(prisma, io, orderId, 'order:status_changed', { orderId, status: decision.reopenStatus, reason: 'rider_dropped' });
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',

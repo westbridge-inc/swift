@@ -6,13 +6,15 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 import { sessionProbe } from '@/lib/auth';
-import { uploadSelfie } from '@/lib/customer';
+import { uploadSelfie } from '@/lib/customer-account';
+import { safeInternalPath } from '@/lib/safe-return-path';
 import styles from './selfie.module.css';
 
 const MAX_CAPTURE_EDGE = 1280;
 
+/** [WEB-GUARDS] The one shared rule (lib/safe-return-path); anything else goes Home. */
 function safeNext(value: string | null): string {
-  return value && /^\/(?!\/)/.test(value) && !value.includes('..') && !value.includes('\\') ? value : '/order';
+  return safeInternalPath(value) ?? '/';
 }
 
 function SelfieSetup() {
@@ -113,7 +115,7 @@ function SelfieSetup() {
     canvas.height = Math.round(video.videoHeight * scale);
     const context = canvas.getContext('2d');
     if (!context) {
-      setError('This browser could not capture the camera frame.');
+      setError('This browser couldn’t take the photo. Try another browser.');
       return;
     }
     context.translate(canvas.width, 0);
@@ -143,7 +145,7 @@ function SelfieSetup() {
   };
 
   return (
-    <main className={styles.page}>
+    <main id="main" tabIndex={-1} className={styles.page}>
       <section className={styles.card} aria-labelledby="selfie-title">
         <Link href={next} aria-label="Return to store" className={styles.brandHome}><SwiftLogo /></Link>
         <div>
@@ -188,7 +190,7 @@ function SelfieSetup() {
           )}
         </div>
 
-        <p className={styles.privacy}>The captured frame is sent as a JPEG and becomes your Swift profile picture. This page does not accept gallery uploads.</p>
+        <p className={styles.privacy}>Your photo is sent to Swift and becomes your profile picture. You can’t upload a photo from your gallery here.</p>
         {error ? <p className={styles.alert} role="alert">{error}</p> : null}
         <button type="button" className={styles.primary} disabled={!file || busy} onClick={() => void save()}>
           {busy ? 'Saving photo…' : 'Save captured photo and continue'}
@@ -201,7 +203,7 @@ function SelfieSetup() {
 
 export default function SelfiePage() {
   return (
-    <Suspense fallback={<main className={styles.page}><p>Loading account setup…</p></main>}>
+    <Suspense fallback={<main id="main" tabIndex={-1} className={styles.page}><p>Loading account setup…</p></main>}>
       <SelfieSetup />
     </Suspense>
   );

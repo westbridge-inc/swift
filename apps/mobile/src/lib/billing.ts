@@ -1,7 +1,7 @@
 import { money } from './money';
 
 // Billing view-model helpers shared by the mover + vendor billing surfaces
-// (My Swift Number screen, wallet status, honest grace/suspension banners).
+// (My Swift Number screen, fee paid ahead, honest grace/suspension banners).
 // Pure functions only, so they unit-test without a renderer. The subscription
 // payload is the spread of the Subscription row + billing/san.service.sanDisplay
 // + billing/agent-cash.service.payInfo (see the /rider|/driver|/vendor
@@ -67,8 +67,45 @@ export function isBehind(sub: any): boolean {
   return p === 'grace' || p === 'past_due';
 }
 
-/** Whole weeks a parked wallet balance covers at the weekly fee. Floors — we
- *  never over-promise coverage. 0 when the fee is unknown or nothing's banked. */
+/** [E12] The partner stopped weekly billing (`autoRenew: false`). The paid
+ *  period still runs out; after that the account stops receiving work until
+ *  billing is resumed or the account is renewed. Server truth only — a missing
+ *  row or flag is never invented into a stopped account. */
+export function isBillingStopped(sub: any): boolean {
+  return !!sub && sub.autoRenew === false;
+}
+
+/** [E12] Stopped AND the paid period (or trial) is over: the plan is PAUSED
+ *  (or about to be — the server's gate already refuses work). Resuming bills
+ *  this week like any renewal. */
+export function isPlanPaused(sub: any, now = Date.now()): boolean {
+  if (!sub) return false;
+  if (String(sub.status ?? '').toUpperCase() === 'PAUSED') return true;
+  const end = sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd).getTime() : Number.NaN;
+  return isBillingStopped(sub) && Number.isFinite(end) && end <= now;
+}
+
+/** [E12] The line under "Weekly billing stopped". */
+export function billingStoppedLine(sub: any, who: 'store' | 'driver' | 'rider', now = Date.now()): string {
+  if (isPlanPaused(sub, now)) {
+    return `Your ${who} is paused and receives no work. Resume to start again — this week's fee is charged when you resume.`;
+  }
+  if (isBlocked(sub)) return 'No more weekly fees will be charged.';
+  const periodEnd = shortDate(sub?.currentPeriodEnd);
+  return periodEnd
+    ? `You keep working until ${periodEnd}. No more weekly fees will be charged.`
+    : 'No more weekly fees will be charged.';
+}
+
+/** [E12] The rail a resume returns to: the one billing was stopped on. A
+ *  legacy CARD subscription has no self-serve card enrollment, so it resumes
+ *  on the prepaid CASH path — the only rails the boundary accepts. */
+export function resumeBillingMethod(sub: any): 'CASH' | 'MOBILE_MONEY' {
+  return sub?.billingMethod === 'MOBILE_MONEY' ? 'MOBILE_MONEY' : 'CASH';
+}
+
+/** Whole weekly fees the money received for coming weeks pays. Floors — we
+ *  never over-promise. 0 when the fee is unknown or nothing has been received. */
 export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | null): number {
   const bal = Number(balanceGyd ?? 0);
   const wk = Number(weeklyGyd ?? 0);
@@ -76,15 +113,20 @@ export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | nu
   return Math.floor(bal / wk);
 }
 
-/** The banked-wallet line for a positive balance — "$2,400 banked · covers 2
- *  weeks", dropping the coverage clause when the weekly fee is unknown. null
- *  when nothing is banked (the caller then renders nothing). */
-export function walletLine(balanceGyd?: number | null, weeklyGyd?: number | null): string | null {
-  const bal = Number(balanceGyd ?? 0);
-  if (!(bal > 0)) return null;
-  const weeks = weeksCovered(bal, weeklyGyd);
-  const covers = weeks >= 1 ? ` · covers ${weeks} ${weeks === 1 ? 'week' : 'weeks'}` : '';
-  return `${money(bal)} banked${covers}`;
+/** [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money
+ *  received before its week starts is named only as the next weekly fee being
+ *  paid: never a wallet, a balance or a top-up, and never "paid ahead" or a
+ *  count of weeks (partners pay one week at a time). Swift holds no money; this
+ *  is Swift's own fee, paid before it is due. Less than one week (or an unknown
+ *  weekly fee) names the amount instead. null when nothing has been received
+ *  (the caller then renders nothing). */
+export function feePaidAheadLine(paidAheadGyd?: number | null, weeklyGyd?: number | null): string | null {
+  const paid = Number(paidAheadGyd ?? 0);
+  if (!(paid > 0)) return null;
+  if (weeksCovered(paid, weeklyGyd) >= 1) return 'Next weekly fee already paid';
+  return Number(weeklyGyd ?? 0) > 0
+    ? `${money(paid)} paid toward your next weekly fee`
+    : `${money(paid)} paid toward your weekly fee`;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +143,7 @@ export function walletLine(balanceGyd?: number | null, weeklyGyd?: number | null
 //
 // Everything here is DERIVED FROM SERVER TRUTH and nothing is invented. If the
 // server did not send a grace deadline we do not print an hours countdown; if
-// it did not send a period end we do not print a paid-through date. A billing
+// it did not send a period end we do not print a billing date. A billing
 // screen that guesses is worse than one that says less: this is the screen a
 // vendor stands on when they think we have taken their money wrongly.
 // ---------------------------------------------------------------------------
@@ -138,17 +180,19 @@ export function daysUntil(iso: string | null | undefined, now: Date = new Date()
   return Math.round((startOfThen - startOfToday) / 86_400_000);
 }
 
-/** Which of the four bands this account is in. `tone` names a semantic token,
- *  never a raw colour — viridian for covered, amber for owed, ink for paused. */
-export type PayBandTone = 'covered' | 'owed' | 'paused';
+/** Which band this account is in. `tone` names a semantic token, never a raw
+ *  colour — viridian for covered, amber for owed, ink for paused, muted ink
+ *  for a fee we could not load. */
+export type PayBandTone = 'covered' | 'owed' | 'paused' | 'unknown';
 
 export interface PayScreenState {
-  band: 'active' | 'due' | 'grace' | 'paused';
+  band: 'active' | 'due' | 'grace' | 'paused' | 'unavailable';
   tone: PayBandTone;
   /** Small caps above the amount — "NOTHING DUE NOW" / "DUE FRIDAY" / "DUE NOW". */
   eyebrow: string;
-  /** The hero. The most readable thing we can put on a cheap screen in sunlight. */
-  amountGyd: number;
+  /** The hero. The most readable thing we can put on a cheap screen in
+   *  sunlight. Null when the fee is UNKNOWN: rendered as a dash, never as $0 [H7]. */
+  amountGyd: number | null;
   /** What the money buys — "Covers 1 week · through 22 Aug". '' when unknown. */
   covers: string;
   title: string;
@@ -158,6 +202,16 @@ export interface PayScreenState {
 }
 
 export function payScreenState(sub: any, now: Date = new Date()): PayScreenState {
+  // [H7] No subscription is not a paid-up one. The sample store in preview has
+  // none while the price list is unavailable, and a pending store has none
+  // yet: say the fee is unavailable rather than reward them with a zero.
+  if (sub == null) {
+    return {
+      band: 'unavailable', tone: 'unknown', eyebrow: 'WEEKLY FEE', amountGyd: null, covers: '',
+      title: 'Fee not available right now',
+      body: 'We could not load your weekly fee. Pull down to refresh, or check back once your store is approved.',
+    };
+  }
   const phase = billingPhase(sub);
   const fee = weeklyFeeGyd(sub);
   const due = Number(sub?.amountDueGyd ?? 0);
@@ -171,8 +225,21 @@ export function payScreenState(sub: any, now: Date = new Date()): PayScreenState
   // and then lists what the vendor still has. That list is not reassurance
   // copy: it is PINV-8, and billing-suspension-retention.test.ts is its proof.
   if (phase === 'suspended' || phase === 'churned') {
+    // [BILLING-REANCHOR · board row 151] No arrears: the days the store was
+    // paused are not charged (the server moves the due date on by exactly the
+    // time paused), so no paid-through date that already went by is shown.
+    // [REVIEW-M #1832 S3-3] The week bought still counts the days traded before
+    // the pause (the grace), so "1 week" alone overstates it: name the next bill
+    // date paying now gives (due date + time paused + 7 days), or say so.
+    const dueAt = sub?.nextBillingDate ? new Date(sub.nextBillingDate).getTime() : NaN;
+    const pausedAt = sub?.suspendedAt ? new Date(sub.suspendedAt).getTime() : NaN;
+    const nextBill = Number.isFinite(dueAt) && Number.isFinite(pausedAt) && pausedAt >= dueAt && pausedAt <= now.getTime()
+      ? shortDate(new Date(dueAt + (now.getTime() - pausedAt) + 7 * 86_400_000).toISOString()) : '';
+    const pausedCovers = nextBill
+      ? `Covers 1 week · next bill ${nextBill} · the days orders were paused are not charged`
+      : 'Covers 1 week, counting the days you traded before the pause · the days orders were paused are not charged';
     return {
-      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers,
+      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers: pausedCovers,
       title: 'New orders are paused',
       body: `Paying ${money(due || fee)} turns them back on, usually within a minute.`,
       extra: 'Still yours while paused: this screen, your receipts, your earnings and support. Orders already in the kitchen still go out.',
@@ -205,11 +272,12 @@ export function payScreenState(sub: any, now: Date = new Date()): PayScreenState
     };
   }
 
-  // Covered. A big zero is the reward for paying, and the fee ahead is stated
-  // once, quietly, in the band — not repeated as a second number up top.
+  // Nothing due does not prove payment: trials also have period dates.
+  const trial = phase === 'trial' || sub.status === 'TRIAL';
+  const trialUntil = shortDate(sub.trialEndsAt ?? periodEnd);
   return {
     band: 'active', tone: 'covered', eyebrow: 'NOTHING DUE NOW', amountGyd: 0,
-    covers: through ? `Paid through ${through}` : '',
+    covers: trial ? (trialUntil ? `Free trial until ${trialUntil}` : '') : (through ? `Next bill: ${through}` : ''),
     title: 'You are covered',
     body: through && fee > 0
       ? `Next fee is ${money(fee)} on ${through}. You can pay early any time.`

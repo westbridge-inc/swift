@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  billingBlocked, classifyVendorProfile, failureOf, memberRoleOf, unwrapOptionalVendorProfile,
+  billingBlocked, classifyVendorProfile, failureOf, heldStoreOrders, memberRoleOf, storeHoldOf, unwrapOptionalVendorProfile,
 } from './vendorProfile';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,44 @@ describe('[MOB-038] absence is a 404, and nothing else', () => {
   it('a good answer is unwrapped', async () => {
     await expect(unwrapOptionalVendorProfile(Promise.resolve({ data: { data: { myRole: 'OWNER' } } })))
       .resolves.toEqual({ myRole: 'OWNER' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [phone feedback P2] The account that has never been a vendor.
+//
+// The server answers the self-profile read of an unheld role with 403 — on
+// purpose, pinned by its authz matrix ("authz answers, not existence"), so a
+// wrong-role token never gets a route oracle. For the owner's fresh customer
+// account that 403 arrived as "This account cannot open that store. Ask the
+// owner to add you again." He has no store to be added to; he wanted to list
+// one. When the account itself holds no vendor role, the 403 is the server
+// confirming "no business" — the one answer that means the setup wizard.
+// ---------------------------------------------------------------------------
+describe('[P2] an outsider’s own 403 is "no business yet"', () => {
+  it('for an account that holds no vendor role, the self-profile 403 is absence → the setup wizard', async () => {
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(403)), { outsider: true })).resolves.toBeNull();
+    expect(classifyVendorProfile({ isLoading: false, error: null, owner: null, fetched: true }))
+      .toMatchObject({ state: 'absent' });
+  });
+
+  it('for an account that HOLDS the vendor role a 403 stays the failure it is — nothing is papered over', async () => {
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(403)), { outsider: false })).rejects.toBeTruthy();
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(403)))).rejects.toBeTruthy();
+    expect(classifyVendorProfile({ isLoading: false, error: err(403), owner: undefined, fetched: true }))
+      .toEqual({ state: 'error', failure: 'forbidden', myRole: undefined });
+  });
+
+  it('only a 403 reads that way: an outage is still an outage for an outsider', async () => {
+    for (const status of [401, 409, 500, 502, 503]) {
+      await expect(unwrapOptionalVendorProfile(Promise.reject(err(status)), { outsider: true })).rejects.toBeTruthy();
+    }
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(undefined)), { outsider: true })).rejects.toBeTruthy();
+  });
+
+  it('a good answer is unwrapped whatever the local roles say — the server seats staff and stale-role owners', async () => {
+    await expect(unwrapOptionalVendorProfile(Promise.resolve({ data: { data: { myRole: 'STAFF', vendors: [{ id: 'v1' }] } } }), { outsider: true }))
+      .resolves.toEqual({ myRole: 'STAFF', vendors: [{ id: 'v1' }] });
   });
 });
 
@@ -135,5 +173,43 @@ describe('[MOB-038] a blocked subscription blocks, mirrored or not', () => {
     // billingBlocked says the subscription is fine; the caller keeps the
     // moderation reason rather than telling them to pay a bill they do not owe
     expect(billingBlocked({ status: 'SUSPENDED', suspensionSource: 'MODERATION', subscription: { status: 'ACTIVE' } })).toBe(false);
+  });
+});
+
+describe('[NO-DEAD-ENDS] storeHoldOf names the hold the server actually wrote', () => {
+  it('reads the three sources the server writes and the closed status', () => {
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'BILLING', subscription: { status: 'SUSPENDED' } })).toBe('FEE_UNPAID');
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'ADMIN', subscription: { status: 'ACTIVE' } })).toBe('SUSPENDED_BY_SWIFT');
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN', subscription: { status: 'CANCELLED' } })).toBe('OWNER_ACCOUNT_CLOSED');
+    expect(storeHoldOf({ status: 'CLOSED', suspensionSource: null })).toBe('CLOSED');
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: null })).toBe('SUSPENDED');
+  });
+
+  it('a hold only Swift lifts wins over an unpaid fee: paying would not reopen the store', () => {
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'ADMIN', subscription: { status: 'SUSPENDED' } })).toBe('SUSPENDED_BY_SWIFT');
+  });
+
+  it('a blocked subscription not mirrored onto a working store is still a fee hold; a healthy or pending store has none', () => {
+    expect(storeHoldOf({ status: 'ACTIVE', subscription: { status: 'CHURNED' } })).toBe('FEE_UNPAID');
+    expect(storeHoldOf({ status: 'ACTIVE', subscription: { status: 'ACTIVE' } })).toBeNull();
+    expect(storeHoldOf({ status: 'PENDING_APPROVAL', subscription: { status: 'TRIALING' } })).toBeNull();
+    expect(storeHoldOf(null)).toBeNull();
+  });
+});
+
+describe('[NO-DEAD-ENDS] heldStoreOrders splits what can be finished from what waits to be declined', () => {
+  it('accepted, cooking and ready orders are finished; new ones wait; done ones are gone', () => {
+    const split = heldStoreOrders([
+      { id: 'a', status: 'ACCEPTED' }, { id: 'p', status: 'PREPARING' }, { id: 'r', status: 'READY_FOR_PICKUP' },
+      { id: 'n', status: 'PENDING' }, { id: 'pl', status: 'PLACED' },
+      { id: 'd', status: 'DELIVERED' }, { id: 'c', status: 'CANCELLED' }, { id: 'x', status: 'COMPLETED' },
+      { status: 'PREPARING' }, null,
+    ]);
+    expect(split.accepted.map((o) => o.id)).toEqual(['a', 'p', 'r']);
+    expect(split.waiting.map((o) => o.id)).toEqual(['n', 'pl']);
+  });
+  it('a missing or malformed board is empty, never a crash', () => {
+    expect(heldStoreOrders(undefined)).toEqual({ accepted: [], waiting: [] });
+    expect(heldStoreOrders({ data: [] })).toEqual({ accepted: [], waiting: [] });
   });
 });

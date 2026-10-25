@@ -49,4 +49,16 @@ describe('order-placed ceremony — dismiss first, navigate after', () => {
     expect(src).toMatch(/requestAnimationFrame\([\s\S]{0,200}navigation\.navigate\('Delivery'/);
     expect(src).toContain('cancelAnimationFrame');
   });
+
+  it('[ANDROID-QA] the fallback cannot cancel itself before it navigates', () => {
+    // Clearing the staged id BEFORE the deferred navigate re-runs this effect,
+    // and React's cleanup then cancels both frames: on Android (no onDismissed)
+    // "Track order" closed the ceremony and left the shopper on an empty Cart.
+    const effect = src.slice(src.indexOf('if (placeOrder.isSuccess || !pendingTrackId) return;'));
+    const beforeFirstFrame = effect.slice(0, effect.indexOf('requestAnimationFrame('));
+    expect(beforeFirstFrame).not.toContain('setPendingTrackId(null)');
+    expect(effect).toMatch(/requestAnimationFrame\(\(\) => \{\s*setPendingTrackId\(null\);\s*navigation\.navigate\('Delivery'/);
+    // iOS keeps navigating from onDismissed, the post-teardown signal.
+    expect(beforeFirstFrame).toMatch(/Platform\.OS === 'ios'\) return;/);
+  });
 });

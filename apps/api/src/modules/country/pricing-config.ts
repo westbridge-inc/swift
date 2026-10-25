@@ -1,6 +1,6 @@
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { DEFAULT_DELIVERY_RATES, mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';
@@ -27,20 +27,43 @@ export type PricingKind = 'TAXI_RATES' | 'TAXI_CLASS_RATES' | 'DELIVERY_RATES' |
 export const PRICING_KINDS: readonly PricingKind[] = ['TAXI_RATES', 'TAXI_CLASS_RATES', 'DELIVERY_RATES', 'COURIER_RATES'];
 export const PRICING_MONEY_MAX = 100_000_000;
 
-export interface TaxiRates { base: number; perKm: number; perMin: number; minimum: number }
+/** `includedKm` is the distance the base fare covers: perKm is charged only
+ *  beyond it, once per trip. A payload that does not name it includes none
+ *  (see NOT_INHERITED), so a config written before it existed prices as it did. */
+export interface TaxiRates {
+  base: number; includedKm?: number; perKm: number; perMin: number; minimum: number;
+  /** [TAXI waiting charge] What one FULL block of waiting costs (whole units), and
+   *  how long a block is. Optional: a payload that names neither (every config
+   *  written before the waiting charge) waits on the declared defaults,
+   *  TAXI_WAITING_DEFAULTS in modules/rides/taxi-waiting.ts (300 per 10 minutes),
+   *  so no stored payload changes and no version is minted by their arrival. */
+  waitingChargePerBlock?: number; waitingBlockMinutes?: number;
+}
 export type ClassRates = { ECONOMY: number; COMFORT: number; XL: number; GROUP: number };
 
-/** The declared defaults — themselves valid full payloads. */
-export const DEFAULT_TAXI_RATES: TaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+/** The declared defaults — themselves valid full payloads.
+ *  Taxi is the owner's Georgetown fare (1 Oct 2026): 800 covers the first
+ *  3 km, then 175 a kilometre; no per-minute charge, and no minimum above the
+ *  base. formulaFare rounds the trip to the nearest 100, so 7 km is 1,500 and
+ *  10 km (2,025) quotes 2,000. The Guyana seed reads this constant
+ *  (ops/platform-config). */
+export const DEFAULT_TAXI_RATES: TaxiRates = { base: 800, includedKm: 3, perKm: 175, perMin: 0, minimum: 800 };
 export const DEFAULT_CLASS_RATES: ClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
 
 /** Whole local-currency units (GYD today) — never fractional, never negative. */
 const money = z.number().int().min(0).max(PRICING_MONEY_MAX);
 const multiplier = z.number().finite().min(0.5).max(10);
 const km = z.number().finite().min(0).max(10_000);
+/** [TAXI waiting charge] A waiting block: whole minutes, at least one, at most a day. */
+const blockMinutes = z.number().int().min(1).max(1440);
 
 const SCHEMAS: Record<PricingKind, z.ZodTypeAny> = {
-  TAXI_RATES: z.object({ base: money, perKm: money, perMin: money, minimum: money }).strict(),
+  // includedKm last: the parsed payload keeps the key order the shadow merge builds.
+  // [TAXI waiting charge] The two waiting terms follow, optional and never taken from the defaults.
+  TAXI_RATES: z.object({
+    base: money, perKm: money, perMin: money, minimum: money, includedKm: km.optional(),
+    waitingChargePerBlock: money.optional(), waitingBlockMinutes: blockMinutes.optional(),
+  }).strict(),
   TAXI_CLASS_RATES: z.object({ ECONOMY: z.literal(1), COMFORT: multiplier, XL: multiplier, GROUP: multiplier }).strict(),
   DELIVERY_RATES: z.object({ baseFee: money, perKmRate: money, includedKm: km, surgeMultiplier: multiplier }).strict(),
   COURIER_RATES: z.object({
@@ -53,7 +76,7 @@ const SCHEMAS: Record<PricingKind, z.ZodTypeAny> = {
 
 /** The units each kind's payload is declared in. */
 export const PRICING_UNITS: Record<PricingKind, string> = {
-  TAXI_RATES: 'GYD_WHOLE',
+  TAXI_RATES: 'GYD_WHOLE+KM',
   TAXI_CLASS_RATES: 'MULTIPLIER',
   DELIVERY_RATES: 'GYD_WHOLE+KM+MULTIPLIER',
   COURIER_RATES: 'GYD_WHOLE+MULTIPLIER',
@@ -72,9 +95,22 @@ export function pricingDefaults(kind: PricingKind): Record<string, unknown> {
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 
+/** Keys a payload never takes from the defaults. A TAXI_RATES payload that
+ *  does not name includedKm includes no kilometres, so every taxi config
+ *  written before includedKm existed prices exactly as it did; only a market
+ *  with no config at all (ABSENT) gets the default's included kilometres. */
+const NOT_INHERITED: Partial<Record<PricingKind, readonly string[]>> = { TAXI_RATES: ['includedKm'] };
+
+/** The defaults a payload is merged over. */
+function inheritedDefaults(kind: PricingKind): Record<string, unknown> {
+  const out = pricingDefaults(kind);
+  for (const key of NOT_INHERITED[kind] ?? []) delete out[key];
+  return out;
+}
+
 /** A partial payload over the defaults, one level of nesting deep. */
 function mergeOverDefaults(kind: PricingKind, raw: Record<string, unknown>): Record<string, unknown> {
-  const out = pricingDefaults(kind);
+  const out = inheritedDefaults(kind);
   for (const [key, value] of Object.entries(raw)) {
     const current = out[key];
     out[key] = isPlainObject(current) && isPlainObject(value) ? { ...current, ...value } : value;
@@ -88,7 +124,7 @@ export type PricingValidation =
   | { status: 'INVALID'; payload: null; problems: string[] };
 
 /** The law: null means "the defaults"; a plain object is merged over the
- *  defaults and the WHOLE result must satisfy the strict schema; anything else
+ *  defaults (less NOT_INHERITED) and the WHOLE result must satisfy the strict schema; anything else
  *  — a scalar, an array, a bad key, a bad value — is INVALID with every
  *  problem named. */
 export function validatePricingConfig(kind: PricingKind, raw: unknown): PricingValidation {
@@ -102,9 +138,27 @@ export function validatePricingConfig(kind: PricingKind, raw: unknown): PricingV
   return { status: 'VALID', payload: parsed.data as Record<string, unknown>, problems: [] };
 }
 
+/** [MASTER-045] The canonical form of a payload: every value at every depth,
+ *  object keys in sorted order, array elements in their own order. (The old
+ *  form passed the TOP-level key list to JSON.stringify as an allow-list, so
+ *  every nested object — the courier's size surcharges and speed multipliers —
+ *  serialised as `{}`.) For a flat payload the output is byte-identical to the
+ *  old form, so no recorded flat fingerprint changes. */
+function canonicalJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (isPlainObject(v)) {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(v).sort()) out[key] = sort(v[key]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
 export function pricingPayloadHash(payload: Record<string, unknown>): string {
-  const canonical = JSON.stringify(payload, Object.keys(payload).sort());
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+  return createHash('sha256').update(canonicalJson(payload)).digest('hex').slice(0, 32);
 }
 
 /** The old tolerant merge, kept ONLY as the shadow. */
@@ -112,7 +166,7 @@ function legacyMerge(kind: PricingKind, raw: unknown): Record<string, unknown> {
   switch (kind) {
     case 'DELIVERY_RATES': return mergeDeliveryRates(raw) as unknown as Record<string, unknown>;
     case 'COURIER_RATES': return mergeCourierRates(raw) as unknown as Record<string, unknown>;
-    case 'TAXI_RATES': return { ...DEFAULT_TAXI_RATES, ...((isPlainObject(raw) ? raw : {}) as Partial<TaxiRates>) };
+    case 'TAXI_RATES': return { ...inheritedDefaults('TAXI_RATES'), ...((isPlainObject(raw) ? raw : {}) as Partial<TaxiRates>) };
     case 'TAXI_CLASS_RATES': return { ...DEFAULT_CLASS_RATES, ...((isPlainObject(raw) ? raw : {}) as Partial<ClassRates>) };
   }
 }
@@ -169,7 +223,12 @@ export async function readPricingConfig<T extends object>(prisma: PrismaClient, 
     let version: number | null = null;
     try {
       const latest = await latestVersion(prisma, countryCode, kind);
-      if (!latest || latest.payloadHash !== pricingPayloadHash(verdict.payload)) {
+      // [MASTER-045] Same version only when the WHOLE payload is the same. The
+      // stored payload is compared, not only its fingerprint, so a version
+      // recorded under the old nested-blind fingerprint is still recognised
+      // when its payload is identical, and is never mistaken for a payload
+      // that differs only in a nested rate.
+      if (!latest || canonicalJson(latest.payload) !== canonicalJson(verdict.payload)) {
         const recorded = await appendVersion(prisma, countryCode, kind, verdict.payload, { createdBy: 'reader' });
         version = recorded.version;
       } else {

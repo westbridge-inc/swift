@@ -2,25 +2,30 @@
 import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
-import { useRoute } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { authApi, API_URL } from '../../services/api';
 import { openPayLink } from '../../lib/payLink';
 import { useAuthStore } from '../../stores/authStore';
 import { SwiftMark } from '../../components/SwiftLogo';
-import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
+import { BrandCheckbox, Header, LabeledInput, PillButton, Screen, T } from '../../kit';
+import { AGE_TICK_LABEL } from '../../lib/ageTickCopy';
 
 // Kit "Register" (frame 7) on the real signup contract: the phone arrived
 // verified from the OTP step; name (+ optional email) completes the account.
 export function RegisterScreen() {
   const route = useRoute<any>();
+  const navigation = useNavigation<any>();
   const phone: string = route.params?.phone ?? '';
+  const registrationProof: string = route.params?.registrationProof ?? '';
   const { setAuth, intent, countryCode } = useAuthStore();
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [agreed, setAgreed] = useState(false);
+  // [Owner ruling 15 Oct 2026] a required, unticked "I am 18 or older" tick, recorded server-side.
+  const [adult, setAdult] = useState(false);
 
   const role = intent === 'mover' ? 'MOVER' : intent === 'vendor' ? 'VENDOR' : 'CUSTOMER';
 
@@ -28,12 +33,14 @@ export function RegisterScreen() {
     mutationFn: () =>
       authApi.register({
         phone,
+        registrationProof,
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         ...(email.trim() ? { email: email.trim() } : {}),
         role,
         ...(countryCode ? { countryCode } : {}),
         acceptTerms: agreed, // recorded server-side w/ the legal version [D9-03]
+        ageConfirmed: adult, // [owner 15 Oct 2026] recorded in the consent ledger; required once sent
       }),
     onSuccess: (res) => {
       const data = res.data?.data;
@@ -43,13 +50,22 @@ export function RegisterScreen() {
     },
   });
 
-  const err = register.isError
-    ? ((register.error as any)?.response?.data?.error?.message ?? 'Registration failed. Try again.')
+  // The server deliberately consumes the one-use proof before account reads
+  // or writes. After any ambiguous failure, a retry cannot safely assume the
+  // proof survived; provide an explicit path that starts a fresh ceremony.
+  const mustVerifyAgain = !registrationProof || register.isError;
+  const err = !registrationProof
+    ? 'Verify your phone again to continue registration.'
+    : register.isError
+    ? `${(register.error as any)?.response?.data?.error?.message ?? 'Registration failed.'} Verify your phone again to retry.`
     : undefined;
-  const valid = firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
+  const valid = !!registrationProof && !mustVerifyAgain && firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed && adult;
 
   return (
     <Screen style={{ backgroundColor: color.surface.base }}>
+      {/* [BUG-GUARDS C4] A way out of sign-up (a wrong number, a change of mind). The phone proof is
+          one-use, so Back starts a fresh sign-in, the same door as "Verify phone again". */}
+      <Header onBack={() => navigation.reset({ index: 0, routes: [{ name: 'PhoneEntry' }] })} />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={{ flexGrow: 1, paddingHorizontal: space['2xl'], paddingTop: space['2xl'] }}
@@ -116,14 +132,37 @@ export function RegisterScreen() {
             </T>
           </Pressable>
 
+          <Pressable
+            onPress={() => setAdult((a) => !a)}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: adult }}
+            accessibilityLabel={AGE_TICK_LABEL}
+            testID="register-age-tick"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}
+          >
+            <BrandCheckbox checked={adult} onToggle={() => setAdult((a) => !a)} />
+            <T variant="label" tone="muted" style={{ flex: 1 }}>
+              {AGE_TICK_LABEL}
+            </T>
+          </Pressable>
+
           <View style={{ flex: 1 }} />
-          <PillButton
-            label="Register"
-            onPress={() => register.mutate()}
-            disabled={!valid}
-            loading={register.isPending}
-            style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
-          />
+          {mustVerifyAgain ? (
+            <PillButton
+              label="Verify phone again"
+              onPress={() => navigation.reset({ index: 0, routes: [{ name: 'PhoneEntry' }] })}
+              testID="register-verify-phone-again"
+              style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
+            />
+          ) : (
+            <PillButton
+              label="Register"
+              onPress={() => register.mutate()}
+              disabled={!valid}
+              loading={register.isPending}
+              style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
+            />
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </Screen>

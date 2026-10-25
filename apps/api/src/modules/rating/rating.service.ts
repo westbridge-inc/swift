@@ -7,6 +7,12 @@ import { maskPii, processReviewText } from './review-scrub';
 import { SAFETY_TAGS, canonicalTags, mostSevereSafetyTag } from './tag-registry';
 import { ratingPipelineCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
+import {
+  publishedVendorReviewWhere,
+  summarizeRatingDistribution,
+  STORE_REVIEW_PROJECTION,
+  storeVisibleReview,
+} from './vendor-review-visibility';
 
 // Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
 // categories route here automatically"): a rating carrying one of these tags
@@ -24,6 +30,11 @@ type RatingType =
   | 'CUSTOMER_TO_PROVIDER'
   | 'PROVIDER_TO_CUSTOMER';
 
+export interface ReviewViewer {
+  tenantId: string;
+  userId: string;
+}
+
 interface RateInput {
   orderId: string;
   raterId: string;
@@ -39,9 +50,16 @@ export class RatingService {
   private stats: RatingStatsService;
 
   /** `io` is optional so read-only callers (jobs, release paths) need no
-   *  socket; rating-CREATING routes pass it so safety flags can page ops. */
-  constructor(private prisma: PrismaClient, private io?: Server) {
-    this.stats = new RatingStatsService(prisma);
+   *  socket; rating-CREATING routes pass it so safety flags can page ops.
+   *  [E26] `onVendorAggregateChanged` lets the API layer schedule a vendor's
+   *  search re-sync right after the vendor aggregate commits — mover/driver
+   *  subjects never fire it (no search document). */
+  constructor(
+    private prisma: PrismaClient,
+    private io?: Server,
+    onVendorAggregateChanged?: (vendorId: string) => void,
+  ) {
+    this.stats = new RatingStatsService(prisma, onVendorAggregateChanged);
   }
 
   async rate(input: RateInput) {
@@ -219,7 +237,8 @@ export class RatingService {
   async processRatingOutbox(opts: { ratingId?: string; limit?: number; now?: Date } = {}): Promise<{ processed: number; failed: number }> {
     const now = opts.now ?? new Date();
     const rows = await this.prisma.ratingOutbox.findMany({
-      where: { processedAt: null, availableAt: { lte: now }, attempts: { lt: 25 }, ...(opts.ratingId ? { ratingId: opts.ratingId } : {}) },
+      // [row 267] The retry budget is the row's own (maxAttempts, 25 by default); a spent row is a dead letter.
+      where: { processedAt: null, deadLetteredAt: null, availableAt: { lte: now }, attempts: { lt: this.prisma.ratingOutbox.fields.maxAttempts }, ...(opts.ratingId ? { ratingId: opts.ratingId } : {}) },
       orderBy: { createdAt: 'asc' },
       take: opts.limit ?? 200,
     });
@@ -345,29 +364,34 @@ export class RatingService {
     return { ratings, message: 'Thank you for your feedback!' };
   }
 
-  async getVendorReviews(vendorId: string, limit = 20, offset = 0) {
-    const [reviews, total] = await Promise.all([
+  async getVendorReviews(vendorId: string, limit = 20, offset = 0, _viewer?: ReviewViewer) {
+    // Anonymous storefront reviews cannot use person-specific content blocks:
+    // any customer token (including another role/account held by an operator)
+    // could toggle a block and compare rows to identify an anonymous author.
+    // Contact/matching blocks keep their separate directional rules.
+    const visibleWhere = publishedVendorReviewWhere(vendorId);
+    const [reviews, scoreBuckets] = await Promise.all([
       this.prisma.rating.findMany({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true, visibleAt: { not: null } },
-        include: { rater: { select: { firstName: true, avatar: true } } },
+        where: visibleWhere,
+        select: STORE_REVIEW_PROJECTION,
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
       }),
-      this.prisma.rating.count({ where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true, visibleAt: { not: null } } }),
+      this.prisma.rating.groupBy({
+        by: ['score'],
+        where: visibleWhere,
+        _count: true,
+      }),
     ]);
+    const summary = summarizeRatingDistribution(scoreBuckets);
 
-    // Rating distribution
-    const distribution = await this.prisma.rating.groupBy({
-      by: ['score'],
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-      _count: true,
-    });
-
-    const dist: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const d of distribution) dist[d.score] = d._count;
-
-    return { reviews, total, distribution: dist };
+    return {
+      reviews: reviews.map(storeVisibleReview),
+      total: summary.totalReviews,
+      averageRating: summary.averageRating,
+      distribution: summary.distribution,
+    };
   }
 
   /**

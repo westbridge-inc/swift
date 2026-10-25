@@ -20,10 +20,14 @@ export interface ApprovalRow {
   capability: string;
   entityId: string | null;
   fingerprint: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
   requestedBy: string;
   /** The requester's stated reason — the thing the approver is here to read. */
   reason: string;
+  /** [DS110-13] The canonical `{ params, body, query }` of the reviewed
+   *  request. The approver reads THIS and apply replays THIS — one stored
+   *  body. */
+  bodySnapshot?: unknown;
   approvedBy: string | null;
   decisionNote: string | null;
   decidedAt: string | null;
@@ -32,6 +36,38 @@ export interface ApprovalRow {
   createdAt: string;
   /** Server-computed: the approver raised this one themselves. */
   isOwnRequest?: boolean;
+  /** [OWNER #13] Approved by the requester in solo mode. */
+  decidedSolo?: boolean;
+  soloEligibleAt?: string | null;
+  /** [OWNER #13] Server-computed, on your own PENDING requests only. */
+  solo?: SoloState | null;
+}
+
+/**
+ * [OWNER #13] Solo mode, as the server reads it for your own pending request:
+ * the wait is running, it has ended, it can be started, or why it cannot.
+ */
+export type SoloState =
+  | { state: 'waiting'; availableAt: string }
+  | { state: 'ready'; availableAt: string }
+  | { state: 'available'; coolOffHours: number }
+  | { state: 'unavailable'; why: string; message: string };
+
+/** "Solo approval: available after 14 Oct, 07:30" — the wait, in plain words. */
+export function soloWaitCopy(availableAt: string, now = new Date()): string {
+  const at = new Date(availableAt);
+  const when = at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return at.getTime() > now.getTime() ? `Solo approval: available after ${when}` : `Solo approval: available now (since ${when})`;
+}
+
+export const SOLO_EXPLAIN = (hours: number) =>
+  `You are the only admin who can approve this. In solo mode you can approve it yourself after a ${hours}-hour wait, ` +
+  'with a sign-in code sent to your phone. Swift emails you and texts your phone now and when you decide, and you can cancel during the wait. ' +
+  'Solo approval is off for 7 days after the email on your account changes.';
+
+/** A server refusal that means "confirm it's you first". */
+export function needsStepUp(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'STEP_UP_REQUIRED';
 }
 
 export type BlockReason = 'own-request' | 'expired' | 'already-decided' | null;
@@ -101,6 +137,7 @@ export function describeAction(action: string): string {
 function humanise(segment: string): string {
   return segment
     .replace(/[-_]/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
@@ -135,7 +172,10 @@ export const shortFingerprint = (fp: string): string => (fp.length > 16 ? `${fp.
  * that a second admin agreed.
  */
 export const NOTE_MAX = 500;
-export const NOTE_MIN = 5;
+// [DS110-14] Deciding is itself C3: the server floor is the same 12
+// characters as every other consequential action, not 5 — a 5-character note
+// passed the screen's check and 400'd at the gate.
+export const NOTE_MIN = 12;
 
 export function noteProblem(note: string, approve: boolean): string | null {
   if (note.length > NOTE_MAX) return `Keep the note under ${NOTE_MAX} characters.`;
@@ -145,4 +185,56 @@ export function noteProblem(note: string, approve: boolean): string | null {
       : 'Say why you are refusing. The requester sees only this, and "no" without a reason means they ask again identically.';
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// [DS110-13] What the second admin is actually reading — the stored body.
+//
+// The fingerprint binds the stored body to the reviewed one; `bodySnapshot`
+// is that body. The card renders its fields (amount, beneficiary, reference,
+// …) so the approver sees exactly what they are signing — not an opaque id —
+// and apply replays the same stored value, so what executes is what was
+// displayed.
+// ---------------------------------------------------------------------------
+
+export interface SnapshotEntry {
+  label: string;
+  value: string;
+}
+
+/** The stored body's fields, keyed by a human label, with the reason left out
+ *  (it is already the largest thing on the card). Empty for legacy rows. */
+export function snapshotEntries(row: ApprovalRow): SnapshotEntry[] {
+  const snapshot = row.bodySnapshot as { body?: Record<string, unknown> } | null | undefined;
+  const body = snapshot?.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return [];
+  return Object.entries(body)
+    .filter(([key]) => key !== 'reason')
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => ({ label: humanise(key), value: formatSnapshotValue(value) }));
+}
+
+function formatSnapshotValue(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+/** Is this row executable at all? APPROVED, unexpired, and with a body on
+ *  record — a row raised before the snapshot existed has no body to replay. */
+function replayable(row: ApprovalRow, now: Date): boolean {
+  if (row.status !== 'APPROVED') return false;
+  if (new Date(row.expiresAt).getTime() <= now.getTime()) return false;
+  return !!row.bodySnapshot;
+}
+
+/** May THIS admin execute the row now? Only the admin who asked executes, once
+ *  a second admin approved — the server refuses anyone else (403). */
+export function canApply(row: ApprovalRow, now = new Date()): boolean {
+  return !!row.isOwnRequest && replayable(row, now);
+}
+
+/** Approved and replayable, but it is the requester's to execute, not this admin's. */
+export function awaitsRequester(row: ApprovalRow, now = new Date()): boolean {
+  return !row.isOwnRequest && replayable(row, now);
 }

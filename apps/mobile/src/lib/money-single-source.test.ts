@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { money, moneyIn, moneyOrDash } from './money';
+import { money, moneyExact, moneyIn, moneyOrDash } from './money';
 
 // ---------------------------------------------------------------------------
 // [UI-MONEY-1] One currency, one spelling.
@@ -95,14 +95,30 @@ describe('[UI-MONEY-1] the canonical formatter keeps every capability it absorbe
     expect(moneyOrDash(0)).toBe('$0');
   });
 
-  it('money() itself still treats absence as $0 — 27 screens depend on it', () => {
-    expect(money(null)).toBe('$0');
-    expect(money(undefined)).toBe('$0');
+  // [AUD-1 row 53] This pinned money(null) as "$0" "because 27 screens depend
+  // on it". The callers were scanned (typed ones by narrowing the signature
+  // under tsc, the rest read by hand): none needs a missing amount to print as
+  // a price, and a missing fare, total or fee shown as "$0" is the defect. The
+  // intended change: money() answers absence with the same dash as moneyOrDash.
+  it('money() answers a missing amount with the same dash — never a confident $0', () => {
+    expect(money(null)).toBe('—');
+    expect(money(undefined)).toBe('—');
+    expect(moneyIn(null, 'USD')).toBe('—');
+    expect(money(null)).toBe(moneyOrDash(null));
+    expect(money(0)).toBe('$0');
   });
 
   it('rounds to whole units in every variant (GYD has no sub-unit)', () => {
     expect(moneyIn(2.6)).toBe('$3');
     expect(moneyOrDash(2.4)).toBe('$2');
     expect(moneyIn(2.6, 'USD')).toBe('USD 3');
+  });
+
+  it('preserves two-decimal server authority only for explicit attestations', () => {
+    expect(moneyExact(417)).toBe('$417');
+    expect(moneyExact(417.2)).toBe('$417.20');
+    expect(moneyExact(417.25)).toBe('$417.25');
+    expect(moneyExact(417.25, 'USD')).toBe('USD 417.25');
+    expect(() => moneyExact(Number.NaN)).toThrow('finite amount');
   });
 });

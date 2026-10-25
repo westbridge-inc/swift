@@ -34,6 +34,7 @@ let customerId: string;
 let vendorId: string;
 const userIds: string[] = [];
 const riderIds: string[] = [];
+const orderIds: string[] = [];
 let seq = 0;
 
 async function purge() {
@@ -77,13 +78,15 @@ async function makeRider() {
 }
 
 async function makeOrder() {
-  return app.prisma.order.create({
+  const order = await app.prisma.order.create({
     data: {
       orderNumber: `FAIR-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId, vendorId, status: 'ACCEPTED', fulfillment: 'DELIVERY',
       pickupAddress: 'Store', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng, deliveryAddress: 'Home', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500, paymentMethod: 'CASH',
     },
   });
+  orderIds.push(order.id);
+  return order;
 }
 
 async function setFairness(enabled: boolean) {
@@ -150,7 +153,15 @@ describe('three riders at equal ETA, twenty offers', () => {
     expect(sorted[0]).toBe(20);
     // Oldest first: `rows[0]` below means "the first shadow decision of this
     // run", which heap order does not promise once the table has churned.
-    const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-01', outcome: 'WOULD_REORDER', shadow: true }, orderBy: { createdAt: 'asc' } });
+    // And only about this file's own orders. Every suite shares one database,
+    // and any suite that dispatches to movers tied at one spot writes ALG-01
+    // rows too. Read table-wide, `rows[0]` was whichever such row was oldest,
+    // so the verdict followed file order: after dispatch-offer-identity a
+    // two-rider tie failed it ("expected 2 to be 3", 09-29); after dispatch.test.ts,
+    // which a largest-first run (CI) puts first, a three-rider tie passed every
+    // assertion here without being this file's row. Those suites now delete the
+    // rows about their own orders; this read no longer depends on any of them.
+    const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-01', outcome: 'WOULD_REORDER', shadow: true, subjectId: { in: orderIds } }, orderBy: { createdAt: 'asc' } });
     // The first offer finds nobody with an offer yet — nothing to reorder; from the second on the band would have moved it.
     expect(rows.length).toBeGreaterThanOrEqual(18);
     const inputs = rows[0]!.inputs as Record<string, unknown>;

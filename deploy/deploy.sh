@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# Swift one-command self-host / staging deploy.
+# Local Compose convenience commands. The reviewed staging sequence is
+# pilot-up.sh with an exact commit SHA.
 #
 #   ./deploy/deploy.sh up        # build + migrate + start the whole stack
 #   ./deploy/deploy.sh update    # rebuild the app image + migrate + restart
@@ -9,11 +10,44 @@
 #   ./deploy/deploy.sh down      # stop (KEEPS data volumes)
 #   ./deploy/deploy.sh nuke      # stop AND delete data volumes (destructive)
 #
-# Safe by design: staging/self-host only. It never touches the gated
-# production cutover path. Requires Docker with the compose plugin.
+# Staging/self-host only: on a production host (deploy/.env or the shell says
+# PILOT_ENV or NODE_ENV=production) every command except logs and health is
+# refused before Docker is called. Requires Docker with the compose plugin.
 # ===========================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# [PROD-PATH · #1448 review] Never on the production host. These commands build
+# whatever is checked out, with no pinned SHA and none of pilot-up.sh's
+# production refusals, stop the stack, or delete the data volumes. A host whose
+# deploy/.env sets PILOT_ENV or NODE_ENV to production, in ANY line and any
+# spelling Compose reads (export, quotes, indentation, `:`, a byte-order mark,
+# a later duplicate, any case), or whose shell exports either as production
+# (Compose uses this shell first), deploys only through pilot-up.sh. Only the
+# read-only logs and health still answer. Refused before any docker call.
+production_posture() {
+  local name
+  for name in PILOT_ENV NODE_ENV; do
+    [ "$(printf '%s' "${!name:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" != production ] || return 0
+  done
+  [[ -f .env ]] || return 1
+  tr -d '\357\273\277\r' < .env |
+    grep -qiE "^[[:space:]]*(export[[:space:]]+)?(PILOT_ENV|NODE_ENV)[[:space:]]*[=:][[:space:]]*[\"']?production([\"'[:space:]#]|\$)"
+}
+case "${1:-up}" in
+  logs | health) ;;
+  *)
+    # Compose would also read settings from the files this names, which the
+    # check below never sees (DS960): refused, as pilot-up.sh refuses it.
+    if [[ -n "${COMPOSE_ENV_FILES+set}" ]]; then
+      echo "error: COMPOSE_ENV_FILES is set in this shell, and Compose would read settings from it that deploy.sh never checks; unset it (deploy.sh reads deploy/.env only)." >&2
+      exit 1
+    fi
+    if production_posture; then
+      echo "error: deploy.sh ${1:-up} is refused on the production host (deploy/.env or this shell names a production posture). Deploy with ./deploy/pilot-up.sh <approved full SHA> (or --data-only / --no-public <SHA>); see deploy/PILOT-RUNBOOK.md section 12." >&2
+      exit 1
+    fi ;;
+esac
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "error: Docker with the 'compose' plugin is required (install Docker Desktop or docker-compose-plugin)." >&2
@@ -23,49 +57,87 @@ fi
 if [[ ! -f .env ]]; then
   echo "No deploy/.env yet — creating one from the template."
   cp .env.deploy.example .env
-  echo "→ Edit deploy/.env and set POSTGRES_PASSWORD, MEILISEARCH_KEY, JWT_SECRET, then re-run." >&2
+  echo "→ Edit deploy/.env (settings only), run ./deploy/gen-secrets.sh for the secrets, then re-run." >&2
   exit 1
 fi
 
-# Refuse to run with unfilled required secrets — fail closed, don't boot broken.
-missing=()
-for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET; do
-  v="$(grep -E "^${k}=" .env | head -1 | cut -d= -f2-)"
-  [[ -z "$v" ]] && missing+=("$k")
-done
-if [[ ${#missing[@]} -gt 0 && "${1:-up}" != "down" && "${1:-up}" != "nuke" && "${1:-up}" != "logs" ]]; then
-  echo "error: these REQUIRED values are empty in deploy/.env: ${missing[*]}" >&2
-  echo "  JWT_SECRET must be >= 32 bytes: openssl rand -hex 32" >&2
-  exit 1
+# ── secrets store check (begin) ───────────────────────────────────────────
+# The stack reads its secrets from /run/swift-secrets, a tmpfs that
+# swift-secrets.service fills from the systemd-creds store: a LINUX host with
+# the store installed (deploy/swift-secrets). There is no macOS path for this
+# stack; stopping it needs no store on any OS.
+ACTION="${1:-up}"
+if [[ "$ACTION" != down && "$ACTION" != nuke && "$ACTION" != logs ]]; then
+  if [[ "${SWIFT_DEV_NO_STORE:-0}" == 1 ]]; then
+    echo "WARNING: SWIFT_DEV_NO_STORE=1 — skipping the secret-store check. You must provide every" >&2
+    echo "         /run/swift-secrets/NAME file yourself. This is for a throwaway local stack only," >&2
+    echo "         never for a host that holds a real credential." >&2
+  elif [[ "$(uname -s)" != Linux ]]; then
+    echo "error: this stack delivers secrets through /run/swift-secrets (systemd-creds + tmpfs), which exists on Linux only." >&2
+    echo "  On macOS run the API with pnpm dev against the local infra containers. To force a throwaway" >&2
+    echo "  stack here anyway, set SWIFT_DEV_NO_STORE=1 and provide the files yourself." >&2
+    exit 1
+  else
+    # Fail closed, don't boot broken: the required secrets must be in the store.
+    STORE_BIN="$(command -v swift-secrets || true)"
+    [[ -n "$STORE_BIN" ]] || STORE_BIN=./swift-secrets
+    # The store's parent is root-only (0700), so list through sudo -n exactly as
+    # pilot-up does; a list that fails is a refusal, never an empty store.
+    stored="$(sudo -n "$STORE_BIN" list)" || {
+      echo "error: could not list the encrypted store (it is root-only; this reads it with sudo -n swift-secrets list)" >&2
+      exit 1
+    }
+    missing=()
+    for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET OTP_HASH_SECRET MASTER_KEK STORAGE_SIGNING_SECRET CONSENT_IP_PEPPER; do
+      grep -qx "$k" <<< "$stored" || missing+=("$k")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      echo "error: these REQUIRED secrets are not in the encrypted store: ${missing[*]}" >&2
+      echo "  ./deploy/gen-secrets.sh stores them; sudo systemctl restart swift-secrets.service delivers them to /run/swift-secrets" >&2
+      exit 1
+    fi
+  fi
 fi
+# ── secrets store check (end) ─────────────────────────────────────────────
 
-API_PORT="$(grep -E '^API_PORT=' .env | head -1 | cut -d= -f2- || true)"; API_PORT="${API_PORT:-3000}"
+ready() {
+  docker compose exec -T api node -e \
+    "fetch('http://127.0.0.1:3000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+}
+wait_ready() {
+  for _ in $(seq 1 60); do
+    if ready >/dev/null 2>&1; then echo "✓ API /ready passed"; return 0; fi
+    sleep 2
+  done
+  echo "✗ API did not become ready" >&2
+  return 1
+}
 
 case "${1:-up}" in
   up)
+    docker network inspect swift-pilot-private >/dev/null 2>&1 || docker network create swift-pilot-private >/dev/null
     echo "▸ Building the API image and starting the stack (migrations run first)…"
     docker compose up -d --build
-    echo "▸ Waiting for the API to report healthy…"
-    for i in $(seq 1 60); do
-      if curl -fsS "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
-        echo "✓ Swift is up — http://localhost:${API_PORT}/health"
-        curl -fsS "http://localhost:${API_PORT}/health" && echo
-        exit 0
-      fi
-      sleep 2
-    done
-    echo "✗ API did not become healthy in time — check: ./deploy/deploy.sh logs" >&2
-    exit 1
+    wait_ready
     ;;
   update)
+    docker network inspect swift-pilot-private >/dev/null 2>&1 || docker network create swift-pilot-private >/dev/null
     echo "▸ Rebuilding the app image, migrating, restarting API + worker…"
     docker compose build api
-    docker compose up -d --no-deps migrate
+    # [Row 312] The upload malware scanner first (signatures loaded), so the
+    # restarted API and worker never scan against nothing.
+    docker compose up -d --wait clamd
+    docker compose stop api worker
+    docker compose up -d --force-recreate migrate
+    MIGRATE_ID="$(docker compose ps -a -q migrate)"
+    [[ -n "$MIGRATE_ID" ]] || { echo "migration container missing" >&2; exit 1; }
+    . ./wait-for-migration.sh
+    wait_for_migration "$MIGRATE_ID" || { echo "migration did not complete successfully" >&2; exit 1; }
     docker compose up -d --no-deps api worker
-    echo "✓ Updated."
+    wait_ready
     ;;
   logs)    docker compose logs -f api worker ;;
-  health)  curl -fsS "http://localhost:${API_PORT}/health" && echo ;;
+  health)  ready ;;
   down)    docker compose down ;;
   nuke)
     read -r -p "This DELETES all Swift data volumes. Type 'yes' to confirm: " ok

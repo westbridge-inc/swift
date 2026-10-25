@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import {
   availableActions, clocksFor, worstSla, queueOrder,
   reasonProblem, reasonAccepted, evidenceActions,
-  sosNeedsHuman, sosUrgency, INCIDENT_TRANSITIONS,
+  sosNeedsHuman, sosUrgency, sosNotes, sosPressesNotShown, INCIDENT_TRANSITIONS,
   type IncidentRow, type EvidenceBundleRow, type SosRow, type IncidentStatus,
 } from './safetyView';
 
@@ -153,7 +153,8 @@ describe('SOS: the coercion doctrine survives the queue', () => {
   const A = (over: Partial<SosRow> = {}): SosRow => ({
     id: 'a1', actorUserId: 'u1', actorRole: 'CUSTOMER', status: 'ACTIVE', orderId: null,
     triggeredAt: iso(-3), triggerSource: 'BUTTON', triggerLat: null, triggerLng: null,
-    triggerAddressText: null, userSafeFlaggedAt: null, acknowledgedAt: null, retriggerCount: 0, ...over,
+    triggerAddressText: null, triggerNote: null, retriggers: null,
+    userSafeFlaggedAt: null, acknowledgedAt: null, retriggerCount: 0, ...over,
   });
 
   it('"I\'m safe" does not settle anything', () => {
@@ -178,6 +179,73 @@ describe('SOS: the coercion doctrine survives the queue', () => {
   it('an unacknowledged ACTIVE alert outranks everything', () => {
     expect(sosUrgency(A(), NOW)).toBe('critical');
     expect(sosUrgency(A({ status: 'TRIGGER_PENDING' }), NOW)).toBe('high');
+  });
+});
+
+describe('SOS: what they said reaches the board', () => {
+  // [PRIV2-S1] The note a person types when they press SOS mid-ride lives in
+  // ops-only records (never the order timeline the other person on the ride
+  // reads). This card is the ONLY screen a responder has, so the words have to
+  // be read off the alert row the war-room feed already returns: the trigger
+  // note, then each repeat press's own note from the server's bounded summary.
+  const A = (over: Partial<SosRow> = {}): SosRow => ({
+    id: 'a1', actorUserId: 'u1', actorRole: 'CUSTOMER', status: 'ACTIVE', orderId: 'o1',
+    triggeredAt: iso(-3), triggerSource: 'BUTTON', triggerLat: 6.8, triggerLng: -58.16,
+    triggerAddressText: null, triggerNote: null, retriggers: null,
+    userSafeFlaggedAt: null, acknowledgedAt: null, retriggerCount: 0, ...over,
+  });
+
+  it('lists the trigger note first, then each repeat press that carried words, each with its time', () => {
+    const a = A({
+      triggerNote: 'being followed',
+      retriggerCount: 3,
+      retriggers: [
+        { seq: 1, at: iso(-2), note: 'he has a knife now', lat: 6.80744, lng: -58.16188 },
+        { seq: 2, at: iso(-1.5), note: null, lat: 6.808, lng: -58.162 },
+        { seq: 3, at: iso(-1), note: 'turned onto the highway', lat: 6.81, lng: -58.17 },
+      ],
+    });
+    expect(sosNotes(a)).toEqual([
+      { seq: 0, at: iso(-3), text: 'being followed' },
+      { seq: 1, at: iso(-2), text: 'he has a knife now' },
+      { seq: 3, at: iso(-1), text: 'turned onto the highway' },
+    ]);
+  });
+
+  it('a press that said nothing is not a message — blank, whitespace, missing, or written before notes existed', () => {
+    // The shipped button sends a position and no note; a legacy summary entry
+    // (imported from the pre-S-02 JSON) has no `note` key at all. Neither is
+    // a message, and neither may render as one.
+    expect(sosNotes(A())).toEqual([]);
+    expect(sosNotes(A({ triggerNote: '   ' }))).toEqual([]);
+    expect(sosNotes(A({ retriggerCount: 2, retriggers: [{ seq: 1, at: iso(-2), note: '  ' }, { seq: 2, at: iso(-1) }] }))).toEqual([]);
+    expect(sosNotes(A({ retriggerCount: 1, retriggers: [{ seq: 1, at: iso(-2), note: 42 as unknown as string }] }))).toEqual([]);
+  });
+
+  it('the first words can arrive on a repeat press, and are shown in press order whatever order the feed sent', () => {
+    const a = A({
+      retriggerCount: 2,
+      retriggers: [
+        { seq: 2, at: iso(-1), note: 'now he locked the doors' },
+        { seq: 1, at: iso(-2), note: 'he will not stop' },
+      ],
+    });
+    expect(sosNotes(a).map((n) => [n.seq, n.text])).toEqual([[1, 'he will not stop'], [2, 'now he locked the doors']]);
+  });
+
+  it('keeps the words exactly — trimmed, never cut or rewritten', () => {
+    const text = '  He said "get out or else" — plate PAA 1234 <b>not bold</b>  ';
+    expect(sosNotes(A({ triggerNote: text }))[0]!.text).toBe(text.trim());
+  });
+
+  it('says how many earlier presses the bounded summary no longer carries', () => {
+    // The server keeps only the newest presses in the alert's summary; the
+    // count on the alert is the truth. A board that silently showed 20 of 25
+    // would let a responder believe they had read everything.
+    const twenty = Array.from({ length: 20 }, (_, i) => ({ seq: i + 6, at: iso(-20 + i), note: `press ${i + 6}` }));
+    expect(sosPressesNotShown(A({ retriggerCount: 25, retriggers: twenty }))).toBe(5);
+    expect(sosPressesNotShown(A({ retriggerCount: 1, retriggers: [{ seq: 1, at: iso(-1), note: null }] }))).toBe(0);
+    expect(sosPressesNotShown(A())).toBe(0);
   });
 });
 
@@ -239,5 +307,22 @@ describe('census drift vs the API', () => {
 
     const { INCIDENT_CATEGORIES } = await import('./safetyView');
     expect(INCIDENT_CATEGORIES).toEqual(server);
+  });
+
+  // [PRIV2-S1] The repeat-press notes reach this console through the alert's
+  // `retriggers` summary, which the server rebuilds from its own rows. If the
+  // server ever stopped summarising `note` (or `at`, or `seq`), every repeat
+  // press would silently lose its words on the only screen a responder has.
+  const RETRIGGER_SRC = join(process.cwd(), '../api/src/modules/safety/sos-retrigger.ts');
+
+  it('the server still summarises each repeat press with its words, its time and its number', () => {
+    expect(existsSync(RETRIGGER_SRC), `${RETRIGGER_SRC} not found — the drift check cannot run`).toBe(true);
+    const src = readFileSync(RETRIGGER_SRC, 'utf8');
+    const start = src.indexOf('function toSummary');
+    expect(start, 'toSummary not found in the API source').toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('}', start));
+    for (const field of ['seq: r.seq', 'at: r.at.toISOString()', 'note: r.note']) {
+      expect(body, `the server's retrigger summary no longer carries "${field}"`).toContain(field);
+    }
   });
 });

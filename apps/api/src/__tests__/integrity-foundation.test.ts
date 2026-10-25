@@ -14,6 +14,7 @@ import { TrialEntitlementService } from '../modules/integrity/trial-entitlement.
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { runIdentityBackfill } from '../modules/integrity/backfill';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -54,7 +55,7 @@ async function makeVendorFor(userId: string) {
   const vendor = await prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `Integrity Vendor ${seq}-${nanoid(4)}`, slug: `integrity-${nanoid(8).toLowerCase()}`,
+      name: `Integrity Vendor ${seq}-${wordFreeTag(8)}`, slug: `integrity-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 500_000 + seq}`,
       addressLine1: '1 Test Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15,
@@ -193,7 +194,18 @@ describe('the trial law (spec §3 — scenarios A, E, G, I + churn)', () => {
     expect(statuses.filter((s) => s === 'TRIAL').length).toBeLessThanOrEqual(1);
   });
 
-  it('G: retroactive payer discovery mid-trials → earliest grant survives, later REVOKED with 48h notice, subscription untouched', async () => {
+  it('unverified payer declarations cannot merge existing trial holders or create enforcement', async () => {
+    const h1 = await makeUser(); const h2 = await makeUser();
+    const s1 = await subscriptions.startTrialForVendor((await makeVendorFor(h1.id)).id);
+    const s2 = await subscriptions.startTrialForVendor((await makeVendorFor(h2.id)).id);
+    for (const h of [h1, h2]) expect((await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: '5920000100', source: 'BILLING' })).dropped).toBe(true);
+    expect(await identity.resolveCluster(h1.id)).not.toBe(await identity.resolveCluster(h2.id));
+    expect(await prisma.trialGrant.count({ where: { accountId: { in: [h1.id, h2.id] }, status: 'ACTIVE' } })).toBe(2);
+    expect(await prisma.enforcementAction.count({ where: { accountId: { in: [h1.id, h2.id] } } })).toBe(0);
+    expect(await prisma.subscription.count({ where: { id: { in: [s1.id, s2.id] }, status: 'TRIAL' } })).toBe(2);
+  });
+
+  it('G: admitted document discovery mid-trials → earliest grant survives, later REVOKED with 48h notice, subscription untouched', async () => {
     const h1 = await makeUser();
     const h2 = await makeUser();
     const [v1, v2] = [await makeVendorFor(h1.id), await makeVendorFor(h2.id)];
@@ -203,10 +215,10 @@ describe('the trial law (spec §3 — scenarios A, E, G, I + churn)', () => {
     expect(s1.status).toBe('TRIAL');
     expect(s2.status).toBe('TRIAL');
 
-    // The money doesn't lie: the same MMG payer appears behind both.
-    const payer = `59260${Math.floor(100000 + Math.random() * 899999)}`;
-    await identity.capture({ accountId: h1.id, actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: payer, source: 'BILLING' });
-    await identity.capture({ accountId: h2.id, actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: payer, source: 'BILLING' });
+    // Independently admitted document evidence retains retroactive-union coverage.
+    const document = `SYNTHETIC-${nanoid(8)}`;
+    await captureId(h1.id, document);
+    await captureId(h2.id, document);
 
     const cluster = await identity.resolveCluster(h1.id);
     const grants = await prisma.trialGrant.findMany({ where: { clusterId: cluster!, role: 'VENDOR' }, orderBy: { startedAt: 'asc' } });

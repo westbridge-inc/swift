@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { searchRoutes } from '../modules/search/search.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [B2] Search wears the ONE vendor-visibility predicate, on every door.
@@ -24,7 +25,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 
 let app: FastifyInstance;
 let token: string;
-const NEEDLE = `svisneedle${nanoid(6).toLowerCase()}`;
+const NEEDLE = `svisneedle${wordFreeTag(8)}`;
 
 const createdUserIds: string[] = [];
 const createdVendorIds: string[] = [];
@@ -122,8 +123,9 @@ beforeAll(async () => {
     await app.prisma.tenant.deleteMany({ where: { slug: { startsWith: 'svis-tenant-' } } });
   }
 
-  const alive = `svis-tenant-${nanoid(8).toLowerCase()}`;
-  const dead = `svis-tenant-${nanoid(8).toLowerCase()}`;
+  // No '_' in these ids: a tenant id ending in '_' cannot become a search document id (search-scope.ts isIdPart).
+  const alive = `svis-tenant-${nanoid(8).toLowerCase().replace(/_/g, 'x')}`;
+  const dead = `svis-tenant-${nanoid(8).toLowerCase().replace(/_/g, 'x')}`;
   await app.prisma.tenant.create({ data: { id: alive, name: 'Svis Alive', slug: alive } });
   await app.prisma.tenant.create({ data: { id: dead, name: 'Svis Dead', slug: dead, isActive: false } });
   createdTenantIds.push(alive, dead);
@@ -224,4 +226,44 @@ describe('search wears the ONE visibility predicate [B2]', () => {
     expect(ids).not.toContain(deadTenant.vendorId);
     expect(ids).not.toContain(unverified.vendorId);
   });
+});
+
+
+it('HTTP search excludes a live database store and its items just outside the launch boundary', async () => {
+  try {
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 8.9999 } });
+    const inside = await get(`/api/v1/search?q=${NEEDLE}&limit=50`);
+    expect(inside.json().data.vendors.map((v: { id: string }) => v.id)).toContain(good.vendorId);
+    expect(inside.json().data.items.map((i: { id: string }) => i.id)).toContain(good.itemId);
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 9.0001 } });
+    const outside = await get(`/api/v1/search?q=${NEEDLE}&limit=50`);
+    expect(outside.statusCode, outside.body).toBe(200);
+    expect(outside.json().data.vendors.map((v: { id: string }) => v.id)).not.toContain(good.vendorId);
+    expect(outside.json().data.items.map((i: { id: string }) => i.id)).not.toContain(good.itemId);
+  } finally { await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 6.801 } }); }
+});
+
+it('HTTP suggestions, trending and nearby exclude a live database store just outside the launch boundary [DS982]', async () => {
+  const { name: vendorName } = await app.prisma.vendor.findUniqueOrThrow({ where: { id: good.vendorId }, select: { name: true } });
+  const texts = async () => ((await get(`/api/v1/search/suggestions?q=${NEEDLE}`)).json().data as { text: string }[]).map((s) => s.text);
+  const trending = async () => ((await get('/api/v1/search/trending')).json().data as { id: string }[]).map((i) => i.id);
+  const near = async (lat: number) => {
+    const res = await get(`/api/v1/search/nearby?lat=${lat}&lng=-58.156&radius=5`);
+    expect(res.statusCode, res.body).toBe(200);
+    return (res.json().data as { id: string }[]).map((v) => v.id);
+  };
+  try {
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 8.9999 } });
+    expect(await texts()).toEqual(expect.arrayContaining([vendorName, `${NEEDLE} good dish`]));
+    expect(await trending()).toContain(good.itemId);
+    expect(await near(8.999)).toContain(good.vendorId);
+    // A caller just across the line has no location here: nothing is near it.
+    expect(await near(9.0001)).not.toContain(good.vendorId);
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 9.0001 } });
+    const refused = await texts();
+    expect(refused).not.toContain(vendorName);
+    expect(refused).not.toContain(`${NEEDLE} good dish`);
+    expect(await trending()).not.toContain(good.itemId);
+    expect(await near(8.9999)).not.toContain(good.vendorId);
+  } finally { await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 6.801 } }); }
 });

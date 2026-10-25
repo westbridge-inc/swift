@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -15,6 +16,9 @@ import { BillingService } from '../modules/billing/billing.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // Spec §I — acceptance conformance baseline. One file maps the 8 given/when/then
@@ -32,10 +36,22 @@ const PHONES = ['+5920009811', '+5920009812', '+5920009813', '+5920009814', '+59
 const GY_MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 // Heavier cart/cash/billing fixtures (#1/#3/#4/#7) get their own phone block so
 // purge() can sweep them without colliding with the verification PHONES above.
-const HEAVY_PREFIX = '+59200099';
+// [SAFE-B · retained history] A no-show filing is immutable evidence kept with the people it names, so this
+// block is a namespace no other suite uses or purges, unique to the run.
+const HEAVY_PREFIX = retainedPhonePrefix('14');
 const GPS = { lat: 7.2, lng: -58.6 };
 let heavySeq = 0;
-const nextHeavyPhone = () => `${HEAVY_PREFIX}${String(++heavySeq).padStart(2, '0')}`;
+const nextHeavyPhone = () => `${HEAVY_PREFIX}${String(++heavySeq).padStart(3, '0')}`;
+/** [SAFE-B · retained history] A door of this run's own beside GPS (~100 m), used only if no retained strike sits
+ *  at its 4-decimal address key: an earlier run's strike there would co-fire collusion_address. */
+let doorSeq = 0;
+async function freshDoor(): Promise<{ lat: number; lng: number }> {
+  for (;;) {
+    doorSeq += 1;
+    const door = { lat: Number((7.2007 + (doorSeq % 30) * 0.0001).toFixed(4)), lng: Number((-58.6007 - Math.floor(doorSeq / 30) * 0.0001 - Math.floor(Math.random() * 20) * 0.0001).toFixed(4)) };
+    if (await app.prisma.strike.count({ where: { addressKey: `geo:${door.lat.toFixed(4)}:${door.lng.toFixed(4)}` } }) === 0) return door;
+  }
+}
 
 let app: FastifyInstance;
 let verification: VerificationService;
@@ -49,13 +65,19 @@ async function purge() {
   });
   const ids = users.map((u) => u.id);
   if (!ids.length) return;
+  await cleanupPayerBillingClocks(app.prisma, ids);
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
   const orders = await app.prisma.order.findMany({
     where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
     select: { id: true },
   });
-  const orderIds = orders.map((o) => o.id);
+  const allOrderIds = orders.map((o) => o.id);
+  // [SAFE-B · retained history] A filed no-show keeps its order, claim and strike, and the people and store it
+  // names. Everything else goes as before; what stays is taken out of service at the end.
+  const kept = await retainedCohort(app.prisma, { orderIds: allOrderIds });
+  const orderIds = without(allOrderIds, kept.orderIds);
+  const keptUserIds = kept.userIds;
   await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.strike.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
@@ -66,10 +88,10 @@ async function purge() {
   await app.prisma.cartItem.deleteMany({ where: { cartId: { in: cartIds } } });
   await app.prisma.cart.deleteMany({ where: { id: { in: cartIds } } });
   // vendors owned by these users → subscriptions + catalogue first, then the vendor
-  const owners = await app.prisma.vendorOwner.findMany({ where: { userId: { in: ids } }, select: { id: true } });
+  const owners = await app.prisma.vendorOwner.findMany({ where: { userId: { in: without(ids, keptUserIds) } }, select: { id: true } });
   const ownerIds = owners.map((o) => o.id);
   const vendors = await app.prisma.vendor.findMany({ where: { ownerId: { in: ownerIds } }, select: { id: true } });
-  const ownedVendorIds = vendors.map((v) => v.id);
+  const ownedVendorIds = without(vendors.map((v) => v.id), kept.vendorIds);
   const subs = await app.prisma.subscription.findMany({ where: { vendorId: { in: ownedVendorIds } }, select: { id: true } });
   const subIds = subs.map((s) => s.id);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -82,9 +104,10 @@ async function purge() {
   await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } });
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+  await app.prisma.rider.deleteMany({ where: { userId: { in: without(ids, keptUserIds) } } });
+  await app.prisma.customer.deleteMany({ where: { userId: { in: without(ids, keptUserIds) } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: without(ids, keptUserIds) } } });
+  await retireKeptScaffolding(app.prisma, kept);
 }
 
 async function makeCustomerUser(trustLevel: 'L1' | 'L2' | 'L3' = 'L1') {
@@ -125,17 +148,18 @@ async function makeRiderUser() {
       locationSessionId: session.id,
     },
   });
-  return { userId: u.id, riderId: rider.id };
+  return { userId: u.id, riderId: rider.id, sessionId: session.id };
 }
 
 async function makeArrivedCashOrder(customerId: string, riderId: string, amount: number) {
+  const door = await freshDoor();
   const created = await app.prisma.order.create({
     data: {
       orderNumber: `ACC-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
       customerId, vendorId, riderId, status: 'ARRIVED',
       // SWIFT-076: guarantee claims now assert handover proximity — a legit
       // at-door handover (gps: GPS) must be beside the delivery point.
-      deliveryAddress: '9 Acc Street, Georgetown', deliveryLat: 7.2007, deliveryLng: -58.6007,
+      deliveryAddress: '9 Acc Street, Georgetown', deliveryLat: door.lat, deliveryLng: door.lng,
       pickupLat: GPS.lat, pickupLng: GPS.lng, pickupAddress: 'Vendor corner',
       subtotalBase: amount, subtotalMarkup: 0, subtotalCustomer: amount,
       deliveryFee: 500, totalAmount: amount, paymentMethod: 'CASH',
@@ -153,7 +177,7 @@ async function makeArrivedCashOrder(customerId: string, riderId: string, amount:
   });
   await app.prisma.rider.update({
     where: { id: riderId },
-    data: { currentLat: 7.2007, currentLng: -58.6007, lastLocationUpdate: new Date() },
+    data: { currentLat: door.lat, currentLng: door.lng, lastLocationUpdate: new Date() },
   });
   // [DOC-1 §31.4 · P31-1] The claim's evidence bundle cites the pickup (custody taken, vendor
   // paid) and the cart; a real at-door order carries both.
@@ -238,8 +262,10 @@ afterAll(async () => {
 });
 
 describe('Spec §I — acceptance conformance baseline', () => {
-  // 1. Threshold gate — OrderService.checkout blocks an L1 cart at/over the gate.
-  it('1. an L1 customer over the ID threshold is blocked at checkout (ID_VERIFICATION_REQUIRED)', async () => {
+  // 1. Threshold gate — REMOVED by owner ruling 24 Oct 2026 ~05:55Z (no customer ID for orders at or over the
+  //    ID-gate threshold; Swift's own 8 Oct choice, not a legal duty). OrderService.checkout used to refuse an L1
+  //    cart at/over the gate; it now places it like any other.
+  it('1. an L1 customer over the old ID threshold checks out — no ID asked (owner 24 Oct 2026)', async () => {
     const category = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
     const item = await app.prisma.item.create({
       data: { vendorId, categoryId: category.id, name: 'Big Combo', basePrice: 60000 }, // well over the ~$50 (GYD) gate
@@ -251,7 +277,10 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const orders = new OrderService(app.prisma, app.io);
     await expect(
       orders.checkout({ userId: customer.id, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' }, now: new Date() }),
-    ).rejects.toMatchObject({ code: 'ID_VERIFICATION_REQUIRED' });
+    ).resolves.toBeTruthy();
+    const placed = await app.prisma.order.findMany({ where: { customerId: customer.id }, select: { totalAmount: true, status: true } });
+    expect(placed.map((o) => [Number(o.totalAmount), o.status])).toEqual([[60000, 'PENDING']]);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.id } })).trustLevel).toBe('L1');
   });
 
   // 2. Float gate — D.3, now LIVE. A rider without enough free float to front the
@@ -310,11 +339,14 @@ describe('Spec §I — acceptance conformance baseline', () => {
   });
 
   // 3 & 4. Ghost / no-show — cashRules.handover on an ARRIVED CASH order.
+  // [SAFE-B] Each is filed on the evidence the server holds: the rider's own session holds a fresh fix at the
+  // door (makeArrivedCashOrder) and the server issued the door photo.
   it('3. a sub-threshold no-show → guarantee auto-approves the rider + customer is struck', async () => {
     const customer = await makeCustomerUser('L1');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 3500); // under the ~$50 gate
-    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: 'storage://t/door.jpg' });
+    const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
+    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: photo.url, sessionId: rider.sessionId });
     expect(result.claim?.status).toBe('AUTO_APPROVED');
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
@@ -324,7 +356,8 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const customer = await makeCustomerUser('L2');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 20000); // over the gate
-    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS });
+    const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
+    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: photo.url, sessionId: rider.sessionId });
     expect(result.claim).toBeNull();
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
@@ -342,7 +375,8 @@ describe('Spec §I — acceptance conformance baseline', () => {
   // 6. Insurance-class hard-fail — REAL
   it('6. a taxi driver without HIRE-class confirmed insurance is blocked with reason "insurance"', async () => {
     const u = await makeUser(PHONES[1]!);
-    // legacyVerified bypasses the base checklist so we isolate the taxi insurance gate;
+    await currentTaxiSplitDocuments(app.prisma, u.id);
+    // Legacy base evidence remains grandfathered; the two new licences are supplied explicitly.
     // an APPROVED vehicle_insurance with no confirmed HIRE class must still hard-fail.
     await approveDoc(u.id, 'vehicle_insurance');
     const status = await verification.getLiveOperationStatus(u.id, { vehicleType: 'CAR', legacyVerified: true });

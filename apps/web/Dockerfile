@@ -1,0 +1,116 @@
+# syntax=docker/dockerfile:1
+# ---------------------------------------------------------------------------
+# Swift web (apps/web, Next.js) — the self-hosted image. The deploy stack
+# serves it (deploy/docker-compose.yml, profile "web") at its staging name
+# (WEB_HOST) and, optionally, at the public names swiftgy.com and www
+# (WEB_ALIAS_HOSTS). Only the staging name is marked noindex (next.config.ts).
+# .github/workflows/deploy-web.yml can still deploy the site to Vercel, which
+# never reads this file.
+# Multi-stage like apps/api/Dockerfile: install the workspace, build Next's
+# standalone server, then a slim non-root runtime that carries only that
+# server. Built from the MONOREPO ROOT so pnpm can resolve the workspace:
+#     docker build -f apps/web/Dockerfile \
+#       --build-arg NEXT_PUBLIC_API_URL=https://api-staging.swiftgy.com \
+#       --build-arg SWIFT_WEB_CHANNEL=staging -t swift-web .
+# NEXT_PUBLIC_* values are inlined into the browser bundle at BUILD time: the
+# API an image talks to is fixed when it is built, never set at runtime.
+# ---------------------------------------------------------------------------
+
+FROM node:20-slim AS base
+ENV PNPM_HOME=/pnpm NEXT_TELEMETRY_DISABLED=1
+# A separate instruction: within one ENV, $PNPM_HOME is not yet defined.
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+WORKDIR /app
+
+# ---- deps: install the workspace (cached on lockfile changes) --------------
+# This app's manifest and the shared packages, as the API image installs its
+# own: the other apps' dependencies (Expo, React Native, Fastify) never enter.
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json apps/web/
+COPY packages/ packages/
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# ---- build: Next's standalone server ---------------------------------------
+FROM deps AS build
+# Which API the browser calls, and which release the build is for. The origin
+# law (src/lib/browser-api-origin.ts) refuses any other pairing:
+#   public site: NEXT_PUBLIC_API_URL=https://api.<site domain>, no SWIFT_WEB_CHANNEL
+#   staging:     NEXT_PUBLIC_API_URL=https://api-staging.<site domain>, SWIFT_WEB_CHANNEL=staging
+ARG NEXT_PUBLIC_API_URL
+ARG SWIFT_WEB_CHANNEL
+# Unset or empty keeps src/site.config.ts refusing to build while a company
+# detail is still a {{TOKEN}}; only an explicit 1 lets such a build through.
+ARG NEXT_PUBLIC_ALLOW_SITE_TOKENS
+# [WEB-TILES] The MapTiler browser key: public by design (inlined into the
+# bundle) and restricted in MapTiler to the site's own origins. Empty: the
+# site draws no map tiles (apps/web/src/lib/map-tiles.ts), never OpenStreetMap's.
+ARG NEXT_PUBLIC_MAPTILER_KEY
+# [Item 7 · S1] The pre-launch switch is NOT a build argument: the site reads
+# SWIFT_WEB_ORDERING from its environment while it runs (deploy/docker-compose.yml).
+# next.config.ts: the standalone server, and the type check and lint stay
+# with CI (the reason is written there).
+ENV SWIFT_WEB_IMAGE_BUILD=1
+# The same headroom as the API's build stage on the 8 GB host. Build stage
+# only: the runtime stage below starts from node:20-slim and does not inherit it.
+ENV NODE_OPTIONS=--max-old-space-size=4096
+COPY tsconfig*.json ./
+COPY apps/web apps/web
+# src/lib/design-tokens.ts imports the vertical tints from the mobile kit by
+# path (the canonical tokens come from packages/ui, copied above). Only
+# modules it imports are compiled; src/image-build-context.test.ts fails when
+# the site imports something from outside apps/web that is not copied here.
+COPY apps/mobile/src/kit apps/mobile/src/kit
+# The customer pages reuse two pure phone-app modules by path (#1351): the
+# home feed's reliability rules and the cart's payment rules. Neither imports
+# anything but @swift/types (packages/, copied above), so exactly these files.
+COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
+COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
+COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
+# [UI-SWEEP U14 / U17] The order pages speak the phone's status words and its
+# reorder notice (src/lib/order-words.ts imports them by path). Both are pure:
+# orderStatus.ts imports only types from @swift/types, reorderNotice.ts nothing.
+COPY apps/mobile/src/lib/orderStatus.ts apps/mobile/src/lib/orderStatus.ts
+COPY apps/mobile/src/lib/reorderNotice.ts apps/mobile/src/lib/reorderNotice.ts
+# [W6] The store page judges an item's choices with the API's own validator
+# (src/lib/menu-options.ts imports it by path, never a second copy). It is a
+# pure module with no imports of its own, so exactly this file.
+COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
+# The business console reuses the app's plain board files by path (PR A): the
+# role matrix, the accept clock, the MMG-dispute pause, the store-delivery rule
+# and the market-calendar helpers. None imports anything but @swift/types.
+COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
+COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
+COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
+COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts
+COPY apps/mobile/src/modules/vendor/storeOrderRules.ts apps/mobile/src/modules/vendor/storeOrderRules.ts
+COPY apps/mobile/src/modules/vendor/storeHandover.ts apps/mobile/src/modules/vendor/storeHandover.ts
+COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
+WORKDIR /app/apps/web
+RUN pnpm run build
+
+# ---- runtime: non-root -----------------------------------------------------
+# The standalone output is the server plus only the node_modules it traced.
+# The site needs no image optimizer (every <Image> is unoptimized) and writes
+# only its own cache under .next, which the node user owns.
+FROM node:20-slim AS runtime
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+# Docker sets HOSTNAME to the container id and Next's standalone server binds
+# to $HOSTNAME; pin every interface so Caddy (web:3000) and the probe both reach it.
+ENV HOSTNAME=0.0.0.0 PORT=3000
+WORKDIR /app
+COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./
+COPY --from=build --chown=node:node /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build --chown=node:node /app/apps/web/public ./apps/web/public
+WORKDIR /app/apps/web
+# Drop to an unprivileged user (node ships in the base image).
+USER node
+EXPOSE 3000
+# /robots.txt is built with the site and served by this process alone, so the
+# probe says "the server answers" without depending on the API it calls.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/robots.txt').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "server.js"]

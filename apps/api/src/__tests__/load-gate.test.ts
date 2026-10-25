@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import {
   estimateLoad,
   requiredPackageSizeForOrder,
@@ -90,6 +91,10 @@ describe('what a vehicle must be able to carry', () => {
     expect(required).toBe('EXTRA_LARGE');
     expect(vehicleCanCarry('BICYCLE', required!)).toBe(false);
     expect(vehicleCanCarry('MOTORCYCLE', required!)).toBe(false);
+    // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: a car carries goods only while the
+    // CAR_DELIVERIES switch is on (default off); with it on, the car carries this order as before.
+    expect(vehicleCanCarry('CAR', required!)).toBe(false);
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     expect(vehicleCanCarry('CAR', required!)).toBe(true);
   });
 
@@ -178,57 +183,57 @@ describe('the bands are config, and a bad config cannot make a wrong gate', () =
   });
 });
 
-describe('it is a SHADOW — it cannot change or stop a dispatch', () => {
+// [owner #20, 13 Oct 2026] The rollout decision this shadow waited for was
+// made: ENFORCE. The block below used to pin "shadow only"; it now pins the
+// enforcement the owner chose, and that the gate's log line still cannot stop
+// a dispatch.
+describe('[owner #20] it is ENFORCED — and its log line still cannot stop a dispatch', () => {
   const dispatchSrc = readFileSync(path.join(__dirname, '..', 'modules', 'dispatch', 'dispatch.service.ts'), 'utf8');
   const riderSrc = readFileSync(path.join(__dirname, '..', 'modules', 'rider', 'rider.routes.ts'), 'utf8');
 
-  it('the candidate query is still driven by courierPackageSize alone', () => {
-    // The moment this argument changes, the gate is LIVE. That must be a
-    // deliberate, evidence-backed change, not something that rides along here.
-    expect(dispatchSrc).toContain('order.courierPackageSize, order.customerId, order.taxiPassengerCount)');
-    expect(dispatchSrc).not.toMatch(/findCandidates\([^)]*requiredPackageSizeForOrder/s);
+  it('the candidate query is driven by the derived requirement, and goods orders keep delivery riders', () => {
+    const ast = ts.createSourceFile('dispatch.ts', dispatchSrc, ts.ScriptTarget.Latest, true);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+        && node.expression.name.text === 'findCandidates'
+        && node.arguments[0]?.getText(ast) === 'orderId') calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    expect(calls).toHaveLength(1);
+    const klass = ast.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'DispatchService') as ts.ClassDeclaration;
+    const method = klass.members.find(n => n.name?.getText(ast) === 'findCandidates') as ts.MethodDeclaration;
+    const sizeAt = method.parameters.findIndex(p => p.name.getText(ast) === 'packageSize');
+    const courierAt = method.parameters.findIndex(p => p.name.getText(ast) === 'courierWork');
+    expect(sizeAt).toBeGreaterThanOrEqual(0);
+    expect(courierAt).toBeGreaterThanOrEqual(0);
+    expect(calls[0]!.arguments[sizeAt]!.getText(ast)).toBe('requiredSize');
+    expect(calls[0]!.arguments[courierAt]!.getText(ast)).toBe("order.orderType === 'COURIER'");
+    expect(dispatchSrc).toContain("const requiredSize = pool === 'RIDER' ? requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS) : null;");
   });
 
-  it('both shadows are wrapped, so a classification bug cannot end a dispatch', () => {
-    // A shadow that can take the cascade down is not a shadow, it is an outage.
-    const shadow = shadowMethod();
-    expect(shadow).toContain('try {');
-    expect(shadow).toContain('} catch {');
-
-    const accept = riderSrc.slice(riderSrc.indexOf("'loadgate:accepted'") - 1500, riderSrc.indexOf("'loadgate:accepted'") + 300);
-    expect(accept).toContain('try {');
-  });
-
-  /** Just the shadow method — bounded at the next member, or a fixed slice
-   *  would run into the following method and read ITS awaits. */
-  function shadowMethod(): string {
-    const start = dispatchSrc.indexOf('private logLoadGateShadow');
-    expect(start, 'the shadow method must exist').toBeGreaterThan(-1);
+  /** Just the log method — bounded at the next member. */
+  function logMethod(): string {
+    const start = dispatchSrc.indexOf('private logLoadGate(');
+    expect(start, 'the gate log method must exist').toBeGreaterThan(-1);
     const rest = dispatchSrc.slice(start);
     const end = rest.search(/\n {2}(private|public|async|\/\*\*)/);
     return end > 0 ? rest.slice(0, end) : rest;
   }
 
-  it('the dispatch shadow awaits nothing, so it adds no latency to a round', () => {
-    const body = shadowMethod();
+  it('the gate log is wrapped and awaits nothing, so it can neither end a round nor slow it', () => {
+    const body = logMethod();
+    expect(body).toContain('try {');
+    expect(body).toContain('} catch {');
     expect(body).toContain('): void {');
     expect(body).not.toContain('await ');
   });
 
-  it('the accept path records the decision field: wouldHaveExcluded', () => {
-    // `wouldHaveExcluded: true` on a job that then completes fine is the single
-    // signal that says the bands are too tight. Without it there is no rollout
-    // evidence, only opinion.
-    expect(riderSrc).toContain('wouldHaveExcluded');
-    expect(riderSrc).toContain('acceptedByVehicle');
-    expect(riderSrc).toContain("'loadgate:accepted'");
-  });
-
-  it('the accept-time refusal is still COURIER-only — nothing is enforced yet', () => {
+  it('the accept-time refusal covers goods orders by the same derivation, beside the parcel check', () => {
     expect(riderSrc).toContain("order.orderType === 'COURIER' && order.courierPackageSize && !vehicleCanCarry");
-    // The new code must not throw. A shadow that refuses an accept has shipped.
-    const shadowBlock = riderSrc.slice(riderSrc.indexOf('[G1 SHADOW] The gate that does NOT exist'), riderSrc.indexOf("'loadgate:accepted'"));
-    expect(shadowBlock).not.toContain('throw ');
-    expect(shadowBlock).not.toContain('VEHICLE_TOO_SMALL');
+    const block = riderSrc.slice(riderSrc.indexOf('[owner #20 · G1 ENFORCED] The same gate for food and grocery'));
+    expect(block).toContain('requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS)');
+    expect(block.slice(0, 900)).toContain("throw new AppError(400, 'VEHICLE_TOO_SMALL'");
   });
 });

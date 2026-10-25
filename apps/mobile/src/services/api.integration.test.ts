@@ -6,6 +6,12 @@ import axios, {
 } from 'axios';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot, RotatedAuthTokens } from '../lib/authSession';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
+
+const nativePlatform = vi.hoisted(() => ({ OS: 'ios' }));
 
 const auth = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
@@ -59,7 +65,7 @@ vi.mock('expo-constants', () => ({
   default: { expoConfig: {} },
 }));
 
-vi.mock('react-native', () => ({
+vi.mock('react-native', () => ({ Platform: nativePlatform,
   TurboModuleRegistry: {
     get: () => ({
       getConstants: () => ({
@@ -82,6 +88,7 @@ import {
   servicesApi,
   verificationApi,
   vendorApi,
+  weeklyFeeApi,
 } from './api';
 
 const originalAxiosAdapter = axios.defaults.adapter;
@@ -147,6 +154,7 @@ function authorization(config: InternalAxiosRequestConfig): string | undefined {
 }
 
 beforeEach(() => {
+  nativePlatform.OS = 'ios';
   auth.current = { ...accountA };
   auth.logoutCalls = 0;
   auth.rotateCalls = 0;
@@ -177,6 +185,20 @@ describe('API origin integration', () => {
   it('uses the native SourceCode host for the shared Axios base URL', () => {
     expect(API_URL).toBe('http://10.0.2.2:3000');
     expect(api.defaults.baseURL).toBe('http://10.0.2.2:3000/api/v1');
+  });
+});
+
+describe('Home request lifetime', () => {
+  it('passes the query abort signal to Axios for obsolete location and account reads', async () => {
+    const controller = new AbortController();
+    let observedSignal: typeof api.defaults.signal;
+    setAdapter(async (config) => {
+      observedSignal = config.signal;
+      return response(config, 200, { success: true, data: {} });
+    });
+
+    await customerApi.getHome(6, -58, controller.signal);
+    expect(observedSignal).toBe(controller.signal);
   });
 });
 
@@ -502,6 +524,55 @@ describe('Axios auth interceptor integration', () => {
     expect(JSON.parse(seen[2]?.data ?? '{}')).toMatchObject({ type: 'CVQ', referenceNumber: 'CVQ-1' });
   });
 
+  it('marks every service-job lifecycle command with contract v2 and sends every authority fact explicitly', async () => {
+    const seen: Array<{ url: string; contract?: string; body: Record<string, unknown> }> = [];
+    setAdapter(async (config) => {
+      const raw = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
+      seen.push({
+        url: config.url ?? '',
+        contract: config.headers.get(SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER) as string | undefined,
+        body: (raw ?? {}) as Record<string, unknown>,
+      });
+      return response(config, 200, { data: { id: 'job-a' } });
+    });
+
+    const expectedUpdatedAt = '2026-09-20T12:00:00.000Z';
+    const expectedScheduledFor = '2026-09-21T13:00:00.000Z';
+    await servicesApi.scheduleJob('job-a', {
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    await servicesApi.cancelJob('job-a', expectedUpdatedAt);
+    await servicesApi.quoteJob('job-a', 8_000, expectedUpdatedAt);
+    await servicesApi.confirmJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.declineSlot('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.startJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.completeJob('job-a', expectedUpdatedAt);
+
+    expect(seen.map(({ url }) => url)).toEqual([
+      '/services/jobs/job-a/schedule',
+      '/services/jobs/job-a/cancel',
+      '/services/jobs/job-a/quote',
+      '/services/jobs/job-a/confirm',
+      '/services/jobs/job-a/decline-slot',
+      '/services/jobs/job-a/start',
+      '/services/jobs/job-a/complete',
+    ]);
+    expect(seen.every(({ contract }) => contract === SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION)).toBe(true);
+    expect(seen[0]?.body).toEqual({
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    expect(seen[1]?.body).toEqual({ expectedUpdatedAt });
+    expect(seen[2]?.body).toEqual({ amount: 8_000, expectedUpdatedAt });
+    for (const index of [3, 4, 5]) {
+      expect(seen[index]?.body).toEqual({ expectedUpdatedAt, expectedScheduledFor });
+    }
+    expect(seen[6]?.body).toEqual({ expectedUpdatedAt });
+  });
+
   it('pins every protected multi-step API method to A while B is current', async () => {
     auth.current = { ...accountB };
     const seen: Array<{ url: string; authorization?: string; keys: string[] }> = [];
@@ -533,7 +604,6 @@ describe('Axios auth interceptor integration', () => {
       }, accountA),
       verificationApi.submitIdentity({
         idDocumentUrl: '/a-id.jpg',
-        selfieUrl: '/a-selfie.jpg',
         consent: true,
         privacyNoticeVersion: 'v1',
       }, accountA),
@@ -541,6 +611,8 @@ describe('Axios auth interceptor integration', () => {
       courierApi.uploadProof('order-a', form, accountA),
       courierApi.proof('order-a', { proofPhotoUrl: '/a-proof.jpg', outcome: 'paid', gps: { lat: 6.8, lng: -58.1 } }, accountA),
       courierApi.collect('order-a', { outcome: 'paid', gps: { lat: 6.8, lng: -58.1 } }, accountA),
+      courierApi.uploadPickupProof('order-a', form, accountA),
+      courierApi.pickupProof('order-a', { proofPhotoUrl: '/a-pickup.jpg', gps: { lat: 6.8, lng: -58.1 } }, accountA),
       riderApi.goOnline(6.8, -58.1, accountA),
       riderApi.location(6.8, -58.1, accountA),
       riderApi.handover('order-a', {
@@ -581,7 +653,8 @@ describe('Axios auth interceptor integration', () => {
     ]);
 
     // [M-28] +1: the courier collect step joined the captured-session matrix.
-    expect(seen).toHaveLength(41);
+    // [E16] +2: the courier pickup-proof upload and confirmation joined it.
+    expect(seen).toHaveLength(43);
     expect(seen.every((request) => request.authorization === 'Bearer access-a-1')).toBe(true);
     expect(seen.every((request) => !request.keys.includes('_swiftAuthBindingId'))).toBe(true);
     expect(auth.current).toEqual(accountB);
@@ -667,5 +740,225 @@ describe('[MOB-010 / TST-010] the store header is vendor-scoped, never global', 
     });
     await expect(api.get('/customer/orders')).resolves.toMatchObject({ status: 200 });
     expect(seen).toEqual([['/customer/orders', null], ['/customer/orders', null]]);
+  });
+});
+
+
+describe('weekly fee MMG transport', () => {
+  it.each(['ios', 'android', 'web'])('every partner subscription request identifies %s', async (platform) => {
+    nativePlatform.OS = platform;
+    const seen: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => { seen.push(config); return response(config, 200, { success: true, data: {} }); });
+    await vendorApi.subscription(); await riderApi.subscription(); await driverApi.subscription();
+    expect(seen).toHaveLength(3);
+    for (const request of seen) expect(request.headers.get('x-client-platform')).toBe(platform);
+  });
+  it.each(['vendor', 'rider', 'driver'] as const)('%s sends platform, idempotency and the exact empty body; 200 OPEN is accepted', async (family) => {
+    auth.selectedStoreId = 'store-a';
+    const seen: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => { seen.push(config); return response(config, 200, { success: true, data: { ref: 'ref-1', status: 'OPEN', checkoutUrl: 'https://checkout.test/opaque' } }); });
+    const client = weeklyFeeApi(family, accountA, 'store-a');
+    expect(await client.start('new-tap-key')).toMatchObject({ ref: 'ref-1', status: 'OPEN' });
+    await client.read('ref/1');
+    expect(seen.map((c) => c.url)).toEqual([`/${family}/subscription/mmg-checkout`, `/${family}/subscription/mmg-checkout/ref%2F1`]);
+    expect(seen[0]!.headers.get('Idempotency-Key')).toBe('new-tap-key');
+    expect(seen[0]!.data).toBe('{}');
+    for (const request of seen) {
+      expect(request.headers.get('x-client-platform')).toBe('ios');
+      expect(authorization(request)).toBe(`Bearer ${accountA.accessToken}`);
+      expect(request.headers.get('x-vendor-id')).toBe(family === 'vendor' ? 'store-a' : undefined);
+    }
+  });
+  it('a checkout may not borrow a new store or principal, including a late reply', async () => {
+    auth.selectedStoreId = 'store-a';
+    const pending = deferred<AxiosResponse>();
+    let sent!: InternalAxiosRequestConfig;
+    setAdapter((config) => { sent = config; return pending.promise; });
+    const client = weeklyFeeApi('vendor', accountA, 'store-a');
+    const request = client.start('tap-key-1');
+    auth.selectedStoreId = 'store-b';
+    pending.resolve(response(sent, 200, { success: true, data: { ref: 'old-ref' } }));
+    await expect(request).rejects.toThrow('paying account changed');
+    await expect(client.start('tap-key-2')).rejects.toThrow('paying account changed');
+    auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
+  });
+});
+
+describe('weak-network uploads', () => {
+  it('gives uploads 90 seconds without extending ordinary writes', async () => {
+    const seen: number[] = [];
+    setAdapter(async (config) => {
+      seen.push(config.timeout!);
+      return response(config, 200, { data: { url: 'fixture-photo' } });
+    });
+    const form = new FormData();
+    await authApi.uploadSelfie(form, accountA);
+    await verificationApi.upload(form, accountA);
+    await courierApi.uploadProof('job', form, accountA);
+    await courierApi.uploadPickupProof('job', form, accountA);
+    await courierApi.returnProof('job', form, accountA);
+    await riderApi.uploadHandoverPhoto('job', form, accountA);
+    await driverApi.uploadHandoverPhoto('job', form, accountA);
+    await api.post('/ordinary-write', {});
+    expect(seen).toEqual([90000, 90000, 90000, 90000, 90000, 90000, 90000, 10000]);
+  });
+  it('retries a lost upload response once with the same photo', async () => {
+    const bodies: unknown[] = [];
+    setAdapter(async (config) => {
+      bodies.push(config.data);
+      if (bodies.length === 1) throw new AxiosError('fixture timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { url: 'fixture-photo' } });
+    });
+    const form = new FormData();
+    form.append('file', 'fixture-image');
+    await verificationApi.upload(form, accountA);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+  });
+  it('does not retry under a replacement account', async () => {
+    let attempts = 0;
+    setAdapter(async (config) => {
+      attempts++;
+      auth.current = accountB;
+      throw new AxiosError('fixture timeout', 'ECONNABORTED', config);
+    });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+  it.each([400, 403, 413, 422, 500])('does not retry a server response (%i)', async (status) => {
+    let attempts = 0;
+    setAdapter(async (config) => {
+      attempts++;
+      throw new AxiosError('fixture rejection', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+  it('stops after one automatic retry', async () => {
+    let attempts = 0;
+    setAdapter(async (config) => { attempts++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(2);
+  });
+});
+
+describe('weak-network driver acceptance', () => {
+  it('retries the exact offer once after a lost response', async () => {
+    const requests: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => {
+      requests.push(config);
+      if (requests.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    const result = await driverApi.acceptOffer('ride-a', 'attempt-a');
+    expect(result.data.data.id).toBe('ride-a');
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.url)).toEqual(['/driver/offers/accept', '/driver/offers/accept']);
+    expect(requests[0]?.data).toBe(requests[1]?.data);
+    expect(JSON.parse(requests[1]!.data)).toEqual({ orderId: 'ride-a', offerAttemptId: 'attempt-a' });
+  });
+  it('[OWNER RULING 8 Oct] never sends a fare on any accept, first try or retry', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    setAdapter(async (config) => {
+      if (config.method === 'post') {
+        bodies.push(JSON.parse(config.data ?? '{}'));
+        if (bodies.length % 2 === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      }
+      return response(config, 200, { data: { id: 'other-ride' } });
+    });
+    await driverApi.acceptOffer('ride-a', 'attempt-a');
+    await driverApi.accept('ride-b');
+    expect(bodies).toHaveLength(4);
+    for (const body of bodies) expect(body).not.toHaveProperty('fare');
+  });
+  it('reconciles a lost board response against the already-held ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it.each(['ALREADY_TAKEN', 'DRIVER_BUSY'])('reconciles a board retry refused %s because the first accept committed', async (code) => {
+    const urls: string[] = [];
+    let posts = 0;
+    let gets = 0;
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        posts++;
+        if (posts === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code } }));
+      }
+      gets++;
+      // Before the retry the first accept has not committed; after it, it has.
+      return response(config, 200, { data: gets === 1 ? null : { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('still fails a refused board retry when the server holds a different ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        if (urls.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code: 'DRIVER_BUSY' } }));
+      }
+      return response(config, 200, { data: { id: 'ride-other' } });
+    });
+    await expect(driverApi.accept('ride-a')).rejects.toThrow();
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('does not borrow another account for a retry', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; auth.current = accountB; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a', 'attempt-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it.each([400, 401, 403, 409, 500])('does not retry an authoritative rejection %i', async (status) => {
+    let calls = 0;
+    if (status === 401) auth.current = null;
+    setAdapter(async (config) => {
+      calls++;
+      throw new AxiosError('rejected', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it('never exceeds two accept attempts', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+});
+
+describe('weak-network read lifetime', () => {
+  it('allows 20 seconds for reads while preserving write and explicit request timeouts', async () => {
+    const seen: number[] = [];
+    setAdapter(async (config) => { seen.push(config.timeout!); return response(config, 200, { data: 'success' }); });
+    await api.get('/customer/home');
+    await api.head('/customer/home');
+    await api.post('/ordinary-write', {});
+    await api.get('/explicit-read', { timeout: 45000 });
+    expect(seen).toEqual([20000, 20000, 10000, 45000]);
+  });
+  it('allows a slow successful read to finish instead of timing out at ten seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      setAdapter((config) => new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new AxiosError('timeout', 'ECONNABORTED', config)), config.timeout);
+        setTimeout(() => { clearTimeout(timeout); resolve(response(config, 200, { data: 'slow success' })); }, 15000);
+      }));
+      const result = api.get('/customer/home');
+      const observed = result.then((value) => value.data.data, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(await observed).toBe('slow success');
+    } finally { vi.useRealTimers(); }
   });
 });

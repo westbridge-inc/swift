@@ -1,11 +1,15 @@
 /** @jsxImportSource react */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
+import { formatResendWait, OTP_RESEND_WINDOW_S, otpCooldownOf } from '../../lib/otpCooldown';
+import { useCountdown } from '../../hooks/useCountdown';
+import { accountBlockedOf, accountSupportMailto } from '../../lib/accountBlocked';
+import { openSupportMail } from '../../lib/accountBlockedAlert';
 import { Header, PillButton, Screen, T } from '../../kit';
 
 const CODE_LEN = 6;
@@ -17,24 +21,26 @@ export function OtpVerificationScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const phone: string = route.params?.phone ?? '';
+  // The phone step hands over the time left when it offers a code already
+  // sent; otherwise a send just happened and the whole server window is ahead.
+  const resendIn: number = route.params?.resendInSeconds ?? OTP_RESEND_WINDOW_S;
   const setAuth = useAuthStore((s) => s.setAuth);
 
   const [code, setCode] = useState('');
-  const [cooldown, setCooldown] = useState(30);
+  const cooldown = useCountdown(resendIn);
+  // A resend refused inside the window sent nothing new: say so.
+  const [resendRefused, setResendRefused] = useState<{ codeAlreadySent: boolean } | null>(null);
   const inputRef = useRef<TextInput>(null);
-
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [cooldown]);
 
   const verify = useMutation({
     mutationFn: (c: string) => authApi.verifyOtp(phone, c),
     onSuccess: (res) => {
       const data = res.data?.data;
       if (data?.isNewUser) {
-        navigation.navigate('Register', { phone });
+        navigation.navigate('Register', {
+          phone,
+          registrationProof: typeof data.registrationProof === 'string' ? data.registrationProof : '',
+        });
         return;
       }
       if (data?.user && data?.tokens) {
@@ -45,7 +51,16 @@ export function OtpVerificationScreen() {
 
   const resend = useMutation({
     mutationFn: () => authApi.sendOtp(phone),
-    onSuccess: () => setCooldown(30),
+    onSuccess: () => {
+      setResendRefused(null);
+      cooldown.start(OTP_RESEND_WINDOW_S);
+    },
+    onError: (error) => {
+      const refusal = otpCooldownOf(error);
+      if (!refusal) return;
+      setResendRefused({ codeAlreadySent: refusal.codeAlreadySent });
+      cooldown.start(refusal.retryAfterSeconds);
+    },
   });
 
   const onChange = (v: string) => {
@@ -54,8 +69,12 @@ export function OtpVerificationScreen() {
     if (clean.length === CODE_LEN && !verify.isPending) verify.mutate(clean);
   };
 
+  // [NO-DEAD-ENDS] A suspended, banned or closed account is refused here with
+  // nowhere to go: Get Help and the appeal need the session it was refused.
+  // Say which state it is in and open the one door that needs no session.
+  const blocked = verify.isError ? accountBlockedOf(verify.error) : null;
   const err = verify.isError
-    ? ((verify.error as any)?.response?.data?.error?.message ?? 'That code didn’t match. Try again.')
+    ? (blocked?.message ?? (verify.error as any)?.response?.data?.error?.message ?? 'That code didn’t match. Try again.')
     : undefined;
 
   return (
@@ -126,14 +145,25 @@ export function OtpVerificationScreen() {
             {err}
           </T>
         ) : null}
+        {blocked ? (
+          <PillButton
+            testID="otp-account-blocked-support"
+            label="Email Swift support"
+            variant="soft"
+            icon="mail"
+            size="md"
+            style={{ marginTop: space.md, alignSelf: 'flex-start' }}
+            onPress={() => openSupportMail(accountSupportMailto(blocked, phone), blocked.supportEmail)}
+          />
+        ) : null}
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space['2xl'] }}>
           <T variant="label" tone="muted">
             Didn’t get it?
           </T>
-          {cooldown > 0 ? (
+          {cooldown.secondsLeft > 0 ? (
             <T variant="label" tone="faint" accessibilityLiveRegion="polite">
-              Resend in {cooldown}s
+              Resend in {formatResendWait(cooldown.secondsLeft)}
             </T>
           ) : (
             <Pressable
@@ -153,6 +183,13 @@ export function OtpVerificationScreen() {
             </Pressable>
           )}
         </View>
+        {resendRefused && cooldown.secondsLeft > 0 ? (
+          <T testID="otp-resend-wait" variant="label" tone="muted" style={{ marginTop: space.sm }}>
+            {resendRefused.codeAlreadySent
+              ? 'No new code yet: enter the one we texted you moments ago.'
+              : 'A code was just requested for this number. You can resend when the timer ends.'}
+          </T>
+        ) : null}
 
         <View style={{ flex: 1 }} />
         <PillButton

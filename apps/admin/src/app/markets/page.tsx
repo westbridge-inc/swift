@@ -2,59 +2,76 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { fetchCountries } from '@/lib/api';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
-/** Weekly tier prices live in subscriptionTiers JSON: { mover, smallVendor, largeVendor, ... }. */
+/** Weekly tier prices live in subscriptionTiers JSON — every partner kind the
+ *  resolver prices: mover, moverHeavy, taxiDriver, serviceVendor, smallVendor,
+ *  largeVendor, departmentVendor. A market that has not set one shows a dash. */
 function tier(c: any, key: string) {
   const v = c?.subscriptionTiers?.[key];
   return v != null ? `${c.currencySymbol}${Number(v).toLocaleString()}` : '—';
 }
 
+const TIER_COLUMNS: Array<[key: string, label: string]> = [
+  ['mover', 'Rider / wk'],
+  ['moverHeavy', 'Heavy delivery / wk'],
+  ['taxiDriver', 'Taxi driver / wk'],
+  ['serviceVendor', 'Service / wk'],
+  ['smallVendor', 'Small vendor / wk'],
+  ['largeVendor', 'Large vendor / wk'],
+  ['departmentVendor', 'Department / wk'],
+];
+const COLUMN_COUNT = 5 + TIER_COLUMNS.length;
+
 export default function MarketsPage() {
-  const { data, isLoading } = useQuery({ queryKey: ['countries'], queryFn: fetchCountries });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['countries'], queryFn: fetchCountries });
   const rows: any[] = data?.data ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Markets</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
-        Every live market&apos;s money rules — currency, ID gate, rider float caps, weekly tiers. Read-only:
-        these numbers gate real money, so edits ship with the billing-rail work, not a free-text box.
+    <div className="mc-page">
+      <p className="mc-muted mb-4 max-w-3xl">
+        Every live market&apos;s money rules — currency, ID check threshold, rider float limits, weekly fees. Read-only:
+        these numbers gate real money, so they change with the billing work, never from a free-text box.
       </p>
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-x-auto">
-        <table className="w-full text-sm whitespace-nowrap">
+      <div className="mc-table-wrap overflow-x-auto">
+        <table className="mc-table" style={{ tableLayout: 'auto' }}>
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Market</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Currency</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">per USD</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">ID gate (USD)</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Float L1 / L2 / L3</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Mover / wk</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Small vendor / wk</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Large vendor / wk</th>
+            <tr>
+              <th className="mc-label">Market</th>
+              <th className="mc-label">Currency</th>
+              <th className="mc-label" data-align="right">per USD</th>
+              <th className="mc-label" data-align="right">ID gate (USD)</th>
+              <th className="mc-label" data-align="right">Float L1 / L2 / L3</th>
+              {TIER_COLUMNS.map(([key, label]) => (
+                <th key={key} className="mc-label" data-align="right">{label}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={COLUMN_COUNT} className="mc-table-empty">Loading…</td></tr>
+            ) : isError ? (
+              <tr><td colSpan={COLUMN_COUNT}>
+                <QueryFailed error={error} what="the markets" onRetry={() => void refetch()} retrying={isFetching} />
+              </td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">No markets configured.</td></tr>
+              <tr><td colSpan={COLUMN_COUNT} className="mc-table-empty">No markets configured.</td></tr>
             ) : (
               rows.map((c: any) => (
-                <tr key={c.id} className="border-b border-[var(--border)] hover:bg-white/5">
-                  <td className="p-4 font-medium">
-                    {c.name} <span className="text-xs text-[var(--muted)] font-mono ml-1">{c.code}</span>
+                <tr key={c.id}>
+                  <td data-label="Market" data-primary className="whitespace-nowrap font-semibold">
+                    {c.name} <span className="mc-muted mc-mono ml-1">{c.code}</span>
                   </td>
-                  <td className="p-4">{c.currencyCode} ({c.currencySymbol})</td>
-                  <td className="p-4 text-right">{Number(c.usdExchangeRate).toLocaleString()}</td>
-                  <td className="p-4 text-right">${Number(c.idGateThresholdUsd).toLocaleString()}</td>
-                  <td className="p-4 text-right text-[var(--muted)]">
+                  <td data-label="Currency" className="whitespace-nowrap">{c.currencyCode} ({c.currencySymbol})</td>
+                  <td data-label="per USD" data-align="right" className="mc-numbers">{Number(c.usdExchangeRate).toLocaleString()}</td>
+                  <td data-label="ID gate (USD)" data-align="right" className="mc-numbers">${Number(c.idGateThresholdUsd).toLocaleString()}</td>
+                  <td data-label="Float L1 / L2 / L3" data-align="right" className="mc-muted mc-numbers whitespace-nowrap">
                     {Number(c.floatL1).toLocaleString()} / {Number(c.floatL2).toLocaleString()} / {Number(c.floatL3).toLocaleString()}
                   </td>
-                  <td className="p-4 text-right">{tier(c, 'mover')}</td>
-                  <td className="p-4 text-right">{tier(c, 'smallVendor')}</td>
-                  <td className="p-4 text-right">{tier(c, 'largeVendor')}</td>
+                  {TIER_COLUMNS.map(([key, label]) => (
+                    <td key={key} data-label={label} data-align="right" className="mc-numbers whitespace-nowrap">{tier(c, key)}</td>
+                  ))}
                 </tr>
               ))
             )}

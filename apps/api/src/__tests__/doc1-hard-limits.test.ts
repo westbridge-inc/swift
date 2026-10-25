@@ -10,7 +10,9 @@
  * Nothing here is skipped, and nothing here pretends.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { recordExternalProcessingDecision } from '../modules/verification/external-processing';
+import { seedDocRegistry } from '../modules/verification/doc-registry';
 import { assertExternalProcessingPermitted } from '../modules/legal/processor-register';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
@@ -63,11 +65,16 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(socketPlugin);
   await app.ready();
+  // [2b] reads and restores the GY owner_national_id document type. The CI
+  // seed does not create the registry, so seed it here (idempotent) instead
+  // of relying on another file in the same shard having done it first.
+  await runWithoutTenant(() => seedDocRegistry(app.prisma), 'doc1-hard-limits-test');
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59275${NUM}9`, firstName: 'Doc', lastName: 'Limits', activeRole: 'VENDOR_OWNER', countryCode: 'GY',
     avatar: `avatars/${RUN}/selfie.jpg`, selfieCapturedAt: new Date(),
   } }));
   userId = u.id;
+  await signupSelfieFixture(app.prisma, userId);
 });
 
 afterAll(async () => {
@@ -81,7 +88,7 @@ afterAll(async () => {
 
 const service = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
 const submitOwnerId = (kyc: KycProvider, tag: string) =>
-  runWithTenant('swift-default', () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', `documents/${RUN}/${tag}.jpg`, 'v1'));
+  runWithTenant('swift-default', async () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', await ownedVerificationFixture(app.prisma, userId, tag), 'v1'));
 
 describe('[DOC-1 §0.5] hard limits', () => {
   it.fails('[1] PERSONAL bytes are not persisted beyond the IDV-1 transient intake TTL — VIOLATED BY DECISION (CONFLICT-DOC-2): images persist to the retention clock', () => {
@@ -188,6 +195,8 @@ describe('[DOC-1 §0.5] hard limits', () => {
       'modules/ads/ads.routes.ts', 'modules/auth/auth.routes.ts', 'modules/chat/chat.routes.ts', 'modules/courier/courier.routes.ts',
       'modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts', 'modules/safety/safety.routes.ts', 'modules/vendor/vendor.routes.ts',
       'modules/verification/verification.routes.ts',
+      // [IMAGES-E2E] The one keeper of photos customers see (store photos, provider portfolio): scanned + redrawn.
+      'utils/owned-photo-upload.ts',
     ]);
     const writers = files.filter((f) => /verificationDocument\.create(Many)?\(/.test(readFileSync(f, 'utf8'))).map((f) => relative(API_SRC, f)).sort();
     expect(writers).toEqual(['modules/verification/verification.service.ts']);

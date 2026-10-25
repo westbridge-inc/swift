@@ -2,7 +2,7 @@
 /**
  * Android TLS pinning for the production API domain, mirroring the iOS
  * NSPinnedDomains entry in app.config.ts. Writes res/xml/network_security_config.xml
- * with a <pin-set> for api.swift.gy (Let's Encrypt root SPKI hashes, ISRG
+ * with a <pin-set> for api.swiftgy.com (Let's Encrypt root SPKI hashes, ISRG
  * Root X1 + X2) and points the manifest at it.
  *
  * The pin-set carries an expiration: if the app ships past that date without
@@ -17,7 +17,7 @@ const path = require('node:path');
 const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
   <domain-config>
-    <domain includeSubdomains="true">api.swift.gy</domain>
+    <domain includeSubdomains="true">api.swiftgy.com</domain>
     <pin-set expiration="2028-07-01">
       <!-- ISRG Root X1 (Let's Encrypt), SPKI SHA-256 -->
       <pin digest="SHA-256">C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=</pin>

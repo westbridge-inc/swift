@@ -22,6 +22,10 @@ const CHECKLIST = ['drivers_licence', 'police_clearance'];
 function dbDouble(opts: { records?: unknown[]; everHeld: number }) {
   return {
     user: { findUnique: async () => ({ countryCode: 'GY' }) },
+    // [ROLE-DOCS · security review] A stored row that lacks a profile key now gets the CODE's list (fail closed), so
+    // this double states the bicycle profile explicitly empty: the checklist under test stays exactly CHECKLIST.
+    countryConfig: { findUnique: async () => ({ documentChecklists: { MOVER: CHECKLIST, MOVER_NO_LICENCE: [] } }) },
+    verificationDocument: { count: async () => opts.everHeld },
     subjectLink: { findMany: async () => [] },
     documentRecord: {
       findMany: async () => opts.records ?? [],
@@ -32,9 +36,6 @@ function dbDouble(opts: { records?: unknown[]; everHeld: number }) {
 
 function service() {
   const svc = new VerificationService({} as never, {} as never, {} as never);
-  (svc as unknown as { countryConfig: unknown }).countryConfig = {
-    getMoverChecklist: async () => CHECKLIST,
-  };
   return svc;
 }
 
@@ -85,6 +86,9 @@ describe('[AUD-L8b-001 / INV-15] an expired document takes a verified mover off 
       { vehicleType: 'CAR' as never, legacyVerified: true },
       {
         user: { findUnique: async () => ({ countryCode: 'GY' }) },
+        countryConfig: { findUnique: async () => ({ documentChecklists: { MOVER: CHECKLIST, MOVER_MOTOR: [], MOVER_TAXI_EXTRA: [] } }) },
+        driver: { findUnique: async () => null },
+        verificationDocument: { count: async () => 0 },
         subjectLink: { findMany: async () => [] },
         documentRecord: {
           // nothing CURRENT for the checklist, and nothing ever filed for the

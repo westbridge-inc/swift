@@ -11,8 +11,11 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { distanceLabel } from '../../../lib/geo';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import {
+  CartBar,
+  useCartBarClearance,
   Chip,
   EmptyState,
   ErrorState,
@@ -24,6 +27,7 @@ import {
   SectionHeader,
   T,
 } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 
 // Kit 57–60: idle = headline + history chips + popular rows.
 //
@@ -101,7 +105,7 @@ function ResultRow({
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={closed ? `${name}. Closed right now` : sub ? `${name}. ${sub}` : name}
+      accessibilityLabel={[name, sub, closed ? 'Closed right now' : null].filter(Boolean).join('. ')}
     >
       {({ pressed }) => (
         <View
@@ -128,13 +132,16 @@ function ResultRow({
               {name}
             </T>
             {meta}
+            {/* A dish keeps its store's name under it when that store is closed:
+                the closed line is added, never swapped in for the name. */}
+            {sub ? (
+              <T variant="caption" tone="muted" numberOfLines={1}>
+                {sub}
+              </T>
+            ) : null}
             {closed ? (
               <T variant="micro" tone="faint">
                 Closed right now
-              </T>
-            ) : sub ? (
-              <T variant="caption" tone="muted" numberOfLines={1}>
-                {sub}
               </T>
             ) : null}
           </View>
@@ -146,6 +153,8 @@ function ResultRow({
 }
 
 export function SearchScreen() {
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
@@ -219,7 +228,11 @@ export function SearchScreen() {
   const places: any[] = engineMode
     ? (openNow ? engineVendors.filter((v) => v.isCurrentlyOpen !== false) : engineVendors)
     : browseResults;
-  const dishes: any[] = engineMode ? (engine.data?.items ?? []) : [];
+  // [owner 13 Oct] Search returns closed stores' dishes too, each marked by its
+  // store's live state (`vendorIsCurrentlyOpen`; an older server omits it and
+  // the dish reads as open, as before). "Open now" narrows dishes the same way.
+  const engineDishes: any[] = engineMode ? (engine.data?.items ?? []) : [];
+  const dishes: any[] = openNow ? engineDishes.filter((d) => d.vendorIsCurrentlyOpen !== false) : engineDishes;
   const suggestions: any[] = (suggestionsQ.data ?? []).filter((s: any) => s.text?.toLowerCase() !== text.toLowerCase()).slice(0, 6);
   const resultsBusy = engineMode ? engine.isLoading : vendors.isLoading;
   const resultsError = engineMode ? engine.isError : vendors.isError;
@@ -259,6 +272,7 @@ export function SearchScreen() {
             hitSlop={14}
             accessibilityRole="button"
             accessibilityLabel="Go back"
+            style={touchTarget(24)}
           >
             <Feather name="chevron-left" size={24} color={color.text.primary} />
           </Pressable>
@@ -319,7 +333,12 @@ export function SearchScreen() {
           // A horizontal row must HUG its chips: in this flex column an
           // un-heighted ScrollView grows to swallow the leftover screen and
           // the results get shoved to the bottom (founder screenshot, 08-30).
-          style={{ flexGrow: 0 }}
+          // And it must never SHRINK: React Native gives every ScrollView
+          // `flexShrink: 1` + `overflow: scroll`, and the results list below
+          // measures as tall as its content, so the column overflows and
+          // squeezes each chip row until it clips the chips' bottoms (owner
+          // screenshot, "Garlic", 17 Oct). `flexShrink: 0` on every row.
+          style={{ flexGrow: 0, flexShrink: 0 }}
           contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
         >
           {TYPES.map((t) => (
@@ -328,7 +347,7 @@ export function SearchScreen() {
               label={t.label}
               selected={type === t.key}
               onPress={() => setType(t.key)}
-              style={{ height: 44, paddingHorizontal: space.lg }}
+              style={{ minHeight: 44, paddingHorizontal: space.lg }}
             />
           ))}
         </ScrollView>
@@ -342,7 +361,7 @@ export function SearchScreen() {
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
-            style={{ marginTop: space.md, flexGrow: 0 }}
+            style={{ marginTop: space.md, flexGrow: 0, flexShrink: 0 }}
             contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
           >
             {/* [B2] In engine mode the ranking IS the sort (words · typo ·
@@ -362,7 +381,7 @@ export function SearchScreen() {
                     flexDirection: 'row',
                     alignItems: 'center',
                     gap: space.sm,
-                    height: 44,
+                    minHeight: 44,
                     paddingHorizontal: space.lg,
                     borderRadius: radius.full,
                     borderWidth: 1,
@@ -385,7 +404,7 @@ export function SearchScreen() {
               label="Open now"
               selected={openNow}
               onPress={() => setOpenNow((v) => !v)}
-              style={{ height: 44, paddingHorizontal: space.lg }}
+              style={{ minHeight: 44, paddingHorizontal: space.lg }}
             />
           </ScrollView>
 
@@ -395,11 +414,11 @@ export function SearchScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              style={{ marginTop: space.md, flexGrow: 0 }}
+              style={{ marginTop: space.md, flexGrow: 0, flexShrink: 0 }}
               contentContainerStyle={{ gap: space.sm, paddingHorizontal: GUTTER }}
             >
               {suggestions.map((s: any) => (
-                <Chip key={`${s.type}-${s.text}`} label={s.text} onPress={() => setQ(s.text)} style={{ height: 36, paddingHorizontal: space.md }} />
+                <Chip key={`${s.type}-${s.text}`} label={s.text} onPress={() => setQ(s.text)} style={{ minHeight: 36, paddingHorizontal: space.md }} />
               ))}
             </ScrollView>
           ) : null}
@@ -410,7 +429,7 @@ export function SearchScreen() {
             ) : resultsError ? (
               <ErrorState onRetry={() => void retryResults()} />
             ) : results.length === 0 && dishes.length === 0 ? (
-              <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] }}>
+              <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] + cartClearance }}>
                 <EmptyState
                   icon="search"
                   title="No matches"
@@ -446,7 +465,7 @@ export function SearchScreen() {
             ) : engineMode ? (
               // [B2] Engine results: PLACES then DISHES — the second section is
               // the whole point ("pepperpot" now finds the dish, not silence).
-              <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}>
+              <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] + cartClearance }}>
                 {results.length > 0 ? (
                   <>
                     {/* [Wave 3 vs reference 10] The header says HOW the list is
@@ -483,6 +502,7 @@ export function SearchScreen() {
                             glyph="food"
                             name={it.name}
                             sub={it.categoryName ? `${it.vendorName} · ${it.categoryName}` : it.vendorName}
+                            closed={it.vendorIsCurrentlyOpen === false}
                             trailing={<Money amount={it.basePrice} />}
                             onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
                           />
@@ -496,7 +516,7 @@ export function SearchScreen() {
               <FlatList
                 data={results}
                 keyExtractor={(v) => v.id}
-                contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}
+                contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] + cartClearance }}
                 ItemSeparatorComponent={Divider}
                 ListHeaderComponent={
                   // [Wave 3 vs reference 10] "4 places · sorted by recommended"
@@ -517,8 +537,8 @@ export function SearchScreen() {
                         topRated={v.topRated}
                         extra={v.etaMin
                           ? `${v.etaMin} min`
-                          : locationFix && v.distanceKm != null
-                            ? `${v.distanceKm} km`
+                          : locationFix
+                            ? distanceLabel(v.distanceKm)
                             : undefined}
                       />
                     }
@@ -547,7 +567,7 @@ export function SearchScreen() {
           />
         </>
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space['2xl'], paddingBottom: space['3xl'] }}>
+        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space['2xl'], paddingBottom: space['3xl'] + cartClearance }}>
           {recentSearches.length > 0 ? (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -593,6 +613,8 @@ export function SearchScreen() {
           ) : null}
         </ScrollView>
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }

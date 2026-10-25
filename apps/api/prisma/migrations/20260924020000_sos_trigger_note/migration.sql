@@ -1,0 +1,41 @@
+-- [PRIV2-S1] In-ride SOS free text: ops-only storage, never the order timeline.
+--
+-- POST /rides/:id/sos wrote the raiser's note and position into
+-- order_status_logs ("SOS raised by passenger: <note> @lat,lng"). Both people
+-- on the ride read that timeline verbatim (the driver's /driver/rides/active,
+-- the passenger's /rides/:id and /customer/orders/:id), so the person the SOS
+-- was about could read the accusation and the live position on their next
+-- poll. The route no longer writes the timeline at all. The note now lives
+-- only in ops-only safety records: the alert the press raised
+-- ("SosAlert"."triggerNote", which the evidence bundle snapshots with the
+-- rest of the alert) and, for a repeat press that collapses onto that alert,
+-- the repeat's own immutable sos_retriggers row ("note").
+--
+-- FORWARD: two nullable TEXT columns; existing rows stay NULL. No backfill:
+-- order_status_logs is append-only evidence, so SOS rows written before this
+-- change are left exactly as they are.
+--
+-- ROLLBACK (never while the new application writes these columns; forward
+-- repair is preferred). The guard refuses whenever a recorded note would be
+-- discarded — losing what a person wrote in an emergency is exactly the
+-- evidence loss this change must not cause:
+--   BEGIN;
+--   DO $$ BEGIN
+--     IF EXISTS (SELECT 1 FROM "SosAlert" WHERE "triggerNote" IS NOT NULL)
+--        OR EXISTS (SELECT 1 FROM "sos_retriggers" WHERE "note" IS NOT NULL) THEN
+--       RAISE EXCEPTION 'refusing rollback: recorded SOS notes would be discarded';
+--     END IF;
+--   END $$;
+--   ALTER TABLE "sos_retriggers" DROP COLUMN "note";
+--   ALTER TABLE "SosAlert" DROP COLUMN "triggerNote";
+--   DO $$ DECLARE n integer; BEGIN
+--     DELETE FROM "_prisma_migrations"
+--       WHERE "migration_name" = '20260924020000_sos_trigger_note';
+--     GET DIAGNOSTICS n = ROW_COUNT;
+--     IF n <> 1 THEN RAISE EXCEPTION 'expected exactly one _prisma_migrations row, deleted %', n; END IF;
+--   END $$;
+--   COMMIT;
+
+SET lock_timeout = '10s';
+ALTER TABLE "SosAlert" ADD COLUMN "triggerNote" TEXT;
+ALTER TABLE "sos_retriggers" ADD COLUMN "note" TEXT;

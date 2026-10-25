@@ -239,3 +239,39 @@ describe('the scripted reconciliation scenario', () => {
     expect(empty.byDay).toEqual([]);
   });
 });
+
+describe('Q12 · the QR dashboard counts only web orders the store can see', () => {
+  it('a web order still held, or cancelled inside its free-cancel window, is not a web order to the store — totals, byDay and funnel', async () => {
+    const ctx = await makeOwnerWithVendor();
+    const auth = { authorization: `Bearer ${ctx.token}` };
+    const code = (await app.inject({ method: 'GET', url: '/api/v1/vendor/qr', headers: auth })).json().data.shortCode as string;
+    const qr = await app.prisma.qrCode.findUniqueOrThrow({ where: { shortCode: code } });
+    const now = Date.now();
+    const webOrder = (data: Record<string, unknown>) => app.prisma.order.create({
+      data: {
+        orderNumber: `QA-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
+        customerId: ctx.userId, vendorId: ctx.vendorId,
+        deliveryAddress: 'q12', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
+        channel: 'WEB', attributionQrCodeId: qr.id,
+        status: 'PENDING',
+        ...data,
+      },
+    });
+    // Seen by the store: released from its hold.
+    createdOrderIds.push((await webOrder({ holdExpiresAt: null, releasedToVendorAt: new Date(now) })).id);
+    // Still inside its window: the store has not been told.
+    createdOrderIds.push((await webOrder({ holdExpiresAt: new Date(now + 4 * 60_000) })).id);
+    // Cancelled inside its window, which has since lapsed: never the store's.
+    createdOrderIds.push((await webOrder({
+      status: 'CANCELLED', placedAt: new Date(now - 10 * 60_000),
+      holdExpiresAt: new Date(now - 5 * 60_000), cancelledAt: new Date(now - 8 * 60_000),
+    })).id);
+
+    const all = (await app.inject({ method: 'GET', url: '/api/v1/vendor/qr/analytics?range=all', headers: auth })).json().data;
+    expect(all.totals.webOrders).toBe(1);
+    expect(all.byDay.reduce((sum: number, d: { webOrders: number }) => sum + d.webOrders, 0)).toBe(1);
+    expect(all.funnel).toContainEqual({ stage: 'WEB_ORDER', count: 1 });
+  });
+});

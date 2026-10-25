@@ -29,15 +29,18 @@ export interface RetriggerFact {
   lng: number | null;
   accuracyM: number | null;
   addressText: string | null;
+  /** [PRIV2-S1] What this press said, if anything. A repeat press is its own
+   *  testimony: collapsing it onto the live alert must not drop its words. */
+  note: string | null;
   counterpartyUserId: string | null;
   actorRole: string;
   clientCreatedAt: Date | null;
 }
 
-type SummaryRow = { seq: number; at: Date; source: string; lat: number | null; lng: number | null; accuracyM: number | null; addressText: string | null; counterpartyUserId: string | null; actorRole: string; clientCreatedAt: Date | null };
+type SummaryRow = { seq: number; at: Date; source: string; lat: number | null; lng: number | null; accuracyM: number | null; addressText: string | null; note: string | null; counterpartyUserId: string | null; actorRole: string; clientCreatedAt: Date | null };
 
 function toSummary(r: SummaryRow) {
-  return { seq: r.seq, at: r.at.toISOString(), source: r.source, lat: r.lat, lng: r.lng, accuracyM: r.accuracyM, addressText: r.addressText, counterpartyUserId: r.counterpartyUserId, actorRole: r.actorRole, clientCreatedAt: r.clientCreatedAt?.toISOString() ?? null };
+  return { seq: r.seq, at: r.at.toISOString(), source: r.source, lat: r.lat, lng: r.lng, accuracyM: r.accuracyM, addressText: r.addressText, note: r.note, counterpartyUserId: r.counterpartyUserId, actorRole: r.actorRole, clientCreatedAt: r.clientCreatedAt?.toISOString() ?? null };
 }
 
 /** Append one fact INSIDE the caller's transaction, after the caller's
@@ -49,7 +52,7 @@ export async function appendRetrigger(tx: Prisma.TransactionClient, sosAlertId: 
   // then reads a strictly greater number.
   const { retriggerCount: seq } = await tx.sosAlert.findUniqueOrThrow({ where: { id: sosAlertId }, select: { retriggerCount: true } });
   await tx.sosRetrigger.create({
-    data: { tenantId, sosAlertId, seq, requestKey, at: fact.at, source: fact.source, lat: fact.lat, lng: fact.lng, accuracyM: fact.accuracyM, addressText: fact.addressText, counterpartyUserId: fact.counterpartyUserId, actorRole: fact.actorRole as never, clientCreatedAt: fact.clientCreatedAt },
+    data: { tenantId, sosAlertId, seq, requestKey, at: fact.at, source: fact.source, lat: fact.lat, lng: fact.lng, accuracyM: fact.accuracyM, addressText: fact.addressText, note: fact.note, counterpartyUserId: fact.counterpartyUserId, actorRole: fact.actorRole as never, clientCreatedAt: fact.clientCreatedAt },
   });
   await refreshSummary(tx, sosAlertId);
   return { seq };

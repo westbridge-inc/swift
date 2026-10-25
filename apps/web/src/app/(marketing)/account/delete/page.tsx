@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
+import { site } from '@/site.config';
 
 // Google Play's account-deletion policy requires a PUBLICLY reachable URL, in
 // addition to the in-app path — reachable by someone who has already
@@ -38,10 +39,10 @@ const KEPT = [
 const GONE = [
   'Your name, phone number and email',
   'Your profile photo and verification selfie',
-  'Your identity documents — the stored file is deleted and its encryption key destroyed, so the data cannot be recovered even from a backup',
+  'Your identity documents — deleted so they cannot be recovered, even from a backup',
   'Your saved addresses and precise locations',
   'Your cart, favourites, emergency contacts and any active trip-share links',
-  'Your sign-in sessions and push notification tokens',
+  'Your sign-ins on all devices and the details Swift uses to send app notifications',
 ];
 
 export default function DeleteAccountPage() {
@@ -50,7 +51,7 @@ export default function DeleteAccountPage() {
       <div className="max-w-3xl">
         <h1 className="text-4xl font-extrabold tracking-tight">Delete your Swift account</h1>
         <p className="mt-4 text-lg text-[var(--swift-muted)]">
-          Swift is operated by Westbridge Inc. You can delete your Swift account and its personal
+          Swift is operated by {site.legalEntityName} (registration no. {site.registrationNo}), {site.address}, phone {site.phone}. You can delete your Swift account and its personal
           data at any time. This page explains how, and exactly what is removed and what we are
           required to keep.
         </p>
@@ -75,20 +76,23 @@ export default function DeleteAccountPage() {
           If you no longer have the app
         </h2>
         <p className="mt-3 text-[var(--swift-muted)]">
-          Email <b><a className="underline" href="mailto:privacy@swift.gy">privacy@swift.gy</a></b> from
+          Email <b><a className="underline" href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a></b> from
           the address on your account, or include the phone number you signed up with, and ask for
           your account to be deleted. We verify that the request really comes from the account
           holder before acting on it — that check protects you, and it is why this page has no
-          one-click form. You will get confirmation when it is done.
+          one-click form. You will get confirmation when it is done. We complete verified requests within one month.
         </p>
 
         <h2 className="mt-12 text-2xl font-bold tracking-tight">
           Business, driver and advertiser accounts
         </h2>
         <p className="mt-3 text-[var(--swift-muted)]">
-          The same right applies. Because these accounts carry payouts, listings and settlement
-          records, anything outstanding is settled first — you will be told exactly what is
-          outstanding rather than being left guessing.
+          The same right applies. Because these accounts carry listings and payment-confirmation
+          records, anything outstanding is resolved first — you will be told exactly what is
+          outstanding rather than being left guessing. If a rider still holds a customer&apos;s cash from
+          an order, the rider&apos;s account deletion waits until our operations team records it resolved,
+          or for at most 90 days; the cash record is kept as part of the order record. A
+          customer&apos;s own deletion is never blocked by this.
         </p>
 
         <h2 className="mt-12 text-2xl font-bold tracking-tight">What is deleted</h2>
@@ -119,10 +123,10 @@ export default function DeleteAccountPage() {
 
         <h2 className="mt-12 text-2xl font-bold tracking-tight">Your other rights</h2>
         <p className="mt-3 text-[var(--swift-muted)]">
-          Guyana&apos;s Data Protection Act 2023 also gives you the right to access your data,
+          Guyana&apos;s Data Protection Act 2023 will give you the right, once in force, to access your data,
           correct it, restrict or object to how it is processed, and receive a copy in a portable
-          form. You can export your data from the same <b>Personal data</b> screen in the app, or
-          email <a className="underline" href="mailto:privacy@swift.gy">privacy@swift.gy</a>. The
+          form. Swift honours these rights now. You can export your data from the same <b>Personal data</b> screen in the app, or
+          email <a className="underline" href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a>. The
           full detail is in our{' '}
           <Link className="underline" href="/legal/privacy">
             privacy policy

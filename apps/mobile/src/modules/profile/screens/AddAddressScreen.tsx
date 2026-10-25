@@ -5,13 +5,12 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { useAddAddress, useUpdateAddress } from '../../../hooks/customer';
-import { useLocationStore } from '../../../stores/locationStore';
 import { BrandSwitch, Header, LabeledInput, PillButton, Screen, T } from '../../../kit';
 
 const GUTTER = space['2xl'];
 
 // Composed from kit input language (no kit frame). Coordinates come from the
-// device fix or the map picker — an address without a pin can't be delivered.
+// map picker — an address without a pin can't be delivered.
 //
 // [S14] Doubles as the EDIT screen. `route.params.address` switches it: the
 // fields start from the saved row instead of blank, and Save sends
@@ -23,7 +22,6 @@ export function AddAddressScreen() {
   const editing = route.params?.address as
     | { id: string; label?: string; addressLine1?: string; addressLine2?: string; city?: string; instructions?: string; isDefault?: boolean; latitude?: number; longitude?: number }
     | undefined;
-  const { latitude: devLat, longitude: devLng } = useLocationStore();
   const addAddress = useAddAddress();
   const updateAddress = useUpdateAddress();
   const saving = editing ? updateAddress : addAddress;
@@ -37,12 +35,13 @@ export function AddAddressScreen() {
   const [pin, setPin] = useState<{ latitude: number; longitude: number } | null>(
     editing?.latitude != null && editing?.longitude != null
       ? { latitude: editing.latitude, longitude: editing.longitude }
-      // A new address starts on the device fix; an edited one keeps ITS pin,
-      // never the phone's current position — editing the gate code from work
-      // must not silently move home across town.
-      : devLat != null && devLng != null
-        ? { latitude: devLat, longitude: devLng }
-        : null,
+      // An edited address keeps ITS pin, never the phone's current position —
+      // editing the gate code from work must not silently move home across town.
+      // [PINS · row 107] A NEW address has no pin until its owner confirms one
+      // on the map (the picker opens where the phone is). The phone's position
+      // used to be taken as the pin unseen: adding "Work" from home saved
+      // home's point, and the rider went there.
+      : null,
   );
 
   // Map picker returns via merged params.
@@ -139,7 +138,7 @@ export function AddAddressScreen() {
               <T variant="body" weight="medium">
                 Set as default address
               </T>
-              <BrandSwitch value={isDefault} onChange={setIsDefault} />
+              <BrandSwitch label="Set as default address" value={isDefault} onChange={setIsDefault} />
             </View>
           )}
 

@@ -95,6 +95,72 @@ export async function blockedCategoryIdsForVendors(prisma: Db, tenantId: string,
   return out;
 }
 
+/**
+ * [S2-1] The tenant's hidden-only item ids — items whose discovery tags exist
+ * but point ONLY at categories that are not ACTIVE (HIDDEN, MERGED, PENDING).
+ *
+ * The taxonomy is a join table without a Prisma relation, so the rule is
+ * resolved to ids here and callers exclude them from the ITEM where-clause
+ * BEFORE a page or fixed window is capped. A hidden row ranked ahead of a
+ * listable one must never consume the page budget: the page, its cursor and
+ * the counts then all see the same eligible population. Untagged items and
+ * items with at least one ACTIVE tag are not in the result and stay listable,
+ * exactly as `listableItemsForVendors` judges them.
+ */
+export async function hiddenOnlyItemIds(prisma: Db, tenantId: string): Promise<string[]> {
+  const categories = await prisma.discoveryCategory.findMany({
+    where: { tenantId },
+    select: { id: true, status: true },
+  });
+  const active = new Set(categories.filter((c) => c.status === 'ACTIVE').map((c) => c.id));
+  const nonActive = categories.filter((c) => c.status !== 'ACTIVE').map((c) => c.id);
+  // With no non-ACTIVE category there is nothing that can hide a tagged item.
+  if (nonActive.length === 0) return [];
+  const hiddenTagged = await prisma.itemDiscoveryCategory.findMany({
+    where: { tenantId, categoryId: { in: nonActive } },
+    select: { itemId: true },
+    distinct: ['itemId'],
+  });
+  const candidates = [...new Set(hiddenTagged.map((t) => t.itemId))];
+  // With no ACTIVE category at all, every tagged item is hidden-only; the
+  // rescue lookup below would be dead work with an empty `in`.
+  if (candidates.length === 0 || active.size === 0) return candidates;
+  const rescued = await prisma.itemDiscoveryCategory.findMany({
+    where: { tenantId, itemId: { in: candidates }, categoryId: { in: [...active] } },
+    select: { itemId: true },
+    distinct: ['itemId'],
+  });
+  const rescueIds = new Set(rescued.map((t) => t.itemId));
+  return candidates.filter((id) => !rescueIds.has(id));
+}
+
+/** Shared public-listing projection gate for Market and guest search. */
+export async function listableItemsForVendors<T extends { id: string; vendorId: string }>(
+  prisma: Db, tenantId: string, rows: readonly T[],
+): Promise<T[]> {
+  if (rows.length === 0) return [];
+  const gated = await blockedCategoryIdsForVendors(prisma, tenantId, rows.map((r) => r.vendorId));
+  const tags = await prisma.itemDiscoveryCategory.findMany({
+    where: { tenantId, itemId: { in: rows.map((r) => r.id) } },
+    select: { itemId: true, categoryId: true },
+  });
+  // Untagged catalogue items remain listable. A tagged item needs at least
+  // one active discovery category; a hidden-only tag must not publish it in
+  // "All" or search. The existing document blocks still apply, including to mixed tags.
+  const activeCategories = tags.length ? await prisma.discoveryCategory.findMany({
+    where: { tenantId, id: { in: [...new Set(tags.map((t) => t.categoryId))] }, status: 'ACTIVE' },
+    select: { id: true },
+  }) : [];
+  const activeIds = new Set(activeCategories.map((c) => c.id));
+  const byItem = new Map<string, string[]>();
+  for (const tag of tags) byItem.set(tag.itemId, [...(byItem.get(tag.itemId) ?? []), tag.categoryId]);
+  return rows.filter((r) => {
+    const categoryIds = byItem.get(r.id) ?? [];
+    return (categoryIds.length === 0 || categoryIds.some((id) => activeIds.has(id))) &&
+      !categoryIds.some((id) => gated.get(r.vendorId)?.has(id));
+  });
+}
+
 /** Checkout: a line in a BLOCK_ORDER category whose licence is not valid fails the order — the lapse-after-publish case. */
 export async function assertOrderable(prisma: Db, vendorId: string, items: ReadonlyArray<{ id: string; name: string }>, now = new Date()): Promise<void> {
   if (items.length === 0) return;

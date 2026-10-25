@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { SearchService, type SearchClientLike, type SearchIndexLike } from '../modules/search/search.service';
 import { FilterValueRejected, ITEM_INDEX, VENDOR_INDEX, docId } from '../modules/search/search-scope';
@@ -48,8 +49,9 @@ class FakeClient implements SearchClientLike {
   index(uid: string): FakeIndex { let i = this.indexes.get(uid); if (!i) { i = new FakeIndex(uid); this.indexes.set(uid, i); } return i; }
 }
 
-const prisma = new PrismaClient();
-const RUN = nanoid(6).toLowerCase();
+const prisma = testPrismaClient();
+// No '_' in these ids: a tenant id ending in '_' cannot become a search document id (search-scope.ts isIdPart).
+const RUN = nanoid(6).toLowerCase().replace(/_/g, 'x');
 const TENANT_A = `tenant-ss-a-${RUN}`;
 const TENANT_B = `tenant-ss-b-${RUN}`;
 const TENANT_DEAD = `tenant-ss-dead-${RUN}`;

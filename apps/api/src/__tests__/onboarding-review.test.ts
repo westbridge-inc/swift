@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -11,6 +11,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { PartnerService } from '../modules/partner/partner.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // The onboarding review LOOP (found live 2026-07-12): documents and new
@@ -76,7 +77,7 @@ describe('onboarding review loop', () => {
     );
 
     const doc = await verification.submitDocument(
-      applicant.id, 'MOVER', 'police_clearance', 'storage://test/pc.jpg', 'v1',
+      applicant.id, 'MOVER', 'hire_car_driver_licence', await ownedVerificationFixture(app.prisma, applicant.id), 'v1',
     );
     expect(doc.status).toBe('PENDING');
 
@@ -95,7 +96,7 @@ describe('onboarding review loop', () => {
     const result = await partners.becomePartner(founder.id, {
       role: 'VENDOR',
       business: {
-        name: `Review Loop Deli ${nanoid(4)}`,
+        name: `Review Loop Deli ${wordFreeTag(8)}`,
         vendorType: 'RESTAURANT',
         phone: '+5926667777',
         addressLine1: '9 Queue Street',

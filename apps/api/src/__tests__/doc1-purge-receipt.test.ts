@@ -41,7 +41,7 @@ const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-purge-rec
 const storage = new LocalStorageProvider();
 
 async function storedDocument(original: Buffer, retentionExpiresAt: Date) {
-  const { url } = await storage.upload({ buffer: original, filename: `doc-${nanoid(6)}.jpg`, mimeType: 'image/jpeg', folder: 'documents' });
+  const { url } = await storage.upload({ buffer: original, filename: `doc-${nanoid(6)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
   const sha256 = crypto.createHash('sha256').update(original).digest('hex');
   await app.prisma.encryptedObject.create({ data: { fileKey: url, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: original.length, sha256, createdBy: userId } });
   const doc = await app.prisma.verificationDocument.create({ data: { userId, role: 'RIDER', docType: 'national_id', fileUrl: url, status: 'APPROVED', retentionExpiresAt } });
@@ -105,7 +105,7 @@ describe('[DOC-INV-7] proof of purge', () => {
       delete: async () => undefined,
       getObject: async () => original,
     };
-    const evidence = await system(() => shredAndProbe(app.prisma, sticky, url));
+    const evidence = await system(() => shredAndProbe(app.prisma, sticky, { fileKey: url, userId, documentId: doc.id }));
     expect(evidence.probe).toBe('FAILED');
     expect(evidence.sha256 && Buffer.from(evidence.sha256).toString('hex')).toBe(sha256);
     expect(Number(evidence.bytesDeleted)).toBe(original.length);

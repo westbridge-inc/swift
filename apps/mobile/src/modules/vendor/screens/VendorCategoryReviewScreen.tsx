@@ -6,6 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useCategorySuggestions, useResolveCategorySuggestion } from '../../../hooks/vendorops';
 import { Card, EmptyState, ErrorState, LoadingBlock, PhotoPlaceholder, Screen, T } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { toast } from '../../../kit/toast';
 import { haptic } from '../../../lib/haptics';
 
@@ -40,7 +41,7 @@ export function VendorCategoryReviewScreen() {
     itemId: string;
     itemName: string;
     imageUrl: string | null;
-    suggestions: Array<{ id: string; slug: string; name: string; emoji: string; confidence: number; stage: string }>;
+    suggestions: Array<{ id: string; slug: string; name: string; confidence: number; stage: string }>;
   }> = Array.isArray(q.data) ? q.data : [];
 
   const act = (id: string, action: 'accept' | 'dismiss', categoryName: string) => {
@@ -61,7 +62,9 @@ export function VendorCategoryReviewScreen() {
   return (
     <Screen>
       <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.lg, paddingBottom: space.md }}>
-        <Pressable onPress={() => navigation.goBack()} accessibilityRole="button" accessibilityLabel="Back" hitSlop={8}>
+        {/* [UI-SWEEP U-P2 census] Back keeps to the left (it stretched across the
+            column, so the whole row was Back) and is 44pt on its own. */}
+        <Pressable onPress={() => navigation.goBack()} accessibilityRole="button" accessibilityLabel="Back" hitSlop={8} style={{ ...touchTarget(24), alignSelf: 'flex-start' }}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </Pressable>
         <T variant="title" style={{ marginTop: space.md }}>
@@ -116,7 +119,7 @@ export function VendorCategoryReviewScreen() {
                   }}
                 >
                   <T variant="body" style={{ flex: 1 }}>
-                    {s.emoji} {s.name}
+                    {s.name}
                   </T>
 
                   {/* Dismiss is quiet and accept is the brand action: the store

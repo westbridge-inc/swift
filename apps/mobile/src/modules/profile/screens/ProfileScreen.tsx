@@ -9,13 +9,18 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { useLiveOrders, useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo } from '../../../kit';
+import { Chip, EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo, useLogoutConfirm } from '../../../kit';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { MonitoringControl } from '../../safety/MonitoringControl';
 import { BrandSwitch } from '../../../kit/controls';
+import { toast } from '../../../kit/toast';
+import { retryRead } from '../../../lib/appQueryPolicy';
+import { profileIdRowSub } from '../../../lib/customerIdCopy';
+import { myRatingWords } from '../../../lib/myRatingWords';
 
 const GUTTER = space['2xl'];
 
@@ -56,7 +61,7 @@ function RowGroup({ children }: { children: React.ReactNode }) {
 /** [DCR-1 NR1-03] Marketing messages toggle — the row the served consent
  *  text promises ("Account -> Marketing messages"). The switch reflects the
  *  ledger's current state; a flip is a new append-only consent row. */
-function MarketingConsentRow() {
+export function MarketingConsentRow() {
   const qc = useQueryClient();
   const consent = useQuery({
     queryKey: ['consent'],
@@ -67,10 +72,24 @@ function MarketingConsentRow() {
   });
   const marketingState = consent.data?.consents.find((c) => c.documentType === 'marketing_consent')?.state;
   const granted = marketingState === 'granted' || marketingState === 're_granted';
+  // [UI-SWEEP U71] The row states a choice only once the ledger has answered.
+  // A failed or unanswered read used to say "Off", telling a person who had
+  // agreed to marketing that they had not; a failed change snapped back
+  // without a word.
+  const unknown = consent.data === undefined;
   const toggle = useMutation({
     mutationFn: (next: boolean) => customerApi.setMarketingConsent(next),
+    onError: () => toast.error('Marketing messages were not changed', 'Check your connection and try again.'),
     onSettled: () => qc.invalidateQueries({ queryKey: ['consent'] }),
   });
+  // [#1946 review S4-1] A change the server accepted (its success is the
+  // authority) is the choice until a newer read answers, so a failed
+  // confirming read never shows the old choice again.
+  const acceptedChange = toggle.isSuccess && consent.dataUpdatedAt < toggle.submittedAt;
+  const on = toggle.isPending || acceptedChange ? toggle.variables === true : granted;
+  // [#1946 review S4-2] Try again shows "Checking your choice…" until the
+  // answer: a refetch with no data puts the query back to pending.
+  const readFailed = unknown && consent.isError;
   return (
     <SettingsRow
       icon="gift"
@@ -78,14 +97,27 @@ function MarketingConsentRow() {
       // affordance, so the row goes plain. Chips mark destinations.
       plain
       label="Marketing messages"
-      sub={granted ? 'On — offers and promos' : 'Off — service messages only'}
+      sub={
+        readFailed
+          ? 'Could not load your choice. Try again.'
+          : unknown
+            ? 'Checking your choice…'
+            : on
+              ? 'On — offers and promos'
+              : 'Off — service messages only'
+      }
       onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
       right={
-        <BrandSwitch
-          value={toggle.isPending ? !granted : granted}
-          disabled={consent.isLoading || toggle.isPending}
-          onChange={(next) => toggle.mutate(next)}
-        />
+        readFailed ? (
+          <Chip label="Try again" onPress={() => consent.refetch()} />
+        ) : (
+          <BrandSwitch
+            label="Marketing messages"
+            value={on}
+            disabled={unknown || toggle.isPending}
+            onChange={(next) => toggle.mutate(next)}
+          />
+        )
       }
     />
   );
@@ -94,17 +126,21 @@ function MarketingConsentRow() {
 export function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
-  const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
+  const { isAuthenticated, promptLogin, user, setIntent } = useAuthStore();
   const profile = useProfile<any>();
   const myRating = useMyRating();
   // [Wave 3 · ref 05] The Orders tile's badge is the LIVE order count — a real
   // number from the live query, never unread-notifications wearing its badge.
   const liveOrders = useLiveOrders();
-  const [confirmLogout, setConfirmLogout] = useState(false);
+  // Kit logout popup (51), now the one shared ask. The cart is a server
+  // query and the account keeps it; logout clears this device's copy.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'You’ll be signed out on this device. Your cart and account details stay with your account.',
+  });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
   const [avatarBroken, setAvatarBroken] = useState(false);
-  // [F-022-18] a failure latch must clear when the URL changes (new selfie).
+  // [F-022-18] a failure latch must clear when the URL changes (a new picture).
   const avatarKey = (profile.data as { avatar?: string } | undefined)?.avatar ?? user?.avatar ?? '';
   React.useEffect(() => { setAvatarBroken(false); }, [avatarKey]);
 
@@ -152,7 +188,8 @@ export function ProfileScreen() {
       </Screen>
     );
   }
-  if (profile.isError) {
+  if (profile.isError && (!profile.data || !retryRead(0, profile.error))) {
+    // Cached details are useful during outages, not after permanent rejection.
     // [REPORT-022 F-022-19] An API failure must never trap the session: the
     // account controls that don't depend on profile data stay reachable.
     return (
@@ -160,19 +197,10 @@ export function ProfileScreen() {
         <ErrorState onRetry={() => profile.refetch()} />
         <View style={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'], gap: space.md }}>
           <PillButton label="Switch app" variant="soft" onPress={() => setSwitcherOpen(true)} />
-          <PillButton label="Log out" icon="log-out" variant="soft" onPress={() => setConfirmLogout(true)} />
+          <PillButton label="Log out" icon="log-out" variant="soft" onPress={requestLogout} />
         </View>
         <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
-        <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
-          <IconChip icon="log-out" size={56} />
-          <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-            Log out of Swift?
-          </PopupTitle>
-          <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-            <PillButton label="Log out" size="md" onPress={() => { setConfirmLogout(false); logout(); }} />
-            <PillButton label="Stay signed in" variant="soft" size="md" onPress={() => setConfirmLogout(false)} />
-          </View>
-        </PopupCard>
+        {logoutDialog}
       </Screen>
     );
   }
@@ -188,9 +216,13 @@ export function ProfileScreen() {
   // THE TRUST HALO's facts — every segment is real, unlit = the honest to-do.
   // [ref 05] `next` speaks the reference's imperative ("place your first
   // order"), not the fact's past-tense label read backwards.
+  // [Owner 16 Oct: customers take no photos] A customer is never asked for a
+  // picture of themselves, so no fact here is about one. The ID on file is not
+  // a fact either: an ID only on file is never called verified (owner 8 Oct),
+  // and the caption below counts facts as "Verified n of m". The "Your ID" row
+  // further down says where the customer's ID stands.
   const facts: { on: boolean; label: string; next: string }[] = [
     { on: true, label: 'Phone verified', next: 'verify your phone' },
-    { on: !!p?.selfieCapturedAt, label: 'Selfie on file', next: 'add a selfie' },
     { on: orders > 0, label: 'First order placed', next: 'place your first order' },
   ];
   const nextFact = facts.find((f) => !f.on);
@@ -213,17 +245,26 @@ export function ProfileScreen() {
           entering={FadeInDown.duration(320).reduceMotion(ReduceMotion.System)}
           style={{ paddingTop: insets.top + space.lg, paddingHorizontal: GUTTER }}
         >
+          {profile.isError ? (
+            <View style={{ gap: space.sm, marginBottom: space.md }}>
+              <T variant="caption" tone="muted">
+                Couldn’t refresh your profile. Showing the last loaded details.
+              </T>
+              <PillButton size="sm" label="Try again" onPress={() => { void profile.refetch(); }} />
+            </View>
+          ) : null}
           {/* [ref 05] The page names itself before it names the person. */}
           <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>ACCOUNT</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
-            {/* The camera chip is a REAL action (>=44 hit target with hitSlop)
+            {/* The edit chip is a REAL action (>=44 hit target with hitSlop)
                 — it opens Personal data. It loses its maroon fill: on paper a
                 control is white with a hairline edge, and maroon is spent on
-                the one brand moment further down. */}
+                the one brand moment further down. A pencil, not a camera:
+                Personal data has no picture action for a customer. */}
             <TrustHalo size={80} stroke={4} facts={facts.map((f) => f.on)}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Edit your photo and personal data"
+                accessibilityLabel="Edit your personal data"
                 hitSlop={12}
                 onPress={() => navigation.navigate('PersonalData')}
               >
@@ -239,7 +280,7 @@ export function ProfileScreen() {
                   </View>
                 )}
                 <View style={{ position: 'absolute', right: -2, bottom: -2, width: 26, height: 26, borderRadius: radius.full, backgroundColor: color.surface.base, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: color.border.subtle }}>
-                  <Feather name="camera" size={13} color={color.text.primary} />
+                  <Feather name="edit-2" size={13} color={color.text.primary} />
                 </View>
               </Pressable>
             </TrustHalo>
@@ -255,15 +296,16 @@ export function ProfileScreen() {
               ) : null}
             </View>
           </View>
-          {/* [ref 05] "✓ Verified 2 of 3 — next: place your first order" —
+          {/* [ref 05] "✓ 2 of 3 done — next: place your first order" —
               the check is drawn, the count is real, the next step is an
-              imperative the person can act on. */}
+              imperative the person can act on. [R7] Never "Verified": a selfie
+              and a first order are not anything a person on our team checked. */}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: space.md }}>
             <Feather name="check-circle" size={12} color={color.success} />
             <T variant="caption" tone="muted">
               {nextFact
-                ? `Verified ${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.next}`
-                : 'Verified — account complete'}
+                ? `${facts.filter((f) => f.on).length} of ${facts.length} done — next: ${nextFact.next}`
+                : 'Account complete'}
             </T>
           </View>
 
@@ -312,9 +354,14 @@ export function ProfileScreen() {
           {/* THE CHIP MARKS A DESTINATION, NOT A LABEL. Every row here used
               to carry the same pale square, which made the chip wallpaper and
               flattened the whole list. Now: a row that takes you SOMEWHERE
-              keeps its chip; a row that is a fact you read (your rating), a
-              consent you flip in place, or a legal document you open gets no
-              chip at all. Fewer chips, so a chip means something. */}
+              keeps its chip; a consent you flip in place or a legal document
+              you open gets no chip at all. Fewer chips, so a chip means
+              something.
+              [UI-SWEEP U-P1, owner 22 Oct] But ONE LIST, ONE ROW SHAPE: a bare
+              "Your rating" under five tiled rows read as broken (no tile, its
+              text at the left edge instead of the text column). Every row in a
+              list is the same SettingsRow, all tiled or all plain
+              (ProfileScreen.rows.test.ts). */}
 
           {/* YOUR ACCOUNT */}
           <T variant="micro" tone="muted" style={{ marginTop: space['2xl'], marginBottom: space.sm }}>YOUR ACCOUNT</T>
@@ -350,28 +397,29 @@ export function ProfileScreen() {
             />
             <SettingsRow
               icon="shield"
-              label="Identity verification"
-              // No status chip here on purpose: /customer/profile carries no
-              // review state for a customer's ID submission, and a chip that
-              // guessed "Pending" from a local flag would be the UI lying.
-              // Registered as a FINDING — when the server returns the
-              // submission status, it lands here and nowhere else.
-              sub="Unlocks bigger orders and rides"
+              label="Your ID"
+              // [Owner ruling 8 Oct 2026 — CUSTOMER ID] The line is the server's own
+              // answer (/customer/profile `idCheck`), never a guess from a local
+              // flag: "on file" for an ID no person reviewed, "checked" only when
+              // one did. An older server sends nothing and the line claims nothing.
+              sub={profileIdRowSub(p?.idCheck)}
               onPress={() => navigation.navigate('IdentityVerification')}
             />
             <SettingsRow
               icon="star"
-              // A fact about you, not a place — the value IS the row.
-              plain
+              // A fact about you; it opens what the rating means. Tiled like
+              // every row above it [UI-SWEEP U-P1].
               label="Your rating"
-              sub={myRating.data?.displayRating != null
-                ? `${myRating.data.displayRating.toFixed(1)} · ${myRating.data.ratingBucket}`
-                : 'No rating yet'}
+              sub={myRatingWords(myRating, ' · ')}
               onPress={() => setRatingInfo(true)}
             />
           </RowGroup>
 
           {/* PRIVACY — reference and legal, so the whole section reads plain. */}
+          {/* [73] SAFETY — the monitoring opt-in the server has always honoured, now reachable. */}
+          <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>SAFETY</T>
+          <MonitoringControl />
+
           <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>PRIVACY</T>
           <RowGroup>
             <MarketingConsentRow />
@@ -446,18 +494,17 @@ export function ProfileScreen() {
             label="Log out"
             icon="log-out"
             variant="outline"
-            onPress={() => setConfirmLogout(true)}
+            onPress={requestLogout}
             style={{ marginTop: space['2xl'] }}
           />
         </View>
       </ScrollView>
 
-      {/* Logout confirm (kit 51) */}
       {/* Movement R9 — why customers have a rating (aggregate-only honesty) */}
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : 'No rating yet'}
+          {myRatingWords(myRating, ' ')}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.
@@ -468,26 +515,8 @@ export function ProfileScreen() {
         </View>
       </PopupCard>
 
-      <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
-        <IconChip icon="log-out" size={56} />
-        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          Log out of Swift?
-        </PopupTitle>
-        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          Your cart and session leave this device; your account keeps everything.
-        </T>
-        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-          <PillButton
-            label="Log Out"
-            size="md"
-            onPress={() => {
-              setConfirmLogout(false);
-              logout();
-            }}
-          />
-          <PillButton label="Stay signed in" variant="soft" size="md" onPress={() => setConfirmLogout(false)} />
-        </View>
-      </PopupCard>
+      {/* Logout confirm (kit 51) */}
+      {logoutDialog}
 
       <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
     </Screen>

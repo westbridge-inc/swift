@@ -34,7 +34,8 @@
 // ---------------------------------------------------------------------------
 
 import type { QueryClient } from '@tanstack/react-query';
-import { getSelectedStore } from './auth';
+import { useSyncExternalStore } from 'react';
+import { getSelectedStore, subscribeSelectedStore } from './auth';
 
 /** Namespace that begins every store-owned query key. */
 export const STORE_SCOPE = 'store';
@@ -64,7 +65,7 @@ export function storeKey(
 
 /** The store this render belongs to. The dashboard shell remounts when it changes. */
 export function useStoreId(): string | null {
-  return getSelectedStore();
+  return useSyncExternalStore(subscribeSelectedStore, getSelectedStore, () => null);
 }
 
 // --- dirty drafts ----------------------------------------------------------

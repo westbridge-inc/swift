@@ -6,9 +6,12 @@ import { useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { withAlpha, color, font, fontSize, radius, space } from '@swift/ui';
 import { useChatMessages, useChatRoom, useSendMessage } from '../../../hooks/chat';
+import { chatSendRefusal } from '../sendRefusal';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBlockUser, useReportContent } from '../../../hooks/customer';
 import { ActionSheet, CircleChip, ConfirmDialog, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
+import { errorMessage } from '../../../lib/apiError';
+import { CHAT_REPORT_REASONS } from '../../../lib/reportReasons';
 
 const GUTTER = space['2xl'];
 
@@ -57,6 +60,9 @@ export function ConversationScreen() {
   const counterpartName: string = fromRoom?.user?.firstName ?? (title !== 'Chat' ? title : 'this person');
 
   const [menuOpen, setMenuOpen] = useState(false);
+  // [R19 · Child Safety Standards] Reporting asks for a reason, Child safety (CSAE) among them; it used to file
+  // every chat report as HARASSMENT. CSAE pages operations at once (server).
+  const [reasonOpen, setReasonOpen] = useState(false);
   const [confirmBlock, setConfirmBlock] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const blockUser = useBlockUser();
@@ -72,7 +78,13 @@ export function ConversationScreen() {
     setDraft('');
     // [WR-035] A failed send restores the draft (unless they typed anew) —
     // clearing it optimistically must never eat the message.
-    send.mutate(text, { onError: () => setDraft((cur) => (cur.trim() ? cur : text)) });
+    send.mutate(text, {
+      onError: (error) => {
+        setDraft((cur) => (cur.trim() ? cur : text));
+        const refusal = chatSendRefusal(error);
+        if (refusal) setNotice(refusal);
+      },
+    });
   };
 
   return (
@@ -90,7 +102,14 @@ export function ConversationScreen() {
       ) : (!paramRoomId && room.isError) || !roomId ? (
         <ErrorState
           onRetry={() => room.refetch()}
-          message="Chat opens once a rider is on your order."
+          message={
+            // [NO-DEAD-ENDS] The room opens without a rider, so a failed open
+            // is a failure (offline, or a refusal the server names), never
+            // "wait for a rider", which had people waiting for nothing.
+            room.isError
+              ? errorMessage(room.error, 'Couldn’t open this chat. Check your connection and try again.')
+              : 'Chat opens once a rider is on your order.'
+          }
         />
       ) : (
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
@@ -214,22 +233,7 @@ export function ConversationScreen() {
             onPress: () => {
               setMenuOpen(false);
               if (!counterpartId) return;
-              // The most recent message from them is the thing being reported.
-              // Falling back to the person means a report is still filed when
-              // the objectionable part was a profile or a name rather than a
-              // message — never a silent no-op.
-              const theirLast = msgs.filter((m) => m.senderId === counterpartId).slice(-1)[0];
-              reportContent.mutate(
-                theirLast?.id
-                  ? { targetType: 'CHAT_MESSAGE', targetId: theirLast.id, reason: 'HARASSMENT' }
-                  : { targetType: 'USER', targetId: counterpartId, reason: 'HARASSMENT' },
-                {
-                  // Said plainly, both ways. A report that appears to vanish
-                  // is why people stop reporting.
-                  onSuccess: () => setNotice('Reported. Our team will review this conversation.'),
-                  onError: () => setNotice('That report did not send. Please try again.'),
-                },
-              );
+              setReasonOpen(true);
             },
           },
           {
@@ -239,6 +243,35 @@ export function ConversationScreen() {
             onPress: () => { setMenuOpen(false); setConfirmBlock(true); },
           },
         ]}
+      />
+
+      <ActionSheet
+        open={reasonOpen}
+        onClose={() => setReasonOpen(false)}
+        title="Why are you reporting this?"
+        actions={CHAT_REPORT_REASONS.map((reason) => ({
+          label: reason.label,
+          onPress: () => {
+            setReasonOpen(false);
+            if (!counterpartId) return;
+            // The most recent message from them is the thing being reported.
+            // Falling back to the person means a report is still filed when
+            // the objectionable part was a profile or a name rather than a
+            // message — never a silent no-op.
+            const theirLast = msgs.filter((m) => m.senderId === counterpartId).slice(-1)[0];
+            reportContent.mutate(
+              theirLast?.id
+                ? { targetType: 'CHAT_MESSAGE', targetId: theirLast.id, reason: reason.key }
+                : { targetType: 'USER', targetId: counterpartId, reason: reason.key },
+              {
+                // Said plainly, both ways. A report that appears to vanish
+                // is why people stop reporting.
+                onSuccess: () => setNotice('Reported. Our team will review this conversation.'),
+                onError: () => setNotice('That report did not send. Please try again.'),
+              },
+            );
+          },
+        }))}
       />
 
       <ConfirmDialog

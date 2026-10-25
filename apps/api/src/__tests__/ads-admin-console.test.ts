@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -15,6 +15,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { AdsRevenueService } from '../modules/ads/revenue.service';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { REAL_PNG } from './helpers/real-image';
 
 // Ads §15 operator console. The revenue MERGE GATE is the dashboards law /
 // acceptance #11: booked revenue must tie to paid invoices EXACTLY (delta 0)
@@ -40,7 +41,7 @@ const WEEK2 = new Date('2026-10-12T00:00:00Z');
 // Thursday of week 1: 3 full days of week 1 elapsed; week 2 not started.
 const NOW = new Date('2026-10-08T12:00:00Z');
 
-const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 async function makeAdmin() {
   seq += 1;
@@ -106,6 +107,7 @@ function multipartBody(fields: Record<string, string>, file?: { mime: string; co
 }
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
@@ -124,6 +126,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await app.prisma.houseAd.deleteMany({ where: { id: { in: houseAdIds } } });
   await app.prisma.adCreative.deleteMany({ where: { campaignId: { in: campaignIds } } });
   await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
@@ -176,6 +179,17 @@ describe('§15.8 revenue dashboard — reconciliation MERGE GATE', () => {
     expect(myRows).toHaveLength(1);
     expect(myRows[0]!.bookedGross).toBe(price);
     expect(d.reconciliation.delta).toBe(0);
+  });
+
+  it('recognized revenue follows the Guyana week: Sunday 22:00 in Guyana is day 7, not a finished week', async () => {
+    const svc = new AdsRevenueService(app.prisma);
+    const { placement } = await seedPaidCampaign();
+    // Mon 12 Oct 02:00Z is Sunday 11 Oct 22:00 in Guyana: week 1 has served six whole days, week 2 none.
+    const d = await svc.dashboard('swift-default', WEEK1, WEEK2, new Date('2026-10-12T02:00:00Z'));
+    const w1 = d.weeks.find((w) => w.placementId === placement.id && w.weekStart === '2026-10-05')!;
+    const w2 = d.weeks.find((w) => w.placementId === placement.id && w.weekStart === '2026-10-12')!;
+    expect(w1.recognized).toBe(6000);
+    expect(w2.recognized).toBe(0);
   });
 
   it('a refunded week splits gross/refunded/net and recognizes nothing', async () => {
@@ -268,7 +282,7 @@ describe('§9.1 video transport cap (the 5 MB global-limit bug)', () => {
     const member = await makeCustomer();
     const a = await app.prisma.advertiser.create({ data: { companyName: `Vid ${nanoid(6)}`, industry: 'RETAIL', contactName: 'V', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000002', createdByUserId: member.userId, status: 'APPROVED' } });
     advertiserIds.push(a.id);
-    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: member.userId, role: 'OWNER' } });
+    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: member.userId, role: 'OWNER', acceptedAt: new Date() } });
     const p = await app.prisma.adPlacement.create({ data: { key: `v-${nanoid(6)}`, name: 'Hero', tier: 1, mediaKind: 'VIDEO', weeklyPrice: 50000, slotsPerWeek: 1 } });
     placementIds.push(p.id);
     const c = await app.prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: 'VidCamp', cities: ['*'], startWeek: WEEK1, endWeek: WEEK1, status: 'PENDING_REVIEW' } });

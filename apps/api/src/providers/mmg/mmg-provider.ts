@@ -1,6 +1,8 @@
+import { mmgHistoryQueryFor, mmgHistoryTruncated } from './mmg-history';
 import { fromMajor, fromMinor, toMajorString as majorStringOf } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { isProduction } from '../../utils/runtime-mode';
+import { AppError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
 // MMG (Mobile Money Guyana) — Merchant-Initiated Payments.
@@ -52,7 +54,217 @@ export interface MmgTransaction {
   currencyCode: string;
   reference?: string;
   createdAt?: string;
+  /** The account(s) the money went to (a lookup's creditParty values). */
+  creditParties?: string[];
 }
+
+/**
+ * [MMG checkout 2/6] One transaction as the merchant lookup reports it, with
+ * the three outcomes a verifier must tell apart: MMG answered with the
+ * transaction, MMG does not know the id, or MMG could not be asked. Only a
+ * `found` answer is evidence. Every field MMG did not send, or sent in a
+ * form that cannot be read exactly, is null: never a default.
+ */
+export type MmgLookupDetail =
+  | {
+    outcome: 'found';
+    transactionId: string;
+    status: MmgTxStatus;
+    /** transactionStatus exactly as MMG sent it ("successful" in UAT, 1 Oct), or null. */
+    statusText: string | null;
+    /** Exact minor units, or null when the amount was absent or unreadable. */
+    amountMinor: number | null;
+    currencyCode: string | null;
+    /** creditParty values, or null when MMG sent none. */
+    creditParties: string[] | null;
+    /** The values of the creditParty entries whose key is exactly "accountid":
+     *  the account the money went to (UAT, 1 Oct: Swift's merchant MSISDN).
+     *  An entry with an empty or missing value is kept as '' [DS632]. Null
+     *  when MMG sent no creditParty list. */
+    creditAccounts: string[] | null;
+    createdAt: string | null;
+    /** transactionReference exactly as sent: MMG's ledger number for the
+     *  payment, a DIFFERENT number from the checkout reply's transactionId
+     *  (UAT, 1 Oct). Null when absent or not a string. */
+    ledgerReference: string | null;
+    /** [F1] What MMG's answer carries in the CONFIRMED reference field(s)
+     *  (MMG_LOOKUP_REFERENCE_FIELDS), exactly as sent. Empty while no field is
+     *  confirmed, and then nothing binds this transaction to a checkout. */
+    echoedReferences: string[];
+    /** The answer as MMG sent it, for the observation record. */
+    raw: Record<string, unknown>;
+  }
+  | { outcome: 'not_found' }
+  | { outcome: 'error'; reason: string };
+
+/**
+ * [MMG checkout F1] Which field of MMG's lookup answer echoes the merchant's
+ * own transaction reference. NONE: MMG's UAT round trip (1 Oct) showed the
+ * lookup carries neither our merchantTransactionId nor our description, so no
+ * field is read by a guessed name. A checkout is tied to its payment by MMG's
+ * own success answer for it instead (the owner's ruling of 1 Oct, in
+ * mmg-checkout.service.ts); a value here only ever adds a contradiction check.
+ * Each entry is an exact key path ('a.b'). A value counts only when it is a
+ * string, compared whole: never a substring, never a number (an 18-digit
+ * reference does not survive a JSON number).
+ */
+export const MMG_LOOKUP_REFERENCE_FIELDS: readonly string[] = [];
+
+/**
+ * [MMG checkout] One HTTP 200 lookup answer as the verifier reads it. Pure:
+ * the live adapter and the tests read MMG's answer the same way. Fields MMG
+ * did not send, or sent in a form that cannot be read exactly, are null.
+ */
+export function lookupDetailFrom(answer: Record<string, unknown>, transactionId: string): Extract<MmgLookupDetail, { outcome: 'found' }> {
+  const creditParty = answer['creditParty'];
+  const statusText = typeof answer['transactionStatus'] === 'string' ? answer['transactionStatus'] : null;
+  const ledgerReference = typeof answer['transactionReference'] === 'string' ? answer['transactionReference'] : null;
+  const party = (entry: unknown) => (entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as Record<string, unknown> : null);
+  return {
+    outcome: 'found',
+    transactionId: ledgerReference ?? transactionId,
+    status: mapMmgStatus(statusText ?? undefined),
+    statusText,
+    amountMinor: exactMinor(answer['amount']),
+    currencyCode: typeof answer['currency'] === 'string' ? answer['currency'] : null,
+    creditParties: Array.isArray(creditParty)
+      ? creditParty.map((entry: unknown) => String(party(entry)?.['value'] ?? '')).filter(Boolean)
+      : null,
+    // [DS632] Every "accountid" entry is kept, an empty or missing value as
+    // '': it is not our merchant, so the verifier holds the payment. Never dropped.
+    creditAccounts: Array.isArray(creditParty)
+      ? creditParty.filter((entry: unknown) => party(entry)?.['key'] === 'accountid').map((entry: unknown) => String(party(entry)?.['value'] ?? ''))
+      : null,
+    createdAt: typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null,
+    ledgerReference,
+    echoedReferences: echoedReferencesFrom(answer),
+    raw: answer,
+  };
+}
+
+/** The string values at exactly these key paths of a lookup answer. */
+export function echoedReferencesFrom(raw: unknown, fields: readonly string[] = MMG_LOOKUP_REFERENCE_FIELDS): string[] {
+  const out: string[] = [];
+  for (const field of fields) {
+    let node: unknown = raw;
+    for (const part of field.split('.')) {
+      node = node && typeof node === 'object' && !Array.isArray(node) && Object.prototype.hasOwnProperty.call(node, part)
+        ? (node as Record<string, unknown>)[part]
+        : undefined;
+    }
+    if (typeof node === 'string') out.push(node);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// [MMG checkout · 7 Oct] Transaction History, read for condition (5).
+// MMG (7 Oct): the lookup's creationDate is the moment of the LOOKUP;
+// history's modificationDate is when the transaction was performed. What
+// MMG UAT answered Swift's merchant credentials on 7 Oct (read-only probe):
+// - GET /e-merchant-initiated-transactions/txn-history?msisdn=<merchant>
+//   &offset=<n>&fromdate=<stamp>&todate=<stamp>, the lookup's x-wss headers;
+// - fromdate and todate are both required (400 without them) and read like
+//   MMG's own stamps (Guyana wall clock written with a "Z"); a date with no
+//   time is refused (422 "Invalid dates");
+// - `offset` is the NUMBER of rows answered, oldest first, not a page;
+// - {executionId, TransactionList: [...]}: each row names the checkout's
+//   transactionId in BOTH transactionReference and transactionReceipt;
+//   transactionStatus "completed"; amount a major-unit string; currency;
+//   modificationDate; displayType; descriptionText; debitParty/creditParty
+//   [{key, value}] (keys accountid, accountcategory); external_id.
+// ---------------------------------------------------------------------------
+
+/** The history query, its dates already written as MMG reads them. `rows` is MMG's `offset`: how many rows to answer. */
+export interface MmgHistoryQuery {
+  fromdate: string;
+  todate: string;
+  rows: number;
+}
+
+/** MMG's history answer: every row as MMG sent it, or why there is none.
+ *  Only an HTTP 200 object whose TransactionList is a list of objects is an
+ *  answer; anything else is an error to retry, never a shorter list. */
+export type MmgHistoryAnswer =
+  | { outcome: 'rows'; rows: Record<string, unknown>[] }
+  | { outcome: 'error'; reason: string };
+
+/** One HTTP answer to the history call, read whole. Pure: the live adapter and the tests read it the same way. */
+export function historyAnswerFrom(status: number, body: unknown): MmgHistoryAnswer {
+  if (status !== 200) return { outcome: 'error', reason: `MMG history HTTP ${status}` };
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG history answered with no object' };
+  const list = (body as Record<string, unknown>)['TransactionList'];
+  if (!Array.isArray(list)) return { outcome: 'error', reason: 'MMG history answered with no TransactionList' };
+  if (!list.every((row: unknown) => !!row && typeof row === 'object' && !Array.isArray(row))) {
+    return { outcome: 'error', reason: 'MMG history answered a row that is not an object' };
+  }
+  return { outcome: 'rows', rows: list as Record<string, unknown>[] };
+}
+
+/** One history row as condition (5) reads it. Every field MMG did not send,
+ *  or sent in a form that cannot be read exactly, is null: never a default. */
+export interface MmgHistoryRow {
+  /** Swift checkout reference from MMG history; never a coerced or trimmed value. */
+  externalId: string | null;
+  transactionReference: string | null;
+  transactionReceipt: string | null;
+  /** transactionStatus exactly as sent ("completed" in UAT, 7 Oct). */
+  statusText: string | null;
+  /** Exact minor units, or null. */
+  amountMinor: number | null;
+  currencyCode: string | null;
+  /** When MMG performed the transaction, exactly as sent. */
+  modificationDate: string | null;
+}
+export function historyRowFrom(row: Record<string, unknown>): MmgHistoryRow {
+  const text = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+  return {
+    externalId: text(row['external_id']),
+    transactionReference: text(row['transactionReference']),
+    transactionReceipt: text(row['transactionReceipt']),
+    statusText: text(row['transactionStatus']),
+    amountMinor: exactMinor(row['amount']),
+    currencyCode: text(row['currency']),
+    modificationDate: text(row['modificationDate']),
+  };
+}
+
+/** MMG's lookup of one transaction: the call every proof reads (the checkout
+ *  verifier, and a weekly-fee reversal's proof). */
+export interface MmgLookupClient {
+  transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail>;
+}
+
+/** The calls the checkout verifier makes: the lookup, and [7 Oct] MMG's
+ *  Transaction History, which ties a payment to its checkout and gives its time. */
+export interface MmgCheckoutLookupClient extends MmgLookupClient {
+  /** [7 Oct] GET txn-history for condition (5). Never throws. */
+  transactionHistoryRows(query: MmgHistoryQuery): Promise<MmgHistoryAnswer>;
+}
+
+/**
+ * [MMG REVERSAL · owner #11] The two calls a weekly-fee reversal makes: ask MMG
+ * to reverse a transaction (FULL only), then MMG's lookup — the only proof.
+ * reverseTransaction never throws: `declined` is MMG refusing (HTTP 422),
+ * `error` is "no usable answer" (transport, timeout, any other status) — a
+ * lost answer is never read as a refusal, and neither is ever read as done.
+ */
+export interface MmgReversalClient extends MmgLookupClient {
+  reverseTransaction(req: { transactionId: string; reason?: string }): Promise<MmgTxResult>;
+}
+
+/**
+ * The published initiate contract accepts Swift's reference in a correlation
+ * header, while the published lookup/history examples expose separate response
+ * fields. Swift does not assume MMG maps between them: sandbox UAT must prove
+ * this exact round-trip before the live factory is enabled.
+ */
+export const MMG_REFERENCE_WIRE_CONTRACT = Object.freeze({
+  outbound: Object.freeze({ carrier: 'header', field: 'x-wss-correlationid' }),
+  lookup: Object.freeze({ carrier: 'json', field: 'metadata[].description' }),
+  history: Object.freeze({ carrier: 'json', field: 'TransactionList[].external_id' }),
+  activationEnv: 'MMG_REFERENCE_ROUNDTRIP_VERIFIED',
+});
 
 export interface MmgBalance {
   currencyCode: string;
@@ -92,6 +304,14 @@ export interface MmgMerchantProvider {
  */
 const txStatusOverrides = new Map<string, MmgTxStatus>();
 const historyRows: MmgTransaction[] = [];
+const initiatedRows = new Map<string, Pick<MmgTransaction, 'amountMinor' | 'currencyCode' | 'reference'>>();
+/** [MMG REVERSAL] How the sandbox answers a reversal of one transaction:
+ *  reversed (default: done, answered), pending (accepted, not yet done),
+ *  declined (refused), error (no answer, nothing done), lost (DONE, but the
+ *  answer never arrived — the case a lookup exists to settle), duplicate
+ *  (refused as already reversed, MMG's REVERSAL_FAIL_DUPLICATE). */
+export type SandboxReversalOutcome = 'reversed' | 'pending' | 'declined' | 'error' | 'lost' | 'duplicate';
+const reversalScript = new Map<string, SandboxReversalOutcome>();
 
 /** Test control: force a transaction's lookup status (wins over markers). */
 export function sandboxSetTxStatus(transactionId: string, status: MmgTxStatus): void {
@@ -101,10 +321,16 @@ export function sandboxSetTxStatus(transactionId: string, status: MmgTxStatus): 
 export function sandboxAddHistory(row: MmgTransaction): void {
   historyRows.push(row);
 }
+/** Test control: how the sandbox answers a reversal of this transaction. */
+export function sandboxScriptReversal(transactionId: string, outcome: SandboxReversalOutcome): void {
+  reversalScript.set(transactionId, outcome);
+}
 /** Test control: wipe all sandbox scripting. */
 export function sandboxResetMmg(): void {
   txStatusOverrides.clear();
   historyRows.length = 0;
+  initiatedRows.clear();
+  reversalScript.clear();
 }
 
 export class SandboxMmgProvider implements MmgMerchantProvider {
@@ -122,11 +348,32 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
     const outcome = req.reference.toLowerCase().includes('pending') ? 'pending' : 'approved';
     // Encode the requested amount so the stateless lookup can echo provider
     // truth exactly. A synthetic zero must never exercise a settlement bypass.
-    return { status: 'pending', transactionId: `mmgtx_${outcome}_amt${req.amountMinor}_${nanoid(10)}` };
+    const transactionId = `mmgtx_${outcome}_amt${req.amountMinor}_${nanoid(10)}`;
+    initiatedRows.set(transactionId, {
+      amountMinor: req.amountMinor,
+      currencyCode: req.currencyCode,
+      reference: req.reference,
+    });
+    return { status: 'pending', transactionId };
   }
 
+  /** [MMG REVERSAL] A transaction still standing (as this sandbox's own
+   *  lookup reads it: scripted, planted, or by its id's marker) is reversed in
+   *  full, and its lookups then say `reversed`; anything else is refused.
+   *  Scripting picks the other answers (sandboxScriptReversal). */
   async reverseTransaction(req: { transactionId: string }): Promise<MmgTxResult> {
-    return { status: 'reversed', transactionId: req.transactionId };
+    const id = req.transactionId;
+    const current = (await this.transactionLookup({ transactionId: id })).status;
+    const scripted = reversalScript.get(id) ?? 'reversed';
+    if (scripted === 'duplicate') return { status: 'declined', transactionId: id, reason: 'REVERSAL_FAIL_DUPLICATE' };
+    if (scripted === 'declined' || current !== 'approved') {
+      return { status: 'declined', transactionId: id, reason: 'MMG refused the reversal (sandbox)' };
+    }
+    if (scripted === 'error') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox) <timeout>' };
+    if (scripted === 'pending') return { status: 'pending', transactionId: id };
+    txStatusOverrides.set(id, 'reversed');
+    if (scripted === 'lost') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox)' };
+    return { status: 'reversed', transactionId: id };
   }
 
   async transactionLookup(req: { transactionId: string }): Promise<MmgTransaction> {
@@ -140,11 +387,19 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
           : req.transactionId.includes('expired')
             ? 'expired'
             : 'approved');
+    const stored = initiatedRows.get(req.transactionId)
+      ?? historyRows.find((row) => row.transactionId === req.transactionId);
     const encodedAmount = /_amt(\d+)_/.exec(req.transactionId)?.[1];
     const amountMinor = req.transactionId.includes('mismatch') && status === 'approved'
       ? 99_900
-      : Number(encodedAmount ?? 0);
-    return { transactionId: req.transactionId, status, amountMinor, currencyCode: 'GYD' };
+      : Number(stored?.amountMinor ?? encodedAmount ?? 0);
+    return {
+      transactionId: req.transactionId,
+      status,
+      amountMinor,
+      currencyCode: stored?.currencyCode ?? 'GYD',
+      ...(stored?.reference ? { reference: stored.reference } : {}),
+    };
   }
 
   async transactionHistory(): Promise<MmgTransaction[]> {
@@ -153,6 +408,49 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
 
   async accountBalance(): Promise<MmgBalance> {
     return { currencyCode: 'GYD', balanceMinor: 0 };
+  }
+
+  /** [MMG checkout 2/6] Only a transaction this sandbox initiated or was told
+   *  about (sandboxAddHistory) is found; any other id is not_found. A stateless
+   *  "approved" for an unknown id would be the synthetic proof of payment the
+   *  checkout verifier exists to refuse. */
+  async transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail> {
+    const planted = historyRows.find((row) => row.transactionId === transactionId);
+    const initiated = initiatedRows.get(transactionId);
+    if (!planted && !initiated) return { outcome: 'not_found' };
+    const status = txStatusOverrides.get(transactionId) ?? planted?.status ?? 'approved';
+    const amountMinor = planted?.amountMinor ?? initiated?.amountMinor ?? null;
+    const currencyCode = planted?.currencyCode ?? initiated?.currencyCode ?? null;
+    const creditParties = planted?.creditParties ?? null;
+    const raw: Record<string, unknown> = {
+      transactionReference: transactionId,
+      transactionStatus: status,
+      ...(amountMinor === null ? {} : { amount: toMajorString(amountMinor) }),
+      ...(currencyCode === null ? {} : { currency: currencyCode }),
+      ...(creditParties === null ? {} : { creditParty: creditParties.map((value) => ({ key: 'accountid', value })) }),
+    };
+    return {
+      outcome: 'found',
+      transactionId,
+      status,
+      // The sandbox speaks Swift's own status words, never MMG's "successful",
+      // so a sandbox checkout is never confirmed automatically.
+      statusText: status,
+      amountMinor,
+      currencyCode,
+      creditParties,
+      creditAccounts: creditParties,
+      createdAt: planted?.createdAt ?? null,
+      ledgerReference: transactionId,
+      echoedReferences: echoedReferencesFrom(raw),
+      raw,
+    };
+  }
+
+  /** [7 Oct] No history for the checkout: the sandbox never answers MMG's
+   *  "successful", so the verifier never asks it, and nothing here confirms. */
+  async transactionHistoryRows(_query: MmgHistoryQuery): Promise<MmgHistoryAnswer> {
+    return { outcome: 'rows', rows: [] };
   }
 }
 
@@ -203,6 +501,17 @@ function toMinor(major: string | undefined): number {
     return 0;
   }
 }
+/** The exact minor amount of what MMG sent, or null. Never 0 for "unreadable":
+ *  a verifier compares this to what was asked for. */
+function exactMinor(major: unknown): number | null {
+  if (typeof major !== 'string' && typeof major !== 'number') return null;
+  try {
+    const minor = fromMajor(String(major), MMG_CURRENCY).minor;
+    return minor >= 0n && minor <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(minor) : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Live adapter over the published Merchant-Initiated OpenAPI (see header).
@@ -219,11 +528,24 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     private fetchFn: typeof fetch = fetch,
   ) {}
 
-  private async call(path: string, init: NonNullable<Parameters<typeof fetch>[1]>): Promise<Response> {
+  /** Every MMG call: the deadline stays active through the response body,
+   * including transports that do not settle their body promise when the
+   * signal is aborted. `read` consumes the body; nothing reads a body outside
+   * it (a body awaited after the deadline cleared could stall a poll forever). */
+  private async callReading<T>(path: string, init: NonNullable<Parameters<typeof fetch>[1]>, read: (response: Response) => Promise<T>): Promise<T> {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), CALL_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        ac.abort();
+        reject(new Error('MMG request timed out'));
+      }, CALL_TIMEOUT_MS);
+    });
     try {
-      return await this.fetchFn(`${this.cfg.baseUrl}${path}`, { ...init, signal: ac.signal });
+      return await Promise.race([
+        this.fetchFn(`${this.cfg.baseUrl}${path}`, { ...init, signal: ac.signal }).then(read),
+        deadline,
+      ]);
     } finally {
       clearTimeout(timer);
     }
@@ -237,16 +559,17 @@ export class LiveMmgProvider implements MmgMerchantProvider {
       username: this.cfg.merchantMsisdn,
       password: this.cfg.password,
     });
-    const res = await this.call('/e-commerce-login/mer', {
+    const body = await this.callReading('/e-commerce-login/mer', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
+    }, async (res) => {
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`MMG auth failed (${res.status}): ${detail.slice(0, 200)}`);
+      }
+      return await res.json() as { access_token?: string; expires_in?: number };
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`MMG auth failed (${res.status}): ${detail.slice(0, 200)}`);
-    }
-    const body = (await res.json()) as { access_token?: string; expires_in?: number };
     if (!body.access_token) throw new Error('MMG auth returned no access_token');
     this.cachedToken = { token: body.access_token, fetchedAt: Date.now() };
     return { token: body.access_token, expiresAt: new Date(Date.now() + (body.expires_in ?? 120) * 1000) };
@@ -276,7 +599,7 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   async initiatePayment(req: MmgInitiateRequest): Promise<MmgTxResult> {
     try {
       const headers = await this.wssHeaders(req.reference);
-      const res = await this.call(
+      const read = await this.callReading(
         `/e-merchant-initiated-transactions/payment?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}`,
         {
           method: 'POST',
@@ -290,22 +613,32 @@ export class LiveMmgProvider implements MmgMerchantProvider {
             creditParty: [{ key: 'accountid', value: this.cfg.merchantMsisdn }],
           }),
         },
+        async (res) => {
+          // Terminal business rejection (e.g. INVALID_* / limit codes).
+          if (res.status === 422) return { got: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
+          if (!res.ok) return { got: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
+          return { got: 'ok' as const, body: (await res.json()) as any };
+        },
       );
-      if (res.status === 422) {
-        // Terminal business rejection (e.g. INVALID_* / limit codes).
-        const body: any = await res.json().catch(() => ({}));
+      if (read.got === 'declined') {
+        const body = read.body;
         return { status: 'declined', transactionId: String(body?.transactionId ?? ''), reason: String(body?.message ?? 'MMG rejected the payment') };
       }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        return { status: 'error', transactionId: '', reason: `MMG payment HTTP ${res.status}: ${detail.slice(0, 200)}` };
+      if (read.got === 'http') {
+        return { status: 'error', transactionId: '', reason: `MMG payment HTTP ${read.status}: ${read.detail.slice(0, 200)}` };
       }
       // 200 → { status: "pending", pendingReason: "approvalrequired",
       //         notificationMethod: "polling", executionId, expiryTime }
-      const body: any = await res.json();
+      const body: any = read.body;
+      // A successful response without a usable provider id is still an
+      // affirmative observation. The billing intent must hold it for history
+      // reconciliation, never look up a coerced object or whitespace token.
+      const transactionId = [body?.executionId, body?.objectReference]
+        .find((value: unknown): value is string => typeof value === 'string'
+          && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) ?? '';
       return {
         status: mapMmgStatus(body?.status),
-        transactionId: String(body?.executionId ?? body?.objectReference ?? ''),
+        transactionId,
         ...(body?.pendingReason ? { reason: String(body.pendingReason) } : {}),
       };
     } catch (err) {
@@ -317,19 +650,24 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   async reverseTransaction(req: { transactionId: string; reason?: string }): Promise<MmgTxResult> {
     try {
       const headers = await this.wssHeaders(`rev-${req.transactionId}`);
-      const res = await this.call(
+      const read = await this.callReading(
         `/e-merchant-initiated-transactions/reversal?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}&transactionId=${encodeURIComponent(req.transactionId)}`,
         { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
+        async (res) => {
+          if (res.status === 422) return { got: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
+          if (!res.ok) return { got: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
+          return { got: 'ok' as const, body: (await res.json()) as any };
+        },
       );
-      if (res.status === 422) {
-        const body: any = await res.json().catch(() => ({}));
-        return { status: 'error', transactionId: req.transactionId, reason: String(body?.message ?? 'MMG reversal rejected') };
+      if (read.got === 'declined') {
+        // [MMG REVERSAL] MMG's business refusal: an ANSWER ("no"), unlike a
+        // transport failure. The lookup still decides what Swift records.
+        return { status: 'declined', transactionId: req.transactionId, reason: String(read.body?.message ?? 'MMG reversal rejected') };
       }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        return { status: 'error', transactionId: req.transactionId, reason: `MMG reversal HTTP ${res.status}: ${detail.slice(0, 200)}` };
+      if (read.got === 'http') {
+        return { status: 'error', transactionId: req.transactionId, reason: `MMG reversal HTTP ${read.status}: ${read.detail.slice(0, 200)}` };
       }
-      const body: any = await res.json();
+      const body: any = read.body;
       const mmgStatus = String(body?.transactionStatus ?? '').toLowerCase();
       return {
         // A 200 means MMG accepted the reversal; "pending" is it working
@@ -345,20 +683,63 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   /** GET /lookup — poll target for the initiate flow. Throws on transport. */
   async transactionLookup(req: { transactionId: string }): Promise<MmgTransaction> {
     const headers = await this.wssHeaders(`lkp-${req.transactionId}`);
-    const res = await this.call(
+    const body: any = await this.callReading(
       `/e-merchant-initiated-transactions/lookup?transactionId=${encodeURIComponent(req.transactionId)}`,
       { method: 'GET', headers },
+      async (res) => {
+        if (!res.ok) throw new Error(`MMG lookup failed (HTTP ${res.status})`);
+        return await res.json();
+      },
     );
-    if (!res.ok) throw new Error(`MMG lookup failed (HTTP ${res.status})`);
-    const body: any = await res.json();
     return {
-      transactionId: String(body?.transactionReference ?? req.transactionId),
+      // Settlement evidence must be exactly what MMG returned on the wire.
+      // Falling back to our request id or the platform currency would turn an
+      // incomplete provider response into apparent proof of payment.
+      transactionId: typeof body?.transactionReference === 'string' ? body.transactionReference : '',
       status: mapMmgStatus(body?.transactionStatus),
       amountMinor: toMinor(body?.amount),
-      currencyCode: String(body?.currency ?? 'GYD'),
+      currencyCode: typeof body?.currency === 'string' ? body.currency : '',
       reference: body?.metadata?.find?.((m: any) => m?.key === 'description')?.value || undefined,
       createdAt: body?.creationDate,
     };
+  }
+
+  /** [MMG checkout 2/6] GET /lookup for the checkout verifier. Never throws:
+   *  400/404/422 mean MMG does not know the id; only an HTTP 200 object is an
+   *  answer (owner, 1 Oct); anything else is an error to retry, never a verdict. */
+  async transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail> {
+    let read: { status: number; body: unknown };
+    try {
+      const headers = await this.wssHeaders(`lkp-${transactionId}`);
+      read = await this.callReading(
+        `/e-merchant-initiated-transactions/lookup?transactionId=${encodeURIComponent(transactionId)}`,
+        { method: 'GET', headers },
+        async (res) => ({ status: res.status, body: res.status === 200 ? await res.json().catch(() => null) : null }),
+      );
+    } catch (err) {
+      return { outcome: 'error', reason: `MMG lookup unreachable: ${(err as Error).message}` };
+    }
+    if (read.status === 400 || read.status === 404 || read.status === 422) return { outcome: 'not_found' };
+    if (read.status !== 200) return { outcome: 'error', reason: `MMG lookup HTTP ${read.status}` };
+    const body = read.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG lookup answered with no object' };
+    return lookupDetailFrom(body as Record<string, unknown>, transactionId);
+  }
+
+  /** [7 Oct] GET /txn-history for condition (5), exactly the dates and row
+   *  count asked. Never throws: MMG unreachable, or any answer other than an
+   *  HTTP 200 list of objects, is an error to retry, never evidence. */
+  async transactionHistoryRows(query: MmgHistoryQuery): Promise<MmgHistoryAnswer> {
+    try {
+      const headers = await this.wssHeaders(`hist-${Date.now()}`);
+      const qs = new URLSearchParams({ msisdn: this.cfg.merchantMsisdn, offset: String(query.rows), fromdate: query.fromdate, todate: query.todate });
+      return await this.callReading(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers }, async (res) => {
+        const body: unknown = res.status === 200 ? await res.json().catch(() => null) : null;
+        return historyAnswerFrom(res.status, body);
+      });
+    } catch (err) {
+      return { outcome: 'error', reason: `MMG history unreachable: ${(err as Error).message}` };
+    }
   }
 
   /** GET /txn-history. Throws on transport. */
@@ -366,17 +747,12 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     const now = new Date();
     const from = req?.from ?? new Date(now.getTime() - 7 * 24 * 3_600_000);
     const to = req?.to ?? now;
-    const headers = await this.wssHeaders(`hist-${from.getTime()}`);
-    const qs = new URLSearchParams({
-      offset: '1',
-      fromdate: from.toISOString(),
-      todate: to.toISOString(),
-      msisdn: this.cfg.merchantMsisdn,
-    });
-    const res = await this.call(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers });
-    if (!res.ok) throw new Error(`MMG history failed (HTTP ${res.status})`);
-    const body: any = await res.json();
-    const list: any[] = Array.isArray(body?.TransactionList) ? body.TransactionList : [];
+    // MMG reads query stamps as Guyana wall clock, as established for checkout.
+    const query = mmgHistoryQueryFor(from, to, 'GUYANA_WALL_CLOCK', now);
+    const answer = await this.transactionHistoryRows(query);
+    if (answer.outcome !== 'rows') throw new Error('MMG history unavailable');
+    if (mmgHistoryTruncated(answer.rows.length, query)) throw new Error('MMG history incomplete');
+    const list: any[] = answer.rows;
     const mapped = list.map((t) => ({
       transactionId: String(t?.transactionReference ?? ''),
       status: mapMmgStatus(t?.transactionStatus),
@@ -391,12 +767,14 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   /** GET /balance — the collection account's available balance. Throws on transport. */
   async accountBalance(): Promise<MmgBalance> {
     const headers = await this.wssHeaders(`bal-${this.cfg.merchantMsisdn}`);
-    const res = await this.call(
+    const body: any = await this.callReading(
       `/e-merchant-initiated-transactions/balance?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}`,
       { method: 'GET', headers },
+      async (res) => {
+        if (!res.ok) throw new Error(`MMG balance failed (HTTP ${res.status})`);
+        return await res.json();
+      },
     );
-    if (!res.ok) throw new Error(`MMG balance failed (HTTP ${res.status})`);
-    const body: any = await res.json();
     const wallet = Array.isArray(body?.accounts) ? body.accounts[0] : null;
     return {
       currencyCode: String(wallet?.accountBalance?.currency ?? 'GYD'),
@@ -405,9 +783,157 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   }
 }
 
-/** Driver selection is config, not code. Defaults to the sandbox. */
-export function getMmgProvider(): MmgMerchantProvider {
+/**
+ * [PROD-PATH] MMG fully OFF — the owner's ruling for a production launch
+ * before the live merchant keys arrive. `MMG_DRIVER=disabled`, exactly; the
+ * boot guard accepts it in production only with the hosted checkout off.
+ * Nothing in this mode reaches MMG: the billing rail never asks MMG
+ * (billing.service attemptCharge), the poller leaves every row as it is, and
+ * any other caller gets this explicit refusal — never a sandbox answer, never
+ * a silent no-op. Whether partners' fees are PAUSED is a separate rule that
+ * also asks whether a card can be used: modules/billing/fee-pause.ts.
+ */
+export function mmgDisabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['MMG_DRIVER'] === 'disabled';
+}
+
+/**
+ * [S1 · SWITCHES 21 Oct, Option A] The merchant-initiated PUSH rail (Swift
+ * sends a charge request to a partner's MMG phone) is a separate switch from
+ * MMG itself. The weekly fee is paid on the MMG checkout page (GUARDRAILS §1);
+ * the push rail is unproven (the merchant reference round trip,
+ * MMG_REFERENCE_ROUNDTRIP_VERIFIED) and stays OFF unless this exact switch is
+ * on. Live MMG for the checkout, its lookup and reversals never needs it.
+ */
+export const MMG_PUSH_RAIL_ENV = 'MMG_PUSH_RAIL_ON';
+
+/** True only where Swift may send a push charge request:
+ *   - sandbox (synthetic, never production: the boot guard and the factories refuse it there);
+ *   - live, outside production, with MMG_PUSH_RAIL_ON=1 AND the reference round trip verified.
+ *  Production never pushes for now: its boot guard also refuses the switch. */
+export function mmgPushRailOn(env: Record<string, string | undefined> = process.env): boolean {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  if (isProduction(env)) return false;
+  if (driver === 'sandbox') return true;
+  if (driver !== 'live') return false;
+  return env[MMG_PUSH_RAIL_ENV] === '1' && env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] === '1';
+}
+
+/** True where a push request Swift already sent may be followed up (looked up
+ *  by OUR reference, history-matched, settled or expired): that needs the
+ *  reference round trip proved, never the push switch. Off: such a row waits,
+ *  untouched, as under MMG_DRIVER=disabled [LAW M-5]. */
+export function mmgPushFollowUpOn(env: Record<string, string | undefined> = process.env): boolean {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  if (driver === 'sandbox') return !isProduction(env);
+  return driver === 'live' && env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] === '1';
+}
+
+export class MmgDisabledError extends AppError {
+  constructor(operation: string) {
+    super(503, 'MMG_DISABLED', `MMG is switched off on this server (MMG_DRIVER=disabled); ${operation} was not sent.`);
+    this.name = 'MmgDisabledError';
+  }
+}
+
+/** Refuses every call. Holds no credential and opens no connection. */
+export class DisabledMmgProvider implements MmgMerchantProvider, MmgCheckoutLookupClient {
+  readonly driver = 'disabled' as const;
+  async authenticate(): Promise<{ token: string; expiresAt?: Date }> { throw new MmgDisabledError('authentication'); }
+  async initiatePayment(_req: MmgInitiateRequest): Promise<MmgTxResult> { throw new MmgDisabledError('the payment request'); }
+  async reverseTransaction(_req: { transactionId: string; reason?: string }): Promise<MmgTxResult> { throw new MmgDisabledError('the reversal'); }
+  async transactionLookup(_req: { transactionId: string }): Promise<MmgTransaction> { throw new MmgDisabledError('the transaction lookup'); }
+  async transactionHistory(_req?: { from?: Date; to?: Date; limit?: number }): Promise<MmgTransaction[]> { throw new MmgDisabledError('the history request'); }
+  async accountBalance(): Promise<MmgBalance> { throw new MmgDisabledError('the balance request'); }
+  async transactionLookupDetail(_transactionId: string): Promise<MmgLookupDetail> { throw new MmgDisabledError('the checkout lookup'); }
+  /** Never throws (the contract): MMG off is an answer no payment is confirmed on. */
+  async transactionHistoryRows(_query: MmgHistoryQuery): Promise<MmgHistoryAnswer> { return { outcome: 'error', reason: 'MMG is switched off on this server (MMG_DRIVER=disabled)' }; }
+}
+
+/** The live merchant credentials, or a refusal naming what is missing. */
+function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConfig {
+  const cfg: LiveMmgConfig = {
+    baseUrl: env['MMG_API_URL'] ?? MMG_UAT_URL,
+    apiKey: env['MMG_API_KEY'] ?? '',
+    merchantMsisdn: env['MMG_MERCHANT_ID'] ?? '',
+    password: env['MMG_PASSWORD'] ?? '',
+    mkey: env['MMG_MKEY'] ?? '',
+    msecret: env['MMG_MSECRET'] ?? '',
+  };
+  const missing = (['apiKey', 'merchantMsisdn', 'password', 'mkey', 'msecret'] as const).filter((k) => !cfg[k]);
+  if (missing.length > 0) {
+    throw new Error(
+      'MMG_DRIVER=live needs MMG_API_KEY, MMG_MERCHANT_ID, MMG_PASSWORD, MMG_MKEY and MMG_MSECRET ' +
+        `(missing: ${missing.join(', ')})`,
+    );
+  }
+  return cfg;
+}
+
+/**
+ * [MMG checkout 2/6] The lookup the checkout verifier uses: the same driver
+ * and credentials as the merchant-initiated rail, WITHOUT that rail's
+ * MMG_REFERENCE_ROUNDTRIP_VERIFIED gate. That gate proves the push rail can
+ * find its own requests by OUR reference in lookup and history; the checkout
+ * looks up MMG's own transaction id and depends on no such round trip.
+ */
+export function getMmgLookupProvider(env: Record<string, string | undefined> = process.env): MmgCheckoutLookupClient {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // [PROD-PATH] MMG fully off: every lookup refuses explicitly (MMG_DISABLED).
+  if (driver === 'disabled') return new DisabledMmgProvider();
+  if (isProduction(env) && driver === 'sandbox') {
+    throw new Error('MMG_DRIVER=sandbox is forbidden in production');
+  }
+  switch (driver) {
+    case 'sandbox':
+      return new SandboxMmgProvider();
+    case 'live': {
+      const cfg = readLiveMmgConfig(env);
+      if (isProduction(env) && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
+        throw new Error('A non-UAT MMG_API_URL is required in production');
+      }
+      return new LiveMmgProvider(cfg);
+    }
+    default:
+      throw new Error(`Unknown MMG_DRIVER: ${driver}`);
+  }
+}
+
+/**
+ * [MMG REVERSAL · owner #11] The client a weekly-fee reversal uses: the same
+ * driver and merchant credentials as the checkout verifier's lookup (it reads
+ * the very transaction the lookup proved), without the push rail's
+ * MMG_REFERENCE_ROUNDTRIP_VERIFIED gate — a reversal names MMG's own
+ * transaction id and depends on no reference round trip.
+ */
+export function getMmgReversalClient(env: Record<string, string | undefined> = process.env): MmgReversalClient {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // MMG fully off: the reversal and its lookups refuse explicitly (MMG_DISABLED).
+  if (driver === 'disabled') return new DisabledMmgProvider();
+  if (isProduction(env) && driver === 'sandbox') {
+    throw new Error('MMG_DRIVER=sandbox is forbidden in production');
+  }
+  switch (driver) {
+    case 'sandbox':
+      return new SandboxMmgProvider();
+    case 'live': {
+      const cfg = readLiveMmgConfig(env);
+      if (isProduction(env) && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
+        throw new Error('A non-UAT MMG_API_URL is required in production');
+      }
+      return new LiveMmgProvider(cfg);
+    }
+    default:
+      throw new Error(`Unknown MMG_DRIVER: ${driver}`);
+  }
+}
+
+/** Driver selection is config, not code. Defaults to the sandbox.
+ *  `followUp`: the poller's lookups of requests already sent (needs only the
+ *  reference round trip); default: the push rail itself (needs mmgPushRailOn). */
+export function getMmgProvider(opts: { followUp?: boolean } = {}): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
+  if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction() && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }
@@ -415,19 +941,17 @@ export function getMmgProvider(): MmgMerchantProvider {
     case 'sandbox':
       return new SandboxMmgProvider();
     case 'live': {
-      const cfg: LiveMmgConfig = {
-        baseUrl: process.env['MMG_API_URL'] ?? MMG_UAT_URL,
-        apiKey: process.env['MMG_API_KEY'] ?? '',
-        merchantMsisdn: process.env['MMG_MERCHANT_ID'] ?? '',
-        password: process.env['MMG_PASSWORD'] ?? '',
-        mkey: process.env['MMG_MKEY'] ?? '',
-        msecret: process.env['MMG_MSECRET'] ?? '',
-      };
-      const missing = (['apiKey', 'merchantMsisdn', 'password', 'mkey', 'msecret'] as const).filter((k) => !cfg[k]);
-      if (missing.length > 0) {
+      const cfg = readLiveMmgConfig(process.env);
+      if (process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
         throw new Error(
-          'MMG_DRIVER=live needs MMG_API_KEY, MMG_MERCHANT_ID, MMG_PASSWORD, MMG_MKEY and MMG_MSECRET ' +
-            `(missing: ${missing.join(', ')})`,
+          'MMG_DRIVER=live requires MMG_REFERENCE_ROUNDTRIP_VERIFIED=1 after sandbox UAT proves ' +
+          'x-wss-correlationid -> lookup metadata.description and history external_id round-trip',
+        );
+      }
+      if (!opts.followUp && !mmgPushRailOn(process.env)) {
+        throw new Error(
+          `The MMG push rail is off (${MMG_PUSH_RAIL_ENV}): Swift sends no charge request to a partner's phone; ` +
+          'the weekly fee is paid on the MMG checkout page',
         );
       }
       if (isProduction() && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {

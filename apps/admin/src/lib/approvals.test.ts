@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   blockedBecause, decidable, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, BLOCK_COPY,
+  canApply, awaitsRequester, snapshotEntries, soloWaitCopy, SOLO_EXPLAIN, needsStepUp,
   type ApprovalRow,
 } from './approvals';
 
@@ -138,5 +139,67 @@ describe('the decision note', () => {
   it('holds the server bound so the request is not rejected at the wire', () => {
     expect(noteProblem('x'.repeat(501), true)).toMatch(/500/);
     expect(noteProblem('x'.repeat(500), true)).toBeNull();
+  });
+
+  it('holds the 12-character floor too — a 5-character note passed the screen and 400’d at the gate', () => {
+    expect(noteProblem('I agree.', true)).toMatch(/why/i);
+    expect(noteProblem('I agree, checked against the statement.', true)).toBeNull();
+  });
+});
+
+describe('[DS110-13] the stored body is what the approver reads and apply replays', () => {
+  it('turns the stored body into labelled fields, leaving the reason to its own place', () => {
+    const entries = snapshotEntries(ROW({
+      bodySnapshot: { params: { id: 'pay_1' }, body: { amount: 2500, subscriptionId: 'SUB-77', reason: 'kept elsewhere' } },
+    }));
+    expect(entries).toEqual([
+      { label: 'Amount', value: '2500' },
+      { label: 'Subscription Id', value: 'SUB-77' },
+    ]);
+  });
+
+  it('returns nothing for a legacy row with no stored body', () => {
+    expect(snapshotEntries(ROW())).toEqual([]);
+    expect(snapshotEntries(ROW({ bodySnapshot: null }))).toEqual([]);
+  });
+
+  it('apply is allowed exactly when a body is on record and the window is still open', () => {
+    const approved = { status: 'APPROVED' as const, bodySnapshot: { body: {} }, isOwnRequest: true };
+    expect(canApply(ROW(approved), NOW)).toBe(true);
+    expect(canApply(ROW({ ...approved, bodySnapshot: null }), NOW)).toBe(false);
+    expect(canApply(ROW({ ...approved, expiresAt: at(-1) }), NOW)).toBe(false);
+    expect(canApply(ROW({ status: 'PENDING', bodySnapshot: { body: {} }, isOwnRequest: true }), NOW)).toBe(false);
+  });
+
+  it('only the admin who asked may apply; anyone else sees it awaiting the requester', () => {
+    const approved = { status: 'APPROVED' as const, bodySnapshot: { body: {} } };
+    expect(canApply(ROW({ ...approved, isOwnRequest: false }), NOW)).toBe(false);
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false }), NOW)).toBe(true);
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: true }), NOW)).toBe(false);
+    // nothing to wait for when there is nothing to execute
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false, bodySnapshot: null }), NOW)).toBe(false);
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false, expiresAt: at(-1) }), NOW)).toBe(false);
+  });
+});
+
+describe('[OWNER #13] solo approval words', () => {
+  it('says when the wait ends, and says "now" once it has', () => {
+    const now = new Date('2026-10-13T12:00:00Z');
+    expect(soloWaitCopy('2026-10-14T00:00:00Z', now)).toMatch(/^Solo approval: available after /);
+    expect(soloWaitCopy('2026-10-13T11:00:00Z', now)).toMatch(/^Solo approval: available now/);
+  });
+  it('names the wait in hours and the safeguards in plain words', () => {
+    const words = SOLO_EXPLAIN(12);
+    expect(words).toMatch(/12-hour wait/);
+    expect(words).toMatch(/sign-in code/);
+    expect(words).toMatch(/emails you/);
+    expect(words).toMatch(/texts your phone/);
+    expect(words).toMatch(/7 days after the email/);
+    expect(words).toMatch(/cancel/);
+  });
+  it('recognises the server asking for a fresh code', () => {
+    expect(needsStepUp(Object.assign(new Error('x'), { code: 'STEP_UP_REQUIRED' }))).toBe(true);
+    expect(needsStepUp(Object.assign(new Error('x'), { code: 'SOLO_COOLING_OFF' }))).toBe(false);
+    expect(needsStepUp(null)).toBe(false);
   });
 });

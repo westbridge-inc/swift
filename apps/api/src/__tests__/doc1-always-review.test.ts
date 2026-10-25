@@ -11,6 +11,7 @@
  * in doc1-extraction-ledger), so activation is the one switch.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
@@ -29,7 +30,8 @@ import type { KycEngine, KycProvider, KycVerificationResult } from '../providers
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 /** BUSINESS with a declared field (the positive path), PERSONAL (always review), BUSINESS with nothing declared (SKIP ≠ PASS). */
-const BUSINESS = 'tin_certificate';
+// [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the registration is the BUSINESS example
+const BUSINESS = 'business_registration';
 const PERSONAL = 'food_handler_cert';
 const UNDECLARED = 'storefront_photo';
 const CODES = { BUSINESS: registryCode('GY', BUSINESS), PERSONAL: registryCode('GY', PERSONAL), UNDECLARED: registryCode('GY', UNDECLARED) };
@@ -61,10 +63,11 @@ async function owner(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 const submit = (userId: string, docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const setActive = (code: string, on: boolean) => system(() => app.prisma.docType.update({ where: { code }, data: { isActive: on, legalFactsVerifiedAt: on ? new Date() : null } }));
 const openCases = (docId: string) => system(() => app.prisma.reviewCase.findMany({ where: { submissionId: docId, closedAt: null } }));
 const readOnly = () => { kyc.verdict = 'approved'; kyc.extracted = { documentNumber: `TIN-${RUN}-${nanoid(4)}` }; };
@@ -114,8 +117,9 @@ describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9
     expect(alwaysReview({ bucket: 'VEHICLE', needsSpecimen: false, alwaysReview: true })).toBe(true);
     expect(alwaysReview({ bucket: 'BUSINESS', needsSpecimen: false, alwaysReview: false })).toBe(false);
     const rows = await system(() => app.prisma.docType.findMany({ where: { countryCode: 'GY', bucket: 'VEHICLE' }, select: { legacyCode: true, alwaysReview: true } }));
-    const flagged = rows.filter((r) => r.alwaysReview).map((r) => r.legacyCode);
-    expect(flagged).toEqual(['vehicle_insurance']);
+    const flagged = rows.filter((r) => r.alwaysReview).map((r) => r.legacyCode).sort();
+    // [VERIFY-DOCS · ruling 8] the certificate of fitness joins the insurance: its PRINTED date decides, so a person reads it
+    expect(flagged).toEqual(['fitness_cert', 'vehicle_insurance']);
     expect(rows.length).toBeGreaterThan(1);
   });
 

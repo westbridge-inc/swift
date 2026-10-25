@@ -1,5 +1,5 @@
 import type { PrismaClient, OrderStatus } from '@prisma/client';
-import { notHeldFilter } from '../order/order.service';
+import { vendorVisibleFilter } from '../order/order.service';
 import { startOfDayGY, dayKeyGY } from '../../utils/time-gy';
 
 // Vendor Insights read-model, extracted verbatim from vendor.routes.ts so the
@@ -8,8 +8,18 @@ import { startOfDayGY, dayKeyGY } from '../../utils/time-gy';
 // in the route. Every method is pinned by a characterization test:
 // vendor-overview-truth / vendor-analytics-ops / vendor-analytics-coverage /
 // busy-hours / vendor-repeat-customers.
+//
+// [Q12] Every order this read-model counts is one the store can see on its
+// board: never an order still held in the customer's free-cancel window, and
+// never one cancelled inside it — the dashboard must not tell the store an
+// order existed that its board never showed.
 export class VendorAnalyticsService {
   constructor(private prisma: PrismaClient) {}
+
+  /** The board's visibility rule, for every order aggregate below [Q12]. */
+  private visible() {
+    return vendorVisibleFilter(this.prisma);
+  }
 
   /** Today / rolling-week / rolling-month order counts + net-of-discount sales,
    *  anchored to Guyana-local midnight (a UTC container would misbucket the last
@@ -29,24 +39,24 @@ export class VendorAnalyticsService {
           where: { id: vendorId },
           select: { averageRating: true, totalRatings: true, totalOrders: true, isCurrentlyOpen: true, acceptingOrders: true },
         }),
-        this.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: todayStart } } }),
-        this.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: weekStart } } }),
-        this.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: monthStart } } }),
+        this.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: todayStart }, AND: [this.visible()] } }),
+        this.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: weekStart }, AND: [this.visible()] } }),
+        this.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: monthStart }, AND: [this.visible()] } }),
         this.prisma.order.aggregate({
-          where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: todayStart } },
+          where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: todayStart }, AND: [this.visible()] },
           _sum: { subtotalCustomer: true, discount: true },
         }),
         this.prisma.order.aggregate({
-          where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: weekStart } },
+          where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: weekStart }, AND: [this.visible()] },
           _sum: { subtotalCustomer: true, discount: true },
         }),
         this.prisma.order.aggregate({
-          where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: monthStart } },
+          where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: monthStart }, AND: [this.visible()] },
           _sum: { subtotalCustomer: true, discount: true },
         }),
         this.prisma.item.count({ where: { vendorId, isAvailable: true } }),
         this.prisma.order.aggregate({
-          where: { vendorId, status: 'PENDING', ...notHeldFilter() },
+          where: { vendorId, status: 'PENDING', AND: [this.visible()] },
           _count: true,
           _sum: { totalAmount: true },
         }),
@@ -72,12 +82,14 @@ export class VendorAnalyticsService {
   /** Operational quality over a window, all from real order timestamps: how fast
    *  orders are accepted, how honest the prep quote is, how often orders die.
    *  Acceptance is judged on DECIDED orders (accepted or vendor-killed) — a
-   *  customer cancel before acceptance is not held against the store. */
+   *  customer cancel before acceptance is not held against the store. Only
+   *  orders the store could see count: never one still held, nor one the
+   *  customer cancelled inside its hold [Q12]. */
   async ops(vendorId: string, days: number) {
     const since = startOfDayGY(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
 
     const orders = await this.prisma.order.findMany({
-      where: { vendorId, placedAt: { gte: since } },
+      where: { vendorId, placedAt: { gte: since }, AND: [this.visible()] },
       select: { status: true, placedAt: true, acceptedAt: true, readyAt: true, estimatedPrepTime: true, cancelledBy: true },
     });
 
@@ -121,7 +133,7 @@ export class VendorAnalyticsService {
     const completedStatuses = ['DELIVERED', 'COMPLETED'] as OrderStatus[];
 
     const orders = await this.prisma.order.findMany({
-      where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: since } },
+      where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: since }, AND: [this.visible()] },
       select: { placedAt: true, subtotalCustomer: true, discount: true, totalAmount: true },
       orderBy: { placedAt: 'asc' },
     });
@@ -161,7 +173,7 @@ export class VendorAnalyticsService {
     since.setDate(since.getDate() - 30);
 
     const orders = await this.prisma.order.findMany({
-      where: { vendorId, placedAt: { gte: since }, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+      where: { vendorId, placedAt: { gte: since }, status: { notIn: ['CANCELLED', 'REFUNDED'] }, AND: [this.visible()] },
       select: { placedAt: true },
     });
 
@@ -190,7 +202,7 @@ export class VendorAnalyticsService {
 
     const recentCounts = await this.prisma.orderItem.groupBy({
       by: ['itemId'],
-      where: { order: { vendorId, placedAt: { gte: since } } },
+      where: { order: { vendorId, placedAt: { gte: since }, AND: [this.visible()] } },
       _sum: { quantity: true },
       orderBy: { _sum: { quantity: 'desc' } },
       take: limit,
@@ -205,7 +217,7 @@ export class VendorAnalyticsService {
   async repeatCustomers(vendorId: string) {
     const grouped = await this.prisma.order.groupBy({
       by: ['customerId'],
-      where: { vendorId, status: { in: ['DELIVERED', 'COMPLETED'] } },
+      where: { vendorId, status: { in: ['DELIVERED', 'COMPLETED'] }, AND: [this.visible()] },
       _count: { _all: true },
     });
     const totalCustomers = grouped.length;

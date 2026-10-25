@@ -1,50 +1,19 @@
-'use client';
+import { vendorListSeed } from '@/lib/browse-server';
+import { CatalogueSearchBar } from '@/components/catalogue-search-bar';
+import { BrowseScreen } from './browse-screen';
 
-import { Suspense, useEffect, useState } from 'react';
-import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
-import { getVendors, type Vendor } from '@/lib/customer';
-import { VendorCard, VendorGridSkeleton, EmptyNote } from '@/components/order-ui';
-
-const TABS = [
-  { key: '', label: 'All' },
-  { key: 'RESTAURANT', label: 'Food' },
-  { key: 'SUPERMARKET', label: 'Groceries' },
-  { key: 'STORE', label: 'Shops' },
-  { key: 'SERVICE', label: 'Services' },
-];
-const TITLE: Record<string, string> = { RESTAURANT: 'Food & takeaway', SUPERMARKET: 'Groceries', STORE: 'Shops', SERVICE: 'Services', '': 'All stores' };
-
-function BrowseInner() {
-  const params = useSearchParams();
-  const type = params.get('type') ?? '';
-  const [vendors, setVendors] = useState<Vendor[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setVendors(null); setError(null);
-    getVendors(type || undefined).then(setVendors).catch((e) => setError(e.message));
-  }, [type]);
-
-  return (
-    <div className="space-y-5">
-      <h1 className="text-2xl font-extrabold">{TITLE[type] ?? 'Stores'}</h1>
-      <div className="flex flex-wrap gap-2">
-        {TABS.map((t) => (
-          <Link key={t.key} href={t.key ? `/order/browse?type=${t.key}` : '/order/browse'}
-            className={`rounded-full px-4 py-2 text-sm font-semibold ${type === t.key ? 'bg-[var(--swift-red)] text-white' : 'border border-black/10 bg-white hover:bg-[var(--swift-subtle)]'}`}>
-            {t.label}
-          </Link>
-        ))}
-      </div>
-      {error ? <EmptyNote>Couldn’t load stores — {error}</EmptyNote>
-        : vendors === null ? <VendorGridSkeleton />
-        : vendors.length === 0 ? <EmptyNote>No open stores in this category right now.</EmptyNote>
-        : <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">{vendors.map((v) => <VendorCard key={v.id} v={v} />)}</div>}
-    </div>
-  );
-}
-
-export default function BrowsePage() {
-  return <Suspense fallback={<VendorGridSkeleton />}><BrowseInner /></Suspense>;
+/**
+ * [W2] A category's stores arrive in the page. The server reads the list as a
+ * GUEST (lib/browse-server.ts; the answer is shared for a minute, and only for
+ * the kinds of store this page offers) and hands it to the list as its first
+ * answer.
+ *
+ * [row 110] The category's search bar is drawn here, on the server, and handed
+ * to the list: a plain form, so the page's script does not grow (perf budget).
+ */
+export default async function BrowsePage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const requested = (await searchParams)['type'];
+  const type = typeof requested === 'string' ? requested : '';
+  const seed = await vendorListSeed(type);
+  return <BrowseScreen seed={seed ? { type, read: seed } : null} searchBar={<CatalogueSearchBar type={type} />} />;
 }

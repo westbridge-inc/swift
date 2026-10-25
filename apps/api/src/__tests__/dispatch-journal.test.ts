@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -8,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { makeDispatchService } from '../modules/dispatch/dispatch.service';
 import { OrderService } from '../modules/order/order.service';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Dispatch search journal (availability spec §3): a record BESIDE the state
@@ -31,7 +33,7 @@ let ownerId: string;
 async function makeRider(at: { lat: number; lng: number }) {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59257${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Journal', lastName: 'Rider',
       roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
       isPhoneVerified: true,
@@ -95,6 +97,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app);
   const { registerEmptyJsonBodyParser } = await import('../plugins/empty-json');
   registerEmptyJsonBodyParser(app);
   const { customerRoutes } = await import('../modules/user/customer.routes');
@@ -105,7 +108,7 @@ beforeAll(async () => {
 
   const me = await app.prisma.user.create({
     data: {
-      phone: `+59258${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Jour', lastName: 'Nal',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, selfieCapturedAt: new Date(),
@@ -245,7 +248,7 @@ describe('checkout delivery gate (§2, flag-gated)', () => {
     // Self-contained always-open vendor at the empty corner (no hours rows).
     const owner = await app.prisma.vendorOwner.create({ data: { userId: customerId } });
     ownerId = owner.id;
-    const marker = nanoid(6).toLowerCase();
+    const marker = wordFreeTag(8);
     const vendor = await app.prisma.vendor.create({
       data: {
         ownerId: owner.id,

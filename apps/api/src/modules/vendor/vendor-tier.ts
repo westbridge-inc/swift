@@ -16,10 +16,13 @@
  * order value the tier may transact per rolling week — the same exposure the cap was
  * written to bound.
  */
+import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { Prisma, PrismaClient, Vendor, VendorTier } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import type { CountryConfigService } from '../country/country-config.service';
 import { REGISTRATION_DOC_TYPES } from '../verification/doc-registry';
+import { vendorVisibleFilter } from '../order/hold-visibility';
+import { ownerWallSystem } from '../../lib/owner-rls';
 export { REGISTRATION_DOC_TYPES };
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -49,13 +52,19 @@ export async function vendorTierCapsFor(countryConfig: CountryConfigService, cou
 
 export interface TierUsage { ordersToday: number; grossThisWeek: number; dayStart: Date; weekStart: Date }
 
-/** What an UNREGISTERED vendor has transacted in the two windows — cancelled orders do not count. */
-export async function tierUsage(db: Db, vendorId: string, now: Date): Promise<TierUsage> {
-  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+/** What an UNREGISTERED vendor has transacted in the two windows — cancelled orders do not count.
+ *  The checkout cap counts every live order, held ones included (they are
+ *  commitments the store will see unless cancelled); the STORE's own view
+ *  (`storeView`) counts only orders its board shows [Q12]. */
+export async function tierUsage(db: Db, vendorId: string, now: Date, opts: { storeView?: boolean } = {}): Promise<TierUsage> {
+  // "Today" is the GUYANA day, as the store's own counters count it — never the
+  // UTC day, which in Guyana ends at 8 pm, in the middle of the evening's orders.
+  const dayStart = startOfGuyanaDay(guyanaDayKey(now));
   const weekStart = new Date(now.getTime() - 7 * 86_400_000);
+  const visible = opts.storeView ? { AND: [vendorVisibleFilter(db)] } : {};
   const [ordersToday, gross] = await Promise.all([
-    db.order.count({ where: { vendorId, placedAt: { gte: dayStart, lte: now }, status: { not: 'CANCELLED' } } }),
-    db.order.aggregate({ _sum: { subtotalBase: true }, where: { vendorId, placedAt: { gte: weekStart, lte: now }, status: { not: 'CANCELLED' } } }),
+    db.order.count({ where: { vendorId, placedAt: { gte: dayStart, lte: now }, status: { not: 'CANCELLED' }, ...visible } }),
+    db.order.aggregate({ _sum: { subtotalBase: true }, where: { vendorId, placedAt: { gte: weekStart, lte: now }, status: { not: 'CANCELLED' }, ...visible } }),
   ]);
   return { ordersToday, grossThisWeek: Number(gross._sum.subtotalBase ?? 0), dayStart, weekStart };
 }
@@ -157,11 +166,12 @@ export async function nudgeOwnerOnce(
   now: Date,
 ): Promise<boolean> {
   if (!verdict.nudge) return false;
-  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const already = await db.notification.findFirst({
+  const dayStart = startOfGuyanaDay(guyanaDayKey(now));
+  // [item 20] The store owner's nudge, looked up from a customer's checkout: the named capability under the owner wall.
+  const already = await ownerWallSystem('vendor-tier:nudged-today', () => db.notification.findFirst({
     where: { data: { path: ['kind'], equals: 'vendor_tier_nudge' }, AND: [{ data: { path: ['vendorId'], equals: vendor.id } }], createdAt: { gte: dayStart } },
     select: { id: true },
-  });
+  }));
   if (already) return false;
   const owner = await db.vendorOwner.findUnique({ where: { id: vendor.ownerId }, select: { userId: true } });
   if (!owner) return false;

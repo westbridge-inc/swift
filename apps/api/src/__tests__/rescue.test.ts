@@ -30,14 +30,12 @@ import { recordDecision } from '../modules/algo/decisions';
 import { ConflictError } from '../utils/errors';
 import {
   foodAge, foodAgeLimitMinutes, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, releaseFoodAgeHold, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg, SWEEP_PAGE,
-  FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME,
+  FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME, RESCUE_SWEEPS, RESCUE_NOTICE_KIND,
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { explainEarning } from '../utils/explain-earning';
-import { grantSuiteCapability } from '../lib/test-target-lock';
+import { moverPool, type MoverPool } from './helpers/mover-pool';
 
-// [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
-grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // [ALG-06] Rescue: the food-age cutoff and the escalating re-offer, against
@@ -47,7 +45,9 @@ grantSuiteCapability('unscoped-mutation');
 //      old to deliver: dispatch stops re-offering, the SYSTEM cancels it with
 //      a reason that marks nobody, the customer and the store are told what is
 //      true for their rail, and the row says why. A younger order is offered
-//      as today. COURIER has no cutoff.
+//      as today. COURIER is not on the food clock (its own wait: OF-17,
+//      riderless-exit.test.ts); a store order nobody marked ready is timed
+//      from its prep promise (OF-01, same file).
 //   ① From the second cascade an offer carries Swift's OWN money; the payable
 //      exists only once the rider has durably claimed the job, once per order.
 //      Ships at 0 — the founder sets the amount.
@@ -60,6 +60,8 @@ const PICKUP = { lat: 6.8, lng: -58.15 };
 const UPDATED_BY = 'rescue.test';
 
 let app: FastifyInstance;
+/** [AUD-G7-042] Empties the dispatch pool by id and puts other people's riders back in afterAll. */
+let riderPool: MoverPool;
 let dispatch: DispatchService;
 let customerId: string;
 let vendorId: string;
@@ -83,7 +85,8 @@ async function purge() {
   for (const o of oids) await app.redis.del(...dispatchKeys(o), `ops_page:food_too_old:${o}`, `ops_page:food_too_old_paid:${o}`);
   await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-06', subjectId: { in: [...oids, ...riders.map((r) => r.id)] } } });
   await app.prisma.earning.deleteMany({ where: { orderId: { in: oids } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: oids } } });
+  await app.prisma.notification.deleteMany({ where: { OR: [{ userId: { in: ids } }, { dedupeKey: { in: oids.map((o) => `food-too-old:ops:${o}`) } }] } });
   await app.prisma.order.deleteMany({ where: { id: { in: oids } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
   const vos = await app.prisma.vendorOwner.findMany({ where: { userId: { in: ids } }, select: { id: true } });
@@ -173,11 +176,13 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.ready();
+  riderPool = moverPool(app.prisma, 'rider');
+  await riderPool.begin();
   await purge();
   await app.prisma.algoConfig.deleteMany({ where: { updatedBy: UPDATED_BY } });
   invalidateAlgoConfig();
   // Only this file's riders may be candidates (files run sequentially).
-  await app.prisma.rider.updateMany({ data: { isOnline: false, isAvailable: false } });
+  await riderPool.empty({ isOnline: false, isAvailable: false });
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
 
   const customer = await app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}90`, firstName: 'Rescue', lastName: 'Customer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
@@ -203,22 +208,38 @@ afterAll(async () => {
   invalidateAlgoConfig();
   await purge();
   await app.prisma.tenant.deleteMany({ where: { id: TENANT_X } }).catch(() => {});
+  if (riderPool) await riderPool.restore(); // undefined only when beforeAll failed before building it
   await app.close();
 });
 
 // ---------------------------------------------------------------------------
 
 describe('[ALG-06 ②] food age — the pure rule', () => {
-  it('measures from readyAt against the vertical limit; no readyAt or no limit means never too old', () => {
+  it('measures from readyAt against the vertical limit; nothing started or no limit means never too old', () => {
     const now = new Date('2026-08-30T12:00:00Z');
     const ready = (min: number) => ({ readyAt: new Date(now.getTime() - min * MIN) });
-    expect(foodAge(ready(50), 45, now)).toEqual({ tooOld: true, ageMinutes: 50 });
-    expect(foodAge(ready(20), 45, now)).toEqual({ tooOld: false, ageMinutes: 20 });
+    expect(foodAge(ready(50), 45, now)).toEqual({ tooOld: true, ageMinutes: 50, basis: 'READY' });
+    expect(foodAge(ready(20), 45, now)).toEqual({ tooOld: false, ageMinutes: 20, basis: 'READY' });
     // Exactly at the limit is still deliverable — past it is not.
     expect(foodAge(ready(45), 45, now).tooOld).toBe(false);
     expect(foodAge(ready(46), 45, now).tooOld).toBe(true);
-    expect(foodAge({ readyAt: null }, 45, now)).toEqual({ tooOld: false, ageMinutes: null });
-    expect(foodAge(ready(500), null, now)).toEqual({ tooOld: false, ageMinutes: null });
+    expect(foodAge({ readyAt: null }, 45, now)).toEqual({ tooOld: false, ageMinutes: null, basis: null });
+    expect(foodAge(ready(500), null, now)).toEqual({ tooOld: false, ageMinutes: null, basis: null });
+  });
+
+  it('[OF-01] never marked ready: timed from acceptance + the prep promise (the Vendor default when none); [OF-17] a parcel from its start', () => {
+    const now = new Date('2026-08-30T12:00:00Z');
+    const ago = (min: number) => new Date(now.getTime() - min * MIN);
+    // Accepted 80 min ago, 30-min prep: 50 min past the promise.
+    expect(foodAge({ readyAt: null, acceptedAt: ago(80), estimatedPrepTime: 30 }, 45, now)).toEqual({ tooOld: true, ageMinutes: 50, basis: 'PREP_PROMISE' });
+    expect(foodAge({ readyAt: null, acceptedAt: ago(70), estimatedPrepTime: 30 }, 45, now).tooOld).toBe(false);
+    // No prep minutes on the order: the Vendor default (30).
+    expect(foodAge({ readyAt: null, acceptedAt: ago(80), estimatedPrepTime: null }, 45, now).ageMinutes).toBe(50);
+    // Once marked ready, readyAt rules again.
+    expect(foodAge({ readyAt: ago(10), acceptedAt: ago(200), estimatedPrepTime: 30 }, 45, now)).toEqual({ tooOld: false, ageMinutes: 10, basis: 'READY' });
+    // A parcel: from the latest of placing, hold end and slot.
+    expect(foodAge({ orderType: 'COURIER', readyAt: null, placedAt: ago(90), holdExpiresAt: ago(70), scheduledFor: null }, 60, now))
+      .toEqual({ tooOld: true, ageMinutes: 70, basis: 'PARCEL' });
   });
 
   it('ships 45 min for FOOD, 90 for GROCERY, no cutoff for COURIER; the incentive ships at 0', () => {
@@ -269,7 +290,11 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
 
     // The cascade's keys are gone; no offer was ever made.
     for (const k of dispatchKeys(order.id)) expect(await app.redis.exists(k)).toBe(0);
-    expect(await app.redis.get(`ops_page:food_too_old:${order.id}`)).toBe('1');
+    // Ops: paged once — this suite's operator holds the page on its own key,
+    // and the cutoff's durable obligation is closed, nothing left owed.
+    const admin = await app.prisma.user.findFirstOrThrow({ where: { phone: `${PHONE_PREFIX}92` }, select: { id: true } });
+    expect(await app.prisma.notification.count({ where: { userId: admin.id, dedupeKey: `food-too-old:ops:${order.id}` } })).toBe(1);
+    expect(await app.prisma.orderOutbox.count({ where: { orderId: order.id, kind: RESCUE_NOTICE_KIND, processedAt: null } })).toBe(0);
   });
 
   it('an MMG order tells the customer the store refunds — Swift never holds their money', async () => {
@@ -301,7 +326,7 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
     await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
   });
 
-  it('an ACCEPTED order that is not ready yet has no age — the clock starts at readyAt', async () => {
+  it('dispatch never retires an order that is not ready — [OF-01] the sweep owns that wait (notice, grace, cancel)', async () => {
     const order = await makeOrder({ status: 'ACCEPTED', readyAgoMin: null });
     // No candidate online ⇒ the loop exhausts honestly instead of retiring.
     const r = await dispatch.dispatchOrder(order.id);
@@ -322,7 +347,7 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
     expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id } })).toBe(0);
   });
 
-  it('the watchdog sweep: grocery past 90 min is retired, 60 min kept, COURIER never', async () => {
+  it('the watchdog sweep: grocery past 90 min is retired, 60 min kept; a fresh COURIER is not on the food clock', async () => {
     const old = await makeOrder({ orderType: 'GROCERY_DELIVERY', readyAgoMin: 100 });
     const fresh = await makeOrder({ orderType: 'GROCERY_DELIVERY', readyAgoMin: 60 });
     const courier = await makeOrder({ orderType: 'COURIER', readyAgoMin: 400 });
@@ -401,6 +426,7 @@ describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
     // Ops: paged once on the paid-hold key, never on the cancel key.
     expect(await app.redis.get(`ops_page:food_too_old_paid:${order.id}`)).toBe('1');
     expect(await app.redis.exists(`ops_page:food_too_old:${order.id}`)).toBe(0);
+    expect(await app.prisma.notification.count({ where: { dedupeKey: `food-too-old:ops:${order.id}` } })).toBe(0);
   });
 
   it('the sweep holds it too, and holding is idempotent: a second tick writes no second row, page or notice', async () => {
@@ -599,16 +625,18 @@ describe('[TA-S0-001 hold v3 — the review of #991] a two-way door with a durab
     try {
       // Other cases in this file leave holds behind too, so the walk is driven
       // until the cursor wraps: every hold in the set has been visited once.
-      await app.redis.del('rescue:cursor:holds');
+      // (The cursor is the durable sweep_cursors row; null = the pass is done.)
+      const passInFlight = async () => (await app.prisma.sweepCursor.findUnique({ where: { workType: RESCUE_SWEEPS.holds } }))?.cursorId != null;
+      await app.prisma.sweepCursor.deleteMany({ where: { workType: RESCUE_SWEEPS.holds } });
       let ticks = 0;
       do {
         await sweepFoodAge(deps());
         ticks += 1;
-      } while ((await app.redis.exists('rescue:cursor:holds')) === 1 && ticks < 60);
+      } while ((await passInFlight()) && ticks < 60);
       expect(ticks).toBeGreaterThan(2); // the page really was smaller than the set
     } finally {
       SWEEP_PAGE.holds = saved;
-      await app.redis.del('rescue:cursor:holds');
+      await app.prisma.sweepCursor.deleteMany({ where: { workType: RESCUE_SWEEPS.holds } });
     }
     for (const id of ids) {
       expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${id}` } })).toBe(1);
@@ -730,6 +758,7 @@ describe('[ALG-06 ①] the escalating re-offer — Swift’s own money', () => {
 describe('[ALG-06] source pins — the hook sits where the law says', () => {
   const service = readFileSync(path.join(__dirname, '../modules/dispatch/dispatch.service.ts'), 'utf8');
   const rescue = readFileSync(path.join(__dirname, '../modules/dispatch/rescue.ts'), 'utf8');
+  const generationKeys = readFileSync(path.join(__dirname, '../modules/dispatch/dispatch-generation-keys.ts'), 'utf8');
   const queue = readFileSync(path.join(__dirname, '../jobs/queue.ts'), 'utf8');
 
   it('the cutoff runs before the live-offer check, inside dispatchOrder, for the RIDER pool only', () => {
@@ -745,7 +774,7 @@ describe('[ALG-06] source pins — the hook sits where the law says', () => {
   it('the payable is settled after the durable claim, never before, and never load-bearing for it', () => {
     const start = service.indexOf('async acceptOffer(');
     const claim = service.indexOf('const claimed = await this.claimOrder(', start);
-    const settle = service.indexOf("if (pool === 'RIDER') await this.settleRescueIncentive(orderId, mover.id);", start);
+    const settle = service.indexOf("if (pool === 'RIDER') await this.settleRescueIncentive(orderId, mover.id, offeredVersion);", start);
     const ret = service.indexOf('return claimed;', start);
     expect(claim).toBeGreaterThan(start);
     expect(settle).toBeGreaterThan(claim);
@@ -755,10 +784,23 @@ describe('[ALG-06] source pins — the hook sits where the law says', () => {
   });
 
   it("rescue's key formats mirror the dispatch service's, and the incentive rides the offer payload", () => {
-    for (const prefix of ['dispatch:offer:${', 'dispatch:declined:${', 'dispatch:exhausts:${', 'dispatch:round:${']) {
-      expect(rescue).toContain(prefix);
-      expect(service).toContain(prefix);
+    expect(service).toContain('const declinedKey = dispatchDeclinedKey;');
+    expect(service).toContain('const roundKey = dispatchRoundKey;');
+    expect(service).toContain('const exhaustKey = dispatchExhaustKey;');
+    for (const helper of ['dispatchDeclinedKey', 'dispatchExhaustKey', 'dispatchRoundKey']) {
+      expect(rescue).toContain(helper);
+      expect(generationKeys).toContain(`export const ${helper}`);
     }
+    for (const prefix of ['dispatch:declined:${', 'dispatch:exhausts:${', 'dispatch:round:${']) {
+      expect(generationKeys).toContain(prefix);
+    }
+    // The offer key format lives once, in the shared helper module (like the
+    // declined, round and exhaust keys above); the service only aliases it.
+    expect(service).toContain('const offerKey = dispatchOfferKey;');
+    expect(service).not.toContain('`dispatch:offer:${');
+    expect(generationKeys).toContain('export const dispatchOfferKey');
+    expect(generationKeys).toContain('`dispatch:offer:${orderId}`');
+    expect(rescue).toContain('`dispatch:offer:${orderId}`');
     const emit = service.indexOf("emit('dispatch:offer', {");
     expect(service.slice(emit, emit + 4000)).toContain('rescueIncentiveGyd: rescueGyd > 0 ? rescueGyd : null,');
   });

@@ -208,6 +208,10 @@ describe('P12 — reopening inside the window rebuilds the SAME card', () => {
     }
     expect(typeof rebuilt.etaMinutes, '"N min away" is on the rebuilt card').toBe('number');
     expect(rebuilt.cashMath, 'the cash box is on the rebuilt card').toEqual(live.cashMath);
+    // [L05] Before acceptance the rebuilt card names the store's public pickup
+    // only; the customer's drop-off waits for acceptance (the live card names neither).
+    expect({ pickup: rebuilt.pickupAddress, dropoff: rebuilt.deliveryAddress }).toEqual({ pickup: 'Vendor HQ', dropoff: null });
+    expect(res.body).not.toContain('Customer place');
   });
 
   it('accept binds to the recovered generation: a fabricated attempt is refused WITHOUT consuming the live card', async () => {
@@ -262,5 +266,36 @@ describe('P12 — reopening inside the window rebuilds the SAME card', () => {
     expect(late.statusCode).toBe(409);
     const untouched = await app.prisma.order.findUnique({ where: { id: order.id }, select: { riderId: true } });
     expect(untouched?.riderId).toBeNull();
+  });
+
+  it('never emits an offer installed after vendor-delivery authority already committed', async () => {
+    await parkAllRiders();
+    const r = await makeRider();
+    const order = await makeOrder();
+    emitted.length = 0;
+
+    // Force the exact cross-store ordering: dispatch has read PLATFORM/NULL and
+    // selected a rider; then the vendor commits VENDOR_DELIVERY while no Redis
+    // pair exists to retire; only after that does the stale cascade install.
+    const internal = dispatch as any;
+    const originalInstall = internal.installOfferPair.bind(dispatch);
+    const install = vi.spyOn(internal, 'installOfferPair').mockImplementationOnce(async (...args: any[]) => {
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'VENDOR_DELIVERY' },
+      });
+      return originalInstall(...args);
+    });
+
+    try {
+      expect(await dispatch.dispatchOrder(order.id)).toEqual({});
+    } finally {
+      install.mockRestore();
+    }
+
+    expect(liveOfferFor(r.userId)).toBeUndefined();
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:mover-offer:${r.riderId}`)).toBeNull();
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, r.riderId)).toBe(0);
   });
 });

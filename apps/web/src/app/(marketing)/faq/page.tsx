@@ -1,7 +1,9 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
+import { BrowserOrderingNote } from '@/components/browser-ordering-note';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
+import { CANCEL_ORDER_ANSWER } from '@/lib/cancel-policy-copy';
 
 export const metadata: Metadata = {
   title: 'Questions',
@@ -73,9 +75,9 @@ const FAQ: QA[] = [
     q: 'Is there an iPhone or Android app?',
     a: (
       <>
-        Not yet — and we will not put a store badge on this page until there genuinely is one. Swift
-        runs in your phone&apos;s browser today: everything works, including tracking your order live.
-        The apps are in progress and this answer changes the day they ship.
+        <BrowserOrderingNote open="Store ordering and order tracking work in your phone's browser." /> Taxi rides
+        require the Swift mobile app
+        during the pilot, including the safety PIN and SOS. Store download links will appear here when available.
       </>
     ),
   },
@@ -83,22 +85,16 @@ const FAQ: QA[] = [
     q: 'How do I know the driver is the right person?',
     a: (
       <>
-        Every taxi ride uses a six-digit code. Your driver asks you for it and enters it before the
+        Every taxi ride uses a six-digit code in the Swift mobile app. Your driver asks you for it and enters it before the
         trip starts, so both of you know you have the right person. On a trip you can share your
         route with someone, and the emergency button dials 911 directly.
       </>
     ),
   },
   {
+    // [Terms 2026-10-15 §7] free or refused, never a fee
     q: 'Can I cancel an order?',
-    a: (
-      <>
-        Yes. After you place an order there is a short window where the store has not been told yet —
-        cancelling in that window is free, and the app shows the clock counting down. After the store
-        starts work a cancellation may carry a cost, and the app tells you the exact amount before
-        you confirm, never after.
-      </>
-    ),
+    a: <>{CANCEL_ORDER_ANSWER}</>,
   },
   {
     q: 'How do I delete my account and my data?',
@@ -117,13 +113,27 @@ const FAQ: QA[] = [
     q: 'I run a business. What do I need to sign up?',
     a: (
       <>
-        Owner ID, business registration, TIN and a photo of your storefront. A person reviews them —
+        Owner ID, business registration, a photo of your storefront, and any licence your kind of
+        business needs (a restaurant adds its GRA licence and food handler&apos;s permit). A person reviews them —
         most businesses clear within a day — and your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}
         <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/vendors">
           business page
         </Link>{' '}
         walks through the whole thing.
+      </>
+    ),
+  },
+  {
+    // [Owner rulings 11 Oct 2026] the two licences and the H plate, said plainly
+    q: 'I drive a taxi. What documents do I need?',
+    a: (
+      <>
+        Seven: your normal driver&apos;s licence; your separate <b>Hire Car Driver&apos;s Licence</b> from
+        GRA (your normal licence does not need to show a hire class); your car&apos;s Certificate of
+        Registration with an <b>H plate</b> (e.g. HC 1234); the car&apos;s yearly hire licence; its
+        certificate of fitness; insurance that covers carrying passengers for hire; and one photo of the car
+        with the plate clearly visible. A police clearance is optional.
       </>
     ),
   },

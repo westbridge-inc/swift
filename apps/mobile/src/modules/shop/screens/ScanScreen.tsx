@@ -4,7 +4,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, radius, space, withAlpha } from '@swift/ui';
-import { Header, PillButton, Screen, T } from '../../../kit';
+import { CartBar, useCartBarClearance, Header, PillButton, Screen, T } from '../../../kit';
 import { destinationForUrl } from '../../../lib/deepLinkParse';
 import { resolveDestination, type ResolveFailure } from '../../../services/deep-links';
 
@@ -55,6 +55,8 @@ export function ScanScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [failure, setFailure] = useState<ResolveFailure | null>(null);
   const [busy, setBusy] = useState(false);
+  // [E09] While the cart bar floats at the bottom, the centred scanner rises clear of it.
+  const cartClearance = useCartBarClearance();
 
   // A QR held in frame fires onBarcodeScanned many times a second. Without this
   // latch every frame would start its own resolve and file its own APP_OPEN
@@ -154,9 +156,11 @@ export function ScanScreen() {
   return (
     <Screen>
       <Header title="Scan" />
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: space['3xl'] }}>
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: space['3xl'] + cartClearance }}>
         {body()}
       </View>
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }

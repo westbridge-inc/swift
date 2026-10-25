@@ -16,10 +16,27 @@ describe('phone authentication entry contract', () => {
     expect(source).toContain('testID="auth-browse-guest"');
   });
 
-  it('makes both country-changing affordances explicit buttons', () => {
-    expect(source).toContain('testID="auth-country-picker"');
-    expect(source).toContain('accessibilityLabel={`Change country calling code. Current code ${dialCode ?? \'+592\'}`}');
-    expect(source).toContain('accessibilityLabel="Change country"');
-    expect(source.match(/accessibilityRole="button"/g) ?? []).toHaveLength(2);
+  it('keeps stable targets for the resend window: the calm notice and the way into code entry', () => {
+    expect(source).toContain('testID="auth-resend-wait"');
+    expect(source).toContain('testID="auth-enter-code"');
+  });
+
+  it('pins signup to Guyana without presenting a misleading country picker', () => {
+    expect(source).toContain('accessibilityLabel="Guyana calling code +592"');
+    expect(source).toContain('+592');
+    expect(source).not.toContain('auth-country-picker');
+    expect(source).not.toContain('Wrong country?');
+    expect(source).not.toContain("navigate('CountryPicker')");
+  });
+
+  it('describes the mover path as becoming a Swift driver, not booking a taxi', () => {
+    expect(source).toContain("const earnerLabel = intent === 'vendor' ? 'a business' : 'a Swift driver'");
+    expect(source).not.toContain("moverPreset === 'taxi'");
+  });
+
+  it("[ANDROID-QA] the keyboard's done key sends the code, under the same guards as the button", () => {
+    // Android edge-to-edge does not lift Send Code above the keyboard.
+    expect(source).toContain('returnKeyType="done"');
+    expect(source).toMatch(/onSubmitEditing=\{\(\) => \{\s*if \(valid && !locked && !send\.isPending\) send\.mutate\(fullPhone\);/);
   });
 });

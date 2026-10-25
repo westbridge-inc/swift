@@ -1,0 +1,134 @@
+// ---------------------------------------------------------------------------
+// [DS110-14] THE REASON CENSUS — one list, graded at the wire.
+//
+// Every admin-console caller of a server route that demands a stated reason
+// (C3/C4/C5 in `ADMIN_ROUTE_AUTHORITY`) is registered here, and the census
+// test grades each one by invoking its api helper with a reason and asserting
+// the outgoing request carries it (the `x-swift-reason` header the single
+// transport puts on every reasoned call). A console caller left off this list
+// fails the census; a server route with no console caller is allowed to be
+// absent.
+//
+// `helper` names an export of `lib/api.ts`; `args` are the helper's
+// NON-reason arguments in call order — every reasoned helper takes its reason
+// as the FINAL argument, so the test can drive all of them identically.
+// `requiredBodyKeys` names the top-level body fields the SERVER's zod schema
+// demands (read from the route handler), so the census grades the body shape
+// at the wire and not just the reason — a helper that passed the reason gate
+// and then 400'd on a missing `note` / deposit evidence is caught here.
+// `reply` is the success `data` the census answers with, for a helper that
+// checks the server's answer before it resolves; absent = an empty object.
+// ---------------------------------------------------------------------------
+
+export interface ReasonCaller {
+  /** "<METHOD> <route template>", exactly as ADMIN_ROUTE_AUTHORITY keys it. */
+  readonly route: string;
+  /** The exported function name in lib/api.ts. */
+  readonly helper: string;
+  /** The helper's non-reason arguments, in call order. */
+  readonly args: readonly unknown[];
+  /** Top-level body fields the server's zod schema requires; absent = none. */
+  readonly requiredBodyKeys?: readonly string[];
+  /** The success `data` the census replies with; absent = `{}`. */
+  readonly reply?: Readonly<Record<string, unknown>>;
+}
+
+export const REASONED_CALLERS: readonly ReasonCaller[] = [
+  // ── People ─────────────────────────────────────────────────────────────
+  { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
+  { route: 'PUT /users/:id/unsuspend', helper: 'unsuspendUser', args: ['usr_1'] },
+  { route: 'PUT /users/:id/ban', helper: 'banUser', args: ['usr_1'] },
+  { route: 'POST /support/:id/complete-account-closure', helper: 'completeAccountClosure', args: ['tkt_1'] },
+
+  // ── Vendors and movers ─────────────────────────────────────────────────
+  { route: 'PUT /vendors/:id/approve', helper: 'approveVendor', args: ['vnd_1'] },
+  { route: 'PUT /vendors/:id/suspend', helper: 'suspendVendor', args: ['vnd_1'] },
+  { route: 'PUT /riders/:id/verify-documents', helper: 'verifyRiderDocuments', args: ['rdr_1'] },
+  { route: 'PUT /drivers/:id/verify-documents', helper: 'verifyDriverDocuments', args: ['drv_1'] },
+  { route: 'PUT /drivers/:id/ride-class', helper: 'setDriverRideClass', args: ['drv_1', 'COMFORT'], requiredBodyKeys: ['rideClass'] },
+
+  // ── Orders ─────────────────────────────────────────────────────────────
+  { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
+  { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
+  { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
+    requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
+  { route: 'POST /orders/:id/door-cash-return/resolve', helper: 'resolveHeldDoorCash', args: ['ord_1'], reply: { orderId: 'ord_1', doorCashReturn: { status: 'RESOLVED' } } },
+
+  // ── Moderation ─────────────────────────────────────────────────────────
+  { route: 'PUT /moderation/reports/:id', helper: 'resolveModerationReport', args: ['rep_1', { status: 'ACTIONED' }], requiredBodyKeys: ['status'] },
+  { route: 'POST /catalogue-review/:id/approve', helper: 'approveCatalogueItem', args: ['itm_1', 'a'.repeat(64)], requiredBodyKeys: ['wordsHash'] },
+  { route: 'POST /catalogue-review/:id/remove', helper: 'removeCatalogueItem', args: ['itm_1', 'ALCOHOL'], requiredBodyKeys: ['prohibitedClass'] },
+  { route: 'POST /catalogue-review/stores/:id/approve', helper: 'approveCatalogueStore', args: ['vnd_1', 'a'.repeat(64)], requiredBodyKeys: ['wordsHash'] },
+  { route: 'POST /ratings/:id/moderate', helper: 'moderateRating', args: ['rat_1', { action: 'publish' }], requiredBodyKeys: ['action'] },
+  { route: 'POST /rating-reports/:id/resolve', helper: 'resolveRatingReport', args: ['rr_1', 'uphold'], requiredBodyKeys: ['action'] },
+
+  // ── Ads ────────────────────────────────────────────────────────────────
+  { route: 'PUT /ads/advertisers/:id/approve', helper: 'approveAdvertiser', args: ['adv_1'] },
+  { route: 'PUT /ads/advertisers/:id/reject', helper: 'rejectAdvertiser', args: ['adv_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /ads/advertisers/:id/suspend', helper: 'suspendAdvertiser', args: ['adv_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /ads/advertisers/:id/reinstate', helper: 'reinstateAdvertiser', args: ['adv_1'] },
+
+  // ── Verification ───────────────────────────────────────────────────────
+  { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
+  { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /verification/:id/revoke', helper: 'revokeDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
+  { route: 'PUT /staff/:userId/catalogue-approver', helper: 'setCatalogueApprover', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
+
+  // ── Compliance ─────────────────────────────────────────────────────────
+  { route: 'POST /compliance/reviews/:id/decide', helper: 'decideComplianceReview', args: ['cre_1', true, undefined], requiredBodyKeys: ['pass'] },
+  { route: 'POST /compliance/violations/:id/resolve', helper: 'resolveComplianceViolation', args: ['vio_1'] },
+
+  // ── Dead letters ───────────────────────────────────────────────────────
+  { route: 'DELETE /dlq/:queue/:id', helper: 'discardDeadLetter', args: ['order', 'job-1', { name: 'process-billing', finishedOn: 1 }] },
+
+  // ── Discovery ──────────────────────────────────────────────────────────
+  { route: 'POST /discovery/categories/:id/merge-into', helper: 'mergeDiscoveryCategory', args: ['cat_1', 'cat_2'], requiredBodyKeys: ['targetId'] },
+
+  // ── Finance, subscriptions, cash ───────────────────────────────────────
+  { route: 'PUT /finance/settlements/:id/process', helper: 'processSettlement', args: ['set_1', undefined] },
+  { route: 'PUT /subscriptions/:id/waive-fee', helper: 'waiveSubscriptionFee', args: ['sub_1'], requiredBodyKeys: ['reason'] },
+  { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },
+  { route: 'POST /subscriptions/:id/refund-credit/set-aside', helper: 'setAsideSubscriptionCredit', args: ['sub_1', 1000], requiredBodyKeys: ['amount'] },
+  { route: 'POST /subscriptions/:id/refund-credit/paid', helper: 'recordSubscriptionRefundPaid', args: ['sub_1', 1000, 'MMG', 'REF-1', 'evt_aside_1'], requiredBodyKeys: ['amount', 'method', 'reference', 'setAsideId'] },
+  { route: 'POST /subscriptions/:id/refund-credit/release', helper: 'releaseSubscriptionRefund', args: ['sub_1', 1000, 'evt_aside_1'], requiredBodyKeys: ['amount', 'setAsideId'] },
+  { route: 'PUT /cash-rules/claims/:id/approve', helper: 'approveClaim', args: ['clm_1'] },
+  { route: 'PUT /cash-rules/claims/:id/reject', helper: 'rejectClaim', args: ['clm_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /cash-rules/claims/:id/paid', helper: 'payClaim', args: ['clm_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
+  { route: 'POST /cash-rules/rlp/reserve/adjust', helper: 'adjustRlpReserve', args: ['GY', 1000, 'Correction entry'], requiredBodyKeys: ['countryCode', 'amount', 'note'] },
+  { route: 'PUT /cash-rules/rlp/movers/:userId/suspend', helper: 'suspendLossProtection', args: ['usr_2'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /cash-rules/rlp/movers/:userId/reinstate', helper: 'reinstateLossProtection', args: ['usr_2', undefined] },
+  { route: 'POST /billing/agent-payments/:id/attach', helper: 'attachAgentPayment', args: ['pay_1', 'sub_1'], requiredBodyKeys: ['subscriptionId'] },
+  { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
+  // [MMG REVERSAL · owner #11] Return a whole MMG weekly-fee payment: the whole amount, typed.
+  { route: 'POST /billing/mmg-checkouts/:id/reverse', helper: 'reverseMmgFeePayment', args: ['mco_1', 2100], requiredBodyKeys: ['amountGyd'] },
+  { route: 'POST /billing/mmg-fee-reversals/:id/resolve', helper: 'resolveMmgFeeReversal', args: ['rev_1', 'NOT_RETURNED', 'MMG-STMT-123'], requiredBodyKeys: ['outcome', 'mmgReference'] },
+  // [continues #1592] Weekly-fee payment confirmations: the reason travels in the body (and the header).
+  { route: 'POST /billing/confirmations/:id/resolve', helper: 'requestConfirmationResolution', args: ['hold_1', { sourceId: 'chk_1', epoch: 1, clockVersion: 3, decision: 'UNPAID', evidenceReference: 'MMG-STATEMENT-1', reason: 'Checked the MMG statement for this payment' }], requiredBodyKeys: ['sourceId', 'epoch', 'clockVersion', 'decision', 'evidenceReference', 'reason'] },
+  { route: 'POST /billing/settlement-batches/:id/confirm-deposit', helper: 'confirmSettlementDeposit', args: ['batch_1', { depositedGyd: 500, depositedAt: '2026-01-01T00:00:00Z', bankRef: 'MMG-BANK-REF-1' }], requiredBodyKeys: ['depositedGyd', 'depositedAt', 'bankRef'] },
+
+  // ── Custody recovery [AF-MOB-006] ──────────────────────────────────────
+  { route: 'POST /custody-cases/:id/direct', helper: 'directCustodyCase', args: ['cc_1', 'RELAY_REQUIRED'], requiredBodyKeys: ['outcome'] },
+  { route: 'POST /custody-cases/:id/relay', helper: 'assignCustodyRelay', args: ['cc_1', 'rdr_1'], requiredBodyKeys: ['riderId'] },
+  { route: 'POST /custody-cases/:id/confirm-return', helper: 'confirmCustodyReturn', args: ['cc_1'] },
+
+  // ── Returns ────────────────────────────────────────────────────────────
+  { route: 'PUT /returns/:id/resolve', helper: 'resolveReturn', args: ['ret_1', 'APPROVED', undefined], requiredBodyKeys: ['status'] },
+  { route: 'PUT /returns/:id/refund-settled', helper: 'settleReturnRefund', args: ['ret_1', 'REF-1', 500, undefined], requiredBodyKeys: ['reference', 'amount'] },
+
+  // ── Platform ───────────────────────────────────────────────────────────
+  { route: 'POST /notifications/broadcast', helper: 'broadcastNotification', args: [{ title: 'T', body: 'B', category: 'service' }], requiredBodyKeys: ['title', 'body', 'category'] },
+  { route: 'PUT /config/:key', helper: 'updateConfig', args: ['DELIVERY_FEE', { base: 100 }], requiredBodyKeys: ['value'] },
+  { route: 'POST /promos', helper: 'createPromo', args: [{
+    code: 'CENSUS', description: 'Census fixture', discountType: 'FIXED_AMOUNT', discountValue: 1,
+    validFrom: '2026-01-01', validUntil: '2026-02-01',
+  }], requiredBodyKeys: ['code', 'description', 'discountType', 'discountValue', 'validFrom', 'validUntil'] },
+
+  // [ZONE-FARES] Fixed zone-to-zone fares
+  { route: 'POST /zone-fares', helper: 'createZoneFare', args: [{ fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12000 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
+  { route: 'PUT /zone-fares/:id', helper: 'updateZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12500 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
+  { route: 'DELETE /zone-fares/:id', helper: 'deleteZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b' }], requiredBodyKeys: ['fromZoneId', 'toZoneId'] },
+
+  // ── The decision itself ────────────────────────────────────────────────
+  { route: 'POST /approvals/:id/decide', helper: 'decideApproval', args: ['apr_1', true], requiredBodyKeys: ['approve'] },
+] as const;

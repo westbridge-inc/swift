@@ -7,6 +7,10 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { NotificationService } from '../modules/notification/notification.service';
+import { pushOptionsFor, pushOptionsForDevice } from '../providers/notifications/alert-class';
+import type { NotificationChannels, PushOptions } from '../providers/notifications/channels';
+import type { Server } from 'socket.io';
 
 // ---------------------------------------------------------------------------
 // Device push registration. Failure paths first: unauthenticated writes are
@@ -140,3 +144,117 @@ describe('DELETE /notifications/devices', () => {
     expect(row?.isActive).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [RINGER · loud alerts 3/4] DeviceToken.alertsVersion: what the installed
+// app can ring with, as it reported at registration. Builds 9-11 report
+// nothing (0) and must keep receiving exactly today's push; the build-12 app
+// reports 1 and gets the job ring for a new order or an offer.
+// ---------------------------------------------------------------------------
+
+function registerReporting(deviceToken: string, auth: string, extra: Record<string, unknown>) {
+  createdTokens.push(deviceToken);
+  return app.inject({
+    method: 'POST',
+    url: '/api/v1/customer/notifications/devices',
+    payload: { token: deviceToken, platform: 'android', ...extra },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${auth}` },
+  });
+}
+
+const storedVersion = async (deviceToken: string) =>
+  (await app.prisma.deviceToken.findUniqueOrThrow({ where: { token: deviceToken } })).alertsVersion;
+
+describe('[RINGER] POST /notifications/devices records alertsVersion', () => {
+  it('records what the app reported; an app that reports nothing (builds 9-11) reads 0', async () => {
+    const { token } = await makeUser();
+    const ringBuild = `ExponentPushToken[${nanoid(12)}]`;
+    const oldBuild = `ExponentPushToken[${nanoid(12)}]`;
+    expect((await registerReporting(ringBuild, token, { alertsVersion: 1 })).statusCode).toBe(200);
+    expect((await register(oldBuild, token)).statusCode).toBe(200);
+    expect(await storedVersion(ringBuild)).toBe(1);
+    expect(await storedVersion(oldBuild)).toBe(0);
+  });
+
+  it('a malformed report reads 0 and never costs the phone its registration', async () => {
+    const { token } = await makeUser();
+    for (const malformed of ['1', 1.5, -1, 5000, null, true, {}]) {
+      const device = `ExponentPushToken[${nanoid(12)}]`;
+      const res = await registerReporting(device, token, { alertsVersion: malformed });
+      expect(res.statusCode, JSON.stringify(malformed)).toBe(200);
+      expect(await storedVersion(device), JSON.stringify(malformed)).toBe(0);
+    }
+  });
+
+  it('is rewritten on every registration: an app that stops reporting it reads 0 again', async () => {
+    const { token } = await makeUser();
+    const device = `ExponentPushToken[${nanoid(12)}]`;
+    await registerReporting(device, token, { alertsVersion: 1 });
+    expect(await storedVersion(device)).toBe(1);
+    await registerReporting(device, token, {});
+    expect(await storedVersion(device)).toBe(0);
+  });
+});
+
+describe('[RINGER] a ringing notification reaches each device as its app can ring', () => {
+  const ioStub = { to: () => ({ emit: () => true }) } as unknown as Server;
+
+  function recordingChannels() {
+    const calls: Array<{ tokens: string[]; data?: Record<string, unknown>; options?: PushOptions }> = [];
+    const channels: NotificationChannels = {
+      sms: { sendSms: async () => ({ ref: 'sms' }) },
+      email: { sendEmail: async () => ({ ref: 'email' }) },
+      push: {
+        async sendPush(tokens, _title, _body, data, options) {
+          calls.push({ tokens, data, options });
+          return { sent: tokens.length };
+        },
+      },
+    };
+    return { calls, channels };
+  }
+
+  it('a new order: the ring for the build-12 phone, today\'s push for the build-11 phone', async () => {
+    const owner = await makeUser();
+    const oldBuild = `ExponentPushToken[${nanoid(12)}]`;
+    const ringBuild = `ExponentPushToken[${nanoid(12)}]`;
+    await registerReporting(oldBuild, owner.token, {});
+    await registerReporting(ringBuild, owner.token, { alertsVersion: 1 });
+    const { calls, channels } = recordingChannels();
+
+    await new NotificationService(app.prisma, ioStub, channels).send({
+      userId: owner.userId,
+      type: 'ORDER_UPDATE',
+      title: 'New Order!',
+      body: 'Order SW-R1',
+      audience: 'business',
+      data: { orderId: `o-${nanoid(8)}`, orderNumber: 'SW-R1', status: 'PENDING', kind: 'vendor_order_alert', respondBy: new Date(Date.now() + 600_000).toISOString() },
+    });
+
+    expect(calls.map((call) => call.tokens)).toEqual([[oldBuild], [ringBuild]]);
+    const data = calls[0]!.data;
+    expect(calls[0]!.options).toEqual(pushOptionsFor(data));
+    expect(calls[0]!.options).not.toHaveProperty('channelId');
+    expect(calls[1]!.options).toEqual(pushOptionsForDevice(data, 1));
+    expect(calls[1]!.options).toMatchObject({ channelId: 'job_offers', sound: 'swift_job_ring.wav', interruptionLevel: 'time-sensitive' });
+  });
+
+  it('an ordinary notification is one push with today\'s options for both phones', async () => {
+    const user = await makeUser();
+    const oldBuild = `ExponentPushToken[${nanoid(12)}]`;
+    const ringBuild = `ExponentPushToken[${nanoid(12)}]`;
+    await registerReporting(oldBuild, user.token, {});
+    await registerReporting(ringBuild, user.token, { alertsVersion: 1 });
+    const { calls, channels } = recordingChannels();
+
+    await new NotificationService(app.prisma, ioStub, channels).send({
+      userId: user.userId, type: 'ORDER_UPDATE', title: 'On the way', body: 'Your order is on the way',
+      data: { orderId: `o-${nanoid(8)}`, status: 'PICKED_UP' },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect([...calls[0]!.tokens].sort()).toEqual([oldBuild, ringBuild].sort());
+    expect(calls[0]!.options).toEqual(pushOptionsFor(calls[0]!.data));
+  });
+});
+

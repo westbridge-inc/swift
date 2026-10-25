@@ -2,7 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { issueReceipt, cashJournalCsv } from '../modules/billing/receipts';
+import { parseCsv } from '../utils/csv';
 import { runBillingInvariants } from '../modules/billing/invariants';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // Scenario R (gapless receipts under concurrency) + the nightly invariants
 // [san spec 24.2/16.3]: balance provability, the wrongful-suspension
@@ -17,7 +20,7 @@ const subIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_008_000_000 + Math.floor(Math.random() * 8_000_000);
 
-async function makeVendorSub(over: Record<string, unknown> = {}) {
+async function makeVendorSub(over: Record<string, unknown> = {}, vendorName?: string) {
   seq += 1;
   const user = await prisma.user.create({
     data: { phone: `+${phoneBase + seq}`, firstName: 'Rcpt', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
@@ -26,7 +29,7 @@ async function makeVendorSub(over: Record<string, unknown> = {}) {
   const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await prisma.vendor.create({
     data: {
-      ownerId: owner.id, name: `Receipt Vendor ${seq}`, slug: `rcpt-${nanoid(8).toLowerCase()}`,
+      ownerId: owner.id, name: vendorName ?? `Receipt Vendor ${seq}`, slug: `rcpt-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 700_000 + seq}`,
       addressLine1: '7 Ledger Way', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
@@ -53,6 +56,7 @@ async function topupEvent(subscriptionId: string, amount: number) {
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.receiptCounter.deleteMany({ where: { tenantId: TENANT } });
   await prisma.collectionContact.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -84,9 +88,24 @@ describe('scenario R — gapless sequential receipts', () => {
 
   it('the cash journal CSV carries receipt, SAN, account, amount', async () => {
     const csv = await cashJournalCsv(prisma, new Date(Date.now() - 3_600_000), new Date(Date.now() + 3_600_000));
-    expect(csv.split('\n')[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref');
+    // [owner Q-1654-BOOKS B] a status column marks a returned payment's receipt
+    expect(csv.split('\n')[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref,status');
     expect(csv).toContain('Receipt Vendor');
     expect(csv).toContain('2100.00');
+  });
+
+  it('[security review: csv-formula-injection] a vendor name, channel or reference shaped like a formula reaches the journal as text', async () => {
+    const name = `=HYPERLINK("http://evil.example/${wordFreeTag(8)}","open")`;
+    const { sub } = await makeVendorSub({}, name);
+    const e = await topupEvent(sub.id, 2100);
+    const { receiptNumber } = await issueReceipt(prisma, { subscriptionId: sub.id, billingEventId: e.id, amount: 2100, channel: '@SUM(A1)', mmgRef: '+1+1', tenantId: TENANT });
+    const rows = parseCsv(await cashJournalCsv(prisma, new Date(Date.now() - 3_600_000), new Date(Date.now() + 3_600_000)));
+    const row = rows.find((r) => r[1] === receiptNumber);
+    expect(row, 'the receipt line').toBeDefined();
+    expect(row![3]).toBe(`'${name}`);
+    expect(row![5]).toBe("'@SUM(A1)");
+    expect(row![7]).toBe("'+1+1");
+    expect(row![6]).toBe('2100.00');
   });
 });
 
@@ -107,6 +126,12 @@ describe('nightly invariants', () => {
     const { sub } = await makeVendorSub({
       status: 'SUSPENDED', suspendedAt: new Date(), currentPeriodEnd: new Date(Date.now() + 5 * 86_400_000),
     });
+    // [#1393] The detector heals only a suspension billing itself recorded (its
+    // SUSPENDED event, a billing-sourced store suspension): an admin restriction
+    // on a paid-through store is never lifted by it.
+    await prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'SUSPENDED', currencyCode: 'GYD',
+      idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}`, note: 'Auto-suspended after 3 failed charges' } });
+    await prisma.vendor.update({ where: { id: sub.vendorId! }, data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' } });
     const report = await runBillingInvariants(prisma);
     expect(report.wrongfulSuspensions).toContain(sub.id);
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
@@ -116,7 +141,9 @@ describe('nightly invariants', () => {
   });
 
   it('enforcement leak (ACTIVE, unpaid past grace+6h) is reported, not acted on', async () => {
-    const { sub } = await makeVendorSub({ currentPeriodEnd: new Date(Date.now() - 60 * 3_600_000) });
+    // [#1393] Unpaid 60 hours past its due date on the shared clock, nothing confirming.
+    const due = new Date(Date.now() - 60 * 3_600_000);
+    const { sub } = await makeVendorSub({ currentPeriodEnd: due, nextBillingDate: due });
     const report = await runBillingInvariants(prisma);
     expect(report.enforcementLeaks).toContain(sub.id);
     const untouched = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });

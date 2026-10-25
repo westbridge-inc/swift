@@ -9,6 +9,7 @@
  * real path; claim / release / approve (implicit claim) / revoke move the state.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
@@ -36,6 +37,9 @@ const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const REASON = `Decision ${RUN}: the document was reviewed against the checklist`;
 const MIGRATION = join(__dirname, '..', '..', 'prisma', 'migrations', '20260906090000_doc_state_machine', 'migration.sql');
+// [REPLACE-PENDING · owner request 8 Oct 2026] The table grew (a newer copy replaces one waiting for review); the newest
+// state-machine migration re-installs the generator, so it is the one that must mirror it verbatim.
+const LATEST_MIGRATION = join(__dirname, '..', '..', 'prisma', 'migrations', '20261011190000_doc_state_replace_pending', 'migration.sql');
 
 let app: FastifyInstance;
 let adminApp: FastifyInstance;
@@ -51,6 +55,7 @@ async function owner(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 /** A row a LEGACY writer would insert (status only) or a row planted at a machine state (state only). */
@@ -63,7 +68,7 @@ const move = (id: string, state: DocState) => system(() => app.prisma.$executeRa
 const setStatus = (id: string, status: string) => system(() => app.prisma.$executeRawUnsafe('UPDATE verification_documents SET status = $1::"VerificationDocumentStatus" WHERE id = $2', status, id));
 const read = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { state: true, status: true, purgedAt: true, reviewNote: true } }));
 const submit = (userId: string, url = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', url, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', await ownedVerificationFixture(app.prisma, userId, url), 'v1'));
 const decideApprove = (docId: string, reviewerId: string, outcome: 'APPROVE' | 'REJECT' = 'APPROVE') => system(async () => {
   const kase = await app.prisma.reviewCase.create({ data: { submissionId: docId, tenantId: 'swift-default', queue: 'STANDARD', slaDueAt: new Date() } });
   await app.prisma.reviewDecision.create({ data: { caseId: kase.id, tenantId: 'swift-default', reviewerId, outcome, reasonCode: outcome === 'APPROVE' ? 'APPROVED' : 'UNSPECIFIED', actorFacingCategory: outcome === 'APPROVE' ? 'APPROVED' : 'OTHER' } });
@@ -89,7 +94,7 @@ beforeAll(async () => {
   await system(() => seedDocRegistry(app.prisma));
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59279${NUM}0`, firstName: 'State', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   adminId = a.id; users.push(adminId);
   adminToken = app.jwt.sign({ userId: a.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
@@ -128,7 +133,8 @@ describe('[DOC-1 P5-1] the transition table is ONE table', () => {
     expect(isTransitionAllowed('REVIEW_QUEUED', 'APPROVED')).toBe(false);
     const sql = readFileSync(MIGRATION, 'utf8');
     expect(sql.startsWith(DOC_STATE_MIGRATION_HEADER)).toBe(true);
-    for (const statement of docStateMachineDdl()) expect(sql).toContain(statement);
+    const latest = readFileSync(LATEST_MIGRATION, 'utf8');
+    for (const statement of docStateMachineDdl()) expect(latest).toContain(statement);
   });
 
   it('a legacy insert (status only) derives its state; a planted state projects its legacy status', async () => {
@@ -239,7 +245,7 @@ describe('[DOC-1 §5.1] the real path walks the machine', () => {
     expect((await admin('POST', `/verification/cases/${kase.id}/release`)).statusCode).toBe(200);
     expect((await read(doc.id)).state).toBe('REVIEW_QUEUED');
 
-    const approve = await admin('PUT', `/verification/${doc.id}/approve`);
+    const approve = await admin('PUT', `/verification/${doc.id}/approve`, { registrationKind: 'COMPANY' }); // [R16]
     expect(approve.statusCode).toBe(200);
     expect(await read(doc.id)).toMatchObject({ state: 'COMMITTED', status: 'APPROVED' });
     const decisions = await system(() => app.prisma.reviewDecision.findMany({ where: { case: { submissionId: doc.id } } }));

@@ -6,11 +6,12 @@ import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
-import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
 import { StandingCard } from '../../../components/StandingCard';
 import {
   AuthSessionBoundaryError,
@@ -24,25 +25,39 @@ import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
-import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import { BillingStatusBlock, BillingStopControl } from '../../../components/billing/BillingSurfaces';
+import { resumeBillingMethod } from '../../../lib/billing';
 import { useMoverPreview } from '../../../stores/moverPreview';
 
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
-  const { user, logout } = useAuthStore();
+  const { user } = useAuthStore();
+  // What the server does when a mover logs out (mover-authority.ts): the mover
+  // goes offline, and a job not yet picked up is released back to dispatch. A
+  // job already in their hands stays theirs; operations are paged.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'You’ll go offline, and a job you haven’t picked up yet goes back to dispatch. Your earnings, vehicle and documents stay with your account.',
+  });
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
   const standingQ = useMoverStanding<any>(kind);
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
   const subQ = useMoverSubscription(kind);
+  const stepUp = useStepUp();
+  const setBilling = useSetMoverBillingMethod(kind, stepUp.withStepUp);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
+  // [Row 312 · REVIEW-F S4-1] While the malware scanner is down a new vehicle photo is stored unscanned and
+  // the server withholds it until its rescan answers clean (vehiclePhotoUrl null + vehiclePhotoScan). Say
+  // what happened instead of "Add photo". An older server sends no vehiclePhotoScan: as before.
+  const photoScan = (profile as { vehiclePhotoScan?: unknown } | null | undefined)?.vehiclePhotoScan;
+  const photoWaiting = !profile?.vehiclePhotoUrl && photoScan === 'AWAITING';
+  const photoFailed = !profile?.vehiclePhotoUrl && photoScan === 'FAILED';
   const qc = useQueryClient();
   // [ALG-34] The MMG pay link is where the money goes: the server asks this
   // session to confirm it holds the phone (the code sheet), then STAGES the
   // change behind a cool-off with the old link live.
-  const stepUp = useStepUp();
   const [mmgError, setMmgError] = React.useState<string | null>(null);
   const saveMmgLink = useMutation({
     mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl })),
@@ -110,7 +125,8 @@ export function MoverAccountScreen({ navigation }: any) {
     <Screen>
       <Header title="Account" />
       <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        {/* Profile */}
+        {/* Profile. Every card below stacks with marginTop space.md and no
+            marginBottom — one gap between cards (owner 17 Oct: two touched). */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
             <T variant="title" tone="onBrand">
@@ -141,9 +157,7 @@ export function MoverAccountScreen({ navigation }: any) {
 
         {/* Movement R9 — Standing (daily-folded; today's ratings never show) */}
         {standingQ.data ? (
-          <View style={{ marginTop: space.md }}>
-            <StandingCard data={standingQ.data} />
-          </View>
+          <StandingCard data={standingQ.data} style={{ marginTop: space.md, marginBottom: 0 }} />
         ) : null}
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
@@ -166,26 +180,39 @@ export function MoverAccountScreen({ navigation }: any) {
                 </T>
               </View>
               <LinkText
-                label={uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl || photoWaiting ? 'Change photo' : photoFailed ? 'Upload again' : 'Add photo'}
                 onPress={pickVehiclePhoto}
               />
             </View>
-            {!profile?.vehiclePhotoUrl ? (
+            {photoWaiting ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Photo waiting for a file check. Customers see it once it clears.
+              </T>
+            ) : photoFailed ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                This photo didn’t pass our file check. Upload a new photo.
+              </T>
+            ) : !profile?.vehiclePhotoUrl ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Add a clear photo of your vehicle — customers see it the moment you accept.
               </T>
             ) : null}
             {uploadVehiclePhoto.isError ? (
-              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-                Upload failed — try a different photo.
-              </T>
+              <View style={{ marginTop: space.sm }}>
+                <T variant="caption" tone="error">Upload failed — your selected photo is kept for retry.</T>
+                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" onPress={() => uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
+              </View>
             ) : null}
           </Card>
         ) : null}
 
-        {isDriver ? (
+        {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+            drop-off, cash or MMG: the card shows only while the server says the link
+            is on (DRIVER_MMG_PAY_LINK). Off, or a server that does not say, means no card. */}
+        {isDriver && (profile as { mmgPayLinkEnabled?: unknown } | null | undefined)?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="rides"
+            style={{ marginTop: space.md, marginBottom: 0 }}
             value={profile?.mmgPayUrl}
             pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
             saving={saveMmgLink.isPending}
@@ -202,6 +229,7 @@ export function MoverAccountScreen({ navigation }: any) {
           <SettingsRow icon="shield" label="Guarantee claims" sub="Cash orders where the customer didn't pay" onPress={() => navigation?.navigate?.('Claims')} />
           <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
           <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
+          <SettingsRow icon="truck" label="Change vehicle" sub="A new vehicle is checked before you go online" onPress={() => navigation?.navigate?.('MoverVehicle')} />
           <SettingsRow
             icon="credit-card"
             label="Weekly fee"
@@ -211,13 +239,12 @@ export function MoverAccountScreen({ navigation }: any) {
             // line renders exactly as before.
             sub={sub ? (sub.usdDisplay?.line ?? `${money(sub.customRate ?? sub.weeklyRate)}/week`) : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
+            // One row (owner, 11 Oct: it was listed twice): it also opens the
+            // fee screen with the checkout and recent payments.
+            onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
-          <SettingsRow
-            icon="hash"
-            label="My Swift Number"
-            sub="Pay the weekly fee at any MMG agent"
-            onPress={() => navigation?.navigate?.('MySwiftNumber')}
-          />
+          <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData')} />
+          <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>
@@ -225,7 +252,21 @@ export function MoverAccountScreen({ navigation }: any) {
         {/* Honest billing status — wallet balance, grace deadline, or the
             paused block. Silent on a healthy account (the row above is the way
             in). */}
-        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('MySwiftNumber')} compact />
+        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('WeeklyFee')} compact />
+        <BillingStopControl
+          sub={sub}
+          who={kind === 'DRIVER' ? 'driver' : 'rider'}
+          pending={setBilling.isPending}
+          onStop={() => setBilling.mutate({ method: 'NONE' })}
+          onResume={() =>
+            setBilling.mutate({
+              method: resumeBillingMethod(sub),
+              ...(sub?.billingMethod === 'MOBILE_MONEY' && sub?.mmgPayerMsisdn
+                ? { mmgPayerMsisdn: sub.mmgPayerMsisdn }
+                : {}),
+            })
+          }
+        />
 
         {/* The model */}
         <Card style={{ marginTop: space.md }}>
@@ -236,15 +277,16 @@ export function MoverAccountScreen({ navigation }: any) {
             </T>
           </View>
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-            Swift only charges a flat weekly fee — no commission on any fare, ever. You&apos;re paid in cash, on every job.
+            Swift only charges a flat weekly fee — no commission on orders. You&apos;re paid directly by the customer: in cash, or into your own MMG account where you offer it.
           </T>
         </Card>
 
-        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={logout} />
+        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={requestLogout} />
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
+      {logoutDialog}
     </Screen>
   );
 }

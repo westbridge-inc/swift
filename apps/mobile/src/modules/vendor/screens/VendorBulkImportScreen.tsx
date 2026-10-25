@@ -6,8 +6,10 @@ import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { Card, PillButton, T } from '../../../kit';
 import { PressableScale } from '../../../kit/pressable-scale';
+import { touchTarget } from '../../../kit/touch-target';
 import { toast } from '../../../kit/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../../hooks/vendorops';
+import { importCheckSummary, importPhotoNotesLine } from '../../../lib/catalogueCheck';
 import {
   AuthSessionBoundaryError,
   getAuthSessionSnapshot,
@@ -126,7 +128,8 @@ export function VendorBulkImportScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.lg, paddingVertical: space.sm }}>
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(24)}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
         <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Bulk import</T>
@@ -210,7 +213,12 @@ export function VendorBulkImportScreen({ navigation }: any) {
                 Check the names and prices below — nothing imports until you confirm.
               </T>
             )}
-            {(mapped.preview ?? []).slice(0, 5).map((r: any, i: number) => (
+            {/* [F-1218-01] Every row the import will create is on this card.
+                A wrongly read row past a five-row cap was importable unseen;
+                the API sends every row a menu produced, and a server that sent
+                fewer rows than it found is said so below, never passed off as
+                the whole. */}
+            {(mapped.preview ?? []).map((r: any, i: number) => (
               <View key={i} style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: color.border.subtle, paddingTop: space.sm }}>
                 <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
                   {r.name ?? '—'}
@@ -221,6 +229,11 @@ export function VendorBulkImportScreen({ navigation }: any) {
                 </T>
               </View>
             ))}
+            {(mapped.preview?.length ?? 0) < (mapped.rowCount ?? 0) ? (
+              <T variant="micro" tone="muted" style={{ marginTop: space.sm }}>
+                Showing the first {mapped.preview?.length ?? 0} of {mapped.rowCount} rows.
+              </T>
+            ) : null}
             <PillButton
               label={`Import ${mapped.rowCount} items`}
               style={{ marginTop: space.md }}
@@ -239,8 +252,13 @@ export function VendorBulkImportScreen({ navigation }: any) {
             </View>
             <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
               {importedCount != null ? `${importedCount} imported` : 'Items imported'}
-              {failedCount ? ` · ${failedCount} skipped` : ''}.
+              {failedCount ? ` · ${failedCount} skipped` : ''}
+              {importCheckSummary(result)}.
             </T>
+            {/* [IMAGES-E2E PR4] Rows whose photo address was not used (photos are uploaded, never imported). */}
+            {importPhotoNotesLine(result) ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{importPhotoNotesLine(result)}</T>
+            ) : null}
             <PillButton label="Back to menu" variant="outline" style={{ marginTop: space.md }} onPress={() => navigation?.goBack?.()} />
           </Card>
         ) : null}

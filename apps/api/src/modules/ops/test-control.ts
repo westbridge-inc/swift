@@ -44,7 +44,11 @@ export function verifyLoadLease(secret: string, lease: LoadLease | null | undefi
 export async function testControlIdentity(prisma: PrismaClient, env: Record<string, string | undefined> = process.env, now = new Date()): Promise<TestControlIdentity> {
   const identity = await prisma.deploymentIdentity.findUnique({ where: { id: 'singleton' } }).catch(() => null);
   const deploymentId = identity?.deploymentId ?? 'unknown';
-  const secret = env['TEST_CONTROL_SECRET'] || 'test-control-dev-secret';
+  // [R2 C2] The repository fallback signs only in the isolated `test` mode.
+  // Everywhere else the secret is required — the boot guard
+  // (utils/boot-config.ts assertTestControlConfig) refuses to start without it.
+  const secret = env['TEST_CONTROL_SECRET'] || (runtimeMode(env) === 'test' ? 'test-control-dev-secret' : '');
+  if (!secret) throw new Error('TEST_CONTROL_SECRET is required to sign a load lease outside test mode');
   return {
     deploymentId,
     environment: identity?.environment ?? 'unknown',

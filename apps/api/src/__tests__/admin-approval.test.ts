@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
@@ -9,8 +9,12 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
-import { APPROVAL_HEADER, APPROVAL_TTL_MS, fingerprintOf, requiresApproval } from '../modules/admin/admin-approval';
+import {
+  APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, markApplied, requiresApproval,
+} from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { ACCESS_COOKIE, BROWSER_CLIENT_HEADER, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-005] A SETTLEMENT WAS ONE PERSON'S SAY-SO.
@@ -18,7 +22,7 @@ import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/ad
 // Every finance, billing, subscription and ads money route decided on a single
 // actor's request. A settlement processed, a fee waived, a top-up granted, an
 // invoice marked paid — no independent check, no reversal path. The only
-// approval model in the schema gates the autonomous agent; no human action
+// approval model in the schema gates privileged admin action; no human action
 // passed through anything like it. One mistaken or malicious admin was the
 // whole control.
 //
@@ -34,7 +38,7 @@ const userIds: string[] = [];
 const REASON = 'Bank confirmed the transfer cleared on the 3rd, reference GY-88213';
 
 async function makeAdmin(permissions: string[]): Promise<{ token: string; userId: string }> {
-  const phone = `+59274${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Approver', lastName: `A${RUN}${userIds.length}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
@@ -96,6 +100,18 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
   }, 'test-cleanup:admin-approval');
   await app.close();
+});
+
+// [U06] One ask per act while it stands: an ask left PENDING or APPROVED by
+// one case would (rightly) refuse the next case's ask on the same key with 409
+// APPROVAL_ALREADY_OPEN. Each case is its own act, so each starts with no
+// standing ask on the shared key, as if the earlier one had been withdrawn.
+// admin-approval-duplicate.test.ts proves the refusal itself.
+beforeEach(async () => {
+  await runWithoutTenant(() => app.prisma.privilegedApproval.updateMany({
+    where: { entityId: CONFIG_KEY, status: { in: ['PENDING', 'APPROVED'] } },
+    data: { status: 'CANCELLED' },
+  }), 'test-reset:admin-approval');
 });
 
 describe('[ADM-005] one person cannot move money alone', () => {
@@ -251,6 +267,70 @@ describe('[ADM-005] the queue a second admin works', () => {
     const seen = (theirs.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === approvalId)!;
     expect(seen['isOwnRequest']).toBe(false);
   });
+
+  // [Owner, admin-staging 25 Oct] A request past its expiry kept status PENDING (nothing moves the column but a later
+  // decide), so it sat under 'Pending' with an 'expired' label while the 'Expired' tab missed it. The queue now
+  // reports and files it by what it IS: past its expiry, an open request (pending, or approved but not applied) is
+  // EXPIRED, and it can never be decided or applied.
+  describe('a request past its expiry is EXPIRED, wherever it is listed', () => {
+    const list = async (status?: string) => {
+      const res = await call(approver.token, 'GET', `/api/v1/admin/approvals?limit=50${status ? `&status=${status}` : ''}`);
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json() as { data: Array<Record<string, unknown>>; pagination: { total: number } };
+    };
+    const lapse = (id: string) => app.prisma.privilegedApproval.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+
+    it('a lapsed PENDING request is out of the Pending tab (and its count) and in the Expired tab, reported EXPIRED; deciding it is refused', async () => {
+      const asked = await writeConfig(requester.token, { rate: 31 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      await lapse(approvalId);
+
+      for (const view of [await list(), await list('PENDING')]) {
+        expect(view.data.map((r) => r['id'])).not.toContain(approvalId);
+      }
+      const expired = (await list('EXPIRED')).data.find((r) => r['id'] === approvalId);
+      expect(expired).toMatchObject({ id: approvalId, status: 'EXPIRED', isOwnRequest: false });
+
+      const tried = await decide(approver.token, approvalId, true);
+      expect(tried.statusCode).toBe(409);
+      expect(tried.json().error.message).toMatch(/expired/);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('EXPIRED');
+      expect(await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }).then((r) => r?.value)).not.toEqual({ rate: 31 });
+    });
+
+    it('an APPROVED request that lapsed before it was applied is out of the Approved tab, in the Expired tab, and can never be applied', async () => {
+      const asked = await writeConfig(requester.token, { rate: 32 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await decide(approver.token, approvalId, true)).json().data.status).toBe('APPROVED');
+      await lapse(approvalId);
+
+      expect((await list('APPROVED')).data.map((r) => r['id'])).not.toContain(approvalId);
+      expect((await list('EXPIRED')).data.find((r) => r['id'] === approvalId)).toMatchObject({ status: 'EXPIRED', approvedBy: approver.userId });
+
+      const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+      expect(applied.statusCode).toBe(403);
+      expect(applied.json().error.message).toMatch(/expired/);
+      const row = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
+      expect([row.status, row.appliedAt]).toEqual(['APPROVED', null]);
+      expect(await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }).then((r) => r?.value)).not.toEqual({ rate: 32 });
+    });
+
+    it('the spend itself refuses a lapsed approval: markApplied\'s compare-and-set carries the expiry', async () => {
+      const asked = await writeConfig(requester.token, { rate: 34 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await decide(approver.token, approvalId, true)).json().data.status).toBe('APPROVED');
+      await lapse(approvalId);
+      expect(await markApplied(app.prisma, approvalId)).toBe(false);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
+    });
+
+    it('a request still inside its time stays where it was (control)', async () => {
+      const asked = await writeConfig(requester.token, { rate: 33 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await list()).data.find((r) => r['id'] === approvalId)).toMatchObject({ status: 'PENDING' });
+      expect((await list('EXPIRED')).data.map((r) => r['id'])).not.toContain(approvalId);
+    });
+  });
 });
 
 describe('[ADM-005] the law itself', () => {
@@ -294,5 +374,224 @@ describe('[ADM-005] the law itself', () => {
     for (const [key, a] of dual) expect(['C4', 'C5'], key).toContain(a.cls);
     const single = Object.entries(ADMIN_ROUTE_AUTHORITY).filter(([, a]) => !requiresApproval(a.cls));
     for (const [key, a] of single) expect(['C0', 'C1', 'C2', 'C3'], key).toContain(a.cls);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DS110-13 / DS110-14] The second signature must SEE what it signs, and the
+// approved act must actually happen — through one stored body.
+//
+// Before this, `resolveApproval` hashed the request and threw the body away:
+// the approvals screen showed a truncated id, and APPROVED rows accumulated
+// forever because nothing replayed them. The row now stores a canonical
+// `{ params, body }` snapshot; `POST /approvals/:id/apply` reconstructs THAT
+// body and replays it through the normal gate with `x-swift-approval`, so what
+// executes is always what was displayed and the compare-and-set keeps it to
+// exactly one execution.
+// ---------------------------------------------------------------------------
+
+describe('[DS110] the stored body is what executes — and only that', () => {
+  // `bodySnapshot` enters the generated client with the 20260924140000
+  // migration; cast until the client is regenerated, so the suite compiles
+  // against both generations.
+  const snapshotRow = async (id: string) =>
+    (await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id } })) as unknown as {
+      status: string;
+      fingerprint: string;
+      bodySnapshot: unknown;
+    };
+  const rewriteSnapshot = async (id: string, bodySnapshot: unknown) =>
+    (app.prisma.privilegedApproval as unknown as {
+      update: (args: { where: { id: string }; data: { bodySnapshot: unknown } }) => Promise<unknown>;
+    }).update({ where: { id }, data: { bodySnapshot } });
+
+  it('the request body is stored durably and returned to the approver, bound by the fingerprint', async () => {
+    const asked = await writeConfig(requester.token, { rate: 30 });
+    const approvalId = asked.json().error.details.approvalId as string;
+
+    const row = await snapshotRow(approvalId);
+    expect(row.bodySnapshot).toEqual({
+      params: { key: CONFIG_KEY },
+      body: { value: { rate: 30 }, reason: REASON },
+      query: {},
+    });
+    expect(fingerprintOf({
+      method: 'PUT',
+      routeUrl: '/config/:key',
+      params: { key: CONFIG_KEY },
+      body: { value: { rate: 30 }, reason: REASON },
+      query: {},
+    })).toBe(row.fingerprint);
+
+    const list = await call(approver.token, 'GET', '/api/v1/admin/approvals');
+    const seen = (list.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === approvalId)!;
+    expect(seen['bodySnapshot']).toEqual({
+      params: { key: CONFIG_KEY },
+      body: { value: { rate: 30 }, reason: REASON },
+      query: {},
+    });
+  });
+
+  it('only the admin who asked executes: the approver is refused and nothing moves', async () => {
+    const asked = await writeConfig(requester.token, { rate: 33 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+    const before = await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } });
+
+    const byApprover = await call(approver.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(byApprover.statusCode).toBe(403);
+    expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }))?.value).toEqual(before?.value);
+
+    const byRequester = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(byRequester.statusCode, byRequester.body).toBe(200);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 33 });
+  });
+
+  it('the gate itself refuses anyone but the requester — re-sending the original request with the approval id moves nothing', async () => {
+    // [DS186 A1] The requester-only rule lives in resolveApproval, the gate
+    // every C4/C5 route passes through, not only in /apply. The approver (and
+    // any third admin) can read the stored body and the approval id from the
+    // queue; re-issuing the original route with that header must not spend it.
+    const bystander = await makeAdmin(['*']);
+    const asked = await writeConfig(requester.token, { rate: 35 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+    const before = await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } });
+
+    for (const actor of [approver, bystander]) {
+      const direct = await writeConfig(actor.token, { rate: 35 }, approvalId);
+      expect(direct.statusCode, direct.body).toBe(403);
+      expect(direct.json().error.message).toMatch(/Only the admin who asked/);
+      const viaApply = await call(actor.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+      expect(viaApply.statusCode).toBe(403);
+    }
+    expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }))?.value).toEqual(before?.value);
+
+    // the requester still holds it: the refusals did not burn the approval
+    const own = await writeConfig(requester.token, { rate: 35 }, approvalId);
+    expect(own.statusCode, own.body).toBe(200);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 35 });
+  });
+
+  it('the console signs in by cookie: apply replays under that same session', async () => {
+    // [A-01] The admin console holds no Bearer; its session is the HttpOnly
+    // access cookie. `authenticate` turns a gated cookie into the Authorization
+    // header, and that header is what the replay forwards. Without it the
+    // replay would run with no identity.
+    const origin = 'https://admin.swift.test';
+    const saved = process.env['CORS_ORIGIN'];
+    process.env['CORS_ORIGIN'] = origin;
+    resetBrowserOriginsForTests();
+    try {
+      const asked = await writeConfig(requester.token, { rate: 34 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+
+      const applied = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/approvals/${approvalId}/apply`,
+        headers: { [BROWSER_CLIENT_HEADER]: 'admin-web', origin, cookie: `${ACCESS_COOKIE}=${requester.token}`, 'content-type': 'application/json' },
+      });
+      expect(applied.statusCode, applied.body).toBe(200);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPLIED');
+      expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 34 });
+    } finally {
+      if (saved === undefined) delete process.env['CORS_ORIGIN'];
+      else process.env['CORS_ORIGIN'] = saved;
+      resetBrowserOriginsForTests();
+    }
+  });
+
+  it('apply replays the stored body and executes exactly once', async () => {
+    const asked = await writeConfig(requester.token, { rate: 31 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+
+    const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(applied.statusCode, applied.body).toBe(200);
+    expect(applied.json().data.status).toBe('APPLIED');
+
+    const written = await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } });
+    expect(written.value).toEqual({ rate: 31 });
+
+    const approval = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
+    expect(approval.status).toBe('APPLIED');
+    expect(approval.appliedAt).toBeTruthy();
+
+    const again = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(again.statusCode).toBe(403);
+    expect(again.json().error.message).toMatch(/already been used/);
+    // the record did not move again
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value)
+      .toEqual({ rate: 31 });
+  });
+
+  it('two racing applies: exactly one executes — the approval is the authorisation', async () => {
+    const asked = await writeConfig(requester.token, { rate: 32 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true);
+
+    const [a, b] = await Promise.all([
+      call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`),
+      call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes, `${a.statusCode}/${b.statusCode}`).toEqual([200, 403]);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value)
+      .toEqual({ rate: 32 });
+  });
+
+  it('a body that no longer matches the reviewed fingerprint is refused before anything executes', async () => {
+    const asked = await writeConfig(requester.token, { rate: 40 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true);
+
+    // tamper with the stored body — the executed value would no longer be the
+    // value the approver read and signed
+    await rewriteSnapshot(approvalId, { params: { key: CONFIG_KEY }, body: { value: { rate: 9999 }, reason: REASON } });
+
+    const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(applied.statusCode).toBe(403);
+    expect(applied.json().error.message).toMatch(/not what was approved/);
+
+    const written = await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } });
+    expect(written.value).not.toEqual({ rate: 9999 });
+    const approval = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
+    expect(approval.status).toBe('APPROVED');
+  });
+
+  it('a snapshot-less legacy row cannot be applied — there is no body to replay', async () => {
+    const asked = await writeConfig(requester.token, { rate: 41 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true);
+    await rewriteSnapshot(approvalId, null);
+
+    const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(applied.statusCode).toBe(403);
+    expect(applied.json().error.message).toMatch(/not what was approved/);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value)
+      .not.toEqual({ rate: 41 });
+  });
+
+  it('apply is classified as workflow, not as a second approval of itself', () => {
+    const entry = ADMIN_ROUTE_AUTHORITY['POST /approvals/:id/apply'];
+    expect(entry?.cls).toBe('C2');
+    expect(ADMIN_ACTION_CLASSES[entry!.cls].requiresApproval).toBe(false);
+    expect(ADMIN_ACTION_CLASSES[entry!.cls].requiresReason).toBe(false);
+  });
+
+  it('the fingerprint binds the query string too — a replayed route cannot drop what the approver reviewed', () => {
+    const base = { method: 'PUT', routeUrl: '/config/:key', params: { key: 'X' }, body: { a: 1 } };
+    expect(fingerprintOf({ ...base, query: { mode: 'dry' } }))
+      .not.toBe(fingerprintOf({ ...base, query: { mode: 'live' } }));
+    expect(fingerprintOf(base)).toBe(fingerprintOf({ ...base, query: {} }));
+    const rebuilt = approvalSubjectOf({
+      action: 'PUT /config/:key',
+      bodySnapshot: { params: { key: 'X' }, body: { a: 1 }, query: { mode: 'dry' } },
+    });
+    expect(rebuilt).not.toBeNull();
+    expect(fingerprintOf(rebuilt!)).toBe(fingerprintOf({ ...base, query: { mode: 'dry' } }));
   });
 });

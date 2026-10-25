@@ -4,6 +4,7 @@
 // endpoints — account, earnings, history and documents. Live dispatch stays on
 // the phone by design (GPS + push belong in the field).
 import { ApiRequestError, apiFetch } from './auth';
+import { parseAmount } from './money';
 
 // [W-10] This used to be `soft()`: `.catch(() => null)` on every read, so a
 // 500, an offline phone or a schema change was indistinguishable from "you
@@ -47,7 +48,7 @@ export const getDriverEarnings = (page = 1) =>
   apiFetch(`/api/v1/driver/earnings?page=${page}&limit=25`).then((r) => ({
     rows: r.data as Array<{ id: string; type: string; amount: number | string; status: string; createdAt: string }>,
     meta: r.meta,
-    totalEarnings: Number(r.totalEarnings ?? 0),
+    totalEarnings: parseAmount(r.totalEarnings),
   }));
 
 // ── History ─────────────────────────────────────────────────────────────────
@@ -79,7 +80,8 @@ export const cancelPendingMmgPayUrl = () =>
 // ── Documents (verification) ────────────────────────────────────────────────
 export interface DocStatus {
   checklist: string[];
-  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string }>;
+  // [REPLACE-PENDING] `replaced`: this copy replaced an earlier one that was still waiting for review.
+  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string; replaced?: boolean }>;
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;
@@ -98,6 +100,7 @@ export const uploadVerificationFile = (file: File) => {
 export const submitVerificationDocument = (docType: string, fileUrl: string) =>
   apiFetch('/api/v1/verification/documents', {
     method: 'POST',
-    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5)
-    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
+    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5); [R17] the API records that
+    // tick in the consent ledger, anchored to the box's exact words (document_v1)
+    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });

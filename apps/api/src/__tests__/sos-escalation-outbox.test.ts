@@ -41,7 +41,7 @@ beforeAll(async () => { await prisma.$connect(); sos = new SosService(prisma, io
 beforeEach(() => { resetDevChannelLog(); sos.observer = {}; });
 afterAll(async () => {
   await prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: alertIds } } }).catch(() => {});
-  await prisma.notification.deleteMany({ where: { data: { path: ['sosAlertId'], string_contains: '' }, title: { contains: 'SOS' } } }).catch(() => {});
+  await prisma.notification.deleteMany({ where: { OR: alertIds.map((id) => ({ data: { path: ['sosAlertId'], equals: id } })) } }).catch(() => {});
   await prisma.sosAlert.deleteMany({ where: { id: { in: alertIds } } });
   await prisma.emergencyContact.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -68,11 +68,15 @@ describe('the register’s red test: the process dies right after the ACTIVE com
     expect(done.every((r) => r.status === 'SENT' && r.attempts === 1 && r.deliveredAt !== null)).toBe(true);
     const paged = await opsPages(alert.id);
     expect(paged).toBeGreaterThanOrEqual(1);
-    expect((done.find((r) => r.channel === 'OPS_PAGE')!.receipt as { opsPaged: number }).opsPaged).toBe(paged);
+    // [AUD-L8b-008] The inbox rows are recorded apart (opsInbox); opsPaged counts only
+    // the pushes and on-call texts a provider accepted, never the rows.
+    const opsReceipt = done.find((r) => r.channel === 'OPS_PAGE')!.receipt as { opsPaged: number; opsInbox: number; opsPushed: number; oncallTexted: number };
+    expect(opsReceipt.opsInbox).toBe(paged);
+    expect(opsReceipt.opsPaged).toBe(opsReceipt.opsPushed + opsReceipt.oncallTexted);
     expect(smsTo(contactPhone)).toBe(1);
     expect(await prisma.evidenceBundle.findUnique({ where: { sosAlertId: alert.id } })).not.toBeNull();
     const receipts = (await prisma.sosAlert.findUniqueOrThrow({ where: { id: alert.id } })).deliveryReceipts as Record<string, unknown>;
-    expect(receipts).toMatchObject({ opsPaged: paged, socketListeners: 0 });
+    expect(receipts).toMatchObject({ opsPaged: opsReceipt.opsPaged, opsInbox: paged, socketListeners: 0 });
     expect(receipts['contacts']).toEqual([{ id: expect.any(String), ok: true }]);
     // exactly once
     const second = await drainSosEscalations(prisma, io, { alertIds: [alert.id] });

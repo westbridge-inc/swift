@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import { getTenantId } from '../plugins/tenant-context';
-import { runAiClassifierBatch, type CategoryClassifier } from '../modules/discovery/ai-classifier';
 import { runCategoryBackfill } from '../modules/discovery/backfill';
 import { reconcileAllDerived } from '../modules/discovery/derivation';
 import {
@@ -22,14 +21,8 @@ describe('discovery background-job tenant boundary', () => {
 
   it('does not let domain entry points revive the old swift-default fallback', async () => {
     const prisma = {} as PrismaClient;
-    const classifier: CategoryClassifier = {
-      enabled: false,
-      classifyCategories: async () => ({}),
-    };
 
-    await expect(runCategoryBackfill(prisma, classifier, {} as never))
-      .rejects.toMatchObject({ code: 'DISCOVERY_TENANT_REQUIRED' });
-    await expect(runAiClassifierBatch(prisma, classifier, {} as never))
+    await expect(runCategoryBackfill(prisma, {} as never))
       .rejects.toMatchObject({ code: 'DISCOVERY_TENANT_REQUIRED' });
     await expect(reconcileAllDerived(prisma, undefined as never))
       .rejects.toMatchObject({ code: 'DISCOVERY_TENANT_REQUIRED' });

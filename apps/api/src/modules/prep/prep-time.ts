@@ -2,6 +2,12 @@ import type { PrismaClient } from '@prisma/client';
 import { algoConfig } from '../algo/algo-config';
 import { recordDecision, shadow } from '../algo/decisions';
 import { log } from '../../utils/logger';
+// The market zone is declared once for every app in @swift/types
+// (packages/types/src/market-time.ts). The API keeps its own literal because
+// the compiled server never `require`s that package — it ships TypeScript
+// source (see apps/api/Dockerfile) — and the type-only import below pins the
+// two literals to each other at compile time: change one and tsc fails.
+import type { GUYANA_TZ as SHARED_GUYANA_TZ } from '@swift/types';
 
 /**
  * [ALG-03 / FMC-01 Movement 12] Ready-time prediction — the prep-time learner.
@@ -39,7 +45,7 @@ import { log } from '../../utils/logger';
  */
 
 export const ALGO_ID = 'ALG-03';
-export const GUYANA_TZ = 'America/Guyana';
+export const GUYANA_TZ: typeof SHARED_GUYANA_TZ = 'America/Guyana';
 export const DEFAULT_PREP_SECONDS = 30 * 60;
 export const LEARN_WINDOW_DAYS = 30;
 export const GRADE_WINDOW_DAYS = 14;

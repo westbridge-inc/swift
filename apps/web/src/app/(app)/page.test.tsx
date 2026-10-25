@@ -1,0 +1,245 @@
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
+import AppLayout from './layout';
+import { HomeScreen as HomePage } from './home-screen';
+
+const state = vi.hoisted(() => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), coords: vi.fn() }));
+vi.mock('next/navigation', () => ({ usePathname: () => '/', useRouter: () => ({ push: state.push, back: state.back, replace: state.replace }) }));
+vi.mock('@/lib/geolocate', () => ({ currentCoords: state.coords }));
+// The real config refuses to load while company details are placeholders.
+vi.mock('@/site.config', () => ({
+  site: { legalEntityName: 'Swift Test Company Ltd', supportEmail: 'support@swiftgy.com' },
+  launch: { markets: ['Georgetown, Guyana'], webOrdering: 'live' },
+  showAppStoreBadges: false,
+  SITE_ORIGIN: 'https://swiftgy.com',
+}));
+
+const VENDOR = {
+  id: 'v1', name: 'Shanta Kitchen', slug: 'shanta-kitchen', vendorType: 'RESTAURANT', cuisineTypes: [],
+  displayRating: 4.6, ratingBucket: 'Great', ratingCount: 40, topRated: true, estimatedPrepTime: 20,
+  isCurrentlyOpen: true, acceptingOrders: true, coverImageUrl: null,
+};
+const NEARBY = { ...VENDOR, id: 'v2', name: 'Pepperpot Corner', slug: 'pepperpot', distanceKm: 1.2 };
+const CLOSED = { ...VENDOR, id: 'v3', name: 'Late Night Roti', slug: 'late-roti', isCurrentlyOpen: false };
+
+function feed(overrides: Record<string, unknown> = {}) {
+  return {
+    activeOrder: null,
+    popularItems: [{ id: 'i1', name: 'Pepperpot bowl', imageUrl: null, price: 1800, vendorId: 'v1', vendorName: 'Shanta Kitchen', vendorType: 'RESTAURANT', etaMin: 25 }],
+    featured: [], nearby: [], orderAgain: [], categories: [],
+    openVendors: [VENDOR], closedVendors: [CLOSED],
+    ...overrides,
+  };
+}
+
+let api: (_request: ApiRequest) => ApiReply | Promise<ApiReply>;
+const homeRequests = () => fetchMock.mock.calls
+  .map(([url]) => new URL(String(url)))
+  .filter((url) => url.pathname === '/api/v1/customer/home');
+let fetchMock: ReturnType<typeof mockApi>;
+
+async function freshAuth() {
+  // The session module keeps who it last saw; every test starts from nobody.
+  const auth = await import('@/lib/auth');
+  auth.clearSession();
+}
+
+beforeEach(async () => {
+  await freshAuth();
+  sessionStorage.clear();
+  state.coords.mockReset();
+  api = ({ url }) => {
+    if (url.pathname === '/api/v1/auth/me') return { status: 401, body: { success: false } };
+    if (url.pathname === '/api/v1/auth/refresh') return { status: 401, body: { success: false } };
+    if (url.pathname === '/api/v1/market/depth') return { body: { success: true, data: { visible: false, items: 0, vendors: 0 } } };
+    if (url.pathname === '/api/v1/customer/home') return { body: { success: true, data: feed() } };
+    return { status: 404, body: { success: false } };
+  };
+  fetchMock = mockApi((request) => api(request));
+});
+
+function renderHome() {
+  return render(<AppLayout><HomePage /></AppLayout>);
+}
+
+// ---------------------------------------------------------------------------
+// [Q7b] swiftgy.com opens straight into ordering. `/` is the customer app's
+// Home — location, search, the services, what's popular, the stores open near
+// you — inside the app shell, open to guests. The marketing introduction moved
+// to /welcome; the legal duties `/` carried stay on it, in the site footer.
+// ---------------------------------------------------------------------------
+
+describe('[Q7b] / is the ordering home', () => {
+  it('opens on ordering, not on the marketing page', async () => {
+    renderHome();
+    // [WEB-REDESIGN] The design greets by the time of day (and by name once signed in).
+    expect(screen.getByRole('heading', { level: 1, name: /^Good (morning|afternoon|evening)/ })).toBeTruthy();
+    expect(screen.queryByText(/Everything your day needs/)).toBeNull();
+    expect(screen.queryByText(/Six things, one app/)).toBeNull();
+    // The services, every one a real page; taxi says where rides are booked.
+    const services = screen.getByRole('navigation', { name: 'Services' });
+    expect(within(services).getByRole('link', { name: /^Food/ }).getAttribute('href')).toBe('/order/browse?type=RESTAURANT');
+    expect(within(services).getByRole('link', { name: /^Groceries/ }).getAttribute('href')).toBe('/order/browse?type=SUPERMARKET');
+    expect(within(services).getByRole('link', { name: /^Taxi/ }).textContent).toMatch(/Swift mobile app/);
+    expect(screen.getByRole('link', { name: /Restaurants, groceries, shops/ }).getAttribute('href')).toBe('/order/search');
+  });
+
+  it('shows what is popular and the stores open now, from the same feed the phone app reads', async () => {
+    renderHome();
+    const popular = await screen.findByRole('region', { name: 'Popular on Swift' });
+    const bowl = within(popular).getByRole('link', { name: /Pepperpot bowl/ });
+    // An item opens at its own store, on that item.
+    expect(bowl.getAttribute('href')).toBe('/order/vendor/v1?item=i1');
+    expect(bowl.textContent).toMatch(/\$1,800/);
+    expect(bowl.textContent).not.toMatch(/GY\$/);
+    const open = screen.getByRole('region', { name: 'Open now' });
+    // [W6] A store card opens the store's one page, by its name.
+    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/store/shanta-kitchen');
+    expect(within(screen.getByRole('region', { name: 'Closed now' })).getByText('Late Night Roti')).toBeTruthy();
+    expect(homeRequests()).toHaveLength(1);
+  });
+
+  it('lets a guest browse — no sign-in wall, no refresh spent — and sort by where they are when they ask', async () => {
+    state.coords.mockResolvedValue({ lat: 6.8, lng: -58.15 });
+    api = ((base) => (request: ApiRequest) => (request.url.pathname === '/api/v1/customer/home' && request.url.searchParams.get('lat')
+      ? { body: { success: true, data: feed({ nearby: [NEARBY], openVendors: [VENDOR, NEARBY] }) } }
+      : base(request)))(api);
+    renderHome();
+    await screen.findByRole('region', { name: 'Open now' });
+    expect(screen.queryByRole('region', { name: /Sign in/ })).toBeNull();
+    // [staging screenshot, 390 px] Sign in keeps its size beside the place pill: one line, never squeezed.
+    const homeSignIn = screen.getAllByRole('link', { name: 'Sign in' }).find((link) => link.className.split(/\s+/).includes('sw-btn-sm'));
+    expect(homeSignIn?.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex-none', 'whitespace-nowrap']));
+    // [owner, staging] One place control on Home: the stores near me are found from its sheet.
+    fireEvent.click(await screen.findByRole('button', { name: /^Delivery address at checkout ASAP/ }));
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delivery or pickup' })).getByRole('button', { name: 'Show stores near me' }));
+    const near = await screen.findByRole('region', { name: 'Nearby' });
+    // Nearby first, then the rest, each store once.
+    expect(within(near).getAllByRole('link').map((link) => link.textContent)).toEqual([
+      expect.stringContaining('Pepperpot Corner'),
+      expect.stringContaining('Shanta Kitchen'),
+    ]);
+    const sorted = homeRequests().at(-1)!;
+    expect([sorted.searchParams.get('lat'), sorted.searchParams.get('lng')]).toEqual(['6.8', '-58.15']);
+    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname);
+    expect(paths).not.toContain('/api/v1/auth/refresh');
+    expect(state.push).not.toHaveBeenCalled();
+  });
+
+  it('shows a signed-in customer where they deliver to, their live order, and stores sorted from that address', async () => {
+    api = ((base) => (request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/auth/me') return { body: { success: true, data: { user: { id: 'c1' } } } };
+      if (request.url.pathname === '/api/v1/customer/addresses') {
+        return { body: { success: true, data: [{ id: 'a1', label: 'Home', addressLine1: '12 Main St', isDefault: true, latitude: 6.81, longitude: -58.16 }] } };
+      }
+      if (request.url.pathname === '/api/v1/customer/home') {
+        return { body: { success: true, data: feed({ activeOrder: { id: 'o1', orderNumber: 'SW-1001', status: 'PREPARING', vendor: { id: 'v1', name: 'Shanta Kitchen' } } }) } };
+      }
+      return base(request);
+    })(api);
+    renderHome();
+    // [owner, staging] ONE place control at the top of Home: delivery and the address together,
+    // the address changed from its sheet. The app frame draws no second bar here.
+    const deliverTo = await screen.findByRole('button', { name: /^Delivery 12 Main St ASAP/ });
+    expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([deliverTo]);
+    expect(screen.getAllByText(/12 Main St/)).toHaveLength(1);
+    expect(screen.queryByText(/address at checkout/)).toBeNull();
+    fireEvent.click(deliverTo);
+    const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
+    expect(within(sheet).getByRole('link', { name: 'Change delivery address' }).getAttribute('href')).toBe('/order/location');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Done' }));
+    expect((await screen.findByRole('link', { name: /Track your live order SW-1001/ })).getAttribute('href')).toBe('/orders/o1');
+    await waitFor(() => {
+      const last = homeRequests().at(-1)!;
+      expect([last.searchParams.get('lat'), last.searchParams.get('lng')]).toEqual(['6.81', '-58.16']);
+    });
+  });
+
+  it('drops what one person loaded the moment they sign out — the next person never sees their live order, even for a moment', async () => {
+    let session = true;
+    api = ((base) => (request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/auth/me') return session ? { body: { success: true, data: { user: { id: 'c1' } } } } : base(request);
+      if (request.url.pathname === '/api/v1/customer/addresses') {
+        return { body: { success: true, data: [{ id: 'a1', label: 'Home', addressLine1: '12 Main St', isDefault: true, latitude: 6.81, longitude: -58.16 }] } };
+      }
+      if (request.url.pathname === '/api/v1/customer/home') {
+        // Signed out, the guest's Home is still on its way when it is needed.
+        return session
+          ? { body: { success: true, data: feed({ activeOrder: { id: 'o1', orderNumber: 'SW-1001', status: 'PREPARING', vendor: { id: 'v1', name: 'Shanta Kitchen' } } }) } }
+          : new Promise<ApiReply>(() => undefined);
+      }
+      return base(request);
+    })(api);
+    renderHome();
+    await screen.findByRole('link', { name: /Track your live order SW-1001/ });
+    await waitFor(() => expect(homeRequests().some((url) => url.searchParams.get('lat') === '6.81')).toBe(true));
+    await screen.findByRole('button', { name: /^Delivery 12 Main St/ });
+
+    session = false;
+    const auth = await import('@/lib/auth');
+    act(() => { auth.clearSession(); });
+    // At once — not after the guest's answer arrives.
+    expect(screen.queryByRole('link', { name: /Track your live order/ })).toBeNull();
+    expect(screen.queryByText('Shanta Kitchen')).toBeNull();
+    expect(screen.getByLabelText('Loading home feed')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Delivery address at checkout ASAP/ })).toBeTruthy();
+    expect(screen.queryByText(/12 Main St/)).toBeNull();
+  });
+
+  it('[owner, staging] in pickup mode Home shows no delivery address — one control, "Pickup from the store"', async () => {
+    sessionStorage.setItem('swift_ordering_mode', 'PICKUP');
+    api = ((base) => (request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/auth/me') return { body: { success: true, data: { user: { id: 'c1' } } } };
+      if (request.url.pathname === '/api/v1/customer/addresses') {
+        return { body: { success: true, data: [{ id: 'a1', label: 'Home', addressLine1: '12 Main St', isDefault: true, latitude: 6.81, longitude: -58.16 }] } };
+      }
+      return base(request);
+    })(api);
+    renderHome();
+    const control = await screen.findByRole('button', { name: /^Pickup from the store ASAP/ });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => new URL(String(url)).pathname === '/api/v1/customer/addresses')).toBe(true));
+    await screen.findByRole('region', { name: 'Open now' });
+    expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([control]);
+    expect(screen.queryByText(/12 Main St/)).toBeNull();
+    expect(screen.queryByRole('link', { name: /delivery address/i })).toBeNull();
+    // The promise row is true for pickup [legal research A12]: no "0% fees", and no "pay cash when it arrives".
+    expect(screen.getByText('No commission and no markup on store prices.')).toBeTruthy();
+    expect(screen.getByText('The delivery fee is shown before you order; pickup is free.')).toBeTruthy();
+    expect(screen.queryByText(/0% fees/)).toBeNull();
+    expect(screen.queryByText(/when it arrives/)).toBeNull();
+  });
+
+  it('[owner, staging] the promise row never reads as "no fees at all" next to a delivery fee', async () => {
+    renderHome();
+    await screen.findByRole('region', { name: 'Open now' });
+    // [Legal research A12] the research's promise: no commission, no markup, the delivery fee shown first.
+    expect(screen.getByText('No commission and no markup on store prices.')).toBeTruthy();
+    expect(screen.getByText('The delivery fee is shown before you order; pickup is free.')).toBeTruthy();
+    expect(screen.queryByText(/0% fees/)).toBeNull();
+    expect(screen.queryByText(/when it arrives/)).toBeNull();
+  });
+
+  it('says it could not load the stores — never "no stores" — and tries again on request', async () => {
+    let failing = true;
+    api = ((base) => (request: ApiRequest) => (request.url.pathname === '/api/v1/customer/home' && failing
+      ? { status: 503, body: { success: false, error: { message: 'Swift is busy' } } }
+      : base(request)))(api);
+    renderHome();
+    // One automatic retry comes first (the shell's query client), then the notice.
+    expect(await screen.findByText(/Couldn.t load the stores/, {}, { timeout: 4000 })).toBeTruthy();
+    expect(screen.queryByText(/No stores are taking orders/)).toBeNull();
+    failing = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('region', { name: 'Open now' })).toBeTruthy();
+  });
+
+  it('keeps the site’s legal duties: privacy, terms, child safety, account deletion and the operating company', async () => {
+    renderHome();
+    const legal = screen.getByRole('navigation', { name: 'Legal' });
+    expect(within(legal).getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual(expect.arrayContaining([
+      '/legal/privacy', '/legal/terms', '/legal/child-safety', '/account/delete', 'mailto:support@swiftgy.com',
+    ]));
+    expect(screen.getAllByText('Swift Test Company Ltd').length).toBeGreaterThan(0);
+  });
+});

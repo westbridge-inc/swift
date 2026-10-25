@@ -19,7 +19,8 @@ const QUEUE = join(process.cwd(), 'src', 'jobs', 'queue.ts');
 /** Every job name queue.ts actually dispatches on. */
 function dispatchedNames(): string[] {
   const source = readFileSync(QUEUE, 'utf8');
-  const byEquality = [...source.matchAll(/job\.name\s*===?\s*'([^']+)'/g)].map((m) => m[1]!);
+  // `===` and the `!==` early-return guards (a worker that handles one name).
+  const byEquality = [...source.matchAll(/job\.name\s*(?:===?|!==?)\s*'([^']+)'/g)].map((m) => m[1]!);
   const bySwitch = [...source.matchAll(/case '([a-z0-9:_-]+)'/g)].map((m) => m[1]!);
   return [...new Set([...byEquality, ...bySwitch])].sort();
 }
@@ -70,6 +71,24 @@ describe('[A-08] every job class has an answer about replaying it', () => {
     expect(uncertified).toBeTruthy();
     expect(requeueRefusal(uncertified![0], false)).not.toBeNull();
     expect(requeueRefusal(uncertified![0], true)).not.toBeNull();
+  });
+
+  it('the pilot-critical E36 classes are certified for replay (a future uncertification is caught)', () => {
+    // Each of these was certified by reading its handler and landing a
+    // red-first replay test that drives the real processor twice: a future
+    // change that silently flips one back to NOT_CERTIFIED fails here.
+    for (const name of ['checkout-outbox', 'dispatch-order', 'offer-timeout', 'release-held-orders', 'reconcile-dispatch']) {
+      expect(JOB_RECOVERY[name as keyof typeof JOB_RECOVERY]?.policy, name).toBe('SAFE_REPLAY');
+    }
+  });
+
+  it('[E36 · DS215 F1] the dispatch worker keys its replay identity by job id AND creation time', () => {
+    // The id alone repeats: the not-my-driver redispatch uses a deterministic
+    // command id, re-added for a NEW episode once the old job left BullMQ
+    // retention. A redelivery keeps the creation time; a re-created job does not.
+    const queueSrc = readFileSync(join(process.cwd(), 'src/jobs/queue.ts'), 'utf8');
+    expect(queueSrc).toContain("dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined)");
+    expect(queueSrc).not.toMatch(/dispatch\.dispatchOrder\(job\.data\.orderId, job\.data\.tenantId, job\.id\)/);
   });
 
   it('money and notification jobs are NOT certified — the certified set is small and deliberate', () => {

@@ -1,3 +1,6 @@
+import { OwnedSosActions } from './OwnedSosActions';
+import { recoveryIsNewer, useOwnedSosAlert } from '../../hooks/owned-safety';
+import { useAuthStore, requireAuthSessionForPrincipal } from '../../stores/authStore';
 import { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -6,6 +9,7 @@ import { DecorativeIcon, PillButton, PopupCard, PopupTitle, T } from '../../kit'
 import { isAxiosError } from 'axios';
 import { openExternal } from '../../lib/openExternal';
 import { useCancelSos, useConfirmSos, useJobSos, useServiceJobSos, type SosRaised } from '../../hooks/safety';
+import { useRideSos } from '../../hooks/rides';
 import { emergencyDialCopy, emergencyDialFor, useEmergencyPolicy } from '../../services/emergencyPolicy';
 import { locationAccuracyBand, recordSosLocation, recordSosTransition, telUrl, type LocationAccuracyBand } from '../../lib/emergencyPolicy';
 
@@ -32,9 +36,16 @@ import { locationAccuracyBand, recordSosLocation, recordSosTransition, telUrl, t
 //  - "Page Swift now" (the confirm endpoint's first real caller) skips the
 //    grace wait; "I'm OK" cancels inside the window; a 409 on cancel is
 //    rendered honestly as "too late — help is being reached".
+//  - [AUD-L5b-009] Once the person has pressed for help, a stray tap on the
+//    dim backdrop (or Android back) never hides the popup: only its own Close
+//    does. A failure offers the emergency call beside the retry.
 // ---------------------------------------------------------------------------
 
-type SosContext = { orderId: string } | { serviceJobId: string };
+/** The record the alert attaches to. A taxi ride keeps its own route,
+ *  `/rides/:id/sos`: IMMEDIATE server-side (no grace window — the person in
+ *  a moving car is dialling emergency services in parallel), unchanged for
+ *  every build in the field. Every other job takes `/safety/sos`. */
+type SosContext = { orderId: string } | { serviceJobId: string } | { rideId: string };
 
 const SOS_STATUSES: ReadonlyArray<SosRaised['status']> = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED', 'RESOLVED', 'CANCELLED'];
 
@@ -45,9 +56,35 @@ function serverStatus(data: unknown): SosRaised['status'] | null {
   return typeof status === 'string' && (SOS_STATUSES as readonly string[]).includes(status) ? (status as SosRaised['status']) : null;
 }
 
+/** The one record this popup raises on, or null when its context names none a
+ *  server could act on (a missing or empty id). Every branch is explicit: an
+ *  unknown context never falls through to a raise with an undefined id. */
+function sosTarget(context: SosContext): { kind: 'ride' | 'order' | 'serviceJob'; id: string } | null {
+  const c = context as { rideId?: unknown; orderId?: unknown; serviceJobId?: unknown } | null | undefined;
+  if (typeof c?.rideId === 'string' && c.rideId) return { kind: 'ride', id: c.rideId };
+  if (typeof c?.orderId === 'string' && c.orderId) return { kind: 'order', id: c.orderId };
+  if (typeof c?.serviceJobId === 'string' && c.serviceJobId) return { kind: 'serviceJob', id: c.serviceJobId };
+  return null;
+}
+
+/** The ride route's answer in the ceremony's terms, or null when it is not
+ *  one — the alert's id and the status the SERVER gave, never assumed. */
+function rideRaised(data: unknown): SosRaised | null {
+  const status = serverStatus(data);
+  const id = (data as { sosAlertId?: unknown } | null | undefined)?.sosAlertId;
+  return status && typeof id === 'string' && id ? { id, status, graceEndsAt: null } : null;
+}
+
 /** A transport failure: no response at all (offline, DNS, timeout). */
 function isOffline(err: unknown): boolean {
   return isAxiosError(err) && !err.response;
+}
+
+/** [REVIEW-PARTNER] The App Review demo's answer: nobody was alerted. Its words are the server's. */
+function reviewDemoSosMessage(err: unknown): string | null {
+  if (!isAxiosError(err) || err.response?.status !== 403) return null;
+  const error = (err.response.data as { error?: { code?: string; message?: string } } | undefined)?.error;
+  return error?.code === 'REVIEW_DEMO_NO_SOS' && typeof error.message === 'string' ? error.message : null;
 }
 
 /** Exactly the server's "the grace window closed" answer — nothing else is that. */
@@ -56,12 +93,13 @@ function isSosNotCancellable(err: unknown): boolean {
     && (err.response.data as { error?: { code?: string } } | undefined)?.error?.code === 'SOS_NOT_CANCELLABLE';
 }
 
-export function SosCeremony({
+function SosCeremonyBody({
   visible,
   onClose,
   context,
   getCoords,
   recordNoun,
+  resumeAlertId,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -69,25 +107,52 @@ export function SosCeremony({
   /** MY coordinates, never the other party's — resolved at press time. */
   getCoords: () => { lat: number; lng: number; accuracyM?: number } | undefined;
   /** "order" | "job" — the record the alert attaches to, for the copy. */
+  resumeAlertId?: string;
   recordNoun: string;
 }) {
   const jobSos = useJobSos();
   const svcSos = useServiceJobSos();
+  const rideSos = useRideSos();
   const confirm = useConfirmSos();
   const cancel = useCancelSos();
+  // The one raise this popup makes, for its own context — and none at all
+  // when the context names no record (every branch explicit, no fallthrough).
+  const target = sosTarget(context);
+  const raise = target === null ? null
+    : target.kind === 'ride' ? rideSos
+    : target.kind === 'order' ? jobSos
+    : target.kind === 'serviceJob' ? svcSos
+    : null;
 
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
+  const owner = { userId: user?.id ?? '', generation: sessionGeneration };
   const [alert, setAlert] = useState<SosRaised | null>(null);
+  // [#1955 S4-2] When the alert last changed HERE (raise, confirm, cancel): a recovery poll that
+  // started before that change carries the old status and must not put it back.
+  const localChangeAt = useRef(0);
+  const changeAlert = (next: SosRaised | null) => { localChangeAt.current = Date.now(); setAlert(next); };
+  const recovery = useOwnedSosAlert(resumeAlertId ?? alert?.id ?? '');
   const [tooLateToCancel, setTooLateToCancel] = useState(false);
+  useEffect(() => { setAlert(null); }, [owner.userId, owner.generation, resumeAlertId]);
+  useEffect(() => { if (recovery.data && !recovery.isError && recoveryIsNewer(recovery.dataUpdatedAt, localChangeAt.current)) setAlert(recovery.data); }, [resumeAlertId, recovery.data, recovery.isError, recovery.dataUpdatedAt]);
   const [graceLeft, setGraceLeft] = useState<number | null>(null);
   // [MOB-018] What the server did NOT say: an unreadable/failed confirm or
   // cancel is UNKNOWN, an unreachable server is OFFLINE. Never inferred ACTIVE.
-  const [outcome, setOutcome] = useState<null | 'offline' | 'confirm-unknown' | 'cancel-unknown'>(null);
+  const [outcome, setOutcome] = useState<null | 'offline' | 'confirm-unknown' | 'cancel-unknown' | 'no-context'>(null);
   // What evidence rode with the alert: the accuracy band of the coordinates attached at press time.
   const [attached, setAttached] = useState<LocationAccuracyBand | null>(null);
   const { country, dial } = useEmergencyPolicy();
 
-  const raisePending = jobSos.isPending || svcSos.isPending;
-  const raiseError = ('orderId' in context ? jobSos.isError : svcSos.isError) && !alert;
+  const raisePending = raise?.isPending ?? false;
+  const raiseError = (raise?.isError ?? false) && !alert;
+  const demoMessage = raiseError ? reviewDemoSosMessage(raise?.error) : null;
+  // [AUD-L5b-009] Only the untouched question may be waved away by a tap on
+  // the dim backdrop (or Android back). Once help was asked for — the request
+  // in flight, an alert saved, paged or cancelled, a failure on screen — the
+  // popup leaves only by its own Close, so a pocket tap or a shaking hand can
+  // never hide an emergency in progress, or the news that Swift was NOT alerted.
+  const untouched = !alert && !raisePending && !(raise?.isError ?? false) && !outcome;
 
   // The grace countdown reads the SERVER deadline; when it passes, the worker
   // is promoting — say that, don't keep a dead countdown alive.
@@ -104,12 +169,34 @@ export function SosCeremony({
     return () => clearInterval(t);
   }, [alert]);
 
+  // [DS1157] The popup stays mounted between opens. When the person closes it
+  // with nothing in flight and no alert held (a failure they have SEEN, or the
+  // untouched question), it forgets that ceremony: the next open is the clean
+  // question again, with no old "Swift was NOT alerted" banner, and a tap
+  // outside may wave it away. Never on open: an answer that lands after a
+  // mid-raise Close (paged or failed) is news the person has not seen, and it
+  // is shown when the popup opens again. A held alert is never forgotten here
+  // (confirm and cancel act only on a held alert, so it guards them too).
+  const wasVisible = useRef(visible);
+  useEffect(() => {
+    const closed = wasVisible.current && !visible;
+    wasVisible.current = visible;
+    if (!closed || alert || raisePending) return;
+    setOutcome(null);
+    rideSos.reset();
+    jobSos.reset();
+    svcSos.reset();
+  }, [visible, alert, raisePending, rideSos, jobSos, svcSos]);
+
   const announced = useRef<string | null>(null);
   const announce = (msg: string) => {
     if (announced.current === msg) return;
     announced.current = msg;
     AccessibilityInfo.announceForAccessibility(msg);
   };
+
+  /** What a tap on the backdrop (or Android back) does once help was asked for: nothing. */
+  const keepOpen = () => {};
 
   const dialNow = () => {
     const decision = emergencyDialFor(country, 'police');
@@ -118,6 +205,7 @@ export function SosCeremony({
   };
 
   const startRaise = () => {
+    if (resumeAlertId) return;
     // The market's VERIFIED number FIRST — Swift records evidence; it is not
     // the rescuer. An unverified candidate has its own "Dial" button above
     // and is never dialed silently; no number means the manual sheet.
@@ -130,15 +218,35 @@ export function SosCeremony({
     setAttached(band);
     const onError = (err: unknown) => { if (isOffline(err)) setOutcome('offline'); };
     const onSuccess = (raised: SosRaised) => {
-      setAlert(raised);
+      try { requireAuthSessionForPrincipal(owner); } catch { return; }
+      changeAlert(raised);
       announce(
         raised.status === 'ACTIVE'
           ? "Swift's safety team has been paged."
           : 'Alert saved. Swift pages its safety team in a few seconds unless you cancel.',
       );
     };
-    if ('orderId' in context) jobSos.mutate({ jobId: context.orderId, coords }, { onSuccess, onError });
-    else svcSos.mutate({ serviceJobId: context.serviceJobId, coords }, { onSuccess, onError });
+    if (target?.kind === 'ride') {
+      rideSos.mutate({ id: target.id, coords }, {
+        onSuccess: (data) => {
+          const raised = rideRaised(data);
+          if (raised) { onSuccess(raised); return; }
+          // Accepted, but the answer is not one: UNKNOWN, never "paged".
+          recordSosTransition('ACTIVE', 'UNKNOWN');
+          setOutcome('confirm-unknown');
+        },
+        onError,
+      });
+    } else if (target?.kind === 'order') {
+      jobSos.mutate({ jobId: target.id, coords }, { onSuccess, onError });
+    } else if (target?.kind === 'serviceJob') {
+      svcSos.mutate({ serviceJobId: target.id, coords }, { onSuccess, onError });
+    } else {
+      // No record a server could act on: never a raise with an undefined id,
+      // never silence. Counted, and said out loud with the emergency call.
+      recordSosTransition('ACTIVE', 'NO_CONTEXT');
+      setOutcome('no-context');
+    }
   };
 
   const pageNow = () => {
@@ -146,6 +254,7 @@ export function SosCeremony({
     setOutcome(null);
     confirm.mutate(alert.id, {
       onSuccess: (data) => {
+        try { requireAuthSessionForPrincipal(owner); } catch { return; }
         // The SERVER's status, never the one this button hoped for.
         const status = serverStatus(data);
         if (!status) {
@@ -154,7 +263,7 @@ export function SosCeremony({
           return;
         }
         if (status !== 'ACTIVE' && status !== 'ACKNOWLEDGED') recordSosTransition('ACTIVE', status);
-        setAlert({ ...alert, status, graceEndsAt: status === 'TRIGGER_PENDING' ? alert.graceEndsAt : null });
+        changeAlert({ ...alert, status, graceEndsAt: status === 'TRIGGER_PENDING' ? alert.graceEndsAt : null });
         if (status === 'ACTIVE' || status === 'ACKNOWLEDGED') announce("Swift's safety team has been paged.");
       },
       onError: (err) => {
@@ -169,10 +278,11 @@ export function SosCeremony({
     setOutcome(null);
     cancel.mutate(alert.id, {
       onSuccess: (data) => {
+        try { requireAuthSessionForPrincipal(owner); } catch { return; }
         const status = serverStatus(data);
-        if (status === 'CANCELLED') { setAlert({ ...alert, status: 'CANCELLED' }); return; }
+        if (status === 'CANCELLED') { changeAlert({ ...alert, status: 'CANCELLED' }); return; }
         recordSosTransition('CANCELLED', status ?? 'UNKNOWN');
-        if (status) setAlert({ ...alert, status });
+        if (status) changeAlert({ ...alert, status });
         else setOutcome('cancel-unknown');
       },
       onError: (err) => {
@@ -180,7 +290,7 @@ export function SosCeremony({
         // clock — help is being reached. Anything else is not that.
         if (isSosNotCancellable(err)) {
           setTooLateToCancel(true);
-          setAlert({ ...alert, status: 'ACTIVE' });
+          changeAlert({ ...alert, status: 'ACTIVE' });
           return;
         }
         recordSosTransition('CANCELLED', isOffline(err) ? 'OFFLINE' : 'ERROR');
@@ -190,7 +300,7 @@ export function SosCeremony({
   };
 
   const live = alert && (alert.status === 'TRIGGER_PENDING' || alert.status === 'ACTIVE' || alert.status === 'ACKNOWLEDGED');
-  const paged = alert && alert.status !== 'TRIGGER_PENDING' && alert.status !== 'CANCELLED';
+  const paged = alert && (alert.status === 'ACTIVE' || alert.status === 'ACKNOWLEDGED');
 
   // ONE semantic PopupTitle per dialog (the popupSemantics gate) — the phase
   // changes its words, never its landmark.
@@ -200,10 +310,23 @@ export function SosCeremony({
       ? 'Alert saved'
       : paged
         ? "Swift's safety team has been paged"
-        : 'Alert cancelled';
+        : alert.status === 'RESOLVED' ? 'Alert resolved by the safety team' : 'Alert cancelled';
+
+  // [AUD-L5b-009] Swift could not be told: the emergency call sits one tap
+  // away beside the retry, never only behind it (an unverified number already
+  // has its own "Dial" button on the first screen; no number has no button).
+  const swiftNotReached = raiseError || outcome === 'offline' || outcome === 'confirm-unknown' || outcome === 'no-context';
+  const callButton = swiftNotReached && !demoMessage && dial.kind !== 'manual' && !(dial.kind === 'confirm' && !alert) ? (
+    <PillButton
+      label={`Call ${dial.number}`}
+      variant="outline"
+      style={{ alignSelf: 'stretch', marginTop: space.md }}
+      onPress={dialNow}
+    />
+  ) : null;
 
   return (
-    <PopupCard visible={visible} onClose={onClose}>
+    <PopupCard visible={visible} onClose={untouched ? onClose : keepOpen}>
       <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: live ? color.error : alert?.status === 'CANCELLED' ? color.surface.sunken : color.error }}>
         <Feather name={alert?.status === 'CANCELLED' ? 'check' : 'alert-triangle'} size={32} color={alert?.status === 'CANCELLED' ? color.text.secondary : color.white} />
       </DecorativeIcon>
@@ -211,7 +334,7 @@ export function SosCeremony({
         {title}
       </PopupTitle>
 
-      {!alert ? (
+      {resumeAlertId && !alert ? <><T variant="body">{recovery.isError ? "Could not refresh your alert." : "Checking your alert…"}</T><PillButton label="Refresh my alert" onPress={() => { void recovery.refetch(); }} /></> : !alert ? (
         <>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             {emergencyDialCopy(dial)} Swift will also alert its safety team and save
@@ -234,32 +357,63 @@ export function SosCeremony({
                 Your emergency call is unaffected. Try again when you have signal.
               </T>
             </View>
+          ) : outcome === 'no-context' ? (
+            <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
+              <T variant="label" tone="error" weight="semibold">
+                Swift was NOT alerted — this screen could not name the {recordNoun}.
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                Call emergency services now, then tell Swift support where you are.
+              </T>
+            </View>
+          ) : outcome === 'confirm-unknown' ? (
+            <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
+              <T variant="label" tone="error" weight="semibold">
+                We could not confirm Swift’s safety team was alerted.
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                Your emergency call is separate. Try alerting Swift again.
+              </T>
+            </View>
           ) : null}
-          {raiseError ? (
+          {demoMessage ? (
+            <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
+              <T variant="label" tone="error" weight="semibold">
+                App Review demo — nobody was alerted.
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {demoMessage}
+              </T>
+            </View>
+          ) : raiseError ? (
             <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
               <T variant="label" tone="error" weight="semibold">
                 Swift was NOT alerted — the request failed.
               </T>
               <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                Your 911 call is unaffected. Check your connection and try again so
+                Your emergency call is unaffected. Check your connection and try again so
                 Swift can track and record this emergency.
               </T>
             </View>
           ) : null}
-          <PillButton
-            label={raisePending ? 'Alerting Swift…' : raiseError ? 'Try alerting Swift again' : dial.kind === 'auto' ? 'Yes — get help now' : 'Alert Swift now'}
-            loading={raisePending}
-            style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-            onPress={startRaise}
-          />
+          {callButton}
+          {/* With no record to raise on, a retry could never succeed: no button promises one. */}
+          {outcome === 'no-context' ? null : (
+            <PillButton
+              label={raisePending ? 'Alerting Swift…' : swiftNotReached ? 'Try alerting Swift again' : dial.kind === 'auto' ? 'Yes — get help now' : 'Alert Swift now'}
+              loading={raisePending}
+              style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+              onPress={startRaise}
+            />
+          )}
           <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={onClose} />
         </>
       ) : alert.status === 'TRIGGER_PENDING' ? (
         <>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             {graceLeft != null && graceLeft > 0
-              ? `Swift pages its safety team in ${graceLeft}s unless you cancel.`
-              : 'Swift is paging its safety team now.'}
+              ? `Swift alerts its safety team in ${graceLeft}s unless you cancel.`
+              : 'The countdown has ended. Swift is alerting its safety team.'}
           </T>
           {outcome ? (
             <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
@@ -267,18 +421,19 @@ export function SosCeremony({
                 {outcome === 'offline'
                   ? 'You appear to be offline — Swift could not be reached.'
                   : outcome === 'confirm-unknown'
-                    ? 'We could not confirm Swift was paged.'
+                    ? 'We could not confirm Swift’s safety team was alerted.'
                     : 'We could not confirm the alert was cancelled.'}
               </T>
               <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                 {outcome === 'cancel-unknown'
-                  ? 'The alert may still page Swift when the countdown ends. Try cancelling again.'
-                  : 'The countdown above is the server’s clock: Swift pages its team when it ends. Your emergency call is unaffected — try again.'}
+                  ? 'The alert may still reach Swift’s safety team when the countdown ends. Try cancelling again.'
+                  : 'When the countdown ends, Swift alerts its safety team. Your emergency call is separate. Try alerting Swift now.'}
               </T>
             </View>
           ) : null}
+          {callButton}
           <PillButton
-            label={confirm.isPending ? 'Paging…' : 'Page Swift NOW'}
+            label={confirm.isPending ? 'Alerting…' : 'Alert Swift now'}
             loading={confirm.isPending}
             style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
             onPress={pageNow}
@@ -311,9 +466,10 @@ export function SosCeremony({
                     : 'Your position at the moment you pressed is on the alert. '}
             Keep your phone with you if you can.
           </T>
+          <OwnedSosActions key={alert.id} id={alert.id} />
           <PillButton label="Close" style={{ alignSelf: 'stretch', marginTop: space['2xl'] }} onPress={onClose} />
         </>
-      ) : (
+      ) : alert.status === 'RESOLVED' ? <><OwnedSosActions key={alert.id} id={alert.id} /><PillButton label="Close" onPress={onClose} /></> : (
         <>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             Nobody was paged. If anything changes, press the emergency button again.
@@ -331,4 +487,14 @@ export function SosCeremony({
       )}
     </PopupCard>
   );
+}
+
+/** Remount presentation at the principal or job boundary. Old callbacks can
+ * finish only against the unmounted owner; captured API sessions reject them. */
+export function SosCeremony(props: Parameters<typeof SosCeremonyBody>[0]) {
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
+  const target = sosTarget(props.context);
+  const contextId = target ? `${target.kind}:${target.id}` : 'none';
+  return <SosCeremonyBody key={`${user?.id ?? 'guest'}:${sessionGeneration}:${contextId}:${props.resumeAlertId ?? ''}`} {...props} />;
 }

@@ -29,57 +29,65 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
+import { OPERATOR } from './legal/generated';
+import { launch } from './site.launch';
 
 export const site = {
-  /** Exact D&B spelling. Appears on /about, /contact and every footer. */
-  legalEntityName: '{{LEGAL_ENTITY_NAME}}',
+  // [Owner 15 Oct 2026 · legal research A11, R2] The company's identity has ONE source, shared with the Terms
+  // and the Privacy Policy: apps/api/src/modules/legal/operator.ts, through the legal:sync snapshot. To change
+  // a fact, change it there (a legal-text change: new LEGAL_VERSION) and run legal:sync.
 
-  /** Exact D&B address, one line. Apple matches this against the D&B record. */
-  address: '{{COMPANY_ADDRESS}}',
+  /** The operator's legal name. Appears on /about, /contact and every footer. */
+  legalEntityName: OPERATOR.name,
+
+  /** Registration number of the company (Guyana). */
+  registrationNo: OPERATOR.registrationNo,
+
+  /** The registered address, one line. */
+  address: `${OPERATOR.registeredAddress}, ${OPERATOR.registeredIn}`,
 
   /** The number the founder actually answers. Apple may call it. */
-  phone: '{{COMPANY_PHONE}}',
+  phone: OPERATOR.phone,
 
   /** Support inbox. Already live on the domain's mail — do not change. */
-  supportEmail: 'support@swiftgy.com',
+  supportEmail: OPERATOR.supportEmail,
+
+  /** [Owner 15 Oct 2026] When support answers, and what to do in an emergency. No page may promise faster. */
+  supportHours: 'Monday to Saturday, 8:00–20:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
 
   /** Canonical apex host. www 301s here; AASA resolves here with no redirect.
    *  Declared in site.domain.ts so next.config can read it without tripping
    *  the unfilled-token guard below. */
   domain: SITE_DOMAIN,
+
+  // ── [Q36] What the card bank requires the site to state ─────────────────
+  //  The bank is sent a screenshot of each of these and may visit the site.
+  //  /about, /legal/refunds, /legal/delivery and every footer read them here.
+
+  /** The name the service trades under, and the other way it is written. */
+  tradeName: 'Swift',
+  tradeNameAlt: 'SwiftGY',
+
+  /** Where the company is officially registered and located. */
+  registeredCity: 'Georgetown',
+
+  /** The domicile country, and the only country Swift operates in. */
+  country: 'Guyana',
+  countryCode: 'GY',
+
+  /** The transaction currency: every price on Swift is in Guyana dollars. */
+  currencyCode: 'GYD',
+  currencyName: 'Guyana dollars',
+
+  /** How soon support answers a question about a Swift charge, in business days. */
+  supportReplyBusinessDays: 2,
 } as const;
 
 export { SITE_ORIGIN };
 
-// ── Launch truth ───────────────────────────────────────────────────────────
-//  Every availability claim on the site reads from here, so the marketing copy
-//  can never drift ahead of what actually works. Apple and Google both treat a
-//  dead call-to-action as a review flag, and a "Download on the App Store"
-//  badge before the app exists is the fastest way to fail.
-//
-//  Flip a vertical to 'live' only when a customer in that market can complete
-//  the flow end to end today.
-
-export type LaunchState = 'live' | 'waitlist' | 'soon';
-
-export const launch = {
-  /** Where the product actually operates. Add a market only when it is real. */
-  markets: ['Georgetown, Guyana'] as const,
-
-  /** Ordering on the web works today; the native apps do not exist yet. */
-  webOrdering: 'live' as LaunchState,
-  iosApp: 'soon' as LaunchState,
-  androidApp: 'soon' as LaunchState,
-
-  verticals: {
-    food: 'live' as LaunchState,
-    groceries: 'live' as LaunchState,
-    shops: 'live' as LaunchState,
-    rides: 'live' as LaunchState,
-    courier: 'live' as LaunchState,
-    services: 'live' as LaunchState,
-  },
-} as const;
+// ── Launch truth: src/site.launch.ts (re-exported here) ─────────────────────
+export { launch };
+export type { LaunchState } from './site.launch';
 
 /** True only when a real, installable app exists in that store. Gates the
  *  store badges — see AC-10. There is deliberately no way to force a badge on. */

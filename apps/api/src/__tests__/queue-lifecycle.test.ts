@@ -54,6 +54,12 @@ vi.mock('bullmq', async () => {
       return { id: `${this.name}-${this.adds.length}` };
     }
 
+    // [row 331] The scheduler reads the repeatable registrations (to remove the
+    // safety timers' old dispatch-queue ones); a fresh fake Redis holds none.
+    async getRepeatableJobs() {
+      return [];
+    }
+
     async close() {
       this.closeCalls += 1;
       this.connection.disconnect();
@@ -236,6 +242,46 @@ afterEach(() => {
 });
 
 describe('BullMQ lifecycle', () => {
+  it.each([false, true])('logs each retained audit class and its reason (registry clocks: %s)', async registered => {
+    const ctx = context();
+    const upsert = vi.fn().mockResolvedValue({});
+    const policies = registered ? ['audit_logs', 'sensitive_read_logs'].map(dataClass => ({ dataClass, enabled: true, retainDays: 7 })) : [];
+    // The same daily sweep re-runs every account erasure whose deletion marker
+    // has committed; this fixture has none, so the census pages once and stops.
+    const erasureCensus = vi.fn().mockResolvedValue([]);
+    // [R23 · C10] Then the inactive-account step reads its switch; unset here, so it stops there.
+    const closureSwitch = vi.fn().mockResolvedValue(null);
+    ctx.prisma = {
+      retentionPolicy: { upsert, findMany: async () => policies }, user: { findMany: erasureCensus }, platformConfig: { findUnique: closureSwitch },
+    } as unknown as JobContext['prisma'];
+    const queues = createQueues(ctx.redis, ctx.log);
+    const workers = await createWorkers(ctx, queues);
+    try {
+      const worker = (bullState.workers as FakeWorker[]).find(w => w.name === QUEUE_NAMES.VERIFICATION)!;
+      await expect(worker.processor({ name: 'retention-sweep', data: {} })).resolves.toBeUndefined();
+      // One idempotent seed per registry default, in order: the three original classes and
+      // [R23] the owner's retention table (chat, resolved support tickets, safety records).
+      expect(upsert.mock.calls.map(([arg]) => (arg as { where: { dataClass: string } }).where.dataClass)).toEqual([
+        'sessions.expired', 'signup_attempts', 'notifications.old',
+        'chat.order_messages', 'support_tickets.resolved', 'safety.records',
+      ]);
+      expect(log.info).toHaveBeenCalledWith({
+        enforced: [],
+        skipped: [
+          { c: 'audit_logs', reason: 'permanent-evidence' },
+          { c: 'sensitive_read_logs', reason: 'policy-unapproved' },
+        ],
+      }, 'retention sweep complete');
+      expect(erasureCensus).toHaveBeenCalledOnce();
+      expect(erasureCensus).toHaveBeenCalledWith(expect.objectContaining({ where: { phone: { startsWith: 'deleted:' } } }));
+      expect(closureSwitch).toHaveBeenCalledOnce();
+      expect(closureSwitch).toHaveBeenCalledWith(expect.objectContaining({ where: { key: 'accounts.inactive_closure' } }));
+    } finally {
+      await workers.cleanup();
+      await Promise.all(Object.values(queues).map(queue => queue.close()));
+    }
+  });
+
   it('reuses one boot-created Queue during a burst and emits no unhandled rejection', async () => {
     const ctx = context();
     const queues = createQueues(ctx.redis, ctx.log);
@@ -246,13 +292,13 @@ describe('BullMQ lifecycle', () => {
     process.on('unhandledRejection', onUnhandled);
 
     try {
-      expect(bullState.queues).toHaveLength(7);
+      expect(bullState.queues).toHaveLength(9); // [row 266] + the offer lane, [row 331] + the safety lane
       await Promise.all(Array.from({ length: 100 }, (_, index) =>
         enqueueVendorAlertFollowup(queues, `order-${index}`),
       ));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(bullState.queues).toHaveLength(7);
+      expect(bullState.queues).toHaveLength(9); // [row 266] + the offer lane, [row 331] + the safety lane
       expect(notificationQueue.adds).toHaveLength(100);
       expect(notificationQueue.closeCalls).toBe(0);
       expect(unhandled).toEqual([]);
@@ -346,7 +392,7 @@ describe('BullMQ lifecycle', () => {
     await expect(initializeJobRuntime(context(), { runWorkers: false }))
       .rejects.toThrow(/verification-jobs failed readiness/);
 
-    expect(bullState.queues).toHaveLength(7);
+    expect(bullState.queues).toHaveLength(9); // [row 266] + the offer lane, [row 331] + the safety lane
     expect((bullState.queues as FakeQueue[]).every((queue) => queue.closeCalls === 1)).toBe(true);
     expect(bullState.workers).toHaveLength(0);
   });
@@ -371,7 +417,7 @@ describe('BullMQ lifecycle', () => {
     await expect(initializeJobRuntime(context(), { runWorkers: true }))
       .rejects.toThrow(/process-billing schedule failed/);
 
-    expect(bullState.workers).toHaveLength(7);
+    expect(bullState.workers).toHaveLength(9); // [row 266] + the offer worker, [row 331] + the safety worker
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.options.autorun === false)).toBe(true);
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.runCalls === 0)).toBe(true);
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.closeCalls === 1)).toBe(true);

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { DataUnavailable } from '@/components/data-unavailable';
 import { cancelPendingMmgPayUrl, getDriverProfile, getRiderProfile, updateDriverProfile } from '@/lib/mover-api';
 
 export default function AccountPage() {
@@ -49,14 +50,25 @@ export default function AccountPage() {
   });
 
   if (rider.isLoading || driver.isLoading) return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
+  // [UI-SWEEP U24] A failed profile read used to render a blank page (the MMG
+  // pay-link card simply vanished): say it could not check, as the home does.
+  if (rider.isError || driver.isError) {
+    return (
+      <DataUnavailable
+        what="your earner profile"
+        error={rider.error ?? driver.error}
+        onRetry={() => { void rider.refetch(); void driver.refetch(); }}
+      />
+    );
+  }
 
   return (
     <div className="max-w-2xl space-y-6">
-      <h1 className="text-2xl font-extrabold">Account</h1>
+      <h1 className="sw-title">Account</h1>
 
       {user && (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
-          <p className="text-lg font-bold">{[user.firstName, user.lastName].filter(Boolean).join(' ')}</p>
+        <div className="sw-card p-6">
+          <p className="sw-heading">{[user.firstName, user.lastName].filter(Boolean).join(' ')}</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">{user.phone}</p>
           <p className="mt-3 text-xs text-[var(--swift-muted)]">
             Name, photo and vehicle details are managed in the Swift app (changes go through review).
@@ -64,8 +76,11 @@ export default function AccountPage() {
         </div>
       )}
 
-      {driver.data && (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
+      {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+          drop-off, cash or MMG: the card shows only while the server's
+          DRIVER_MMG_PAY_LINK switch is on (mmgPayLinkEnabled), never by default. */}
+      {driver.data && driver.data['mmgPayLinkEnabled'] === true && (
+        <div className="sw-card p-6">
           <p className="font-bold">Your MMG pay link (taxi)</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             Riders who choose MMG pay this link at the end of a trip — the money goes straight to you.
@@ -106,7 +121,7 @@ export default function AccountPage() {
               value={mmg}
               onChange={(e) => setMmg(e.target.value)}
               placeholder="https://pay.mmg.gy/…"
-              className="min-w-64 flex-1 rounded-lg border border-black/10 px-3 py-2 text-sm focus:border-[var(--swift-red)] focus:outline-none"
+              className="min-w-0 w-full flex-1 rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm focus:border-[var(--swift-red)] focus:outline-none sm:w-auto"
             />
             <button
               onClick={() => {

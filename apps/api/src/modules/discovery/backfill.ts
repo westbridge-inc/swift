@@ -1,14 +1,14 @@
 import type { PrismaClient } from '@prisma/client';
 import { DiscoveryService } from './discovery.service';
 import { reconcileAllDerived } from './derivation';
-import { runAiClassifierBatch, type CategoryClassifier } from './ai-classifier';
 import { requireDiscoveryTenantId } from './tenant-boundary';
 
 // ---------------------------------------------------------------------------
 // The backfill movement (#17 Part 4, CAT-I): run once per tenant behind the
-// flag — Stage A across every live item, Stage B for what A couldn't place
-// (under the daily budget; the un-placed remainder simply waits for the
-// hourly job on later days), Stage C derivation, then ONE notification per
+// flag — Stage A across every live item, Stage C derivation, then ONE
+// notification per
+// [NO-AI] There is no Stage B. An item Stage A cannot place stays UNPLACED for
+// a person to categorise; nothing guesses it and no job retries it later.
 // vendor with pending suggestions. Idempotent by construction (upserts +
 // law-C frozen ground): a re-run scans again but writes nothing new and
 // never re-notifies. Keyset iteration — no OFFSET on a growing table (#22).
@@ -17,9 +17,6 @@ import { requireDiscoveryTenantId } from './tenant-boundary';
 export interface BackfillReport {
   itemsScanned: number;
   matcherSuggestionsWritten: number;
-  aiScanned: number;
-  aiSuggested: number;
-  aiBudgetLeft: number;
   derivedAdded: number;
   derivedRemoved: number;
   vendorsNotified: number;
@@ -30,14 +27,11 @@ export const categoryBackfillNotifiedMarker = (tenantId: string) => `${LEGACY_NO
 
 export async function runCategoryBackfill(
   prisma: PrismaClient,
-  classifier: CategoryClassifier,
   opts: {
     tenantId: string;
     /** Send the review notification to vendors with pending suggestions. */
     notify?: (userId: string) => Promise<void>;
     batchSize?: number;
-    /** Injectable accounting clock; production defaults to the current UTC day. */
-    now?: Date;
   },
 ): Promise<BackfillReport> {
   const tenantId = requireDiscoveryTenantId(opts.tenantId);
@@ -67,17 +61,12 @@ export async function runCategoryBackfill(
     cursor = items[items.length - 1]!.id;
   }
 
-  // ---- Stage B: the AI remainder, strictly under the daily budget ---------
-  let aiScanned = 0;
-  let aiSuggested = 0;
-  let aiBudgetLeft = 0;
-  for (;;) {
-    const r = await runAiClassifierBatch(prisma, classifier, { tenantId, limit: 50, now: opts.now });
-    aiScanned += r.scanned;
-    aiSuggested += r.suggested;
-    aiBudgetLeft = r.budgetLeft;
-    if (r.scanned === 0) break; // no candidates left, budget spent, or model down
-  }
+  // ---- Stage B: REMOVED [NO-AI] -------------------------------------------
+  // A budgeted model pass used to take the items Stage A's synonym matcher
+  // could not place. Swift contains no model runtime, so those items simply
+  // remain unplaced — which is the honest outcome. Stage A's suggestions and
+  // the vendor's own review are the whole pipeline now; an item nobody can
+  // categorise automatically is categorised by a person, not guessed at.
 
   // ---- Stage C: derivation across the catalog -----------------------------
   const derived = await reconcileAllDerived(prisma, tenantId);
@@ -129,9 +118,6 @@ export async function runCategoryBackfill(
   return {
     itemsScanned,
     matcherSuggestionsWritten,
-    aiScanned,
-    aiSuggested,
-    aiBudgetLeft,
     derivedAdded: derived.added,
     derivedRemoved: derived.removed,
     vendorsNotified,

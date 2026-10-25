@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
-import { useState, useEffect } from 'react';
-import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
 import {
@@ -27,15 +28,23 @@ import {
   useDeleteCategory,
   useDeleteItem,
   useSetItemAvailability,
+  useUploadCategoryPhoto,
+  useRemoveCategoryPhoto,
 } from '../../../hooks/vendorops';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { inventorySummary } from '../../../lib/vendorInventory';
-import { mediaUrl } from '../../../lib/images';
+import { isKeptPhoto, storePhotoUrl } from '../../../lib/images';
+import { MENU_LIST_WINDOW } from '../../../lib/listPerformance';
+
+/** [IMAGES-E2E PR4 · REVIEW-F S4-2 on #1965] A photo address saved before photos were uploaded: named for what it is. */
+export const OUTSIDE_PHOTO_NOTE = "Its old photo link isn't shown to customers. Upload the photo again.";
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import { catalogueMeta, safeVendorRole, numericFact } from '../shared';
+import { catalogueCheckLine } from '../../../lib/catalogueCheck';
 
-function MenuItemRow({
+export function MenuItemRow({
   item,
   navigation,
   categories,
@@ -72,6 +81,10 @@ function MenuItemRow({
         ? `${item.stockQuantity} in stock`
         : null;
   const itemDetail = [ordered == null ? null : `${ordered} orders placed`, stockDetail].filter(Boolean).join(' · ');
+  // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] Only a photo Swift keeps is shown, here as to customers;
+  // an outside address saved before photos were uploaded is named, so the store can upload it again.
+  const photoUri = isKeptPhoto(item.imageUrl) ? storePhotoUrl(item.imageUrl, 160) : null;
+  const photoNotShown = !!item.imageUrl && !photoUri;
   const toggleAvailability = () => {
     const next = !markedAvailable;
     setMarkedAvailable(next);
@@ -85,9 +98,9 @@ function MenuItemRow({
     <Card style={{ marginBottom: space.md, backgroundColor: soldOut || outOfStock ? color.soft.warning : color.surface.base }}>
       <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
         <View style={{ opacity: soldOut ? 0.55 : 1 }}>
-          {item.imageUrl ? (
+          {photoUri ? (
             <Image
-              source={{ uri: mediaUrl(item.imageUrl)! }}
+              source={{ uri: photoUri }}
               style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.md }}
               contentFit="cover"
               accessibilityLabel={`${item.name} photo`}
@@ -126,6 +139,17 @@ function MenuItemRow({
               </T>
             ) : null}
           </View>
+          {photoNotShown ? (
+            <T variant="caption" weight="semibold" style={{ marginTop: space.xs, color: color.warning }}>
+              {OUTSIDE_PHOTO_NOTE}
+            </T>
+          ) : null}
+          {/* [GUARDRAILS §8] Why customers cannot see this item: Swift does not allow it, or is checking it. */}
+          {catalogueCheckLine(item.catalogueCheck) ? (
+            <T variant="caption" weight="semibold" style={{ marginTop: space.xs, color: item.catalogueCheck?.status === 'NOT_ALLOWED' ? color.error : color.warning }}>
+              {catalogueCheckLine(item.catalogueCheck)}
+            </T>
+          ) : null}
         </View>
       </View>
 
@@ -314,7 +338,7 @@ function LowStockCard({ categories, navigation, catOptions }: { categories: any[
 
 /** Category heading with manager controls; staff receive the same factual heading
  *  without authoring affordances. */
-function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
+export function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const updateCategory = useUpdateCategory();
   const deleteCategory = useDeleteCategory();
@@ -322,6 +346,39 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
   const [name, setName] = useState<string>(cat.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const itemCount = (cat.items ?? []).length;
+  // [IMAGES-E2E PR4/PR5] The section's own photo: above the section on the store page, and Home can show it.
+  const [photoOpen, setPhotoOpen] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  // [REVIEW-F S4-5 on #1965] Removing asks first, like every other photo removal.
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const uploadPhoto = useUploadCategoryPhoto();
+  const removePhoto = useRemoveCategoryPhoto();
+  const sectionPhoto = isKeptPhoto(cat.imageUrl) ? storePhotoUrl(cat.imageUrl, 160) : null;
+  // [REVIEW-F S4-4 on #1965] An outside address is named here too, as on items.
+  const sectionPhotoNotShown = !!cat.imageUrl && !sectionPhoto;
+  const closePhoto = () => { setPhotoOpen(false); setConfirmRemove(false); };
+  const photoBusy = uploadPhoto.isPending || removePhoto.isPending;
+  const serverWords = (e: unknown, fallback: string) =>
+    (e as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message ?? fallback;
+  const pickSectionPhoto = async () => {
+    if (readOnly || !canEdit) return;
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      setPhotoError('Photo library access needed. Allow it in Settings to choose a photo.');
+      return;
+    }
+    setPhotoError(null);
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.85 });
+    if (res.canceled || !res.assets?.[0]) return;
+    const a = res.assets[0];
+    uploadPhoto.mutate(
+      { id: cat.id, file: { uri: a.uri, name: a.fileName ?? 'section.jpg', type: a.mimeType ?? 'image/jpeg' } },
+      {
+        onSuccess: closePhoto,
+        onError: (e: unknown) => setPhotoError(serverWords(e, "That photo didn't upload. Check your connection and try again.")),
+      },
+    );
+  };
 
   const saveName = () => {
     if (readOnly || !canEdit) return;
@@ -354,6 +411,25 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
 
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
+      {sectionPhoto || canEdit ? (
+        <Pressable
+          disabled={readOnly || !canEdit}
+          onPress={() => { setPhotoError(null); setConfirmRemove(false); setPhotoOpen(true); }}
+          accessibilityRole={canEdit ? 'button' : 'image'}
+          accessibilityLabel={canEdit ? `Photo for ${cat.name}` : `${cat.name} photo`}
+          accessibilityState={{ disabled: readOnly || !canEdit }}
+          hitSlop={4}
+          style={{ marginRight: space.md }}
+        >
+          <View style={{ width: 40, height: 40, borderRadius: radius.md, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+            {sectionPhoto ? (
+              <Image source={{ uri: sectionPhoto }} style={{ width: '100%', height: '100%' }} contentFit="cover" />
+            ) : (
+              <Feather name={sectionPhotoNotShown ? 'alert-circle' : 'camera'} size={16} color={sectionPhotoNotShown ? color.warning : color.text.muted} />
+            )}
+          </View>
+        </Pressable>
+      ) : null}
       <T variant="heading" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
         {cat.name}
       </T>
@@ -391,6 +467,63 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
         </>
       ) : null}
 
+      <PopupCard visible={canEdit && photoOpen} onClose={closePhoto}>
+        <PopupTitle variant="title" center>Photo for “{cat.name}”</PopupTitle>
+        {confirmRemove ? (
+          <>
+            <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+              {sectionPhotoNotShown
+                ? 'Remove this photo link? It is taken off this section.'
+                : 'Remove this photo? It is deleted from Swift and customers stop seeing it.'}
+            </T>
+            {photoError ? <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>{photoError}</T> : null}
+            <PillButton
+              label="Remove photo"
+              style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+              loading={removePhoto.isPending}
+              disabled={photoBusy}
+              onPress={() => {
+                if (readOnly || !canEdit) return;
+                removePhoto.mutate(cat.id, {
+                  onSuccess: closePhoto,
+                  onError: (e: unknown) => setPhotoError(serverWords(e, "That photo couldn't be removed. Try again.")),
+                });
+              }}
+            />
+            <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmRemove(false)} />
+          </>
+        ) : (
+          <>
+            {/* [REVIEW-F S3-1 on #1965 · S4-1 on #1973] True on both counts: the store page always shows it above the
+                section (PR5); Home only can (one tile per section name, none while the discovery rail is live). */}
+            <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+              Customers see it above “{cat.name}” on your store page, and it can show on Home. Location and camera details are removed.
+            </T>
+            {sectionPhotoNotShown ? (
+              <T variant="caption" weight="semibold" center style={{ marginTop: space.sm, color: color.warning }}>{OUTSIDE_PHOTO_NOTE}</T>
+            ) : null}
+            {photoError ? <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>{photoError}</T> : null}
+            <PillButton
+              label={sectionPhoto ? 'Choose a new photo' : 'Choose a photo'}
+              style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+              loading={uploadPhoto.isPending}
+              disabled={photoBusy}
+              onPress={() => { void pickSectionPhoto(); }}
+            />
+            {cat.imageUrl ? (
+              <PillButton
+                label="Remove photo"
+                variant="soft"
+                style={{ alignSelf: 'stretch', marginTop: space.md }}
+                disabled={photoBusy}
+                onPress={() => { setPhotoError(null); setConfirmRemove(true); }}
+              />
+            ) : null}
+            <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={closePhoto} />
+          </>
+        )}
+      </PopupCard>
+
       <PopupCard visible={canEdit && confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="trash-2" size={56} tone="error" />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
@@ -417,9 +550,33 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
   );
 }
 
+/** [SPEED 22 Oct] A row of the store's Products/Menu list: a section's header, one
+ *  of its items, "No items yet." for an empty section, or the gap after a section
+ *  (the old per-section wrapper's bottom margin). */
+type MenuRow =
+  | { kind: 'section'; key: string; category: any }
+  | { kind: 'item'; key: string; item: any }
+  | { kind: 'noItems'; key: string }
+  | { kind: 'gap'; key: string };
+
+function menuRows(categories: any[]): MenuRow[] {
+  const rows: MenuRow[] = [];
+  for (const category of categories) {
+    rows.push({ kind: 'section', key: `section:${category.id}`, category });
+    const items: any[] = category.items ?? [];
+    if (items.length === 0) rows.push({ kind: 'noItems', key: `no-items:${category.id}` });
+    for (const item of items) rows.push({ kind: 'item', key: `item:${item.id}`, item });
+    rows.push({ kind: 'gap', key: `gap:${category.id}` });
+  }
+  return rows;
+}
+
+const menuRowKey = (row: MenuRow) => row.key;
+
 export function VendorMenuScreen({ navigation }: any) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const menuQ = useVendorMenu();
+  const pull = usePullToRefresh(menuQ.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const createCategory = useCreateCategory();
   const { owner, store } = useVendorProfile();
   const myRole = safeVendorRole(owner?.myRole);
@@ -428,15 +585,31 @@ export function VendorMenuScreen({ navigation }: any) {
   const [newCat, setNewCat] = useState('');
   const [addingCategory, setAddingCategory] = useState(false);
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
-  const categories: any[] = menuQ.data ?? [];
-  const catOptions = categories.map((c) => ({ id: c.id, name: c.name }));
+  const categories: any[] = useMemo(() => menuQ.data ?? [], [menuQ.data]);
+  const catOptions = useMemo(() => categories.map((c) => ({ id: c.id, name: c.name })), [categories]);
   const allItems = categories.flatMap((category) => category.items ?? []);
   const soldOutCount = allItems.filter((item: any) => item.isAvailable === false).length;
   const activeCount = Math.max(0, allItems.length - soldOutCount);
-  const visibleCategories = selectedCategoryId
-    ? categories.filter((category) => category.id === selectedCategoryId)
-    : categories;
+  const visibleCategories = useMemo(
+    () => (selectedCategoryId ? categories.filter((category) => category.id === selectedCategoryId) : categories),
+    [categories, selectedCategoryId],
+  );
   const selectedCategoryExists = !selectedCategoryId || categories.some((category) => category.id === selectedCategoryId);
+  // [SPEED 22 Oct] One flat list of rows (section header, its items, a gap) for a
+  // windowed list: the tab draws the first batch, not every item of every section.
+  const rows = useMemo(() => menuRows(visibleCategories), [visibleCategories]);
+  const renderRow = useCallback(({ item: row }: { item: MenuRow }) => {
+    if (row.kind === 'section') return <CategoryHeader cat={row.category} canEdit={canEdit} />;
+    if (row.kind === 'gap') return <View style={{ height: space.lg }} />;
+    if (row.kind === 'noItems') {
+      return (
+        <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
+          No items yet.
+        </T>
+      );
+    }
+    return <MenuItemRow item={row.item} navigation={navigation} categories={catOptions} canEdit={canEdit} />;
+  }, [canEdit, navigation, catOptions]);
 
   useEffect(() => {
     if (!selectedCategoryExists) setSelectedCategoryId(null);
@@ -463,22 +636,26 @@ export function VendorMenuScreen({ navigation }: any) {
       {menuQ.isLoading ? (
         <LoadingBlock />
       ) : menuQ.isError && !menuQ.data ? (
-        <ErrorState message="We couldn't load your live catalogue. Check your connection and try again." onRetry={() => menuQ.refetch()} />
+        <ErrorState message="We couldn't load your menu. Check your connection and try again." onRetry={() => menuQ.refetch()} />
       ) : (
-        <ScrollView
+        <FlatList
+          data={rows}
+          keyExtractor={menuRowKey}
+          renderItem={renderRow}
+          {...MENU_LIST_WINDOW}
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={menuQ.isRefetching} onRefresh={() => menuQ.refetch()} tintColor={color.brand[500]} />}
-        >
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
+          ListHeaderComponent={<>
           {menuQ.isError && menuQ.data ? (
             <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
-              Showing the last loaded catalogue — refresh did not complete.
+              Showing the menu from the last check. Check your connection and try again.
             </T>
           ) : null}
           <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginBottom: space.lg }}>
             <View style={{ flex: 1 }}>
               <T variant="micro" tone="muted">
-                LIVE CATALOGUE
+                YOUR MENU
               </T>
               <T variant="heading" style={{ marginTop: space.xs }}>
                 {activeCount} active · {soldOutCount} sold out
@@ -574,36 +751,15 @@ export function VendorMenuScreen({ navigation }: any) {
           ) : null}
 
           {canEdit ? <LowStockCard categories={categories} navigation={navigation} catOptions={catOptions} /> : null}
-
-          {categories.length === 0 ? (
+          </>}
+          ListEmptyComponent={categories.length === 0 ? (
             <EmptyState
               icon="book-open"
               title={canEdit ? `Build your ${cat.label.toLowerCase()}` : 'No items to update'}
               body={canEdit ? 'Add a section, then start adding items.' : 'A manager or owner needs to add the first item.'}
             />
-          ) : (
-            visibleCategories.map((category) => (
-              <View key={category.id} style={{ marginBottom: space.lg }}>
-                <CategoryHeader cat={category} canEdit={canEdit} />
-                {(category.items ?? []).length === 0 ? (
-                  <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
-                    No items yet.
-                  </T>
-                ) : (
-                  category.items.map((item: any) => (
-                    <MenuItemRow
-                      key={item.id}
-                      item={item}
-                      navigation={navigation}
-                      categories={catOptions}
-                      canEdit={canEdit}
-                    />
-                  ))
-                )}
-              </View>
-            ))
-          )}
-
+          ) : null}
+          ListFooterComponent={<>
           {/* [Wave 3 · ref 20] The reference's fuller promise, verified true
               before being written: proposeSubstitution (vendor) → the
               customer approves/rejects LIVE (hooks/customer.ts §5.3), with
@@ -611,12 +767,13 @@ export function VendorMenuScreen({ navigation }: any) {
               claim what the rails actually do. */}
           {categories.length > 0 ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Sold-out items hide from new orders instantly and return the moment you switch them back
-              on. A live order holding an item you just 86&apos;d asks the customer to swap — or the
-              line is refunded — never a silent removal.
+              Sold-out items are hidden from new orders. They appear again when you switch them on.
+              If a current order has an item you mark sold out, the customer is asked to choose a
+              replacement or the item is marked for a refund. The business handles any money directly.
             </T>
           ) : null}
-        </ScrollView>
+          </>}
+        />
       )}
     </Screen>
   );

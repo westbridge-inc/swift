@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient, VehicleType } from '@prisma/client';
-import { evaluatePureRules, DEFAULT_BATCHING_CONFIG, type CandidateOrder, type RunShape } from '../batching/eligibility';
+import { evaluatePureRules, DEFAULT_BATCHING_CONFIG, type BatchingConfig, type CandidateOrder, type RunShape } from '../batching/eligibility';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
-import { bandForBulk, totalBulkUnits, DEFAULT_BULK_UNITS } from '../../utils/load';
+import { bandForBulk, totalBulkUnits, requiredPackageSizeForOrder, DEFAULT_BULK_UNITS, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { log } from '../../utils/logger';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
@@ -87,8 +87,13 @@ function toCandidate(o: OrderRow): CandidateOrder | null {
   const pickupLat = o.pickupLat ?? (o.vendor?.latitude != null ? Number(o.vendor.latitude) : null);
   const pickupLng = o.pickupLng ?? (o.vendor?.longitude != null ? Number(o.vendor.longitude) : null);
   if (pickupLat == null || pickupLng == null) return null;
-  const size = o.courierPackageSize
-    ?? bandForBulk(totalBulkUnits(o.items.map((l) => ({ quantity: l.quantity, bulkUnits: l.bulkUnits ?? DEFAULT_BULK_UNITS }))));
+  // [owner #20 · DS1323 S3] The one size rule (utils/load): a bulky line means a car or van, so a stacked leg is
+  // weighed exactly as dispatch gated it — a bulky order is XL and never batches. An order the rule cannot size
+  // keeps the reading it always had.
+  const lines = o.items.map((l) => ({ quantity: l.quantity, bulkUnits: l.bulkUnits ?? DEFAULT_BULK_UNITS }));
+  const size = requiredPackageSizeForOrder({ orderType: o.orderType, courierPackageSize: o.courierPackageSize, items: lines }, DEFAULT_LOAD_BANDS)
+    ?? o.courierPackageSize
+    ?? bandForBulk(totalBulkUnits(lines));
   return {
     orderId: o.id,
     vertical,
@@ -110,8 +115,14 @@ export type StackVerdict =
  * to the rider (so a refusal rolls the whole claim back) — and by the offer
  * cascade before installing a stacked offer, so an ineligible pairing is
  * skipped instead of dangled in front of a rider who cannot take it.
+ *
+ * `capacity` is the ONE founder knob, `riderStackingCapacity()`, exactly as
+ * the caller read it for this decision (the same number it hands
+ * reserveRiderLeg and the candidate gates). It is R2's limit. Required, so no
+ * caller can ask the stacking question without saying how many legs are
+ * allowed.
  */
-export async function stackVerdict(tx: Tx, riderId: string, orderId: string): Promise<StackVerdict> {
+export async function stackVerdict(tx: Tx, riderId: string, orderId: string, capacity: number): Promise<StackVerdict> {
   const rider = await tx.rider.findUnique({
     where: { id: riderId },
     select: { vehicleType: true, floatLimit: true },
@@ -150,7 +161,13 @@ export async function stackVerdict(tx: Tx, riderId: string, orderId: string): Pr
     riderBlocked: false, // R12's live inputs (SOS/incident) arrive with the safety wiring
   };
 
-  const { eligible, rules } = evaluatePureRules(candidate, run, DEFAULT_BATCHING_CONFIG);
+  // [STK-3] R2 counts against the ONE capacity knob. It used to read the
+  // shadow engine's DEFAULT_BATCHING_CONFIG.maxOrdersPerRun (2), so after the
+  // owner raised the knob to 3 (2026-09-24, #1358) every count gate said 3
+  // and this gate refused the third leg "R2: 3 vs 2". Every other rule keeps
+  // the rulebook's values, and R2 keeps its own hard ceiling of 3.
+  const cfg: BatchingConfig = { ...DEFAULT_BATCHING_CONFIG, maxOrdersPerRun: capacity };
+  const { eligible, rules } = evaluatePureRules(candidate, run, cfg);
   if (eligible) return { eligible: true, legs };
   const failed = rules.find((r) => !r.pass);
   const verdict: StackVerdict = {
@@ -160,7 +177,7 @@ export async function stackVerdict(tx: Tx, riderId: string, orderId: string): Pr
     detail: failed ? `${failed.value} vs ${failed.limit}` : 'rule failed',
   };
   // The seam's old failure mode was silence. Never again: every refused stack
-  // says which rule refused it.
-  log().info({ riderId, orderId, ...verdict }, 'stacking: second leg refused');
+  // says which rule refused it, and against which capacity.
+  log().info({ riderId, orderId, capacity, ...verdict }, 'stacking: stacked leg refused');
   return verdict;
 }

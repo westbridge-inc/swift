@@ -13,7 +13,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { FareService } from '../modules/rides/fare.service';
-import { pickZone, scanFareZones, fareZoneTableKilled, DEFAULT_TENANT_ID } from '../modules/rides/fare-zones';
+import { pickZone, scanFareZones, fareZoneTableKilled, resolveFareZones, resolveFareZonePath, zonePricedPairs, DEFAULT_TENANT_ID } from '../modules/rides/fare-zones';
 import { polygonArea, polygonsOverlap } from '../utils/geo';
 import { fareZoneCounter, fareZoneGauge } from '../plugins/observability';
 import { runWithoutTenant } from '../plugins/tenant-context';
@@ -220,5 +220,68 @@ describe('the call sites carry the market (source pins)', () => {
     const fare = src('modules/rides/fare.service.ts');
     expect(fare).toContain('resolveFareZones(this.prisma, { tenantId, countryCode }, pickup, dropoff)');
     expect(fare).not.toContain("zone.findMany({ where: { isActive: true } })");
+  });
+});
+
+describe('[TAXI multi-stop] every point of a route, and every pair the table would price', () => {
+  // Three zones in a row, far east of everything else in this file.
+  const ZA = box(-57.80, 6.70, -57.75, 6.75);
+  const ZB = box(-57.74, 6.70, -57.69, 6.75);
+  const ZC = box(-57.68, 6.70, -57.63, 6.75);
+  const PA = { lat: 6.725, lng: -57.775 };
+  const PB = { lat: 6.725, lng: -57.715 };
+  const PC = { lat: 6.725, lng: -57.655 };
+  const OUT = { lat: 6.60, lng: -57.715 };
+  const OUT_2 = { lat: 6.60, lng: -57.655 };
+  const market = { tenantId: DEFAULT_TENANT_ID, countryCode: 'GY' };
+  let a: { id: string }; let b: { id: string }; let c: { id: string };
+  const pairs = async (points: Array<{ lat: number; lng: number }>) =>
+    (await zonePricedPairs(app.prisma, market, points)).map((p) => [p.from, p.to]);
+
+  beforeAll(async () => {
+    a = await zone('path A', ZA);
+    b = await zone('path B', ZB);
+    c = await zone('path C', ZC);
+    // Directed fares: A → B, B → C, C → A. Nothing else.
+    await fare(a.id, b.id, 2500);
+    await fare(b.id, c.id, 2600);
+    await fare(c.id, a.id, 2700);
+  });
+
+  it('resolves every point in order, with the same law; two points are exactly both ends', async () => {
+    const path = await resolveFareZonePath(app.prisma, market, [PA, OUT, PB, PC]);
+    expect(path.killed).toBe(false);
+    expect(path.picks.map((p) => p.zone?.id ?? null)).toEqual([a.id, null, b.id, c.id]);
+    const ends = await resolveFareZones(app.prisma, market, PA, PC);
+    expect([ends.from.zone?.id, ends.to.zone?.id, ends.killed]).toEqual([a.id, c.id, false]);
+  });
+
+  it('checks every leg in order, then the direct pickup → destination pair', async () => {
+    expect(await pairs([PA, PB])).toEqual([[0, 1]]); // a two-point trip: its one leg IS the direct pair
+    expect(await pairs([OUT, PA, PB, OUT_2])).toEqual([[1, 2]]); // a middle leg only
+    expect(await pairs([OUT, PC, PA])).toEqual([[1, 2]]); // the last leg only
+    expect(await pairs([PB, OUT, PC])).toEqual([[0, 2]]); // the direct pair only: a stop cannot step around a fixed fare
+    expect(await pairs([PA, PB, PC])).toEqual([[0, 1], [1, 2]]); // several: the legs, in order
+    expect(await pairs([PB, PA, OUT])).toEqual([]); // zoned, but no fare in that direction
+  });
+
+  it('names the two zones of a priced pair', async () => {
+    expect(await zonePricedPairs(app.prisma, market, [OUT, PA, PB])).toEqual([{ from: 1, to: 2, fromZoneId: a.id, toZoneId: b.id }]);
+  });
+
+  it('another operator’s market has no zones there, so nothing is priced for it', async () => {
+    expect(await runWithoutTenant(() => zonePricedPairs(app.prisma, { tenantId: TENANT_B, countryCode: 'GY' }, [PA, PB, PC]))).toEqual([]);
+  });
+
+  it('FARE_ZONE_TABLE_KILL=1: nothing resolves, so the table prices nothing', async () => {
+    process.env['FARE_ZONE_TABLE_KILL'] = '1';
+    try {
+      const path = await resolveFareZonePath(app.prisma, market, [PA, PB, PC]);
+      expect(path.killed).toBe(true);
+      expect(path.picks.map((p) => p.zone)).toEqual([null, null, null]);
+      expect(await zonePricedPairs(app.prisma, market, [PA, PB, PC])).toEqual([]);
+    } finally {
+      delete process.env['FARE_ZONE_TABLE_KILL'];
+    }
   });
 });

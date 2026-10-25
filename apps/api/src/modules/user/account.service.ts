@@ -1,121 +1,123 @@
-import { recordStorageOrphan, retryStorageOrphans } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF } from './account-closure';
+import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
+import { eraseUserDevices } from '../../lib/owner-rls';
+import { closeOpenMmgStagesFor } from '../integrity/money-surface';
+import { eraseMoverObjects } from './mover-object-erasure';
+import { exportPersonalData } from './data-export';
+import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
+import { lockIdentityAuthority } from '../integrity/identity-review';
+import {
+  openAvatarErasureObligationIds,
+  owedPublicPhotoCount,
+  queueStorageOrphan,
+  recordStorageOrphan,
+  retryStorageOrphan,
+  retryStorageOrphans,
+} from '../../lib/storage-orphans';
+import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
+import { queueStoresPhotoErasure } from '../vendor/store-photos';
+import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
+import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
-import type { ServiceJobStatus } from '@prisma/client';
+import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
+import { isOwnedAvatarKey } from '../verification/object-authority';
 
-// ---------------------------------------------------------------------------
-// SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
-// self-serve and in-app (previously the privacy policy pointed people at
-// Support with no mechanism behind it).
-//
-//  • exportData  — everything we hold about the person, as portable JSON.
-//  • deleteAccount — crypto-shred verification docs, revoke access, and
-//    de-identify the account. Records the law REQUIRES us to keep (orders, for
-//    disputes/guarantees) stay, but the person behind them is anonymised.
-//
-// Scope: EVERY account type the app can create.
-//
-// It used to be "a pure CUSTOMER account" — mover and vendor accounts closed
-// through Support, because they carry payouts, live listings and staff and a
-// self-delete would orphan a running catalogue. That reasoning was right about
-// the risk and wrong about the remedy, and App Review names the remedy
-// specifically: 5.1.1(v) requires in-app deletion for every account type an
-// app can create, and pointing at Support does not satisfy it. The app has a
-// Delete account button, so a driver pressing it was told to write an email.
-//
-// What a partner holds divides cleanly. Money in flight REFUSES — cash they
-// are holding, an unconfirmed settlement, earnings owed — because erasing over
-// any of it loses somebody's money, and each one ends on its own with a next
-// step the person can take themselves. Everything else WINDS DOWN in the purge
-// phase: storefront off sale, staff keys revoked, subscription stopped. See
-// partner-wind-down.ts.
-//
-// [LAUNCH-2] That old scope sentence was only ever true of the `roles` array, and
-// two kinds of authority deliberately live outside it: advertiser membership
-// (AdvertiserMember, ads §4 — "NOT a new UserRole") and vendor staff access
-// (VendorStaff). Both belong to people the role filter sees as plain
-// CUSTOMERs, so both could always self-delete — leaving a LIVE ad campaign
-// with no owner, and staff rows pointing at "Deleted User". Step 0b now winds
-// those down. Closing MOVER and VENDOR_OWNER accounts in-app was the remaining
-// half; it is done, above.
-// ---------------------------------------------------------------------------
+// Account erasure closes authority before storage work, preserves financial and
+// legal records, and de-identifies the account. The exact phone tombstone is a
+// durable retry marker consumed by the retention worker. Direct-payment earnings
+// never prevent erasure; live work and open cash obligations do. Business and
+// advertiser self-service requests enter the support queue for closure handling.
 
 // A closed order is safe to leave behind; anything else is in-flight and must
 // finish (or be cancelled) before the customer can erase themselves.
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
+export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+/** The server-written record that a closure request was confirmed in the app
+ *  (behind the deletion step-up). Anyone can type the subject into a support
+ *  ticket; only the confirmed request writes this record, so support completes
+ *  only a ticket that carries it. */
+export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
+
+/** The server, not a navigation flag or active role, chooses the business
+ *  closure flow: anyone who owns a store or belongs to an advertiser closes
+ *  through a request the support team completes, keeping sign-in until
+ *  listings, campaigns and obligations are resolved. The profile reports the
+ *  same answer so the app's confirmation copy matches what Delete does. */
+export async function closesByRequest(
+  db: Pick<Prisma.TransactionClient, 'vendorOwner' | 'advertiserMember'>, userId: string, roles: readonly string[],
+): Promise<boolean> {
+  return roles.includes('VENDOR_OWNER')
+    || !!await db.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
+    // [ads security] an open, unaccepted team invitation is not a membership
+    || !!await db.advertiserMember.findFirst({ where: { userId, acceptedAt: { not: null } }, select: { advertiserId: true } });
+}
+
 export class AccountService {
-  constructor(private app: FastifyInstance) {}
+  constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
-  /** DPA right of access + portability: a copy of the person's own data. */
+  /** DPA right of access + portability: a copy of the person's own data.
+   *  [Row 331 (b)] Every category of the export register, paged, never cut silently (data-export.ts). */
   async exportData(userId: string) {
-    const prisma = this.app.prisma;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        phone: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roles: true,
-        activeRole: true,
-        lastMoverRole: true,
-        countryCode: true,
-        trustLevel: true,
-        isPhoneVerified: true,
-        createdAt: true,
-        lastActiveAt: true,
-      },
+    return exportPersonalData(this.app.prisma, userId);
+  }
+
+  private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
+    const where = { userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
+    const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
+      ?? await tx.supportTicket.create({ data: {
+        userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
+        message: ACCOUNT_CLOSURE_MESSAGE,
+      } });
+    // Same transaction as the request: the confirmation and its ticket commit
+    // together. One record per ticket; a repeated request reuses it.
+    const confirmed = await tx.auditLog.findFirst({
+      where: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
     });
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+    if (!confirmed) {
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id } });
+    }
+    return ticket;
+  }
 
-    const [addresses, orders, ratingsGiven, serviceJobs] = await Promise.all([
-      prisma.address.findMany({
-        where: { userId },
-        select: { label: true, addressLine1: true, addressLine2: true, city: true, latitude: true, longitude: true, createdAt: true },
-      }),
-      prisma.order.findMany({
-        where: { customerId: userId },
-        select: { orderNumber: true, orderType: true, status: true, totalAmount: true, createdAt: true, deliveredAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.rating.findMany({
-        where: { raterId: userId },
-        select: { score: true, comment: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.serviceJob.findMany({
-        where: { customerId: userId },
-        select: { status: true, scheduledFor: true, quoteAmount: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-    ]);
+  private async closureReceipt(userId: string, ticketId: string) {
+    try {
+      await notifyAdmins(this.app.prisma, new NotificationService(this.app.prisma, this.app.io), {
+        tenantId: await tenantOfUser(this.app.prisma, userId),
+        title: 'Account closure requested', body: 'An in-app closure request needs review in the support queue.',
+        data: { kind: 'support_ticket', ticketId },
+      });
+    } catch (error) {
+      this.app.log.error({ err: error, ticketId }, 'Closure notification failed; support ticket remains open');
+    }
+    return { deleted: false, status: 'CLOSURE_REQUESTED' as const, ticketId,
+      message: 'Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.' };
+  }
 
-    return {
-      exportedAt: new Date().toISOString(),
-      notice:
-        'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
-      account: user,
-      addresses,
-      orders,
-      ratingsGiven,
-      serviceJobs,
-    };
+  /** The existing support queue owns the human business wind-down. */
+  async requestClosure(userId: string) {
+    const ticket = await this.app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { status: true } });
+      if (!user || user.status !== 'ACTIVE') throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+      return this.closureTicket(tx, userId);
+    });
+    return this.closureReceipt(userId, ticket.id);
   }
 
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
-  async deleteAccount(userId: string) {
+  async deleteAccount(userId: string, selfServe = false) {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
       // Service-job creation, provider profile changes and verification events
@@ -130,42 +132,83 @@ export class AccountService {
       if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
-        select: { id: true, phone: true, roles: true, status: true },
+        select: { id: true, phone: true, roles: true, status: true, avatar: true, tenantId: true },
       });
-      if (user.status === 'DEACTIVATED' && user.phone.startsWith('deleted:')) {
+      const queueAvatarBeforePointerClear = async () => {
+        if (!user.avatar) return null;
+        return queueStorageOrphan(tx, {
+          key: user.avatar,
+          reason: isOwnedAvatarKey(user.avatar, userId)
+            ? 'ACCOUNT_DELETION_DELETE_PENDING'
+            : 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN',
+          userId,
+          tenantId: user.tenantId,
+        });
+      };
+      // [IMAGES-E2E · REVIEW-F S2-1] The provider's portfolio photos (they can show a customer's
+      // home or people) go with the account: each Swift-kept photo's deletion row is written with
+      // the pointer clear, under this lock; the objects are deleted after the commit.
+      const queuePortfolioBeforePointerClear = async (): Promise<void> => {
+        const provider = await tx.serviceProvider.findUnique({ where: { userId }, select: { id: true, portfolioPhotos: true } });
+        if (!provider || provider.portfolioPhotos.length === 0) return;
+        await queuePortfolioPhotoDeletions(
+          tx, { id: provider.id, userId }, user.tenantId, provider.portfolioPhotos, PUBLIC_PHOTO_ACCOUNT_DELETION,
+        );
+        await tx.serviceProvider.update({ where: { id: provider.id }, data: { portfolioPhotos: [] } });
+      };
+      // [IMAGES-E2E PR4] The photos of the stores this person owns (logo, cover, sections, items:
+      // they can show people) go too, the same way: deletion rows first, then the addresses cleared.
+      const queueStorePhotosBeforePointerClear = async (): Promise<void> => {
+        const stores = await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } });
+        if (stores.length > 0) await queueStoresPhotoErasure(tx, stores.map((v) => v.id), PUBLIC_PHOTO_ACCOUNT_DELETION);
+      };
+      const revokeAccessBeforeCleanup = async () => {
+        await tx.session.deleteMany({ where: { userId } });
+        // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
+        await eraseUserDevices(tx, userId);
+        // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
+        // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
+        // verification.service openForOwedWork), and the row's userId never
+        // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
+        await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
+        // [COORD 18 Oct 23:28Z · REVIEW-F #1879 §4] Notices, staged money-setting commands, finished mover
+        // revocations, unheld safety check-in deliveries, renewal reminders and staff permissions (erasure-coverage.ts).
+        await eraseOwedRowsInTransaction(tx, userId);
+      };
+      if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
         // late write landed — fall through and RE-SWEEP (every purge step is
         // idempotent), instead of short-circuiting on the marker.
-        return { alreadyComplete: false, resweep: true, hold: null };
+        await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
+        const avatarOrphan = await queueAvatarBeforePointerClear();
+        if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
+        await queuePortfolioBeforePointerClear();
+        await queueStorePhotosBeforePointerClear();
+        await revokeAccessBeforeCleanup();
+        return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
       }
 
-      // [Apple 5.1.1(v)] A partner closes their own account, in the app.
-      //
-      // This used to refuse every non-CUSTOMER role outright and point at
-      // Support. The app has a Delete account button, so a driver pressing it
-      // was told to write an email — which App Review names specifically as
-      // not satisfying the guideline. The comment at the top of this file has
-      // said so all along while nothing acted on it.
-      //
-      // The refusal was right about the risk and wrong about the remedy. What
-      // a partner holds divides cleanly: money in flight BLOCKS (and each
-      // blocker ends on its own, with a next step the person can take), and
-      // everything else — a live storefront, staff keys, a subscription —
-      // WINDS DOWN in the purge phase below, exactly as ad campaigns already
-      // do. See partner-wind-down.ts.
-      const partnerRoles = user.roles.filter((role) => role !== 'CUSTOMER');
-      if (partnerRoles.length > 0) {
-        const verdict = verdictFor(await partnerObligations(tx, userId));
-        if (!verdict.clear) {
-          throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers));
-        }
+      // The server, not a navigation flag or active role, chooses the business
+      // closure flow. Keep sign-in until the support team resolves obligations.
+      if (selfServe && await closesByRequest(tx, userId, user.roles)) {
+        const ticket = await this.closureTicket(tx, userId);
+        return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }
 
+      // Checkout locks these same vendor rows before its live eligibility read.
+      // Closing commerce under this lock prevents a new order after the census.
+      await tx.$queryRaw`
+        SELECT v.id FROM vendors v JOIN vendor_owners o ON o.id = v."ownerId"
+        WHERE o."userId" = ${userId} ORDER BY v.id FOR UPDATE OF v
+      `;
+
       const [inFlightOrders, inFlightServiceJobs] = await Promise.all([
-        tx.order.count({ where: { customerId: userId, status: { notIn: TERMINAL_ORDER } } }),
+        tx.order.count({ where: { status: { notIn: TERMINAL_ORDER }, OR: [
+          { customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } },
+        ] } }),
         tx.serviceJob.count({
           where: {
             status: { notIn: TERMINAL_SERVICE_JOB },
@@ -173,8 +216,19 @@ export class AccountService {
           },
         }),
       ]);
+      // Read the cash census after the live-work snapshot. If goods return
+      // between these reads, their terminal status cannot hide customer cash
+      // that the rider still holds. Otherwise the earlier snapshot blocks
+      // closure while the order is still active.
+      // Profile ownership, not the active role, defines obligations. Switching
+      // to customer mode must never hide cash or live mover work.
+      const obligations = await partnerObligations(tx, userId);
+      const verdict = verdictFor(obligations);
+      if (!verdict.clear) {
+        throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers, obligations));
+      }
       if (inFlightOrders > 0) {
-        throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders before deleting your account.');
+        throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders and jobs before deleting your account. For a job already collected, finish the handover or open Get help to resolve it.');
       }
       if (inFlightServiceJobs > 0) {
         throw new AppError(409, 'ACTIVE_SERVICE_JOBS', 'Finish or cancel your active service jobs before deleting your account.');
@@ -197,11 +251,35 @@ export class AccountService {
       // Cut public/action authority before any fallible retention work. The
       // relational ACTIVE check is authoritative; the profile flag is a second
       // fail-closed barrier for old clients and background consumers.
+      // Commit the outstanding document obligations and exact erasure marker
+      // WITH the cutoff. The reaper consumes that marker under this user lock;
+      // it cannot retire a newly due document as ordinary image retention.
+      // Status alone is insufficient: a later admin ban can replace it. Safety
+      // escrow above has already captured any needed contact authority.
+      await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
-      await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
-      return { alreadyComplete: false, hold };
+      // Marked wound down with the cutoff, so no billing repair or fee payment
+      // can reopen a closed account's store (it reopens billing holds only).
+      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
+      await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
+      const avatarOrphan = await queueAvatarBeforePointerClear();
+      await queuePortfolioBeforePointerClear();
+      await queueStorePhotosBeforePointerClear();
+      // [row 622] The tombstone (the exact erasure marker) BEFORE the cleanup, in this same transaction: the
+      // owner wall's erase actions (devices, notices) refuse any account that does not carry it. Nothing the
+      // cleanup runs reads users.status or users.phone (owner-wall-erase-guard.test.ts pins it), and the
+      // commit is the same either way.
+      await tx.user.update({
+        where: { id: userId },
+        data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
+      });
+      await revokeAccessBeforeCleanup();
+      // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
+      // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
+      return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
-    if (preflight.alreadyComplete) return { deleted: true };
+    if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
     if ((preflight as { resweep?: boolean }).resweep) {
       this.app.log.info({ userId }, 'account deletion re-sweep: purging any late writes');
     }
@@ -218,38 +296,17 @@ export class AccountService {
       this.app.log.warn({ err: error, userId }, 'account deletion socket cleanup failed');
     }
 
-    // 0b. [LAUNCH-2] Access that is NOT a UserRole.
-    //
-    //     The partner guard above filters `user.roles`, but two kinds of
-    //     authority never appear there: advertiser membership is keyed on
-    //     AdvertiserMember by design (ads §4 — "NOT a new UserRole"), and
-    //     vendor staff access is keyed on VendorStaff. To that role filter a
-    //     person running live ad campaigns, or a manager with keys to someone
-    //     else's storefront, is an ordinary CUSTOMER — so they never hit the
-    //     PARTNER_ACCOUNT guard and could always delete themselves. What they
-    //     left behind was a LIVE campaign with no owner and vendor_staff rows
-    //     pointing at "Deleted User".
-    //
-    //     Campaigns are PAUSED, never cancelled: pausing stops serving
-    //     immediately, while cancelling would reach into refund intents and
-    //     booked inventory — money movement has no business riding an erasure
-    //     request. The Advertiser company row itself survives with its
-    //     invoices, which are financial records under the same legal-obligation
-    //     basis as the rest. This runs in the purge phase so the re-sweep
-    //     repairs it, and every step is idempotent.
-    // [Apple 5.1.1(v)] Close what leaving implies: a storefront off sale, staff
-    // keys revoked, the subscription stopped. Taken off sale rather than
-    // deleted — orders, receipts and sales history are financial records under
-    // the same legal-obligation basis as everything else kept here. What must
-    // stop is a customer ordering from a business that no longer has an owner.
-    // Idempotent, so the re-sweep repairs a partial run; moves no money.
-    const wound = await windDownPartner(prisma, userId).catch((error) => {
-      this.app.log.error({ err: error, userId }, '[5.1.1v] partner wind-down failed — re-sweep will retry');
-      return null;
-    });
+    // Wind down commercial access without moving money. A failure propagates;
+    // the API returns a pending receipt and the retention sweep retries the
+    // durable marker even though the person can no longer sign in.
+    const wound = await windDownPartner(prisma, userId);
     if (wound && (wound.vendorsClosed || wound.itemsWithdrawn || wound.staffRevoked || wound.subscriptionsCancelled)) {
       this.app.log.info({ userId, ...wound }, '[5.1.1v] partner wound down on account deletion');
     }
+
+    // [COORD 19 Oct 03:46Z] Every saved card leaves service (REVOKED, unsent charges closed; the row is PT-1
+    // frozen) and card sessions that moved no money go; payment evidence stays (settlement history, §6).
+    await retireCardsAndSessions(prisma, userId);
 
     const memberships = await prisma.advertiserMember.findMany({
       where: { userId },
@@ -307,48 +364,120 @@ export class AccountService {
       where: { userId, purgedAt: null, legalHoldId: null },
       select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
+    let pendingDocuments = 0;
     for (const doc of docs) {
-      // [DOC-INV-7] Delete, shred, PROBE, and write the receipt with the purge
-      // mark in one transaction. Erasure must complete for the person, so a
-      // FAILED probe is recorded as FAILED and the bytes are filed as a
-      // storage orphan for the retry sweep — never silently swallowed.
-      const evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, doc.fileUrl) : NOTHING_STORED;
+      // [DOC-INV-7] Passing evidence closes the document with its receipt in
+      // one transaction. An authority refusal or FAILED probe retains the
+      // due pointer; it cannot prevent the other personal-data cleanup.
+      let evidence;
+      try {
+        // [Row 243] Destroyed only under the person's lock while still unheld. A hold that landed
+        // since the census keeps the document; the tombstone retry then defers it as held.
+        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }) : NOTHING_STORED;
+        if (!fenced) { pendingDocuments += 1; continue; }
+        evidence = fenced;
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
+        // Refusal is an unresolved obligation, never proof of destruction.
+        // The retained row + due clock committed above are the retry census.
+        pendingDocuments += 1;
+        this.app.log.warn({ userId, documentId: doc.id }, 'account document erasure pending: object authority unavailable');
+        continue;
+      }
       if (evidence.probe === 'FAILED' && doc.fileUrl) {
         await recordStorageOrphan(prisma, this.app.log, { key: doc.fileUrl, reason: 'ERASURE_PURGE_PROBE_FAILED', userId, tenantId: doc.user.tenantId });
+        await writeDeletionReceipt(prisma, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+        pendingDocuments += 1;
+        continue;
       }
-      await prisma.$transaction(async (tx) => {
-        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+      const closed = await prisma.$transaction(async (tx) => {
+        // [Row 243] The close re-checks the hold under the person's row lock (placeDocLegalHoldIn takes the same lock
+        // first). A hold that landed since the census keeps the record and its extracted values: that includes a
+        // document whose image R24 already purged (fileUrl ''), which never enters the fence above. A document a
+        // concurrent purge already closed is not closed (or receipted) twice.
+        await bindTenantTransaction(tx);
+        const person = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
+        `;
+        if (person.length !== 1) return false;
+        const close = await tx.verificationDocument.updateMany({
+          where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
+        });
+        if (close.count !== 1) return false;
         // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
         await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
         await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
         await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+        return true;
       });
+      // Held (or already closed) since the census: the tombstone retry defers or skips it.
+      if (!closed) pendingDocuments += 1;
     }
+
+    const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
+    pendingDocuments += moverObjects.pending;
+
+    // [Row 331 · DSAR-ERASURE (a)] Uploads no document or mover pointer claims (the optional L2
+    // ID selfie, an abandoned onboarding file) go too, with a receipt; a hold keeps them.
+    const uploads = await eraseUnclaimedUploads(prisma, storage, userId, this.app.log);
+    // [Row 331 (c)] Everything shredded above stops carrying its content hash, so the same
+    // document uploaded later cannot find this account again (held objects keep theirs until purged).
+    const fingerprints = await forgetErasedFingerprints(prisma, userId, this.app.log);
+    let pendingUploads = uploads.pending + fingerprints.pending;
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
     //     leaves the object reachable — a DPA deletion-barrier breach. Delete
     //     the object here, before the column is cleared, so the census still
-    //     knows the key. Absolute-URL / signed-URL legacy values aren't our
-    //     keys to delete; bare keys and /uploads paths are. A failure is
-    //     LOGGED (not silently swallowed) so an orphan is discoverable.
-    // [F-026-02] Opportunistic retry of earlier orphans — account deletion is
-    // a natural, already-privileged moment to work the census down without a
-    // dedicated worker (IDV-1's sweeper takes standing ownership later).
-    await retryStorageOrphans(prisma, storage, this.app.log).catch(() => undefined);
-
-    const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true, tenantId: true } });
-    const rawAvatar = avatarRow?.avatar;
-    if (rawAvatar && !rawAvatar.startsWith('http://') && !rawAvatar.startsWith('https://')) {
-      // Pass the stored value as-is: the provider's resolveKey normalises the
-      // "/uploads/" prefix and refuses path escapes (same call the doc loop uses).
-      await storage.delete(rawAvatar).catch(async (err) => {
-        this.app.log.error({ err, userId, key: rawAvatar }, '[F-024-08] avatar object delete failed on account deletion — orphaned key');
-        // [F-026-02] Nulling the column erases the only pointer — census it
-        // durably so the deletion barrier survives this failure.
-        await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId, tenantId: avatarRow?.tenantId });
-      });
+    //     knows the key. Only the server-issued avatar namespace of this
+    //     subject proves deletion authority; unproven pointers stay censused.
+    // The pointer and durable obligation were committed together under the
+    // User lock in preflight. Only a provider-canonical, globally unreferenced
+    // key with a confirmed-absence probe can close that exact row. A failed or
+    // quarantined row keeps the account response pending.
+    const avatarOrphanId = (preflight as { avatarOrphanId?: string | null }).avatarOrphanId;
+    let exactAvatarObligationClosed = avatarOrphanId === null || avatarOrphanId === undefined;
+    if (avatarOrphanId) {
+      exactAvatarObligationClosed = await retryStorageOrphan(prisma, storage, this.app.log, avatarOrphanId);
     }
+
+    // A standing verification worker also drains this census. This bounded
+    // pass opportunistically repairs older obligations without making account
+    // deletion of another person the only recovery mechanism.
+    await retryStorageOrphans(prisma, storage, this.app.log).catch(() => undefined);
+    const openAvatarObligations = new Set<string>();
+    try {
+      for (const id of await openAvatarErasureObligationIds(prisma, userId)) openAvatarObligations.add(id);
+      // Upsert preserves prior provenance. If the exact row returned during
+      // preflight belongs to another subject/tenant, the subject census above
+      // intentionally will not find it; unless this invocation proved it
+      // closed, it still blocks a truthful completion response.
+      if (avatarOrphanId && !exactAvatarObligationClosed) {
+        const exact = await prisma.storageOrphan.findUnique({
+          where: { id: avatarOrphanId }, select: { purgedAt: true },
+        }).catch(() => null);
+        if (!exact?.purgedAt) openAvatarObligations.add(avatarOrphanId);
+      }
+    } catch (error) {
+      // Failure to prove an empty global census is pending erasure, not success.
+      openAvatarObligations.add(avatarOrphanId ?? `unproven-avatar-census:${userId}`);
+      this.app.log.error({ err: error, userId }, 'account avatar-erasure completion census failed');
+    }
+    const pendingAvatarObjects = openAvatarObligations.size;
+
+    // [IMAGES-E2E · REVIEW-F S2-1] This person's photos still owed a deletion (the portfolio queued
+    // above, or one an earlier run or a take-down could not delete): deleted now; any still open
+    // keeps the receipt pending, and this sweep's retry (or the standing one) finishes it.
+    // Read as the named system capability: the census sees this person's rows whatever tenant
+    // the request runs in (an admin-run erasure included), so "nothing owed" is never a blind spot.
+    // [REVIEW-G S3-1 / DUP-AUDIT B-4] The census is a proven system-login read (#1953's proof):
+    // unproven (no system login under the wall, a narrowed policy) = still pending, never "deleted".
+    pendingUploads += await owedPublicPhotoCount(prisma, userId, [...PUBLIC_PHOTO_DELETE_REASONS], (id) =>
+      runAsSystem('account-erasure-public-photos', () => retryStorageOrphan(prisma, storage, this.app.log, id)),
+    ).catch((err: unknown) => {
+      this.app.log.error({ err, userId }, 'account public-photo erasure census failed');
+      return 1;
+    });
 
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
     //     the account's identity signals — hashed keys, cluster membership,
@@ -361,16 +490,41 @@ export class AccountService {
     const integrity = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
     await prisma.faceTemplate.deleteMany({ where: { accountId: userId } });
     if (!integrity?.tombstoneRetentionEnabled) {
-      await prisma.identityKey.deleteMany({ where: { accountId: userId } });
-      await prisma.identityClusterMember.deleteMany({ where: { accountId: userId } });
+      await prisma.$transaction(async (tx) => {
+        await lockIdentityAuthority(tx);
+        await tx.identityKey.deleteMany({ where: { accountId: userId } });
+        await tx.identityClusterMember.deleteMany({ where: { accountId: userId } });
+      });
     }
 
-    // 2. Revoke access everywhere: refresh sessions + push tokens.
-    await prisma.session.deleteMany({ where: { userId } });
-    await prisma.deviceToken.deleteMany({ where: { userId } });
+    // 2. [Owner decision + coordinator ruling 2026-10-05] Ratings this person
+    //    wrote, and ratings others wrote about them, stay counted — score and
+    //    tags keep every rating, average and history unchanged — but free text
+    //    can name or describe them and automatic redaction is unreliable, so
+    //    the comment AND any reply to it are deleted, as is any queued copy of
+    //    the comment. Idempotent, so a re-sweep repeats it safely.
+    await prisma.rating.updateMany({
+      where: {
+        AND: [
+          { OR: [{ raterId: userId }, { rateeId: userId }] },
+          { OR: [{ comment: { not: null } }, { response: { not: null } }, { respondedBy: { not: null } }] },
+        ],
+      },
+      data: { comment: null, response: null, respondedAt: null, respondedBy: null },
+    });
+    await prisma.$executeRaw`
+      UPDATE rating_outbox SET payload = payload - 'comment'
+      WHERE "ratingId" IN (SELECT id FROM ratings WHERE "raterId" = ${userId} OR "rateeId" = ${userId})
+        AND jsonb_typeof(payload) = 'object' AND payload ? 'comment'
+      /* account-erasure-review-text */
+    `;
 
-    // 3. Drop precise saved locations (home/work) outright.
-    await prisma.address.deleteMany({ where: { userId } });
+    // Sessions and push tokens were revoked atomically with authority cutoff.
+
+    // 3. Drop precise saved locations (home/work) outright. [item 20] Through
+    //    a named system capability: an admin's closure or the erasure retry job
+    //    acts for someone else, and the owner wall would let it delete nothing.
+    await runAsSystem('account:erasure-addresses', () => prisma.address.deleteMany({ where: { userId } }));
 
     // 3b. [NR-3 census gap 6] Ephemeral high-risk rows go WITH the account —
     //     recovery ID/selfie pointers, biometric liveness rows, public trip
@@ -379,12 +533,32 @@ export class AccountService {
     //     leaves; case-bound safety evidence lives elsewhere under its own
     //     hold rules.
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    await prisma.livenessCheck.deleteMany({ where: { userId } });
+    // [Row 331 (a)] The shift selfie photos first: each row goes once its photo is confirmed gone
+    // (a legal hold on the person keeps both, reported as held).
+    const liveness = await eraseLivenessSelfies(prisma, storage, userId, this.app.log);
+    pendingUploads += liveness.pending;
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
     await prisma.emergencyContact.deleteMany({ where: { userId } });
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
+    await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
+
+    // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
+    //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
+    //     appeal text), case and request free text, and closed, unheld safety records (location, address, notes).
+    // [IMAGES-E2E · DUP-AUDIT B-2] A portfolio photo still listed here (normally none: the cut-off
+    // cleared them) got its deletion row before its pointer went; deleted now, or it stays owed.
+    const lateProfilePhotos = await deidentifyProfiles(prisma, userId);
+    if (lateProfilePhotos.length > 0) {
+      pendingUploads += await runAsSystem('account-erasure-public-photos', async () => {
+        let open = 0;
+        for (const id of lateProfilePhotos) if (!(await retryStorageOrphan(prisma, storage, this.app.log, id))) open += 1;
+        return open;
+      }).catch(() => lateProfilePhotos.length);
+    }
+    await deidentifyCaseRecords(prisma, userId);
+    await deidentifySafetyRecords(prisma, userId);
 
     // 4. De-identify the account row. It stays (orders/ratings reference it for
     //    the legal retention window) but the person is stripped from it. The
@@ -407,6 +581,25 @@ export class AccountService {
         lastKnownLng: null,
       },
     });
+
+    // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
+    const heldUploads = uploads.held + liveness.held;
+    if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
+      return {
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
+        message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
+      };
+    }
+
+    if (pendingDocuments > 0 || pendingAvatarObjects > 0 || pendingUploads > 0) {
+      return {
+        deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
+        message: 'Your account is closed. Some personal-data erasure is pending; no further sign-in is needed.',
+        ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
+      };
+    }
 
     // [AG-XF-013] The receipt names the hold when there is one. Everything the
     // person asked to be erased HAS been erased; what remains is an encrypted

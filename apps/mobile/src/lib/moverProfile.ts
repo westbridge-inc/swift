@@ -1,13 +1,28 @@
 /** Profile discovery may fall back to the other mover kind only when the
  * server definitively says this profile does not exist. Network, auth, and 5xx
  * failures must remain errors; treating them as absence can silently cross
- * from an active Rider job into the Driver UI. */
-export async function unwrapOptionalMoverProfile<T>(request: Promise<any>): Promise<T | null> {
+ * from an active Rider job into the Driver UI.
+ *
+ * A 403 is definitive too, for exactly one caller: an account that holds no
+ * mover role at all. The server refuses a self-profile read of an unheld role
+ * with 403 rather than 404 (its authz matrix pins that — no route oracle for
+ * a wrong-role token), so a customer opening "Swift Driver" to apply used to
+ * hit 403 on BOTH probes, retried each three times, and carry an error into a
+ * screen that was only ever going to show the application. `outsider` comes
+ * from the account's OWN roles (lib/roleLanding accountHoldsRole): for such an
+ * account 403 means "no profile", and for an account that holds the role it
+ * stays the error it is. */
+export async function unwrapOptionalMoverProfile<T>(
+  request: Promise<any>,
+  opts: { outsider?: boolean } = {},
+): Promise<T | null> {
   try {
     const response = await request;
     return response?.data?.data as T;
   } catch (error: any) {
-    if (error?.response?.status === 404) return null;
+    const status = error?.response?.status;
+    if (status === 404) return null;
+    if (status === 403 && opts.outsider === true) return null;
     throw error;
   }
 }

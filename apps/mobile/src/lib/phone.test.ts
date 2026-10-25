@@ -40,6 +40,17 @@ describe('clampPhone', () => {
   it('strips non-digits', () => {
     expect(clampPhone('+592', '612-3456')).toBe('6123456');
   });
+  it('drops a pasted copy of the calling code instead of clamping it into the number', () => {
+    expect(clampPhone('+592', '+592 600 1234')).toBe('6001234');
+    expect(clampPhone('+592', '00592 600 1234')).toBe('6001234');
+    expect(clampPhone('+592', '592 600 1234')).toBe('6001234'); // bare copy, too long to be local
+    expect(clampPhone('+592', '+592')).toBe('');
+    expect(clampPhone('+1784', '+1 784 464 1237')).toBe('4641237'); // NANP: the area code is in the dial code
+  });
+  it('keeps a local number that merely starts with the calling code’s digits', () => {
+    expect(clampPhone('+592', '5921234')).toBe('5921234');
+    expect(clampPhone('+592', '592')).toBe('592');
+  });
 });
 
 describe('phoneExample', () => {

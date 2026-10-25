@@ -1,7 +1,9 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { slotBlocked, slotFitsConfig, type ExceptionWindow } from './availability';
+import { slotBlocked, slotFitsConfig, type ExceptionWindow, canonicalSlotStart } from './availability';
+import { guyanaWallClockParts } from '../../utils/guyana-day';
+import { emitToStoreRoom } from '../order/order-room-emission.service';
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
 export interface BookingConfig {
@@ -18,12 +20,29 @@ export interface BookingConfig {
   minNoticeMinutes?: number;
 }
 
+/** [AX289 F6] A transaction that lost a lock race: Prisma's P2034 (a write
+ *  conflict or a deadlock in an interactive transaction), or PostgreSQL's
+ *  40P01 (deadlock detected) / 40001 (serialization failure) surfacing from a
+ *  raw statement. Exported for the unit pin. */
+export function isTransactionConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const e = error as { code?: unknown; meta?: { code?: unknown } | null; message?: unknown };
+  if (e.code === 'P2034') return true;
+  if (e.meta?.code === '40P01' || e.meta?.code === '40001') return true;
+  return typeof e.message === 'string' && /\b(40P01|40001)\b|deadlock detected|could not serialize access/i.test(e.message);
+}
+
 // ---------------------------------------------------------------------------
 // BookingService — appointment slots on SERVICE listings. The double-booking
 // guarantee is the database's: a partial unique index on (itemId, slotStart)
 // for non-CANCELLED rows means two concurrent reservations resolve to
 // exactly one winner, no matter how the requests interleave.
 // ---------------------------------------------------------------------------
+
+/** Parent order states in which an appointment can still be moved. */
+const LIVE_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'ACCEPTED']);
+/** Parent order states that mean the appointment happened. */
+const FINISHED_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['COMPLETED', 'DELIVERED']);
 
 export class BookingService {
   /** io is optional and never load-bearing (spec 2.6): mutations nudge the
@@ -33,16 +52,16 @@ export class BookingService {
 
   /** Fire-and-forget liveness nudge. */
   private nudge(vendorId: string, itemId: string): void {
-    try {
-      this.io?.to(`vendor:${vendorId}`).emit('bookings:changed', { itemId });
-    } catch { /* liveness is garnish */ }
+    // Through the store-room gate (it never throws): the current team only.
+    if (this.io) void emitToStoreRoom(this.prisma, this.io, vendorId, 'bookings:changed', { itemId });
   }
 
   /** All slot rules except the reservation itself — checkout fails fast here.
    *  ONE availability computation: window/stride/lead-time via availability.ts
    *  and the SAME exception subtraction the picker applies — a stale picker
    *  can never book into a blocked window. */
-  async validateSlot(itemId: string, slotStart: Date): Promise<BookingConfig> {
+  async validateSlot(itemId: string, requestedSlotStart: Date): Promise<BookingConfig> {
+    const slotStart = canonicalSlotStart(requestedSlotStart);
     const item = await this.prisma.item.findUnique({
       where: { id: itemId },
       select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
@@ -68,17 +87,19 @@ export class BookingService {
     }
 
     const exceptions = await this.exceptionsFor(item.vendorId, slotStart);
-    const minutesIntoDay = slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
+    const local = guyanaWallClockParts(slotStart);
+    const minutesIntoDay = local.hour * 60 + local.minute;
     if (slotBlocked(minutesIntoDay, config.durationMinutes, itemId, exceptions)) {
-      // Same face as a taken slot — a block's existence (or reason) never leaks.
+      // A block's existence (or reason) never leaks.
       throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
     }
     return config;
   }
 
-  /** The vendor's exception windows overlapping the slot's UTC-face date. */
+  /** The vendor's exception windows for the slot's Guyana calendar date. */
   async exceptionsFor(vendorId: string, onDate: Date): Promise<ExceptionWindow[]> {
-    const day = new Date(Date.UTC(onDate.getUTCFullYear(), onDate.getUTCMonth(), onDate.getUTCDate()));
+    const local = guyanaWallClockParts(onDate);
+    const day = new Date(Date.UTC(local.year, local.month - 1, local.day));
     return this.prisma.bookingException.findMany({
       where: { vendorId, date: day },
       select: { itemId: true, start: true, end: true },
@@ -102,6 +123,7 @@ export class BookingService {
     orderId?: string,
     db?: Prisma.TransactionClient,
   ) {
+    slotStart = canonicalSlotStart(slotStart);
     const config = await this.validateSlot(itemId, slotStart);
     const slotEnd = new Date(slotStart.getTime() + config.durationMinutes * 60_000);
 
@@ -124,6 +146,20 @@ export class BookingService {
       }
       throw error;
     }
+  }
+
+  /** [Q12] Checkout's fail-fast twin of the partial unique: a slot another
+   *  booking already holds is refused when the customer asks for it — the same
+   *  subtraction the picker makes — instead of a request the provider can
+   *  never confirm waiting up to a day for its auto-decline. Two open requests
+   *  for a FREE slot still both wait for the provider; acceptance decides. */
+  async assertSlotFree(itemId: string, requestedSlotStart: Date): Promise<void> {
+    const slotStart = canonicalSlotStart(requestedSlotStart);
+    const held = await this.prisma.booking.findFirst({
+      where: { itemId, slotStart, status: { not: 'CANCELLED' } },
+      select: { id: true },
+    });
+    if (held) throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
   }
 
   /** Cancelling frees the slot (the partial unique ignores CANCELLED rows). */
@@ -153,6 +189,7 @@ export class BookingService {
     newSlotStart: Date,
     actor: { customerId?: string; vendorId?: string },
   ) {
+    newSlotStart = canonicalSlotStart(newSlotStart);
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
       include: { item: { select: { id: true, vendorId: true, name: true } } },
@@ -171,6 +208,27 @@ export class BookingService {
     const slotEnd = new Date(newSlotStart.getTime() + config.durationMinutes * 60_000);
     try {
       const next = await this.prisma.$transaction(async (tx) => {
+        // [AX289 F6] The canonical lock order is Order → Booking: the
+        // cancellation, the acceptance and every order transition take the
+        // order row first, then its bookings. A reschedule that wrote its
+        // bookings first and the order last could deadlock against a
+        // cancellation of the same order, so it waits on the order row BEFORE
+        // it touches a booking; the guarded write below then sees whatever
+        // that cancellation committed.
+        if (booking.orderId) {
+          await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${booking.orderId} FOR UPDATE`;
+          // [L09 · M018] A finished appointment is not reopened by moving its
+          // booking: read the parent under its own lock and refuse.
+          const parent = await tx.order.findUniqueOrThrow({ where: { id: booking.orderId }, select: { status: true } });
+          if (FINISHED_APPOINTMENT_ORDER_STATUSES.has(parent.status)) {
+            throw new AppError(400, 'NOT_RESCHEDULABLE', 'This appointment is completed and cannot be moved');
+          }
+          // A cancellation (or any other exit) committed while we waited on
+          // the lock: the same answer the lost race has always had.
+          if (!LIVE_APPOINTMENT_ORDER_STATUSES.has(parent.status)) {
+            throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
+          }
+        }
         const created = await tx.booking.create({
           data: {
             itemId: booking.itemId,
@@ -189,6 +247,13 @@ export class BookingService {
         if (freed.count !== 1) {
           throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
         }
+        // [Q12] The ORDER carries the time every surface shows: the customer
+        // order screen and home card, the provider board and detail, admin.
+        // Moving only the booking left all of them on the old time while the
+        // provider calendar and the reminder moved: two answers to "when".
+        if (booking.orderId) {
+          await tx.order.update({ where: { id: booking.orderId }, data: { appointmentSlot: newSlotStart } });
+        }
         return created;
       });
       await this.nudgeForItem(booking.itemId);
@@ -196,6 +261,11 @@ export class BookingService {
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
+      }
+      // [AX289 F6] A deadlock or serialization failure is a race this move
+      // lost, not a server fault: the customer reloads and tries again.
+      if (isTransactionConflict(error)) {
+        throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
       }
       throw error;
     }

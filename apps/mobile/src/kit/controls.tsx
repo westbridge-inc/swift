@@ -1,12 +1,13 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Pressable, Switch, View, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, Switch, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { cardShadow } from './card';
 import { haptic } from '../lib/haptics';
 import { HeartGlyph, StarGlyph } from './glyphs';
 import { T } from './text';
+import { touchTarget } from './touch-target';
 
 function RoundIconButton({
   icon,
@@ -29,7 +30,7 @@ function RoundIconButton({
       accessibilityRole="button"
       accessibilityLabel={label ?? icon.replace(/-/g, ' ')}
       accessibilityState={{ disabled }}
-      style={{ opacity: disabled ? 0.4 : 1 }}
+      style={{ ...touchTarget(size), opacity: disabled ? 0.4 : 1 }}
     >
       {({ pressed }) => (
         <View
@@ -203,6 +204,12 @@ export function Chip({
   style?: ViewStyle;
 }) {
   const onTint = selected && !!tint;
+  // A chip's size is a FLOOR, never a ceiling: a fixed `height` cuts the label
+  // (and the border under it) once the phone's text size is turned up, and the
+  // horizontal row holding the chip clips with it (owner screenshot, search,
+  // 17 Oct). A caller's `height` is kept as the minimum, so normal text draws
+  // exactly as before and large text grows the chip instead of clipping it.
+  const { height: floor, ...rest } = (StyleSheet.flatten(style) ?? {}) as ViewStyle;
   return (
     <Pressable
       onPress={
@@ -225,14 +232,14 @@ export function Chip({
               alignItems: 'center',
               gap: space.sm,
               paddingHorizontal: space.xl,
-              height: 48,
+              minHeight: typeof floor === 'number' ? floor : 48,
               borderRadius: 9999,
               backgroundColor: onTint ? tint!.bg : selected ? color.brand[500] : color.surface.base,
               borderWidth: 1,
               borderColor: onTint ? tint!.ink : selected ? color.brand[500] : color.border.subtle,
               opacity: pressed ? 0.75 : 1,
             },
-            style,
+            rest,
           ]}
         >
           <T
@@ -278,9 +285,21 @@ export function TonePill({ label, tone = 'neutral', dark }: { label: string; ton
 }
 
 /** Brand-tracked switch (settings rows). */
-export function BrandSwitch({ value, onChange, disabled }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+export function BrandSwitch({
+  value,
+  onChange,
+  disabled,
+  label,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  /** The row's visible name, so a screen reader announces what it switches. */
+  label?: string;
+}) {
   return (
     <Switch
+      accessibilityLabel={label}
       value={value}
       onValueChange={onChange}
       disabled={disabled}

@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '@prisma/client';
-import { RIDER_COUNTERPARTY_SELECT, liveLocationVisible, redactLiveLocation, riderCounterpartySelect } from '../utils/counterparty';
+import {
+  RIDER_COUNTERPARTY_SELECT,
+  counterpartyContactVisible,
+  liveLocationVisible,
+  redactCounterpartyPhone,
+  redactCustomerContact,
+  redactLiveLocation,
+  riderCounterpartySelect,
+} from '../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // [F-027-07] What one party to an order may see about the other.
@@ -28,6 +36,8 @@ const riderFields = (Prisma.dmmf.datamodel.models.find((m) => m.name === 'Rider'
 /** Columns that must never reach a counterparty. Named individually so the
  *  reason for each is on the record. */
 const FORBIDDEN: Record<string, string> = {
+  averageRating: 'the courier’s LIVE rating mean — moves with each single rating (COORD 18 Oct option S: a star is shown from whole groups of 5 only)',
+  totalRatings: 'the courier’s LIVE rating count — moves with each single rating (option S)',
   nationalIdUrl: 'KYC document',
   driverLicenseUrl: 'KYC document',
   vehicleInsuranceUrl: 'KYC document',
@@ -136,9 +146,13 @@ describe('[F-027-07] the counterparty view of a mover', () => {
     // order, and keeping them in the default view is what made every
     // historical surface a tracking surface. Live position is opt-in and
     // status-gated now — see the F-028-11 block below.
-    for (const needed of ['vehicleMake', 'vehicleModel', 'vehicleColor', 'licensePlate', 'vehiclePhotoUrl', 'averageRating']) {
+    // TRANSFORMED (COORD 18 Oct, option S): 'averageRating' was listed as needed. It is the courier's LIVE mean,
+    // which moves with each single rating; no client read it, and the star a customer sees now comes from whole
+    // groups of 5 (rating-groups.ts). So it is pinned OUT, with totalRatings.
+    for (const needed of ['vehicleMake', 'vehicleModel', 'vehicleColor', 'licensePlate', 'vehiclePhotoUrl']) {
       expect(Object.keys(RIDER_COUNTERPARTY_SELECT), needed).toContain(needed);
     }
+    for (const live of ['averageRating', 'totalRatings']) expect(Object.keys(RIDER_COUNTERPARTY_SELECT), live).not.toContain(live);
   });
 
   it('withPhone gates the contact number — only surfaces where the parties actually meet', () => {
@@ -217,5 +231,58 @@ describe('[F-028-11] live mover position', () => {
   it('survives a party that is absent or null', () => {
     expect(() => redactLiveLocation({ status: 'DELIVERED' })).not.toThrow();
     expect(() => redactLiveLocation({ status: 'DELIVERED', rider: null })).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] The phone/contact gates ride the same liveness idea:
+// a terminal order stops handing out the customer's phone, the rider's phone
+// and the delivery destination. These are pure-function pins so the gates are
+// graded without a wire round-trip.
+// ---------------------------------------------------------------------------
+
+describe('[S1 response-shaping] vendor-side contact and mover-phone gates', () => {
+  it('counterpartyContactVisible is exactly the live set — including PENDING, never terminal', () => {
+    for (const live of ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'EN_ROUTE_DELIVERY']) {
+      expect(counterpartyContactVisible(live), live).toBe(true);
+    }
+    for (const done of ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED']) {
+      expect(counterpartyContactVisible(done), done).toBe(false);
+    }
+    expect(counterpartyContactVisible(null)).toBe(false);
+    expect(counterpartyContactVisible(undefined)).toBe(false);
+  });
+
+  it('redactCustomerContact nulls the customer phone, rider phone and destination only once terminal', () => {
+    const settled = redactCustomerContact({
+      status: 'DELIVERED',
+      customer: { id: 'c1', phone: '+5920000001' },
+      rider: { user: { phone: '+5920000002' } },
+      deliveryLat: 6.8, deliveryLng: -58.1, deliveryAddress: '1 Priv Street',
+    });
+    expect(settled).toMatchObject({
+      customer: { id: 'c1', phone: null },
+      rider: { user: { phone: null } },
+      deliveryLat: null, deliveryLng: null, deliveryAddress: null,
+    });
+
+    const live = redactCustomerContact({
+      status: 'PENDING',
+      customer: { id: 'c1', phone: '+5920000001' },
+      rider: { user: { phone: '+5920000002' } },
+      deliveryLat: 6.8, deliveryLng: -58.1, deliveryAddress: '1 Priv Street',
+    });
+    expect(live.customer.phone).toBe('+5920000001');
+    expect(live.rider.user.phone).toBe('+5920000002');
+    expect(live.deliveryAddress).toBe('1 Priv Street');
+  });
+
+  it('redactCounterpartyPhone nulls the mover phone once not trackable and leaves a live one', () => {
+    const settled = redactCounterpartyPhone({ status: 'COMPLETED', rider: { user: { phone: '+5920000002' } } });
+    expect(settled.rider.user.phone).toBeNull();
+    const inFlight = redactCounterpartyPhone({ status: 'EN_ROUTE_DELIVERY', rider: { user: { phone: '+5920000002' } } });
+    expect(inFlight.rider.user.phone).toBe('+5920000002');
+    expect(() => redactCounterpartyPhone({ status: 'COMPLETED' })).not.toThrow();
+    expect(() => redactCounterpartyPhone({ status: 'COMPLETED', rider: null })).not.toThrow();
   });
 });

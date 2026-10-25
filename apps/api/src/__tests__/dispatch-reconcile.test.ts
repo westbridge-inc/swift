@@ -6,6 +6,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { reconcileStuckDispatch } from '../modules/dispatch/dispatch.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // C1 (CRITICAL from the pre-launch audit): the dispatch offer key + the delayed
@@ -20,25 +21,36 @@ const createdOrderIds: string[] = [];
 let customerId: string;
 let vendorId: string;
 
-async function makeStuckOrder(status: OrderStatus, opts: { orderType?: string; fulfillment?: string; riderId?: string | null; driverId?: string | null } = {}) {
+async function makeStuckOrder(status: OrderStatus, opts: { orderType?: string; fulfillment?: string; riderId?: string | null; driverId?: string | null; paymentMethod?: string; paymentStatus?: string; customerId?: string } = {}) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `RC-${nanoid(10)}`,
       orderType: (opts.orderType as never) ?? 'FOOD_DELIVERY',
-      customerId,
+      customerId: opts.customerId ?? customerId,
       ...(opts.orderType === 'TAXI' ? {} : { vendorId }),
       status,
       fulfillment: (opts.fulfillment as never) ?? 'DELIVERY',
       pickupAddress: 'x', pickupLat: 6.8, pickupLng: -58.15,
       deliveryAddress: 'y', deliveryLat: 6.81, deliveryLng: -58.16,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
-      deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
+      deliveryFee: 500, totalAmount: 1500, paymentMethod: (opts.paymentMethod as never) ?? 'CASH',
+      ...(opts.paymentStatus ? { paymentStatus: opts.paymentStatus as never } : {}),
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       ...(opts.driverId ? { driverId: opts.driverId } : {}),
     },
   });
   createdOrderIds.push(order.id);
   return order;
+}
+
+// A customer holds at most one live taxi (orders_one_live_taxi_per_customer_key),
+// so every taxi fixture here has its own passenger.
+async function newPassenger(): Promise<string> {
+  const passenger = await app.prisma.user.create({
+    data: { phone: testPhone(), firstName: 'Rc', lastName: 'Passenger', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+  });
+  (app as any).__cleanupUsers.push(passenger.id);
+  return passenger.id;
 }
 
 const collector = () => {
@@ -57,15 +69,15 @@ beforeAll(async () => {
   await app.ready();
 
   const customer = await app.prisma.user.create({
-    data: { phone: `+59247${String(Math.floor(Math.random() * 9e6) + 1e6)}`, firstName: 'Rc', lastName: 'Cust', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: testPhone(), firstName: 'Rc', lastName: 'Cust', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   customerId = customer.id;
   const ownerUser = await app.prisma.user.create({
-    data: { phone: `+59247${String(Math.floor(Math.random() * 9e6) + 1e6)}`, firstName: 'Rc', lastName: 'Vend', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: testPhone(), firstName: 'Rc', lastName: 'Vend', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
   const vendor = await app.prisma.vendor.create({
-    data: { ownerId: owner.id, name: 'Rc Diner', slug: `rc-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: `+59247${nanoid(6)}`, addressLine1: '1 Rc', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE' },
+    data: { ownerId: owner.id, name: 'Rc Diner', slug: `rc-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(), addressLine1: '1 Rc', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE' },
   });
   vendorId = vendor.id;
   (createdOrderIds as string[]).push(); // noop to keep ref
@@ -95,14 +107,34 @@ describe('reconcileStuckDispatch', () => {
     expect(res.recovered).toContain(order.id);
     expect(enqueued).toContain(order.id);
     // a cooldown marker is set so it won't be re-driven immediately
-    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBe('1');
+    const token = await app.redis.get(`dispatch:reconciled:${order.id}`);
+    expect(token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await app.redis.ttl(`dispatch:reconciled:${order.id}`)).toBeGreaterThan(0);
+    expect(await app.redis.ttl(`dispatch:reconciled:${order.id}`)).toBeLessThanOrEqual(600);
+    const again = collector();
+    await reconcileStuckDispatch(app.prisma, app.redis, again.enqueue, NOW_STUCK);
+    expect(again.enqueued).not.toContain(order.id);
+    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBe(token);
   });
 
   it('re-enqueues a stranded TAXI (PENDING, no driver)', async () => {
-    const ride = await makeStuckOrder('PENDING', { orderType: 'TAXI' });
+    const ride = await makeStuckOrder('PENDING', { orderType: 'TAXI', customerId: await newPassenger() });
     const { enqueue, enqueued } = collector();
     await reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK);
     expect(enqueued).toContain(ride.id);
+  });
+
+  it('SKIPS a TAXI held because MMG money moved (legacy): it waits for a person and is never re-dispatched [E02 · DS274 A1]', async () => {
+    const claimed = await makeStuckOrder('PENDING', { orderType: 'TAXI', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', customerId: await newPassenger() });
+    const captured = await makeStuckOrder('PENDING', { orderType: 'TAXI', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', customerId: await newPassenger() });
+    const cash = await makeStuckOrder('PENDING', { orderType: 'TAXI', customerId: await newPassenger() });
+    const { enqueue, enqueued } = collector();
+    await reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK);
+    expect(enqueued).toContain(cash.id); // the sweep ran
+    expect(enqueued).not.toContain(claimed.id);
+    expect(enqueued).not.toContain(captured.id);
+    expect(await app.redis.get(`dispatch:reconciled:${claimed.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:reconciled:${captured.id}`)).toBeNull();
   });
 
   it('SKIPS an order that still has a live offer key (mid-cascade)', async () => {

@@ -15,7 +15,9 @@ export type LinkDestination =
   | { kind: 'store'; slug: string; code: string | null }
   | { kind: 'short'; code: string };
 
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// A store address as the server mints it: the name plus a nanoid code
+// (capitals, digits, `-`, `_`). The same rule as the website's STORE_SLUG_RE.
+export const STORE_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const CODE_RE = /^[23456789bcdfghjkmnpqrstvwxyz]{10}$/i;
 
 // ---------------------------------------------------------------------------
@@ -33,7 +35,7 @@ export function defaultLinkPolicy(): LinkPolicy {
   if (!policy) {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__ === true;
     policy = policyFrom({
-      webUrl: process.env['EXPO_PUBLIC_WEB_URL'] ?? (isDev ? 'http://localhost:3001' : 'https://swift.gy'),
+      webUrl: process.env['EXPO_PUBLIC_WEB_URL'] ?? (isDev ? 'http://localhost:3001' : 'https://swiftgy.com'),
       previewHosts: process.env['EXPO_PUBLIC_LINK_PREVIEW_HOSTS'] ?? null,
       scheme: 'swift',
       isDev,
@@ -94,7 +96,7 @@ export function destinationForUrl(url: string, linkPolicy: LinkPolicy = defaultL
     return null;
   }
   const [head, tail] = parts as [string, string];
-  if (head === 'store' && SLUG_RE.test(tail)) {
+  if (head === 'store' && STORE_SLUG_RE.test(tail)) {
     const c = query.get('c');
     report({ kind: 'accepted', origin, host });
     return { kind: 'store', slug: tail, code: c && CODE_RE.test(c) ? c.toUpperCase() : null };

@@ -22,6 +22,7 @@ import { CartScreen } from '../modules/cart/screens/CartScreen';
 import { OrdersHistoryScreen } from '../modules/orders/screens/OrdersHistoryScreen';
 import { MarketScreen } from '../modules/shop/screens/MarketScreen';
 import { useMarketDepth } from '../hooks/customer';
+import { marketTabVisible } from '../lib/homeReliability';
 import { DeliveryScreen } from '../modules/orders/screens/DeliveryScreen';
 import { FeedbackScreen } from '../modules/orders/screens/FeedbackScreen';
 import { ChatListScreen } from '../modules/chat/screens/ChatListScreen';
@@ -77,10 +78,16 @@ const TAB_ICON: Record<string, TabGlyphName> = {
 
 function HomeTabs() {
   const depth = useMarketDepth();
-  const marketVisible = depth.data?.visible === true;
+  const marketVisible = marketTabVisible(depth.data);
   return (
     <Tab.Navigator
+      detachInactiveScreens
       screenOptions={({ route }) => ({
+        // First visit is lazy; visited routes retain their state and queries.
+        // Freeze offscreen rendering without eagerly mounting every tab.
+        lazy: true,
+        freezeOnBlur: true,
+        animation: 'none',
         headerShown: false,
         tabBarActiveTintColor: color.brand[500],
         tabBarInactiveTintColor: color.text.muted,
@@ -120,14 +127,14 @@ function HomeTabs() {
         ),
       })}
     >
-      <Tab.Screen name="Home" component={HomeScreen} />
-      {/* [MKT G7 / §5.4] "An empty marketplace is worse than no marketplace."
-          The tab used to mount unconditionally while market.routes.ts carried a
-          comment claiming it "stays hidden below ~150 items" — the comment was
-          true of the design and false of the code, and the tab shipped with one
-          store in it. The SERVER decides now; hidden while unknown. */}
+      {/* Home has a live hold countdown; Cart has quote/recovery effects.
+          Keep their lifecycle renders active. Neither is unmounted on blur. */}
+      <Tab.Screen name="Home" component={HomeScreen} options={{ freezeOnBlur: false }} />
+      {/* Server depth must positively confirm Market before its route mounts.
+          React Query retains a known-visible verdict during refetch errors,
+          and the last complete verdict seeds a cold start from device memory. */}
       {marketVisible ? <Tab.Screen name="Market" component={MarketScreen} /> : null}
-      <Tab.Screen name="Cart" component={CartScreen} />
+      <Tab.Screen name="Cart" component={CartScreen} options={{ freezeOnBlur: false }} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   );

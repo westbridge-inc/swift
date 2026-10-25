@@ -39,3 +39,20 @@ describe('OSRM fallback metric [SWIFT-UG-ETA-01]', () => {
     expect(await fallbackCount('route')).toBe(before + 1);
   });
 });
+
+describe('OSRM fallback metric — [TAXI multi-stop] routeLegs', () => {
+  const provider = new OsrmMapsProvider('http://127.0.0.1:0');
+
+  beforeEach(() => {
+    osrmOutcomeCounter.reset();
+  });
+
+  it('a routeLegs fallback still returns every leg, marked degraded, AND counts the degrade', async () => {
+    const before = await fallbackCount('route');
+    const route = await provider.routeLegs([{ lat: 6.8, lng: -58.15 }, { lat: 6.81, lng: -58.16 }, { lat: 6.82, lng: -58.15 }]);
+    expect(route.legs).toHaveLength(2);
+    expect(route.km).toBeGreaterThan(0);
+    expect(route.degraded).toBe(true);
+    expect(await fallbackCount('route')).toBe(before + 1);
+  });
+});

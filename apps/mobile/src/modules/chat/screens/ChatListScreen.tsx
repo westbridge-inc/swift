@@ -1,15 +1,16 @@
 /** @jsxImportSource react */
 import React, { useMemo } from 'react';
-import { FlatList, View } from 'react-native';
+import { FlatList, RefreshControl, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useOrders } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
-import { Card, EmptyState, ErrorState, LoadingBlock, Screen, T } from '../../../kit';
+import { Card, EmptyState, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
 
-const ACTIVE = new Set(['RIDER_ASSIGNED', 'PICKED_UP', 'READY']);
+const ACTIVE = new Set(['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING']);
 const RECENT = new Set(['DELIVERED', 'COMPLETED']);
 
 // Kit Chat List (40). Swift chat is order-scoped (customer ↔ rider), so the
@@ -19,6 +20,8 @@ export function ChatListScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const orders = useOrders<any>();
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => orders.refetch());
 
   const rows = useMemo(() => {
     const all: any[] = Array.isArray(orders.data) ? orders.data : (orders.data?.orders ?? []);
@@ -31,9 +34,8 @@ export function ChatListScreen() {
   if (!isAuthenticated) {
     return (
       <Screen>
-        <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-          <T variant="heading">Chat</T>
-        </View>
+        {/* [UI-SWEEP U11] A pushed screen: the kit header's back chip, not a title alone. */}
+        <Header title="Chat" />
         <EmptyState
           icon="message-circle"
           title="Sign in to chat"
@@ -47,9 +49,7 @@ export function ChatListScreen() {
 
   return (
     <Screen>
-      <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-        <T variant="heading">Chat</T>
-      </View>
+      <Header title="Chat" />
       {orders.isLoading ? (
         <LoadingBlock />
       ) : orders.isError ? (
@@ -64,6 +64,7 @@ export function ChatListScreen() {
         <FlatList
           data={rows}
           keyExtractor={(o) => o.id}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
           renderItem={({ item: o }) => {
             const rider = o.rider?.user ?? o.rider;

@@ -4,6 +4,8 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet'
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import type { LiveOps } from '@/lib/api';
+import { label } from '@/lib/labels';
+import { MAP_TILES_NOT_CONFIGURED, opsMapTiles } from '@/lib/map-tiles';
 
 // Georgetown — the launch market's center of gravity.
 const CENTER: [number, number] = [6.8013, -58.1551];
@@ -29,13 +31,19 @@ export function OpsMap({ data }: { data?: LiveOps }) {
   const movers = data?.movers ?? [];
   const orders = (data?.activeOrders ?? []).filter((o) => o.pickupLat != null && o.deliveryLat != null);
 
+  // [ADMIN-TILES] The tiles come from ONE place (lib/map-tiles.ts). None in this build: the
+  // pins still draw on a plain ground, and the map says why there is no street map.
+  const tiles = opsMapTiles();
+
   return (
-    <MapContainer center={CENTER} zoom={13} style={{ height: '100%', width: '100%', background: 'var(--ink)' }} zoomControl={false}>
-      {/* CARTO dark basemap keeps the console's night theme. */}
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-      />
+    <MapContainer center={CENTER} zoom={13} style={{ height: '100%', width: '100%', background: '#EFEAE6' }} zoomControl={false}>
+      {tiles ? (
+        <TileLayer url={tiles.url} attribution={tiles.attribution} />
+      ) : (
+        <div role="note" className="leaflet-top leaflet-right" style={{ pointerEvents: 'auto', margin: 12, maxWidth: 320, padding: '8px 12px', background: '#fff', border: '1px solid #EAE2E1', borderRadius: 8, color: '#6B5F5F', fontSize: 12, lineHeight: 1.4 }}>
+          {MAP_TILES_NOT_CONFIGURED}
+        </div>
+      )}
       {orders.map((o) => (
         <Polyline
           key={o.id}
@@ -50,7 +58,7 @@ export function OpsMap({ data }: { data?: LiveOps }) {
         o.pickupLat != null ? (
           <Marker key={`p-${o.id}`} position={[o.pickupLat, o.pickupLng as number]} icon={ICONS.pickup}>
             <Popup>
-              <span style={{ fontFamily: 'monospace' }}>#{o.orderNumber}</span> · {o.status}
+              <span style={{ fontFamily: 'monospace' }}>#{o.orderNumber}</span> · {label('OrderStatus', o.status)}
               <br />
               {o.vendorName ?? ''}
               <br />
@@ -66,8 +74,8 @@ export function OpsMap({ data }: { data?: LiveOps }) {
           icon={ICONS[`${m.kind}${m.busy ? 'Busy' : 'Free'}` as keyof typeof ICONS]}
         >
           <Popup>
-            {m.name || (m.kind === 'rider' ? 'Rider' : 'Driver')} · {m.kind}
-            {m.rideClass ? ` (${m.rideClass})` : ''}
+            {m.name ? `${m.name} · ` : ''}{m.kind === 'rider' ? 'Rider' : 'Driver'}
+            {m.rideClass ? ` (${label('RideClass', m.rideClass)})` : ''}
             <br />
             {m.busy ? 'on a job' : 'available'}
             <br />

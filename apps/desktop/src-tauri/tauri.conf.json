@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http://localhost:3000 https://api.swift.gy data:; frame-src 'self' http://localhost:3000 https://api.swift.gy; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 https://api.swift.gy wss://api.swift.gy"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http://localhost:3000 https://api.swiftgy.com data:; frame-src 'self' http://localhost:3000 https://api.swiftgy.com; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 https://api.swiftgy.com wss://api.swiftgy.com"
     }
   },
   "bundle": {

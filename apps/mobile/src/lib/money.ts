@@ -15,11 +15,34 @@
  *  amount is a dash (not a confident "$0"), and ad campaigns can settle in a
  *  currency that is not the local one. `money-single-source.test.ts` now fails
  *  the build if a second formatter appears anywhere.
+ *
+ *  [AUD-1 row 53] The dash is now EVERY formatter's answer to a missing
+ *  amount, money() included. It used to print "$0" for null/undefined (and
+ *  "$NaN" for garbage): a price, fare or total that had not arrived read as a
+ *  confident "free". A real 0 is still "$0".
  */
 
-const whole = (n: number | null | undefined) => Math.round(Number(n ?? 0)).toLocaleString();
+/** What a screen shows when there is no amount to show. */
+export const NO_AMOUNT = '—';
 
-export const money = (n: number | null | undefined) => `$${whole(n)}`;
+/** The amount, or null when there is none: null/undefined, a blank string, or
+ *  anything that is not a finite number. Responses are loosely typed, so a
+ *  numeric string (a serialized decimal such as "1250.00") still counts. */
+function amountOf(n: unknown): number | null {
+  if (typeof n === 'number') return Number.isFinite(n) ? n : null;
+  if (typeof n === 'string' && n.trim() !== '') {
+    const v = Number(n);
+    return Number.isFinite(v) ? v : null;
+  }
+  return null;
+}
+
+const whole = (n: number) => Math.round(n).toLocaleString();
+
+export const money = (n: number | null | undefined) => {
+  const amount = amountOf(n);
+  return amount == null ? NO_AMOUNT : `$${whole(amount)}`;
+};
 
 /**
  * The same amount, when the currency is not assumed. GYD keeps the bare "$"
@@ -27,13 +50,33 @@ export const money = (n: number | null | undefined) => `$${whole(n)}`;
  * "$" beside a foreign total is the one place this convention becomes a lie.
  */
 export function moneyIn(n: number | null | undefined, currency: string = 'GYD'): string {
-  return currency === 'GYD' ? money(n) : `${currency} ${whole(n)}`;
+  if (currency === 'GYD') return money(n);
+  const amount = amountOf(n);
+  return amount == null ? NO_AMOUNT : `${currency} ${whole(amount)}`;
 }
 
 /**
  * For a figure that may genuinely not exist yet — a campaign with no spend, a
  * total still loading. "$0" asserts a fact; "—" admits there isn't one.
+ * [AUD-1 row 53] Every formatter now answers that way; this name stays for the
+ * callers that say so on purpose.
  */
 export function moneyOrDash(n: number | null | undefined, currency: string = 'GYD'): string {
-  return n == null ? '—' : moneyIn(n, currency);
+  return moneyIn(n, currency);
+}
+
+/**
+ * Preserve a server-authoritative amount exactly to its stored two-decimal
+ * precision. Most Swift money is whole GYD and should continue to use
+ * `money()`; attestations are different because the number shown to a person
+ * must be the number they submit. Callers must validate the value first.
+ */
+export function moneyExact(n: number, currency: string = 'GYD'): string {
+  if (!Number.isFinite(n)) throw new TypeError('moneyExact requires a finite amount');
+  const fractionDigits = Number.isInteger(n) ? 0 : 2;
+  const formatted = n.toLocaleString(undefined, {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: 2,
+  });
+  return currency === 'GYD' ? `$${formatted}` : `${currency} ${formatted}`;
 }

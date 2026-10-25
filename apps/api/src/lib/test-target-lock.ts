@@ -39,11 +39,21 @@ export const TEST_TARGET_DEFAULTS = Object.freeze({
   REDIS_URL: 'redis://localhost:6382/15',
 });
 
+/** [AUD-G7-040] The pin every side vitest config (vitest.*.config.ts) carries,
+ *  like the main config's: a bare run of any of them targets the disposable
+ *  defaults, never whatever the development .env would hand Prisma. */
+export function sideConfigTestEnv(env: Record<string, string | undefined> = process.env): { DATABASE_URL: string; REDIS_URL: string } {
+  return {
+    DATABASE_URL: env['DATABASE_URL'] ?? TEST_TARGET_DEFAULTS.DATABASE_URL,
+    REDIS_URL: env['REDIS_URL'] ?? TEST_TARGET_DEFAULTS.REDIS_URL,
+  };
+}
+
 export const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 /** A disposable test database, by name. Override with TEST_TARGET_DB_ALLOWLIST (comma-separated exact names). */
 export const TEST_DB_PATTERN = /^swift_test[a-z0-9_]*$/;
 /** Hosts that can only be someone's real data. */
-const PRODUCTION_LOOKING = /prod|live|swift\.gy|swiftgy\.com|rds\.amazonaws|render\.com|railway|supabase|neon\.tech|fly\.dev/i;
+const PRODUCTION_LOOKING = /prod|live|swift\.gy|swiftgy\.com|rds\.amazonaws|render\.com|railway|supabase|neon\.tech|fly\.dev/i; // [OLD-DOMAIN] the pre-2026-09-24 name stays a DENY pattern: Swift never owned it, so a test may never target a host there
 
 export interface TestTarget {
   pgHost: string;
@@ -67,6 +77,45 @@ function parseRedisDb(u: URL): number | null {
   return 0; // ioredis default when nothing is said
 }
 
+/** One postgres URL against the disposable-target rule: loopback (or
+ *  TEST_TARGET_HOST_ALLOWLIST) and a swift_test… database (or
+ *  TEST_TARGET_DB_ALLOWLIST). No socket is opened. */
+export function postgresTargetProblems(
+  label: 'DATABASE_URL' | 'SYSTEM_DATABASE_URL',
+  raw: string,
+  env: Record<string, string | undefined>,
+): { problems: string[]; url: URL | null } {
+  const problems: string[] = [];
+  const allowedHosts = new Set([...LOOPBACK_HOSTS, ...list(env['TEST_TARGET_HOST_ALLOWLIST'])]);
+  const allowedDbs = list(env['TEST_TARGET_DB_ALLOWLIST']);
+  let url: URL | null = null;
+  try { url = new URL(raw); } catch { problems.push(`${label} is not a URL`); return { problems, url: null }; }
+  if (!/^postgres(ql)?:$/.test(url.protocol)) problems.push(`${label} must be a postgres URL (got ${url.protocol})`);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (PRODUCTION_LOOKING.test(host)) problems.push(`${label} host "${host}" looks like a real deployment — refused by name`);
+  else if (!allowedHosts.has(host)) problems.push(`${label} host "${host}" is not loopback and not in TEST_TARGET_HOST_ALLOWLIST`);
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  if (!database) problems.push(`${label} names no database`);
+  else if (!(TEST_DB_PATTERN.test(database) || allowedDbs.includes(database))) problems.push(`${label} database "${database}" is not a disposable test database (swift_test…, or TEST_TARGET_DB_ALLOWLIST)`);
+  return { problems, url };
+}
+
+/** [AUD-G7-040] Inside a vitest worker (vitest sets VITEST in every worker),
+ *  a Prisma client is only ever built on a disposable test database — whatever
+ *  config, harness or per-file fallback brought the URL. An unset URL is
+ *  refused too: Prisma would then read DATABASE_URL through its own dotenv
+ *  (the development .env). Outside vitest — every deployed process, every
+ *  script — this returns at once and changes nothing. */
+export function refuseNonTestDatabaseInVitest(
+  label: 'DATABASE_URL' | 'SYSTEM_DATABASE_URL',
+  url: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  if (env['VITEST'] !== 'true') return;
+  const problems = url ? postgresTargetProblems(label, url, env).problems : [`${label} is unset — Prisma would fall through to its own .env`];
+  if (problems.length) throw new TestTargetLockError('TARGET_REFUSED', `a test may only build a Prisma client on a disposable test database: ${problems.join('; ')}`);
+}
+
 /** The structural proof. No socket is opened here, ever. */
 export function assessTestTarget(env: Record<string, string | undefined>): TargetAssessment {
   const problems: string[] = [];
@@ -75,19 +124,11 @@ export function assessTestTarget(env: Record<string, string | undefined>): Targe
   try { mode = runtimeMode(env); } catch { mode = null; }
   if (mode !== 'test') problems.push(`NODE_ENV must be "test" (got ${env['NODE_ENV'] ?? 'unset'}) — the destructive guard and the pinned flags exist only there`);
   const allowedHosts = new Set([...LOOPBACK_HOSTS, ...list(env['TEST_TARGET_HOST_ALLOWLIST'])]);
-  const allowedDbs = list(env['TEST_TARGET_DB_ALLOWLIST']);
 
   const checkPostgres = (label: 'DATABASE_URL' | 'SYSTEM_DATABASE_URL', raw: string): URL | null => {
-    let url: URL | null = null;
-    try { url = new URL(raw); } catch { problems.push(`${label} is not a URL`); return null; }
-    if (!/^postgres(ql)?:$/.test(url.protocol)) problems.push(`${label} must be a postgres URL (got ${url.protocol})`);
-    const host = url.hostname.replace(/^\[|\]$/g, '');
-    if (PRODUCTION_LOOKING.test(host)) problems.push(`${label} host "${host}" looks like a real deployment — refused by name`);
-    else if (!allowedHosts.has(host)) problems.push(`${label} host "${host}" is not loopback and not in TEST_TARGET_HOST_ALLOWLIST`);
-    const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
-    if (!database) problems.push(`${label} names no database`);
-    else if (!(TEST_DB_PATTERN.test(database) || allowedDbs.includes(database))) problems.push(`${label} database "${database}" is not a disposable test database (swift_test…, or TEST_TARGET_DB_ALLOWLIST)`);
-    return url;
+    const checked = postgresTargetProblems(label, raw, env);
+    problems.push(...checked.problems);
+    return checked.url;
   };
 
   let pg: URL | null = null;
@@ -133,7 +174,7 @@ export function assessTestTarget(env: Record<string, string | undefined>): Targe
 export type SuiteCapability = 'unscoped-mutation' | 'ddl';
 
 export class TestTargetLockError extends Error {
-  constructor(readonly code: 'UNSCOPED_MUTATION_REFUSED' | 'DDL_REFUSED', message: string) {
+  constructor(readonly code: 'UNSCOPED_MUTATION_REFUSED' | 'DDL_REFUSED' | 'TARGET_REFUSED', message: string) {
     super(`[${code}] ${message}`);
     this.name = 'TestTargetLockError';
   }

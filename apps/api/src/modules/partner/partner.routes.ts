@@ -1,6 +1,9 @@
+import { OWN_NAME_VENDOR_TYPES, storeNameIsOwnName } from '../vendor/own-name';
+import { assertHirePlate } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
-import { z } from 'zod';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
+import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
 import { NotificationService } from '../notification/notification.service';
@@ -8,6 +11,13 @@ import {
   completeUserRoleAuthorityTransition,
   transitionUserRoleAuthorityInTransaction,
 } from '../mover-authority';
+import { requireStepUp } from '../auth/step-up';
+import { consentSurfaceOf } from '../legal/consent-surface';
+import { VerificationService } from '../verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { recordBackgroundLocationConsent } from './location-consent';
+import { assertWeeklyFeeAck, weeklyFeeAckRequired } from './weekly-fee-ack';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -26,6 +36,10 @@ const businessSchema = z.object({
   region: z.string().trim().max(80).optional(),
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
+  // [ROLE-DOCS · owner 21 Oct 2026] The sign-up's first question: does the store trade under the owner's OWN name
+  // (no business registration needed: Business Names (Registration) Act s.3) or a business name? Absent = a business
+  // name, as every older client. OWN_NAME is only checked here; the owner signs the declaration after the store exists.
+  nameBasis: z.enum(['OWN_NAME', 'REGISTERED']).optional(),
 });
 
 const becomeSchema = z.object({
@@ -39,12 +53,44 @@ const becomeSchema = z.object({
   // No released build predates the control, so the API now refuses without it (below); the
   // consent row is still written exactly as ticked, never fabricated.
   acceptAgreement: z.boolean().optional(),
+  // [Row 628] "I understand the weekly fee": the words' version and the fee the client showed. Required from
+  // the website and from any client that sends it; phone builds 9-12 send none (partner/weekly-fee-ack.ts).
+  weeklyFeeAck: z.object({
+    version: z.string().trim().min(1).max(20),
+    amount: z.number().int().positive(),
+    currencyCode: z.string().trim().length(3),
+  }).strict().optional(),
 });
 export const AGREEMENT_REQUIRED = 'AGREEMENT_REQUIRED';
 
+/** [VEHICLES] PUT /vehicle — the vehicle a mover works with, changed. */
+const changeVehicleSchema = z.object({
+  vehicleType: z.nativeEnum(VehicleType),
+  vehicle: vehicleSchema.optional(),
+});
+
 export async function partnerRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const service = new PartnerService(app.prisma, new NotificationService(app.prisma, app.io));
+  const notifications = new NotificationService(app.prisma, app.io);
+  const service = new PartnerService(app.prisma, notifications);
+  const verification = new VerificationService(app.prisma, notifications, getKycProvider());
+
+  /** [R18] POST /consent/background-location { granted } — the mover's answer to
+   *  the background-location disclosure, in the consent ledger (location-consent).
+   *  The phone sends yes only when the disclosure was accepted AND the system
+   *  sheet granted access. Movers only: nobody else is asked for it. */
+  app.post('/consent/background-location', auth, async (request) => {
+    const userId = request.user.userId;
+    const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { roles: true } });
+    if (!user?.roles.some((r) => r === 'RIDER' || r === 'DRIVER' || r === 'MOVER')) {
+      throw new AppError(403, 'NOT_A_MOVER', 'Background location is asked of riders and drivers only.');
+    }
+    const { granted } = z.object({ granted: z.boolean() }).strict().parse(request.body);
+    const outcome = await recordBackgroundLocationConsent(app.prisma, {
+      userId, granted, surface: consentSurfaceOf(request), ip: request.ip,
+    });
+    return { success: true, data: outcome };
+  });
 
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
@@ -52,6 +98,22 @@ export async function partnerRoutes(app: FastifyInstance) {
     // [TA-S1-008] Acceptance is a precondition of the authority, not a courtesy of the client.
     if (body.acceptAgreement !== true) {
       throw new AppError(400, AGREEMENT_REQUIRED, `Accept the ${body.role === 'VENDOR' ? 'vendor' : 'driver'} agreement to continue — Swift records that you agreed, and cannot record what you did not.`);
+    }
+    // [Row 628] The weekly fee was shown and ticked — before any provisioning, role change or row.
+    assertWeeklyFeeAck(weeklyFeeAckRequired(request, body), body.weeklyFeeAck);
+    if (body.business?.name) {
+      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only.
+      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true, firstName: true, lastName: true } });
+      assertNameNotReserved(body.business.name, me?.phone);
+      // [ROLE-DOCS] An own-name store is refused before it exists when its name clearly is not the owner's own name.
+      if (body.business.nameBasis === 'OWN_NAME') {
+        if (!(OWN_NAME_VENDOR_TYPES as readonly string[]).includes(body.business.vendorType)) {
+          throw new AppError(400, 'OWN_NAME_NOT_APPLICABLE', 'A service business is not asked for a business registration, so it needs no own-name declaration.');
+        }
+        if (!me || !storeNameIsOwnName(body.business.name, me.firstName, me.lastName)) {
+          throw new AppError(400, 'OWN_NAME_MISMATCH', `“${body.business.name}” is not just your surname with your first names or initials, so the law asks you to register it as a business name.`);
+        }
+      }
     }
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,
@@ -61,8 +123,9 @@ export async function partnerRoutes(app: FastifyInstance) {
         request.user.userId,
         targetRole,
       ),
-      // [DCR-1] Ledger context for the role-agreement consent row.
-      { accepted: body.acceptAgreement === true, ip: request.ip },
+      // [DCR-1] Ledger context for the role-agreement consent row: the surface is the
+      // client's own (the web app's clickwrap is the web, not the app).
+      { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request), weeklyFeeAck: body.weeklyFeeAck },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
     reply.code(result.created ? 201 : 200);
@@ -78,6 +141,57 @@ export async function partnerRoutes(app: FastifyInstance) {
         ...provisioned,
         activeRole: authorityCleanup.activeRole,
         lastMoverRole: authorityCleanup.lastMoverRole,
+      },
+    };
+  });
+
+  /**
+   * PUT /vehicle — [VEHICLES] change the vehicle a mover works with (PartnerService
+   * changeVehicleWithAuthority). A mover whose documents are verified steps up first: the
+   * change takes them offline and retires the papers about the old vehicle, so it is
+   * their livelihood, and a borrowed phone must not be able to do it. A mover still in
+   * onboarding changes freely.
+   */
+  app.put('/vehicle', auth, async (request) => {
+    // [REVIEW-PARTNER] Answered before the step-up below; the service (changeVehicleWithAuthority) is the authority.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
+    const body = changeVehicleSchema.parse(request.body);
+    const userId = request.user.userId;
+    const [rider, driver] = await Promise.all([
+      app.prisma.rider.findUnique({ where: { userId }, select: { documentsVerified: true } }),
+      app.prisma.driver.findUnique({ where: { userId }, select: { documentsVerified: true } }),
+    ]);
+    const verified = !!rider?.documentsVerified || !!driver?.documentsVerified
+      || ((!!rider || !!driver) && await verification.isRoleVerified(userId, 'MOVER'));
+    // [Owner ruling 11 Oct 2026] A taxi plate that can never be approved is refused in plain words
+    // BEFORE the step-up: there is nothing to confirm for it. The service checks it again.
+    if (body.vehicle) assertHirePlate(body.vehicleType, body.vehicle.licensePlate);
+    if (verified) await requireStepUp(app, request);
+    const { result, authorityCleanup } = await service.changeVehicleWithAuthority(
+      userId,
+      body,
+      (tx, targetRole) => transitionUserRoleAuthorityInTransaction(tx, userId, targetRole),
+    );
+    if (authorityCleanup) {
+      // Every profile this change took offline gives up its held offer and closes its online session.
+      await completeUserRoleAuthorityTransition(app, {
+        ...authorityCleanup,
+        riderId: authorityCleanup.riderId ?? result.retiredRiderId,
+        driverId: authorityCleanup.driverId ?? result.retiredDriverId,
+      });
+    }
+    return {
+      success: true,
+      data: {
+        kind: result.kind,
+        id: result.id,
+        vehicleType: result.vehicleType,
+        previousVehicleType: result.previousVehicleType,
+        changed: result.changed,
+        retiredDocuments: result.retiredDocuments,
+        withdrawnDocuments: result.withdrawnDocuments,
+        activeRole: authorityCleanup?.activeRole ?? null,
+        lastMoverRole: authorityCleanup?.lastMoverRole ?? null,
       },
     };
   });

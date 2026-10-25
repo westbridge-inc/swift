@@ -10,14 +10,16 @@
  * The first fix (#990) gave the key the lifetime of an attempt. This one gives
  * the attempt the shape of an INTENT, so the key follows what the person means:
  *
- *   principal   the signed-in account and its login generation — a persisted
- *               intent from another principal (a shared device) is never reused
+ *   principal   the signed-in account and its login generation — another
+ *               account cannot use it; a new login may recover its own sent key
  *   bodyHash    the canonical hash of what will be sent — payment method,
  *               fulfillment, tip, promo, schedule, appointments
- *   state       open  = minted, or answered with a definitive failure: the
- *                       same key may be retried, a changed body supersedes it
+ *   state       open  = minted, or reopened by a current observation of
+ *                       "none" with no active transport: the same key may be
+ *                       retried, a changed body supersedes it
  *               sent  = on the wire with the outcome UNKNOWN (a timeout, a lost
- *                       response, an app killed mid-request): the same body
+ *                       response, an app killed mid-request, any 5xx or the
+ *                       server's CHECKOUT_OUTCOME_UNKNOWN): the same body
  *                       replays it; a DIFFERENT body must first ask the server
  *                       what became of it (the receipt probe) — never place a
  *                       second order over an unresolved first one
@@ -55,6 +57,16 @@ export interface CheckoutIntent {
   state: CheckoutIntentState;
   createdAt: number;
   sentAt?: number;
+  /** Persisted send/ownership revision; negative observations compare this. */
+  revision: number;
+}
+
+export interface CheckoutObservation {
+  readonly key: string;
+  readonly principal: CheckoutPrincipal;
+  readonly revision: number;
+  /** Captured before probing; live observations never gain negative authority later. */
+  readonly quiescent: boolean;
 }
 
 export type BeginOutcome =
@@ -101,7 +113,7 @@ function decodeIntent(raw: string | null): CheckoutIntent | null {
     if (typeof v.bodyHash !== 'string' || !v.bodyHash) return null;
     if (v.state !== 'open' && v.state !== 'sent') return null;
     if (!Number.isFinite(v.createdAt)) return null;
-    return { key: v.key, principal: { userId: v.principal.userId, generation: v.principal.generation }, bodyHash: v.bodyHash, state: v.state, createdAt: v.createdAt as number, ...(Number.isFinite(v.sentAt) ? { sentAt: v.sentAt as number } : {}) };
+    return { key: v.key, principal: { userId: v.principal.userId, generation: v.principal.generation }, bodyHash: v.bodyHash, state: v.state, createdAt: v.createdAt as number, revision: Number.isSafeInteger(v.revision) && (v.revision as number) >= 0 ? v.revision as number : 0, ...(Number.isFinite(v.sentAt) ? { sentAt: v.sentAt as number } : {}) };
   } catch {
     return null;
   }
@@ -113,20 +125,52 @@ export function createCheckoutAttempt(
   now: () => number = Date.now,
   legacy: Pick<CheckoutKeyStore, 'get' | 'clear'> | null = null,
 ) {
-  let memory: CheckoutIntent | null = null;
+  // One minimal record per account. Switching accounts never evicts an
+  // unresolved key; no request payload, contact data or credentials are stored.
+  let memory: CheckoutIntent[] | null = null;
+  let activeUserId: string | null = null;
   let legacyRead = false;
-
-  const persist = (intent: CheckoutIntent | null) => {
-    memory = intent;
-    try {
-      if (intent) store.set(JSON.stringify(intent));
-      else store.clear();
-    } catch {
-      // Memory holds it; the double tap is still one attempt.
-    }
+  // Shared by every mounted consumer. SENT/revision persist before transport.
+  const activeSends = new Set<CheckoutObservation>();
+  const advance = (revision: number) => {
+    if (revision >= Number.MAX_SAFE_INTEGER) throw new Error('Checkout revision exhausted');
+    return revision + 1;
   };
-
-  /** The #990 bare key, adopted ONCE as an unresolved intent of unknown body for whoever asks first. */
+  const samePrincipal = (a: CheckoutPrincipal, b: CheckoutPrincipal) => a.userId === b.userId && a.generation === b.generation;
+  const read = (): CheckoutIntent[] => {
+    if (memory) return memory;
+    memory = [];
+    try {
+      const raw = store.get();
+      const old = decodeIntent(raw);
+      if (old) { memory = [old]; activeUserId = old.principal.userId; }
+      else if (raw) {
+        const saved = JSON.parse(raw) as { version?: number; intents?: unknown[]; activeUserId?: string };
+        if ((saved.version === 3 || saved.version === 4) && Array.isArray(saved.intents)) {
+          memory = saved.intents.map((v) => decodeIntent(JSON.stringify(v))).filter((v): v is CheckoutIntent => !!v);
+          activeUserId = saved.activeUserId ?? null;
+        }
+      }
+    } catch { /* Memory still protects retries when storage is unavailable. */ }
+    // Restart invalidates observations from the previous authority even when
+    // the login generation was persisted unchanged. Unknown sends stay SENT.
+    if (memory.length) {
+      memory = memory.map((i) => i.state === 'sent' ? { ...i, revision: advance(i.revision) } : i);
+      persist();
+    }
+    return memory;
+  };
+  const persist = () => {
+    try {
+      if (read().length) store.set(JSON.stringify({ version: 4, intents: memory, activeUserId }));
+      else store.clear();
+    } catch { /* The in-memory records remain intact. */ }
+  };
+  const put = (intent: CheckoutIntent) => {
+    memory = [...read().filter((i) => i.principal.userId !== intent.principal.userId), intent];
+    activeUserId = intent.principal.userId;
+    persist();
+  };
   const adoptLegacy = (principal: CheckoutPrincipal): CheckoutIntent | null => {
     if (legacyRead || !legacy) return null;
     legacyRead = true;
@@ -134,63 +178,151 @@ export function createCheckoutAttempt(
     try { raw = legacy.get(); } catch { raw = null; }
     try { legacy.clear(); } catch { /* best effort */ }
     if (!validKey(raw)) return null;
-    const intent: CheckoutIntent = { key: raw, principal, bodyHash: UNKNOWN_BODY_HASH, state: 'sent', createdAt: now(), sentAt: now() };
-    persist(intent);
+    const intent: CheckoutIntent = { key: raw, principal, bodyHash: UNKNOWN_BODY_HASH, state: 'sent', createdAt: now(), sentAt: now(), revision: 0 };
+    put(intent);
     return intent;
   };
-
-  const read = (): CheckoutIntent | null => {
-    if (memory) return memory;
-    try {
-      memory = decodeIntent(store.get());
-    } catch {
-      memory = null;
-    }
-    return memory;
+  const owned = (key: string, principal: CheckoutPrincipal) => read().find((i) => i.key === key && samePrincipal(i.principal, principal));
+  const currentFor = (principal: CheckoutPrincipal): CheckoutIntent | null => {
+    const intent = read().find((i) => i.principal.userId === principal.userId) ?? (read().length === 0 ? adoptLegacy(principal) : null);
+    return intent && samePrincipal(intent.principal, principal) ? intent : null;
   };
-
-  const samePrincipal = (a: CheckoutPrincipal, b: CheckoutPrincipal) => a.userId === b.userId && a.generation === b.generation;
-
+  // Called only by a freshly authorized operation/recovery. A returning account
+  // inherits its own unresolved key, but an old generation cannot complete it.
+  const resumeFor = (principal: CheckoutPrincipal): CheckoutIntent | null => {
+    const intent = read().find((i) => i.principal.userId === principal.userId) ?? (read().length === 0 ? adoptLegacy(principal) : null);
+    if (!intent) return null;
+    if (samePrincipal(intent.principal, principal)) return intent;
+    if (intent.state !== 'sent') return null;
+    const adopted = { ...intent, principal, revision: advance(intent.revision) };
+    put(adopted);
+    return adopted;
+  };
+  const hasActiveSend = (key: string, principal: CheckoutPrincipal) => [...activeSends].some((send) => send.key === key && send.principal.userId === principal.userId);
+  const observe = (key: string, principal: CheckoutPrincipal): CheckoutObservation | null => {
+    const intent = owned(key, principal);
+    return intent ? { key, principal: { ...principal }, revision: intent.revision, quiescent: !hasActiveSend(key, principal) } : null;
+  };
+  const unchanged = (observation: CheckoutObservation) => {
+    const intent = owned(observation.key, observation.principal);
+    return intent?.revision === observation.revision ? intent : null;
+  };
+  const negativeAuthority = (observation: CheckoutObservation) => {
+    const intent = unchanged(observation);
+    // Include old login generations: their wire request can still be live
+    // after recovery adopts this account's SENT key.
+    const active = hasActiveSend(observation.key, observation.principal);
+    return intent && observation.quiescent && !active ? intent : null;
+  };
+  const markSent = (key: string, principal: CheckoutPrincipal): CheckoutObservation | null => {
+    const intent = owned(key, principal);
+    if (!intent) return null;
+    put({ ...intent, state: 'sent', sentAt: now(), revision: advance(intent.revision) });
+    return observe(key, principal);
+  };
   return {
-    /** The intent this process holds, whoever it belongs to (the hook filters by principal). */
-    current(): CheckoutIntent | null {
-      return read();
+    observe,
+    markSent,
+    startSend(key: string, principal: CheckoutPrincipal): CheckoutObservation | null {
+      const send = markSent(key, principal);
+      if (send) activeSends.add(send);
+      return send;
     },
-    /** The open intent for THIS principal, or null. */
-    currentFor(principal: CheckoutPrincipal): CheckoutIntent | null {
-      const intent = read() ?? adoptLegacy(principal);
-      return intent && samePrincipal(intent.principal, principal) ? intent : null;
+    finishSend(send: CheckoutObservation): void { activeSends.delete(send); },
+    /** Synchronous CAS: a negative answer cannot outlive a send or adoption. */
+    markOpen(observation: CheckoutObservation): boolean {
+      const intent = negativeAuthority(observation);
+      if (!intent) return false;
+      put({ ...intent, state: 'open', revision: advance(intent.revision) });
+      return true;
     },
-    /** Reuse, supersede, mint — or refuse to decide while a sent intent with another body is unresolved. Never throws. */
+    /** CAS/replacement are one transition; never end/await/begin. */
+    replaceAfterNone(observation: CheckoutObservation, bodyHash: string): string | null {
+      if (!negativeAuthority(observation)) return null;
+      const intent: CheckoutIntent = { key: mint(), principal: observation.principal, bodyHash, state: 'open', createdAt: now(), revision: 0 };
+      put(intent);
+      return intent.key;
+    },
+    endIfUnchanged(observation: CheckoutObservation): boolean {
+      if (!negativeAuthority(observation)) return false;
+      memory = read().filter((i) => !(i.key === observation.key && samePrincipal(i.principal, observation.principal)));
+      persist();
+      return true;
+    },
+    current(): CheckoutIntent | null { return read().find((i) => i.principal.userId === activeUserId) ?? null; },
+    currentFor,
+    resumeFor,
     begin(input: { principal: CheckoutPrincipal; bodyHash: string }): BeginOutcome {
-      const existing = read() ?? adoptLegacy(input.principal);
-      if (existing && samePrincipal(existing.principal, input.principal)) {
+      const existing = resumeFor(input.principal);
+      if (existing) {
         if (existing.bodyHash === input.bodyHash) return { kind: 'reused', key: existing.key, state: existing.state };
         if (existing.state === 'sent') return { kind: 'ambiguous', key: null, pending: existing };
-        // an open intent for another body: the person changed their mind before anything left the device
       }
-      const intent: CheckoutIntent = { key: mint(), principal: input.principal, bodyHash: input.bodyHash, state: 'open', createdAt: now() };
-      persist(intent);
+      const intent: CheckoutIntent = { key: mint(), principal: input.principal, bodyHash: input.bodyHash, state: 'open', createdAt: now(), revision: 0 };
+      put(intent);
       return { kind: 'new', key: intent.key };
     },
-    /** The request left the device: until an answer comes back, the outcome is unknown. */
-    markSent(key: string): void {
-      const intent = read();
-      if (intent && intent.key === key && intent.state !== 'sent') persist({ ...intent, state: 'sent', sentAt: now() });
+    /** An authoritative completion can remove only the exact operation. */
+    end(key: string, principal: CheckoutPrincipal): boolean {
+      if (!owned(key, principal)) return false;
+      memory = read().filter((i) => !(i.key === key && samePrincipal(i.principal, principal)));
+      persist();
+      return true;
     },
-    /** A definitive answer came back without an order (a validation failure): the same key may try again, a changed body may supersede. */
-    markOpen(key: string): void {
-      const intent = read();
-      if (intent && intent.key === key && intent.state !== 'open') persist({ ...intent, state: 'open' });
-    },
-    /** The order was placed (or found placed), or the cart changed: whatever comes next is a new intent. */
-    end(): void {
-      persist(null);
+    /** Cart edits supersede an unsent intent, but never an unknown outcome. */
+    invalidateCart(principal: CheckoutPrincipal): void {
+      const intent = currentFor(principal);
+      if (intent?.state === 'open') {
+        memory = read().filter((i) => i !== intent);
+        persist();
+      }
     },
   };
 }
 
 export type CheckoutAttempt = ReturnType<typeof createCheckoutAttempt>;
+
+// ---------------------------------------------------------------------------
+// [AX372 R1] An unknown outcome is never read as a failure.
+// ---------------------------------------------------------------------------
+
+/** Transport status cannot settle a SENT key. Another send may have committed
+ * while this response was delayed, including a first send's 4xx refusal.
+ * Only the receipt authority's `none` permits reopening. Committed receipts
+ * are handled separately as placed; absent/in-flight evidence stays unknown. */
+export type CheckoutFailureOutcome = 'unknown' | 'refused';
+
+export function checkoutFailureOutcome(failure: { status?: number; code?: string; receipt?: ReceiptProbe }): CheckoutFailureOutcome {
+  return failure.receipt?.status === 'none' ? 'refused' : 'unknown';
+}
+
+/** The receipt probe's answer for a key (GET /customer/checkout/receipts/:key). */
+export type ReceiptProbe = { status: 'placed'; orderIds: string[] } | { status: 'in_flight' } | { status: 'none' };
+
+/** The waits between receipt probes while a key is still in flight: backing
+ *  off to 15 s, 135 s in all, past the server's 120 s default settle window
+ *  for an unknown outcome (CHECKOUT_UNKNOWN_SETTLE_S), after which a missing
+ *  receipt is conclusive and the probe can answer "none". */
+export const RECEIPT_PROBE_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000];
+
+/** Ask what became of an unresolved intent until the server can say. "placed"
+ *  or "none" ends the asking; "in_flight" keeps asking, with backoff. When the
+ *  waits run out (or whoever asked is gone) the answer is still "in_flight":
+ *  never "none" by default. */
+export async function settleUnresolvedIntent(
+  probe: () => Promise<ReceiptProbe>,
+  options: { sleep?: (ms: number) => Promise<void>; backoffMs?: readonly number[]; stopped?: () => boolean } = {},
+): Promise<ReceiptProbe> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+  let answer = await probe();
+  for (const ms of options.backoffMs ?? RECEIPT_PROBE_BACKOFF_MS) {
+    if (answer.status !== 'in_flight' || options.stopped?.()) return answer;
+    await sleep(ms);
+    if (options.stopped?.()) return answer;
+    answer = await probe();
+  }
+  return answer;
+}
 
 // ---------------------------------------------------------------------------
 // On-device counters: checkout_dedupe_replay, key_body_conflict,

@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 // ---------------------------------------------------------------------------
 
 const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
-const HOOK = strip(readFileSync(new URL('./mover.ts', import.meta.url), 'utf8'));
+const HOOK = strip(readFileSync(new URL('./dispatchOffers.ts', import.meta.url), 'utf8'));
 const CARD = strip(readFileSync(new URL('../modules/mover/screens/MoverHomeScreen.tsx', import.meta.url), 'utf8'));
 
 describe('the app asks the server for its live offer', () => {
@@ -30,7 +30,11 @@ describe('the app asks the server for its live offer', () => {
     // attempt id the accept will echo.
     expect(body).toContain('offerAttemptId: data.offer.offerAttemptId ?? undefined');
     expect(body).toContain('setOffer(recoveredOffer);');
-    expect(body).toContain('markSeen(recoveredOffer.orderId, recoveredOffer.offerAttemptId);');
+    // [AX299 F2] And, like a live card, it is marked seen once it is ON SCREEN,
+    // never on arrival: the render proof has exactly one stamp, the on-screen
+    // effect (dispatchOffers.test.ts drives it through the hook).
+    expect(body.match(/\.offerSeen\(/g)).toHaveLength(1);
+    expect(body).toContain('void api.offerSeen(offer.orderId, offer.offerAttemptId)');
   });
 });
 

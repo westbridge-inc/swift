@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -12,7 +12,9 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { injectWithApproval } from './helpers/admin-approval';
+import { askAndApprove, injectWithApproval, seedSecondApproval } from './helpers/admin-approval';
+import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
+import { OrderService } from '../modules/order/order.service';
 
 // ---------------------------------------------------------------------------
 // [A-14] A CASH ORDER REFUND IS A PROMISE UNTIL SOMEBODY PROVES IT.
@@ -46,7 +48,11 @@ async function makeCustomer() {
   return user;
 }
 
-async function makeCashOrder(opts?: { payment?: 'CASH' | 'MOBILE_MONEY'; total?: number }) {
+async function makeCashOrder(opts?: {
+  payment?: 'CASH' | 'MOBILE_MONEY'; total?: number;
+  /** A row born in this state, as history holds it (see the E02 case below). */
+  born?: { status: 'CANCELLED'; paymentStatus: 'CLAIMED' | 'CAPTURED'; refundOwedAmount: number };
+}) {
   const customer = await makeCustomer();
   return app.prisma.order.create({
     data: {
@@ -56,6 +62,7 @@ async function makeCashOrder(opts?: { payment?: 'CASH' | 'MOBILE_MONEY'; total?:
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: 300, totalAmount: opts?.total ?? 1300,
       paymentMethod: opts?.payment ?? 'CASH',
+      ...(opts?.born ? { ...opts.born, cancelledAt: new Date(), refundOwedAt: new Date() } : {}),
     },
   });
 }
@@ -73,12 +80,13 @@ const cancel = (id: string, body: Record<string, unknown>) =>
     payload: body,
   });
 
-const settle = (id: string, body: Record<string, unknown>) =>
-  injectWithApproval(app, {
-    method: 'PUT', url: `/api/v1/admin/orders/${id}/refund-settled`,
-    headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
-    payload: body,
-  });
+const settleRequest = (id: string, body: Record<string, unknown>, approvalId?: string) => ({
+  method: 'PUT' as const, url: `/api/v1/admin/orders/${id}/refund-settled`,
+  headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json',
+    ...(approvalId ? { [APPROVAL_HEADER]: approvalId } : {}) },
+  payload: body,
+});
+const settle = (id: string, body: Record<string, unknown>) => injectWithApproval(app, settleRequest(id, body));
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -134,6 +142,32 @@ describe('[A-14] deciding to refund a cash order records an obligation, not a pa
     expect(fresh.refundRef).toBeNull();
     expect(fresh.refundPaidAmount).toBeNull();
     expect(fresh.refundSettledAt).toBeNull();
+  });
+
+  it.each(['record', 'response'])('[M066] the refund %s uses an adjustment committed after the preview and before the order lock', async (projection) => {
+    const order = await makeCashOrder();
+    const transition = OrderService.prototype.transitionOrderAtomically;
+    let adjusted = false;
+    const spy = vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockImplementation(async function (this: OrderService, input) {
+      if (input.orderId === order.id) {
+        // Deterministic boundary: the route has read its preview, but the
+        // canonical transition has not acquired the order lock yet.
+        await app.prisma.order.update({ where: { id: order.id }, data: { deliveryFee: 400, totalAmount: 1400 } });
+        adjusted = true;
+      }
+      return transition.call(this, input);
+    });
+    try {
+      const response = await cancel(order.id, { reason: 'store could not fulfil', refund: true });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(adjusted).toBe(true);
+      const stored = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(Number(stored.totalAmount)).toBe(1400);
+      expect(stored.status).toBe('CANCELLED');
+      expect(stored.refundSettledAt).toBeNull();
+      if (projection === 'record') expect(Number(stored.refundOwedAmount)).toBe(1400);
+      else expect(response.json().data.refundOwed).toBe('1400');
+    } finally { spy.mockRestore(); }
   });
 
   it('cancelling WITHOUT the refund flag records no obligation', async () => {
@@ -211,6 +245,23 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     expect((await settle(order.id, { reference: '!!', amount: 1300 })).json().error.code).toBe('REFUND_REF_INVALID');
   });
 
+  it.each(['CLAIMED', 'CAPTURED'] as const)('[E02 · DS272 F2] a %s MMG order is never settled here: 409 MMG_REFUND_RAIL_REQUIRED, and the order is untouched', async (paymentStatus) => {
+    // Legacy only: an MMG order the store was paid for, cancelled with an A-14
+    // obligation before cancel refused MMG. Born in that state, because the
+    // database no longer lets anything move a paid MMG order to CANCELLED
+    // without a refund obligation. Settling it here used to reach the
+    // REFUNDED write, which the database refuses at COMMIT: a 500.
+    const order = await makeCashOrder({ payment: 'MOBILE_MONEY', born: { status: 'CANCELLED', paymentStatus, refundOwedAmount: 1300 } });
+    const res = await settle(order.id, { reference: refFor('MMG'), amount: 1300 });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('MMG_REFUND_RAIL_REQUIRED');
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: fresh.status, paymentStatus: fresh.paymentStatus, ref: fresh.refundRef, settledAt: fresh.refundSettledAt })
+      .toEqual({ status: 'CANCELLED', paymentStatus, ref: null, settledAt: null });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'REFUNDED' } })).toBe(0);
+  });
+
   it('an order that owes nothing cannot be settled', async () => {
     const order = await makeCashOrder();
     await cancel(order.id, { reason: 'duplicate', refund: false });
@@ -226,7 +277,19 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     // settlement whose reference is not the one on the row.
     const order = await owedOrder(1300);
     const refs = Array.from({ length: 5 }, (_, i) => refFor(`CASH-R${i}`));
-    const results = await Promise.all(refs.map((reference) => settle(order.id, { reference, amount: 1300 })));
+    // [U06] One ask per act: while the first settlement ask stands, every other
+    // ask to settle this order is refused at the gate, whatever its reference...
+    const [firstRef, ...otherRefs] = refs;
+    const first = await askAndApprove(app, settleRequest(order.id, { reference: firstRef, amount: 1300 }));
+    for (const reference of otherRefs) {
+      const again = await app.inject(settleRequest(order.id, { reference, amount: 1300 }));
+      expect(again.statusCode, again.body).toBe(409);
+      expect(again.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    }
+    // ...so five approved settlers can only be approvals written before that
+    // rule. They race exactly as before: the settlement's own guard must hold.
+    const approvals = [first, ...await Promise.all(otherRefs.map((reference) => seedSecondApproval(app, first, { body: (b) => ({ ...b, reference }) })))];
+    const results = await Promise.all(refs.map((reference, i) => app.inject(settleRequest(order.id, { reference, amount: 1300 }, approvals[i]))));
 
     const ok = results.filter((r) => r.statusCode === 200);
     expect(ok).toHaveLength(1);

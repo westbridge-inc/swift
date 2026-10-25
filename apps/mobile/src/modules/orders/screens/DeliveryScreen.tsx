@@ -1,9 +1,11 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
+import { openDirections } from '../../../lib/openDirections';
 // The emergency path for the person WAITING. The earner side got one; the
 // customer watching a stranger walk up their path did not.
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -14,20 +16,30 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
+import { readOrderFresh, useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
-import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
+import { copyText } from '../../../lib/clipboard';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
+import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, Header, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
+import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
+import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
+import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
+import { isTaxiOrder } from '../../../lib/orderTrackRoute';
+import { pickupWords } from '../pickup-words';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -44,6 +56,9 @@ const LIVE_TRACKING_STATUSES = new Set([
   'DRIVER_EN_ROUTE',
   'DRIVER_ARRIVED',
   'RIDE_IN_PROGRESS',
+  // [E17 · DS231 F2] The return leg is live-trackable on the server
+  // (counterparty.ts); the sender sees where their parcel is on its way back.
+  'RETURNING',
 ]);
 const LIVE_ETA_STATUSES = new Set([
   'RIDER_ASSIGNED',
@@ -59,7 +74,7 @@ const validMapCoordinate = coordinateOf;
 
 function isTerminalOrderSnapshot(order: any): boolean {
   const status = String(order?.status ?? '').toUpperCase();
-  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED'].includes(status)
+  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED', 'RETURNED'].includes(status)
     || (order?.fulfillment === 'PICKUP' && status === 'PICKED_UP');
 }
 
@@ -82,6 +97,10 @@ function timelineIndex(order: any, holdActive: boolean, releasePending: boolean)
   const status = String(order.status ?? '').toUpperCase();
   const pickup = order.fulfillment === 'PICKUP';
   const courier = order.orderType === 'COURIER';
+  // [E17 · DS231 F3] On its way back: the travel step, relabelled below. A
+  // RETURNED parcel has no step — the forward timeline would promise a
+  // delivery — so it falls to the plain status line.
+  if (courier && status === 'RETURNING') return 3;
   if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
   if (pickup && status === 'READY_FOR_PICKUP') return 3;
   if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
@@ -118,7 +137,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     : 'Live rider tracking appears after assignment and a GPS fix.';
   if (pickup) {
     transitLabel = 'Ready';
-    transitDescription = 'Show the pickup code at the counter.';
+    transitDescription = pickupWords(order.pickupCodeRequired).timeline;
   } else if (appointment) {
     transitLabel = 'In progress';
     transitDescription = 'The booked work is underway.';
@@ -127,7 +146,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitDescription = 'This step begins when the assigned rider sets off.';
   } else if (['RIDER_ASSIGNED', 'DRIVER_ASSIGNED'].includes(status)) {
     transitLabel = 'Rider assigned';
-    transitDescription = 'The rider is assigned. The next server update will show when they set off.';
+    transitDescription = 'A rider is assigned. We’ll show when they set off.';
   } else if (['RIDER_EN_ROUTE_PICKUP', 'DRIVER_EN_ROUTE'].includes(status)) {
     transitLabel = 'Rider heading to pickup';
     transitDescription = 'The rider is heading to the pickup.';
@@ -136,17 +155,20 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitDescription = 'The rider reached the pickup.';
   } else if (status === 'PICKED_UP') {
     transitLabel = 'Picked up';
-    transitDescription = 'The rider has the order. Waiting for the server to confirm the delivery leg.';
+    transitDescription = 'The rider has your order. We’ll show when they head to you.';
   } else if (status === 'ARRIVED') {
     transitLabel = 'Rider arrived';
     transitDescription = 'The rider reached the delivery address.';
+  } else if (courier && status === 'RETURNING') {
+    transitLabel = 'Coming back to you';
+    transitDescription = `${order.rider?.firstName ?? 'The rider'} couldn’t deliver the parcel and is bringing it back to you.`;
   }
   const steps: TimelineStep[] = [
     {
       key: 'placed',
       label: courier ? 'Requested' : appointment ? 'Booked' : 'Placed',
-      description: 'The server received your request.',
-      upcomingDescription: 'The server will record the request here.',
+      description: 'We received your request.',
+      upcomingDescription: 'Your request will appear here.',
       icon: 'clipboard',
       timestamp: order.placedAt,
     },
@@ -158,15 +180,15 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
           ? 'The rider search starts only when the ring closes.'
           : `Until the ring closes, ${appointment ? 'the provider' : vendorName} hasn’t been told.`
         : releasePending
-          ? 'The timer ended. Waiting for the server to confirm release.'
+          ? 'The timer ended. Checking whether your request was sent.'
           : courier
             ? 'The request is visible to eligible riders.'
             : `${appointment ? 'The provider' : vendorName} can see the request now.`,
       doneDescription: courier
-        ? 'The server released the request to eligible riders.'
+        ? 'The request was sent to riders who can take it.'
         : `${appointment ? 'The provider' : vendorName} received the request.`,
       upcomingDescription: courier
-        ? 'The server will release the request to eligible riders.'
+        ? 'The request will be sent to riders who can take it.'
         : `${appointment ? 'The provider' : vendorName} will receive the request after the hold.`,
       icon: 'send',
     },
@@ -182,7 +204,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
               ? 'Preparing'
               : acceptedRecorded || status === 'ACCEPTED' ? 'Accepted' : 'Preparing',
       description: courier
-        ? 'The assigned rider appears here when the server confirms them.'
+        ? 'Your rider will appear here once assigned.'
         : appointment
           ? 'The provider has confirmed the booking.'
           : status === 'READY_FOR_PICKUP'
@@ -193,12 +215,12 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
               ? `${vendorName} is working on your order.`
               : `${vendorName} accepted the order; preparation is next.`,
       doneDescription: courier
-        ? 'The server assigned a rider.'
+        ? 'A rider was assigned.'
         : appointment
           ? 'The provider confirmed the booking.'
           : `${vendorName} finished this step.`,
       upcomingDescription: courier
-        ? 'The assigned rider will appear after the server confirms them.'
+        ? 'Your rider will appear here once assigned.'
         : appointment
           ? 'The provider will confirm the booking here.'
           : `${vendorName} will accept and prepare the order here.`,
@@ -228,8 +250,8 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
       key: 'complete',
       label: pickup ? 'Picked up' : appointment ? 'Completed' : 'Delivered',
       description: pickup ? 'The store confirms collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
-      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The server marked the booking complete.' : 'The server marked the delivery complete.',
-      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'The server will mark the booking complete here.' : 'The server will mark the delivery complete here.',
+      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
+      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'You’ll see here when the booking is complete.' : 'You’ll see here when delivery is complete.',
       icon: 'check',
       timestamp: pickup ? order.pickedUpAt : order.deliveredAt,
     },
@@ -244,7 +266,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
           <Feather name="info" size={18} color={color.info} />
           <T variant="label" tone="info" style={{ flex: 1 }}>
-            Current server status: {humanStatus(String(order.status ?? 'unknown'))}.
+            Current status: {humanStatus(String(order.status ?? 'unknown'))}.
           </T>
         </View>
       ) : null}
@@ -323,7 +345,6 @@ export function DeliveryScreen() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelChecking, setCancelChecking] = useState(false);
   const [cancelPreviewFresh, setCancelPreviewFresh] = useState(false);
-  const [cancelPreviewFee, setCancelPreviewFee] = useState<number | null>(null);
   const [cancelPreviewOrderId, setCancelPreviewOrderId] = useState<string | null>(null);
   const prevStatus = useRef<string | null>(null);
   const prevStatusRef = useRef<string | undefined>(undefined);
@@ -335,13 +356,13 @@ export function DeliveryScreen() {
   // A courier job cancels through its own endpoint so the assigned rider is
   // freed AND told they're back in the dispatch pool (the generic order-cancel
   // frees the rider row but doesn't notify them). Everything else uses the
-  // standard customer cancel with its free-window / fee logic.
+  // standard customer cancel with its free-or-refused rule.
   // [REPORT-011 F-02] The SERVER owns the clock: the cancel result carries the
-  // authoritative message (and any late-cancel fee it actually charged). Keep
-  // it and show it, instead of discarding it and rendering a stale generic
-  // banner — a client-clock/preview "free" promise must never be the last word.
+  // authoritative message. Keep it and show it, instead of discarding it and
+  // rendering a stale generic banner — a client-clock/preview "free" promise
+  // must never be the last word. [owner #46/#50] Cancelling never costs a fee:
+  // a cancel is free or refused, so no amount is ever shown.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
-  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const qc = useQueryClient();
   const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
     mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
@@ -357,10 +378,9 @@ export function DeliveryScreen() {
       if (target.targetOrderId !== activeOrderIdRef.current) return;
       // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
       // still returns the raw envelope — accept both shapes, never lose the
-      // message OR the numeric fee the server actually charged.
+      // server's message.
       const payload = res?.data?.data ?? res?.data ?? res ?? {};
       if (typeof payload.message === 'string') setCancelMessage(payload.message);
-      setCancelFee(typeof payload.cancellationFee === 'number' ? payload.cancellationFee : null);
       setConfirmCancel(false);
       order.refetch();
     },
@@ -373,7 +393,7 @@ export function DeliveryScreen() {
         setConfirmCancel(false);
         toast.show(
           'Checking cancellation status',
-          'We couldn’t confirm the outcome. The latest server status is being refreshed before you try again.',
+          'We couldn’t confirm whether the order was cancelled. Check its latest status before trying again.',
         );
       }
       // The outcome is unknown (a timeout can mean the cancel DID land), so
@@ -382,23 +402,60 @@ export function DeliveryScreen() {
       void order.refetch();
     },
   });
-  const decideSub = useDecideSubstitution(orderId);
+  const decideSub = useDecideSubstitution();
+  // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
+  // their only first-party door to "I didn't pay". That statement can pause
+  // the order, so it is confirmed first; the order refetches either way.
+  const claimPayment = useClaimMmgPayment();
+  // [R4 · F-PR1262-SOL-01] The confirmation carries the order it was opened
+  // on. It is shown only while this screen still shows that order, and it is
+  // sent to that order — never to whichever order a reused screen shows now.
+  const [pendingMmgClaim, setPendingMmgClaim] = useState<PendingMmgClaim | null>(null);
+  const confirmingMmgClaim = boundMmgClaim(pendingMmgClaim, orderId);
+  const mmgClaimSending = claimPayment.isPending && claimPayment.variables?.orderId === orderId;
+  const mmgClaimFailed = (error: any, claim: { orderId: string }) => {
+    if (claim.orderId !== activeOrderIdRef.current) return;
+    const serverMessage = error?.response?.data?.error?.message;
+    toast.error('That didn’t go through', typeof serverMessage === 'string' ? serverMessage : 'Check your connection and try again.');
+  };
 
   const o = order.data;
+  // [TAXI-FLOW 22 Oct] THE BACKSTOP. A ride is never drawn as a store order
+  // ("Sent to the store", "Preparing", "have $800 ready for the seller"). Any
+  // door that reaches this screen with a ride's id — a notification tap, the
+  // inbox, an older caller — is handed to the ride screen the moment the
+  // server's order type is known. `replace`, so Back does not return here.
+  const rideHandedOn = useRef(false);
+  useEffect(() => {
+    if (!isTaxiOrder(o) || rideHandedOn.current) return;
+    rideHandedOn.current = true;
+    navigation.replace('Taxi');
+  }, [navigation, o]);
   const orderStatus = String(o?.status ?? '').toUpperCase();
   const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)
     && !(o?.fulfillment === 'PICKUP' && orderStatus === 'PICKED_UP');
   const liveTrackingAllowedRef = useRef(liveTrackingAllowed);
   liveTrackingAllowedRef.current = liveTrackingAllowed;
 
+  // [row 5 · ANDROID-QA] The cancel taps read the order straight from the
+  // server (readOrderFresh), not through `order.refetch()`: the screen's own
+  // background refreshes cancel a shared read in flight, and the tap then
+  // waited on their read, which on a slow line could time out and drop it.
+  const readCancelSnapshot = async (targetOrderId: string): Promise<{ data: any; isError: boolean }> => {
+    try {
+      return { data: await readOrderFresh<any>(qc, targetOrderId), isError: false };
+    } catch {
+      return { data: undefined, isError: true };
+    }
+  };
+
   const openCancelConfirmation = async () => {
     const targetOrderId = orderId;
     setCancelPreviewFresh(false);
-    setCancelPreviewFee(null);
     setCancelPreviewOrderId(null);
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -406,16 +463,8 @@ export function DeliveryScreen() {
         return;
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
-        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        toast.show('This order can no longer be cancelled', latest.cancelUnavailable?.message ?? 'Check the latest status on the order timeline.');
         return;
-      }
-      if (latest.orderType !== 'COURIER') {
-        const previewFee = latest.cancellationFee;
-        if (typeof previewFee !== 'number' || !Number.isFinite(previewFee)) {
-          toast.error('Couldn’t confirm cancellation cost', 'Try again before cancelling. Your order is unchanged.');
-          return;
-        }
-        setCancelPreviewFee(previewFee);
       }
       setCancelPreviewFresh(true);
       setCancelPreviewOrderId(targetOrderId);
@@ -433,7 +482,7 @@ export function DeliveryScreen() {
     }
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -442,21 +491,8 @@ export function DeliveryScreen() {
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
         setConfirmCancel(false);
-        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        toast.show('This order can no longer be cancelled', latest.cancelUnavailable?.message ?? 'Check the latest status on the order timeline.');
         return;
-      }
-      if (latest.orderType !== 'COURIER') {
-        const latestFee = latest.cancellationFee;
-        if (typeof latestFee !== 'number' || !Number.isFinite(latestFee)) {
-          toast.error('Couldn’t recheck cancellation cost', 'Nothing was cancelled. Try again.');
-          return;
-        }
-        if (cancelPreviewFee !== latestFee) {
-          setCancelPreviewFee(latestFee);
-          setCancelPreviewFresh(true);
-          toast.show('Cancellation cost updated', 'Review the new server preview, then confirm again.');
-          return;
-        }
       }
       cancelOrder.mutate({ targetOrderId, orderType: latest.orderType });
     } finally {
@@ -594,10 +630,9 @@ export function DeliveryScreen() {
     setConfirmCancel(false);
     setCancelChecking(false);
     setCancelPreviewFresh(false);
-    setCancelPreviewFee(null);
     setCancelPreviewOrderId(null);
     setCancelMessage(null);
-    setCancelFee(null);
+    setPendingMmgClaim(null);
     lastCourierServerFixAt.current = null;
     prevStatus.current = null;
     prevStatusRef.current = undefined;
@@ -656,10 +691,34 @@ export function DeliveryScreen() {
     prevStatusRef.current = status;
   }, [isFocused, o?.status, o?.fulfillment]);
 
-  if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
-  if (order.isError || !o) {
+  if (order.isLoading) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
+  if (isTaxiOrder(o)) {
+    // The hand-off above is on its way: nothing of the store screen shows.
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
+  // [row 5 · ANDROID-QA] Only an order that never loaded is an error screen.
+  // On a slow line a background refresh (the 15 s poll, a reconnect) can time
+  // out; that used to swap the whole order, and the Cancel button under the
+  // customer's finger, for an error screen until the next read landed. The
+  // order already on screen stays (the cart's E07 rule).
+  if (!o) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => order.refetch()} />
       </View>
     );
@@ -669,7 +728,11 @@ export function DeliveryScreen() {
   const failed = o.status === 'FAILED';
   const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
     || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
-  const terminal = cancelled || failed || complete;
+  // [E17 · DS231 F3] A parcel returned to its sender is over: no live-rider
+  // controls, tracking link or cancel once the return is complete. The rider's
+  // identity card stays, exactly as it does on a delivered order.
+  const returned = o.status === 'RETURNED';
+  const terminal = cancelled || failed || complete || returned;
   const verticalTint = o.orderType === 'COURIER'
     ? SEND_TINT
     : o.fulfillment === 'APPOINTMENT' ? SERVICES_TINT : ORDER_TINT;
@@ -681,6 +744,10 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG to the store's number, sent only after the store accepts.
+  const mmgStorePayment = parseMmgStorePayment(o.mmgPayment);
+  const mmgClaim = parseMmgClaimView(o.mmgClaim);
+  const custodyRecovery = parsePartyCaseView(o.custodyRecovery);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
   const ringHidden = terminal || mmgCaptured || !o.canCancel;
   // Hold lifecycle and cancel eligibility are separate server facts. A paid or
@@ -706,7 +773,7 @@ export function DeliveryScreen() {
   const mapAnchor = courierPos ?? pickupPos ?? dropPos;
   const initialRegion = mapAnchor ? { ...mapAnchor, latitudeDelta: 0.05, longitudeDelta: 0.05 } : null;
   const mapNotice = holdTimingUnavailable
-    ? 'Checking the cancellation window with the server.'
+    ? 'Checking whether you can still cancel.'
     : holdActive || releasePending
     ? o.orderType === 'COURIER'
       ? 'Live tracking starts after the request is released to riders.'
@@ -749,7 +816,7 @@ export function DeliveryScreen() {
   const holdCancellationCaption = o.orderType === 'COURIER'
     ? 'Changed your mind? Cancel before a rider accepts. Swift does not collect or hold courier payment.'
     : o.fulfillment === 'APPOINTMENT'
-      ? 'Changed your mind? Cancel before the provider starts — the app shows any cost before you confirm.'
+      ? 'Changed your mind? You can cancel until the provider accepts your booking. Swift never charges for cancelling.'
       : holdRingCaption(mmgCancellationAmbiguous);
   const pendingSummary = o.orderType === 'COURIER'
     ? 'Waiting for an eligible rider to accept'
@@ -767,10 +834,21 @@ export function DeliveryScreen() {
     : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
   const mmgPayee = mmgPaymentAction?.recipientName
     ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+  // The last two food sentences a booking could reach on this screen were both
+  // cancellation copy on the MMG rail — the one rail where the money may have
+  // already moved. They name the party who holds it from the fulfillment, the
+  // discriminator every other booking word on this screen keys on, and call a
+  // booking a booking. Food, pickup and courier keep their exact words.
+  const refundParty = o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+  const cancelledNoun = o.fulfillment === 'APPOINTMENT' ? 'booking' : 'order';
   let etaCopy = pendingSummary;
   if (cancelled) etaCopy = 'Cancelled';
   else if (failed) etaCopy = 'Couldn’t complete this order';
   else if (complete) etaCopy = 'Completed';
+  // [E17 · DS236 F3-R2] The creation-time estimate is the forward leg's; a
+  // parcel on its way back (or back) must not show a countdown to the door.
+  else if (returned) etaCopy = 'Returned to you';
+  else if (orderStatus === 'RETURNING') etaCopy = 'Coming back to you';
   else if (arrivalReached) {
     etaCopy = orderStatus === 'RIDER_ARRIVED_PICKUP' ? 'Rider reached the pickup' : 'Your rider has arrived';
   } else if (o.fulfillment === 'APPOINTMENT' && orderStatus === 'ACCEPTED') {
@@ -786,14 +864,15 @@ export function DeliveryScreen() {
     etaCopy = 'Ready for pickup';
   } else if (o.fulfillment === 'PICKUP' && serverPrepMinutes != null) {
     etaCopy = `Estimated ready time · ~${serverPrepMinutes} min`;
-  } else if (serverEstimateMinutes != null) etaCopy = `Server estimate · ~${serverEstimateMinutes} min total`;
+  } else if (serverEstimateMinutes != null) etaCopy = `Estimated time · ~${serverEstimateMinutes} min total`;
 
   // [ALG-12] The promise the customer was given at checkout — a RANGE on
   // five-minute marks from the server, recomputed against this screen's
   // ticking clock so a passed window is never shown as still coming
   // (R-12.2.4). The live line above is labelled live; this is the commitment
   // (L7). Delivery orders only, and only while the order is still coming.
-  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete ? promiseLine(o.promise, nowTs) : null;
+  // A returning parcel is not coming to the door: the forward promise is over too.
+  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete && !returned && orderStatus !== 'RETURNING' ? promiseLine(o.promise, nowTs) : null;
   const promiseUpdate = promiseNote(o.promise);
 
   return (
@@ -932,6 +1011,7 @@ export function DeliveryScreen() {
           ...elevation.raised,
         }}
       >
+        {initialRegion ? <MapCredits /> : null}
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
           {/* The "#NNNN · held" caption moved onto the map as the reference's
               floating chip — one statement of the state, where it belongs. */}
@@ -947,11 +1027,17 @@ export function DeliveryScreen() {
             }}
             hidden={ringHidden || !isFocused}
           />
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+            <View style={{ marginTop: space.md }}>
+              <T variant="label" tone="muted">Appointment</T>
+              <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
+            </View>
+          ) : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
               <T variant="label" tone="info" style={{ flex: 1 }}>
-                Checking the hold timing with the server. No progress ring is shown without both server timestamps.
+                Checking when this order will be sent. Try again in a moment.
               </T>
             </View>
           ) : null}
@@ -959,7 +1045,7 @@ export function DeliveryScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="send" size={18} color={color.info} />
               <T variant="label" tone="info" style={{ flex: 1 }}>
-                Timer closed. Checking with the server before marking this order sent.
+                The wait is over. Checking whether your order was sent.
               </T>
             </View>
           ) : null}
@@ -984,7 +1070,63 @@ export function DeliveryScreen() {
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
           {!terminal ? items
             .filter((it: any) => it.subStatus === 'PENDING')
-            .map((it: any) => (
+            .map((it: any) => isRemovalQuestion(it.substitution) ? (
+              /* [O-4 · owner 22 Oct 2026] Asked before the store accepted: nothing to swap. The
+                 customer agrees to the changed order before paying, or cancels it (free while the
+                 store has not accepted). */
+              <View
+                key={`sub-${it.id}`}
+                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <Feather name="alert-circle" size={16} color={color.brand[600]} />
+                  <T variant="label" weight="bold" style={{ flex: 1 }}>
+                    {it.name} is out of stock
+                  </T>
+                </View>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {it.substitution?.lastItem
+                    ? `${o.vendor?.name ?? 'The store'} can't supply it.`
+                    : `${o.vendor?.name ?? 'The store'} can't supply it. Continue without it, or cancel the order. Nothing has been charged.`}
+                </T>
+                {removalChangeText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {removalChangeText(it.substitution)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                  {it.substitution?.lastItem ? null : (
+                    <PillButton
+                      label="Continue without it"
+                      size="md"
+                      style={{ flex: 1 }}
+                      loading={decideSub.isPending}
+                      disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                      onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
+                    />
+                  )}
+                  <PillButton
+                    label="Cancel order"
+                    variant="soft"
+                    size="md"
+                    style={{ flex: 1 }}
+                    loading={cancelChecking || cancelOrder.isPending}
+                    disabled={!o.canCancel}
+                    onPress={() => { void openCancelConfirmation(); }}
+                  />
+                </View>
+              </View>
+            ) : (
               <View
                 key={`sub-${it.id}`}
                 style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
@@ -997,24 +1139,44 @@ export function DeliveryScreen() {
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
-                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
+                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead.{swapDecisionPermissions(it.substitution, o.paymentMethod).reject ? ' Rejecting removes the item and lowers your total.' : ''}
                 </T>
+                {/* [L09 · M028] What approving changes, from the server's own
+                    numbers: the total (paid options included), and the chosen
+                    options that do not come with the swap. */}
+                {swapChangeText(it.substitution, o.paymentMethod) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapChangeText(it.substitution, o.paymentMethod)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {/* [SUBSTITUTION · owner 17 Oct] The question waits a bounded
+                    time; say until when and what happens without an answer. */}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
                     size="md"
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
                   />
                   <PillButton
                     label="No thanks"
                     variant="soft"
                     size="md"
                     style={{ flex: 1 }}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: false })}
                   />
                 </View>
               </View>
@@ -1114,25 +1276,18 @@ export function DeliveryScreen() {
             />
           ) : null}
 
-          {/* [B9] The recipient's half of Send. GET /courier/track/:token has
-              been public since launch and NOTHING generated the link — the
-              sender had no way to hand tracking to the person waiting for the
-              parcel. Web twin: /track/[token]. Sender-scoped token, in-flight
-              only (the token never expires, so a settled parcel stops
-              advertising it). */}
-          {!terminal && o?.orderType === 'COURIER' && o?.courierTrackingToken ? (
-            <PillButton
-              label="Share tracking with the recipient"
-              variant="soft"
-              icon="share-2"
-              style={{ marginTop: space.md }}
-              onPress={() => {
-                const who = o?.courierRecipientName ? `${o.courierRecipientName}, track` : 'Track';
-                void Share.share({
-                  message: `${who} your Swift parcel live: ${WEB_URL}/track/${o.courierTrackingToken}`,
-                }).catch(() => toast.show("Couldn't open the share sheet."));
-              }}
-            />
+          {!terminal && o?.orderType === 'COURIER' ? (
+            <View style={{ marginTop: space.md, gap: space.sm }}>
+              <PillButton label="Share a new tracking link" variant="soft" icon="share-2"
+                onPress={() => {
+                  void courierApi.rotateTracking(o.id).then((res) => Share.share({
+                    message: `Track your Swift parcel live: ${WEB_URL}/track/${res.data.data.trackingToken}`,
+                  })).catch(() => toast.show("Couldn't share tracking. Try again."));
+                }} />
+              <T variant="caption" tone="muted">A new link replaces the previous link. Tracking expires 12 hours after booking.</T>
+              <PillButton label="Stop tracking sharing" variant="outline"
+                onPress={() => { void courierApi.revokeTracking(o.id).then(() => toast.show('Tracking sharing stopped.')).catch(() => toast.show('Could not stop sharing. Try again.')); }} />
+            </View>
           ) : null}
 
           {cancelled || failed ? (
@@ -1155,22 +1310,11 @@ export function DeliveryScreen() {
                   {failed
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
+                      ?? (typeof o.cancellationNotice === 'string' && o.cancellationNotice.trim() ? o.cancellationNotice : null) /* [owner 18 Oct 2026] why an unpaid MMG order closed by itself */
                       ?? (mmgCancellationAmbiguous
-                        ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-                        : 'This order was cancelled.')}
+                        ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+                        : `This ${cancelledNoun} was cancelled.`)}
                 </T>
-                {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
-                    rendered from the committed result, never a preview. */}
-                {!failed && cancelFee != null ? (
-                  <T variant="caption" tone="error" style={{ marginTop: space.xs }}>
-                    {/* [REPORT-013 F-013-03] The fee is a recorded deterrence
-                        marker on a cash platform — Swift never collects it;
-                        saying "charged" would be a false financial fact. */}
-                    {cancelFee > 0
-                      ? `Late-cancellation fee recorded: ${money(cancelFee)} (not collected by Swift).`
-                      : 'No cancellation fee.'}
-                  </T>
-                ) : null}
               </View>
             </View>
           ) : (
@@ -1230,18 +1374,17 @@ export function DeliveryScreen() {
                 }}
               >
                 <T variant="title" tone="deep">It’s ready.</T>
-                <T variant="micro" tone="muted" style={{ marginTop: space.md }}>
-                  Show this code at the counter
+                <T variant="micro" tone="muted" style={{ marginTop: space.md, textAlign: 'center' }}>
+                  {pickupWords(o.pickupCodeRequired).ready}
                 </T>
                 <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
                   {o.pickupCode}
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
-                    onPress={() => {
-                      const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
-                      void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
-                    }}
+                    // [row 363] The phone's own maps: Apple Maps on iOS, Google
+                    // Maps on Android (it was maps.apple.com on every phone).
+                    onPress={() => { void openDirections({ lat: o.pickupLat, lng: o.pickupLng, address: o.pickupAddress }); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Directions to ${o.vendor?.name ?? 'the store'}`}
                     accessibilityHint="Opens turn-by-turn directions"
@@ -1268,14 +1411,53 @@ export function DeliveryScreen() {
                   marginTop: space.xl,
                 }}
               >
-                <T variant="micro" tone="muted">
-                  Pickup code — show at the counter
+                <T variant="micro" tone="muted" style={{ textAlign: 'center' }}>
+                  {pickupWords(o.pickupCodeRequired).waiting}
                 </T>
                 <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
                   {o.pickupCode}
                 </T>
               </View>
             )
+          ) : null}
+
+          {/* [R14 · legal research D12] The server's words, shown while the store delivers THIS order
+              with its own rider (null on every other order) — never decided here. */}
+          {typeof o.ownRiderNotice === 'string' && o.ownRiderNotice ? (
+            <View
+              accessible
+              accessibilityLabel={o.ownRiderNotice}
+              style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.xl, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.info }}
+            >
+              <Feather name="info" size={16} color={color.info} />
+              <T variant="caption" tone="info" style={{ flex: 1 }}>{o.ownRiderNotice}</T>
+            </View>
+          ) : null}
+
+          {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at
+              the door. Quiet until the goods leave the store; from pickup to the
+              door the customer holds it and shows it to their rider. The rider
+              never sees it — they enter it. */}
+          {o.fulfillment === 'DELIVERY' && o.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(o.status) ? (
+            <View
+              style={{
+                alignItems: 'center',
+                borderRadius: radius.lg,
+                backgroundColor: color.brand[50],
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: color.brand[500],
+                paddingVertical: space.xl,
+                paddingHorizontal: space.lg,
+                marginTop: space.xl,
+              }}
+            >
+              <T variant="micro" tone="muted">
+                Show this code to your rider at the door
+              </T>
+              <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
+                {o.ridePin}
+              </T>
+            </View>
           ) : null}
 
           {/* Order lines */}
@@ -1338,6 +1520,56 @@ export function DeliveryScreen() {
             </View>
           ) : null}
 
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store has accepted: pay it directly, by MMG, to its
+              number. The server sends this ONLY to this order's customer and only until the store marks the
+              order "Paid by MMG"; the app opens no payment page and Swift never touches the money. */}
+          {mmgStorePayment && !cancelled && !failed ? (
+            <View testID="mmg-store-number" style={{ borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.lg, marginTop: space.xl }}>
+              <T variant="body" weight="bold" tone="deep">
+                Pay by MMG
+              </T>
+              <T variant="body" style={{ marginTop: space.xs }}>
+                {mmgStorePayment.instruction}
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {mmgStorePaymentNote(mmgStorePayment)}
+              </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {mmgStorePaymentDeadline(mmgStorePayment) ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {mmgStorePaymentDeadline(mmgStorePayment)}
+                </T>
+              ) : null}
+              <PillButton
+                label="Copy MMG number"
+                icon="copy"
+                variant="soft"
+                onPress={() => {
+                  toast.show(copyText(mmgStorePayment.number) ? 'MMG number copied' : `The number is ${mmgStorePayment.numberDisplay}`);
+                }}
+                style={{ marginTop: space.md }}
+              />
+            </View>
+          ) : null}
+
+          {/* [AF-MOB-006] After pickup, a delivery problem is an owned case:
+              the server's sentence says who is handling it and what happens. */}
+          {partyCaseWorthShowing(custodyRecovery) ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
+
+          {mmgClaim && !cancelled && !failed ? (
+            <MmgPaymentClaimCard
+              view={mmgClaim}
+              pending={mmgClaimSending}
+              onClaim={(action) => {
+                if (action.confirm) {
+                  setPendingMmgClaim({ orderId, action });
+                  return;
+                }
+                claimPayment.mutate({ orderId, paid: action.paid }, { onError: mmgClaimFailed });
+              }}
+            />
+          ) : null}
+
           {/* [SPS-F-0023] The post-delivery tip prompt is GONE, not disabled:
               the API fails closed (TIP_COLLECTION_UNAVAILABLE — no rail
               collects money after the job), and a button that always errors is
@@ -1371,6 +1603,26 @@ export function DeliveryScreen() {
             style={{ marginTop: space.md }}
           />
 
+          {/* [owner #46/#50] No Cancel once the store (or the driver, rider or
+              provider five minutes after accepting) has the order: the server's
+              reason, and the store's published number to call instead. */}
+          {!o.canCancel && !terminal && o.cancelUnavailable?.message ? (
+            <View
+              accessibilityRole="summary"
+              style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info, gap: space.sm }}
+            >
+              <T variant="label" tone="info">{o.cancelUnavailable.message}</T>
+              {o.cancelUnavailable.contactPhone ? (
+                <PillButton
+                  label={`Call ${o.cancelUnavailable.contactPhone}`}
+                  variant="soft"
+                  icon="phone"
+                  onPress={() => { void openExternal(`tel:${o.cancelUnavailable.contactPhone}`); }}
+                />
+              ) : null}
+            </View>
+          ) : null}
+
           {o.canCancel && !terminal && !holdActive && !holdTimingUnavailable && !releasePending ? (
             <PillButton
               label={`Cancel ${referenceNoun}`}
@@ -1395,30 +1647,21 @@ export function DeliveryScreen() {
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {o.orderType === 'COURIER'
             ? rider
-              ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
+              ? 'This cancels the pickup. The rider can take other jobs. It can’t be undone.'
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
-              ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
-              : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
+              ? `Cancelling stops this ${cancelledNoun}. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+              : `Cancelling stops this ${cancelledNoun}. We’ll show the final result when cancellation is confirmed.`}
         </T>
-        {cancelPreviewFresh && o.orderType === 'COURIER' ? (
+        {/* [owner #46/#50] The server's own words — never a fee, and never a
+            "free" the app authored itself (DS1141 S1). */}
+        {cancelPreviewFresh && o.cancellationMessage ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
             <DecorativeIcon>
               <Feather name="info" size={18} color={color.info} />
             </DecorativeIcon>
             <T variant="label" tone="info" style={{ flex: 1 }}>
-              Fresh server check: cancellation is still available. This courier flow does not quote an in-app cancellation fee, and Swift does not collect courier payment.
-            </T>
-          </View>
-        ) : cancelPreviewFresh && cancelPreviewFee != null ? (
-          <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: cancelPreviewFee > 0 ? color.soft.warning : color.soft.info }}>
-            <DecorativeIcon>
-              <Feather name={cancelPreviewFee > 0 ? 'alert-triangle' : 'info'} size={18} color={cancelPreviewFee > 0 ? color.warning : color.info} />
-            </DecorativeIcon>
-            <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
-              {cancelPreviewFee > 0
-                ? `Server preview: ${money(cancelPreviewFee)} would be recorded if you cancel now. Swift does not collect it.`
-                : 'Server preview: no cancellation fee.'}
+              {o.cancellationMessage}
             </T>
           </View>
         ) : null}
@@ -1437,6 +1680,42 @@ export function DeliveryScreen() {
             size="md"
             disabled={cancelChecking || cancelOrder.isPending}
             onPress={() => setConfirmCancel(false)}
+          />
+        </View>
+      </PopupCard>
+
+      {/* [ORDER-SPINE S1-6] "I didn't pay" can pause the order for a person to
+          check, so it is a deliberate second tap — never a single stray one. */}
+      <PopupCard
+        visible={confirmingMmgClaim !== null}
+        onClose={() => { if (!mmgClaimSending) setPendingMmgClaim(null); }}
+      >
+        <IconChip icon="alert-circle" size={56} />
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
+          {confirmingMmgClaim?.action.confirm?.title ?? ''}
+        </PopupTitle>
+        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
+          {confirmingMmgClaim?.action.confirm?.body ?? ''}
+        </T>
+        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
+          <PillButton
+            label={confirmingMmgClaim?.action.confirm?.confirmLabel ?? 'Confirm'}
+            size="md"
+            loading={mmgClaimSending}
+            onPress={() => {
+              const sent = sendBoundMmgClaim(pendingMmgClaim, orderId, (claim) => claimPayment.mutate(claim, {
+                onSettled: () => setPendingMmgClaim((current) => (current?.orderId === claim.orderId ? null : current)),
+                onError: mmgClaimFailed,
+              }));
+              if (!sent) setPendingMmgClaim(null);
+            }}
+          />
+          <PillButton
+            label="Go back"
+            variant="soft"
+            size="md"
+            disabled={mmgClaimSending}
+            onPress={() => setPendingMmgClaim(null)}
           />
         </View>
       </PopupCard>

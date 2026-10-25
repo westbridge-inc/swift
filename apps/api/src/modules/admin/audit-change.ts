@@ -2,6 +2,19 @@ import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { SNAPSHOT_UNIQUE_FIELDS, type AdminRouteEntity } from './admin-authority';
 import { adminAuditSnapshotCounter } from '../../plugins/observability';
+import { getTenantId } from '../../plugins/tenant-context';
+
+/**
+ * [ZONE-FARES] The tenant predicate for an entity walled only through its
+ * parents (`tenantVia`): every named relation's `tenantId` is the caller's.
+ * `null` means "read nothing" — no tenant is bound, so no row can be proven
+ * the caller's. `{}` means the entity declares no such wall.
+ */
+export function tenantPredicateOf(entity: Pick<AdminRouteEntity, 'tenantVia'>, tenantId: string | null = getTenantId()): Record<string, unknown> | null {
+  if (!entity.tenantVia || entity.tenantVia.length === 0) return {};
+  if (!tenantId) return null;
+  return Object.fromEntries(entity.tenantVia.map((relation) => [relation, { tenantId }]));
+}
 
 /**
  * [ADM-004] THE AUDIT ROW SAYS WHAT CHANGED, NOT WHAT WAS ASKED.
@@ -104,8 +117,13 @@ export async function snapshot(
     adminAuditSnapshotCounter.labels('selector', entity.model).inc();
     return ABSENT;
   }
+  const walled = tenantPredicateOf(entity);
+  if (walled === null) {
+    adminAuditSnapshotCounter.labels('no_tenant', entity.model).inc();
+    return ABSENT;
+  }
   try {
-    const row = await delegate.findUnique({ where: { [field]: id } });
+    const row = await delegate.findUnique({ where: { [field]: id, ...walled } });
     if (!row) {
       adminAuditSnapshotCounter.labels('missing', entity.model).inc();
       return ABSENT;

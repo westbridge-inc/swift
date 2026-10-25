@@ -19,6 +19,9 @@ export const AML_RETENTION_DAYS = 7 * 365;
 export interface RetentionRuling {
   days: number;
   source: 'REGISTRY' | 'AML' | 'COUNTRY_DEFAULT';
+  // Classification is separate from the winning duration: an AML class can
+  // have a registry window longer than the seven-year floor.
+  amlRecord: boolean;
   docType: string;
   role: string;
 }
@@ -36,5 +39,5 @@ export async function retentionDaysFor(
   let source: RetentionRuling['source'] = 'COUNTRY_DEFAULT';
   if (row?.persistRetentionDays != null) { days = row.persistRetentionDays; source = 'REGISTRY'; }
   if (row && row.amlRecordClass !== 'NOT_APPLICABLE' && AML_RETENTION_DAYS > days) { days = AML_RETENTION_DAYS; source = 'AML'; }
-  return { days, source, docType: input.docType, role: input.role };
+  return { days, source, amlRecord: Boolean(row && row.amlRecordClass !== 'NOT_APPLICABLE'), docType: input.docType, role: input.role };
 }

@@ -4,21 +4,31 @@ import { Dimensions, FlatList, Linking, Pressable, ScrollView, Share, TextInput,
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, elevation, font, fontSize, radius, space, withAlpha } from '@swift/ui';
+import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
 import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
-import { itemPhoto, vendorPhoto } from '../../../lib/images';
+import { requestAuthContinuation } from '../../../navigation/authContinuation';
+import { distanceLabel } from '../../../lib/geo';
+import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
+import { forgivingFilter } from '../../../lib/forgivingSearch';
+import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
+import { SellerInfo } from '../../../components/SellerInfo';
+import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
+import { STORE_PICKS_TITLE } from '../../../lib/storePick';
 import {
   AddMorph,
+  CartBar,
+  useCartBarClearance,
   Chip,
   CircleChip,
   ErrorState,
   FoodCard,
+  Header,
   HeartBadge,
   IconChip,
   LoadingBlock,
@@ -64,6 +74,11 @@ function StatCol({
     <Pressable
       onPress={onPress}
       disabled={!onPress}
+      // One spoken name from the visible words. Without it a screen reader
+      // reads the icon-font glyph too ("\uf1e5, New, See reviews").
+      accessible
+      accessibilityRole={onPress ? 'button' : 'text'}
+      accessibilityLabel={`${value}, ${caption}`}
       style={{
         flex: 1,
         borderRightWidth: last ? 0 : 1,
@@ -168,9 +183,12 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             padding: space.md,
           }}
         >
+          {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+              beside the tile; squeezed into 64pt it broke across lines. */}
           <Photo
             uri={itemPhoto(item)}
             label={item.name}
+            showLabel={false}
             style={{ width: 64, height: 64, borderRadius: radius.md }}
             contentFit="cover"
           />
@@ -202,11 +220,21 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
 // Kit 14–20: cover hero + floating chips, white sheet w/ name + info strip,
 // promos row, Recommended/Best-seller rails, then the full menu by category.
 export function RestaurantScreen() {
+  const route = useRoute<any>();
+  // [UI-SWEEP U10 S3-1] A store link or QR goes back to a store page already
+  // in the stack (navigate + pop) and hands the SAME mounted page the new
+  // store. The aisle, menu section, search and open sheets below belong to
+  // ONE store: a new store id is a new page, so store A's menu section can
+  // never empty store B's menu and A's report sheet can never file against B.
+  return <RestaurantStore key={route.params?.vendorId ?? ''} />;
+}
+
+function RestaurantStore() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const vendorId: string = route.params?.vendorId;
-  const { isAuthenticated, promptLogin } = useAuthStore();
+  const { isAuthenticated, wantsAuth, promptLogin } = useAuthStore();
 
   const vendor = useVendor<any>(vendorId);
   const toggleFav = useToggleFavorite();
@@ -226,6 +254,8 @@ export function RestaurantScreen() {
   // FlashList is the on-device follow-up — this bounds the eager mount now.)
   const [renderCap, setRenderCap] = useState(48);
   const cart = useCart<any>();
+  // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance({ vendorId });
   const addToCart = useAddToCart();
   const updateCartItem = useUpdateCartItem();
 
@@ -238,6 +268,8 @@ export function RestaurantScreen() {
     [allItems],
   );
   const closed = v && !v.isCurrentlyOpen;
+  // The one store-distance formatter (lib/geo) — the same words Home and Search use.
+  const distance = distanceLabel(v?.distanceKm);
   const promos: any[] = v?.activePromos ?? [];
   const isMart = v?.vendorType === 'SUPERMARKET' || v?.vendorType === 'STORE';
   const isServiceStore = v?.vendorType === 'SERVICE';
@@ -251,8 +283,9 @@ export function RestaurantScreen() {
   })();
   const martItems = useMemo(() => {
     const base = aisleId ? (categories.find((c: any) => c.id === aisleId)?.items ?? []) : allItems;
-    const q = storeQuery.trim().toLowerCase();
-    return q ? base.filter((i: any) => String(i.name).toLowerCase().includes(q)) : base;
+    // Owner, 13 Oct: the in-store search forgives like the Search tab — any
+    // word order, a typed plural, one slip — exact matches first (lib/forgivingSearch).
+    return forgivingFilter(base, storeQuery, (i: any) => ({ name: i?.name, description: i?.description }));
   }, [aisleId, storeQuery, categories, allItems]);
 
   // Bounded render windows (see renderCap above). The mart grid is a flat slice;
@@ -276,7 +309,9 @@ export function RestaurantScreen() {
 
   if (vendor.isLoading) {
     return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <LoadingBlock />
       </View>
     );
@@ -284,6 +319,8 @@ export function RestaurantScreen() {
   if (vendor.isError || !v) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => vendor.refetch()} />
       </View>
     );
@@ -292,9 +329,14 @@ export function RestaurantScreen() {
   const openItem = (item: any) => navigation.navigate('MenuItem', { vendorId, itemId: item.id });
 
   const cartLines: any[] = cart.data?.items ?? [];
-  const cartCount = cartLines.reduce((n, l) => n + (l.quantity ?? 0), 0);
   const lineFor = (itemId: string) => cartLines.find((l) => l.itemId === itemId);
-  const guardAuth = (fn: () => void) => (isAuthenticated ? fn() : promptLogin());
+  const guardAuth = (fn: () => void) => {
+    if (isAuthenticated) return fn();
+    requestAuthContinuation({ screen: 'Restaurant', vendorId }, promptLogin);
+    // A scan can open the public menu over an already active sign-in flow.
+    // In that case its root gate is mounted already, so return to it directly.
+    if (wantsAuth) navigation.getParent()?.navigate('Auth');
+  };
 
   const itemCard = (item: any, width: number) => (
     <FoodCard
@@ -311,7 +353,7 @@ export function RestaurantScreen() {
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: space['3xl'] }}
+        contentContainerStyle={{ paddingBottom: space['3xl'] + cartClearance }}
         scrollEventThrottle={64}
         onScroll={(e) => {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -326,8 +368,12 @@ export function RestaurantScreen() {
             colour; nothing here tints the image. */}
         <View>
           <Photo
-            uri={vendorPhoto(v)}
+            uri={vendorPhoto(v, HERO_PHOTO_WIDTH)}
             label={v.name}
+            // The store's name is set ON this photo, in the title below — so
+            // a store with no cover photo must not print it a second time in
+            // the placeholder's centre. One name, drawn once [Q3].
+            showLabel={false}
             glyph="shops"
             transition={200}
             style={{ width: SCREEN_W, height: 300 }}
@@ -388,18 +434,19 @@ export function RestaurantScreen() {
               alignItems: 'center',
             }}
           >
-            <CircleChip icon="chevron-left" onPress={() => navigation.goBack()} />
+            <CircleChip icon="chevron-left" label="Back" onPress={() => navigation.goBack()} />
             <View style={{ flex: 1 }} />
             <View style={{ flexDirection: 'row', gap: space.md }}>
               <HeartBadge
                 size={44}
                 active={!!v.isFavorite}
                 onPress={() =>
-                  isAuthenticated ? toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
+                  isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
                 }
               />
               <CircleChip
                 icon="share-2"
+                label="Share this store"
                 onPress={() => void Share.share({ message: `${v.name} is on Swift — ${v.description ?? 'order in the app'}` }).catch(() => toast.show("Couldn't open the share sheet."))}
               />
               {/* [B15] The flag beside the share — quiet, auth-gated like the
@@ -440,7 +487,7 @@ export function RestaurantScreen() {
               caption="See reviews"
               onPress={() => navigation.navigate('VendorReviews', { vendorId })}
             />
-            {v.distanceKm != null ? <StatCol icon="map-pin" value={`${v.distanceKm} km`} caption="Distance" /> : null}
+            {distance ? <StatCol icon="map-pin" value={distance} caption="Distance" /> : null}
             {v.etaMin != null ? <StatCol icon="clock" value={`${v.etaMin} min`} caption="Arrive" /> : null}
             {/* Pickup spec 2.4 — quiet honesty: goods stores take order-ahead
                 pickup; the Cart's mode toggle is where it's chosen. */}
@@ -640,10 +687,10 @@ export function RestaurantScreen() {
             </>
           ) : (
             <>
-          {/* Recommended rail */}
+          {/* The store's own picks (its isPopular tick), named as such: never "Recommended for you". */}
           {recommended.length > 0 ? (
             <>
-              <SectionHeader title="Recommended for you" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
+              <SectionHeader title={STORE_PICKS_TITLE} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -697,7 +744,7 @@ export function RestaurantScreen() {
             .map((cat: any) =>
               (cat.items?.length ?? 0) > 0 ? (
                 <View key={cat.id}>
-                  <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <SectionPhotoHeader title={cat.name} imageUrl={cat.imageUrl} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
                   <View
                     style={{
                       marginHorizontal: GUTTER,
@@ -752,48 +799,15 @@ export function RestaurantScreen() {
               This store hasn’t published a menu yet.
             </T>
           ) : null}
+
+          {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
 
-      {/* [Wave 3 vs reference 06] The pinned cart bar belongs to EVERY store
-          type, not only marts — the reference draws it on a restaurant menu.
-          Gated on the cart actually belonging to THIS store (the cart is
-          single-vendor and carries its vendorId), so browsing another
-          storefront never shows another store's basket. Copy per the
-          reference: "View cart" left, "N items · $X" right. */}
-      {cartCount > 0 && cart.data?.vendorId === vendorId ? (
-        <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Cart' })}>
-          {({ pressed }) => (
-            <View
-              style={{
-                position: 'absolute',
-                left: GUTTER,
-                right: GUTTER,
-                bottom: insets.bottom + space.lg,
-                height: 52,
-                borderRadius: 9999,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                paddingHorizontal: space.xl,
-                backgroundColor: color.brand[500],
-                opacity: pressed ? 0.9 : 1,
-                ...elevation.floating,
-              }}
-            >
-              <T variant="body" weight="bold" tone="onBrand">
-                View cart
-              </T>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
-                <T variant="body" weight="bold" tone="onBrand">
-                  {cartCount} item{cartCount === 1 ? '' : 's'} ·
-                </T>
-                <Money amount={Number(cart.data?.subtotalCustomer ?? 0)} tone="onBrand" />
-              </View>
-            </View>
-          )}
-        </Pressable>
-      ) : null}
+      {/* [E09] One pinned cart bar for every surface: the storefront passes its
+          vendorId so the bar only shows for THIS store's basket. */}
+      <CartBar vendorId={vendorId} />
 
       {/* Operating hours (kit 17) */}
       <PopupCard visible={showHours} onClose={() => setShowHours(false)}>
@@ -858,18 +872,13 @@ export function RestaurantScreen() {
         open={reportOpen}
         onClose={() => setReportOpen(false)}
         title="Report this store"
-        actions={[
-          { key: 'SPAM', label: 'Misleading or spam' },
-          { key: 'ILLEGAL_GOODS', label: 'Selling something it shouldn’t' },
-          { key: 'HATE_SPEECH', label: 'Hateful content' },
-          { key: 'SEXUAL_CONTENT', label: 'Sexual content' },
-          { key: 'OTHER', label: 'Something else' },
-        ].map((reason) => ({
+        // [R19] the shared list, Child safety (CSAE) included
+        actions={STORE_REPORT_REASONS.map((reason) => ({
           label: reason.label,
           onPress: () => {
             setReportOpen(false);
             reportContent.mutate(
-              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key as never },
+              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key },
               {
                 onSuccess: () => toast.success('Thanks — our team will look', 'Reports are reviewed by a human.'),
                 onError: () => toast.error('Couldn’t send that report', 'Check your connection and try again.'),

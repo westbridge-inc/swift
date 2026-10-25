@@ -11,6 +11,7 @@
  * provenance and touches no record; the SLA watchdog leaves that case open.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -33,7 +34,8 @@ import type { KycEngine, KycProvider, KycVerificationResult } from '../providers
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
-const TYPE = 'tin_certificate';
+// [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the restaurant licence (BUSINESS, not AML) stands in
+const TYPE = 'gra_restaurant_licence';
 const CODE = registryCode('GY', TYPE);
 const AML_TYPE = 'business_registration';
 const AML_CODE = registryCode('GY', AML_TYPE);
@@ -64,6 +66,7 @@ async function person(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   const token = app.jwt.sign({ userId: u.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `dsar-${RUN}-${n}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   tokens.set(u.id, token);
@@ -71,7 +74,7 @@ async function person(n: number) {
 }
 const submit = (userId: string, docType: string, documentNumber?: string) => {
   kyc.extracted = documentNumber ? { documentNumber } : undefined;
-  return runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  return runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 };
 const get = (userId: string) => app.inject({ method: 'GET', url: '/api/v1/verification/dsar/documents', headers: { authorization: `Bearer ${tokens.get(userId)}` } });
 const erase = (userId: string, documentIds?: string[]) => app.inject({ method: 'POST', url: '/api/v1/verification/dsar/documents/erase', payload: documentIds ? { documentIds } : {}, headers: { authorization: `Bearer ${tokens.get(userId)}`, 'content-type': 'application/json' } });
@@ -176,8 +179,9 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
   });
 
   it('rectify: re-opens a review case with the request as provenance, touches no record, tells the admins; the SLA watchdog leaves that case open', async () => {
-    const approved = (await submit(me, 'tin_certificate', `TIN ${RUN}-0002`)).id;
-    await runWithTenant('swift-default', () => service.approveDocument(approved, adminId));
+    const approved = (await submit(me, TYPE, `TIN ${RUN}-0002`)).id;
+    // the restaurant licence prints an expiry, which the reviewer keys
+    await runWithTenant('swift-default', () => service.approveDocument(approved, adminId, new Date(Date.now() + 200 * 86_400_000)));
     const before = await docRow(approved);
     expect((await rectify(me, approved, 'not_a_field')).statusCode).toBe(400);
     const res = await rectify(me, approved, 'doc_number');

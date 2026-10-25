@@ -1,3 +1,5 @@
+import { moneyExact } from './money';
+
 /**
  * [MOB-046] A DEBT TO A RIDER DOES NOT DISAPPEAR BECAUSE A QUERY FAILED.
  *
@@ -47,6 +49,42 @@ export interface OwedLedgerInput {
   readonly error: unknown;
   readonly data: unknown;
   readonly fetched: boolean;
+}
+
+export interface CashSettlementAmount {
+  /** The exact number submitted to the confirmation endpoint. */
+  readonly amount: number;
+  /** The same number, rendered without whole-dollar rounding. */
+  readonly formatted: string;
+}
+
+const CASH_SETTLEMENT_MAX = 99_999_999.99;
+
+/**
+ * Parse the server-minted debt once and bind its display to its attestation.
+ * The ledger is Decimal(10,2), so malformed values and values with finer
+ * precision are refused instead of being coerced or rounded on screen.
+ */
+export function cashSettlementAmount(value: unknown): CashSettlementAmount | null {
+  let amount: number;
+  if (typeof value === 'number') {
+    amount = value;
+  } else if (typeof value === 'string' && /^\d+(?:\.\d{1,2})?$/.test(value.trim())) {
+    amount = Number(value.trim());
+  } else {
+    return null;
+  }
+
+  if (
+    !Number.isFinite(amount)
+    || amount <= 0
+    || amount > CASH_SETTLEMENT_MAX
+    || Number(amount.toFixed(2)) !== amount
+  ) {
+    return null;
+  }
+
+  return { amount, formatted: moneyExact(amount) };
 }
 
 /**

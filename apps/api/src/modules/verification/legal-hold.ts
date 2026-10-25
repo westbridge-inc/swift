@@ -14,6 +14,7 @@
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isUuid } from '../../utils/uuid';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { docLegalHoldGauge } from '../../plugins/observability';
 
@@ -56,13 +57,20 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
       SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE /* verification-document-purge-authority */
     `;
     if (!locked[0]) throw new NotFoundError('User', input.subjectUserId);
-    const holdable = await tx.verificationDocument.findMany({
+    const candidates = await tx.verificationDocument.findMany({
       where: {
         userId: input.subjectUserId, purgedAt: null, legalHoldId: null,
         ...(input.documentIds && input.documentIds.length > 0 ? { id: { in: input.documentIds } } : {}),
       },
-      select: { id: true },
+      select: { id: true, fileUrl: true },
     });
+    // [Row 243] A purge that held this lock first has already shredded its object: those bytes
+    // are gone, and a hold must not claim (or block the bookkeeping of) a destroyed document.
+    const keys = candidates.map((d) => d.fileUrl).filter((k) => k !== '');
+    const shredded = new Set(keys.length === 0 ? [] : (await tx.encryptedObject.findMany({
+      where: { fileKey: { in: keys }, shreddedAt: { not: null } }, select: { fileKey: true },
+    })).map((o) => o.fileKey));
+    const holdable = candidates.filter((d) => !shredded.has(d.fileUrl));
     if (holdable.length === 0) {
       throw new AppError(409, 'NOTHING_TO_HOLD', 'No unpurged, unheld document to hold — a hold never resurrects purged bytes');
     }
@@ -79,6 +87,8 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
 }
 
 export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId: string; releasedBy: string; reason: string }, now = new Date()) {
+  // An id that is not a UUID names no hold (doc_legal_holds.id is a uuid column): 404, not a failed query.
+  if (!isUuid(input.holdId)) throw new NotFoundError('DocLegalHold', input.holdId);
   return prisma.$transaction(async (tx) => {
     const hold = await tx.docLegalHold.findUnique({ where: { id: input.holdId } });
     if (!hold) throw new NotFoundError('DocLegalHold', input.holdId);

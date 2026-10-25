@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import {
   calculateDeliveryFee,
@@ -24,8 +25,8 @@ describe('deliveryFeeFromRates default-preservation (characterization)', () => {
     }
   });
 
-  it('the code defaults are exactly the old function defaults (500 / 200 / 2 / 1.0)', () => {
-    expect(DEFAULT_DELIVERY_RATES).toEqual({ baseFee: 500, perKmRate: 200, includedKm: 2, surgeMultiplier: 1.0 });
+  it('the code defaults are the owner’s Georgetown schedule (500 / 100 / 3 / 1.0), which the function defaults read', () => {
+    expect(DEFAULT_DELIVERY_RATES).toEqual({ baseFee: 500, perKmRate: 100, includedKm: 3, surgeMultiplier: 1.0 });
   });
 });
 
@@ -57,7 +58,7 @@ describe('CountryConfigService.getDeliveryRates (reads config, resilient)', () =
 
   beforeAll(async () => {
     process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
-    prisma = new PrismaClient();
+    prisma = testPrismaClient();
     svc = new CountryConfigService(prisma);
     await prisma.countryConfig.create({
       data: {

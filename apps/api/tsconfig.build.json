@@ -1,0 +1,9 @@
+{
+  // The production build (Dockerfile `pnpm run build`). The same compiler
+  // settings as tsconfig.json, minus the test files: 611 of src's ~1000 .ts
+  // files are tests, and compiling them into the image's dist/ pushed the
+  // build to the 4 GB heap cap on the 8 GB staging host (09-24). Type-checking
+  // still covers every file: `type-check` and CI use tsconfig.json.
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "src/**/__tests__/**", "src/**/*.test.ts", "src/**/*.spec.ts"]
+}

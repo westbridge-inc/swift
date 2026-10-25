@@ -1,6 +1,10 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
+import { preload } from 'react-dom';
+import { PRELOADED_FONTS } from '@/lib/fonts';
+import { appleStartupImages } from '@/lib/apple-startup-images';
 import './globals.css';
-import { swiftDesignVariables } from '@/lib/design-tokens';
+import { appChrome, swiftDesignVariables } from '@/lib/design-tokens';
+import { ServiceWorkerRegistrar } from '@/components/service-worker-registrar';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 
 /**
@@ -33,7 +37,7 @@ export const metadata: Metadata = {
   twitter: {
     card: 'summary_large_image',
     title: 'Swift',
-    description: `One app for ${launch.markets[0]}. Zero commission — ever.`,
+    description: `One app for ${launch.markets[0]}. No commission on orders.`,
   },
   robots: { index: true, follow: true },
   // IDENTITY LAW [SITE-1.1 Part 2]: the company is the author, never a person.
@@ -41,12 +45,41 @@ export const metadata: Metadata = {
   creator: site.legalEntityName,
   publisher: site.legalEntityName,
   formatDetection: { telephone: false, address: false, email: false },
+  // [PWA-1] The installed app (manifest.ts carries the rest). iOS reads its
+  // home-screen icon and title from these tags, not from the manifest's icons.
+  // 'default' keeps the status bar solid with dark text above the customer
+  // shell's white header; 'black-translucent' would lay white status text over it.
+  appleWebApp: { capable: true, title: 'Swift', statusBarStyle: 'default', startupImage: appleStartupImages },
+  icons: {
+    icon: [{ url: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' }],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
+  // Next emits only the standard `mobile-web-app-capable` for `capable`; the
+  // Apple-prefixed name is what older iOS releases look for.
+  other: { 'apple-mobile-web-app-capable': 'yes' },
+};
+
+/**
+ * [PWA-1] `viewport-fit=cover` lets the installed app use the whole screen on a
+ * notched iPhone — and makes `env(safe-area-inset-*)` report real values, which
+ * the body (sides) and the customer shell (header, bottom) then pad by, so
+ * nothing sits under the notch or the home bar. Zoom stays enabled.
+ */
+export const viewport: Viewport = {
+  themeColor: appChrome.theme,
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  for (const href of PRELOADED_FONTS) preload(href, { as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' });
   return (
     <html lang="en-GY" style={swiftDesignVariables}>
-      <body>{children}</body>
+      <body>
+        {/* [Row 111 · W8] A keyboard or screen-reader user can jump past the navigation to the content. */}
+        <a href="#main" className="sw-skip-link">Skip to main content</a>
+        <ServiceWorkerRegistrar />
+        {children}
+      </body>
     </html>
   );
 }

@@ -1,6 +1,6 @@
 name: Deploy API
 
-# Manual fail-closed sentinel. Production authority cutover cannot use a
+# Manual fail-closed sentinel. Production authority cutovers cannot use a
 # generic rolling deploy and the repository does not yet contain the reviewed
 # Fly manifest/process-group controls needed to automate the non-rolling path.
 on:
@@ -22,11 +22,13 @@ jobs:
       # rollback. That is incompatible with the session-owned mover-location
       # authority cutover, which requires every old API/worker Machine to be
       # stopped before migration and forbids resuming the old binary after new
-      # owners exist. Fail closed until the real Fly manifest/process groups
-      # are checked in and this workflow is replaced by the independently
-      # reviewed non-rolling procedure in MOVER-AUTHORITY-CUTOVER-RUNBOOK.md.
+      # owners exist. The signup-continuation authority cutover has the same
+      # non-rolling requirement because old binaries use incompatible Redis
+      # keys and trust a phone-global registration flag. Fail closed until the
+      # real Fly manifest/process groups are checked in and this workflow is
+      # replaced by independently reviewed non-rolling procedures.
       - name: Block obsolete rolling deployment path
         run: |
-          echo "::error::Production deploy is intentionally blocked: the mover-authority release requires a coordinated non-rolling cutover."
-          echo "Follow apps/api/MOVER-AUTHORITY-CUTOVER-RUNBOOK.md and replace this workflow only after the Fly manifest, process groups, maintenance controls, and rollback proof exist."
+          echo "::error::Production deploy is intentionally blocked: authority releases require a coordinated non-rolling cutover."
+          echo "Follow apps/api/MOVER-AUTHORITY-CUTOVER-RUNBOOK.md and apps/api/SIGNUP-CONTINUATION-CUTOVER.md; replace this workflow only after the Fly manifest, process groups, maintenance controls, and rollback proof exist."
           exit 1

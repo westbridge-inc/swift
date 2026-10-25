@@ -10,6 +10,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import courierRoutes from '../modules/courier/courier.routes';
 import { OrderService, reconcileMissingEarnings } from '../modules/order/order.service';
 import { COURIER_CASH_OUTCOME_ENFORCED_AT } from '../modules/cash/cash-rules.service';
+import { issueSyntheticHandoverPhoto, persistSessionFix } from './helpers/handover-proof';
+import { retainedPhonePrefix } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // [M-28 · S0] A proof photo never implies money.
@@ -23,11 +25,22 @@ import { COURIER_CASH_OUTCOME_ENFORCED_AT } from '../modules/cash/cash-rules.ser
 // refused or nobody there fails the job with the photo as the claim's
 // evidence, a strike, and the rider's claim); the terminal authority, the
 // earnings writer and the reconciler all refuse an unpaid cash courier job.
+//
+// [SAFE-B] The proof is the one the server issued (the shared issuer behind
+// /proof-photo), bound to the job, its sender and the assigned rider; the
+// canonical delivery seam admits nothing else. A refusal or nobody-there
+// strikes and auto-approves only on complete evidence: the issued proof and
+// the fix the rider's own session persisted at the drop-off. A sender's
+// refusal at pickup is a declaration and strikes nobody. Issued proofs and
+// filings are retained evidence, so this suite deletes neither and lives in a
+// phone namespace unique to the run.
 // ---------------------------------------------------------------------------
 
 const CENTRAL = { lat: 6.81, lng: -58.155 };
 const SOUTH = { lat: 6.755, lng: -58.155 };
 const DAY = 86_400_000;
+/** [SAFE-B · retained history] A phone namespace no other suite uses or purges, unique to the run. */
+const PHONE_PREFIX = retainedPhonePrefix('04');
 let app: FastifyInstance;
 let orders: OrderService;
 const createdUserIds: string[] = [];
@@ -37,15 +50,15 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200178${String(seq).padStart(2, '0')}`, firstName: 'Courier', lastName: `Cash${seq}`, roles, activeRole,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName: 'Courier', lastName: `Cash${seq}`, roles, activeRole,
       isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2', countryCode: 'GY',
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'm28', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
-  return { userId: user.id, token };
+  const session = await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'm28', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+  return { userId: user.id, token, sessionId: session.id };
 }
 async function makeRider() {
   const u = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
@@ -57,20 +70,31 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
   return app.inject({ method, url, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}), headers: { ...(payload !== undefined ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) } });
 }
 let doorSeq = 0;
-/** A courier job in the rider's custody with the proof photo issued. */
+const RUN_DROP_OFFSET = Math.floor(Math.random() * 90) * 0.0001;
+/** A courier job in the rider's custody with the proof photo issued. [SAFE-B] The server's issuer mints the
+ *  proof for the assigned rider (in custody only), and the rider's own session holds a fresh fix at the drop-off. */
 async function jobInCustody(payer: 'SENDER' | 'RECIPIENT', status: 'RIDER_ASSIGNED' | 'PICKED_UP' = 'PICKED_UP') {
   const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
   const created = (await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, payer }, sender.token)).json().data;
   const rider = await makeRider();
-  doorSeq += 1;
-  const issued = `storage://t/courier-proof/${created.orderId}/proof.jpg`;
+  // [SAFE-B · retained history] A drop-off of this run's own: a strike an earlier run left at a fixed drop would
+  // co-fire collusion_address on the claim this suite expects to be clean.
+  let drop = { lat: 0, lng: 0 };
+  for (;;) {
+    doorSeq += 1;
+    drop = { lat: Number((SOUTH.lat + RUN_DROP_OFFSET + doorSeq * 0.01).toFixed(4)), lng: Number((SOUTH.lng - doorSeq * 0.01).toFixed(4)) };
+    if (await app.prisma.strike.count({ where: { addressKey: `geo:${drop.lat.toFixed(4)}:${drop.lng.toFixed(4)}` } }) === 0) break;
+  }
   await app.prisma.order.update({
     where: { id: created.orderId },
-    data: { riderId: rider.riderId, status, courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.riderId, deliveryLat: SOUTH.lat + doorSeq * 0.01, deliveryLng: SOUTH.lng - doorSeq * 0.01 },
+    data: { riderId: rider.riderId, status, deliveryLat: drop.lat, deliveryLng: drop.lng },
   });
   await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: created.orderId, isAvailable: false } }).catch(() => {});
-  const order = await app.prisma.order.findUniqueOrThrow({ where: { id: created.orderId } });
-  return { orderId: created.orderId as string, sender, rider, issued, drop: { lat: order.deliveryLat, lng: order.deliveryLng } };
+  await persistSessionFix(app.prisma, { riderId: rider.riderId }, rider.sessionId, drop);
+  const issued = status === 'PICKED_UP'
+    ? (await issueSyntheticHandoverPhoto(app.prisma, { orderId: created.orderId, actorId: rider.userId, role: 'RIDER' })).url
+    : '';
+  return { orderId: created.orderId as string, sender, rider, issued, drop };
 }
 async function facts(orderId: string, customerId: string) {
   const o = await app.prisma.order.findUniqueOrThrow({ where: { id: orderId } });
@@ -98,20 +122,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  const riders = await app.prisma.rider.findMany({ where: { userId: { in: createdUserIds } }, select: { id: true } });
-  const rows = await app.prisma.order.findMany({ where: { OR: [{ customerId: { in: createdUserIds } }, { riderId: { in: riders.map((r) => r.id) } }] }, select: { id: true } });
-  const ids = rows.map((o) => o.id);
-  await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: ids } } });
-  await app.prisma.strike.deleteMany({ where: { orderId: { in: ids } } });
-  await app.prisma.earning.deleteMany({ where: { orderId: { in: ids } } });
-  await app.prisma.rider.updateMany({ where: { userId: { in: createdUserIds } }, data: { currentOrderId: null } }).catch(() => {});
-  await app.prisma.order.deleteMany({ where: { id: { in: ids } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [SAFE-B · retained history] Every job here carries an issued proof or a filing: jobs, claims, strikes,
+  // earnings and the people they name are kept. Only scaffolding is touched: the retained riders drop their
+  // job pointers and stay offline (one statement), so no other suite or census sees a live mover. Nothing is
+  // swallowed.
+  try {
+    await app.prisma.rider.updateMany({ where: { userId: { in: createdUserIds } }, data: { currentOrderId: null, isOnline: false, isAvailable: false } });
+  } finally {
+    await app.close();
+  }
 });
 
 describe('[M-28] the sender pays — at pickup', () => {
@@ -131,13 +150,13 @@ describe('[M-28] the sender pays — at pickup', () => {
     expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'DELIVERED', payment: 'CAPTURED', proof: job.issued, fees: 1, strikes: 0, claims: 0 });
   });
 
-  it('the sender refuses at pickup: the job ends before custody, the sender takes a strike, no claim is minted, nothing is earned', async () => {
+  it('the sender refuses at pickup: the job ends before custody, no claim is minted, nothing is earned, and the declaration strikes nobody', async () => {
     const job = await jobInCustody('SENDER', 'RIDER_ASSIGNED');
     const res = await inject('POST', `/api/v1/courier/order/${job.orderId}/collect`, { outcome: 'refused', gps: CENTRAL }, job.rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data).toMatchObject({ status: 'CANCELLED', paymentStatus: 'FAILED', collected: false });
-    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'CANCELLED', payment: 'FAILED', strikes: 1, claims: 0, fees: 0 });
-    expect((await app.prisma.strike.findFirstOrThrow({ where: { orderId: job.orderId } })).reason).toBe('failed_payment_refused');
+    // [SAFE-B] The rider's report is the only evidence of a refusal at pickup: it ends the job, it punishes no one.
+    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'CANCELLED', payment: 'FAILED', strikes: 0, claims: 0, fees: 0 });
     expect(await app.prisma.notification.count({ where: { userId: job.sender.userId, title: 'Courier job ended — fee not paid' } })).toBe(1);
   });
 });

@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // Presence (5.1/6.2): coarse, capped, hailable-only, jittered — never exact,
@@ -64,6 +65,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
+  // [PAYMENT-SIMPLIFY] These cases cover the driver link's ON path, kept dormant behind DRIVER_MMG_PAY_LINK.
+  process.env['DRIVER_MMG_PAY_LINK'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -151,7 +154,7 @@ describe('MMG pay-link exposure (trip-end surface only)', () => {
     expect(before.json().data.driver.mmgPayUrl).toBeNull();
 
     // Underway: the link rides along for the post-trip sheet.
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'RIDE_IN_PROGRESS' } });
+    await walkOrderStatus(app.prisma, order.id, 'RIDE_IN_PROGRESS');
     const during = await active(c.token);
     expect(during.json().data.driver.mmgPayUrl).toBe('https://pay.example.com/pay/driver-1');
 
@@ -162,9 +165,20 @@ describe('MMG pay-link exposure (trip-end surface only)', () => {
     });
     expect(receipt.json().data.driver.mmgPayUrl).toBe('https://pay.example.com/pay/driver-1');
 
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'PENDING', driverId: d.driverId } });
+    // [row 264] A delivered ride never goes back to PENDING (the database refuses it):
+    // the matching-phase fetch is of a second ride, born PENDING.
+    const matchingOrder = await app.prisma.order.create({
+      data: {
+        orderNumber: `PM-MATCH-${seq}`, orderType: 'TAXI', customerId: c.userId, driverId: d.driverId,
+        status: 'PENDING',
+        pickupAddress: 'A', pickupLat: GT.lat, pickupLng: GT.lng,
+        deliveryAddress: 'B', deliveryLat: 6.8143, deliveryLng: -58.1443,
+        subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500,
+        deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+      } as never,
+    });
     const matching = await app.inject({
-      method: 'GET', url: `/api/v1/rides/${order.id}`, headers: { authorization: `Bearer ${c.token}` },
+      method: 'GET', url: `/api/v1/rides/${matchingOrder.id}`, headers: { authorization: `Bearer ${c.token}` },
     });
     expect(matching.json().data.driver.mmgPayUrl).toBeNull();
   });

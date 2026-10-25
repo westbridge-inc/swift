@@ -6,6 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { withPushRetry, type PushProvider } from '../providers/notifications/channels';
 import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { opsPageOnce } from '../jobs/queue';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // SWIFT-UG-NOTIF-01/02 + SWIFT-AUD-D7-02/03 — notification hardening and ops
@@ -41,6 +42,9 @@ afterAll(async () => {
   }
   await app.redis.del('ops_page:test-dedupe');
   await app.redis.del('ops_page:test-dedupe-fail');
+  await app.redis.del('ops_page:test-zero-reach');
+  await app.redis.del('ops_page:test-reached');
+  await app.redis.del('ops_page:test-void-reach');
   await app.close();
 });
 
@@ -92,7 +96,7 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
     await app.prisma.tenant.create({ data: { id: otherTenant, name: 'Other', slug: otherTenant, isActive: true } });
     const foreignAdmin = await app.prisma.user.create({
       data: {
-        phone: `+59278${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Foreign', lastName: 'Admin',
         roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: otherTenant,
@@ -133,7 +137,7 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
 
       const superAdmin = await app.prisma.user.create({
         data: {
-          phone: `+59280${Math.floor(Math.random() * 900000) + 100000}`,
+          phone: testPhone(),
           firstName: 'Platform', lastName: 'Operator',
           roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never,
           isPhoneVerified: true, status: 'ACTIVE', tenantId: otherTenant,
@@ -178,7 +182,7 @@ describe('notifyAdmins under request tenant scope [F-028-10]', () => {
     await app.prisma.tenant.create({ data: { id: opsTenant, name: 'Ops home', slug: opsTenant, isActive: false } });
     const operator = await app.prisma.user.create({
       data: {
-        phone: `+59281${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Outage', lastName: 'Operator',
         roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: opsTenant,
@@ -257,5 +261,53 @@ describe('opsPageOnce dedup [SWIFT-AUD-D7-02]', () => {
     const second = await opsPageOnce({ redis: app.redis }, 'test-dedupe-fail', 60, ok);
     expect(second).toBe(true);
     expect(fired).toBe(2); // both attempts ran — the failure did not suppress paging
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [AUD-MAIN-008 / AUD-L4-024] A PAGE THAT REACHED NOBODY IS NOT A DELIVERED PAGE.
+//
+// opsPageOnce released its claim when the callback THREW, but a callback that
+// RESOLVES having reached nobody was counted as success: the Redis key stayed
+// claimed for the whole window and the condition went dark. notifyAdmins
+// returns the number of recipients reached and 30 of the 40 call sites resolve
+// to it directly, so the information was already there and simply discarded.
+//
+// This is not a new rule — modules/ops/ops-page.ts already refuses to claim a
+// zero-recipient page ("zero_recipient_pending"). It covered one condition.
+// This gives the same guarantee to the rest.
+//
+// The live instance: backup-freshness fires daily, correctly, forever; a stock
+// deploy seeds no SUPER_ADMIN, so notifyAdmins returns 0 — and the alarm for
+// total data loss marked itself delivered and slept 20 hours.
+// ---------------------------------------------------------------------------
+describe('[AUD-MAIN-008] a page that reached nobody does not hold the dedupe key', () => {
+  it('a callback resolving 0 returns false and leaves the key unclaimed', async () => {
+    const ok = await opsPageOnce({ redis: app.redis }, 'test-zero-reach', 3600, async () => 0);
+    expect(ok).toBe(false);
+    expect(await app.redis.get('ops_page:test-zero-reach')).toBeNull();
+  });
+
+  it('so the NEXT detection re-pages instead of going dark for the window', async () => {
+    await opsPageOnce({ redis: app.redis }, 'test-zero-reach', 3600, async () => 0);
+    let reached = 0;
+    const ok = await opsPageOnce({ redis: app.redis }, 'test-zero-reach', 3600, async () => { reached = 1; return 1; });
+    expect(ok).toBe(true);
+    expect(reached).toBe(1);                                      // it actually ran again
+    expect(await app.redis.get('ops_page:test-zero-reach')).toBe('1');
+  });
+
+  it('a page that DID reach someone still dedupes for the window', async () => {
+    const first = await opsPageOnce({ redis: app.redis }, 'test-reached', 3600, async () => 2);
+    const second = await opsPageOnce({ redis: app.redis }, 'test-reached', 3600, async () => 2);
+    expect([first, second]).toEqual([true, false]);
+  });
+
+  it('a callback that reports nothing is unchanged — silence is not zero', async () => {
+    // Most call sites resolve to a count; the ones that return void must keep
+    // their existing behaviour rather than be silently treated as undelivered.
+    const ok = await opsPageOnce({ redis: app.redis }, 'test-void-reach', 5, async () => undefined);
+    expect(ok).toBe(true);
   });
 });

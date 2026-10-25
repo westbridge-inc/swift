@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { BookingService } from '../modules/booking/booking.service';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 
@@ -89,10 +90,10 @@ async function makeServiceVendor() {
   return { owner, vendor, item };
 }
 
-/** Tomorrow 10:00 on the UTC face (the codebase's local-wall-clock convention). */
+/** Tomorrow at the vendor's Guyana wall-clock hour, stored as a true instant. */
 function slotTomorrow(hour: number): Date {
-  const d = new Date(Date.now() + DAY);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hour, 0, 0, 0));
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  return instantOfGuyanaWallClock(new Date(Date.UTC(y!, m! - 1, d! + 1, hour)));
 }
 
 async function makeAppointmentOrder(customerUserId: string, vendorId: string, itemId: string, slot: Date, status: 'PENDING' | 'ACCEPTED') {

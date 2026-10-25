@@ -1,6 +1,5 @@
 declare const styles: {
   readonly alert: string;
-  readonly backLink: string;
   readonly breakdown: string;
   readonly cancelButton: string;
   readonly cancelConfirm: string;
@@ -31,6 +30,7 @@ declare const styles: {
   readonly primaryButton: string;
   readonly progressCard: string;
   readonly rating: string;
+  readonly reportProblem: string;
   readonly riderDetails: string;
   readonly secondaryButton: string;
   readonly sectionHeading: string;

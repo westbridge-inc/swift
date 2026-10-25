@@ -1,65 +1,85 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchVendors, approveVendor } from '@/lib/api';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { fetchVendors } from '@/lib/api';
+import { ENUM_LABELS, label, ratingText } from '@/lib/labels';
+import { EMPTY_LIST_STATE, listQueryString, type ListState } from '@/lib/list-query';
+import { ListToolbar, Pager } from '@/components/mc/ListControls';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { StatusBadge } from '@/components/mc/StatusBadge';
+import { Truncate } from '@/components/mc/Truncate';
+import { DataTable } from '@/components/mc/DataTable';
+
+// [MISSION CONTROL · PR-1] The store list's errors, in words: a failed read is
+// "Couldn't load the store list — Retry", never an empty table that reads as
+// "no stores". Paging, search, filters and hiding test data come in PR-3.
+//
+// [MC-PR3] Server paging, search, status and type filters, test data hidden by default.
+//
+// [MC-PR2] No "Approve" from the list: a store goes live by itself when its
+// last required document is approved. The store's page shows which documents
+// are still waiting, with a link to the Review Center.
+
+interface VendorRow {
+  id: string;
+  name: string;
+  vendorType: string;
+  status: string;
+  city?: string | null;
+  averageRating?: number | null;
+  totalRatings?: number | null;
+  totalOrders?: number | null;
+  owner?: { user?: { id?: string } | null } | null;
+}
 
 export default function VendorsPage() {
-  const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['vendors'], queryFn: () => fetchVendors() });
-  const approveMutation = useMutation({
-    mutationFn: approveVendor,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['vendors'] }),
-  });
+  const [state, setState] = useState<ListState>(EMPTY_LIST_STATE);
+  const list = useQuery({ queryKey: ['vendors', state], queryFn: () => fetchVendors(listQueryString(state)), placeholderData: keepPreviousData });
+  const rows: VendorRow[] = list.data?.data ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">Vendors</h1>
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Name</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Rating</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Orders</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
-            ) : (
-              data?.data?.map((vendor: any) => (
-                <tr key={vendor.id} className="border-b border-[var(--border)] hover:bg-white/5">
-                  <td className="p-4 font-medium"><Link href={`/vendors/${vendor.id}`} className="hover:text-[var(--accent)] transition-colors">{vendor.name}</Link></td>
-                  <td className="p-4">{vendor.vendorType}</td>
-                  <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      vendor.status === 'ACTIVE' ? 'bg-green-500/20 text-green-400' :
-                      vendor.status === 'PENDING_APPROVAL' ? 'bg-yellow-500/20 text-yellow-400' :
-                      'bg-red-500/20 text-red-400'
-                    }`}>{vendor.status}</span>
-                  </td>
-                  <td className="p-4">{vendor.averageRating.toFixed(1)}</td>
-                  <td className="p-4">{vendor.totalOrders}</td>
-                  <td className="p-4 text-right">
-                    {vendor.status === 'PENDING_APPROVAL' && (
-                      <button
-                        onClick={() => approveMutation.mutate(vendor.id)}
-                        className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80"
-                      >
-                        Approve
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+    <div className="mc-page">
+      <ListToolbar
+        state={state}
+        onChange={setState}
+        searchLabel="Search by store name"
+        filters={[
+          { key: 'status', label: 'Status', options: [['', 'Any status'], ...Object.entries(ENUM_LABELS.VendorStatus)] },
+          { key: 'type', label: 'Type', options: [['', 'All types'], ...Object.entries(ENUM_LABELS.VendorType)] },
+        ]}
+      />
+      {list.isLoading ? (
+        <div className="mc-card" aria-busy="true">Loading the store list…</div>
+      ) : list.isError ? (
+        <QueryFailed error={list.error} what="the store list" onRetry={() => void list.refetch()} retrying={list.isFetching} />
+      ) : (
+        <>
+        <DataTable<VendorRow>
+          label="Stores"
+          rows={rows}
+          rowKey={(v) => v.id}
+          empty={state.search || Object.values(state.filters).some(Boolean) ? 'No store matches this search.' : 'No stores yet.'}
+          columns={[
+            {
+              key: 'name', header: 'Name', width: '30%', primary: true,
+              cell: (v) => (
+                <Link href={`/vendors/${v.id}`} className="block min-w-0">
+                  <Truncate text={v.name} />
+                  {v.city ? <span className="mc-cell-sub"><Truncate text={v.city} /></span> : null}
+                </Link>
+              ),
+            },
+            { key: 'type', header: 'Type', width: '16%', cell: (v) => label('VendorType', v.vendorType) },
+            { key: 'status', header: 'Status', width: '20%', cell: (v) => <StatusBadge group="VendorStatus" value={v.status} /> },
+            { key: 'rating', header: 'Rating', width: '12%', cell: (v) => <span className="mc-numbers">{ratingText(v.averageRating, v.totalRatings)}</span> },
+            { key: 'orders', header: 'Orders', width: '10%', align: 'right', cell: (v) => <span className="mc-numbers">{v.totalOrders ?? 0}</span> },
+          ]}
+        />
+        <Pager meta={list.data?.meta} shown={rows.length} onPage={(page) => setState({ ...state, page })} onShowTestData={() => setState({ ...state, showTestData: true, page: 1 })} />
+        </>
+      )}
     </div>
   );
 }

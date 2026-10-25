@@ -67,7 +67,7 @@ export function assertMmgAttestable(order: AttestableOrder): void {
       throw new AppError(
         409,
         'PAYMENT_FAILED',
-        'MMG reports this payment as failed. If money did reach your wallet, contact support with the transaction reference — do not mark it received here.',
+        'MMG reports this payment as failed. If money did reach your MMG account, contact support with the transaction reference — do not mark it received here.',
       );
     case 'EXPIRED':
       throw new AppError(
@@ -95,14 +95,14 @@ export function normaliseMmgReference(raw: unknown): string {
     throw new AppError(
       400,
       'REFERENCE_REQUIRED',
-      'Enter the MMG transaction reference from the message in your wallet — it is what proves this payment later.',
+      'Enter the MMG transaction reference from MMG’s payment message — it is what proves this payment later.',
     );
   }
   if (!REFERENCE_SHAPE.test(value)) {
     throw new AppError(
       400,
       'REFERENCE_INVALID',
-      'That does not look like an MMG transaction reference. Copy it from the payment message in your wallet.',
+      'That does not look like an MMG transaction reference. Copy it from MMG’s payment message.',
     );
   }
   return value;
@@ -133,9 +133,12 @@ export async function recordVendorAttestation(
   });
   if (clash) return { ok: false, reason: 'REFERENCE_ALREADY_USED' };
 
+  // [E02 · refund rail 1/8] The amount lands on the row beside the reference,
+  // in the same write: it is the cap every MMG refund obligation on this order
+  // is held to (a deferred trigger refuses anything over it).
   await tx.order.update({
     where: { id: input.orderId },
-    data: { mmgAttestedRef: input.reference, mmgAttestedById: input.actorId, mmgAttestedAt: now },
+    data: { mmgAttestedRef: input.reference, mmgAttestedById: input.actorId, mmgAttestedAt: now, mmgAttestedAmount: input.amount },
   });
   // The evidence a reconciliation, a dispute or an audit reads back. It names
   // the money and the destination, because "received" without an amount and a

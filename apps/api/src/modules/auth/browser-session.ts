@@ -28,17 +28,91 @@ export const BROWSER_CLIENTS = new Set(['admin-web', 'web']);
 
 export const ACCESS_COOKIE = 'swift_at';
 export const REFRESH_COOKIE = 'swift_rt';
+export const SIGNUP_CONTINUATION_COOKIE = 'swift_signup';
 /** The refresh cookie is sent only to the auth routes — never to an ordinary API call. */
 export const REFRESH_COOKIE_PATH = '/api/v1/auth';
 export const ACCESS_COOKIE_PATH = '/api/v1';
+export const SIGNUP_CONTINUATION_COOKIE_PATH = '/api/v1/auth';
 /** Matches the refresh session's life (30 days); the access cookie carries the 15-minute JWT and expires with it. */
 export const REFRESH_COOKIE_MAX_AGE_S = 30 * 24 * 3600;
 export const ACCESS_COOKIE_MAX_AGE_S = 15 * 60;
+export const SIGNUP_CONTINUATION_COOKIE_MAX_AGE_S = 10 * 60;
 
-export function browserClientOf(request: Pick<FastifyRequest, 'headers'>): string | null {
+// ---------------------------------------------------------------------------
+// THE ADMIN CONSOLE'S COOKIES ARE BOUND TO THE API HOST.
+//
+// A plain-named cookie can be SET for the API host by any sibling subdomain
+// (`Domain=.<site>`), and the web app's own session cookies live on the same
+// host under the same names: a session tossed into an admin's browser — or the
+// web app's session in the same browser — reached the admin console's requests
+// as if the admin had signed in (session fixation; one app's session read as
+// the other's). `__Host-` makes a browser refuse any Set-Cookie for that name
+// that is not Secure, at Path=/, with no Domain, so only the API host itself,
+// over TLS, can write it. The prefix needs Secure, so it applies only where the
+// cookies are Secure (the same `secure()` predicate as the writer below; plain
+// HTTP local development keeps the plain pair, which a browser would otherwise
+// drop), and Path=/, which the web app's path-scoped pair does not use — so the
+// web app is untouched. Reader and writer decide the names HERE, from the same
+// request: over TLS the admin console is authenticated ONLY by its `__Host-`
+// pair; a plain-named cookie on an admin-console request is not a credential.
+// ---------------------------------------------------------------------------
+
+export const HOST_COOKIE_PREFIX = '__Host-';
+export const ADMIN_BROWSER_CLIENT = 'admin-web';
+type Env = Record<string, string | undefined>;
+
+export interface SessionCookieNames {
+  readonly access: string;
+  readonly refresh: string;
+  readonly accessPath: string;
+  readonly refreshPath: string;
+}
+const PLAIN_SESSION_COOKIES: SessionCookieNames = Object.freeze({
+  access: ACCESS_COOKIE, refresh: REFRESH_COOKIE, accessPath: ACCESS_COOKIE_PATH, refreshPath: REFRESH_COOKIE_PATH,
+});
+const HOST_SESSION_COOKIES: SessionCookieNames = Object.freeze({
+  access: `${HOST_COOKIE_PREFIX}${ACCESS_COOKIE}`, refresh: `${HOST_COOKIE_PREFIX}${REFRESH_COOKIE}`, accessPath: '/', refreshPath: '/',
+});
+
+type RequestPosture = Pick<FastifyRequest, 'headers'> & { protocol?: string };
+
+/** The session cookie names and paths for this request's browser client under this transport. */
+export function sessionCookieNamesFor(request: RequestPosture, env: Env = process.env): SessionCookieNames {
+  return browserClientOf(request, env) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
+}
+
+/** Whether a request carries ITS OWN session pair (the browse gate's "this is a session: authenticate it").
+ *  Only the pair this request's client reads counts: the console's `__Host-` pair is Path=/ on the API host, so
+ *  the website's requests from the same browser carry it too — and are still guests to the website. */
+export function carriesOwnSessionCookie(request: RequestPosture, env: Env = process.env): boolean {
+  const cookies = parseCookies(request.headers['cookie']);
+  const names = sessionCookieNamesFor(request, env);
+  return Object.hasOwn(cookies, names.access) || Object.hasOwn(cookies, names.refresh);
+}
+
+/**
+ * The browser client a request names — and the console is that client only from
+ * the console's own origin. The CORS allowlist is ONE list for the website and the
+ * console, and both sit on the API's site, so a script on the website's origin
+ * could name itself `admin-web` and its requests would carry the console's
+ * SameSite=Strict `__Host-` pair. With the console's host configured
+ * (`ADMIN_HOST`, which deploy/pilot-up.sh also requires in CORS_ORIGIN), only
+ * `https://<ADMIN_HOST>` is `admin-web`; production without it serves no console,
+ * so nothing is; local development and tests keep the allowlist rule. A claim
+ * from elsewhere is no browser client at all: no cookie is read or written for it.
+ */
+export function browserClientOf(request: Pick<FastifyRequest, 'headers'>, env: Env = process.env): string | null {
   const raw = request.headers[BROWSER_CLIENT_HEADER];
   const value = Array.isArray(raw) ? raw[0] : raw;
-  return typeof value === 'string' && BROWSER_CLIENTS.has(value) ? value : null;
+  if (typeof value !== 'string' || !BROWSER_CLIENTS.has(value)) return null;
+  if (value === ADMIN_BROWSER_CLIENT && !isConsoleOrigin(originOf(request), env)) return null;
+  return value;
+}
+
+function isConsoleOrigin(origin: string | null, env: Env): boolean {
+  const host = (env['ADMIN_HOST'] ?? '').trim().toLowerCase();
+  if (host) return origin === `https://${host}`;
+  return !isProduction(env);
 }
 
 export function parseCookies(header: string | undefined): Record<string, string> {
@@ -81,66 +155,201 @@ function originOf(request: Pick<FastifyRequest, 'headers'>): string | null {
  * browser client AND comes from an allowed origin. A cookie on a request
  * without both is not a credential.
  */
-export function bearerOrCookieToken(request: Pick<FastifyRequest, 'headers'>): string {
+export function bearerOrCookieToken(request: RequestPosture, env: Env = process.env): string {
   const bearer = request.headers.authorization;
   if (typeof bearer === 'string' && bearer.startsWith('Bearer ')) return bearer.slice('Bearer '.length);
   const cookies = parseCookies(request.headers['cookie']);
-  const cookie = cookies[ACCESS_COOKIE];
+  const cookie = cookies[sessionCookieNamesFor(request, env).access];
   if (!cookie) return '';
-  if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
+  if (!browserClientOf(request, env)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
   const origin = originOf(request);
   if (!origin || !allowedBrowserOrigins().has(origin)) { browserSessionCounter.labels('cookie_rejected_origin').inc(); return ''; }
   browserSessionCounter.labels('cookie_auth').inc();
   return cookie;
 }
 
+/** The website's name for itself on a realtime socket handshake (`auth: { client: 'web' }`). */
+export const WEB_BROWSER_CLIENT = 'web';
+/** Where the website opens the store socket: under the access cookie's Path, so the browser sends it. */
+export const BROWSER_SOCKET_PATH = '/api/v1/socket.io/';
+
+/**
+ * [PERF row 8] The website's credential on a realtime socket handshake. The
+ * phone apps hand the socket their access token (`auth.token`); the website
+ * holds no token (W-01), so its socket presents the access cookie instead,
+ * behind this socket's version of the cookie gate:
+ *  - the handshake names the website (`auth.client === 'web'`). A browser
+ *    cannot set a custom header on a WebSocket, so the name travels in the
+ *    handshake payload, and it selects the website's pair ONLY: the names come
+ *    from sessionCookieNamesFor() for a 'web' client, never the console's
+ *    `__Host-` pair;
+ *  - the handshake's Origin is on the CORS allowlist (the same allowlist as
+ *    every cookie request). An Origin is REQUIRED: a browser always sends one
+ *    on a WebSocket, so a handshake without one is not a browser's, and the
+ *    Referer is never read here.
+ * What the cookie yields is the access token, verified exactly as a phone's
+ * (JWT, live session row by digest, account, recheck, expiry). '' = none.
+ */
+export function browserSocketCredentialOf(
+  handshake: { headers: Record<string, string | string[] | undefined>; auth?: unknown },
+  env: Env = process.env,
+): string {
+  const auth = (handshake.auth ?? {}) as Record<string, unknown>;
+  if (auth['client'] !== WEB_BROWSER_CLIENT) return '';
+  const cookieHeader = handshake.headers['cookie'];
+  const posture = { headers: { [BROWSER_CLIENT_HEADER]: WEB_BROWSER_CLIENT, cookie: typeof cookieHeader === 'string' ? cookieHeader : undefined } };
+  const cookie = parseCookies(posture.headers.cookie)[sessionCookieNamesFor(posture, env).access];
+  if (!cookie) return '';
+  const origin = handshake.headers['origin'];
+  if (typeof origin !== 'string' || !origin || !allowedBrowserOrigins().has(origin.toLowerCase())) {
+    browserSessionCounter.labels('socket_cookie_rejected_origin').inc();
+    return '';
+  }
+  browserSessionCounter.labels('socket_cookie_auth').inc();
+  return cookie;
+}
+
+/** Requests whose Authorization header was written HERE from the access cookie. authenticate()
+ *  can run twice for one request (the admin plugin's onRequest hook and the route's own guard);
+ *  the second pass sees a Bearer, and must still report where it came from. */
+const adoptedFromCookie = new WeakSet<object>();
+
 /** The JWT plugin verifies the Authorization header: when a request carries no Bearer but a
  *  cookie credential that passes the gate, the cookie becomes that header for this request. */
-export function adoptCookieCredential(request: FastifyRequest): void {
-  if (typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')) return;
+export function adoptCookieCredential(request: FastifyRequest): 'bearer' | 'cookie' | null {
+  if (adoptedFromCookie.has(request)) return 'cookie';
+  if (typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')) return 'bearer';
   const token = bearerOrCookieToken(request);
-  if (token) request.headers.authorization = `Bearer ${token}`;
+  if (!token) return null;
+  request.headers.authorization = `Bearer ${token}`;
+  adoptedFromCookie.add(request);
+  return 'cookie';
 }
 
 /** The refresh credential for the auth routes: the body's token (native apps) or the refresh cookie (browsers, same gate). */
-export function refreshCredentialOf(request: Pick<FastifyRequest, 'headers' | 'body'>): string | null {
+export function refreshCredentialOf(request: RequestPosture & Pick<FastifyRequest, 'body'>, env: Env = process.env): string | null {
   const body = (request.body ?? {}) as { refreshToken?: unknown };
   if (typeof body.refreshToken === 'string' && body.refreshToken) return body.refreshToken;
-  const cookie = parseCookies(request.headers['cookie'])[REFRESH_COOKIE];
+  const cookie = parseCookies(request.headers['cookie'])[sessionCookieNamesFor(request, env).refresh];
   if (!cookie) return null;
-  if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
+  if (!browserClientOf(request, env)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
   const origin = originOf(request);
   if (!origin || !allowedBrowserOrigins().has(origin)) { browserSessionCounter.labels('cookie_rejected_origin').inc(); return null; }
   return cookie;
 }
 
-// The runtime posture comes from THE parser, never a bare NODE_ENV comparison —
-// `runtime-mode.ts` exists because "is this production?" was answered a dozen
-// different ways, and a census enforces it. A cookie's `Secure` flag is exactly
-// the kind of answer that must not be a second opinion.
-const secure = (env: Record<string, string | undefined> = process.env): boolean => isProduction(env);
+/**
+ * Registration authority for this request. Native clients carry the opaque
+ * continuation in the body. Named browser clients can use only the HttpOnly
+ * cookie behind the same client-header + origin gate as session cookies, so a
+ * page script never receives the signup credential in a response body.
+ */
+export function signupContinuationOf(request: Pick<FastifyRequest, 'headers' | 'body'>): string | null {
+  if (!browserClientOf(request)) {
+    const body = (request.body ?? {}) as { registrationProof?: unknown };
+    return typeof body.registrationProof === 'string' && body.registrationProof
+      ? body.registrationProof
+      : null;
+  }
 
-function cookie(name: string, value: string, path: string, maxAgeS: number, env?: Record<string, string | undefined>): string {
+  const proof = parseCookies(request.headers['cookie'])[SIGNUP_CONTINUATION_COOKIE];
+  if (!proof) return null;
+  const origin = originOf(request);
+  if (!origin || !allowedBrowserOrigins().has(origin)) {
+    browserSessionCounter.labels('cookie_rejected_origin').inc();
+    return null;
+  }
+  return proof;
+}
+
+// Production always requires Secure. HTTPS staging does too: Fastify's
+// protocol respects TRUST_PROXY; never interpret forwarded headers ourselves.
+function secureTransport(request: { protocol?: string } | undefined, env: Env = process.env): boolean {
+  if (isProduction(env) || request?.protocol === 'https') return true;
+  try { return new URL(env['API_PUBLIC_URL'] ?? '').protocol === 'https:'; } catch { return false; }
+}
+function secure(reply: FastifyReply, env: Env = process.env): boolean {
+  return secureTransport(reply.request, env);
+}
+/** The names the reply's own request decides (a reply built without a request is a plain one). */
+function cookieNamesForReply(reply: FastifyReply, env?: Env): SessionCookieNames {
+  return reply.request ? sessionCookieNamesFor(reply.request, env) : PLAIN_SESSION_COOKIES;
+}
+
+function cookie(reply: FastifyReply, name: string, value: string, path: string, maxAgeS: number, env?: Record<string, string | undefined>): string {
   const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${path}`, `Max-Age=${maxAgeS}`, 'HttpOnly', 'SameSite=Strict'];
-  if (secure(env)) parts.push('Secure');
+  if (secure(reply, env)) parts.push('Secure');
   return parts.join('; ');
+}
+
+function appendSetCookies(reply: FastifyReply, values: string[]): void {
+  const present = reply.getHeader('Set-Cookie');
+  const current = present == null
+    ? []
+    : Array.isArray(present)
+      ? present.map(String)
+      : [String(present)];
+  // Fastify appends Set-Cookie values instead of replacing them. Re-submitting
+  // `current` without first removing the header therefore duplicates every
+  // cookie already staged on a real reply (the simple unit harness used to
+  // hide that distinction).
+  reply.removeHeader('Set-Cookie');
+  reply.header('Set-Cookie', [...current, ...values]);
 }
 
 /** Issue the session as cookies. Called only in cookie mode; the body carries no credential. */
 export function setSessionCookies(reply: FastifyReply, tokens: { accessToken: string; refreshToken: string }, env?: Record<string, string | undefined>): void {
-  reply.header('Set-Cookie', [
-    cookie(ACCESS_COOKIE, tokens.accessToken, ACCESS_COOKIE_PATH, ACCESS_COOKIE_MAX_AGE_S, env),
-    cookie(REFRESH_COOKIE, tokens.refreshToken, REFRESH_COOKIE_PATH, REFRESH_COOKIE_MAX_AGE_S, env),
+  const names = cookieNamesForReply(reply, env);
+  appendSetCookies(reply, [
+    cookie(reply, names.access, tokens.accessToken, names.accessPath, ACCESS_COOKIE_MAX_AGE_S, env),
+    cookie(reply, names.refresh, tokens.refreshToken, names.refreshPath, REFRESH_COOKIE_MAX_AGE_S, env),
   ]);
   browserSessionCounter.labels('cookie_issued').inc();
 }
 
 export function clearSessionCookies(reply: FastifyReply, env?: Record<string, string | undefined>): void {
-  reply.header('Set-Cookie', [
-    cookie(ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
-    cookie(REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
-  ]);
+  const names = cookieNamesForReply(reply, env);
+  const deletions = [
+    cookie(reply, names.access, '', names.accessPath, 0, env),
+    cookie(reply, names.refresh, '', names.refreshPath, 0, env),
+  ];
+  // An admin browser that signed in before the rebinding still holds the plain
+  // pair: it is no credential for the console any more, and sign-out is the
+  // moment to delete it rather than leave it to expire.
+  if (names !== PLAIN_SESSION_COOKIES) {
+    deletions.push(
+      cookie(reply, ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
+      cookie(reply, REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
+    );
+  }
+  appendSetCookies(reply, deletions);
   browserSessionCounter.labels('cookie_cleared').inc();
+}
+
+export function setSignupContinuationCookie(
+  reply: FastifyReply,
+  registrationProof: string,
+  env?: Record<string, string | undefined>,
+): void {
+  appendSetCookies(reply, [cookie(
+    reply,
+    SIGNUP_CONTINUATION_COOKIE,
+    registrationProof,
+    SIGNUP_CONTINUATION_COOKIE_PATH,
+    SIGNUP_CONTINUATION_COOKIE_MAX_AGE_S,
+    env,
+  )]);
+}
+
+export function clearSignupContinuationCookie(reply: FastifyReply, env?: Record<string, string | undefined>): void {
+  appendSetCookies(reply, [cookie(
+    reply,
+    SIGNUP_CONTINUATION_COOKIE,
+    '',
+    SIGNUP_CONTINUATION_COOKIE_PATH,
+    0,
+    env,
+  )]);
 }
 
 /** In cookie mode the tokens leave the response body; only the rest of the payload is returned. */

@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { AccountService } from '../modules/user/account.service';
 import { lockActiveOrderCustomer } from '../modules/order/order-creation-authority';
+import { testPhone } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 const userIds: string[] = [];
@@ -17,7 +18,7 @@ function deferred() {
 async function makeCustomer() {
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59282${nanoid(7)}`,
+      phone: testPhone(),
       firstName: 'Order',
       lastName: 'Authority',
       roles: ['CUSTOMER'],

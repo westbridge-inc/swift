@@ -64,7 +64,7 @@ describe('legal pages', () => {
     // law, and gives an off-app contact that a locked-out user can still reach.
     expect(res.body).toContain('data controller');
     expect(res.body).toContain('Data Protection Act 2023');
-    expect(res.body).toContain('privacy@swift.gy');
+    expect(res.body).toContain('privacy@swiftgy.com');
   });
 
   it('serves the Child Safety Standards page (STORE-003 — Google Play UGC gate)', async () => {
@@ -76,6 +76,6 @@ describe('legal pages', () => {
     // a named point of contact.
     expect(res.body).toContain('CSAE');
     expect(res.body).toContain('Report');
-    expect(res.body).toContain('childsafety@swift.gy');
+    expect(res.body).toContain('childsafety@swiftgy.com');
   });
 });

@@ -1,13 +1,13 @@
 /** @jsxImportSource react */
+import { useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect, type ReactNode } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, ErrorState, LinkText, LoadingBlock, PillButton, Screen, Segmented, T } from '../../../kit';
 import { DeltaBadge, GUTTER, InlineInput, KpiTile, fmtDate } from '../shared';
-import { classifyOwedLedger, markPaidPrompt } from '../../../lib/riderFeesOwed';
+import { cashSettlementAmount, classifyOwedLedger, markPaidPrompt } from '../../../lib/riderFeesOwed';
 import { errorMessage } from '../../../lib/apiError';
 import { StandingCard } from '../../../components/StandingCard';
 import { API_URL, vendorApi } from '../../../services/api';
@@ -26,10 +26,16 @@ import {
   useBusyHours,
   useRepeatCustomers,
 } from '../../../hooks/vendorops';
-import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../../../stores/authStore';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
+import { getAuthSessionSnapshot, requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../../../stores/authStore';
 import { useVendorPreview } from '../../../stores/vendorPreview';
-import { money } from '../../../lib/money';
-import { mediaUrl } from '../../../lib/images';
+import { useStoreSwitcher } from '../../../stores/storeSwitcher';
+import { money, moneyExact } from '../../../lib/money';
+import { isKeptPhoto, storePhotoUrl } from '../../../lib/images';
+import {
+  captureVendorCashSettlementConfirmation,
+  requireCurrentCashSettlementConfirmation,
+} from '../../../hooks/cashSettlement';
 import {
   TabHeader,
   type RevenueDay,
@@ -153,9 +159,9 @@ function TopItemsCard({ items, sample }: { items: any[]; sample: boolean }) {
             <T variant="numM" tone="muted" style={{ width: space['2xl'] }}>
               {i + 1}
             </T>
-            {item.imageUrl ? (
+            {isKeptPhoto(item.imageUrl) ? (
               <Image
-                source={{ uri: mediaUrl(item.imageUrl)! }}
+                source={{ uri: storePhotoUrl(item.imageUrl, 160)! }}
                 style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.sm }}
                 contentFit="cover"
                 accessibilityLabel={`${item.name} photo`}
@@ -373,10 +379,21 @@ function VendorStandingSection() {
                 <T variant="caption" numberOfLines={1} style={{ flex: 1 }}>
                   {r.name}
                 </T>
-                <T variant="caption" tone="muted">
-                  👎 {r.down}
-                  {r.up > 0 ? `  ·  👍 ${r.up}` : ''}
-                </T>
+                <View
+                  accessible
+                  accessibilityLabel={`${r.down} thumbs down${r.up > 0 ? `, ${r.up} thumbs up` : ''}`}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+                >
+                  <Feather name="thumbs-down" size={12} color={color.text.muted} />
+                  <T variant="caption" tone="muted">{r.down}</T>
+                  {r.up > 0 ? (
+                    <>
+                      <T variant="caption" tone="muted">{'  ·  '}</T>
+                      <Feather name="thumbs-up" size={12} color={color.text.muted} />
+                      <T variant="caption" tone="muted">{r.up}</T>
+                    </>
+                  ) : null}
+                </View>
               </View>
             ))}
           </View>
@@ -520,6 +537,7 @@ function InsightMetric({ label, value, detail, badge }: { label: string; value: 
 function RiderFeesOwedCard() {
   const q = useVendorCashSettlements();
   const confirm = useConfirmVendorCashSettlement();
+  const selectedStoreId = useStoreSwitcher((state) => state.selectedStoreId);
   // [MOB-046] A failed read used to produce an empty list, and an empty list
   // removed this card from the screen — which to a store owner is not an
   // outage, it is the absence of a debt. Money owed to a person is the last
@@ -534,7 +552,7 @@ function RiderFeesOwedCard() {
           YOU OWE RIDERS
         </T>
         <T variant="label" weight="bold">
-          {ledger.owed == null ? '—' : money(ledger.owed)}
+          {ledger.owed == null ? '—' : moneyExact(ledger.owed)}
         </T>
       </View>
       {ledger.state !== 'ready' ? (
@@ -559,7 +577,16 @@ function RiderFeesOwedCard() {
       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
         MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at pickup).
       </T>
-      {rows.map((r) => (
+      {rows.map((r) => {
+        // The server-minted ledger row supplies both the displayed number and
+        // the attestation body. Operators never type or reconstruct the amount.
+        const attestation = cashSettlementAmount(r.amount);
+        const formattedAmount = attestation?.formatted ?? '—';
+        const authSession = getAuthSessionSnapshot();
+        const confirmation = attestation && authSession
+          ? captureVendorCashSettlementConfirmation(r.id, attestation.amount, selectedStoreId, authSession)
+          : null;
+        return (
         <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={{ flex: 1 }}>
@@ -571,7 +598,7 @@ function RiderFeesOwedCard() {
               </T>
             </View>
             <T variant="label" weight="bold" style={{ marginLeft: space.md }}>
-              {money(r.amount)}
+              {formattedAmount}
             </T>
           </View>
           {r.status === 'STORE_CONFIRMED' ? (
@@ -585,35 +612,50 @@ function RiderFeesOwedCard() {
                   The rider confirmed receiving it — mark it paid to close it out.
                 </T>
               ) : null}
-              <PillButton
-                label="Mark paid"
-                variant="soft"
-                size="sm"
-                style={{ alignSelf: 'flex-start', marginTop: space.sm }}
-                loading={confirm.isPending && confirm.variables === r.id}
-                disabled={confirm.isPending}
-                onPress={() => {
-                  // [MOB-046] One tap used to record a cash payment with no
-                  // confirmation and no visible failure. This is an attestation
-                  // that money left the till and reached a named person: it
-                  // names them and the amount, because a mis-tap on the wrong
-                  // row is the same mistake as not paying at all.
-                  const prompt = markPaidPrompt(r, money(r.amount));
-                  Alert.alert(prompt.title, prompt.body, [
-                    { text: 'Not yet', style: 'cancel' },
-                    {
-                      text: prompt.confirm,
-                      onPress: () => confirm.mutate(r.id, {
-                        onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
-                      }),
-                    },
-                  ]);
-                }}
-              />
+              {confirmation ? (
+                <PillButton
+                  label="Mark paid"
+                  variant="soft"
+                  size="sm"
+                  style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+                  loading={confirm.isPending && confirm.variables?.id === r.id}
+                  disabled={confirm.isPending}
+                  onPress={() => {
+                    // [MOB-046] One tap used to record a cash payment with no
+                    // confirmation and no visible failure. This is an attestation
+                    // that money left the till and reached a named person: it
+                    // names them and the amount, because a mis-tap on the wrong
+                    // row is the same mistake as not paying at all.
+                    try {
+                      requireCurrentCashSettlementConfirmation(confirmation);
+                      const prompt = markPaidPrompt(r, formattedAmount);
+                      Alert.alert(prompt.title, prompt.body, [
+                        { text: 'Not yet', style: 'cancel' },
+                        {
+                          text: prompt.confirm,
+                          onPress: () => {
+                            try {
+                              requireCurrentCashSettlementConfirmation(confirmation);
+                              confirm.mutate(confirmation, {
+                                onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
+                              });
+                            } catch (confirmationError) {
+                              Alert.alert('Not recorded', errorMessage(confirmationError));
+                            }
+                          },
+                        },
+                      ]);
+                    } catch (confirmationError) {
+                      Alert.alert('Not recorded', errorMessage(confirmationError));
+                    }
+                  }}
+                />
+              ) : null}
             </>
           )}
         </View>
-      ))}
+        );
+      })}
     </Card>
   );
 }
@@ -649,7 +691,7 @@ export function VendorInsightsScreen() {
   const q = useVendorAnalytics();
   const readOnly = !!useVendorPreview((state) => state.previewType);
   // Signed short-lived link (the JWT can't ride an in-app browser).
-  const statement = useMutation({
+  const statement = useVendorMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
       const r = await vendorApi.salesStatement(owner);
@@ -690,7 +732,9 @@ export function VendorInsightsScreen() {
   const primaryLoading = (q.isLoading && !q.data) || (revenueQ.isLoading && !revenueQ.data) || (revenueBehindAnalytics && !revenueQ.isError);
   const primaryError = (q.isError && !q.data) || (revenueQ.isError && (!revenueQ.data || revenueBehindAnalytics));
   const showingStale = (q.isError && !!q.data) || (revenueQ.isError && !!revenueQ.data);
-  const refreshing = q.isRefetching || revenueQ.isRefetching || opsQ.isRefetching || popularQ.isRefetching;
+  // The spinner follows the owner's own pull, never the analytics poll or the
+  // revenue catch-up effect above (lib/pullToRefresh). A pull refreshes all four.
+  const pull = usePullToRefresh(() => Promise.all([q.refetch(), revenueQ.refetch(), opsQ.refetch(), popularQ.refetch()]));
   const opsDetail = readOnly
     ? 'Not included in sample'
     : opsQ.isLoading
@@ -717,13 +761,8 @@ export function VendorInsightsScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={refreshing}
-            onRefresh={() => {
-              q.refetch();
-              revenueQ.refetch();
-              opsQ.refetch();
-              popularQ.refetch();
-            }}
+            refreshing={pull.refreshing}
+            onRefresh={() => { void pull.onRefresh(); }}
             tintColor={color.brand[500]}
           />
         }

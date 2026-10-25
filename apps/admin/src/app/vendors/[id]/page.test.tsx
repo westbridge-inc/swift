@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import VendorDetailPage from './page';
 import {
@@ -40,6 +40,13 @@ const vendor = {
   _count: { items: 0, orders: 0 },
 };
 
+const liveChecklist = {
+  vendorId: 'vendor-target', applicantId: 'owner-1', storeStatus: 'ACTIVE', suspensionSource: null, ownerAccountStatus: 'ACTIVE',
+  isVerified: true, activationValidUntil: null, role: 'RESTAURANT',
+  checklist: { complete: true, items: [{ docType: 'owner_national_id', state: 'APPROVED', documentId: 'd1', submittedAt: null, expiresAt: null, note: null, renewalPending: false }] },
+  disclosure: { engaged: false, complete: true, missing: [] }, ready: true, next: 'LIVE',
+};
+
 function vendorHandler(mutation: (_request: ApiRequest) => { body: unknown; status?: number }) {
   return (request: ApiRequest) => {
     if (
@@ -48,16 +55,25 @@ function vendorHandler(mutation: (_request: ApiRequest) => { body: unknown; stat
     ) {
       return { body: { success: true, data: vendor } };
     }
+    // [MC-PR2] the page also reads the store's activation checklist
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/activation-checklist') {
+      return { body: { success: true, data: liveChecklist } };
+    }
     return mutation(request);
   };
 }
 
 describe('vendor suspension mutation', () => {
+  // [MC-PR1] The confirmation and the reason are one in-page panel now (owner
+  // ruling: no browser prompts). Every guarantee of the old prompt/confirm test
+  // is kept: the panel names the visible store and the consequence, cancelling
+  // sends nothing, and confirming suspends exactly this vendor with the
+  // operator's own words.
   it('names the visible store, confirms, and suspends the exact vendor', async () => {
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const confirm = vi.fn();
+    const prompt = vi.fn();
     vi.stubGlobal('confirm', confirm);
-    // [ADM-006] the operator is asked why; the reason is theirs, not a template
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
+    vi.stubGlobal('prompt', prompt);
     const fetchMock = mockApi(
       vendorHandler((request) => {
         if (
@@ -72,30 +88,34 @@ describe('vendor suspension mutation', () => {
     const { user } = renderWithQuery(
       <VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />,
     );
-    const suspendButton = await screen.findByRole('button', { name: 'Suspend' });
+    const suspendButton = await screen.findByRole('button', { name: 'Suspend…' });
 
     await user.click(suspendButton);
-    expect(confirm).toHaveBeenNthCalledWith(
-      1,
-      'Suspend Target Store? They stop taking orders immediately. This cannot be reversed from the console.',
-    );
+    let dialog = screen.getByRole('dialog', { name: 'Suspend Target Store?' });
+    expect(dialog.textContent).toContain('It stops taking orders immediately');
+    expect(dialog.textContent).toContain('You can reinstate it from this page later, once its required documents are approved and current.');
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Repeated no-shows after three written warnings');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     await user.click(suspendButton);
+    dialog = screen.getByRole('dialog', { name: 'Suspend Target Store?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Repeated no-shows after three written warnings');
+    await user.click(within(dialog).getByRole('button', { name: 'Suspend store' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
-    expect(confirm).toHaveBeenNthCalledWith(
-      2,
-      'Suspend Target Store? They stop taking orders immediately. This cannot be reversed from the console.',
-    );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/vendors/vendor-target/suspend`);
     expect(init?.method).toBe('PUT');
     expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Repeated no-shows after three written warnings' });
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe('Repeated no-shows after three written warnings');
+    expect((await screen.findByRole('status')).textContent).toContain('Target Store is suspended');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it('surfaces the server rejection and leaves the active store visible', async () => {
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       vendorHandler((request) => {
         if (
@@ -119,17 +139,62 @@ describe('vendor suspension mutation', () => {
     const { user } = renderWithQuery(
       <VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />,
     );
-    const suspendButton = await screen.findByRole('button', { name: 'Suspend' });
+    const suspendButton = await screen.findByRole('button', { name: 'Suspend…' });
 
     await user.click(suspendButton);
+    const dialog = screen.getByRole('dialog', { name: 'Suspend Target Store?' });
+    const reason = within(dialog).getByRole('textbox', { name: /reason/i });
+    await user.type(reason, 'Repeated no-shows after three written warnings');
+    await user.click(within(dialog).getByRole('button', { name: 'Suspend store' }));
 
-    expect((await screen.findByRole('alert')).textContent).toContain(
-      'Suspension did not record: Vendor with id vendor-target not found',
-    );
+    // the refusal, in words, inside the panel — with the typed reason still there
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert.textContent).toContain("This record doesn't exist, or isn't in your market");
+    expect(alert.textContent).toContain('Vendor with id vendor-target not found');
+    expect(alert.textContent).toContain('Code NOT_FOUND · HTTP 404');
+    expect((reason as HTMLTextAreaElement).value).toBe('Repeated no-shows after three written warnings');
+    expect((within(dialog).getByRole('button', { name: 'Suspend store' }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByRole('heading', { name: 'Target Store' })).toBeTruthy();
-    expect(screen.getByText('ACTIVE')).toBeTruthy();
-    expect((suspendButton as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText('Live')).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
-    expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(1);
+    // two reads on load — the store and its activation checklist [MC-PR2]; the refusal re-read nothing
+    expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(2);
+
+    // closing the panel does not make the refusal vanish: the page keeps it
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect((await screen.findByRole('alert')).textContent).toContain('Vendor with id vendor-target not found');
+    expect((suspendButton as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('[GUARDRAILS §8] the items Swift does not allow, or is checking', () => {
+  it('names each one and why: removed, banned category, waiting, approved — and links to the check', async () => {
+    const prohibitedItems = [
+      { id: 'i-1', name: 'Mystery tonic', state: 'BANNED', prohibitedClass: 'MEDICINE', source: 'removed', term: null, reason: 'Sold as a cure for fever' },
+      { id: 'i-2', name: 'Cold relief', state: 'BANNED', prohibitedClass: 'MEDICINE', source: 'category', term: 'pharmacy', reason: null },
+      { id: 'i-3', name: 'Rum cake slice', state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' },
+      { id: 'i-4', name: 'Gas stove', state: 'APPROVED', prohibitedClass: 'LPG', field: 'name', term: 'gas' },
+    ];
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target') {
+        return { body: { success: true, data: { ...vendor, prohibitedItems } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
+    const section = await screen.findByRole('region', { name: 'Items Swift does not allow, or is checking' });
+    expect(section.textContent).toContain('Removed as medicines: Sold as a cure for fever');
+    expect(section.textContent).toContain('Not allowed: medicines (filed under a banned category)');
+    expect(section.textContent).toContain('Waiting for a check: "rum" in the name (alcohol)');
+    expect(section.textContent).toContain('Approved: "gas" in the name (cooking gas (LPG))');
+    expect(within(section).getByRole('link', { name: 'Open the catalogue check' }).getAttribute('href')).toBe('/catalogue-check');
+  });
+
+  it('shows nothing when no item is touched', async () => {
+    mockApi(vendorHandler(() => { throw new Error('no mutation expected'); }));
+    renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
+    await screen.findByRole('heading', { name: 'Target Store' });
+    expect(screen.queryByRole('region', { name: 'Items Swift does not allow, or is checking' })).toBeNull();
   });
 });

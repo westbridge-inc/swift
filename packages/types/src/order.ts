@@ -25,6 +25,8 @@ export enum OrderStatus {
   CANCELLED = 'CANCELLED',
   REFUNDED = 'REFUNDED',
   FAILED = 'FAILED',
+  RETURNING = 'RETURNING',
+  RETURNED = 'RETURNED',
 }
 
 export enum PackageSize {
@@ -63,6 +65,29 @@ export interface MmgDirectPaymentAction {
   recipientName: string;
   amount: number;
   url: string;
+}
+
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] On the customer's OWN order, once the store has accepted and
+ * until it marks the order "Paid by MMG": where to send the money, directly to the store, in MMG's app.
+ * Swift never holds, moves or confirms it. */
+export interface MmgStoreNumberPayment {
+  payTo: 'STORE_NUMBER';
+  provider: 'MMG';
+  fundsFlow: 'DIRECT_TO_VENDOR';
+  recipientName: string;
+  /** Canonical +592 mobile, e.g. "+5926001234". */
+  number: string;
+  /** How a person reads it, e.g. "+592 600 1234". */
+  numberDisplay: string;
+  /** The exact order total (goods + delivery fee + tip). */
+  amount: number;
+  currencyCode: string;
+  /** The server's own sentence: "Pay $X by MMG to <store>'s MMG number <number>." */
+  instruction: string;
+  /** [owner 18 Oct 2026] When the order cancels if the store has not marked it "Paid by MMG" (ISO). */
+  payBy?: string;
+  /** The server's sentence for it: "If <store> hasn't marked it paid by 3:45 PM, the order is cancelled automatically." */
+  deadline?: string;
 }
 
 export interface OrderCheckoutResult<TOrder = unknown> {
@@ -158,3 +183,65 @@ export interface OrderStatusLog {
   changedBy?: string | null;
   createdAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// THE DECLARED VERTICAL — the one contract the API declares and the app reads.
+//
+// The persisted `OrderType` has no SERVICE member: a booking with a service
+// business rides the FOOD_DELIVERY spine, distinguished by its APPOINTMENT
+// fulfillment. The API DECLARES the vertical of every customer order
+// projection (`orderVertical`, apps/api) and sends it as `vertical` beside the
+// untouched `orderType`. Both sides spell it from here: the API's return type
+// is this alias and the app's vocabulary is asserted equal to it at compile
+// time, so a member added or misspelt on one side fails the other.
+// ---------------------------------------------------------------------------
+
+/** `OrderType` as it travels: the enum's string values. */
+export type OrderTypeValue = `${OrderType}`;
+
+/** The vertical the API declares for a customer order projection. */
+export type OrderVertical = OrderTypeValue | 'SERVICE';
+
+/** Fulfillment as it travels (schema `FulfillmentType`). */
+export type OrderFulfillment = 'DELIVERY' | 'PICKUP' | 'APPOINTMENT';
+
+/** The two facts a screen presents the vertical from: the declaration when the
+ *  server sent one, else the persisted type (an API that predates it). */
+export interface OrderVerticalFacts {
+  vertical?: OrderVertical | null;
+  orderType?: OrderTypeValue | null;
+}
+
+/** The serialized order projection every customer surface can rely on — Home's
+ *  live card, the activity list and the tracking screen all read these; each
+ *  endpoint adds its own fields on top. `vertical` is REQUIRED: this is the
+ *  contract of an API that declares it. A status this client does not know is
+ *  rendered by the label authority's honest fallback, so it stays `string`. */
+export interface OrderProjection {
+  id: string;
+  orderNumber: string;
+  status: string;
+  orderType: OrderTypeValue;
+  vertical: OrderVertical;
+  fulfillment?: OrderFulfillment | null;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only: the
+   *  rider payloads omit it). Present on DELIVERY goods/service rows during
+   *  delivery; null elsewhere (and hidden once a store self-delivers). */
+  ridePin?: string | null;
+  /** A booking's slot as a TRUE UTC instant (ISO 8601): 09:00 in Guyana
+   *  travels as 13:00Z. Present on APPOINTMENT rows; every human-facing
+   *  rendering formats it in the market zone (GUYANA_TZ), never in UTC and
+   *  never in the device zone. */
+  appointmentSlot?: string | null;
+}
+
+/** The same projection from an API that predates the declaration: no
+ *  `vertical`. Kept separate so the required discriminator above is never
+ *  made optional by accident. */
+export interface LegacyOrderProjection extends Omit<OrderProjection, 'vertical'> {
+  vertical?: undefined;
+}
+
+/** Persisted order-line substitution states, shared by every client. */
+export const SUBSTITUTION_STATUSES = ['NONE', 'PENDING', 'APPROVED', 'REJECTED', 'REFUNDED'] as const;
+export type SubstitutionStatus = (typeof SUBSTITUTION_STATUSES)[number];

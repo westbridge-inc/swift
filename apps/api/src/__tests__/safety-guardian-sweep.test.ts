@@ -3,6 +3,7 @@ import { PrismaClient, type UserRole } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import { GuardianService, riskBand } from '../modules/safety/guardian.service';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // Trip Guardian M4b (safety spec §5.1–§5.2, self-test §14-E) — the sweep
 // reconciler + L1 detectors, driven with scripted GPS exactly like the spec's
@@ -197,12 +198,18 @@ describe('Guardian sweep — session lifecycle [§5]', () => {
   it('closes the session when the ride completes — and the close reason says why', async () => {
     const passenger = await makeUser(['CUSTOMER']);
     const { driver } = await makeDriver();
+    // Two live rides at once need two drivers and two passengers: one driver
+    // holds one live ride, one customer one live taxi (the single-winner indexes).
+    const otherPassenger = await makeUser(['CUSTOMER']);
+    const { driver: otherDriver } = await makeDriver();
     const done = await makeRide({ driverId: driver.id, customerId: passenger.id });
-    const gone = await makeRide({ driverId: driver.id, customerId: passenger.id });
+    const gone = await makeRide({ driverId: otherDriver.id, customerId: otherPassenger.id });
     await sweep(new Date());
 
-    await prisma.order.update({ where: { id: done.id }, data: { status: 'COMPLETED' } });
-    await prisma.order.update({ where: { id: gone.id }, data: { status: 'CANCELLED' } });
+    await walkOrderStatus(prisma, done.id, 'COMPLETED');
+    // [row 264] A monitored ride (passenger aboard) never becomes CANCELLED: the database refuses
+    // RIDE_IN_PROGRESS -> CANCELLED. The trip that is simply gone is the one whose order vanished (a purge).
+    await prisma.order.delete({ where: { id: gone.id } });
     await sweep(new Date());
 
     expect((await session(done.id)).closeReason).toBe('TRIP_COMPLETED');
@@ -272,7 +279,7 @@ describe('Guardian detectors — scripted GPS [§5.2 / self-test §14-E]', () =>
     expect(flagsOf(await session(stopped.id)).longStop).toBeTruthy();
 
     // Alighting at the destination is a legitimate stop — suppressed (§5.2).
-    await prisma.order.update({ where: { id: stopped.id }, data: { status: 'COMPLETED' } });
+    await walkOrderStatus(prisma, stopped.id, 'COMPLETED');
     const arriving = await makeRide({ driverId: driver.id, customerId: passenger.id });
     const t1 = t0 + 600_000;
     await putFix(driver.id, new Date(t1), { lat: 6.8201, lng: -58.1301 }); // ~15 m from dest

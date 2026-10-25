@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { PNG } from 'pngjs';
 import jsQR from 'jsqr';
+import { PDFParse } from 'pdf-parse';
 import {
   QR_TEMPLATES,
   contrastRatio,
@@ -22,7 +23,7 @@ import {
 // for structure: page geometry (trim + 2×3mm bleed), embedded brand fonts.
 // ---------------------------------------------------------------------------
 
-const URL = 'https://swift.gy/s/BCDFGHJKMN';
+const URL = 'https://swiftgy.com/s/BCDFGHJKMN';
 const MM_TO_PX_300DPI = 300 / 25.4;
 const MM_TO_PT = 72 / 25.4;
 
@@ -117,11 +118,24 @@ describe('print PDFs', () => {
 
       expect(text).toContain('BricolageGrotesque');
       expect(text).toContain('HankenGrotesk');
+
+      const parser = new PDFParse({ data: new Uint8Array(pdf) });
+      try {
+        const extracted = await parser.getText();
+        const copies = template === 'sticker' || template === 'tabletent' ? 2 : 1;
+        expect(extracted.total).toBe(1);
+        expect(extracted.text.match(/Auntie's Roti Shop/g)).toHaveLength(copies);
+        expect(extracted.text.match(/powered by Swift/g)).toHaveLength(copies);
+      } finally {
+        await parser.destroy();
+      }
     });
   }
 
   it('services vendors get "Scan to book" and their promise line', () => {
     const copy = templateCopy('Singh Electrical', 'SERVICE');
+    expect(copy.headline).toBe('Singh Electrical');
+    expect(copy.attribution).toBe('powered by Swift');
     expect(copy.action).toBe('Scan to book');
     expect(copy.promise).toBe('Book Singh Electrical on Swift');
     expect(templateCopy('Green Bowl', 'RESTAURANT').action).toBe('Scan to order');

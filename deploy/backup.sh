@@ -24,11 +24,21 @@
 # Format is pg_dump custom (-Fc): compressed, and restorable selectively with
 # pg_restore, which plain SQL is not.
 #
-# OFFSITE IS THE POINT. A dump written next to the database it protects is a
-# copy, not a backup: one dead disk takes both. When BACKUP_BUCKET is set this
-# script uploads each dump off the machine and VERIFIES the upload before it
-# will call the run a success. Without it, it warns loudly and keeps going, so
-# a laptop or a dev box still works.
+# OFFSITE IS THE POINT. The staging timer sets BACKUP_REQUIRED=1 and refuses
+# local-only success. An interactive development run may omit the bucket.
+#
+# [BACKUP-ENC] ENCRYPTED TO THE OWNER (owner ruling, 13 Oct). On production
+# (PILOT_ENV=production) every dump is encrypted, ON THIS HOST, to the owner's
+# OpenPGP PUBLIC key before it is uploaded or kept: BACKUP_GPG_RECIPIENT_FILE
+# (the exported public key, outside the checkout) whose primary key must have
+# exactly the fingerprint pinned in BACKUP_GPG_FINGERPRINT. The private key is
+# never on any server: a file holding a secret key is refused, and nothing
+# here can decrypt. The plain dump exists only between pg_dump and the
+# encryption (mode 600, removed right after, and on any failure); the copy
+# kept here and the copy uploaded are both the .gpg. Restores are drilled from
+# the owner's own computer (deploy/backup-drill.sh), which decrypts there.
+# Elsewhere encryption applies when both settings are set; staging without
+# them keeps plain dumps as before.
 #
 # It also records a heartbeat in the database on success. That is what lets
 # something else notice when backups have quietly stopped — a silent backup
@@ -38,28 +48,33 @@
 #   ./deploy/backup.sh                    # → deploy/backups/swift-<utc>.dump
 #   ./deploy/backup.sh /path/to/dir       # → that directory
 #   BACKUP_RETAIN_DAYS=14 ./deploy/backup.sh
+# Local retention defaults to 14 days, and to 2 days on production (hourly
+# encrypted dumps; the off-site copies are the history).
 #
-# Reads DATABASE_URL from the environment, else from deploy/.env.
-# Offsite (all from deploy/.env, same credentials the app already uses for R2):
+# Reads the bundled Postgres through its private Compose network. No host
+# DATABASE_URL or published database port is needed.
+# Offsite SETTINGS come from the environment, then deploy/.env:
 #   BACKUP_BUCKET      bucket for dumps (e.g. swift-backups)
 #   AWS_S3_ENDPOINT    R2/S3 endpoint
-#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #   BACKUP_PREFIX      key prefix, default "db"
+#   AWS_CLI_IMAGE      pinned image@sha256 that provides the AWS CLI (no snap)
+# The storage KEYS never come from deploy/.env: AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY are read from the environment, from *_FILE, or from
+# $CREDENTIALS_DIRECTORY, where systemd puts them for swift-backup.service via
+# LoadCredentialEncrypted= (deploy/secret-env.sh). The database password never
+# reaches this host process at all: pg_dump runs inside the postgres container
+# and reads POSTGRES_PASSWORD_FILE there.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# [S3-3, Opus review 14 Oct] --check-key runs only the owner-key proof below
+# (the same one every encrypted dump runs) and exits: no dump, no upload, no
+# storage keys. pilot-up.sh calls it before changing anything on production.
+CHECK_KEY=0
+if [ "${1:-}" = --check-key ]; then CHECK_KEY=1; shift; fi
 OUT_DIR="${1:-$HERE/backups}"
-RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-14}"
-
-if [ -z "${DATABASE_URL:-}" ] && [ -f "$HERE/.env" ]; then
-  # Only this one variable, and never echoed.
-  DATABASE_URL="$(grep -E '^DATABASE_URL=' "$HERE/.env" | head -1 | cut -d= -f2- || true)"
-fi
-if [ -z "${DATABASE_URL:-}" ]; then
-  echo "FATAL: DATABASE_URL is not set and deploy/.env does not define it." >&2
-  exit 1
-fi
+COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 
 # Offsite settings, from the environment first, then deploy/.env. Values are
 # never echoed — only whether each is present.
@@ -67,23 +82,135 @@ env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
-for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION BACKUP_HEARTBEAT_URL; do
+# [STG-B] The AWS CLI runs INSIDE a pinned container image — there is no host
+# `aws` binary. The snap-packaged CLI starts through setuid snap-confine, which
+# the backup unit's NoNewPrivileges=true forbids (observed: "snap-confine is
+# packaged without necessary permissions"), and weakening the unit's hardening
+# is not on the table. The unit already talks to the docker socket (pg_dump
+# above runs through `docker compose exec`), so the pinned image does the S3
+# work instead. Credentials pass BY NAME (-e NAME): the values flow to the
+# daemon in the container config, never into this process's argv or any log.
+aws_cli_image() {
+  local image="${AWS_CLI_IMAGE:-}"
+  [ -n "$image" ] || { echo "FATAL: AWS_CLI_IMAGE is not set — pin the AWS CLI container image (deploy/.env.deploy.example, OFFSITE BACKUPS)." >&2; return 1; }
+  case "$image" in
+    *PLACEHOLDER*|*'<'*|*'>'*)
+      echo "FATAL: AWS_CLI_IMAGE is still a placeholder — pin a reviewed image@sha256 digest." >&2; return 1; ;;
+  esac
+  # Anchored digest check: only `<image>@sha256:<64 hex chars>` is a pin. A
+  # substring test would let `ubuntu@sha256:` or `aws-cli:2@sha256:zzz`
+  # through to fail later at `docker run` with an unhelpful message.
+  if ! printf '%s\n' "$image" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
+    echo "FATAL: AWS_CLI_IMAGE must pin an image@sha256:<64-hex> digest — a floating tag or malformed digest is not a pin." >&2; return 1
+  fi
+  printf '%s\n' "$image"
+}
+# aws_cli MOUNT ARGS... — one pinned-AWS-CLI container run. MOUNT is a docker
+# bind mount; the backup mounts its dump directory read-only, restore mounts
+# its scratch directory read-write. Runs as the caller's uid so any file the
+# container creates is owned by the deploy user.
+aws_cli() {
+  local mount="$1" image
+  shift
+  image="$(aws_cli_image)" || return 1
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY ${AWS_REGION:+-e AWS_REGION} \
+    -v "$mount" \
+    "$image" "$@"
+}
+aws_s3() {
+  local mount="$1"
+  shift
+  if [ -n "${AWS_S3_ENDPOINT:-}" ]; then aws_cli "$mount" --endpoint-url "$AWS_S3_ENDPOINT" "$@"
+  else aws_cli "$mount" "$@"; fi
+}
+for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE BACKUP_HEARTBEAT_URL PILOT_ENV BACKUP_RETAIN_DAYS BACKUP_GPG_RECIPIENT_FILE BACKUP_GPG_FINGERPRINT; do
   if [ -z "${!var:-}" ]; then export "$var=$(env_value "$var")"; fi
 done
+# The storage keys: environment, *_FILE or systemd's credentials directory.
+. "$HERE/secret-env.sh"
+[ "$CHECK_KEY" = 1 ] || load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
 AWS_REGION="${AWS_REGION:-auto}"
+if [ "${PILOT_ENV:-}" = production ]; then RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-2}"; else RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-14}"; fi
 
-command -v pg_dump >/dev/null 2>&1 || { echo "FATAL: pg_dump not found (install the postgresql client)." >&2; exit 1; }
+# [BACKUP-ENC] Decide, before anything is dumped, whether this run encrypts,
+# and prove the recipient is the owner's public key and nothing else.
+ENCRYPT=0
+GPG_HOME=""
+GPG_KEYIDS=""
+PLAIN=""
+# When encrypting, no plain dump outlives this run, whatever happens: the
+# partial, the plain file and the unfinished .gpg are removed on exit, and the
+# throwaway keyring with them. The finished .gpg stays.
+cleanup() {
+  if [ "$ENCRYPT" = 1 ] && [ -n "$PLAIN" ]; then rm -f -- "$PLAIN.partial" "$PLAIN" "$PLAIN.gpg.partial"; fi
+  [ -z "$GPG_HOME" ] || rm -rf -- "$GPG_HOME"
+}
+trap cleanup EXIT
+if [ "${PILOT_ENV:-}" = production ] || [ -n "${BACKUP_GPG_RECIPIENT_FILE:-}" ] || [ -n "${BACKUP_GPG_FINGERPRINT:-}" ]; then
+  ENCRYPT=1
+  [ -n "${BACKUP_GPG_RECIPIENT_FILE:-}" ] && [ -n "${BACKUP_GPG_FINGERPRINT:-}" ] || {
+    echo "FATAL: set BACKUP_GPG_RECIPIENT_FILE and BACKUP_GPG_FINGERPRINT: production dumps leave this host only encrypted to the owner's public key (owner ruling, 13 Oct)." >&2; exit 1; }
+  [[ "$BACKUP_GPG_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]] ||
+    { echo "FATAL: BACKUP_GPG_FINGERPRINT must be the 40-character fingerprint (upper-case hex, no spaces) of the owner's backup key." >&2; exit 1; }
+  [[ "$BACKUP_GPG_RECIPIENT_FILE" == /* ]] && [ -f "$BACKUP_GPG_RECIPIENT_FILE" ] && [ -r "$BACKUP_GPG_RECIPIENT_FILE" ] ||
+    { echo "FATAL: BACKUP_GPG_RECIPIENT_FILE must be an absolute path to the owner's exported PUBLIC key, readable here." >&2; exit 1; }
+  # The private key is never on a server: refuse a file that carries one
+  # (named, never printed).
+  if grep -q 'PRIVATE KEY BLOCK' "$BACKUP_GPG_RECIPIENT_FILE"; then
+    echo "FATAL: BACKUP_GPG_RECIPIENT_FILE holds a PRIVATE key. The owner's private key must never be on a server: remove this file and give only the public key (gpg --armor --export)." >&2; exit 1
+  fi
+  command -v gpg >/dev/null 2>&1 || { echo "FATAL: gpg is required to encrypt the dump (apt-get install gnupg)." >&2; exit 1; }
+  GPG_HOME="$(mktemp -d)"
+  chmod 700 "$GPG_HOME"
+  KEY_LINES="$(gpg --homedir "$GPG_HOME" --no-autostart --batch --with-colons --show-keys "$BACKUP_GPG_RECIPIENT_FILE" 2>/dev/null || true)"
+  if printf '%s\n' "$KEY_LINES" | grep -Eq '^(sec|ssb):'; then
+    echo "FATAL: BACKUP_GPG_RECIPIENT_FILE holds a PRIVATE key. The owner's private key must never be on a server." >&2; exit 1
+  fi
+  [ "$(printf '%s\n' "$KEY_LINES" | grep -c '^pub:')" = 1 ] ||
+    { echo "FATAL: BACKUP_GPG_RECIPIENT_FILE must hold exactly one public key (the owner's backup key)." >&2; exit 1; }
+  PRIMARY_FPR="$(printf '%s\n' "$KEY_LINES" | awk -F: '/^pub:/ { want = 1; next } want && /^fpr:/ { print $10; exit }')"
+  [ "$PRIMARY_FPR" = "$BACKUP_GPG_FINGERPRINT" ] ||
+    { echo "FATAL: the key in BACKUP_GPG_RECIPIENT_FILE is not the pinned owner key (its fingerprint differs from BACKUP_GPG_FINGERPRINT). Refusing to encrypt to anyone else." >&2; exit 1; }
+  # Every key id of that one key: the encrypted file must name only these.
+  GPG_KEYIDS="$(printf '%s\n' "$KEY_LINES" | awk -F: '/^(pub|sub):/ { print $5 }' | sort -u)"
+fi
+if [ "$CHECK_KEY" = 1 ]; then
+  [ "$ENCRYPT" = 1 ] ||
+    { echo "FATAL: --check-key: no backup key is configured (BACKUP_GPG_RECIPIENT_FILE and BACKUP_GPG_FINGERPRINT)." >&2; exit 1; }
+  echo "backup key OK: BACKUP_GPG_RECIPIENT_FILE holds exactly the pinned public key $BACKUP_GPG_FINGERPRINT, and no private key"
+  exit 0
+fi
+
+[[ "$RETAIN_DAYS" =~ ^[0-9]+$ ]] || { echo "FATAL: BACKUP_RETAIN_DAYS must be a non-negative integer." >&2; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "FATAL: Docker is required for the private Postgres connection." >&2; exit 1; }
+if [ "${BACKUP_REQUIRED:-0}" = "1" ]; then
+  for name in BACKUP_BUCKET AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+    [ -n "${!name:-}" ] || { echo "FATAL: $name is required for offsite backups." >&2; exit 1; }
+  done
+fi
+if [ -n "${AWS_S3_BUCKET:-}" ] && [ "${BACKUP_BUCKET:-}" = "$AWS_S3_BUCKET" ]; then
+  echo "FATAL: BACKUP_BUCKET must differ from AWS_S3_BUCKET." >&2
+  exit 1
+fi
+
+command -v pg_restore >/dev/null 2>&1 || { echo "FATAL: pg_restore not found (install the postgresql client)." >&2; exit 1; }
 
 mkdir -p "$OUT_DIR"
 chmod 700 "$OUT_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$OUT_DIR/swift-$STAMP.dump"
+PLAIN="$TARGET"
 
 echo "dumping → $(basename "$TARGET")"
 # Write to a partial name first: a backup job killed mid-write must never leave
 # a truncated file that looks like a good backup.
-pg_dump "$DATABASE_URL" -Fc -f "$TARGET.partial"
+# The container holds the password as a file (POSTGRES_PASSWORD_FILE); it is
+# read there, by the exec'd shell, and never crosses to this host.
+"${COMPOSE[@]}" exec -T postgres sh -c \
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+  > "$TARGET.partial"
 mv "$TARGET.partial" "$TARGET"
 chmod 600 "$TARGET"
 
@@ -98,33 +225,49 @@ if ! pg_restore --list "$TARGET" > /dev/null 2>&1; then
 fi
 echo "verified: pg_restore can read the archive's table of contents"
 
+# [BACKUP-ENC] Encrypt to the owner's key, prove the result names only that
+# key, then drop the plain dump: from here on only the .gpg exists.
+if [ "$ENCRYPT" = 1 ]; then
+  gpg --homedir "$GPG_HOME" --no-autostart --batch --no-tty --yes --quiet --trust-model always \
+    --recipient-file "$BACKUP_GPG_RECIPIENT_FILE" --output "$TARGET.gpg.partial" --encrypt "$TARGET" ||
+    { echo "FATAL: encrypting the dump to the owner's key failed. Nothing was uploaded; the plain dump is removed." >&2; exit 1; }
+  RECIPIENTS="$(gpg --homedir "$GPG_HOME" --no-autostart --batch --list-packets "$TARGET.gpg.partial" 2>/dev/null |
+    sed -n 's/^:pubkey enc packet:.* keyid \([0-9A-F]\{16\}\).*/\1/p' | sort -u || true)"
+  [ -n "$RECIPIENTS" ] || { echo "FATAL: the encrypted dump names no recipient. Treating this run as FAILED." >&2; exit 1; }
+  for keyid in $RECIPIENTS; do
+    printf '%s\n' "$GPG_KEYIDS" | grep -qx "$keyid" ||
+      { echo "FATAL: the encrypted dump names a recipient that is not the owner's key. Treating this run as FAILED." >&2; exit 1; }
+  done
+  mv "$TARGET.gpg.partial" "$TARGET.gpg"
+  chmod 600 "$TARGET.gpg"
+  rm -f -- "$TARGET"
+  TARGET="$TARGET.gpg"
+  SIZE=$(wc -c < "$TARGET" | tr -d ' ')
+  echo "encrypted → $(basename "$TARGET") ($SIZE bytes, to the owner's key $BACKUP_GPG_FINGERPRINT only; the plain dump is removed)"
+fi
+
 # ── OFFSITE ─────────────────────────────────────────────────────────────────
 # The dump leaves this machine, and we PROVE it arrived before trusting it.
 UPLOADED=0
 if [ -n "${BACKUP_BUCKET:-}" ]; then
-  if ! command -v aws >/dev/null 2>&1; then
-    echo "FATAL: BACKUP_BUCKET is set but the aws CLI is not installed. Offsite backup cannot run." >&2
-    exit 1
-  fi
+  aws_cli_image >/dev/null || exit 1
   KEY="$BACKUP_PREFIX/$(basename "$TARGET")"
-  ENDPOINT_ARG=()
-  [ -n "${AWS_S3_ENDPOINT:-}" ] && ENDPOINT_ARG=(--endpoint-url "$AWS_S3_ENDPOINT")
-
+  OUT_ABS="$(cd "$OUT_DIR" && pwd)"
   echo "uploading → s3://$BACKUP_BUCKET/$KEY"
-  if ! aws "${ENDPOINT_ARG[@]}" s3 cp "$TARGET" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors; then
+  if ! aws_s3 "$OUT_ABS:/data:ro" s3 cp "/data/$(basename "$TARGET")" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors; then
     echo "FATAL: offsite upload failed. The local dump exists but is NOT safe from this machine dying." >&2
     exit 1
   fi
 
   # An upload that "succeeded" but landed truncated is the failure that hurts
   # most, because it looks fine. Compare the byte count at the destination.
-  REMOTE_SIZE=$(aws "${ENDPOINT_ARG[@]}" s3api head-object \
+  REMOTE_SIZE=$(aws_s3 "$OUT_ABS:/data:ro" s3api head-object \
     --bucket "$BACKUP_BUCKET" --key "$KEY" --query 'ContentLength' --output text 2>/dev/null || echo "")
   if [ "$REMOTE_SIZE" != "$SIZE" ]; then
     echo "FATAL: uploaded object is $REMOTE_SIZE bytes, local dump is $SIZE. Treating this run as FAILED." >&2
     exit 1
   fi
-  echo "verified offsite: $KEY ($REMOTE_SIZE bytes, byte-for-byte with the local dump)"
+  echo "verified offsite: $KEY ($REMOTE_SIZE bytes; restore drill verifies contents)"
   UPLOADED=1
 else
   echo "WARNING: BACKUP_BUCKET is not set — this dump lives only on the machine it backs up." >&2
@@ -136,8 +279,10 @@ fi
 # backups stop. Recorded ONLY when the dump is genuinely safe: offsite-verified,
 # or explicitly local-only. Best-effort — a failed heartbeat must not fail a
 # backup that actually worked; the staleness check will catch a real outage.
-if command -v psql >/dev/null 2>&1; then
-  psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || echo "note: heartbeat write failed (backup itself is fine)" >&2
+if command -v docker >/dev/null 2>&1; then
+  "${COMPOSE[@]}" exec -T postgres sh -c \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -v ON_ERROR_STOP=1' \
+    <<SQL >/dev/null 2>&1 || echo "note: heartbeat write failed (backup itself is fine)" >&2
 -- id has no database-side default (Prisma mints the cuid), so supply one.
 INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_backup_at', to_jsonb(now()::text), now())
@@ -160,7 +305,7 @@ if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
 fi
 
 if [ "$RETAIN_DAYS" -gt 0 ]; then
-  DELETED=$(find "$OUT_DIR" -name 'swift-*.dump' -type f -mtime +"$RETAIN_DAYS" -print -delete | wc -l | tr -d ' ')
+  DELETED=$(find "$OUT_DIR" \( -name 'swift-*.dump' -o -name 'swift-*.dump.gpg' \) -type f -mtime +"$RETAIN_DAYS" -print -delete | wc -l | tr -d ' ')
   [ "$DELETED" != "0" ] && echo "pruned $DELETED backup(s) older than $RETAIN_DAYS days"
 fi
 
