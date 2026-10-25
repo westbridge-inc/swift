@@ -37,8 +37,9 @@ import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgHistoryAnswer, 
 // match, a failed or partial read, a failed control, a reply, a settlement, a
 // provider payment or a second-admin request already raised: nothing changes,
 // the admins keep it as today, and MMG is asked again on a bounded schedule.
-// Times: the window is the checkout's plus 30 minutes after its deadline,
-// padded by MMG's 2-minute tolerance and 10-minute margin; the first check is
+// Times: MMG is asked from the checkout's opening (less MMG's 2-minute
+// tolerance and 10-minute margin) up to the check itself less 2 minutes
+// [REVIEW-M S3-1: MMG's page may outlive our deadline, U8]; the first check is
 // 42 minutes after the deadline, then 30m, 1h, 2h, 4h, 8h, 16h, 24h x3 (10).
 // ---------------------------------------------------------------------------
 
@@ -130,7 +131,7 @@ const bodyOf = (o: { body: unknown }) => o.body as Record<string, unknown>;
 const queriesFor = (row: { createdAt: Date; expiresAt: Date }) => history.queries.filter((q) => {
   const to = mmgCreationInstant(q.todate, 'GUYANA_WALL_CLOCK');
   const from = mmgCreationInstant(q.fromdate, 'GUYANA_WALL_CLOCK');
-  return to !== null && from !== null && from <= row.createdAt.getTime() && to >= row.expiresAt.getTime() + 41 * MIN;
+  return to !== null && from !== null && from <= row.createdAt.getTime() && to >= row.expiresAt.getTime() + 40 * MIN;
 });
 
 let controls = 0;
@@ -227,8 +228,10 @@ describe('an abandoned MMG page: closed as NOT PAID only on MMG’s own word', (
     expect(queriesFor(row)).toHaveLength(0);
 
     await service.pollIntents(at(row, FIRST_CHECK + MIN));
-    // MMG was asked for the whole window (the page, plus half an hour after it).
-    expect(queriesFor(row).length).toBeGreaterThanOrEqual(1);
+    // MMG was asked from the page's opening up to the check itself (less 2 minutes).
+    const asked = queriesFor(row);
+    expect(asked.length).toBeGreaterThanOrEqual(1);
+    expect(mmgCreationInstant(asked[0]!.todate, 'GUYANA_WALL_CLOCK')).toBeGreaterThanOrEqual(at(row, FIRST_CHECK + MIN).getTime() - 2 * MIN);
     const checks = await checksOf(row.id);
     expect(checks).toHaveLength(1);
     expect(checks[0]!.failure).toBe('HISTORY_NOT_FOUND');
@@ -273,6 +276,22 @@ describe('an abandoned MMG page: closed as NOT PAID only on MMG’s own word', (
     expect(await topups(s.subId)).toBe(0);
   });
 
+  it('[REVIEW-M S3-1] a payment MMG recorded after our deadline and its half hour, but before the check, is seen: untouched', async () => {
+    await confirmedControl();
+    const { s, row } = await abandoned();
+    // MMG kept its page open past our deadline (its own limit is unconfirmed, U8): the partner paid an hour after it, and no reply came.
+    history.holds(tx('PASTDEADLINE'), Number(row.amount), { external_id: row.merchantTransactionId, modificationDate: mmgTimeOf(at(row, 60 * MIN)) });
+    await service.pollIntents(at(row, 120 * MIN)); // the first check runs later than its earliest time
+    expect(await intentOf(row.id)).toMatchObject({ status: 'EXPIRED', reason: 'NO_REPLY' });
+    expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE', resolvedBy: null });
+    const checks = await checksOf(row.id);
+    expect(checks).toHaveLength(1);
+    expect(bodyOf(checks[0]!)).toMatchObject({ decision: 'PAYMENT_MAY_MATCH' });
+    expect(bodyOf(checks[0]!)['naming']).toHaveLength(1);
+    expect(await topups(s.subId)).toBe(0);
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+  });
+
   it('MMG shows a payment Swift cannot explain (not another confirmed checkout’s own): untouched, and that payment is never stored', async () => {
     await confirmedControl();
     const { row } = await abandoned();
@@ -303,7 +322,7 @@ describe('an abandoned MMG page: closed as NOT PAID only on MMG’s own word', (
     const controlRow = history.rows.get(control.txn)!;
     historyFault = (query) => {
       const to = mmgCreationInstant(query.todate, 'GUYANA_WALL_CLOCK')!;
-      if (to < row.expiresAt.getTime() + 41 * MIN) return null;
+      if (to < row.expiresAt.getTime() + 40 * MIN) return null;
       return { outcome: 'rows', rows: Array.from({ length: query.rows }, () => controlRow) };
     };
     await service.pollIntents(at(row, FIRST_CHECK + MIN));
@@ -317,7 +336,7 @@ describe('the read itself must be healthy: a control, or nothing is decided', ()
     await confirmedControl();
     const { s, row } = await abandoned();
     const first = at(row, FIRST_CHECK + MIN);
-    historyFault = (query) => (mmgCreationInstant(query.todate, 'GUYANA_WALL_CLOCK')! >= row.expiresAt.getTime() + 41 * MIN
+    historyFault = (query) => (mmgCreationInstant(query.todate, 'GUYANA_WALL_CLOCK')! >= row.expiresAt.getTime() + 40 * MIN
       ? { outcome: 'error', reason: 'MMG history unreachable: timeout' } : null);
     await service.pollIntents(first);
     expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE' });
@@ -477,6 +496,22 @@ describe('never: a reply, a settlement, a provider payment or a second-admin req
     strayObservationIds.push(stray.id);
     try {
       await service.pollIntents(at(row, FIRST_CHECK + MIN));
+      expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE' });
+      expect(await checksOf(row.id)).toHaveLength(0);
+    } finally {
+      await app.prisma.mmgCheckoutObservation.delete({ where: { id: stray.id } });
+    }
+  });
+
+  it('[REVIEW-M S3-1] an untied reply after our deadline and its half hour, but before the check, keeps it too', async () => {
+    await confirmedControl();
+    const { row } = await abandoned();
+    const stray = await app.prisma.mmgCheckoutObservation.create({ data: {
+      intentId: null, source: 'NOTIFY', detail: 'notify', failure: 'INVALID_RESPONSE', createdAt: at(row, 60 * MIN),
+    } });
+    strayObservationIds.push(stray.id);
+    try {
+      await service.pollIntents(at(row, 120 * MIN));
       expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE' });
       expect(await checksOf(row.id)).toHaveLength(0);
     } finally {

@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { currentDunningClock, resolveConfirmationInTx } from './dunning-clock';
 import { historyRowFrom, type MmgCheckoutLookupClient, type MmgHistoryQuery } from '../../providers/mmg/mmg-provider';
-import { MMG_HISTORY_CLOCK_TOLERANCE_MS, MMG_HISTORY_MARGIN_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
+import { MMG_HISTORY_CLOCK_TOLERANCE_MS, MMG_HISTORY_MARGIN_MS, MMG_HISTORY_ROWS, mmgHistoryQueryFor, mmgHistoryTruncated, mmgStampOf } from '../../providers/mmg/mmg-history';
 import type { MmgCreationZone } from '../../providers/mmg/mmg-checkout';
 import { mmgCheckoutEventsCounter, mmgCheckoutLookupsCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
@@ -13,10 +13,12 @@ import { log } from '../../utils/logger';
 // ACTIVE: the Pay button is hidden and the billing clock is frozen until two
 // admins close it as NOT PAID. Local expiry is never negative evidence, so
 // Swift asks MMG's own records:
-//   - MMG's Transaction History for the whole window the page could have been
-//     paid in (the checkout's window, plus half an hour after our deadline:
-//     MMG's own page limit is unconfirmed, U8), read only once that window is
-//     entirely in the past;
+//   - MMG's Transaction History from the checkout's opening up to the check
+//     itself (less MMG's two-minute clock tolerance), never only to our own
+//     deadline: MMG's own page limit is unconfirmed (U8), so a payment made on
+//     the page after our deadline but before the check is seen and keeps the
+//     hold. The first check waits until half an hour after our deadline (plus
+//     MMG's tolerance and margin);
 //   - in the same pass, a CONTROL: the tenant's own most recent confirmed
 //     checkout, read the same way, must come back as exactly MMG's record of
 //     its transaction naming its reference. That proves the read itself is
@@ -51,9 +53,12 @@ export const NO_REPLY_CLOSE_AUDIT = 'MMG_EXPIRED_HOLD_AUTO_CLOSED';
 export const NO_REPLY_CHECK_PURPOSE = 'NO_REPLY_EXPIRY_CHECK';
 /** The second-admin route that closes a hold by hand; a request for it in flight leaves the hold to the admins. */
 export const CONFIRMATION_RESOLVE_ACTION = 'POST /billing/confirmations/:id/resolve';
-/** How long after our deadline a payment on MMG's page is still looked for. */
+/** How long after our deadline the first check waits (MMG's page may outlive our deadline, U8). */
 export const NO_REPLY_COVER_AFTER_EXPIRY_MS = 30 * 60_000;
-/** The first check waits until the whole padded window is in the past. */
+/** [REVIEW-M #2098 S3-1] MMG's history is read up to the check's own time less
+ *  this (MMG's clock tolerance), so the asked window is in MMG's past too. */
+export const NO_REPLY_SETTLE_MARGIN_MS = MMG_HISTORY_CLOCK_TOLERANCE_MS;
+/** The first check: half an hour past our deadline, plus MMG's tolerance and margin. */
 export const NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS = NO_REPLY_COVER_AFTER_EXPIRY_MS + MMG_HISTORY_CLOCK_TOLERANCE_MS + MMG_HISTORY_MARGIN_MS;
 /** The wait before each further check (after the 1st, 2nd, ... check). */
 export const NO_REPLY_CHECK_BACKOFF_MS: readonly number[] = [
@@ -86,19 +91,24 @@ function neverAnswered(c: CheckoutFacts): boolean {
     && c.mmgTransactionId === null && c.providerPaymentId === null && c.confirmedAt === null;
 }
 
-/** The end of the window MMG is asked about. */
-function windowEnd(c: Pick<CheckoutFacts, 'expiresAt'>): number {
+/** When the first check is due. */
+function firstCheckAt(c: Pick<CheckoutFacts, 'expiresAt'>): number {
   return c.expiresAt.getTime() + NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS;
 }
-/** MMG's history query for the whole window, never clamped: only asked once it is in the past. */
-export function noReplyQueryFor(c: Pick<CheckoutFacts, 'createdAt' | 'expiresAt'>, zone: MmgCreationZone, now: Date): MmgHistoryQuery {
-  return mmgHistoryQueryFor(c.createdAt, new Date(c.expiresAt.getTime() + NO_REPLY_COVER_AFTER_EXPIRY_MS), zone, now);
+/** [REVIEW-M #2098 S3-1] MMG's history from the checkout's opening (less
+ *  MMG's tolerance and margin) up to THIS check (less the settle margin): every
+ *  payment MMG recorded for the page before the close is seen, however long
+ *  MMG kept the page open. Only asked once the first check is due, so it always
+ *  reaches at least 40 minutes past our deadline. */
+export function noReplyQueryFor(c: Pick<CheckoutFacts, 'createdAt'>, zone: MmgCreationZone, now: Date): MmgHistoryQuery {
+  const from = c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS - MMG_HISTORY_MARGIN_MS;
+  return { fromdate: mmgStampOf(from, zone), todate: mmgStampOf(now.getTime() - NO_REPLY_SETTLE_MARGIN_MS, zone, 'ceil'), rows: MMG_HISTORY_ROWS };
 }
 /** When the next check is due, or null once the attempts are spent. */
 export function noReplyCheckDueAt(c: Pick<CheckoutFacts, 'expiresAt'>, attempts: number, lastAt: Date | null): number | null {
   if (attempts >= NO_REPLY_CHECK_MAX_ATTEMPTS) return null;
-  if (attempts === 0 || !lastAt) return windowEnd(c);
-  return Math.max(windowEnd(c), lastAt.getTime() + NO_REPLY_CHECK_BACKOFF_MS[attempts - 1]!);
+  if (attempts === 0 || !lastAt) return firstCheckAt(c);
+  return Math.max(firstCheckAt(c), lastAt.getTime() + NO_REPLY_CHECK_BACKOFF_MS[attempts - 1]!);
 }
 
 const canon = (id: string) => id.trim().toUpperCase();
@@ -114,8 +124,8 @@ function leaves(value: unknown, out: string[] = [], depth = 0): string[] {
 /**
  * Something that leaves the hold to the admins, read on the same client the
  * close uses (under its locks there). A reply of any kind for this checkout,
- * or one nobody could tie to a checkout that arrived while it could have been
- * paid; a provider payment credited to it, or any MMG payment on this
+ * or one nobody could tie to a checkout that arrived between its opening and
+ * this check (MMG's page may outlive our deadline); a provider payment credited to it, or any MMG payment on this
  * subscription since it opened; a second-admin request for this hold that is
  * still waiting or approved and unspent.
  */
@@ -123,7 +133,7 @@ async function blockerOf(db: Db, holdId: string, c: CheckoutFacts, now: Date): P
   const replies = await db.mmgCheckoutObservation.count({ where: { OR: [
     { intentId: c.id, source: { in: ['RETURN', 'NOTIFY'] } },
     { intentId: null, source: { in: ['RETURN', 'NOTIFY'] }, failure: { in: ['NO_TOKEN', 'INVALID_RESPONSE'] },
-      createdAt: { gte: new Date(c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS), lte: new Date(windowEnd(c)) } },
+      createdAt: { gte: new Date(c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS), lte: now } },
   ] } });
   if (replies > 0) return 'REPLY_ON_RECORD';
   const money = await db.providerPayment.count({ where: { OR: [
