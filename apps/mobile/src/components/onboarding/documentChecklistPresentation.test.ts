@@ -78,5 +78,7 @@ describe('[VERIFY-DOCS] optional documents follow the server', () => {
     expect(optionalDocHint('police_clearance')).toMatch(/^Optional\. If Swift approves a current one, your account is recorded as police-cleared\./);
     expect(optionalDocHint('police_clearance')).not.toMatch(/badge|profile/i);
     for (const t of ['police_clearance', 'national_id', 'anything']) expect(optionalDocHint(t)).not.toMatch(/required|must/i);
+    // [ROLE-DOCS · owner 21 Oct 2026] no mover is offered a second ID, so no line says the licence proves who they are
+    expect(optionalDocHint('national_id')).toBe('Optional. Not needed to start working.');
   });
 });

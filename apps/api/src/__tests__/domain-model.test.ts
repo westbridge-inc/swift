@@ -90,7 +90,9 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
     // comes with the vehicle (licence, or the national ID on a bicycle); the rest may be added.
     expect(await countryConfig.getDocumentChecklist('GY', 'MOVER')).toEqual([]);
     expect(await countryConfig.getDocumentChecklist('GY', 'MOVER_NO_LICENCE')).toEqual(['national_id']);
-    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER', [])).toEqual(['national_id', 'police_clearance']);
+    // [ROLE-DOCS · owner 21 Oct 2026] no optional document for every mover; a taxi driver may add a police clearance
+    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER', [])).toEqual([]);
+    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER_TAXI_EXTRA', [])).toEqual(['police_clearance']);
     const restaurantDocs = await countryConfig.getDocumentChecklist('GY', 'RESTAURANT');
     expect(restaurantDocs).toContain('food_handler_cert');
   });

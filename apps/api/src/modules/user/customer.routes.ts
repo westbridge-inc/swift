@@ -1,5 +1,6 @@
 import { servedPhotoAddress } from '../../utils/photo-address';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { customerTimeline } from '../order/customer-timeline';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
@@ -2719,6 +2720,7 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
+            requirePickupCode: true, // [O-2] read for pickupCodeRequired below
             // [S1 response-shaping · High #6] never `phone` — that is the
             // store's account/OTP line, not a number it chose to publish, and
             // it was handed to every customer on every order, for good. The
@@ -2883,12 +2885,8 @@ export async function customerRoutes(app: FastifyInstance) {
         }
       : null;
 
-    // Timeline
-    const timeline = order.statusHistory.map((sh) => ({
-      status: sh.status,
-      note: sh.note,
-      timestamp: sh.createdAt,
-    }));
+    // Timeline — [O-2 · REVIEW-F S3-2] the customer's projection (no store-tap row, no position evidence).
+    const timeline = customerTimeline(order.statusHistory);
 
     return {
       success: true,
@@ -2899,7 +2897,8 @@ export async function customerRoutes(app: FastifyInstance) {
         // The declared vertical — SERVICE for a service business's booking.
         vertical: orderVertical(order),
         status: order.status,
-        vendor: order.vendor,
+        // The store's own setting is read for pickupCodeRequired, not passed through as a store field.
+        vendor: order.vendor ? (({ requirePickupCode: _code, ...vendor }) => vendor)(order.vendor) : order.vendor,
         items: order.items.map((i) => ({
           id: i.id,
           itemId: i.itemId,
@@ -2945,6 +2944,9 @@ export async function customerRoutes(app: FastifyInstance) {
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
         pickupCode: order.pickupCode,
+        // [O-2 · owner 22 Oct 2026] Whether the store asks for that code. Off by default: the store checks
+        // the customer's first name and order number instead (the code still works if it is asked for).
+        pickupCodeRequired: order.vendor?.requirePickupCode === true,
         // [MKT-F057] The delivery door PIN — the customer HOLDS this and gives
         // it to the rider at the door (taxi parity: holder sees, verifier enters).
         // Null on pickup/appointment/courier rows and once a store self-delivers
