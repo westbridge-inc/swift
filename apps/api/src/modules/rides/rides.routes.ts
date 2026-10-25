@@ -46,6 +46,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
+import { counterpartPhone } from '../calls/counterpart-phone';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -542,6 +543,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
     // off (the default), the passenger pays the driver directly at drop-off.
     const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
+    // [O-1] The driver's personal number only to an installed store build (it dials it);
+    // a bridge-aware client calls through Swift and is sent none.
+    driver.user = { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
