@@ -452,6 +452,7 @@ model Tenant {
   taxiTripStops    TaxiTripStop[]
   custodyRecoveryCases CustodyRecoveryCase[]
   taxiRideWaitings TaxiRideWaiting[]
+  callSessions     CallSession[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -2018,6 +2019,8 @@ model Order {
   /// charge frozen at "Fare collected" (one row, only for a ride booked while
   /// TAXI_WAITING_CHARGE was on). The charge itself is in totalAmount.
   taxiRideWaiting    TaxiRideWaiting?
+  /// [O-1] Swift call-bridge attempts on this order (never a phone number).
+  callSessions       CallSession[]
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -2455,6 +2458,45 @@ model TaxiRideWaiting {
 
   @@index([tenantId])
   @@map("taxi_ride_waiting")
+}
+
+/// [O-1 · owner 22-24 Oct 2026] One Swift call-bridge attempt on a live order:
+/// who asked (the caller), which party they asked for, and how far it got.
+/// NEVER a phone number: both numbers are read from the order's own rows at
+/// the moment each leg is dialled, and handed only to the voice provider.
+/// No row is written while CALL_RELAY is off. A connected call is one where
+/// Swift's own "Press 1" screen recorded the called party's 1 (Twilio's
+/// "completed" alone is not a person answering).
+model CallSession {
+  id                String    @id @default(cuid())
+  tenantId          String    @default("swift-default")
+  tenant            Tenant    @relation(fields: [tenantId], references: [id])
+  orderId           String
+  order             Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// The person who tapped Call (leg 1 rings them).
+  callerUserId      String
+  /// customer | rider | driver | store: what the caller is on this order.
+  callerRole        String
+  /// customer | rider | driver | store | recipient: who they asked for (leg 2).
+  calleeRole        String
+  /// The voice provider that placed the call ('twilio').
+  provider          String
+  /// The provider's id for leg 1 (Twilio CallSid); null until the provider takes the call.
+  providerCallId    String?   @unique
+  /// DIALING_CALLER -> CALLER_CONFIRMED -> CONNECTED, or NOT_CONNECTED / FAILED.
+  status            String    @default("DIALING_CALLER")
+  callerConfirmedAt DateTime?
+  connectedAt       DateTime?
+  endedAt           DateTime?
+  /// Seconds the provider reports for the bridged leg (0 when never connected).
+  durationSeconds   Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([orderId, createdAt])
+  @@index([callerUserId])
+  @@map("call_sessions")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle

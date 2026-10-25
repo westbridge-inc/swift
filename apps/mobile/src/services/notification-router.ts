@@ -189,6 +189,20 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // VendorStack never mounts, so "New Order!" opened on whatever was last on
   // screen. orderNumber only rides along when the payload actually carries it
   // (it titles the detail header while the order loads) — never invented.
+  // [O-1] "Swift is calling you about your order": sent just before a Swift-
+  // bridged call rings this person. It names the order as callOrderId (never
+  // orderId), so an older app that has no case here opens itself instead of a
+  // Delivery screen that cannot show a rider's or a store's job. Here it opens
+  // the order where this person works it: a store on its order desk, a mover on
+  // their live job (a driver on the ride), a customer on their tracking screen.
+  if (kind === 'call_incoming') {
+    const callOrderId = typeof data['callOrderId'] === 'string' ? (data['callOrderId'] as string) : undefined;
+    const taxi = data['orderType'] === 'TAXI';
+    if (audience === 'business') return callOrderId ? { screen: 'VendorOrderDetail', params: { orderId: callOrderId } } : { screen: 'VendorRoot' };
+    if (audience === 'earner') return { screen: taxi ? 'Main' : 'ActiveJob' };
+    if (taxi) return { screen: 'Taxi' };
+    return callOrderId ? { screen: 'Delivery', params: { orderId: callOrderId } } : { screen: HOME_SCREEN };
+  }
   if (kind === 'vendor_order_alert' && orderId) {
     const orderNumber = typeof data['orderNumber'] === 'string' ? (data['orderNumber'] as string) : undefined;
     return { screen: 'VendorOrderDetail', params: orderNumber ? { orderId, orderNumber } : { orderId } };

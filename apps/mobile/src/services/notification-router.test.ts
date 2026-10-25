@@ -393,6 +393,9 @@ const CENSUS: Case[] = [
   { k: 'incident_shadow_restricted', d: { caseNumber: 'INC-1', category: 'HARASSMENT' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account under review' } }, why: 'the subject — the body says contact support to respond; GetHelp is mounted in every navigator, as for incident_interim_suspension' },
   { k: 'compliance_review_failed', d: { audience: 'earner', caseId: 'c1' }, to: { screen: 'MoverDocuments' }, why: 'mover — offline until their documents are re-verified; the body says re-submit them in the app' },
 
+  // [O-1] "Swift is calling you about your order", just before a Swift-bridged call rings this person.
+  // One row (the customer copy); the store and mover copies are tabled below and graded too.
+  { k: 'call_incoming', d: { callOrderId: 'o1', orderType: 'FOOD_DELIVERY', from: 'rider', leg: 2, audience: 'customer' }, to: DELIVERY('o1'), why: '[O-1] the customer — Swift is about to ring them for a call about this order; their tracking screen. The payload says callOrderId, never orderId, so builds 9-12 (no case for it) open the app instead of a screen that cannot show a mover\'s or a store\'s job' },
   // ── Store surfaces, then the advertiser kinds (ADS OFF at launch).
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: VENDOR_TAB('Menu'), why: 'store owner — the catalogue tab, where stock and availability are set. The payload names the item, not the store: it opens on the selected store' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: { screen: 'VendorRoot' }, why: 'the person ADDED to a store team — the store’s own screen, selected by its vendorId; it is reached in Business mode, which the body tells them to choose' },
@@ -535,6 +538,7 @@ const CUSTOMER_COPIES: Record<string, unknown>[] = [
   { kind: 'trip_share_rotated', orderId: 'o1' },
   { kind: 'trip_share_ended', outcome: 'COMPLETED' },
   { kind: 'trust_l3' },
+  { kind: 'call_incoming', callOrderId: 'o1', orderType: 'TAXI', from: 'driver', leg: 2, audience: 'customer' },
 ];
 
 /** Store copies of kinds the census lists with another audience. */
@@ -542,6 +546,7 @@ const STORE_COPIES: Record<string, unknown>[] = [
   ...PARTNER_FEE_KINDS.map((kind) => ({ kind, subscriptionId: 's1', audience: 'business' })),
   ...DOCUMENT_KINDS.map((kind) => ({ kind, docId: 'd1', audience: 'business' })),
   { kind: 'support_update', ticketId: 't1' },
+  { kind: 'call_incoming', callOrderId: 'o1', orderType: 'FOOD_DELIVERY', from: 'rider', leg: 2, audience: 'business' },
 ];
 
 /** [payload (+ the app that is open, as `intent`), where it lands]. */
@@ -653,6 +658,19 @@ describe('every destination is a route the app actually registers', () => {
       if (screen && !mounted.has(screen)) unreachable.push(`${kind} -> ${screen} (${why})`);
     }
     expect(unreachable, 'a mover tapping these opens nothing — the screen is in another stack').toEqual([]);
+  });
+
+  // [O-1] The call notice to a mover: a rider on their live job, a driver on the ride (Main).
+  it('a call notice aimed at a MOVER lands on a screen MoverStack mounts', () => {
+    const stack = readFileSync(join(process.cwd(), 'src', 'modules', 'mover', 'MoverStack.tsx'), 'utf8');
+    const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
+    mounted.add('Main');
+    expect(mounted.has('ActiveJob'), 'the scan found the live-job screen').toBe(true);
+    for (const [orderType, screen] of [['FOOD_DELIVERY', 'ActiveJob'], ['COURIER', 'ActiveJob'], ['TAXI', 'Main']] as const) {
+      const dest = destinationFor({ kind: 'call_incoming', callOrderId: 'o1', orderType, from: 'customer', leg: 2, audience: 'earner' });
+      expect(dest, orderType).toEqual({ screen });
+      expect(mounted.has(dest!.screen), `${orderType} -> ${dest!.screen}`).toBe(true);
+    }
   });
 
   // [E28] THE SAME LESSON FOR THE CUSTOMER. booking_rescheduled goes to two
