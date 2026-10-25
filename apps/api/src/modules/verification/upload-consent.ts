@@ -34,6 +34,20 @@ export const UPLOAD_CONSENT = {
 } as const satisfies Record<string, { documentType: ConsentDocumentType; version: string; text: string }>;
 
 export type UploadConsentTick = keyof typeof UPLOAD_CONSENT;
+
+/**
+ * [DOC-CONSENT S4 · REVIEW-G2 S4-1] How the person gave the tick for THIS upload, so the ledger's evidence says it
+ * truly: the box ticked on this visit, the box shown from their own grant on record (no new tap; the API checks the
+ * grant is there), or the prompt a police clearance asks before its photo. An upload that names none (builds 9-12,
+ * the website) is the checkbox, as before.
+ */
+export const UPLOAD_CONSENT_VIAS = ['checkbox', 'record', 'prompt'] as const;
+export type UploadConsentVia = (typeof UPLOAD_CONSENT_VIAS)[number];
+const CONTROL_FOR_VIA: Record<UploadConsentVia, string> = {
+  checkbox: 'upload_consent_checkbox',
+  record: 'upload_consent_on_record',
+  prompt: 'upload_consent_prompt',
+};
 export const UPLOAD_CONSENT_TICKS = Object.keys(UPLOAD_CONSENT) as [UploadConsentTick, ...UploadConsentTick[]];
 
 /** The ledger subject for a checklist role: a mover is a driver; a business or a service provider a vendor user. */
@@ -45,7 +59,7 @@ export function consentSubjectForRole(role: string | null): ConsentSubjectType {
 
 export async function recordUploadConsent(
   prisma: PrismaClient,
-  input: { userId: string; tick: UploadConsentTick; subjectType: ConsentSubjectType; surface: ConsentSurface; ip?: string | null; docType: string },
+  input: { userId: string; tick: UploadConsentTick; subjectType: ConsentSubjectType; surface: ConsentSurface; ip?: string | null; docType: string; via?: UploadConsentVia },
 ): Promise<void> {
   const c = UPLOAD_CONSENT[input.tick];
   await publishLegalDocumentOnce(prisma, { documentType: c.documentType, version: c.version, renderedText: c.text });
@@ -57,6 +71,6 @@ export async function recordUploadConsent(
     action: 'granted',
     surface: input.surface,
     ip: input.ip ?? null,
-    evidence: { control: 'upload_consent_checkbox', path: 'verification', docType: input.docType },
+    evidence: { control: CONTROL_FOR_VIA[input.via ?? 'checkbox'], path: 'verification', docType: input.docType },
   }));
 }
