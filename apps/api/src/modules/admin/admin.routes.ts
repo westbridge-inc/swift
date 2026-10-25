@@ -1,5 +1,6 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
+import { documentScanState, uploadScanRefusal, retryHeldEvidenceScan } from '../../lib/upload-scan-debt';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -46,7 +47,7 @@ import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capab
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
   alreadyOpenMessage, fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
-  type ApprovalSnapshotRow,
+  approvalsViewWhere, effectiveApprovalStatus, type ApprovalSnapshotRow,
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
@@ -61,6 +62,7 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { consoleRoleOf } from '../auth/console-role';
 import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
 import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
@@ -377,6 +379,8 @@ const approveDocSchema = z.object({
   certificateYear: z.coerce.number().int().min(1900).max(9999).optional(),
   // [R16] a business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation
   registrationKind: z.enum(REGISTRATION_KINDS).optional(),
+  // [ROLE-DOCS · owner 21 Oct 2026] an own-name declaration: the reviewer confirms the store name against the owner's ID
+  ownNameConfirmed: z.boolean().optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -676,6 +680,21 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   };
 
+  // [ADMIN-ROLE] The console acts under the admin role the account HOLDS
+  // (users.roles, read with the session on this very request), never the
+  // phone app's active mode: an admin whose phone is in rider mode still runs
+  // the console, and an account whose admin role is removed is refused on its
+  // next call. `request.user.role` becomes that admin role for the rest of the
+  // request, so the capability engine, the two-person rule, the founder check
+  // and the audit trail all see the authority actually used. authenticate()
+  // resets it to the active mode, so every guard that re-authenticates binds
+  // it again. Returns null (and binds nothing) for an account holding none.
+  const bindConsoleRole = (request: any): string | null => {
+    const role = consoleRoleOf(request.heldRoles);
+    if (role) request.user.role = role;
+    return role;
+  };
+
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
     // The production server opens this store globally. Admin routes also do it
@@ -684,7 +703,7 @@ export async function adminRoutes(app: FastifyInstance) {
     beginRequestTenantContext();
     await app.authenticate(request, reply);
     if (reply.sent) return;
-    if (!['ADMIN', 'SUPER_ADMIN'].includes(request.user.role)) {
+    if (!bindConsoleRole(request)) {
       throw new ForbiddenError('Admin access required');
     }
     requireTenantId();
@@ -697,6 +716,9 @@ export async function adminRoutes(app: FastifyInstance) {
   const founderGuard = async (request: any, reply: any) => {
     await app.authenticate(request, reply);
     if (reply.sent) return;
+    // [ADMIN-ROLE] Judged on the admin role the account HOLDS (bound for the
+    // request); an account holding none is judged on nothing, never its mode.
+    if (!bindConsoleRole(request)) request.user.role = '';
     assertFounderAccess(request.user.role);
   };
 
@@ -1785,7 +1807,7 @@ export async function adminRoutes(app: FastifyInstance) {
         const refusedNow = again === 'CAN_REINSTATE' ? null
           : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         if (refusedNow) throw refusedNow;
-        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx);
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx, id);
         // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
         // suspension source survives it for a later heal or payment to act on. The CAS names the exact
         // suspension decided above, under the lock.
@@ -6085,6 +6107,7 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
       ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
       ...(body.registrationKind !== undefined ? { registrationKind: body.registrationKind } : {}),
+      ...(body.ownNameConfirmed !== undefined ? { ownNameConfirmed: body.ownNameConfirmed } : {}),
     }, {
       // [S2-29 · KYC-DECISION-ATOMIC] The trail commits with the decision, in its transaction: the
       // action row and the canonical admin row. A decision cannot commit without them.
@@ -6296,6 +6319,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const ttlSeconds = 300;
 
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
+    // [Row 312 · G S3-1 (a), COORD 23 Oct] A document stored while the scanner was down (the bypass) is not
+    // opened by staff until its rescan answers CLEAN: no link is minted and no view is recorded.
+    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
     // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
     // re-checks their grant on every load.
     const minted = mintRenderPath(id, request.user.userId, ttlSeconds);
@@ -6639,11 +6665,18 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status } = z.object({
       status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED']).optional(),
     }).parse(request.query);
-    const where = status ? { status } : { status: 'PENDING' };
-    const [rows, total] = await Promise.all([
+    // [Owner, admin-staging 25 Oct] Nothing moves an open request's status column when its time runs out (only a
+    // later decide does), so a lapsed request used to sit under Pending with an 'expired' label and never reach
+    // the Expired tab. The queue files and reports it by what it IS: past expiresAt, an open request (pending, or
+    // approved but not applied) is EXPIRED. The gate already refuses it either way (decide and apply both check
+    // expiresAt); this makes the screen say so.
+    const now = new Date();
+    const where = approvalsViewWhere(status ?? 'PENDING', now);
+    const [found, total] = await Promise.all([
       tenantPrisma.privilegedApproval.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
       tenantPrisma.privilegedApproval.count({ where }),
     ]);
+    const rows = found.map((row) => ({ ...row, status: effectiveApprovalStatus(row, now) }));
     // An approver must be able to tell their own asks apart at a glance: they
     // cannot decide those, and a queue that hides the fact wastes their time.
     const mine = request.user.userId;
@@ -7213,6 +7246,39 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     });
     return { success: true, data: { queue, id, retried: true } };
+  });
+
+  // [Row 312 · COORD 21-22 Oct] Evidence that could not be scanned (the scanner was up but failed on the
+  // file itself, or its rescans ran out) is HELD in the quarantine: served to no one, admitted as proof by
+  // no claim, and paged. A platform admin lists it here and retries its scan; it leaves the quarantine
+  // ONLY on a CLEAN answer (never on a person's word), a signature quarantines it like any positive.
+  // Rows hold no person id and no content: the object key, the digest, the surface.
+  app.get('/upload-scan-debts/held', { preHandler: [platformControlGuard] }, async () => {
+    const rows = await app.prisma.uploadScanDebt.findMany({
+      where: { result: 'HELD', releasedAt: null },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+      select: { id: true, surface: true, fileKey: true, sha256: true, createdAt: true, attempts: true },
+    });
+    return { success: true, data: rows };
+  });
+
+  app.post('/upload-scan-debts/:id/release', { preHandler: [platformControlGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    const outcome = await retryHeldEvidenceScan(
+      { prisma: app.prisma, redis: app.redis, notifications, storage: getStorageProvider() },
+      id,
+      // The release and its trail commit together.
+      (tx) => auditIn(tx, request.user.userId, 'RELEASE_HELD_UPLOAD', 'UploadScanDebt', id, { reason: body.reason }, request),
+    );
+    if (outcome.outcome === 'NOT_HELD') throw new AppError(409, 'NOT_HELD', 'This upload is not held (already released, or never held).');
+    if (outcome.outcome !== 'RELEASED') {
+      // Not released: the attempt is still on the record.
+      await auditIn(app.prisma, request.user.userId, 'RETRY_HELD_UPLOAD_SCAN', 'UploadScanDebt', id, { reason: body.reason, outcome: outcome.outcome }, request);
+    }
+    if (outcome.outcome === 'STILL_HELD') throw new AppError(409, 'STILL_HELD', `Still held: ${outcome.why}.`);
+    return { success: true, data: { id, outcome: outcome.outcome, released: outcome.outcome === 'RELEASED' } };
   });
 
   /** DELETE /dlq/:queue/:id — discard a dead job for good. */

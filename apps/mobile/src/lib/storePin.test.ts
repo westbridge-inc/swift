@@ -158,6 +158,18 @@ describe('Create store waits for a confirmed pin', () => {
     pin,
   };
 
+  // [ROLE-DOCS · owner 21 Oct 2026] own name instead of a business registration: the tick first, and the basis sent
+  it('an own-name store waits for the declaration tick and says so; the basis travels only for the three store types', () => {
+    expect(businessSetupBlocker({ ...complete, nameBasis: 'OWN_NAME', ownNameTick: false })).toBe('Sign the own-name declaration');
+    expect(vendorBusinessPayload({ ...complete, nameBasis: 'OWN_NAME', ownNameTick: false })).toBeNull();
+    expect(vendorBusinessPayload({ ...complete, nameBasis: 'OWN_NAME', ownNameTick: true })).toMatchObject({ nameBasis: 'OWN_NAME' });
+    expect(vendorBusinessPayload({ ...complete, nameBasis: 'REGISTERED' })).not.toHaveProperty('nameBasis');
+    expect(vendorBusinessPayload(complete)).not.toHaveProperty('nameBasis');
+    // a service business is never asked for a registration: no tick, no basis
+    expect(businessSetupBlocker({ ...complete, type: 'SERVICE', nameBasis: 'OWN_NAME', ownNameTick: false })).toBeNull();
+    expect(vendorBusinessPayload({ ...complete, type: 'SERVICE', nameBasis: 'OWN_NAME' })).not.toHaveProperty('nameBasis');
+  });
+
   it('with everything else filled in and agreed, no pin keeps Create off and says so', () => {
     expect(businessSetupBlocker({ ...complete, pin: null })).toBe('Place your store on the map');
     expect(vendorBusinessPayload({ ...complete, pin: null })).toBeNull();

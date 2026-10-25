@@ -50,7 +50,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       if (!user || !isAdmin) { dropSessionCache(); router.replace('/login'); return; }
       if (attested.current !== null && attested.current !== user.id) dropSessionCache();
       attested.current = user.id;
-      setRole(user.activeRole ?? null);
+      // [ADMIN-ROLE] The chip names the admin role the account HOLDS, which is
+      // what the server acts under; never the phone app's mode (an admin whose
+      // phone is in rider mode is still an admin here).
+      setRole(user.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : 'ADMIN');
       setReadyPath(pathname);
     });
     return () => { cancelled = true; };
@@ -79,7 +82,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div data-desktop-sidebar className="hidden md:flex shrink-0"><Sidebar role={role} /></div>
       <div className="min-w-0 flex-1 flex flex-col overflow-hidden" inert={drawer ? true : undefined}>
         <Header onOpenNavigation={() => setDrawer(true)} />
-        <main className="min-w-0 flex-1 overflow-auto p-4 md:p-6">{children}</main>
+        <main className="min-w-0 flex-1 overflow-auto bg-[var(--mc-paper)] p-4 text-[var(--mc-ink)] md:p-6">{children}</main>
       </div>
       {drawer && <Modal title="Navigation" onClose={() => setDrawer(false)} className="admin-drawer" overlayTestId="navigation-overlay">
         <button className="admin-drawer-close" onClick={() => setDrawer(false)} aria-label="Close navigation">Close navigation ×</button>

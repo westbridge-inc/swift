@@ -49,7 +49,8 @@ const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
 const CONSENT_ID_PHONE = `+${runBase + 10}`;
 const CONSENT_DOC_PHONE = `+${runBase + 11}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE];
+const CONSENT_ID2_PHONE = `+${runBase + 12}`;
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE, CONSENT_ID2_PHONE];
 
 // [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
 // documents; the licence is their photo ID. [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] A
@@ -1225,5 +1226,32 @@ describe('[R17] upload consent ticks are recorded in the consent ledger', () => 
       where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v1', locale: 'en-GY' } },
     });
     expect(doc.renderedText).toBe('I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.');
+  });
+
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] An ID no longer unlocks taxi rides or larger orders, so
+  // the current app shows new words under their own version (v2); builds that show the v1 words keep sending v1
+  // (the case above), and each tick stays anchored to the words its app showed.
+  it('a customer ID sent with the v2 tick writes a v2 customer_id_consent row whose words promise no unlock', async () => {
+    const customer = await signup(CONSENT_ID2_PHONE, 'CUSTOMER');
+    const res = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id-v2'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v2',
+    }, customer.tokens.accessToken);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
+      expect.objectContaining({ documentVersion: 'v2', action: 'granted', subjectType: 'customer' }),
+    ]);
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v2', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo with my account, as the Privacy Policy explains.');
+    expect(doc.renderedText).not.toMatch(/unlock|taxi|larger orders/i);
+    // A document tick is still not a customer-ID tick, and a customer-ID tick is not a document tick.
+    const wrong = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id-v2-wrong'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1',
+    }, customer.tokens.accessToken);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('CONSENT_TICK_MISMATCH');
   });
 });

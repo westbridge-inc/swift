@@ -8,7 +8,6 @@ import { z } from '../../lib/zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,
-  assertL2,
   createRideRequest,
   fareChanged,
   replayRideRequestAnswer,
@@ -371,8 +370,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     assertHirePassengers(body.passengerCount);
     if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     assertRoadTripInMarket(body);
+    // [Owner ruling 24 Oct 2026] No customer ID gate here either (rides.service assertRideGates).
     const user = await assertRideGates(app, request.user.userId);
-    assertL2(user);
 
     // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
     // passenger saw is checked now and kept with the entry; nothing is queued

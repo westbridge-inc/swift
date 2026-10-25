@@ -347,7 +347,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       mmgCheckoutHeldAt: 'FRAUD_SAFETY', suspensionSource: 'SYSTEM', isFeatured: 'SYSTEM', mmgMissesClearedAt: 'SYSTEM', nameReviewApprovedHash: 'SYSTEM',
     },
     fields: [
-      'id', 'name', 'slug', 'description', 'vendorType', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
+      'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
       'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders',
       'deliveryRadius', 'minOrderAmount', 'estimatedPrepTime', 'cuisineTypes', 'tags', 'refundRule', 'vatRegistrationNumber', 'qrSlug',
       'mmgNumber', 'mmgNumberPending', 'mmgNumberPendingAt', 'mmgNumberApplyAt', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt',

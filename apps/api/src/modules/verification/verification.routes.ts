@@ -1,6 +1,7 @@
 import { discardUnusedCustomerSelfie } from '../user/upload-erasure';
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
+import { documentScanState, uploadScanRefusal, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -14,6 +15,7 @@ import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
+import { documentConsentOnRecord } from './document-consent-record';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { liveDuplicateHolders } from './duplicate-holders';
 
@@ -83,11 +85,16 @@ export async function verificationRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const auth = { preHandler: [app.authenticate] };
 
-  /** GET /status?role= — checklist, submitted docs, what's missing. */
+  /** GET /status?role= — checklist, submitted docs, what's missing. [DOC-CONSENT] `documentConsent` (additive; older
+   *  apps ignore it): whether this person's document-upload tick is on record, so the checklist shows their own
+   *  recorded choice instead of an empty box on every visit (document-consent-record.ts). */
   app.get('/status', auth, async (request) => {
     const { role, vehicleType } = statusQuerySchema.parse(request.query);
-    const status = await verification.getStatus(request.user.userId, role, vehicleType);
-    return { success: true, data: status };
+    const [status, documentConsent] = await Promise.all([
+      verification.getStatus(request.user.userId, role, vehicleType),
+      documentConsentOnRecord(app.prisma, request.user.userId, role),
+    ]);
+    return { success: true, data: { ...status, documentConsent } };
   });
 
   /** POST /appeal — "Think this is a mistake?" (trial-integrity Part 4).
@@ -183,7 +190,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
     const sealedType = photo?.mimeType ?? file.mimetype;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
-    await scanUpload(buffer, { surface: 'verification', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
@@ -228,6 +235,8 @@ export async function verificationRoutes(app: FastifyInstance) {
           createdBy: request.user.userId,
         },
       });
+      // [Row 312] Stored sealed: the rescan opens it with this key row (found by the same fileKey).
+      await recordUnscannedUpload(app.prisma, scan, { surface: 'verification', fileKey: url, buffer, sealed: true, storage });
 
       if (dup) {
         // Global correlation is a platform review signal. Tenant-local
@@ -281,6 +290,9 @@ export async function verificationRoutes(app: FastifyInstance) {
       throw documentReviewerRequired();
     }
     const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
+    // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
+    // staff before its rescan answers CLEAN, whatever link was minted.
+    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 
@@ -301,11 +313,12 @@ export async function verificationRoutes(app: FastifyInstance) {
 
   /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
    *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
-   *  repeat truthfully: ON_FILE (unlocked now, no person reviewed it), WAITING (a person looks
+   *  repeat truthfully: ON_FILE (on file now, no person reviewed it), WAITING (a person looks
    *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
-    if (body.consentTick && body.consentTick !== 'customer_id_v1') {
+    // v1 = the words build 12 shows; v2 = the current app's (owner ruling 24 Oct 2026: no unlock promised).
+    if (body.consentTick && body.consentTick !== 'customer_id_v1' && body.consentTick !== 'customer_id_v2') {
       throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
     }
     const doc = await verification.submitIdentity(
