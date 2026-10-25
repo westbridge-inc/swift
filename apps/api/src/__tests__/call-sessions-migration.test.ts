@@ -60,7 +60,13 @@ describe('the call_sessions migration', () => {
     const rollback = readFileSync(path.join(DIR, 'rollback.sql'), 'utf8');
     const sql = migration();
     expect(rollback).toMatch(/IF EXISTS \(SELECT 1 FROM "call_sessions"\) THEN\s+RAISE EXCEPTION/);
-    expect(rollback).toMatch(/^BEGIN;(?:\s*--[^\n]*)*\s*SET LOCAL row_security = off;/m);
+    // The first statement after BEGIN (comments and blank lines aside) reads past the forced wall. Checked line by
+    // line rather than with one backtracking pattern.
+    const lines = rollback.split('\n').map((l) => l.trim());
+    const begin = lines.indexOf('BEGIN;');
+    expect(begin, 'rollback.sql has no BEGIN;').toBeGreaterThanOrEqual(0);
+    const firstStatement = lines.slice(begin + 1).find((l) => l !== '' && !l.startsWith('--'));
+    expect(firstStatement).toBe('SET LOCAL row_security = off;');
     const created = [...sql.matchAll(/CREATE (?:OR REPLACE )?FUNCTION (\w+)\(/g)].map((m) => m[1]).sort();
     const dropped = [...rollback.matchAll(/DROP FUNCTION (\w+)\(/g)].map((m) => m[1]).sort();
     expect(dropped).toEqual(created);

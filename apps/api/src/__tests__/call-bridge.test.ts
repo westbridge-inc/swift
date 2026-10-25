@@ -159,9 +159,9 @@ const bridge = (token: string, orderId: string, target: string) =>
   app.inject({ method: 'POST', url: '/api/v1/calls/bridge', headers: { authorization: `Bearer ${token}` }, payload: { orderId, target } });
 
 /** Post a webhook exactly as Twilio would: form body, signature over the public URL + form. */
-function hook(step: string, sessionId: string, form: Record<string, string> = {}, opts: { sign?: 'ok' | 'none' | 'wrong-url' } = {}) {
+function hook(step: string, callId: string, form: Record<string, string> = {}, opts: { sign?: 'ok' | 'none' | 'wrong-url' } = {}) {
   const fields = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, [v]]));
-  const query = `?s=${encodeURIComponent(sessionId)}`;
+  const query = `?s=${encodeURIComponent(callId)}`;
   const signedUrl = opts.sign === 'wrong-url' ? `${BASE}/${step}?s=someone-else` : `${BASE}/${step}${query}`;
   const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
   if (opts.sign !== 'none') headers['x-twilio-signature'] = twilioSignature(TOKEN, signedUrl, fields);
