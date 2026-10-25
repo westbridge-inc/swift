@@ -740,6 +740,34 @@ export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReaso
 export const revokeDoc = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/revoke`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 
+// [STORE-VAT · owner O-5] A store's VAT is decided by a document reviewer (the reviewer grant, like every document
+// door) who reads the store's GRA VAT certificate and TYPES what it says: the VAT number (it must equal the number
+// the store gave), the registered name, and the date it takes effect. The certificate's own decision and the store's
+// VAT decision commit together on the server. Nothing a customer sees changes until this approval.
+export interface StoreVatPendingRow {
+  vendorId: string;
+  name: string;
+  vatRegistrationNumber: string | null;
+  mode: string | null;
+  certificate: { id: string; status: string; state: string; createdAt: string } | null;
+}
+export interface StoreVatApproval {
+  certificateDocId: string;
+  vatNumber: string;
+  registeredName: string;
+  /** YYYY-MM-DD, as printed on the certificate. */
+  effectiveFrom: string;
+  nameMatchesStore: true;
+}
+export const fetchStoreVatPending = () =>
+  apiFetch('/api/v1/admin/store-vat/pending').then((r: { data?: StoreVatPendingRow[] }) => r.data ?? []);
+export const approveStoreVat = (vendorId: string, body: StoreVatApproval, reason: string) =>
+  apiFetch(`/api/v1/admin/store-vat/${encodeURIComponent(vendorId)}/approve`, { method: 'POST', body: JSON.stringify(body), reason });
+export const rejectStoreVat = (vendorId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/store-vat/${encodeURIComponent(vendorId)}/reject`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+export const revokeStoreVat = (vendorId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/store-vat/${encodeURIComponent(vendorId)}/revoke`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+
 // [VERIFY-DOCS V3] The document reviewer grant. Opening, approving and
 // rejecting a document need it; `*` never implies it. A SUPER_ADMIN lists the
 // team and grants or removes it — to themselves too — with a stated reason.
