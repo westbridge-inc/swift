@@ -9,6 +9,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] this suite installs (and removes) a fault-injection trigger on
 // stock_adjustments by raw DDL — a stated, reviewable capability.
@@ -31,7 +32,8 @@ let app: FastifyInstance;
 const userIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_610_000_000 + Math.floor(Math.random() * 300_000_000);
-const run = nanoid(6).replace(/[^a-zA-Z0-9]/g, 'x').toLowerCase();
+// Digits only: the item and store names below are words the prohibited-items checker reads.
+const run = wordFreeTag(8);
 const TRIGGER = `m025_fault_${run}`;
 let ownerToken = '';
 let vendorId = '';
