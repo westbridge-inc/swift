@@ -35,23 +35,20 @@ export function DataUnavailable({
   return (
     <div
       role="status"
-      className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3 text-sm"
+      className="flex items-start gap-3 rounded-[var(--mc-radius-sm)] border border-[rgb(185_28_28/30%)] bg-[var(--mc-bad-soft)] p-3 text-sm"
     >
-      <AlertOctagon size={16} className="mt-0.5 shrink-0 text-red-400" />
+      <AlertOctagon size={16} className="mc-text-bad mt-0.5 shrink-0" />
       <div className="flex-1">
-        <p className="font-semibold text-red-400">{what} could not be loaded.</p>
-        <p className="text-[var(--muted)]">{notAnAllClear}</p>
+        <p className="mc-text-bad font-semibold">{what} could not be loaded.</p>
+        <p className="text-[var(--mc-muted-strong)]">{notAnAllClear}</p>
         {lastSuccessAt ? (
-          <p className="mt-1 text-xs text-[var(--muted)]">
+          <p className="mt-1 text-xs text-[var(--mc-muted-strong)]">
             Last successful read {new Date(lastSuccessAt).toLocaleTimeString()}.
           </p>
         ) : null}
       </div>
       {onRetry ? (
-        <button
-          onClick={onRetry}
-          className="shrink-0 rounded-lg border border-[var(--border)] px-3 py-1 text-xs hover:bg-white/10"
-        >
+        <button type="button" onClick={onRetry} className="mc-btn shrink-0">
           Try again
         </button>
       ) : null}
