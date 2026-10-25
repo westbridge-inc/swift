@@ -116,9 +116,9 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           {name.charAt(0).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1 basis-56">
-          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+          <h2 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
             <Truncate text={name} lines={2} focusable />
-          </h1>
+          </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <StatusBadge group="UserStatus" value={u.status} />
             {(u.roles ?? []).map((r: string) => <span key={r} className="mc-badge">{label('UserRole', r)}</span>)}

@@ -246,12 +246,17 @@ const OUT: Record<string, string> = {
   [`${ADMIN}|POST|/integrity/appeals/:id/resolve`]: 'Decides an integrity appeal (C3); it creates no order or money.',
   [`${ADMIN}|PUT|/verification/legal-holds/:id/release`]: 'Releases a legal hold on a verification record; no order or money.',
   [`${ADMIN}|POST|/verification/cases/:id/release`]: 'Releases a verification case back to the queue; no order or money.',
+  [`${ADMIN}|POST|/upload-scan-debts/:id/release`]: 'Rescans an upload held by the malware scanner and releases it only if the scan is clean (scan-ledger state + audit row); no order or money. A replay finds it NOT_HELD (409).',
   [`${ADMIN}|PUT|/support/:id/resolve`]: 'Marks a support ticket resolved; no order or money.',
   [`${ADMIN}|POST|/compliance/violations/:id/resolve`]: 'Resolves a compliance violation record; no order or money.',
   [`${ADMIN}|POST|/discovery/backfill`]: 'Rebuilds discovery/search projections; no order or money.',
   [`${ADMIN}|POST|/rating-reports/:id/resolve`]: 'Decides a reported rating; no order or money.',
   // [#1964 review F2 S3-1 / G S4-1] Transitions and nouns now read, that create none of the eight.
   'modules/rider/rider.routes.ts|POST|/orders/:id/accept': 'A rider takes an existing order (assignment under the order lock); no new order and no money row — earnings come at delivered.',
+  // [#1995 ads security] Accepting one's own advertiser team invitation creates nothing: one compare-and-set
+  // (updateMany where acceptedAt is null, the invitee's own row, unexpired) sets acceptedAt; a retry finds no
+  // open invitation and answers 404. No order, no money row, no new row.
+  'modules/ads/ads.routes.ts|POST|/advertiser/:id/members/accept': 'The invited person accepts their own open invitation: one compare-and-set on their row (acceptedAt null -> now); a retry finds nothing open (404). Creates no row and moves no money.',
   'modules/rider/rider.routes.ts|POST|/offers/accept': 'A rider takes an offered order (the offer is claimed once); assignment only, no money row.',
   'modules/driver/driver.routes.ts|POST|/rides/:id/accept': 'A driver takes an existing ride request (assignment); the fare is earned at complete, not here.',
   'modules/driver/driver.routes.ts|POST|/offers/accept': 'A driver takes an offered ride (the offer is claimed once); assignment only, no money row.',
@@ -285,7 +290,8 @@ function sources(dir: string): string[] {
 }
 const FILES = Object.fromEntries(sources(join(SRC, 'modules')).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')]));
 /** The approval gate itself: every C4/C5 admin request spends its approval once, before the handler. */
-const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED' }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
+// [#2086] The spend's compare-and-set also carries the expiry (a lapsed approval never spends): the pin follows it.
+const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED', expiresAt: { gt: now } }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
 const RESULT = census(FILES, SCOPE, OUT, PENDING_FIX, GATE);
 
 describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () => {

@@ -376,6 +376,75 @@ describe('[O-4] MMG: the total may change only before acceptance and before any 
   });
 });
 
+// [REVIEW-M S4-1 on #2043 · card switch-on prerequisite] Card and bank transfer are prepaid rails, both
+// OFF (checkout takes cash or MMG only), so these orders are written as a future rail would leave them.
+// Exactly like MMG: the total may change in-app only before the store accepts and before any payment;
+// after that it is fixed, nothing comes off, and the store settles item changes with the customer.
+describe('[REVIEW-M S4-1] card / bank transfer: the total may change only before acceptance and before any payment', () => {
+  const FIXED_COPY = 'This order’s total can’t change in-app once the store has accepted it or a payment exists — the store settles item changes with you directly.';
+  const RAILS = ['CARD', 'BANK_TRANSFER'] as const;
+  /** A real cash checkout, then the rail (and payment facts) a prepaid rail would have written. */
+  const placeOn = async (paymentMethod: (typeof RAILS)[number], data: Record<string, unknown> = {}) => {
+    const orderId = await placeOrder('CASH');
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { paymentMethod, ...data } }));
+    return orderId;
+  };
+
+  it.each(RAILS)('a waiting %s order with nothing paid: "Continue without it" lowers the total (the same window as MMG)', async (rail) => {
+    const orderId = await placeOn(rail);
+    const before = await orderRow(orderId);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200);
+    expect(Number((await orderRow(orderId)).totalAmount)).toBe(Number(before.totalAmount) - Number(rice.totalCustomer));
+  });
+
+  it.each(RAILS)('after acceptance a %s total stays fixed: "Out of stock" is refused and nothing comes off', async (rail) => {
+    const orderId = await placeOn(rail);
+    expect((await accept(orderId)).statusCode).toBe(200);
+    const before = await orderRow(orderId);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    const refused = await outOfStock(orderId, rice.id);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toMatchObject({ code: 'MMG_ADJUSTMENT_UNAVAILABLE', message: FIXED_COPY });
+    const after = await orderRow(orderId);
+    expect({ sub: after.items.find((l) => l.id === rice.id)!.subStatus, total: Number(after.totalAmount) }).toEqual({ sub: 'NONE', total: Number(before.totalAmount) });
+  });
+
+  it.each(RAILS)('a waiting %s order already paid keeps its total fixed: no removal question is asked', async (rail) => {
+    const orderId = await placeOn(rail, { paymentStatus: 'CAPTURED' });
+    const rice = await lineOf(orderId, grocer.rice);
+    const refused = await outOfStock(orderId, rice.id);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    expect((await lineOf(orderId, grocer.rice)).subStatus).toBe('NONE');
+  });
+
+  it.each(RAILS)('a swap asked while a %s order could still change, then paid: the customer can neither approve nor decline, and no answer WITHDRAWS it', async (rail) => {
+    const orderId = await placeOn(rail);
+    const before = await orderRow(orderId);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    expect((await offerSwap(orderId, rice.id, grocer.riceB)).statusCode).toBe(200);
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } }));
+
+    const view = (await customerView(orderId)).items.find((i) => i.id === rice.id)!;
+    expect(view['substitution']).toMatchObject({ kind: 'SWAP', decisions: { approve: false, reject: false }, settlementGuidance: FIXED_COPY, ifNoAnswer: 'WITHDRAW' });
+    for (const approve of [true, false]) {
+      const refused = await answer(orderId, rice.id, approve);
+      expect(refused.statusCode, refused.body).toBe(409);
+      expect(refused.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    }
+
+    const due = (await lineOf(orderId, grocer.rice)).substituteDecideBy!;
+    await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000), orderService: new OrderService(app.prisma, app.io, undefined, undefined, app.redis) }));
+    const after = await orderRow(orderId);
+    const line = after.items.find((l) => l.id === rice.id)!;
+    expect({ sub: line.subStatus, swap: line.substituteItemId, total: Number(after.totalAmount), status: after.status })
+      .toEqual({ sub: 'NONE', swap: null, total: Number(before.totalAmount), status: 'PENDING' });
+    expect((await pushes(orderId)).map((n) => n.title)).toContain(`${rice.name}: the swap question closed`);
+  });
+});
+
 describe('[O-4] the store is never auto-cancelled for the customer\'s time', () => {
   it('an open question holds the no-response cancel, which is armed again for the answer deadline + the response time', async () => {
     const orderId = await placeOrder();

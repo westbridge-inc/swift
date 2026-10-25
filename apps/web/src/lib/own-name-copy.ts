@@ -13,11 +13,6 @@ I declare that:
 4. Under the Business Names (Registration) Act, Cap. 90:05, section 3, I therefore do not need to register a business name.
 5. If I trade under any other name, I will register it with the Deeds and Commercial Registries Authority (DCRA) and upload the certificate to Swift before I use it.`;
 
-/** The store types asked for a business registration (a service business never is). */
-export function ownNameStoreType(vendorType: string): boolean {
-  return vendorType === 'RESTAURANT' || vendorType === 'SUPERMARKET' || vendorType === 'STORE';
-}
-
 /** [ROLE-DOCS · REVIEW-F #2046 S4-1] The declaration is per store: the line that names the store it is signed for. */
 export function ownNameSigningFor(storeName: string | null | undefined): string | null {
   const name = storeName?.trim();

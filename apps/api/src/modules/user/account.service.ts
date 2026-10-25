@@ -60,7 +60,8 @@ export async function closesByRequest(
 ): Promise<boolean> {
   return roles.includes('VENDOR_OWNER')
     || !!await db.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
-    || !!await db.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } });
+    // [ads security] an open, unaccepted team invitation is not a membership
+    || !!await db.advertiserMember.findFirst({ where: { userId, acceptedAt: { not: null } }, select: { advertiserId: true } });
 }
 
 export class AccountService {
@@ -264,11 +265,15 @@ export class AccountService {
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await queuePortfolioBeforePointerClear();
       await queueStorePhotosBeforePointerClear();
-      await revokeAccessBeforeCleanup();
+      // [row 622] The tombstone (the exact erasure marker) BEFORE the cleanup, in this same transaction: the
+      // owner wall's erase actions (devices, notices) refuse any account that does not carry it. Nothing the
+      // cleanup runs reads users.status or users.phone (owner-wall-erase-guard.test.ts pins it), and the
+      // commit is the same either way.
       await tx.user.update({
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      await revokeAccessBeforeCleanup();
       // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
       // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });

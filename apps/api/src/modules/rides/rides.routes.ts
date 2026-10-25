@@ -8,7 +8,6 @@ import { z } from '../../lib/zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,
-  assertL2,
   createRideRequest,
   fareChanged,
   replayRideRequestAnswer,
@@ -46,6 +45,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
+import { withoutPositionEvidence } from '../order/customer-timeline';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -80,6 +80,9 @@ const requestRideSchema = z.object({
   // server's own fare, never used as the price.
   stops: z.array(z.unknown()).nullish(),
   expectedFare: zMoneyWhole.optional(),
+  // [TAXI waiting charge · quote proof] The waiting terms the passenger was
+  // shown beside the fare, echoed back (the website; the phone from build 13).
+  waiting: z.object({ chargePerBlock: zMoneyWhole, blockMinutes: z.number().int().min(1).max(1440) }).optional(),
 });
 
 const cancelSchema = z.object({
@@ -257,6 +260,8 @@ export async function ridesRoutes(app: FastifyInstance) {
       // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
       // passenger was shown travels to the booking for every ride that has one.
       ...(body.expectedFare !== undefined ? { expectedFare: body.expectedFare } : {}),
+      // [TAXI waiting charge · quote proof] The terms the passenger was shown, when echoed.
+      ...(body.waiting !== undefined ? { waitingEcho: { chargePerBlock: body.waiting.chargePerBlock, blockMinutes: body.waiting.blockMinutes } } : {}),
     };
     const userId = request.user.userId;
     if (body.expectedFare === undefined) {
@@ -364,8 +369,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     assertHirePassengers(body.passengerCount);
     if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     assertRoadTripInMarket(body);
+    // [Owner ruling 24 Oct 2026] No customer ID gate here either (rides.service assertRideGates).
     const user = await assertRideGates(app, request.user.userId);
-    assertL2(user);
 
     // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
     // passenger saw is checked now and kept with the entry; nothing is queued
@@ -559,6 +564,10 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    // [REVIEW-F S4-2 on #2055] The driver's recorded position (a step note's ' — gps:…' evidence, kept
+    // for support and appeals) is never the passenger's to read: the same cut as the customer's
+    // order timeline. Every other field of a row is unchanged.
+    ride.statusHistory = ride.statusHistory.map((row) => ({ ...row, note: withoutPositionEvidence(row.note) }));
     if (ride.driver) {
       const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
       Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });

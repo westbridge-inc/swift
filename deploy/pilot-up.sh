@@ -365,6 +365,13 @@ if [ "$PILOT_ENV" = production ]; then
     "" | clamd) ;;
     *) die "PILOT_ENV=production needs MALWARE_SCAN unset or exactly clamd: every upload is scanned by the private clamd service (owner ruling, 21 Oct)" ;;
   esac
+  # [COORD 21 Oct] The emergency bypass is the only way a production upload is
+  # stored unscanned, and only as 1 (or 0/unset = off). It is allowed (it exists
+  # for an outage) and shouted below.
+  case "$(env_setting MALWARE_SCAN_BYPASS)" in
+    "" | 0 | 1) ;;
+    *) die "PILOT_ENV=production needs MALWARE_SCAN_BYPASS unset, 0 or 1 (1 = the emergency bypass)" ;;
+  esac
   # Address search (the API refuses to boot in production without a provider,
   # #1563): osm, the private Photon service this script then starts, or
   # google, the owner's key in the encrypted store. Which one is the owner's
@@ -385,6 +392,10 @@ if [ "$PILOT_ENV" = production ]; then
   fi
 fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
+# [COORD 21 Oct] MALWARE_SCAN_BYPASS_SHOUT: the emergency bypass is loud on every deploy.
+if [ "$(env_setting MALWARE_SCAN_BYPASS)" = 1 ]; then
+  echo "WARNING: MALWARE_SCAN_BYPASS=1 — THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON: while clamd is down, liveness selfies, onboarding documents and vehicle photos are stored WITHOUT a scan (rescanned once it answers; ops are paged hourly). Remove it from deploy/.env once clamd answers." >&2
+fi
 # [PROD-PATH] The production stack obtains certificates for every name it
 # serves, so each must already resolve to this host. Until DNS moves, the
 # public names still reach the old host: starting here would fail its own
@@ -443,6 +454,10 @@ if [ "$PILOT_ENV" = production ]; then
   if [ "$DATA_ONLY" -eq 0 ]; then
     systemctl is-enabled --quiet swift-backup-hourly.timer && systemctl is-active --quiet swift-backup-hourly.timer ||
       die "PILOT_ENV=production needs the hourly backup timer enabled and active before the API starts (sudo systemctl enable --now swift-backup-hourly.timer; PILOT-RUNBOOK §4)"
+    # [Off-site erasure ledger] Every erasure must leave the host within minutes; the API pages
+    # production when one has not. The shipper exists before the API does.
+    systemctl is-enabled --quiet swift-erasure-ledger.timer && systemctl is-active --quiet swift-erasure-ledger.timer ||
+      die "PILOT_ENV=production needs the off-site erasure ledger timer enabled and active before the API starts (sudo systemctl enable --now swift-erasure-ledger.timer; PILOT-RUNBOOK §4)"
   fi
 fi
 if [ "$PILOT_ENV" = production ]; then
@@ -713,15 +728,16 @@ fi
 
 # [Row 312] The upload malware scanner, before the running API is stopped:
 # healthy (its signatures loaded; a first start on a new volume can take a few
-# minutes), then proven from the API image on the private network with the
+# minutes), then proven from the API image (on the scanner network, below) with the
 # API's own gate: the EICAR test string (assembled in the process, harmless by
-# design) must be refused and ordinary bytes passed. Until both hold, nothing
+# design) must be refused and ordinary bytes passed, over the scanner's own
+# internal network (swift_scanner), the one the API and worker use. Until both hold, nothing
 # was stopped or migrated. The data-only stage starts no API and needs none.
 if [ "$DATA_ONLY" -eq 0 ]; then
   "${COMPOSE[@]}" up -d --wait --wait-timeout 900 clamd ||
     die "the upload malware scanner (clamd) did not become healthy with its signatures loaded; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
   # SCANNER_PROOF
-  docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" -e "
+  docker run --rm --network swift_scanner --entrypoint node "swift-api:$SHA" -e "
     const { scanUpload } = require('./dist/lib/malware-scan.js');
     const env = { MALWARE_SCAN: 'clamd', CLAMD_HOST: 'clamd', CLAMD_PORT: '3310' };
     const eicar = Buffer.from('X5O!P%@AP[4\\\\PZX54(P^)7CC)7}\$' + 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!\$H+H*');
@@ -730,7 +746,7 @@ if [ "$DATA_ONLY" -eq 0 ]; then
       try { await scanUpload(eicar, { surface: 'admin' }, env); process.exit(1); }
       catch (e) { process.exit(e && e.code === 'UPLOAD_REJECTED' ? 0 : 1); }
     })().catch(() => process.exit(1));" >/dev/null 2>&1 ||
-    die "the upload malware scanner did not refuse the EICAR test string (or did not pass ordinary bytes) through the API's own gate on the private network; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
+    die "the upload malware scanner did not refuse the EICAR test string (or did not pass ordinary bytes) through the API's own gate on the scanner network; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
   echo "upload malware scanner ready: signatures loaded, EICAR refused through the API's gate"
 fi
 [ "${DATA_ONLY:-0}" -eq 1 ] || "${COMPOSE[@]}" stop api worker

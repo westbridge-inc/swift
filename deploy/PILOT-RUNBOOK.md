@@ -221,14 +221,36 @@ and disk budget are reviewed. Their Compose file publishes no host ports.
 ### The upload malware scanner (row 312)
 
 Every upload is scanned by the `clamd` service (ClamAV, pinned by tag and
-digest in docker-compose.yml) on the private network before it is stored; the
-API and worker reach it as `clamd:3310` and it publishes no port. pilot-up.sh
+digest in docker-compose.yml) before it is stored. clamd sits on its own
+internal network (`swift_scanner`), shared only with the API and the worker,
+which reach it as `clamd:3310`; nothing else on the host can reach it, and it
+publishes no port (a second network of its own lets freshclam download). pilot-up.sh
 starts it before anything is stopped, waits until it is healthy (signatures
 loaded; a first start on a new volume can take a few minutes) and proves, from
-the new API image on the private network, that the EICAR test string is refused
+the new API image on the scanner network, that the EICAR test string is refused
 and ordinary bytes pass. While clamd does not answer, every upload is refused
-(503) -- the shift liveness selfie included -- and the worker pages ops after
-two failed checks (two minutes apart). `./deploy/doctor.sh` reports it.
+(503) and the worker pages ops after two failed checks (two minutes apart).
+`./deploy/doctor.sh` reports it. clamd is the container's main process, so a
+SHUTDOWN restarts the container. Two kinds of upload are stored before a clean
+scan and owe one (upload_scan_debts; the worker rescans every five minutes once
+clamd answers, and a positive or unscannable file is quarantined and paged).
+Evidence (safety evidence, delivery and handover proof) is never refused, but it
+is stored only in the held quarantine folder: served to no one and admitted as
+proof by no claim until a scan answers CLEAN, which moves it to its normal
+folder (custody never waits: the delivery goes on). The production emergency
+switch `MALWARE_SCAN_BYPASS=1` in deploy/.env (then recreate api and worker)
+covers exactly the liveness selfies, onboarding documents and vehicle photos.
+Never a profile picture. They are stored unscanned in their normal folder only
+while clamd is UNREACHABLE (the connection fails AND a fresh PING fails) and no
+file has failed a scan in the last 30 minutes (a file that crashes clamd must
+not make the next upload look "down"; the cool-down is shared through Redis).
+While it is set, pilot-up, the doctor and the preflight shout and ops are paged
+every hour. Remove it as soon as clamd answers. If clamd is UP but fails on one
+file (an error or a timeout on the file itself), that file is refused, bypass or
+not; evidence is instead HELD in the quarantine and paged, and a platform admin
+retries its scan (`GET /admin/upload-scan-debts/held`, `POST
+/admin/upload-scan-debts/:id/release` with a reason; audited): it leaves the
+quarantine only on a CLEAN answer.
 
 Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
 a signature reload (freshclam checks 12 times a day); the service's ceiling is
@@ -627,6 +649,46 @@ backups. Before the first production backup:
    swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
+4. Install the OFF-SITE ERASURE LEDGER timer (production and staging). Every
+   erasure writes its ledger entry in its own transaction; this unit ships the
+   unshipped entries every minute, encrypted to the same owner key, to
+   `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`:
+
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.service /etc/systemd/system/swift-erasure-ledger.service
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.timer /etc/systemd/system/swift-erasure-ledger.timer
+       systemctl daemon-reload
+       systemctl enable --now swift-erasure-ledger.timer
+       systemctl list-timers swift-erasure-ledger.timer
+
+   The ledger objects live under the backups' own prefix, so the bucket
+   keeps them at least as long as the backups. Never give the
+   `erasure-ledger/` prefix a shorter lifecycle rule than the dumps. An entry
+   still unshipped after 10 minutes pages the platform responders (the API's
+   erasure-ledger watch; production only), and doctor.sh FAILs. pilot-up.sh
+   refuses a production stage that starts the API unless this timer is
+   enabled and active. Every batch is encrypted to the owner key in every
+   environment, so staging needs BACKUP_GPG_RECIPIENT_FILE and
+   BACKUP_GPG_FINGERPRINT too, or it ships nothing (and doctor.sh FAILs).
+
+   Replaying it (a restore without the live database):
+   - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`.
+     The ones from before the backup you restore are harmless (each fact is
+     applied once). Fetch them all rather than guess the cut.
+   - Decrypt them on the owner's own computer, concatenate them into one file,
+     and `chmod 600` it.
+   - Copy it to the restore host and run `restore.sh --project <name>
+     --no-live-ledger --i-know-live-is-gone --ledger-from <file> <dump>`. Add
+     the two DR flags only when the live database is really gone; with it,
+     `--ledger-from` joins the live ledger.
+   - When the restore is done, shred the decrypted file on BOTH machines
+     (`shred -u <file>`, or `rm -P` on a Mac).
+
+   Every restore (drill, rehearsal or DR) also prints
+   `NOT erasure-complete for #1905/#1945 de-identifications`: the replay does not yet re-run the
+   app's own erasure passes, so those de-identifications (updates, not
+   deletes) are not re-applied to the copy. Until the follow-up lands, re-apply
+   them by hand for every closed account before anything from a restored copy
+   is used.
 
 ## 5. Restore drill, with no live overwrite
 

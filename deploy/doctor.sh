@@ -93,6 +93,9 @@ else
         *'"malwareScanner":"down"'*) bad "upload malware scanner is DOWN: every upload is refused until clamd answers (docker compose -f deploy/docker-compose.yml logs --tail=100 clamd)" ;;
         *) warn "upload malware scanner state not reported (an API older than the scanner deployment)" ;;
       esac
+      case "$HEALTH" in
+        *'"malwareScanBypass":true'*) bad "MALWARE_SCAN BYPASS IS ON in the running API: a mover's uploads are stored unscanned while clamd is down (remove MALWARE_SCAN_BYPASS from deploy/.env and recreate api worker)" ;;
+      esac
       ;;
     # No token, or a rejected one: the API hides the per-check detail and the
     # only thing a 200 tells us is the aggregate status. That is not a FAIL.
@@ -211,6 +214,19 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   else
     ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
   fi
+  # [Off-site erasure ledger] An erasure not shipped off-site within 10 minutes: the backup is not
+  # erasure-safe (a total loss of this database would bring the person back from the newest backup).
+  LEDGER=$(db_query "SELECT to_regclass('public.erasure_ledger_entry') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]' || true)
+  if [ "$LEDGER" = t ]; then
+    LATE=$(db_query "SELECT count(*) FROM erasure_ledger_entry e WHERE e.\"createdAt\" < now()::timestamp(3) - interval '10 minutes' AND NOT EXISTS (SELECT 1 FROM erasure_ledger_shipment s WHERE s.\"entryId\" = e.id);" 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -z "$LATE" ]; then
+      bad "could not read the off-site erasure ledger"
+    elif [ "$LATE" != 0 ]; then
+      bad "$LATE erasure ledger entr(ies) older than 10 minutes have not reached the off-site ledger: check swift-erasure-ledger.timer (journalctl -u swift-erasure-ledger)"
+    else
+      ok "every erasure older than 10 minutes has reached the off-site ledger"
+    fi
+  fi
 fi
 
 # [BACKUP-ENC · Opus review 14 Oct, S3-2] Production backs up hourly (owner
@@ -222,6 +238,11 @@ if [ -f "$HERE/.env" ] && [ "$(grep -E '^PILOT_ENV=' "$HERE/.env" | head -1 | cu
   else
     bad "production's hourly backup timer (swift-backup-hourly.timer) is not enabled and active: sudo systemctl enable --now swift-backup-hourly.timer (PILOT-RUNBOOK §4)"
   fi
+  if systemctl is-enabled --quiet swift-erasure-ledger.timer 2>/dev/null && systemctl is-active --quiet swift-erasure-ledger.timer 2>/dev/null; then
+    ok "the off-site erasure ledger timer is enabled and active"
+  else
+    bad "production's off-site erasure ledger timer (swift-erasure-ledger.timer) is not enabled and active: sudo systemctl enable --now swift-erasure-ledger.timer (PILOT-RUNBOOK §4)"
+  fi
 fi
 
 # [TA-S0-003 · R3] The business wall's contract posture (TENANT_RLS_BIND=1 in
@@ -230,6 +251,10 @@ fi
 # the role contract through deploy/rls-logins.sh roles (reason codes only),
 # and each container's settings by NAME (a value is never printed).
 env_line() { [ -f "$HERE/.env" ] && grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
+# [COORD 21 Oct] The upload malware scan emergency bypass shouts while it is set.
+if [ "$(env_line MALWARE_SCAN_BYPASS)" = 1 ]; then
+  bad "MALWARE_SCAN_BYPASS=1 in deploy/.env: THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON (liveness selfies, onboarding documents and vehicle photos stored unscanned while clamd is down; ops paged hourly)"
+fi
 if [ "$(env_line TENANT_RLS_BIND)" = 1 ]; then
   WALL_ROLES="$("$HERE/rls-logins.sh" roles 2>/dev/null | tail -1)"
   case "$WALL_ROLES" in

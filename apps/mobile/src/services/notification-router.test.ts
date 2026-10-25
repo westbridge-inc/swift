@@ -407,6 +407,7 @@ const CENSUS: Case[] = [
   { k: 'ad_campaign_live', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_completed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_paused', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
+  { k: 'ad_team_invite', d: { advertiserId: 'a1' }, to: null, why: 'ADS OFF: the invited person — the accept and decline screens are built when ads go on (ads-on checklist); until then the notice is the whole message' },
   { k: 'ad_campaign_resumed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_cancelled', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_killed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
@@ -427,6 +428,12 @@ const CENSUS: Case[] = [
   { k: 'ops_backup_stale', to: null, why: 'admins' },
   // The upload malware scanner (clamd) stopped answering: uploads are refused until it is back.
   { k: 'ops_malware_scanner_down', d: { failures: 2, reason: 'x' }, to: null, why: 'admins — ops page, acted on from the server (row 312)' },
+  // Uploads stored before a clean scan (row 312 follow-up): the emergency bypass is on, evidence is
+  // held for its scan, or a stored upload was quarantined. Admin-only, acted on from the server.
+  { k: 'ops_malware_scan_bypass', d: { unscannedOpen: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_evidence_unscanned', d: { open: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_evidence_held', d: { held: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_upload_quarantined', d: { surface: 'vehicle-photo', reason: 'bypass', debtId: 'd1', signature: 'x' }, to: null, why: 'admins — ops page (row 312)' },
   { k: 'ops_reaper_stale', d: { ageHours: 50 }, to: null, why: 'admins — the document reaper is behind by two cycles (DOC-1 §9.2)' },
   { k: 'ops_reaper_failed', d: { error: 'x' }, to: null, why: 'admins — the document reaper threw (DOC-1 §9.2)' },
   { k: 'ops_image_policy_failed', d: { error: 'boom' }, to: null, why: 'admins — ops page, admin only' },

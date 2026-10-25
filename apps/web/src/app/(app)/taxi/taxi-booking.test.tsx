@@ -104,6 +104,29 @@ describe('[Row 117] with web booking on, the customer books at the fare on the b
     expect(screen.getByText(/Your trip page shows a six-digit start code: your driver types it to start the ride\./)).toBeTruthy();
   });
 
+  it('[quote proof] the waiting terms printed under the fare travel with the booking', async () => {
+    const text = 'Waiting: 300 per 10 minutes after your driver arrives';
+    vi.mocked(rides.rideEstimate).mockResolvedValue({ ...ESTIMATE, waiting: { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', text } } as never);
+    const user = await pricedPage();
+    expect(screen.getAllByText(text).length).toBeGreaterThan(0);
+    await user.click(requestButton()!);
+    await waitFor(() => expect(rides.requestRide).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(rides.requestRide).mock.calls[0]![0]).toEqual({
+      pickup: { lat: STABROEK.lat, lng: STABROEK.lng }, dropoff: { lat: SHERIFF.lat, lng: SHERIFF.lng },
+      pickupAddress: 'Stabroek Market', dropoffAddress: 'Sheriff Street',
+      passengerCount: 1, rideClass: 'ECONOMY', expectedFare: 1300, waiting: { chargePerBlock: 300, blockMinutes: 10 },
+    });
+  });
+
+  it('[quote proof] the waiting terms moved: nothing booked, the route is priced again', async () => {
+    vi.mocked(rides.requestRide).mockRejectedValueOnce(new ApiRequestError('terms changed', 409, 'WAITING_TERMS_CHANGED'));
+    const user = await pricedPage();
+    await user.click(requestButton()!);
+    expect(await screen.findByText('The waiting charge changed since you looked. Check the new terms, then request again.')).toBeTruthy();
+    await waitFor(() => expect(rides.rideEstimate).toHaveBeenCalledTimes(2));
+    expect(push).not.toHaveBeenCalled();
+  });
+
   it('a press that may have landed is retried under the SAME key; a new choice gets a new key', async () => {
     vi.mocked(rides.requestRide)
       .mockRejectedValueOnce(new TypeError('Failed to fetch'))
@@ -138,7 +161,10 @@ describe('[Row 117] with web booking on, the customer books at the fare on the b
   });
 
   it.each([
-    ['ID_VERIFICATION_REQUIRED', 403, 'Your first ride needs your ID on file. Add your ID in the Swift app (Account), then book here.'],
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] The server no longer asks for an ID on file before a ride.
+    // The page has no "add your ID" answer: a refusal it does not know (an older server's, say) shows the
+    // server's own words, and books nothing.
+    ['ID_VERIFICATION_REQUIRED', 403, 'server words'],
     ['RIDE_IN_PROGRESS', 409, 'You already have a ride in progress.'],
     ['DUPLICATE_REQUEST', 409, 'This ride is already being requested — hold on.'],
   ])('%s is said in plain words and books nothing', async (code, status, words) => {

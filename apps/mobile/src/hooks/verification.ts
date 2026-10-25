@@ -196,8 +196,9 @@ export function useSubmitIdentity() {
     mutationFn: async (data: { idDocumentUrl: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
-        // [R17 · in-app ¶15] the screen's tick (build 12) is recorded in the consent ledger
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v1' },
+        // [R17 · in-app ¶15] the screen's tick is recorded in the consent ledger. [Owner ruling 24 Oct 2026]
+        // v2 = the words that promise no unlock (the API accepts v1 from build 12's own JS as well).
+        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v2' },
         owner,
       ));
       requireAuthSessionForPrincipal(owner);

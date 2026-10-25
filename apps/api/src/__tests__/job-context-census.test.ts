@@ -25,7 +25,7 @@ const QUEUE_SRC = readFileSync(join(__dirname, '..', 'jobs', 'queue.ts'), 'utf8'
 const PER_ENTITY = ['auto-cancel', 'auto-complete', 'dispatch-order', 'offer-timeout', 'route-match', 'sync-vendor', 'vendor-alert-escalate'] as const;
 const CROSS_TENANT = [
   'ads-lifecycle', 'ads-release-expired', 'ads-stats-rollup', 'ads-weekly-report', 'agent-cash-sla', 'algo-decision-retention',
-  'audit-chain-anchor', 'audit-chain-verify', 'backup-freshness', 'batching-shadow-scan', 'billing-fx-notices', 'billing-invariants',
+  'audit-chain-anchor', 'audit-chain-verify', 'backup-freshness', 'erasure-ledger-watch', 'batching-shadow-scan', 'billing-fx-notices', 'billing-invariants',
   'booking-reminders', 'checkout-outbox', 'collusion-affinity-scan', 'compliance-sample', 'convert-trials', 'cw-scan',
   'discovery-backfill', 'discovery-derivation', 'eta-pad-weekly', 'evidence-retention', 'expiry-sweep', 'flag-ratings',
   'guardian-sweep', 'handover-claims-reconcile', 'image-policy-sweep', 'incident-pattern-scan', 'incident-sla-watch',
@@ -33,7 +33,7 @@ const CROSS_TENANT = [
   'prep-shadow-grade', 'prep-stats-nightly', 'process-billing', 'process-settlements', 'promote-sos-grace',
   'qr-attribution-purge', 'rating-actor-fold', 'rating-reminder-sweep', 'rating-stats-recompute', 'reaper-lag',
   'reconcile-dispatch', 'reconcile-earnings', 'release-held-orders', 'retention-sweep', 'rlp-reserve-provision', 'rlp-sweep',
-  'scheduler-heartbeat', 'stale-movers', 'substitution-expiry', 'supply-watch-scan', 'tier-recalc', 'vat-threshold-watch',
+  'scheduler-heartbeat', 'stale-movers', 'substitution-expiry', 'supply-watch-scan', 'tier-recalc', 'upload-rescan', 'vat-threshold-watch',
   // [S2-29] The approval-tail drain sweeps every tenant's owed rows, like the other outbox drains.
   'verification-decision-outbox',
 ] as const;
