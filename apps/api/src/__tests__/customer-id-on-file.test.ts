@@ -15,7 +15,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider, SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { customerIdCheck, ON_FILE_REVIEWER } from '../modules/verification/customer-id';
-import { assertL2 } from '../modules/rides/rides.service';
+import * as ridesService from '../modules/rides/rides.service';
 import { FloatService } from '../modules/dispatch/float.service';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
@@ -167,12 +167,12 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     const told = await notices(c.id);
     expect(told.map((n) => n.title)).toContain('Your ID is on file');
     for (const n of told) expect(`${n.title} ${n.body}`).not.toMatch(/verified/i);
-    // [Owner ruling 16 Oct: customers take no photos] A taxi ride needs only the ID on file
-    // (rides.service assertL2), so the notice says rides are unlocked, never asks for a photo, and
-    // never promises orders "of any size".
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Taxi rides and bigger orders no longer need the ID, so
+    // the notice claims no unlock: it says where the ID is kept. [16 Oct] It never asks for a photo, and never
+    // promises orders "of any size".
     const onFile = told.find((n) => n.title === 'Your ID is on file');
-    expect(onFile?.body).toMatch(/Bigger orders and taxi rides are unlocked now/);
-    expect(onFile?.body).not.toMatch(/photo|selfie|any size/i);
+    expect(onFile?.body).toBe('Thanks — it is kept with your account, as the Privacy Policy explains.');
+    expect(onFile?.body).not.toMatch(/unlock|taxi|bigger orders|photo|selfie|any size/i);
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('ON_FILE');
   });
 
@@ -230,13 +230,11 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     expect(again.json().error.message).toBe('Your ID is already on file.');
   });
 
-  // [Owner ruling 16 Oct: customers take no photos] The gate reads no selfie: it opens on the ID on file alone.
-  it('the taxi L2 gate opens on an ID on file, and its refusal speaks of "on file", not verification', () => {
-    expect(() => assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L2' })).not.toThrow();
-    let message = '';
-    try { assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L1' }); } catch (e) { message = (e as Error).message; }
-    expect(message).toMatch(/ID on file/);
-    expect(message).not.toMatch(/verif/i);
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] The taxi L2 gate (assertL2, "Rides need your ID on
+  // file first") is gone: a ride needs neither an ID nor a photo (16 Oct). An ID on file is optional and stays.
+  it('the taxi ID gate is gone: rides.service has no L2 gate left to call', () => {
+    expect(Object.keys(ridesService)).not.toContain('assertL2');
+    expect(typeof ridesService.assertRideGates).toBe('function');
   });
 });
 
@@ -356,11 +354,10 @@ describe('(1) an automatic check holds the ID for a person', () => {
     expect(approved.statusCode, approved.body).toBe(200);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('CHECKED');
-    // The person-checked notice is truthful too: bigger orders and taxi rides, and no photo (owner 16 Oct).
+    // The person-checked notice is truthful too: no unlock claim (owner 24 Oct 2026), and no photo (owner 16 Oct).
     const checked = (await notices(c.id)).find((n) => n.title === 'Identity verified');
-    expect(checked?.body).toMatch(/A person on our team checked your ID/);
-    expect(checked?.body).toMatch(/Bigger orders and taxi rides are unlocked now/);
-    expect(checked?.body).not.toMatch(/photo|selfie|any size/i);
+    expect(checked?.body).toBe('A person on our team checked your ID. It is kept with your account, as the Privacy Policy explains.');
+    expect(checked?.body).not.toMatch(/unlock|taxi|bigger orders|photo|selfie|any size/i);
   });
 });
 
@@ -373,9 +370,11 @@ describe('(1) an admin can withdraw an ID at any time — back to L1', () => {
     expect(revoked.statusCode, revoked.body).toBe(200);
     expect(revoked.json().data.accountTrustLevel).toBe('L1');
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
-    // ...and the taxi gate refuses again (the big-order gate keys on the same L1, orders.test).
-    expect(() => assertL2({ id: c.id, tenantId: 't', countryCode: 'GY', trustLevel: 'L1' })).toThrow(/ID on file/);
-    expect((await notices(c.id)).map((n) => n.title)).toContain('Your ID is no longer on file');
+    // [Owner ruling 24 Oct 2026] Back at L1 nothing locks again (no taxi or big-order ID gate), so the notice
+    // promises no lock: it says how to add the ID again if the app asks for it.
+    const gone = (await notices(c.id)).find((n) => n.title === 'Your ID is no longer on file');
+    expect(gone?.body).toBe('Our team withdrew the ID on your account. If the app asks for your ID, add it again and a person will look at it.');
+    expect(gone?.body).not.toMatch(/taxi|ID limit|bigger orders|unlock/i);
     expect(await customerIdCheck(app.prisma, c.id, 'L1')).toBe('NOT_ACCEPTED');
 
     const next = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) });

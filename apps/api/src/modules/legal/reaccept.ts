@@ -28,7 +28,9 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
     version: '2026-10-17',
     summary: [
       'Identity checks are done by people on Swift’s verification team: no outside identity-verification provider and no automated face-matching receives your documents or selfie.',
-      'Customers never need a photo, taxi rides included — a ride needs only your ID on file — and a mover or business is never shown a photo of a customer.',
+      // [Owner ruling 24 Oct 2026] "a ride needs only your ID on file" is gone from this line: from 2026-10-25 a ride
+      // needs no ID either, and this summary is still shown to anyone asked to re-accept from before 2026-10-17.
+      'Customers never need a photo, taxi rides included, and a mover or business is never shown a photo of a customer.',
       'Privacy: if a business takes MMG, the MMG payment details it gives Swift are shown to its customer on the order, so the customer pays the business directly.',
       'Privacy: a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name.',
     ],
@@ -63,6 +65,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     // [ROLE-DOCS · owner 21 Oct 2026; COORD rulings 21 Oct (NON-material) + 23 Oct 00:59Z (stamped above 2026-10-22)]
     version: '2026-10-22.1',
     why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
+  },
+  {
+    // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · non-material: it removes a requirement]
+    version: '2026-10-25',
+    why: 'Swift asks for less: taxi rides and larger orders no longer need a customer\u2019s ID on file. The Terms, the Privacy Policy and the Child Safety page now say so, and say when the app still asks for an ID (after repeated failed deliveries or payments, or for a high-value promotion). No one loses anything and no one is asked for more.',
   },
 ];
 

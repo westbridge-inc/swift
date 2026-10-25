@@ -85,12 +85,16 @@ export const TAXI_01: Journey<Ctx> = {
   id: 'TAXI-01',
   estimateSeconds: 330,
   title: 'Ride request + queue (mobile only)',
-  cases: 'L2 request; L1 denial; no-supply queue; auto-request recovery',
+  cases: 'L2 request; L1 request (no ID asked, owner 24 Oct 2026); no-supply queue; auto-request recovery',
   async run(rec, ctx) {
     const C7 = ctx.roster.customers.C7!.session;
     rec.require('an L2 passenger was provisioned', !ctx.world.notReady.C7, ctx.world.notReady.C7 ?? '');
-    const l1 = await POST('/rides/request', rideBody(), ctx.roster.customers.C1!.session.token);
-    rec.deny('an L1 account cannot request a ride', l1, [403], ['ID_VERIFICATION_REQUIRED'], `reason=${l1.json?.error?.details?.reason ?? ''}`);
+    // [Owner ruling 24 Oct 2026] A ride needs no ID on file: an L1 account books like any other. Its ride is
+    // withdrawn at once so the L2 cases below meet a clean board.
+    const C1 = ctx.roster.customers.C1!.session;
+    const l1 = await POST('/rides/request', rideBody(), C1.token);
+    rec.expect('an L1 account (no ID on file) requests a ride — no ID asked', l1, 201, undefined, `code=${l1.json?.error?.code ?? ''}`);
+    if (l1.json?.data?.ride?.id) await cancelRide(C1, l1.json.data.ride.id);
     const est = await POST('/rides/estimate', { pickup: PICKUP, dropoff: DROPOFF }, C7.token);
     const eco = (est.json?.data?.tiers ?? []).find((t: any) => t.rideClass === 'ECONOMY');
     rec.check('the estimate prices an economy ride', est.ok && Number(eco?.fare) > 0, `→ ${brief(est)} economy=${eco?.fare} ${est.json?.data?.currencyCode ?? ''}`);

@@ -246,6 +246,7 @@ const OUT: Record<string, string> = {
   [`${ADMIN}|POST|/integrity/appeals/:id/resolve`]: 'Decides an integrity appeal (C3); it creates no order or money.',
   [`${ADMIN}|PUT|/verification/legal-holds/:id/release`]: 'Releases a legal hold on a verification record; no order or money.',
   [`${ADMIN}|POST|/verification/cases/:id/release`]: 'Releases a verification case back to the queue; no order or money.',
+  [`${ADMIN}|POST|/upload-scan-debts/:id/release`]: 'Rescans an upload held by the malware scanner and releases it only if the scan is clean (scan-ledger state + audit row); no order or money. A replay finds it NOT_HELD (409).',
   [`${ADMIN}|PUT|/support/:id/resolve`]: 'Marks a support ticket resolved; no order or money.',
   [`${ADMIN}|POST|/compliance/violations/:id/resolve`]: 'Resolves a compliance violation record; no order or money.',
   [`${ADMIN}|POST|/discovery/backfill`]: 'Rebuilds discovery/search projections; no order or money.',
@@ -289,7 +290,8 @@ function sources(dir: string): string[] {
 }
 const FILES = Object.fromEntries(sources(join(SRC, 'modules')).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')]));
 /** The approval gate itself: every C4/C5 admin request spends its approval once, before the handler. */
-const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED' }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
+// [#2086] The spend's compare-and-set also carries the expiry (a lapsed approval never spends): the pin follows it.
+const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED', expiresAt: { gt: now } }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
 const RESULT = census(FILES, SCOPE, OUT, PENDING_FIX, GATE);
 
 describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () => {
