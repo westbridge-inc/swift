@@ -220,6 +220,15 @@ const PUBLISHED: Record<
     driver_agreement: '77ba8953b63491aa88492edc5ec4fb815466a19c27ac6b5eea69a942102ed69b',
     vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
   },
+  // [ROLE-DOCS · owner 21 Oct 2026 · COORD rulings (A) + 23 Oct 00:59Z, NON-material] On top of 2026-10-22: police
+  // clearance optional for TAXI drivers only (Privacy "With your explicit consent" line; Mover Agreement documents
+  // paragraph). Same day, so the human date is unchanged: Terms and the Business Agreement keep their 2026-10-22 hashes.
+  '2026-10-22.1': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: '9d0eb3b0e6b218d18edbb10630c4fcefeea090043cf5671c2b9ad7658f993ebb',
+    driver_agreement: 'bfbfc55fb330b4d6e095ec3754c76570a8c128d460a7a59b3c4c0c586161b785',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -280,10 +289,13 @@ describe('legal version binding [F-035-08]', () => {
   });
 
   it('the version is a date stamp, and LAST_UPDATED must move with it (shape check)', () => {
-    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // [ROLE-DOCS · COORD ruling 21 Oct 2026 — a DELIBERATE extension] A second stamp on the same day carries a
+    // same-day suffix (2026-10-22.1): versions compare as strings, so it sorts after 2026-10-22 and before the next
+    // day. The date part still has to match LAST_UPDATED.
+    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     // The human form is rendered into both documents — same date, or the
     // page contradicts its own version.
-    const [y, m, d] = LEGAL_VERSION.split('-').map(Number);
+    const [y, m, d] = LEGAL_VERSION.split('.')[0]!.split('-').map(Number);
     const human = new Date(Date.UTC(y!, m! - 1, d!)).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
     });
