@@ -656,7 +656,7 @@ async function stopsSwitchedOn(rec: Recorder, ctx: Ctx, C7: Session, maxStops: n
         `this build wrote no verification on the far arrival (note=${note2 ?? 'none'}): #1908 is not in it, so the waiting charge must stay off with stops on`);
     }
     rec.deny('a skip without a reason', await stopMove(D, ride2!.id, 1, 'skip', {}), [400]);
-    rec.deny('a skip reason the passenger must never be sent (a phone number)', await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Call me on 600 1234 instead' }), [400], ['SKIP_REASON_REFUSED']);
+    rec.deny('a skip reason the passenger must never be sent (a phone number)', await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Call me on +592 012 3456 instead' }), [400], ['SKIP_REASON_REFUSED']);
     const skip = await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Road or access blocked' });
     rec.check('ride 2: stop 1 skipped with its reason, the destination next', skip.ok && skip.json?.data?.stop?.status === 'SKIPPED' && skip.json?.data?.stop?.skipReason === 'Road or access blocked' && skip.json?.data?.nextStopSequence === null,
       `→ ${brief(skip)} stop=${skip.json?.data?.stop?.status}`);
