@@ -183,9 +183,9 @@ describe('[F-106-03] the rider is told what is true, and given a way out that wo
 describe('[review] the policy is ORDERED, and only the dangerous direction is refused', () => {
   // The mechanism this replaces was an exact-match list carried on the DEVICE,
   // with the API warning that bumping its constant alone would black out every
-  // mobile-money handover in the fleet. There is no expo-updates in this app,
-  // so the device is the side that updates LAST — it could not hold a grace
-  // window. The risk is one-directional, so the rule is now a minimum.
+  // mobile-money handover in the fleet. An installed app keeps its JS until it
+  // takes an update, so the device is the side that updates LAST — it could not
+  // hold a grace window. The risk is one-directional, so the rule is now a minimum.
 
   const served = (over: Record<string, unknown>) => parseHandoverAuthority({
     ...authority(), ...over,

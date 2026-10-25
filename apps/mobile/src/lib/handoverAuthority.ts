@@ -23,9 +23,10 @@ export type HandoverPermission = 'DELIVER_NO_CASH' | 'COLLECT_CASH_THEN_DELIVER'
  * It was a list of accepted strings carried HERE, on the device, with the API
  * warning that bumping its constant alone would black out every mobile-money
  * handover in the fleet. That could not work. Mobile builds are never atomic
- * with an API deploy — there is no `expo-updates` in this app, so even a
- * JS-only change needs an EAS build, store review and a user upgrade — so the
- * grace window sat on the side that updates LAST, which cannot hold it. A
+ * with an API deploy — an installed app keeps the JS it has until it takes an
+ * update (over the air on a later launch, or a store build for a native
+ * change) — so the grace window sat on the side that updates LAST, which
+ * cannot hold it. A
  * rider at a customer's door would have seen the refusal, and because it is
  * minted HERE, no server metric would have moved.
  *

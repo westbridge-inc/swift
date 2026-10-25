@@ -96,10 +96,11 @@ export const PAYMENT_STATE_INCONSISTENT_BLOCK = 'PAYMENT_STATE_INCONSISTENT';
  * handover in the fleet. The warning was true, and a warning is not a control:
  * the doc comment INSTRUCTED the bump, the contract test FORCED both edits into
  * one commit, and neither could change where the grace list lived. Mobile
- * builds are never atomic with an API deploy — this repo has no `expo-updates`,
- * so a JS-only change still needs an EAS build, store review and a user
- * upgrade. The side holding the compatibility window was the side that updates
- * LAST, which is the one side that cannot hold it.
+ * builds are never atomic with an API deploy: an installed app keeps the JS it
+ * has until it takes an update (an over-the-air update applies on a later
+ * launch; a native change needs a store build and a user upgrade). The side
+ * holding the compatibility window was the side that updates LAST, which is
+ * the one side that cannot hold it.
  *
  * The asymmetry the discriminator actually protects against is one-directional.
  * The danger is an authority computed by a server that PREDATES a rule — it is
