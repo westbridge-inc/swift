@@ -46,7 +46,7 @@ import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capab
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
   alreadyOpenMessage, fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
-  type ApprovalSnapshotRow,
+  approvalsViewWhere, effectiveApprovalStatus, type ApprovalSnapshotRow,
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
@@ -6625,11 +6625,18 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status } = z.object({
       status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED']).optional(),
     }).parse(request.query);
-    const where = status ? { status } : { status: 'PENDING' };
-    const [rows, total] = await Promise.all([
+    // [Owner, admin-staging 25 Oct] Nothing moves an open request's status column when its time runs out (only a
+    // later decide does), so a lapsed request used to sit under Pending with an 'expired' label and never reach
+    // the Expired tab. The queue files and reports it by what it IS: past expiresAt, an open request (pending, or
+    // approved but not applied) is EXPIRED. The gate already refuses it either way (decide and apply both check
+    // expiresAt); this makes the screen say so.
+    const now = new Date();
+    const where = approvalsViewWhere(status ?? 'PENDING', now);
+    const [found, total] = await Promise.all([
       tenantPrisma.privilegedApproval.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
       tenantPrisma.privilegedApproval.count({ where }),
     ]);
+    const rows = found.map((row) => ({ ...row, status: effectiveApprovalStatus(row, now) }));
     // An approver must be able to tell their own asks apart at a glance: they
     // cannot decide those, and a queue that hides the fact wastes their time.
     const mine = request.user.userId;

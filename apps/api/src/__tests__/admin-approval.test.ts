@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import {
-  APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, requiresApproval,
+  APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, markApplied, requiresApproval,
 } from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { ACCESS_COOKIE, BROWSER_CLIENT_HEADER, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
@@ -313,6 +313,15 @@ describe('[ADM-005] the queue a second admin works', () => {
       const row = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
       expect([row.status, row.appliedAt]).toEqual(['APPROVED', null]);
       expect(await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }).then((r) => r?.value)).not.toEqual({ rate: 32 });
+    });
+
+    it('the spend itself refuses a lapsed approval: markApplied\'s compare-and-set carries the expiry', async () => {
+      const asked = await writeConfig(requester.token, { rate: 34 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await decide(approver.token, approvalId, true)).json().data.status).toBe('APPROVED');
+      await lapse(approvalId);
+      expect(await markApplied(app.prisma, approvalId)).toBe(false);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
     });
 
     it('a request still inside its time stays where it was (control)', async () => {
