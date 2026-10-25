@@ -186,11 +186,11 @@ export function MoverAccountScreen({ navigation }: any) {
             </View>
             {photoWaiting ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
-                Photo waiting for its safety check
+                Photo waiting for a file check. Customers see it once it clears.
               </T>
             ) : photoFailed ? (
               <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-                This photo failed its safety check — upload it again
+                This photo didn’t pass our file check. Upload a new photo.
               </T>
             ) : !profile?.vehiclePhotoUrl ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 // (the emergency bypass) a mover's vehicle photo is stored unscanned and the server withholds it until
 // its rescan answers clean: vehiclePhotoUrl null, vehiclePhotoScan AWAITING (or FAILED). The mover's own
 // Account screen used to say "Add photo" as if nothing had been uploaded. It now says the photo is
-// waiting for its safety check, or that it failed and must be uploaded again.
+// waiting for its file check (REVIEW-F S3-1 on #2095: not "safety check", which means the safety check-ins), or that it did not pass and must be uploaded again.
 
 const server = vi.hoisted(() => ({ photo: {} as Record<string, unknown>, sub: null as Record<string, unknown> | null }));
 
@@ -92,28 +92,28 @@ const shown = (photo: Record<string, unknown>) => {
 describe('[Row 312] the mover’s own vehicle card says what happened to the photo', () => {
   it('waiting for its scan: says so, never "Add photo"', () => {
     const view = shown({ vehiclePhotoUrl: null, vehiclePhotoScan: 'AWAITING' });
-    expect(view).toContain('Photo waiting for its safety check');
+    expect(view).toContain('Photo waiting for a file check. Customers see it once it clears.');
     expect(view).not.toContain('Add photo');
     expect(view).not.toContain('Add a clear photo of your vehicle');
   });
   it('failed its scan: says so and asks for a new upload', () => {
     const view = shown({ vehiclePhotoUrl: null, vehiclePhotoScan: 'FAILED' });
-    expect(view).toContain('This photo failed its safety check — upload it again');
+    expect(view).toContain('This photo didn’t pass our file check. Upload a new photo.');
     expect(view).toContain('Upload again');
-    expect(view).not.toContain('Photo waiting for its safety check');
+    expect(view).not.toContain('Photo waiting for a file check. Customers see it once it clears.');
   });
   it('no photo (or one gone before its scan): "Add photo" as before; a shown photo: "Change photo"', () => {
     for (const photo of [{}, { vehiclePhotoUrl: null }, { vehiclePhotoUrl: null, vehiclePhotoScan: 'GONE' }]) {
       const view = shown(photo);
       expect(view, JSON.stringify(photo)).toContain('Add photo');
       expect(view).toContain('Add a clear photo of your vehicle');
-      expect(view).not.toMatch(/safety check/);
+      expect(view).not.toMatch(/file check/);
     }
     // A photo the server shows has passed: whatever state rides along, it is not "waiting".
     for (const photo of [{ vehiclePhotoUrl: '/uploads/vehicles/d1/car.jpg' }, { vehiclePhotoUrl: '/uploads/vehicles/d1/car.jpg', vehiclePhotoScan: 'AWAITING' }]) {
       const view = shown(photo);
       expect(view, JSON.stringify(photo)).toContain('Change photo');
-      expect(view).not.toMatch(/safety check|Add photo/);
+      expect(view).not.toMatch(/file check|Add photo/);
     }
   });
 });
