@@ -1,6 +1,6 @@
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { DEFAULT_DELIVERY_RATES, mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';
@@ -35,7 +35,7 @@ export interface TaxiRates {
   /** [TAXI waiting charge] What one FULL block of waiting costs (whole units), and
    *  how long a block is. Optional: a payload that names neither (every config
    *  written before the waiting charge) waits on the declared defaults,
-   *  TAXI_WAITING_DEFAULTS in modules/rides/taxi-waiting.ts (500 per 10 minutes),
+   *  TAXI_WAITING_DEFAULTS in modules/rides/taxi-waiting.ts (300 per 10 minutes),
    *  so no stored payload changes and no version is minted by their arrival. */
   waitingChargePerBlock?: number; waitingBlockMinutes?: number;
 }
@@ -138,9 +138,27 @@ export function validatePricingConfig(kind: PricingKind, raw: unknown): PricingV
   return { status: 'VALID', payload: parsed.data as Record<string, unknown>, problems: [] };
 }
 
+/** [MASTER-045] The canonical form of a payload: every value at every depth,
+ *  object keys in sorted order, array elements in their own order. (The old
+ *  form passed the TOP-level key list to JSON.stringify as an allow-list, so
+ *  every nested object — the courier's size surcharges and speed multipliers —
+ *  serialised as `{}`.) For a flat payload the output is byte-identical to the
+ *  old form, so no recorded flat fingerprint changes. */
+function canonicalJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (isPlainObject(v)) {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(v).sort()) out[key] = sort(v[key]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
 export function pricingPayloadHash(payload: Record<string, unknown>): string {
-  const canonical = JSON.stringify(payload, Object.keys(payload).sort());
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+  return createHash('sha256').update(canonicalJson(payload)).digest('hex').slice(0, 32);
 }
 
 /** The old tolerant merge, kept ONLY as the shadow. */
@@ -205,7 +223,12 @@ export async function readPricingConfig<T extends object>(prisma: PrismaClient, 
     let version: number | null = null;
     try {
       const latest = await latestVersion(prisma, countryCode, kind);
-      if (!latest || latest.payloadHash !== pricingPayloadHash(verdict.payload)) {
+      // [MASTER-045] Same version only when the WHOLE payload is the same. The
+      // stored payload is compared, not only its fingerprint, so a version
+      // recorded under the old nested-blind fingerprint is still recognised
+      // when its payload is identical, and is never mistaken for a payload
+      // that differs only in a nested rate.
+      if (!latest || canonicalJson(latest.payload) !== canonicalJson(verdict.payload)) {
         const recorded = await appendVersion(prisma, countryCode, kind, verdict.payload, { createdBy: 'reader' });
         version = recorded.version;
       } else {

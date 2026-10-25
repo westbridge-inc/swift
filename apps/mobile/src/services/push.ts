@@ -1,9 +1,10 @@
-import { Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import axios from 'axios';
 import { color } from '@swift/ui';
 import { API_URL } from './api';
+import { JOB_OFFERS_CHANNEL, JOB_RING_SOUND, hasJobRing, jobAlertsVersion } from './jobRingCapability';
 import { getAuthSessionSnapshot } from '../stores/authStore';
 import {
   samePrincipalBoundary,
@@ -80,6 +81,25 @@ async function registerForSession(session: AuthSessionSnapshot, mayPrompt: boole
         // notification LED silently forks the palette.
         lightColor: color.brand[500],
       });
+      // [RINGER · owner ruling 15 Oct] Job offers ring on their own channel:
+      // the loudest importance, Swift's tone, a strong buzz. Android never
+      // lets an app change a channel's sound once it exists, so the channel
+      // is created ONLY by a binary that bundles the tone (build 12): this JS
+      // reaching an older binary over the air must not create it soundless.
+      // Do Not Disturb is the partner's choice (bypassDnd false; they can
+      // let it through in the channel's settings, see openJobAlertSettings).
+      if (hasJobRing()) {
+        await Notifications.setNotificationChannelAsync(JOB_OFFERS_CHANNEL, {
+          name: 'Job offers',
+          description: 'New orders and job offers that need your answer',
+          importance: Notifications.AndroidImportance.MAX,
+          sound: JOB_RING_SOUND,
+          vibrationPattern: [0, 500, 250, 500, 250, 500],
+          enableVibrate: true,
+          bypassDnd: false,
+          lightColor: color.brand[500],
+        });
+      }
     }
 
     const projectId = (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)?.eas?.projectId;
@@ -100,7 +120,10 @@ async function registerForSession(session: AuthSessionSnapshot, mayPrompt: boole
     const send = (accessToken: string) =>
       axios.post(
         `${API_URL}/api/v1/customer/notifications/devices`,
-        { token, platform: Platform.OS === 'ios' ? 'ios' : 'android' },
+        // [RINGER] alertsVersion tells the server whether THIS binary has
+        // the job ring (1, build 12) or not (0): only a binary that has it is
+        // sent the job_offers channel, the tone and time-sensitive.
+        { token, platform: Platform.OS === 'ios' ? 'ios' : 'android', alertsVersion: jobAlertsVersion() },
         {
           timeout: 10000,
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -151,4 +174,55 @@ export async function preparePushTokenForLogout(session: AuthSessionSnapshot): P
     pushTokensBySession.delete(key);
     if (registeredSessionKey === key) registeredSessionKey = null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// [STORE-ALERT 18 Oct 2026] An earner's phone must be able to ring.
+//
+// iOS starts every install "undetermined", and the only OS prompt in the app
+// was the one-time priming card at three moments (an order placed, a driver
+// application, a store created IN the app). A store owner who signed in on an
+// iPhone was never asked, held no push token, and a new order rang nothing:
+// only the backup SMS arrived. These helpers let the earner dashboards ask
+// (services/notification-priming maybePrimeEarnerNotifications), show the
+// state (components/PushOffStrip) and re-register when the person comes back
+// from Settings (installPushForegroundRetry).
+// ---------------------------------------------------------------------------
+
+/** What turning push on takes on this phone: nothing, the OS prompt, or Settings. */
+export type PushPermission = 'granted' | 'ask' | 'settings';
+
+export async function pushPermission(): Promise<PushPermission> {
+  try {
+    const permission = await Notifications.getPermissionsAsync();
+    if (permission.status === 'granted') return 'granted';
+    // iOS asks once: after that canAskAgain is false and only Settings can turn
+    // it on. Android 13+ may ask again after a first refusal.
+    return permission.canAskAgain === false ? 'settings' : 'ask';
+  } catch {
+    return 'ask';
+  }
+}
+
+/** The earner's "Turn on": the OS prompt while it can still be shown (and the
+ *  registration that follows a yes), otherwise this app's page in Settings. */
+export async function turnOnPush(): Promise<PushPermission> {
+  const now = await pushPermission();
+  if (now === 'settings') {
+    await Linking.openSettings().catch(() => undefined);
+    return now;
+  }
+  if (now === 'ask') await registerDeviceForPush();
+  return pushPermission();
+}
+
+/** Re-run the silent registration whenever the app comes to the foreground:
+ *  someone who turned notifications on in Settings registers the moment they
+ *  return, not at the next cold start. register() no-ops once this session's
+ *  token is on the server. */
+export function installPushForegroundRetry(): () => void {
+  const subscription = AppState.addEventListener('change', (state) => {
+    if (state === 'active') void registerIfGranted();
+  });
+  return () => subscription.remove();
 }

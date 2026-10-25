@@ -16,12 +16,15 @@ import { JUDGED_FIELD_WORDS as FIELD_WORDS, PROHIBITED_CLASS_LABELS as CLASS_LAB
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { label } from '@/lib/labels';
 
 // ---------------------------------------------------------------------------
 // [GUARDRAILS §8] THE CATALOGUE CHECK (owner, 13 Oct 2026).
 //
 // Swift never carries alcohol, tobacco, vapes, 18+ items, medicines, cooking
-// gas or fuel. A banned platform category is refused outright; a banned WORD
+// gas or fuel — nor, since 15 Oct (R4), explosives, pesticides, raw gold and
+// stones, firearms, protected wildlife, counterfeits, currency and payment
+// cards, or legal services. A banned platform category is refused outright; a banned WORD
 // in a partner's own text saves the item but holds it hidden until a person
 // looks — and this is where that person looks.
 //
@@ -92,10 +95,10 @@ function StoreRow({ store, onDone }: { store: WaitingStore; onDone: (_outcome: O
 
   return (
     <li className="mc-card" aria-label={store.name}>
-      <p className="mc-label">Store · {store.status}</p>
+      <p className="mc-label">Store · {label('VendorStatus', store.status)}</p>
       <h2 className="text-base font-semibold">{store.name}</h2>
       <p className="text-sm">
-        Held as <strong>{CLASS_LABELS[store.prohibitedClass] ?? store.prohibitedClass}</strong>: the word &ldquo;{store.term}&rdquo; in the{' '}
+        Held as <strong>{CLASS_LABELS[store.prohibitedClass] ?? 'goods Swift does not allow'}</strong>: the word &ldquo;{store.term}&rdquo; in the{' '}
         {STORE_FIELD_WORDS[store.field] ?? store.field}. Its items are hidden with it.
       </p>
       <dl className="mc-rows">
@@ -149,7 +152,7 @@ function Row({ item, onDone }: { item: WaitingItem; onDone: (_outcome: Outcome |
       <p className="mc-label">{item.vendor.name}</p>
       <h2 className="text-base font-semibold">{item.name}</h2>
       <p className="text-sm">
-        Held as <strong>{CLASS_LABELS[item.prohibitedClass] ?? item.prohibitedClass}</strong>: the word &ldquo;{item.term}&rdquo; in the{' '}
+        Held as <strong>{CLASS_LABELS[item.prohibitedClass] ?? 'goods Swift does not allow'}</strong>: the word &ldquo;{item.term}&rdquo; in the{' '}
         {FIELD_WORDS[item.field] ?? item.field}.
       </p>
       <dl className="mc-rows">
@@ -188,10 +191,11 @@ export default function CatalogueCheckPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="text-2xl font-bold mb-2">Catalogue check</h1>
       <p className="mc-muted mb-4 text-sm">
-        Swift never carries alcohol, tobacco, vapes, 18+ items, medicines, cooking gas or fuel. These items were saved
-        with one of those words in the partner&apos;s own text, so customers cannot see or order them until you check.
+        Swift never carries alcohol, tobacco, vapes, cannabis or other drugs, 18+ items, medicines, cooking gas, fuel,
+        fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms,
+        ammunition or replicas, protected wildlife, counterfeit goods, currency or payment cards, and never lists legal
+        services. These items were saved with one of those words in the partner&apos;s own text, so customers cannot see or order them until you check.
         Approve shows an item exactly as written; remove bans it for good. Neither can lift a ban on a category. A store
         whose own name, description or tags mention those goods is held too, with all its items, until you approve it or
         suspend it.

@@ -147,7 +147,7 @@ vi.mock('../lib/storage', () => ({
 vi.mock('../lib/adsQueue', () => ({ retireAdEventScope: () => undefined }));
 vi.mock('../lib/analytics', () => ({ track: () => undefined }));
 vi.mock('../lib/payLink', () => ({ openPayLink: async () => false }));
-vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, preparePushTokenForLogout: async () => null }));
+vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, installPushForegroundRetry: () => () => undefined, preparePushTokenForLogout: async () => null }));
 vi.mock('../services/attribution', () => ({ ensureFirstLaunchClaim: () => undefined, flushAttributedDestination: () => undefined }));
 vi.mock('../services/socket', () => ({ connectSocket: () => undefined, getSocket: () => ({ connected: false }), disconnectSocket: () => undefined, reconnectSocketForStoreHandoff: () => undefined }));
 vi.mock('../services/backgroundLocation', () => ({ stopMoverLocation: async () => undefined }));
@@ -163,6 +163,8 @@ vi.mock('../hooks', async () => {
     useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined, useMoverKind: () => ({ kind: 'RIDER', profile: null }),
   };
 });
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../kit/toast', () => ({ toast: { show: () => undefined, success: () => undefined, info: () => undefined, error: (message: string) => { fx.toasts.push(message); } } }));
 vi.mock('../kit', async () => {
   const R = await import('react');
@@ -182,6 +184,7 @@ vi.mock('../kit', async () => {
     ErrorState: ({ message }: any) => R.createElement('div', null, message ?? 'Something went wrong'),
     EmptyState: ({ title, body }: any) => R.createElement('div', null, title, ' ', body),
     PillButton: ({ label, onPress, disabled, testID }: any) => control(label, onPress, disabled, testID),
+    BrandCheckbox: ({ checked, onToggle }: any) => R.createElement('div', { role: 'checkbox', 'aria-checked': checked ? 'true' : 'false', onClick: onToggle }),
     LinkText: ({ label, onPress }: any) => control(label, onPress),
     LabeledInput: ({ value, placeholder, onChangeText }: any) =>
       R.createElement('input', { placeholder, value: value ?? '', onInput: (event: any) => onChangeText?.(event.target.value), onChange: () => undefined }),
@@ -238,6 +241,8 @@ vi.mock('../modules/mover/screens/MoverDocumentsScreen', () => ({ MoverDocuments
 vi.mock('../modules/mover/screens/MoverVehicleScreen', () => ({ MoverVehicleScreen: () => null }));
 vi.mock('../modules/chat/screens/ConversationScreen', () => ({ ConversationScreen: () => null }));
 vi.mock('../modules/safety/screens/LivenessCheckScreen', () => ({ LivenessCheckScreen: () => null }));
+// The signed-in safety control (an owner's live SOS) has its own tests; it renders nothing when calm.
+vi.mock('../modules/safety/OwnedSafetyPanel', () => ({ OwnedSafetyPanel: () => null }));
 vi.mock('../modules/safety/screens/GuardianDriverConfirmScreen', () => ({ GuardianDriverConfirmScreen: () => null }));
 
 import { BackHandler } from 'react-native';

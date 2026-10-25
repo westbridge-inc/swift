@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clockLabel, fareBreakdownOf, liveWaiting, stopWaitMinutes, waitingDisclosure, waitingView } from './taxiWaiting';
+import { clockLabel, fareBreakdownOf, liveWaiting, stopWaitMinutes, waitingDisclosure, waitingEcho, waitingView } from './taxiWaiting';
 import { ESTIMATE_WITH_ONE_STOP, FARE_BREAKDOWN, RIDE_STOPS_PENDING, WAITING_LIVE, WAITING_TERMS, riderRideWithStops } from './taxiContract.fixtures';
 
 // ---------------------------------------------------------------------------
@@ -11,9 +11,23 @@ import { ESTIMATE_WITH_ONE_STOP, FARE_BREAKDOWN, RIDE_STOPS_PENDING, WAITING_LIV
 
 const nextAt = Date.parse(WAITING_LIVE.nextChargeAt);
 
+describe('[quote proof] the terms echoed with the booking', () => {
+  it('the numbers behind the line shown, and nothing else', () => {
+    expect(waitingEcho({ ...ESTIMATE_WITH_ONE_STOP.data, waiting: WAITING_TERMS })).toEqual({ chargePerBlock: 300, blockMinutes: 10 });
+  });
+
+  it('none when no line is shown: no terms, broken terms or fractional numbers', () => {
+    expect(waitingEcho(ESTIMATE_WITH_ONE_STOP.data)).toBeNull();
+    expect(waitingEcho(undefined)).toBeNull();
+    for (const waiting of [null, { chargePerBlock: 'x', blockMinutes: 10 }, { chargePerBlock: 500, blockMinutes: 0 }, { chargePerBlock: -5, blockMinutes: 10 }, { chargePerBlock: 300.5, blockMinutes: 10 }]) {
+      expect(waitingEcho({ waiting }), JSON.stringify(waiting)).toBeNull();
+    }
+  });
+});
+
 describe('the disclosure before booking (§8.2)', () => {
   it('shows the server’s own sentence', () => {
-    expect(waitingDisclosure({ ...ESTIMATE_WITH_ONE_STOP.data, waiting: WAITING_TERMS })).toBe('Waiting: 500 per 10 minutes after your driver arrives');
+    expect(waitingDisclosure({ ...ESTIMATE_WITH_ONE_STOP.data, waiting: WAITING_TERMS })).toBe('Waiting: 300 per 10 minutes after your driver arrives');
   });
 
   it('nothing when the server sends no terms — today’s screen', () => {
@@ -23,8 +37,8 @@ describe('the disclosure before booking (§8.2)', () => {
   });
 
   it('builds the same sentence from the server’s numbers when the text is missing', () => {
-    expect(waitingDisclosure({ waiting: { chargePerBlock: 500, blockMinutes: 10, currencyCode: 'GYD' } }))
-      .toMatch(/^Waiting: \$500 per 10 minutes after your driver arrives$/);
+    expect(waitingDisclosure({ waiting: { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD' } }))
+      .toMatch(/^Waiting: \$300 per 10 minutes after your driver arrives$/);
   });
 
   it('never invents terms from broken numbers', () => {
@@ -41,20 +55,20 @@ describe('the live wait (§8.3)', () => {
   });
 
   it('reads the contract’s object', () => {
-    expect(liveWaiting(riderRideWithStops({ waiting: WAITING_LIVE }))).toMatchObject({ waitingMinutes: 13, waitingCharge: 500, running: true });
+    expect(liveWaiting(riderRideWithStops({ waiting: WAITING_LIVE }))).toMatchObject({ waitingMinutes: 13, waitingCharge: 300, running: true });
   });
 
   it('ticks the timer locally from nextChargeAt; the money stays the server’s', () => {
     const live = liveWaiting({ waiting: WAITING_LIVE })!;
     const view = waitingView(live, nextAt - 390_000);
-    expect(view).toMatchObject({ minutes: 13, charge: 500, running: true, nextChargeInSeconds: 390 });
-    expect(waitingView(live, nextAt - 120_000)).toMatchObject({ minutes: 18, charge: 500, nextChargeInSeconds: 120 });
+    expect(view).toMatchObject({ minutes: 13, charge: 300, running: true, nextChargeInSeconds: 390 });
+    expect(waitingView(live, nextAt - 120_000)).toMatchObject({ minutes: 18, charge: 300, nextChargeInSeconds: 120 });
   });
 
   it('past nextChargeAt the clock keeps going but no charge is predicted before the server says so', () => {
     const view = waitingView(liveWaiting({ waiting: WAITING_LIVE })!, nextAt + 90_000);
     expect(view.minutes).toBe(21);
-    expect(view.charge).toBe(500);
+    expect(view.charge).toBe(300);
     expect(view.nextChargeInSeconds).toBeNull();
   });
 
@@ -66,7 +80,7 @@ describe('the live wait (§8.3)', () => {
 
   it('a stopped wait shows the server’s figures as they are', () => {
     const view = waitingView(liveWaiting({ waiting: { ...WAITING_LIVE, running: false, nextChargeAt: null } })!, nextAt);
-    expect(view).toMatchObject({ minutes: 13, charge: 500, running: false, nextChargeInSeconds: null });
+    expect(view).toMatchObject({ minutes: 13, charge: 300, running: false, nextChargeInSeconds: null });
   });
 
   it('each stop’s own wait, when the server sends it', () => {

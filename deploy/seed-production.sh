@@ -106,9 +106,10 @@ esac
 SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 [ -n "$SEED_ADMIN_PHONE" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
 # +592600 is DEMO_PHONE_PREFIX (apps/api/src/modules/ops/purge-plan.ts): the
-# range every demo seed mints and the demo purge classifies on. A real
-# SUPER_ADMIN inside it would be entangled with the demo classification, so
-# the ceremony refuses it. The phone value itself is never printed.
+# range every demo seed mints. The demo purge selects by the synthetic marker
+# only (the range is a live carrier range), but a real SUPER_ADMIN inside it
+# would still be confusable with the demo accounts, so the ceremony refuses
+# it. The phone value itself is never printed.
 [[ "$SEED_ADMIN_PHONE" != +592600* ]] ||
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
 # [OWNER EMAIL · Opus money review 14 Oct, S2-L] Solo approval in the apps
@@ -180,15 +181,18 @@ IDENTITY_ENV="${IDENTITY#*:}"
 cd "$ROOT"
 [ -z "$(git status --porcelain --untracked-files=normal)" ] ||
   die "checkout has local changes; refusing to build a ceremony image from it"
-git fetch origin main
+git fetch origin main >&2
 git merge-base --is-ancestor "$SHA" origin/main ||
   die "the requested SHA is not on current origin/main"
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "the checkout is not at the requested SHA; run pilot-up.sh <sha> first"
 
 export SWIFT_TAG="$SHA"
-"${COMPOSE[@]}" config --quiet || die "compose configuration is invalid"
+"${COMPOSE[@]}" config --quiet >&2 || die "compose configuration is invalid"
 
 # Build the `build` stage of the exact checkout, then run the seed exactly
 # once. `--rm` removes the ceremony container; `--no-TTY` keeps it a script.
-"${COMPOSE[@]}" build seed || die "the seed ceremony image could not be built"
+# Stdout is the seed's own text only (the plan, the request block the signers
+# read, the approval lines): every build and progress line goes to stderr,
+# so `> request.txt` captures exactly what is signed.
+"${COMPOSE[@]}" build seed >&2 || die "the seed ceremony image could not be built"
 "${COMPOSE[@]}" run --rm --no-TTY seed

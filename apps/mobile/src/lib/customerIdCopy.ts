@@ -6,6 +6,10 @@
  * nobody read and confirmed it — so the app never says "verified" for it. Only an ID a person
  * approved is "checked". The server says which (`idCheck`); an older server that does not send it
  * is read from the submission's status, and an unknown answer claims nothing.
+ *
+ * [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Taxi rides and bigger orders no longer
+ * need the ID, so no line here claims they unlock: the ID is optional, and it is kept with the
+ * account as the Privacy Policy explains.
  */
 export type CustomerIdCheck = 'NONE' | 'ON_FILE' | 'CHECKED' | 'WAITING' | 'NOT_ACCEPTED';
 
@@ -26,26 +30,26 @@ export function submittedCopy(check: CustomerIdCheck | null): { title: string; b
   switch (check) {
     case 'ON_FILE':
     case 'CHECKED':
-      return { title: 'Your ID is on file', body: 'Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' };
+      // [Owner ruling 24 Oct 2026] Nothing unlocks: the ID is simply kept (the server's own notice says the same).
+      return { title: 'Your ID is on file', body: 'Thanks — it is kept with your account, as the Privacy Policy explains.' };
     case 'NOT_ACCEPTED':
       return { title: 'We couldn’t accept this ID', body: 'Check that the photo shows your whole ID clearly, then try again — or contact us from Help.' };
     case 'WAITING':
-      return { title: 'A person will check your ID', body: 'Someone on our team looks at it before taxi rides and bigger orders unlock. We’ll let you know.' };
+      return { title: 'A person will check your ID', body: 'Someone on our team looks at it first. We’ll let you know.' };
     default:
-      return { title: 'ID sent', body: 'We’ll let you know when taxi rides and bigger orders are unlocked.' };
+      return { title: 'ID sent', body: 'We’ll let you know when it is on file.' };
   }
 }
 
 /** The Profile row's line under "Your ID". */
 export function profileIdRowSub(check: unknown): string {
   switch (check) {
-    // Taxi rides also need the profile photo, so the short line claims only what the ID unlocks.
-    case 'ON_FILE': return 'On file — bigger orders unlocked';
+    case 'ON_FILE': return 'On file';
     case 'CHECKED': return 'Checked by our team';
     case 'WAITING': return 'A person is checking it';
     case 'NOT_ACCEPTED': return 'Not accepted — add it again';
-    // NONE also reaches an account already above L1 with no customer ID on record: say what the ID
-    // is for, never that this account needs one.
-    default: return 'For bigger orders and taxi rides';
+    // NONE also reaches an account already above L1 with no customer ID on record. [24 Oct 2026] An ID
+    // is optional: never say this account needs one.
+    default: return 'Optional';
   }
 }

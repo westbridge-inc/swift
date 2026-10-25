@@ -1,6 +1,6 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import JobsPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -87,13 +87,14 @@ describe('discard is permanent, so it asks first', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Discard' })[0]!);
 
     // The confirmation NAMES the job — a permanent action that says only
-    // "are you sure?" is a coin flip, not a decision.
-    expect(await screen.findByText(/Yes, discard process-settlements/)).toBeTruthy();
+    // "are you sure?" is a coin flip, not a decision. It is the in-page panel.
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Permanently discard process-settlements?');
+    expect(within(panel).getByRole('button', { name: 'Discard process-settlements' })).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'DELETE')).toHaveLength(0);
   });
 
   it('deletes only after the named confirmation', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('The job has exhausted its retries and is safe to discard'));
     const fetchMock = mockApi(
       handler((r) =>
         r.url.pathname === '/api/v1/admin/dlq/settlement/910' && r.method === 'DELETE'
@@ -105,7 +106,9 @@ describe('discard is permanent, so it asks first', () => {
     await screen.findByText('process-settlements');
 
     await userEvent.click(screen.getAllByRole('button', { name: 'Discard' })[0]!);
-    await userEvent.click(await screen.findByRole('button', { name: /Yes, discard process-settlements/ }));
+    const panel = await screen.findByRole('dialog');
+    await userEvent.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'The job has exhausted its retries and is safe to discard');
+    await userEvent.click(within(panel).getByRole('button', { name: 'Discard process-settlements' }));
 
     await waitFor(() => {
       const deletes = requestsByMethod(fetchMock, 'DELETE');
@@ -151,7 +154,9 @@ describe('a money queue is not one queue among six', () => {
     // Colour is the SECOND signal; the queue name is the first. What is asserted
     // here is that the two are not styled identically.
     expect(settlement.className).not.toBe(search.className);
-    expect(settlement.className).toMatch(/red/);
+    // [ADMIN-UI] Mission Control's alarm colour is the 'bad' tone (red #B91C1C), not a Tailwind red-* class.
+    expect(settlement.className).toMatch(/mc-tone-bad/);
+    expect(search.className).not.toMatch(/mc-tone-bad/);
   });
 });
 
@@ -197,5 +202,34 @@ describe('[A-08] retry-safety is a property each class earns', () => {
     await screen.findByText(/qr-attribution-purge/);
     expect(screen.queryByText(/Not replayable:/)).toBeNull();
     expect((screen.getByRole('button', { name: 'Retry this job' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // [U58] A RECONCILE_FIRST job may have half-finished before it failed. The
+  // server retries it once the operator says they checked what that run did
+  // (acknowledgedReconciled=true); the console used to show it as "Not
+  // replayable", so it could never be retried at all.
+  it('[U58] a reconcile-first class is retried in two steps, and the request says it was reconciled', async () => {
+    const reconcileFirst = { ...settlementFailure, id: '913', name: 'mmg-payout-push', recovery: { policy: 'RECONCILE_FIRST' as const, why: 'It may have sent the payout before it failed.' } };
+    const fetchMock = mockApi((r: ApiRequest) => (r.method === 'POST'
+      ? { body: { success: true, data: { retried: true } } }
+      : { body: { success: true, data: [reconcileFirst] } }));
+    const { user } = renderWithQuery(<JobsPage />);
+    await screen.findByText(/mmg-payout-push/);
+    expect(screen.queryByText(/Not replayable:/)).toBeNull();
+    expect(screen.getByText(/Reconcile first: It may have sent the payout before it failed./)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry this job' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'I have reconciled it: retry' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Retry mmg-payout-push after reconciling it?');
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    await user.click(within(panel).getByRole('button', { name: 'I have reconciled it: retry' }));
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const url = new URL(String(requestsByMethod(fetchMock, 'POST')[0]![0]));
+    expect(url.pathname).toBe('/api/v1/admin/dlq/settlement/913/requeue');
+    expect(url.searchParams.get('acknowledgedReconciled')).toBe('true');
+    expect(url.searchParams.get('expectedName')).toBe('mmg-payout-push');
+    expect(await screen.findByText('mmg-payout-push queued to run once more.')).toBeTruthy();
   });
 });

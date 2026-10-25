@@ -23,19 +23,58 @@
 # to the live database since the dump is a mismatch, reported by table. The
 # backup and rehearsal heartbeats in platform_config are left out — backup.sh
 # writes them after the dump by design.
+#
+# [item 196] A restored copy is QUARANTINED and the LIVE erasure ledger is
+# replayed onto it before anything is reported. The scratch database is closed
+# to every login role except the operator's own (and superusers) from the moment
+# it exists, before any row arrives. A backup is older than the live database:
+# people who closed their account, documents purged and keys destroyed since
+# the dump are still whole in it. restore-erasure-ledger.sql says what is read
+# from the live database, restore-replay-erasures.sql re-applies it to the copy
+# in one transaction; a failure leaves the copy quarantined and unreported. On a
+# fresh dump the replay changes nothing, so --compare-source still proves the
+# copy equal to its source.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+die() { echo "FATAL: $*" >&2; exit 1; }
 COMPARE_SOURCE=0
 FETCH_ENCRYPTED=0
-if [ "${1:-}" = "--compare-source" ]; then COMPARE_SOURCE=1; shift
-elif [ "${1:-}" = "--fetch-encrypted" ]; then FETCH_ENCRYPTED=1; shift; fi
+# [#1977] Disaster recovery: with the live database gone there is no live ledger. Both flags or nothing.
+NO_LIVE_LEDGER=0
+LIVE_IS_GONE=0
+# [#1977] A failed replay drops the copy (it holds people the live database erased) unless kept.
+KEEP_FAILED=0
+# [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
+# base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
+PROJECT=""
+# [Off-site erasure ledger] The shipped entries, decrypted by the owner on his own computer: a plain
+# JSONL file only this login can read. They join the live ledger, or stand alone in a DR restore.
+LEDGER_FROM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the decrypted off-site ledger file"; LEDGER_FROM="$2"; shift ;;
+    --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
+    --compare-source) COMPARE_SOURCE=1 ;;
+    --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
+    --no-live-ledger) NO_LIVE_LEDGER=1 ;;
+    --i-know-live-is-gone) LIVE_IS_GONE=1 ;;
+    --keep-failed) KEEP_FAILED=1 ;;
+    --*) die "unknown option $1" ;;
+    *) break ;;
+  esac
+  shift
+done
+if [ "$NO_LIVE_LEDGER" = 1 ] || [ "$LIVE_IS_GONE" = 1 ]; then
+  [ "$NO_LIVE_LEDGER" = 1 ] && [ "$LIVE_IS_GONE" = 1 ] ||
+    die "the disaster-recovery restore needs BOTH --no-live-ledger and --i-know-live-is-gone: without the live database there is no erasure ledger, and the copy will not be erasure-complete"
+  [ "$COMPARE_SOURCE" = 0 ] && [ "$FETCH_ENCRYPTED" = 0 ] ||
+    die "--no-live-ledger --i-know-live-is-gone restores without a live database: it cannot be combined with --compare-source or --fetch-encrypted"
+fi
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 TMP_DIR=""
-
-die() { echo "FATAL: $*" >&2; exit 1; }
 env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
@@ -80,8 +119,160 @@ db_psql() {
     'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
     sh "$database" "$@"
 }
+# [#1977 · REVIEW-G S4-1] Every read of the LIVE database's ledger runs read-only: this path never writes live.
+db_psql_ro() {
+  local database="$1"; shift
+  "${COMPOSE[@]}" exec -T postgres sh -c \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; export PGOPTIONS="-c default_transaction_read_only=on"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
+    sh "$database" "$@"
+}
+# [#1977 · REVIEW-F S4-1] Once rows are in the copy, a failure DROPS it: a copy the replay did not
+# finish still holds people the live database has erased. --keep-failed keeps it, quarantined.
+ROWS_IN=0
+die_copy() {
+  [ "$ROWS_IN" = 1 ] || die "$*; scratch database retained (quarantined, empty), not restored"
+  if [ "$KEEP_FAILED" = 1 ]; then
+    die "$*; scratch database $SCRATCH retained (quarantined) because --keep-failed was given. It may hold people the live database erased: drop it as soon as you are done"
+  fi
+  if db_psql postgres -q -c "DROP DATABASE \"$SCRATCH\" WITH (FORCE);"; then
+    die "$*; the scratch database (quarantined until now) was dropped: it held people the live database has erased. Fix and rerun, or pass --keep-failed to inspect it"
+  fi
+  die "$*; DROPPING the scratch database $SCRATCH FAILED: drop it by hand now, it holds people the live database has erased"
+}
+# [#1977 · REVIEW-F S4-2] Which deployment a database belongs to (environment/deploymentId), or none/none.
+deployment_identity_of() {
+  local fn="$2" has
+  has="$("$fn" "$1" -tAc "SELECT to_regclass('public.deployment_identity') IS NOT NULL;" | tr -d '[:space:]')" || return 1
+  if [ "$has" != t ]; then echo "none/none"; return 0; fi
+  "$fn" "$1" -tAc "SELECT coalesce(max(environment), 'none') || '/' || coalesce(max(\"deploymentId\"), 'none') FROM deployment_identity;" | tr -d '[:space:]'
+}
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
 trap cleanup EXIT
+private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_DIR"; }; }
+
+# [item 196] Only the operator's own login (and superusers) may connect to the
+# scratch copy: not PUBLIC, not any application login. Checked, not assumed.
+quarantine_scratch() {
+  db_psql postgres -q <<SQL
+REVOKE ALL ON DATABASE "$SCRATCH" FROM PUBLIC;
+DO \$\$ DECLARE r record; BEGIN
+  FOR r IN SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user LOOP
+    EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', '$SCRATCH', r.rolname);
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user
+             AND has_database_privilege(rolname, '$SCRATCH', 'CONNECT')) THEN
+    RAISE EXCEPTION 'the scratch database could not be closed to application logins';
+  END IF;
+END \$\$;
+SQL
+}
+
+# [item 196] Read the live erasure ledger and replay it onto the scratch copy,
+# in one transaction on the copy. Prints the replay's summary line.
+LEDGER_SQL="$HERE/restore-erasure-ledger.sql"
+REPLAY_SQL="$HERE/restore-replay-erasures.sql"
+OFFSITE_SQL="$HERE/restore-offsite-ledger.sql"
+OFFSITE_CSV=""
+OFFSITE_NEWEST=""
+# [Off-site erasure ledger] Check the file before anything is created: readable by this login only,
+# every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to CSV
+# (one JSON value per row) in this run's private directory; prints the newest entry's time.
+read_offsite_ledger() {
+  [ -f "$LEDGER_FROM" ] || die "--ledger-from: $LEDGER_FROM is not a file"
+  private_tmp
+  OFFSITE_CSV="$TMP_DIR/offsite-ledger.csv"
+  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" <<'PY'
+import csv, json, os, re, stat, sys
+src, dst = sys.argv[1], sys.argv[2]
+if os.stat(src).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    sys.exit("--ledger-from: the ledger file is readable by others; chmod 600 it")
+kinds = {"receipts", "destroyed_keys", "retired_documents", "shredded_runs", "shredded_fields",
+         "closed_accounts", "deleted_rows", "erased_rating_text", "erased_outbox_text"}
+uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+stamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?")
+newest, n = "", 0
+with open(src) as f, open(dst, "w", newline="") as out:
+    w = csv.writer(out, lineterminator="\n")
+    for no, line in enumerate(f, 1):
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            sys.exit(f"--ledger-from: line {no} is not JSON")
+        if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
+                and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
+            sys.exit(f"--ledger-from: line {no} is not an erasure ledger entry")
+        w.writerow([json.dumps(e)])
+        newest = max(newest, e["createdAt"])
+        n += 1
+if n == 0:
+    sys.exit("--ledger-from: the ledger file holds no entry")
+print(newest)
+PY
+)" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
+  [ -f "$OFFSITE_SQL" ] || die "--ledger-from: restore-offsite-ledger.sql is missing next to restore.sh"
+  echo "off-site ledger : $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
+}
+replay_erasure_ledger() {
+  local has=f names=() selects=() name="" line i script summary live_id copy_id
+  [ -f "$LEDGER_SQL" ] && [ -f "$REPLAY_SQL" ] ||
+    die_copy "the erasure ledger files are missing next to restore.sh; not restored"
+  copy_id="$(deployment_identity_of "$SCRATCH" db_psql)" || die_copy "could not read the deployment identity of the restored copy; not restored"
+  if [ "$NO_LIVE_LEDGER" = 1 ]; then
+    echo "live database identity : gone (disaster recovery: the off-site ledger only)"
+    echo "restored copy identity : $copy_id"
+  else
+    live_id="$(deployment_identity_of "$LIVE_DB" db_psql_ro)" || die_copy "could not read the deployment identity of $LIVE_DB; not restored"
+    echo "live database identity : $live_id"
+    echo "restored copy identity : $copy_id"
+    if [ "${live_id%%/*}" != none ] && [ "${copy_id%%/*}" != none ] && [ "${live_id%%/*}" != "${copy_id%%/*}" ]; then
+      die_copy "the live database ($live_id) and the restored copy ($copy_id) belong to different environments: the live ledger does not describe this copy; not restored"
+    fi
+    has="$(db_psql_ro "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
+      die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
+    if [ "$has" != t ] && [ -z "$LEDGER_FROM" ]; then
+      echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
+      return 0
+    fi
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^--\ ledger:\ ([a-z_]+)$ ]]; then name="${BASH_REMATCH[1]}"; continue; fi
+    if [ -n "$name" ] && [[ "$line" == SELECT\ * ]]; then names+=("$name"); selects+=("$line"); name=""; fi
+  done < "$LEDGER_SQL"
+  [ "${#names[@]}" -gt 0 ] || die_copy "the erasure ledger file names no entries; not restored"
+  private_tmp
+  script="$TMP_DIR/erasure-replay.sql"
+  # The live rows travel through this run's private directory only (ids,
+  # timestamps and already de-identified account columns).
+  ( umask 077
+    { echo 'BEGIN;'
+      for i in "${!names[@]}"; do
+        echo "CREATE TEMP TABLE restore_ledger_${names[$i]} ON COMMIT DROP AS ${selects[$i]} WITH NO DATA;"
+      done
+      if [ "$has" = t ]; then
+        for i in "${!names[@]}"; do
+          echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
+          db_psql_ro "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+          printf '%s\n' '\.'
+        done
+      fi
+      if [ -n "$LEDGER_FROM" ]; then
+        echo "CREATE TEMP TABLE restore_offsite (line jsonb NOT NULL) ON COMMIT DROP;"
+        echo "COPY restore_offsite (line) FROM STDIN WITH (FORMAT csv);"
+        cat "$OFFSITE_CSV"
+        printf '%s\n' '\.'
+        cat "$OFFSITE_SQL"
+      fi
+      cat "$REPLAY_SQL"
+      echo 'COMMIT;'
+    } > "$script" ) || die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
+  summary="$(db_psql "$SCRATCH" -q -tA < "$script")" ||
+    die_copy "the erasure ledger replay failed; not restored"
+  rm -f -- "$script"
+  printf '%s\n' "$summary" | grep -E '^erasure ledger replayed: ' ||
+    die_copy "the erasure ledger replay reported nothing; not restored"
+}
 
 [ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg"
 if [ "$FETCH_ENCRYPTED" = 1 ]; then
@@ -152,16 +343,37 @@ fi
 [ -f "$DUMP" ] || die "dump file does not exist"
 pg_restore --list "$DUMP" >/dev/null 2>&1 || die "pg_restore cannot read this archive"
 
+[ -z "$LEDGER_FROM" ] || read_offsite_ledger
+[ -n "$PROJECT" ] ||
+  die "name the Compose project that holds the target Postgres: --project <name> (live is 'swift', a rehearsal copy e.g. 'swift-rehearsal'); restore.sh never guesses"
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "--project must be a Compose project name (lowercase letters, digits, - and _)"
+COMPOSE+=(-p "$PROJECT")
+echo "compose project : $PROJECT (its postgres service)"
 echo "archive : $(basename "$DUMP")"
 echo "scratch : $SCRATCH"
 EXISTS="$(db_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$SCRATCH';")"
 [ -z "$EXISTS" ] || die "scratch database already exists; choose a new name"
-db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\";"
+# [#1977 · copy run #5c gap (a)] Closed from birth: created refusing every connection, then closed
+# to PUBLIC and to each login, and only then opened, for the restore.
+db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS false;"
+quarantine_scratch || die "the scratch database could not be quarantined; it was created empty and is retained"
+db_psql postgres -q -c "ALTER DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS true;" ||
+  die "the quarantined scratch database could not be opened for the restore; it was created empty and is retained"
 
 STARTED="$(date +%s)"
+ROWS_IN=1
 "${COMPOSE[@]}" exec -T postgres sh -c \
   'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
-  sh "$SCRATCH" < "$DUMP"
+  sh "$SCRATCH" < "$DUMP" || die_copy "pg_restore failed; not restored"
+quarantine_scratch || die_copy "the restored scratch database could not be kept quarantined"
+if [ "$NO_LIVE_LEDGER" = 1 ] && [ -z "$LEDGER_FROM" ]; then
+  echo "DISASTER-RECOVERY MODE: no live erasure ledger was replayed (--no-live-ledger --i-know-live-is-gone)"
+elif [ "$NO_LIVE_LEDGER" = 1 ]; then
+  echo "DISASTER-RECOVERY MODE: replaying the off-site erasure ledger only (the live database is gone)"
+  replay_erasure_ledger
+else
+  replay_erasure_ledger
+fi
 
 FAILED=0
 check() {
@@ -259,7 +471,7 @@ compare_with_source() {
   local live_snapshot scratch_snapshot
   live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
   scratch_snapshot="$(db_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
-  printf '%s\n' "$live_snapshot" | grep -q '^rows|' || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  grep -q '^rows|' <<<"$live_snapshot" || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
@@ -296,6 +508,27 @@ else
 fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
+# [#1984 COORD ruling 14:11Z] The replay covers documents, keys, receipts, tombstones, the closure's
+# rows and rating text; it does not yet re-run the app's own erasure passes, so the de-identifications
+# #1905 and #1945 add (updates, not deletes) are not replayed. Every restore says so until it does.
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used"
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used" >&2
+if [ "$NO_LIVE_LEDGER" = 1 ]; then
+  # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
+  echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
+  if [ -n "$LEDGER_FROM" ]; then
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)"
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)" >&2
+    echo "Anything erased after $OFFSITE_NEWEST never reached the off-site ledger and is still whole in this copy: check the erasure receipts and the ops pages for an unshipped ledger before anything from it is used. Keep it quarantined until then."
+  else
+    echo "NOT erasure-complete: replay the off-site ledger before use"
+    echo "NOT erasure-complete: replay the off-site ledger before use" >&2
+    echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
+  fi
+  echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained, quarantined, NOT for use"
+  exit 3
+fi
+echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
 echo "RESTORE OK — ${SECONDS_TAKEN}s; scratch database retained for inspection"
 # A failed rehearsal heartbeat cannot turn a verified scratch restore into a
 # failure, but doctor.sh will keep warning until a successful record exists.
@@ -307,5 +540,6 @@ INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_restore_rehearsal_seconds', to_jsonb($SECONDS_TAKEN), now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
 SQL
-echo "Inspect the scratch DB before dropping it with psql inside the Postgres container."
+echo "The quarantine covers the logins that exist now: re-run the quarantine before use (a login created later is not covered), and drop the copy after use (psql inside the Postgres container)."
 echo "Document objects and MASTER_KEK require separate recovery proof."
+echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."

@@ -2,10 +2,9 @@ import Fastify, { type RouteOptions } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
 import { helmetOptions } from './config/security-headers';
-import { rateLimitKey } from './utils/rate-limit-key';
+import { createRateLimitStore, rateLimitOptions } from './utils/rate-limit-options';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
 import { vendorRoutes } from './modules/vendor/vendor.routes';
@@ -38,6 +37,7 @@ import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegra
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
+import { registerPublicStorePhotos } from './utils/public-store-photos';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
@@ -54,6 +54,7 @@ import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
 import { getMapsProvider } from './providers/maps/maps-provider';
 import { createRoutingProbe } from './providers/maps/routing-probe';
+import { getPlacesHealth, placesProviderName } from './providers/places/places-health';
 
 
 // Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
@@ -111,6 +112,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
   const runtimeReadiness: RuntimeReadinessState = {
     checkRouting,
+    // [PLACES-LOUD] The last real address-search call's outcome: reported, never a failure, no Google call.
+    checkPlaces: () => getPlacesHealth().readiness(placesProviderName()),
     checkQueues: () => false,
     checkConsumers: () => false,
     checkWorker: async () => {
@@ -145,31 +148,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // OTP/login limits weaken linearly with the fleet size you scale up for launch.
   // Dev/test keep the in-memory store (a shared Redis counter across vitest's
   // per-file workers would cross-contaminate the whole suite's rate-limit state).
-  const rateLimitRedis =
-    isProduction()
-      ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', {
-          connectionName: 'swift-rate-limit',
-          // A rate-limit store must fail OPEN, never queue or crash a request if
-          // Redis blips — the plugin degrades gracefully on a store error.
-          maxRetriesPerRequest: 1,
-          enableOfflineQueue: false,
-        })
-      : undefined;
-  await app.register(rateLimit, {
-    // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
-    // can raise it without a code change (per-route limits on auth/OTP stay tight
-    // regardless). Callers with a VERIFIED token are bucketed per userId;
-    // anonymous and unverifiable requests share the resolved-IP bucket (never
-    // the spoofable X-Forwarded-For) — see D1-01.
-    ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
-    // The key generator verifies the bearer token (captured lazily via the
-    // closure — app.jwt is decorated by authPlugin, registered below) so an
-    // attacker cannot mint a fresh bucket per fake token; unverified and
-    // anonymous requests share the resolved-IP bucket.
-    keyGenerator: rateLimitKey((token) => app.jwt.verify(token)),
-    max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
-    timeWindow: '1 minute',
-  });
+  // [row 331 · G5-F3] The store fails OPEN with a logged alert, never a 500 on
+  // every route; /live does not consult it. Composed in utils/rate-limit-options.
+  const rateLimitRedis = isProduction() ? createRateLimitStore(process.env['REDIS_URL'] || 'redis://localhost:6379', app.log) : undefined;
+  // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
+  // can raise it without a code change (per-route limits on auth/OTP stay tight
+  // regardless). The key generator verifies the bearer token (captured lazily
+  // via the closure — app.jwt is decorated by authPlugin, registered below) so
+  // an attacker cannot mint a fresh bucket per fake token.
+  await app.register(rateLimit, rateLimitOptions({ store: rateLimitRedis, verify: (token) => app.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }));
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   });
@@ -177,9 +164,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Custom plugins
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
+  // [Row 312 · COORD 22 Oct] The upload scanner's payload-failure cool-down is shared by every API
+  // replica (and the worker) through Redis, so a file that crashes clamd on one replica cannot make the
+  // next upload on another look "down".
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(app.redis)); }
   await app.register(authPlugin);
   await app.register(socketPlugin);
   runtimeReadiness.checkRealtime = app.checkSocketAdapterReady;
+  // [Row 312 · COORD 23 Oct] A photo stored while the scanner was down (the bypass) leaves NO response,
+  // on any surface, before its rescan answers CLEAN (lib/photo-scan-filter.ts). Root hook, before any route.
+  { const { registerUploadPhotoScan } = await import('./lib/photo-scan-filter'); registerUploadPhotoScan(app); }
 
   // Multi-tenancy: give every request a fresh tenant store BEFORE any auth runs,
   // so `authenticate` can bind the caller's tenant without leaking across
@@ -280,12 +274,24 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return { status, timestamp: new Date().toISOString() };
     }
     const { EXHAUST_CAP, REDISPATCH_DELAY_MS } = await import('./modules/dispatch/dispatch.service');
+    // [Row 312] The upload malware scanner, detail only: 'off' (dark), 'ok', or 'down' (every upload is
+    // refused 503 until it answers; the worker's watch pages ops). It never turns the API's status
+    // degraded: everything but uploads still works, and the probes must not take the API down with it.
+    const { malwareScanBypassOn, malwareScanEnabled, malwareScannerStatus } = await import('./lib/malware-scan');
+    const malwareScanner = (await malwareScannerStatus(process.env, { timeoutMs: 2_000 })).state;
+    // [COORD 21 Oct] The emergency switch, so the doctor can shout while it is on.
+    const malwareScanBypass = malwareScanEnabled() && malwareScanBypassOn();
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      malwareScanner,
+      malwareScanBypass,
       routing,
+      // [PLACES-LOUD] Address search: last known status and the last failure's class and
+      // Google status words (never a key or a query). Detail-gated like the rest.
+      places: getPlacesHealth().detail(placesProviderName()),
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
       // carry different env than the server it drives — a cap-3 shell judged
@@ -302,6 +308,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
   registerPublicUploads(app, UPLOAD_BASE);
+  // [IMAGES-E2E] Stores' photos in object storage, at the address both apps build
+  // ("<api>/items/<store>/<file>"): only a photo a visible store still shows.
+  registerPublicStorePhotos(app);
 
   // API routes
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
@@ -364,6 +373,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // reply only prompts the server's own MMG lookup, never a credit.
   const { mmgCheckoutPublicRoutes } = await import('./modules/billing/mmg-checkout.routes');
   await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
+  // [R22] Texted STOP: the Twilio incoming-message webhook withdraws marketing
+  // consent in the ledger. Signature-checked before the body is used; dark (503)
+  // until TWILIO_WEBHOOK_AUTH_TOKEN and TWILIO_INBOUND_SMS_URL are set.
+  const { smsInboundRoutes } = await import('./modules/notification/sms-inbound.routes');
+  await app.register(smsInboundRoutes, { prefix: '/api/v1/sms' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps

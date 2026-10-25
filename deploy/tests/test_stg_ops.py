@@ -201,7 +201,7 @@ class StgCDoctorHealthDetail(unittest.TestCase):
         # containers are running with a restart policy, and the db queries
         # fail (warn, not FAIL). Keeps the doctor's container section from
         # failing on a test host that merely has no stack running.
-        sh_shim(self.bin, "docker", 'case "$*" in *"ps -q postgres"*|*"ps -q redis"*) echo "c0";; *" ps"*) exit 0;; *"{{.State.Status}}"*) echo "running";; *"{{.HostConfig.RestartPolicy.Name}}"*) echo "unless-stopped";; *"exec -T postgres"*) exit 1;; esac\nexit 0')
+        sh_shim(self.bin, "docker", 'case "$*" in *"ps -q postgres"*|*"ps -q redis"*|*"ps -q clamd"*) echo "c0";; *" ps"*) exit 0;; *"{{.State.Status}}"*) echo "running";; *"{{.HostConfig.RestartPolicy.Name}}"*) echo "unless-stopped";; *"exec -T postgres"*) exit 1;; esac\nexit 0')
         # Pin the disk check at 57% so the doctor tests do not depend on the
         # host's free space.
         sh_shim(self.bin, "df", 'echo "Filesystem Size Used Avail Capacity Mounted"\necho "/dev/disk1 100Gi 43Gi 57Gi 57% /"')
@@ -352,9 +352,9 @@ class SeedProductionScript(unittest.TestCase):
 
     def test_refuses_a_phone_inside_the_demo_purge_range(self):
         # [D1] +592600 is DEMO_PHONE_PREFIX: every demo seed mints numbers in
-        # it and the demo purge classifies on it. A real SUPER_ADMIN inside it
-        # would be entangled with the demo classification, so the ceremony
-        # refuses it before anything runs.
+        # it. The demo purge selects by the synthetic marker only, but a real
+        # SUPER_ADMIN inside the range would be confusable with the demo
+        # accounts, so the ceremony refuses it before anything runs.
         result = self.run_script(SEED_ADMIN_PHONE="+5926000000")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("592600", result.stderr)
@@ -369,6 +369,33 @@ class SeedProductionScript(unittest.TestCase):
         # DATABASE_URL is assembled in the container's memory only.
         self.assertNotIn("DATABASE_URL", result.stdout + result.stderr)
         self.assertNotIn("DATABASE_URL", calls)
+
+    def test_stdout_carries_only_the_seeds_own_text(self):
+        """The request run's stdout is what the operator saves and the signers
+        read (`> ~/seed-request.txt`): exactly the seed's own text. The image
+        build talks on stderr, where the operator still sees it (14 Oct: 87
+        build lines in front of the request block made the signer refuse it)."""
+        block = ("swift-seed-approval v2\n"
+                 "request: cmVxdWVzdA==\n"
+                 "end of request\n")
+        (self.tmp / "block.txt").write_text(block)
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\n'
+                'case "$*" in\n'
+                '  *"exec -T postgres"*) echo "1:staging"; exit 0;;\n'
+                '  *"config --quiet"*) echo "WARN the attribute version is obsolete"; exit 0;;\n'
+                '  *" build seed"*) i=0; while [ $i -lt 87 ]; do echo "#$i [build 2/9] RUN pnpm install"; i=$((i+1)); done; echo "build progress" >&2; exit 0;;\n'
+                '  *"run --rm --no-TTY seed"*) cat "$BLOCK"; echo "Container seed-run Creating" >&2; exit 2;;\n'
+                '  *) exit 0;;\n'
+                'esac')
+        sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; '
+                '*fetch*) echo "From github.com:example/swift";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001", BLOCK=str(self.tmp / "block.txt"))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, block)
+        self.assertIn("[build 2/9] RUN pnpm install", result.stderr)
+        self.assertEqual(result.stderr.count("[build 2/9]"), 87)
+        self.assertIn("From github.com:example/swift", result.stderr)
+        self.assertIn("attribute version is obsolete", result.stderr)
 
     def test_the_script_and_its_compose_override_never_carry_database_url(self):
         script = (DEPLOY / "seed-production.sh").read_text()
@@ -733,6 +760,9 @@ class Q11WebsiteCompose(unittest.TestCase):
         self.assertIn("SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}", web)
         # Unfilled company details stay refused unless the operator says otherwise.
         self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
+        # [WEB-TILES] The MapTiler browser key (public, domain-restricted) reaches the
+        # build from deploy/.env's WEB_MAPTILER_KEY; unset, the site draws no map tiles.
+        self.assertIn("NEXT_PUBLIC_MAPTILER_KEY: ${WEB_MAPTILER_KEY:-}", web)
 
     def test_the_website_has_a_memory_ceiling_that_v8_collects_below(self):
         web = self.web()
@@ -793,6 +823,8 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_API_URL"], "https://api-staging.example.invalid")
         self.assertEqual(web["build"]["args"]["SWIFT_WEB_CHANNEL"], "staging")
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_ALLOW_SITE_TOKENS"], "1")
+        # [WEB-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so no tiles (never OpenStreetMap's).
+        self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_MAPTILER_KEY"], "")
         self.assertEqual(model["services"]["caddy"]["environment"]["WEB_HOST"], "staging.example.invalid")
         # pilot-up's isolation check passes with the website in the model.
         check = subprocess.run(
@@ -991,6 +1023,8 @@ class LiveCaddyReadinessWait(unittest.TestCase):
         self.assertEqual(source.count("wait_for_test_caddy(self, name, "), 3)
         self.assertEqual(source.count('lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403'), 2)
         self.assertEqual(source.count('raw_https(port, API_HOST, "/metrics")[0] == 403'), 1)
+        # The website gate's two live serves also wait for a handshake on every name they reach.
+        self.assertEqual(source.count("self.every_name_has_tls(lambda host: "), 2)
 
 
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
@@ -1072,7 +1106,7 @@ class Q11WebsiteDockerfile(unittest.TestCase):
 
     def test_the_api_origin_and_channel_are_build_args_of_the_building_stage(self):
         build_step = self.build.index("RUN pnpm run build")
-        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS"):
+        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS", "NEXT_PUBLIC_MAPTILER_KEY"):
             declared = re.search(rf"(?m)^ARG {arg}$", self.build)
             self.assertIsNotNone(declared, f"{arg} must be a build ARG with no baked-in default")
             self.assertLess(declared.start(), build_step, arg)
@@ -1124,6 +1158,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": {"osrm": {}}}))
     else:
         services = {name: {} for name in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [Row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"},
                                        {"published": "443", "target": 443, "protocol": "tcp"}]}
         if "--profile" in argv and argv[argv.index("--profile") + 1] == "web":
@@ -1148,7 +1185,7 @@ class Q11PilotUpWebsite(unittest.TestCase):
         self.here = self.tmp / "repo" / "deploy"
         (self.here / "routing-data" / "osrm").mkdir(parents=True)
         (self.here / "routing-data" / "osrm" / "guyana-latest.osrm").write_text("")
-        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py",
+        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py", "check-upload-storage.py",
                      "Caddyfile", "docker-compose.yml", "docker-compose.routing.yml"):
             shutil.copy(DEPLOY / name, self.here / name)
         utils = self.tmp / "repo" / "apps" / "api" / "src" / "utils"
@@ -1483,8 +1520,11 @@ class AdminConsoleCompose(unittest.TestCase):
         admin = self.admin()
         self.assertIn("dockerfile: apps/admin/Dockerfile", admin)
         self.assertIn("image: swift-admin:${SWIFT_TAG:-local}", admin)
+        # [ADMIN-TILES] The only other input is the Live Ops map's MapTiler BROWSER key (public by
+        # design, certified !not-a-secret in security/public-env-allowlist.txt), the website's key.
         self.assertEqual(re.findall(r"(?m)^        ([A-Z][A-Z0-9_]*): (.*)$", admin),
-                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}")])
+                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}"),
+                          ("NEXT_PUBLIC_MAPTILER_KEY", "${WEB_MAPTILER_KEY:-}")])
 
     def test_the_console_has_a_memory_ceiling_that_v8_collects_below(self):
         admin = self.admin()
@@ -1537,7 +1577,8 @@ class AdminConsoleRenderedByCompose(unittest.TestCase):
         self.assertNotIn("ports", admin)
         self.assertEqual(list((admin.get("networks") or {}).keys()), ["private"])
         self.assertEqual(sorted((admin.get("environment") or {}).keys()), ["NODE_OPTIONS"])
-        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid"})
+        # [ADMIN-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so the Live Ops map has no tiles.
+        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid", "NEXT_PUBLIC_MAPTILER_KEY": ""})
         self.assertEqual(model["services"]["caddy"]["environment"]["ADMIN_HOST"], "admin-staging.example.invalid")
         # pilot-up's isolation check passes with the console in the model.
         check = subprocess.run(
@@ -1630,7 +1671,15 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     # the console and echoes any Authorization header that reaches it. Caddy
     # takes ONE global options block, first in the file, and the file opens
     # with its own (the log filter), so the options join that block.
-    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n"
+    # storage_clean_interval off: a fresh Caddy cleans its storage at start, AT
+    # THE SAME TIME as it issues the names' first certificates, and the cleaner
+    # can delete a site folder whose key is still being written ("deleting site
+    # folder because key is empty", then "job failed: caching certificate after
+    # obtaining it: ... .key: no such file or directory"). That name then has no
+    # certificate until Caddy's next maintenance pass (minutes), so the test
+    # Caddy never answered (run 39175786618). A test container's storage is new
+    # and thrown away, so there is nothing to clean.
+    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n    storage_clean_interval off\n"
     STAND_IN = '\nhttp://:3000 {\n    respond "authorization=[{http.request.header.Authorization}]" 200\n}\n'
 
     @classmethod
@@ -1670,6 +1719,19 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     def accounts(self, console) -> list:
         found = re.findall(r'"accounts": (\[.*?\])', json.dumps(console))
         return [account["username"] for listing in found for account in json.loads(listing)]
+
+    def test_the_live_caddy_never_cleans_its_storage_while_it_issues_the_first_certificates(self):
+        tmp = Path(tempfile.mkdtemp(prefix="swift-admin-caddy-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS))
+        adapted = subprocess.run(["docker", "run", "--rm", "--network", "none", "-e", f"API_HOST={API_HOST}",
+                                  "-v", f"{tmp / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                                  "caddy", "adapt", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+                                 text=True, capture_output=True, timeout=60)
+        self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
+        tls = json.loads(adapted.stdout)["apps"]["tls"]
+        self.assertIs(tls.get("disable_storage_clean"), True)
+        self.assertEqual(tls["automation"]["policies"][0]["issuers"], [{"module": "internal"}])
 
     def test_without_admin_host_it_validates_and_serves_exactly_what_it_did(self):
         for env in ({"API_HOST": API_HOST},
@@ -1768,7 +1830,11 @@ class AdminConsoleDockerfile(unittest.TestCase):
         declared = re.search(r"(?m)^ARG NEXT_PUBLIC_API_URL$", build)
         self.assertIsNotNone(declared, "NEXT_PUBLIC_API_URL must be a build ARG with no baked-in default")
         self.assertLess(declared.start(), build.index("RUN pnpm run build"))
-        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL"])
+        # [ADMIN-TILES] ...and the Live Ops map's public MapTiler browser key, also before the build.
+        tiles = re.search(r"(?m)^ARG NEXT_PUBLIC_MAPTILER_KEY$", build)
+        self.assertIsNotNone(tiles, "NEXT_PUBLIC_MAPTILER_KEY must be a build ARG with no baked-in default")
+        self.assertLess(tiles.start(), build.index("RUN pnpm run build"))
+        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_MAPTILER_KEY"])
         self.assertIn("ENV SWIFT_ADMIN_IMAGE_BUILD=1", build)
         # A public variable in the runtime would claim a setting the bundle cannot change.
         self.assertNotIn("NEXT_PUBLIC_", self.stages["runtime"])
@@ -1778,7 +1844,14 @@ class AdminConsoleDockerfile(unittest.TestCase):
         for line in re.findall(r"(?m)^ENV (.*)$", self.text):
             names += re.findall(r"([A-Z][A-Z0-9_]*)=", line)
         self.assertTrue(names)
+        # [ADMIN-TILES] Exempt ONLY a public (NEXT_PUBLIC_) name the allowlist certifies "!not-a-secret"
+        # with its written who-can-read / what-it-allows reasoning — today the MapTiler browser key.
+        certified = set(re.findall(r"(?m)^(NEXT_PUBLIC_[A-Z0-9_]+) !not-a-secret ",
+                                   (DEPLOY.parent / "security" / "public-env-allowlist.txt").read_text()))
+        self.assertEqual(certified & set(names), {"NEXT_PUBLIC_MAPTILER_KEY"})
         for name in names:
+            if name in certified:
+                continue
             self.assertNotRegex(name, r"SECRET|TOKEN|PASSWORD|PASSWD|KEY|HASH|CREDENTIAL|AUTH", name)
         # The build context never carries a settings file: every .env stays out.
         ignored = (DEPLOY.parent / ".dockerignore").read_text().splitlines()
@@ -1831,6 +1904,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": {"osrm": {}}}))
     else:
         services = {name: {} for name in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [Row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"},
                                        {"published": "443", "target": 443, "protocol": "tcp"}]}
         for i, arg in enumerate(argv[:-1]):
@@ -1857,7 +1933,7 @@ class AdminConsolePilotUp(unittest.TestCase):
         self.here = self.tmp / "repo" / "deploy"
         (self.here / "routing-data" / "osrm").mkdir(parents=True)
         (self.here / "routing-data" / "osrm" / "guyana-latest.osrm").write_text("")
-        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py",
+        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py", "check-upload-storage.py",
                      "Caddyfile", "docker-compose.yml", "docker-compose.routing.yml"):
             shutil.copy(DEPLOY / name, self.here / name)
         utils = self.tmp / "repo" / "apps" / "api" / "src" / "utils"
@@ -2470,8 +2546,20 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403
+                            and self.every_name_has_tls(lambda host: self.fetch(name, f"https://{host}/")[0] != 0))
         return name
+
+    # Caddy's internal issuer makes each name's certificate on its own, so the API
+    # answering says nothing about the website's name: until its certificate exists
+    # a handshake for it ends in "tlsv1 alert internal error". Every live test waits
+    # (by the same wall time) until each name it reaches completes a handshake with
+    # any HTTP status, then asserts exactly what it asserted before.
+    TLS_NAMES = (WEB_HOST, *PUBLIC_ALIASES.split(), ADMIN_HOST)
+
+    @classmethod
+    def every_name_has_tls(cls, answers_with_a_status, names=TLS_NAMES) -> bool:
+        return all(answers_with_a_status(host) for host in names)
 
     def reached_website(self, out, path, host=WEB_HOST, authorization=""):
         self.assertIn(f"authorization=[{authorization}] uri=[{path}] host=[{host}]", out)
@@ -2631,8 +2719,10 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
         def answers() -> bool:
             try:
-                return raw_https(port, API_HOST, "/metrics")[0] == 403
-            except OSError:
+                return (raw_https(port, API_HOST, "/metrics")[0] == 403
+                        and self.every_name_has_tls(lambda host: bool(raw_https(port, host, "/")[0]),
+                                                    (WEB_HOST, ADMIN_HOST)))
+            except OSError:  # ssl.SSLError (a name with no certificate yet) is an OSError
                 return False
         wait_for_test_caddy(self, name, answers)
         return port

@@ -16,7 +16,12 @@ export interface FeeSubscription {
   id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
   currentPeriodEnd?: string | null; gracePeriodEnd?: string | null;
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
+  /** [owner legal plan R12] The weekly-fee receipts, printed by the API (one source for every screen). */
+  feeReceipts?: FeeReceipt[];
+  /** The partner's newest card session of the last day (CARD-CHECKOUT-API section 4), read by the card lib only. */
+  latestCardSession?: unknown;
 }
+export interface FeeReceipt { receiptNumber: string; lines: string[] }
 export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl: string | null; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
 export const feeMoney = (n: number) => `GY$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 export function feeDate(value?: string | null): string {

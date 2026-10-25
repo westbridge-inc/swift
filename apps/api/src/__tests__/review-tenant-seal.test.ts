@@ -50,13 +50,14 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 import { grantStepUp } from './helpers/step-up';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REVIEW = `review-seal-${RUN}`;
 const PRODUCTION = 'swift-default';
 const DAY = 86_400_000;
 /** Phones: +59200065 + 4 digits (a block no other suite uses). */
-const base = `+59200065${String(Math.floor(Math.random() * 90) + 10)}`;
+const base = testPhone();
 const CONTACT = `${base}91`; // a real-looking emergency contact a reviewer might type (no account)
 
 let app: FastifyInstance;
@@ -305,7 +306,7 @@ describe('[seal 3] role grants: refused inside every authority', () => {
     // An advertiser a demo account owns (planted) grants no membership.
     const adv = await system(async () => {
       const a = await app.prisma.advertiser.create({ data: { companyName: `Demo Co ${RUN}`, industry: 'Retail', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234', createdByUserId: ids.customer, tenantId: REVIEW } as never });
-      await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ids.customer, role: 'OWNER' } });
+      await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ids.customer, role: 'OWNER', acceptedAt: new Date() } });
       return a;
     });
     const member = await withAdsOn(() => call('POST', `/api/v1/ads/advertiser/${adv.id}/members`, tokens.customer, { phone: riderPhone, role: 'MANAGER' }));

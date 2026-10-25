@@ -19,9 +19,12 @@ describe('the customer ID panel tells a reviewer what kind of ID this is', () =>
     expect(customerIdFact({ ...onFile, reviewedBy: 'kyc:auto' })).toMatch(/No person has reviewed this ID/);
     expect(customerIdFact({ ...onFile, reviewedBy: 'reviewer-user-id' })).toBe('On file — approved by a reviewer.');
     expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).toMatch(/Held for a person/);
-    // Approval unlocks the ID gate only: taxi rides also need the customer's profile photo.
-    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).toMatch(/taxi rides also need the customer.s profile photo/);
-    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).not.toMatch(/unlocks taxi rides/);
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Taxi rides and big orders need no ID, so approving says
+    // what L2 still does and claims no taxi or big-order unlock. [16 Oct] The console never tells staff a
+    // customer needs a photo.
+    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).toMatch(/Approving it puts the ID on file \(L2\), which lifts a strike restriction and the high-value promo limit\./);
+    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).not.toMatch(/taxi|big orders/i);
+    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).not.toMatch(/photo|selfie/i);
     // An older approved row that names nobody claims nobody.
     expect(customerIdFact({ ...onFile, reviewedBy: null })).toBe('On file.');
   });

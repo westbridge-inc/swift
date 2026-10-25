@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { swapChangeText, swapDecisionPermissions } from './substitutionCopy';
+import { isRemovalQuestion, removalChangeText, storeSwapWaitText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from './substitutionCopy';
 
 // [L09 · M028] The swap card's sentence about what approving changes, built
 // from the server's swap view (priceDelta = the approval's own formula).
@@ -40,4 +40,60 @@ it('MMG without new decision fields stays conservative on an older server', () =
 });
 it('a forbidden approval never promises a total change', () => {
   expect(swapChangeText({ priceDelta: 400, decisions: { approve: false, reject: false } })).toBeNull();
+});
+
+// [SUBSTITUTION · owner 17 Oct 2026] The customer is told how long the question waits and what happens then.
+describe('how long the swap question waits', () => {
+  const clock = (d: Date) => d.toISOString().slice(11, 16);
+  it('cash: answer by the deadline, or the item comes off and the total drops', () => {
+    expect(swapDeadlineText({ decideBy: '2026-10-17T21:23:00.000Z', ifNoAnswer: 'REMOVE' }, clock))
+      .toBe("Please answer by 21:23. If you don't, it comes off your order and your total goes down.");
+  });
+  it('MMG: the store settles it directly', () => {
+    expect(swapDeadlineText({ decideBy: '2026-10-17T21:23:00.000Z', ifNoAnswer: 'WITHDRAW' }, clock))
+      .toBe("If it isn't approved by 21:23, the store settles this item with you directly.");
+  });
+  it.each([null, undefined, {}, { decideBy: 'not a date', ifNoAnswer: 'REMOVE' as const }, { decideBy: '2026-10-17T21:23:00.000Z' }])(
+    'no usable deadline from the server: nothing extra is said (%j)', (view) => {
+      expect(swapDeadlineText(view as never, clock)).toBeNull();
+    },
+  );
+});
+
+describe('what the store reads while it waits on the customer', () => {
+  const clock = (d: Date) => d.toISOString().slice(11, 16);
+  it('cash: no answer removes the item and lowers the total', () => {
+    expect(storeSwapWaitText('2026-10-17T21:23:00.000Z', 'CASH', clock)).toBe('No answer by 21:23 removes the item and lowers the total.');
+  });
+  it('MMG: no answer closes the question and the store settles directly', () => {
+    expect(storeSwapWaitText('2026-10-17T21:23:00.000Z', 'MOBILE_MONEY', clock)).toBe('No answer by 21:23 closes the question; settle the item with the customer directly.');
+  });
+  it.each([null, undefined, '', 'nope'])('no usable deadline: nothing is said (%s)', (raw) => {
+    expect(storeSwapWaitText(raw, 'CASH', clock)).toBeNull();
+  });
+});
+
+// [O-4 · owner 22 Oct 2026] Nothing to swap, asked before the store accepted: the customer continues
+// without the item (the total goes down) or cancels the order.
+
+describe('the removal question (O-4)', () => {
+  it('is told apart from a swap by the server\'s kind', () => {
+    expect(isRemovalQuestion({ kind: 'REMOVAL' })).toBe(true);
+    expect(isRemovalQuestion({ kind: 'SWAP' })).toBe(false);
+    expect(isRemovalQuestion({})).toBe(false);
+    expect(isRemovalQuestion(null)).toBe(false);
+  });
+
+  it('says what continuing does to the total, from the server\'s own number, and nothing without one', () => {
+    expect(removalChangeText({ kind: 'REMOVAL', priceDelta: -2500 })).toBe('Continuing without it lowers your total by $2,500. You pay only the new total.');
+    expect(removalChangeText({ kind: 'REMOVAL', priceDelta: 0 })).toBeNull();
+    expect(removalChangeText({ kind: 'REMOVAL' })).toBeNull();
+  });
+});
+
+describe('[O-4 · REVIEW-F S3-1] the only item left', () => {
+  it('no answer cancels the order, and the deadline says so', () => {
+    expect(swapDeadlineText({ decideBy: '2026-10-23T02:30:00.000Z', ifNoAnswer: 'CANCEL' }, () => '10:30 PM'))
+      .toBe("Please answer by 10:30 PM. If you don't, the order is cancelled. Nothing has been charged.");
+  });
 });

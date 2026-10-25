@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
-import { AdvertiserService } from './advertiser.service';
+import { z } from '../../lib/zod';
+import { AdvertiserService, assertCapabilityWithin } from './advertiser.service';
 import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
 import { AdCheckoutService } from './checkout.service';
 import { CreativeService } from './creative.service';
@@ -8,8 +8,8 @@ import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
 import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { adsEnabled } from './ads-enabled';
+import { NotificationService } from '../notification/notification.service';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
 // the "under review" dashboard read. Ops/admin queue actions live in the admin
@@ -74,7 +74,7 @@ export async function adsRoutes(app: FastifyInstance) {
    *  the inventory engine. */
   app.get<{ Params: { id: string } }>('/placements/:id/availability', auth, async (request) => {
     const member = await app.prisma.advertiserMember.findFirst({
-      where: { userId: request.user.userId },
+      where: { userId: request.user.userId, acceptedAt: { not: null } },
       select: { advertiserId: true },
     });
     if (!member) {
@@ -100,8 +100,9 @@ export async function adsRoutes(app: FastifyInstance) {
     return { success: true, data: await booking.availability(request.params.id, q.city, from, to) };
   });
 
-  /** POST /campaigns — create a DRAFT campaign (any member; weeks snapped to
-   *  Mondays). Reserving inventory + paying is gated on an APPROVED advertiser. */
+  /** POST /campaigns — create a DRAFT campaign (OWNER or MANAGER; weeks
+   *  snapped to Mondays). Reserving inventory + paying is gated on an APPROVED
+   *  advertiser and is the OWNER's alone. */
   app.post('/campaigns', auth, async (request) => {
     const body = z.object({
       advertiserId: z.string().min(1),
@@ -114,7 +115,7 @@ export async function adsRoutes(app: FastifyInstance) {
       destinationType: z.enum(['NONE', 'URL', 'DEEPLINK']).optional(),
       destinationValue: z.string().trim().max(500).optional(),
     }).parse(request.body ?? {});
-    await advertisers.assertMember(body.advertiserId, request.user.userId);
+    await advertisers.assertCapability(body.advertiserId, request.user.userId, 'campaign');
     const placement = await app.prisma.adPlacement.findUnique({ where: { id: body.placementId } });
     if (!placement || !placement.active) throw new NotFoundError('AdPlacement', body.placementId);
 
@@ -150,14 +151,19 @@ export async function adsRoutes(app: FastifyInstance) {
       include: { advertiser: { select: { id: true, status: true } } },
     });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'finance');
     if (campaign.advertiser.status !== 'APPROVED') {
       throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account must be approved before you can book inventory.');
     }
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId } });
     // [R045-ADS-06] The reservation and the campaign's status commit together
     // under the campaign lock — never RESERVED inventory on a DRAFT campaign.
-    const result = await booking.reserveAndHold(campaign.id, { reservationMinutes: settings?.reservationMinutes ?? 20 });
+    // [MASTER-064] The member's role is re-read under lock in the same
+    // transaction as the hold: a downgrade that won the race is obeyed.
+    const result = await booking.reserveAndHold(campaign.id, {
+      reservationMinutes: settings?.reservationMinutes ?? 20,
+      within: (tx) => assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance'),
+    });
     return { success: true, data: result };
   });
 
@@ -170,9 +176,11 @@ export async function adsRoutes(app: FastifyInstance) {
     const { provider } = z.object({ provider: z.enum(['MOCK', 'MMG', 'POWERTRANZ', 'MANUAL']).default('MANUAL') }).parse(request.body ?? {});
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'finance');
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId } });
-    const { invoice, reservedUntil } = await checkout.checkout(request.params.id, provider, settings?.reservationMinutes ?? 20);
+    const { invoice, reservedUntil } = await checkout.checkout(request.params.id, provider, settings?.reservationMinutes ?? 20, {
+      authorize: (tx) => assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance'),
+    });
     return {
       success: true,
       data: { invoiceId: invoice.id, number: invoice.number, amount: Number(invoice.amount), currency: invoice.currency, status: invoice.status, paymentUrl: invoice.paymentUrl, reservedUntil },
@@ -187,7 +195,7 @@ export async function adsRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/campaigns/:id/creatives', auth, async (request) => {
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'campaign');
 
     // Per-call transport cap: §9.1 allows 25 MB videos, but the GLOBAL
     // multipart limit is 5 MB (KYC/selfie/proof photos) — without this
@@ -213,7 +221,7 @@ export async function adsRoutes(app: FastifyInstance) {
     async (request: { user: { userId: string }; params: { id: string } }) => {
       const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
       if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-      await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+      await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'campaign');
       const updated = await lifecycle.transition(request.params.id, event, request.user.userId);
       return { success: true, data: { id: updated.id, status: updated.status } };
     };
@@ -275,7 +283,7 @@ export async function adsRoutes(app: FastifyInstance) {
     z.object({ granularity: z.enum(['day']).default('day') }).parse(request.query ?? {});
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'read');
     return { success: true, data: await statsService.campaignStats(request.params.id) };
   });
 
@@ -283,7 +291,7 @@ export async function adsRoutes(app: FastifyInstance) {
 
   /** §14.2 home — the advertiser's campaigns with placement + invoice status. */
   app.get<{ Params: { id: string } }>('/advertiser/:id/campaigns', auth, async (request) => {
-    await advertisers.assertMember(request.params.id, request.user.userId);
+    await advertisers.assertCapability(request.params.id, request.user.userId, 'read');
     const campaigns = await app.prisma.adCampaign.findMany({
       where: { advertiserId: request.params.id },
       include: {
@@ -312,7 +320,7 @@ export async function adsRoutes(app: FastifyInstance) {
 
   /** §14.5 billing — the advertiser's invoices. */
   app.get<{ Params: { id: string } }>('/advertiser/:id/invoices', auth, async (request) => {
-    await advertisers.assertMember(request.params.id, request.user.userId);
+    await advertisers.assertCapability(request.params.id, request.user.userId, 'read');
     const invoices = await app.prisma.adInvoice.findMany({
       where: { advertiserId: request.params.id },
       include: { campaign: { select: { name: true } } },
@@ -329,47 +337,35 @@ export async function adsRoutes(app: FastifyInstance) {
     };
   });
 
-  /** §14.6 team — list members; OWNER adds MANAGER/ANALYST by phone (the
-   *  invited person must already have a Swift account). */
-  app.get<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => {
-    await advertisers.assertMember(request.params.id, request.user.userId);
-    const members = await app.prisma.advertiserMember.findMany({ where: { advertiserId: request.params.id } });
-    const users = await app.prisma.user.findMany({
-      where: { id: { in: members.map((m) => m.userId) } },
-      select: { id: true, firstName: true, lastName: true, phone: true },
-    });
-    const userById = new Map(users.map((u) => [u.id, u]));
-    return {
-      success: true,
-      data: members.map((m) => {
-        const u = userById.get(m.userId);
-        return { userId: m.userId, role: m.role, name: u ? `${u.firstName} ${u.lastName}`.trim() : null, phone: u?.phone ?? null };
-      }),
-    };
-  });
+  /** §14.6 team — [ads security] a member reads the team: accepted members by name and phone, an
+   *  open invitation by its role only. OWNER invites by phone; the person accepts or declines. */
+  app.get<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => ({
+    success: true, data: await advertisers.teamList(request.params.id, request.user.userId),
+  }));
 
   app.post<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => {
     const body = z.object({
       phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Use international format, e.g. +5926001234.'),
       role: z.enum(['MANAGER', 'ANALYST']),
     }).parse(request.body ?? {});
-    await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
-    const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
-    // [REVIEW-PARTNER] No membership is granted by a demo account (about the
-    // caller alone, so it says nothing about the number typed).
-    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
-    // [Row 55] One reply for every number: an unknown phone is no longer a
-    // 404 and a known one no longer hands back its user id. (Invite + accept
-    // for advertiser teams follows after launch; ads are off at launch.)
-    // A demo account is never granted one either; same reply.
-    if (invited && !(await isReviewAccount(app.prisma, invited.id))) {
-      await app.prisma.advertiserMember.upsert({
-        where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
-        create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
-        update: { role: body.role },
-      });
-    }
+    // [Row 55] One reply for every number: an unknown phone, a demo account and a real one answer
+    // alike, and the reply never carries a user id. Nothing is granted until the person accepts.
+    await advertisers.inviteToTeam({ redis: app.redis, notifications: new NotificationService(app.prisma, app.io) },
+      request.params.id, request.user.userId, body.phone, body.role);
     return { success: true, data: { status: 'SENT_IF_ACCOUNT', role: body.role } };
+  });
+
+  /** The caller's own open team invitations. */
+  app.get('/advertiser/invites', auth, async (request) => ({ success: true, data: await advertisers.listTeamInvites(request.user.userId) }));
+
+  app.post<{ Params: { id: string } }>('/advertiser/:id/members/accept', auth, async (request) => {
+    await advertisers.acceptTeamInvite(request.params.id, request.user.userId);
+    return { success: true, data: { status: 'ACCEPTED' } };
+  });
+
+  app.post<{ Params: { id: string } }>('/advertiser/:id/members/decline', auth, async (request) => {
+    await advertisers.declineTeamInvite(request.params.id, request.user.userId);
+    return { success: true, data: { status: 'DECLINED' } };
   });
 
   /** §14.4 — the EXACT refund the advertiser will get if they cancel now,
@@ -377,7 +373,7 @@ export async function adsRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>('/campaigns/:id/refund-preview', auth, async (request) => {
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'read');
     const { AdsRefundService } = await import('./refund.service');
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId }, select: { cancelFullRefundDays: true } });
     const plan = await new AdsRefundService(app.prisma, app.io).preview(request.params.id, 'ADVERTISER_CANCEL', { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 });
@@ -389,7 +385,7 @@ export async function adsRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/campaigns/:id/cancel', auth, async (request) => {
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
-    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'finance');
     const { AdsRefundService } = await import('./refund.service');
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId }, select: { cancelFullRefundDays: true } });
     const refunds = new AdsRefundService(app.prisma, app.io);
@@ -397,7 +393,11 @@ export async function adsRoutes(app: FastifyInstance) {
     // cancel; execution follows, and the worker retries it if that fails.
     let staged: { intentId: string } | null = null;
     const updated = await lifecycle.transition(request.params.id, 'cancel', request.user.userId, undefined, {
-      within: async (tx) => { staged = await refunds.stage(tx, request.params.id, 'ADVERTISER_CANCEL', request.user.userId, { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 }); },
+      within: async (tx) => {
+        // [MASTER-064] Re-checked under lock inside the cancel's transaction.
+        await assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance');
+        staged = await refunds.stage(tx, request.params.id, 'ADVERTISER_CANCEL', request.user.userId, { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 });
+      },
     });
     const refund = staged
       ? await refunds.executeNow((staged as { intentId: string }).intentId).catch(() => ({ planTotal: 0, refundedTotal: 0, creditedTotal: 0, releasedSlots: 0, intentId: (staged as { intentId: string }).intentId }))

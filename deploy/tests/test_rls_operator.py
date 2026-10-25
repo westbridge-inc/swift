@@ -122,7 +122,7 @@ def catalogue():
             'unforcedTables': 0, 'qrSchemaPresent': True, 'qrUnsafeGrants': 0, 'obsoleteExecutable': 0,
             'parentUpdateMissing': 0, 'appendOnlyUnsafeGrants': 0, 'defaultGrantCount': 0,
             'groupUnsafeAttributes': 0, 'groupUnexpectedParents': 0, 'groupOwnedObjects': 0,
-            'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64}
+            'ownerWallMembers': 0, 'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64}
 
 
 class Host:
@@ -389,7 +389,7 @@ class OperatorEndToEnd(unittest.TestCase):
         # swift_app) moves only the ownership digest, which roles does not pin:
         # the count of objects the groups own is what holds it.
         for field, value in (('unforcedTables', 1), ('qrUnsafeGrants', 1), ('migration', 'incomplete'),
-                             ('groupOwnedObjects', 1)):
+                             ('groupOwnedObjects', 1), ('ownerWallMembers', 1)):
             with self.subTest(field=field):
                 broken = json.loads(self.host.state.read_text())
                 broken['catalogue'][field] = value
@@ -589,7 +589,7 @@ class OperatorUnits(unittest.TestCase):
         census = (DEPLOY / 'wall' / 'census.sql').read_text()
         built = census[census.index('SELECT json_build_object('):]
         for field in (*operator.logins.TARGET_FIELDS, *operator.logins.ZERO_FIELDS,
-                      'ownerIsPrivileged', 'qrSchemaPresent', 'tenantTables', 'roles'):
+                      'ownerIsPrivileged', 'qrSchemaPresent', 'tenantTables', 'ownerWallMembers', 'roles'):
             with self.subTest(field=field):
                 self.assertIn(f"'{field}', ", built)
         self.assertIn('groupOwnedObjects', operator.logins.ZERO_FIELDS)
@@ -627,6 +627,35 @@ class OperatorUnits(unittest.TestCase):
         self.assertIsNone(operator.parse_published('mysql://x:y@postgres:5432/swift'))
         self.assertIsNone(operator.parse_published(url + '?sslmode=disable'))
 
+
+
+class OperatorLeavesNoBytecode(unittest.TestCase):
+    def test_the_operator_writes_no_bytecode_beside_the_deployed_checkout(self):
+        """17 Oct: a journeys run from the deployed checkout (/opt/swift) left
+        deploy/wall/__pycache__/logins.cpython-312.pyc behind (operator.py loads
+        logins.py by path), so that checkout was no longer clean. rls-logins.sh
+        runs python3 -I under env -i, which ignores PYTHONDONTWRITEBYTECODE, so the
+        operator itself must write none."""
+        tmp = Path(tempfile.mkdtemp(prefix='swift-wall-bytecode-'))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        wall = tmp / 'wall'
+        wall.mkdir()
+        for name in ('operator.py', 'logins.py'):
+            shutil.copy(DEPLOY / 'wall' / name, wall / name)
+        result = subprocess.run(['env', '-i', f'PATH={os.environ["PATH"]}', f'HOME={tmp}', 'LANG=C.UTF-8',
+                                 sys.executable, '-I', str(wall / 'operator.py'), '--help'],
+                                capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Least-privilege runtime logins', result.stdout)
+        cache = wall / '__pycache__'
+        self.assertFalse(cache.exists(), sorted(p.name for p in cache.iterdir()) if cache.exists() else None)
+        self.assertEqual(sorted(p.name for p in wall.iterdir()), ['logins.py', 'operator.py'])
+        # The flag is restored after the load: the operator does not change it for anything else.
+        probe = subprocess.run([sys.executable, '-I', '-c',
+                                'import importlib.util, sys; s = importlib.util.spec_from_file_location("op", sys.argv[1]); '
+                                'm = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(sys.dont_write_bytecode)',
+                                str(wall / 'operator.py')], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(probe.stdout.strip(), 'False', probe.stderr)
 
 if __name__ == '__main__':
     unittest.main()

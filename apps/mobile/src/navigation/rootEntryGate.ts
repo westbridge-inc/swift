@@ -1,6 +1,6 @@
 export type RootIntent = 'customer' | 'mover' | 'vendor' | 'advertiser';
 
-export type RootEntryGate = 'role-picker' | 'auth' | 'selfie' | 'main';
+export type RootEntryGate = 'role-picker' | 'auth' | 'selfie' | 'hold' | 'main';
 
 export interface RootEntryState {
   isAuthenticated: boolean;
@@ -10,7 +10,8 @@ export interface RootEntryState {
   anyPreview: boolean;
   needsSelfie: boolean;
   /** An authenticated state carries a user (the hydration law). If it ever
-   *  does not, the gate holds on the selfie screen [MOB-007]. */
+   *  does not, the gate holds [MOB-007]: an earner on the selfie screen, a
+   *  customer on the sign-out hold (customers take no photos). */
   hasUser: boolean;
 }
 
@@ -54,11 +55,14 @@ export function rootEntryGate(state: RootEntryState): RootEntryGate {
 
   const isEarner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   if (isEarner && !isAuthenticated && !anyPreview) return 'auth';
-  // [E27] No profile selfie merely to browse or order: a signed-in customer
-  // goes straight in. Taxi asks for one when a ride is booked (the driver sees
-  // it); earners keep this gate, since a mover cannot go online without it.
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A signed-in customer
+  // goes straight in and is never sent to the camera, taxi included (a ride
+  // needs only the ID on file). Earners keep this gate, since a mover cannot
+  // go online without the photo.
+  if (needsSelfie && intent !== 'customer') return 'selfie';
   // [MOB-007] An authenticated state with no user never opens the app for
-  // anyone: it holds on the selfie screen, whose "Sign out" is the way back.
-  if (needsSelfie && (intent !== 'customer' || !hasUser)) return 'selfie';
+  // anyone. A customer holds on the sign-out hold (no camera); its "Sign out"
+  // is the way back. (needsSelfie is true whenever there is no user.)
+  if (needsSelfie && !hasUser) return 'hold';
   return 'main';
 }

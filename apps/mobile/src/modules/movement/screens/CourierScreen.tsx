@@ -14,6 +14,7 @@ import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { pickupLocationContext } from '../../../lib/deviceLocation';
 import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
+import { orderStatusLabel } from '../../../lib/orderStatus';
 import { BrandCheckbox, PinGlyph, Card, CircleChip, LabeledInput, Pictogram, PillButton, T, TonePill, cardShadow } from '../../../kit';
 import { JourneyRail } from '../../../kit/journey-rail';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
@@ -46,8 +47,10 @@ const SPEEDS: { key: Speed; label: string; icon: React.ComponentProps<typeof Fea
   { key: 'RUSH', label: 'Rush', icon: 'zap', hint: 'Fastest' },
 ];
 
-function prettyStatus(s: string) {
-  return (s || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+// [UI-SWEEP U72] A parcel's status in the parcel's own words ("Rider on the
+// way to collect"), never the code with spaces ("Rider en route pickup").
+function parcelStatus(s: string | null | undefined) {
+  return orderStatusLabel(s, 'COURIER');
 }
 
 type LatLng = { latitude: number; longitude: number };
@@ -217,7 +220,9 @@ export function CourierScreen({ navigation }: any) {
       },
       {
         onSuccess: (res: any) => {
-          if (res?.orderId) navigation?.navigate?.('Delivery', { orderId: res.orderId });
+          // [UI-SWEEP U01] The sent parcel's tracking REPLACES the form: Back
+          // never returns to a filled, still-armed "Send parcel" button.
+          if (res?.orderId) navigation?.replace?.('Delivery', { orderId: res.orderId });
         },
         onError: (error: any) => {
           // The fee moved since the quote: fetch the new one to show (the
@@ -470,7 +475,7 @@ export function CourierScreen({ navigation }: any) {
                   key={o.id}
                   onPress={() => navigation?.navigate?.('Delivery', { orderId: o.id })}
                   accessibilityRole="button"
-                  accessibilityLabel={`Send to ${o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}. Order ${o.orderNumber}. ${money(o.totalAmount)}. ${prettyStatus(o.status)}`}
+                  accessibilityLabel={`Send to ${o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}. Order ${o.orderNumber}. ${money(o.totalAmount)}. ${parcelStatus(o.status)}`}
                   accessibilityHint="Opens delivery details"
                 >
                   {({ pressed }) => (
@@ -504,7 +509,7 @@ export function CourierScreen({ navigation }: any) {
                         </View>
                       </View>
                       <TonePill
-                        label={prettyStatus(o.status)}
+                        label={parcelStatus(o.status)}
                         tone={o.status === 'DELIVERED' || o.status === 'COMPLETED' ? 'success' : 'brand'}
                       />
                     </Card>

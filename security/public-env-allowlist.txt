@@ -17,8 +17,8 @@
 #
 # The `!not-a-secret` marker is REQUIRED for, and only for, a name whose text
 # matches the secret-word pattern (KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL,
-# DSN, PRIVATE, AUTH). Two legitimate names do (NEXT_PUBLIC_ALLOW_SITE_TOKENS and
-# EXPO_PUBLIC_SENTRY_DSN), and the marker makes each a deliberate, reviewed act
+# DSN, PRIVATE, AUTH). Three legitimate names do (NEXT_PUBLIC_ALLOW_SITE_TOKENS,
+# EXPO_PUBLIC_SENTRY_DSN and NEXT_PUBLIC_MAPTILER_KEY), and the marker makes each a deliberate, reviewed act
 # instead of a silent exception.
 #
 # ADDING AN ENTRY IS A SECURITY DECISION. Before adding one, answer in the
@@ -35,3 +35,4 @@ VITE_RESTORE_SESSION # A developer opt-in flag for the desktop preview: set to r
 EXPO_PUBLIC_LINK_PREVIEW_HOSTS # [MOB-002] Comma-separated PREVIEW/staging hostnames a preview build may accept as Swift deep-link origins, on top of the production web origin. Public hostnames by definition; empty in production builds. It can only ADD exact hosts to the link policy for that build and grants nothing at runtime.
 EXPO_PUBLIC_SENTRY_DSN !not-a-secret # [L13 item 7] The mobile crash-report address (a Sentry-protocol client DSN) for Swift's self-hosted error tracker. Client DSNs are designed to ship inside apps: possession lets an install SUBMIT a crash report and nothing else (no read access, no project settings). Unset means crash reporting is OFF. It matches the secret-word pattern only because the protocol calls the address a DSN. Set by the owner as an EAS environment variable, never committed.
 NEXT_PUBLIC_CARD_FRAME # [CARD embed] '1' when this web build may show the bank's card page inside the weekly-fee page (an iframe of Swift's own API card page); absent otherwise. Set only by next.config from the build switch SWIFT_WEB_CARD_FRAME, together with the CSP frame-src for the API origin. A boolean with no value of its own: anyone can read it, and it grants nothing; the server still decides whether card payments are live.
+NEXT_PUBLIC_MAPTILER_KEY !not-a-secret # [WEB-TILES, owner ruling 14 Oct #5] The website's MapTiler BROWSER key for its map tiles (apps/web/src/lib/map-tiles.ts), and the same key for the admin console's Live Ops map (apps/admin/src/lib/map-tiles.ts; the console's origin is added to the key's allowed origins). Who can read it: anyone who opens a page with a map, because every tile request carries it, as MapTiler designs browser keys. What they can do with it: request MapTiler map tiles; MapTiler serves them only to the origins the owner restricts the key to (the site's own names), it reads and changes nothing in Swift or in the MapTiler account, and a script that copies it and fakes the Referer can only spend the plan's tile quota, which MapTiler caps and the owner can rotate. Set by the owner at a hidden prompt as deploy/.env WEB_MAPTILER_KEY (a web and admin build argument), kept out of the repository. Unset: the built site draws no map tiles. It matches the secret-word pattern only because MapTiler calls it a key.

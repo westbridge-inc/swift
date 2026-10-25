@@ -1,5 +1,6 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, vendorApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
@@ -14,6 +15,7 @@ import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import { verificationRefetchInterval } from './verificationPolling';
 import type { MutationGuard } from './useStepUp';
+import type { WeeklyFeeAck } from '../lib/partnerPricing';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -52,6 +54,8 @@ export function useBecomePartner() {
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
       /** [DCR-1] The role-agreement checkbox, recorded in the consent ledger. */
       acceptAgreement?: boolean;
+      /** [Row 628] The "I understand the weekly fee" tick: the words' version and the fee on screen. */
+      weeklyFeeAck?: WeeklyFeeAck;
       business?: {
         name: string;
         vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -59,6 +63,8 @@ export function useBecomePartner() {
         addressLine1: string;
         city: string;
         region?: string;
+        /** [ROLE-DOCS · owner 21 Oct 2026] the store trades under its owner's own name (checked by the server) */
+        nameBasis?: 'OWN_NAME' | 'REGISTERED';
         latitude: number;
         longitude: number;
       };
@@ -89,6 +95,15 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // [ROLE-DOCS · owner 21 Oct 2026] The owner ticked the own-name declaration before the store existed: it is
+      // signed now, in the same turn as the session check above, so it is this account's. Here, not on the screen:
+      // the store's creation swaps the navigator, and a callback on an unmounted screen never runs. A failure never
+      // fails the store; its Documents checklist offers the same signature again.
+      if (data.role === 'VENDOR' && data.business?.nameBasis === 'OWN_NAME') {
+        let signing: Promise<unknown>;
+        try { signing = Promise.resolve(vendorApi.signOwnName()); } catch { signing = Promise.resolve(); }
+        await signing.catch(() => undefined);
+      }
       // The store exists: its List-your-business draft is done. Cleared here,
       // not by the screen — a per-call observer callback never runs once the
       // screen has unmounted — and only for the account that submitted it.
@@ -163,7 +178,8 @@ export function useUploadFile() {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const up = await unwrap<{ url: string }>(verificationApi.upload(form, current));
       requireAuthSessionForPrincipal(owner);
       return up.url;
@@ -177,10 +193,12 @@ export function useUploadFile() {
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl?: string }) => {
+    mutationFn: async (data: { idDocumentUrl: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
+        // [R17 · in-app ¶15] the screen's tick is recorded in the consent ledger. [Owner ruling 24 Oct 2026]
+        // v2 = the words that promise no unlock (the API accepts v1 from build 12's own JS as well).
+        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v2' },
         owner,
       ));
       requireAuthSessionForPrincipal(owner);
@@ -204,7 +222,8 @@ export function useUploadDocument(role: string) {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form, initial));
       const current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(
@@ -214,6 +233,8 @@ export function useUploadDocument(role: string) {
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
+          // [R17] the checklist's tick (build 12) is recorded in the consent ledger
+          consentTick: 'document_v1',
         }, current),
       );
       requireAuthSessionForPrincipal(owner);

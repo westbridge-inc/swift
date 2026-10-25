@@ -1,8 +1,7 @@
 import { handoverBlockCounter } from '../../plugins/observability';
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Order, Prisma } from '@prisma/client';
 import { AppError } from '../../utils/errors';
-import { handoverAttemptState } from './handover-security';
+import { handoverAttemptState, handoverCodeMatches } from './handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 
 export interface HandoverDecision {
@@ -11,6 +10,10 @@ export interface HandoverDecision {
   vendorUserId?: string;
   expectedVendorId?: string;
   handoverVersion?: string;
+  /** [O-2 · owner 22 Oct 2026] Takeaway only: the store has the pickup code OFF (the default), so a
+   *  handover with NO code needs no proof (the store checked the customer's first name + order
+   *  number). A code that IS sent (store builds 9/11/12) is still verified exactly as before. */
+  codeWaived?: boolean;
 }
 export interface HandoverFailure {
   handoverFailure: { statusCode: number; code: string; message: string };
@@ -76,12 +79,20 @@ export async function verifyHandoverDecision(tx: Prisma.TransactionClient, sourc
   if (!secret) return null;
   const attempts = pickup ? source.pickupCodeAttempts : source.ridePinAttempts;
   const { locked, remaining } = handoverAttemptState(attempts);
+  // [O-2 · COORD ruling on #2055 G S4-3] An order locked by wrong-code guesses never completes, not
+  // even by the no-code path below: someone tried codes, so it fails safe to the support outcome.
   if (locked) return { handoverFailure: { statusCode: 400, code: 'MAX_ATTEMPTS', message: 'Too many incorrect handover-code attempts on this order. Please contact support.' } };
+  // [O-2] No code, and the store has the takeaway code off: no proof is asked. The route's read is a
+  // preview: the setting is re-read here, on the store row authorizeHandover holds FOR SHARE, so a
+  // store that turned the code ON in the meantime is asked for it.
+  if (pickup && proof.codeWaived === true && !proof.code && source.vendorId) {
+    const store = await tx.vendor.findUnique({ where: { id: source.vendorId }, select: { requirePickupCode: true } });
+    if (store && store.requirePickupCode !== true) return null;
+  }
   if (!proof.code) return { handoverFailure: { statusCode: 400, code: pickup ? 'MISSING_PICKUP_CODE' : 'MISSING_PIN',
     message: pickup ? "Enter the customer's pickup code to hand over this order." : "Enter the customer's 6-digit delivery PIN." } };
   // Fixed-length digests avoid a secret-dependent comparison or length exit.
-  const digest = (value: string) => createHash('sha256').update(value).digest();
-  const matches = timingSafeEqual(digest(secret), digest(proof.code));
+  const matches = handoverCodeMatches(secret, proof.code);
   // Preserve the existing counters: pickup counts every comparison, delivery
   // counts wrong guesses. A successful terminal action admits no more guesses.
   if (pickup || !matches) await tx.order.update({ where: { id: source.id }, data: pickup

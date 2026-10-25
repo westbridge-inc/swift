@@ -1,14 +1,15 @@
 import type { Prisma } from '@prisma/client';
 import { gpsEvidence } from '../cash/cash-rules.service';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 // ---------------------------------------------------------------------------
-// [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile lets a
-// manager (or anyone holding a manager session) move the pin riders and
-// customers are sent to. Without a record, a store could be relocated with no
-// way to tell who moved it, from where, or when. So a move writes an audit row
-// in the transaction that makes it, and when the mover is not the owner the
-// owner is told, with a notice that commits with the move and is fanned out
-// after it.
+// [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile requires
+// the owner to move the pin riders and customers are sent to. Without a record,
+// a store could be relocated with no way to tell who moved it, from where, or
+// when. So a move writes an audit row in the transaction that makes it. [PIN-OWNER]
+// The route now lets only the owner move it; when a mover is ever not the owner
+// (an earlier manager move, or a future non-route caller) the owner is told, with
+// a notice that commits with the move and is fanned out after it.
 // ---------------------------------------------------------------------------
 
 type Tx = Prisma.TransactionClient;
@@ -67,15 +68,12 @@ export async function recordStorePinMove(
   if (!ownerNotified) return null;
   const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { firstName: true, lastName: true } });
   const who = [actor?.firstName, actor?.lastName].filter(Boolean).join(' ') || 'A manager on your team';
-  const notice = await tx.notification.create({
-    data: {
-      userId: ownerUserId,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Your store pin was moved',
-      body: `${who} moved the map pin for ${before.name}. Riders and customers now go to the new spot. If that is wrong, open Account, Store location and move it back.`,
-      data: { kind: 'store_pin_moved', vendorId: input.vendorId, audience: 'business' },
-    },
-    select: { id: true },
+  const notice = await insertNoticeFor(tx, {
+    userId: ownerUserId,
+    type: 'SYSTEM_ANNOUNCEMENT',
+    title: 'Your store pin was moved',
+    body: `${who} moved the map pin for ${before.name}. Riders and customers now go to the new spot. If that is wrong, open Account, Store location and move it back.`,
+    data: { kind: 'store_pin_moved', vendorId: input.vendorId, audience: 'business' },
   });
   return notice.id;
 }

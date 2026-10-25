@@ -74,6 +74,7 @@ export default function OrdersPage() {
         <p>The customer and {store} are told the order is cancelled.</p>
       ),
       confirmLabel: refund ? 'Cancel and record refund owed' : 'Cancel order',
+      dismissLabel: 'Keep the order',
       reason: { hint: 'The customer is owed the real reason; it is kept on the permanent record.' },
       submit: ({ reason }) => cancelOrder(o.id, { refund }, reason),
       success: () => (refund ? `Order ${o.orderNumber} is cancelled; ${store} owes the customer a refund.` : `Order ${o.orderNumber} is cancelled.`),
@@ -85,7 +86,6 @@ export default function OrdersPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Orders</h1>
       <HeldOrders />
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
       <ListToolbar

@@ -1,9 +1,11 @@
-import { isNeverAcceptedDocType } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, TRADE_LICENCE_DOC_TYPES } from '../verification/doc-registry';
+import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 /** The verification projection is used both on the root client and inside
  * profile-save transactions. Keep the contract narrow enough that the same
@@ -13,6 +15,7 @@ type ProviderVerificationDb = PrismaClient | Prisma.TransactionClient;
 import {
   canonicalServiceTrade,
   isServiceCategoryOperational,
+  profileOffersDroneWork,
   type ServiceTradeId,
 } from './service-catalog';
 export {
@@ -40,7 +43,8 @@ export async function sendBookingReminders(
   let sent = 0;
 
   const alreadyReminded = async (userId: string, kind: string, refId: string) => {
-    const existing = await prisma.notification.findFirst({
+    // [item 20] A customer's or provider's reminder, looked up by the reminder job: the named capability under the owner wall.
+    const existing = await ownerWallSystem('services:already-reminded', () => prisma.notification.findFirst({
       where: {
         userId,
         AND: [
@@ -49,7 +53,7 @@ export async function sendBookingReminders(
         ],
       },
       select: { id: true },
-    });
+    }));
     return existing !== null;
   };
 
@@ -111,24 +115,70 @@ function tradeChecklistKey(trade: ServiceTradeId): string {
 }
 
 /**
+ * The provider's country checklists: the code defaults under the stored JSON,
+ * as every other checklist reader merges them (a list added in code exists on a
+ * deployed row before any reseed; an edited stored list still wins). No country
+ * row means no checklist — never another market's defaults.
+ */
+async function providerLists(prisma: ProviderVerificationDb, userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  if (!user) return null;
+  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
+  if (!config) return null;
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists as Record<string, string[]>) ?? {}) };
+  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true, bio: true } });
+  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
+  if (!trade || !isServiceCategoryOperational(trade)) return null;
+  // [R15 · research A9] Drone and aerial work is held: a stored profile that offers it (saved before
+  // the profile check, or by any other writer) has no checklist, so it is never verified or listed.
+  if (profileOffersDroneWork(provider?.bio ?? null)) return null;
+  return { lists, trade };
+}
+
+/**
  * The full document checklist a provider must satisfy: the SERVICE_PROVIDER
  * base (identity + character) PLUS any trade-mandated extension from
  * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
- * In Guyana that is exactly one trade: electrical work is illegal without a
- * GEI Electrical Contractor Licence, so electricians carry
- * `gei_electrical_licence` as a GATE, never a badge.
+ * Electrical work is illegal without a GEI Electrical Contractor Licence, so
+ * electricians carry `gei_electrical_licence` as a GATE. [ROLE-DOCS · PR 3] Once a
+ * person has approved it, it is also the licence line ("Licence on file, checked
+ * on [date]", requiredLicenceCheckedOn) — never a badge of its own.
+ *
+ * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
+ * floor (identity, police clearance and its own licences), which no stored
+ * edit can remove. A profile that offers drone or aerial work has no
+ * checklist at all (held, R15). The provider gate reads the lists and the floor
+ * here, never the DOC-1 registry facade (registryChecklist); a change that
+ * moves providers onto the registry must carry SERVICE_TRADE_LAUNCH_FLOOR too.
  */
 export async function providerChecklist(prisma: ProviderVerificationDb, userId: string): Promise<string[]> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  if (!user) return [];
-  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
-  const lists = (config?.documentChecklists as Record<string, string[]>) ?? {};
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
   const base = lists['SERVICE_PROVIDER'] ?? [];
-  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true } });
-  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
-  if (!trade || !isServiceCategoryOperational(trade)) return [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
-  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+  const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade] ?? [];
+  return [...new Set([...base, ...extra, ...floor])].filter((docType) => !isNeverAcceptedDocType(docType));
+}
+
+/**
+ * [TRADES] Documents a provider MAY add — the base `SERVICE_PROVIDER_OPTIONAL`
+ * list and their trade's `_OPTIONAL` list — never one their checklist already
+ * requires. Display and upload only: no gate reads it.
+ */
+export async function providerOptionalDocuments(
+  prisma: ProviderVerificationDb,
+  userId: string,
+  required: readonly string[],
+): Promise<string[]> {
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
+  const optional = [
+    ...(lists[`SERVICE_PROVIDER${OPTIONAL_LIST_SUFFIX}`] ?? []),
+    ...(lists[`${tradeChecklistKey(trade)}${OPTIONAL_LIST_SUFFIX}`] ?? []),
+  ];
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }
 
 /**
@@ -155,6 +205,53 @@ export async function isProviderVerified(
   const approved = await approvedEvidenceFor(prisma, userId, checklist, now);
   const have = new Set(approved.map((d) => d.docType));
   return checklist.every((docType) => have.has(docType));
+}
+
+/** [ROLE-DOCS · PR 3] The trade licences (a registry fact, DOC-INV-2: verification/doc-registry). */
+export { TRADE_LICENCE_DOC_TYPES };
+
+/** The licences among a checklist, in checklist order. */
+export function tradeLicencesOf(checklist: readonly string[]): string[] {
+  return checklist.filter((docType) => TRADE_LICENCE_DOC_TYPES.has(docType));
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · R7 · GUARDRAILS §7(4)] "Licence on file, checked on [date]" from the licence the provider's trade
+ * REQUIRES: the latest day a PERSON approved one, or null. Fail closed: every licence the checklist names must be
+ * approved and current under THE evidence rule, each by a person — the approver must be a user of Swift, never an
+ * engine marker ('system', 'kyc:auto', 'auto:…'). An engine's approval still lets the provider work (the gate reads the
+ * record) but is never shown as a licence a person checked.
+ */
+export async function requiredLicenceCheckedOn(prisma: ProviderVerificationDb, userId: string, now = new Date()): Promise<Date | null> {
+  return (await requiredLicenceStatus(prisma, userId, now)).checkedOn;
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] Whether the provider's trade REQUIRES a licence, and the day a person checked
+ * it (requiredLicenceCheckedOn). A trade that requires a licence is never "self-skilled": with no person's check the
+ * line reads "No trade credential shown", never "Self-skilled".
+ */
+export async function requiredLicenceStatus(
+  prisma: ProviderVerificationDb, userId: string, now = new Date(),
+): Promise<{ required: boolean; checkedOn: Date | null }> {
+  const licences = tradeLicencesOf(await providerChecklist(prisma, userId));
+  if (licences.length === 0) return { required: false, checkedOn: null };
+  return { required: true, checkedOn: await personCheckedOn(prisma, userId, licences, now) };
+}
+
+async function personCheckedOn(prisma: ProviderVerificationDb, userId: string, licences: string[], now: Date): Promise<Date | null> {
+  const rows = (await approvedEvidenceFor(prisma, userId, licences, now)).filter((row) => row.userId === userId);
+  const approvers = [...new Set(rows.map((row) => row.approvedBy).filter((by) => !/^(system$|kyc:|auto:|engine:)/.test(by)))];
+  const people = approvers.length === 0
+    ? new Set<string>()
+    : new Set((await prisma.user.findMany({ where: { id: { in: approvers } }, select: { id: true } })).map((u) => u.id));
+  let latest: Date | null = null;
+  for (const docType of licences) {
+    const checked = rows.filter((row) => row.docType === docType && people.has(row.approvedBy));
+    if (checked.length === 0) return null;
+    for (const row of checked) if (!latest || row.approvedAt > latest) latest = row.approvedAt;
+  }
+  return latest;
 }
 
 /** Optional observation seam for deterministic concurrency certification.
@@ -190,11 +287,13 @@ export async function projectProviderVerificationLocked(
           trade,
           status: 'VERIFIED',
           verifiedAt: { not: null },
-          ...(trade === 'electrician' ? {} : { type: { not: 'GEI_LICENCE' } }),
+          // [ROLE-DOCS · owner 21 Oct 2026] a GEI_LICENCE qualification counts for no trade (qualificationTypeMatchesTrade)
+          type: { not: 'GEI_LICENCE' },
         },
       })
     : 0;
-  const selfSkilled = matchingQualificationCount === 0;
+  // [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] A trade that requires a licence is never "self-skilled".
+  const selfSkilled = matchingQualificationCount === 0 && !(await requiredLicenceStatus(tx, userId)).required;
 
   await observer?.afterSnapshot?.({
     providerId: provider.id,
@@ -337,6 +436,11 @@ export function decodeProviderCursor(
   return (claims as ProviderCursorClaims).afterId;
 }
 
+/** How long an unanswered request counts as "the same request" when the
+ *  customer sends it again (a lost response, a second tap). Longer than any
+ *  client timeout plus a re-tap; far shorter than a real second ask. */
+export const SERVICE_JOB_RETRY_WINDOW_MS = 10 * 60 * 1000;
+
 export interface ServiceJobAuthorityObserver {
   /** Test-only observation seam. Production does not provide an observer. */
   afterAuthorityChecked?: (snapshot: Readonly<{
@@ -417,6 +521,30 @@ export async function createServiceJobWithLiveAuthority(
       trade,
     });
 
+    // [C2 server] A RETRIED REQUEST IS THE SAME REQUEST. The phone sends no
+    // Idempotency-Key here (builds 9/11 cannot be changed), so a response lost
+    // on a slow network, or a second tap, used to mint a second REQUESTED job
+    // and a second chat room for the same ask. The natural key is the ask
+    // itself: this customer, this provider, the same words and photos, still
+    // unanswered (REQUESTED), asked moments ago. The customer's User row is
+    // locked FOR UPDATE above, so two copies of one request run one after the
+    // other and the second one sees the first. It gets the first job back —
+    // same job, same room, and no second notice to the provider.
+    const earlier = await tx.serviceJob.findFirst({
+      where: {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        providerId: provider.id,
+        description: input.description,
+        photos: { equals: input.photos },
+        status: 'REQUESTED',
+        chatRoomId: { not: null },
+        createdAt: { gte: new Date(Date.now() - SERVICE_JOB_RETRY_WINDOW_MS) },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (earlier) return { job: earlier, created: false as const };
+
     const job = await tx.serviceJob.create({
       data: {
         // [TA-S1-006] Both parties were just proven to live in input.tenantId;
@@ -440,6 +568,7 @@ export async function createServiceJobWithLiveAuthority(
         },
       },
     });
-    return tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    const linked = await tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    return { job: linked, created: true as const };
   });
 }

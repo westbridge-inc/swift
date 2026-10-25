@@ -62,6 +62,7 @@ import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkC
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
 import { CountryConfigService } from '../modules/country/country-config.service';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 /** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
  *  behind that switch, so it is graded with advertising switched on. */
@@ -73,7 +74,7 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REVIEW = `review-partner-${RUN}`;
 const PRODUCTION = 'swift-default';
 const UPLOAD_DIR = `/tmp/review-partner-test-uploads-${RUN}`;
@@ -83,7 +84,7 @@ const SPOT = { lat: 6.3107, lng: -57.5321 };
 const NEAR = { lat: SPOT.lat + 0.0027, lng: SPOT.lng };
 const DAY = 86_400_000;
 /** Production fixture phones: +59200064 + 4 digits of this run (a range no other suite uses). */
-const prodPhoneBase = `+59200064${String(Math.floor(Math.random() * 90) + 10)}`;
+const prodPhoneBase = testPhone();
 
 let app: FastifyInstance;
 let dispatch: DispatchService;
@@ -281,10 +282,13 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     expect(first.state).toBe('PRESENT');
     expect(first.partners).toMatchObject({ RIDER: { credentials: 1, ready: 1 }, DRIVER: { credentials: 1, ready: 1 }, profiles: 2 });
     // GY: a motorbike rider's checklist (identity, police, licence, registration, insurance) and a taxi's (+ hire permit, plate, car photos, fitness).
-    // [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] a motorbike rider proves identity by the licence; the
-    // national ID is optional and the pack partner still presents it (so it stays L2); no police clearance.
-    expect(riderChecklist).toEqual(expect.arrayContaining(['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
+    // [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] a motorbike rider proves identity by the licence.
+    // [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] no vehicle partner is offered a second ID any more, so the
+    // pack partner presents none (it keeps the L2 it always had: partner-pack.ts); no police clearance.
+    expect(riderChecklist).toEqual(expect.arrayContaining(['drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
+    expect(riderChecklist).not.toContain('national_id');
     expect(riderChecklist).not.toContain('police_clearance');
+    expect(driverChecklist).not.toContain('national_id');
     // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
     expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence']));
     expect(first.partnerDocumentsCommitted).toBe(riderChecklist.length + driverChecklist.length);

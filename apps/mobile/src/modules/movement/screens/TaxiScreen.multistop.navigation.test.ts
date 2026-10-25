@@ -241,7 +241,7 @@ const adapter: AxiosAdapter = async (config) => {
 let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 let client: QueryClient;
-const navigation = { navigate: fx.navigate, goBack: vi.fn(), isFocused: () => true };
+const navigation = { navigate: fx.navigate, goBack: vi.fn(), replace: vi.fn(), isFocused: () => true };
 
 const snap = (name: string) => (globalThis as { __msCapture?: (n: string, html: string) => void }).__msCapture?.(name, host.innerHTML);
 async function settle(rounds = 6) {
@@ -309,7 +309,7 @@ describe('flag off — the booking screen is exactly today’s', () => {
     expect(byTestId('taxi-add-stop')).toBeNull();
     expect(host.querySelector('[data-testid^="taxi-stop"]')).toBeNull();
     expect(text()).not.toMatch(/Add a stop|One fare for the whole trip|Your route|stops/);
-    expect(text()).toContain('Fare estimate · cash to the driver');
+    expect(text()).toContain('Fare estimate · pay the driver cash or MMG at drop-off');
 
     for (const config of sent('post /rides/estimate')) expect(Object.keys(bodyOf(config))).toEqual(['pickup', 'dropoff']);
 
@@ -344,8 +344,9 @@ describe('flag on — the passenger adds, removes and reorders stops up to the m
     expect(bodyOf(sent('post /rides/estimate').at(-1)).stops).toEqual(REQUEST_BODY_WITH_ONE_STOP.stops);
     expect(byTestId('taxi-add-stop')).toBeTruthy();
 
-    // One fare for the whole trip, said before booking; no per-stop fee.
-    expect(text()).toContain('One fare for the whole trip with 1 stop · cash to the driver. No extra fee for stops.');
+    // One fare for the whole trip, said before booking; no per-stop fee, and (REVIEW-M S4-2) a skipped stop never
+    // lowers it: said at the quote, not only after the skip.
+    expect(text()).toContain('One fare for the whole trip with 1 stop · pay the driver cash or MMG at drop-off. No extra fee for stops, and the fare stays the same if a stop is skipped.');
     expect(text()).toContain('Pickup to stop 1 · 2.5 km');
     expect(requestButton()?.textContent).toMatch(/^Request Car · \$2.?800$/);
     snap('rider-booking-one-stop-quote');
@@ -518,8 +519,18 @@ describe('the waiting charge at booking (Rev 2 §8.2)', () => {
     fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
-    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 500 per 10 minutes after your driver arrives');
+    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 300 per 10 minutes after your driver arrives');
     snap('rider-booking-waiting-terms');
+  });
+
+  it('[quote proof] the booking echoes the terms it showed, with the fare', async () => {
+    fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    await click(requestButton() ?? null);
+    const [request] = sent('post /rides/request');
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare', 'waiting']);
+    expect(bodyOf(request).waiting).toEqual({ chargePerBlock: 300, blockMinutes: 10 });
   });
 
   it('says nothing when the server sends no terms', async () => {
@@ -568,8 +579,8 @@ describe('the live ride', () => {
     snap('rider-active-ride-waiting');
     const card = byTestId('taxi-waiting');
     expect(card?.textContent).toContain('13 min waited');
-    expect(card?.textContent).toMatch(/\$500 so far/);
-    expect(card?.textContent).toMatch(/Next \$500 in 6:30/);
+    expect(card?.textContent).toMatch(/\$300 so far/);
+    expect(card?.textContent).toMatch(/Next \$300 in 6:30/);
   });
 
   it('no waiting card before the server sends one', async () => {
@@ -585,7 +596,7 @@ describe('the live ride', () => {
     fx.routes['get /rides/active'] = () => ok(null);
     await act(async () => fx.fire('order:status_changed', { orderId: 'cm-ride-3', status: 'DELIVERED', fare: { total: 2800, fareBreakdown: FARE_BREAKDOWN } }));
     await settle();
-    expect(byTestId('post-trip')?.textContent).toBe('3300');
+    expect(byTestId('post-trip')?.textContent).toBe('3100');
   });
 
   it('a DELIVERED event without a breakdown hands the receipt today’s ride', async () => {
@@ -629,6 +640,40 @@ describe('the price on screen is the price booked', () => {
     expect(sent('post /rides/request').map((c) => bodyOf(c).expectedFare)).toEqual([2400, 2600]);
   });
 
+  it('joining the queue carries the fare on screen; a fare that moved is quoted again', async () => {
+    fx.routes['get /rides/supply'] = () => ok({ online: 0, busy: 0, level: 'NONE', nearestEtaMinutes: null });
+    fx.routes['get /rides/availability'] = () => ok({ level: 'NONE', nearestEtaMinutes: null, gate: true });
+    let fare = 2400;
+    fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, tiers: [{ rideClass: 'ECONOMY', multiplier: 1, fare, capacity: 4, source: 'formula' }] });
+    let calls = 0;
+    fx.routes['post /rides/queue/join'] = () => (++calls === 1
+      ? refuse(409, 'FARE_CHANGED', { expectedFare: 2400, fare: 2600, rideClass: 'ECONOMY', currencyCode: 'GYD' })
+      : ok({ status: 'WAITING', position: 1, etaMinutes: null }, 201));
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    fare = 2600;
+    const quotesBefore = sent('post /rides/estimate').length;
+    await click(byLabel('Join the queue'));
+    expect(text()).toContain('server words for FARE_CHANGED');
+    expect(sent('post /rides/estimate').length).toBeGreaterThan(quotesBefore);
+    await click(byLabel('Join the queue'));
+    expect(sent('post /rides/queue/join').map((c) => bodyOf(c).expectedFare)).toEqual([2400, 2600]);
+  });
+
+  it('nobody joins the queue without a fare on screen', async () => {
+    fx.routes['get /rides/supply'] = () => ok({ online: 0, busy: 0, level: 'NONE', nearestEtaMinutes: null });
+    fx.routes['get /rides/availability'] = () => ok({ level: 'NONE', nearestEtaMinutes: null, gate: true });
+    fx.routes['post /rides/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    const join = byLabel('Join the queue');
+    expect(join?.hasAttribute('disabled')).toBe(true);
+    expect(byTestId('taxi-queue-needs-fare')?.textContent).toBe('You join the line at the fare you see — waiting for the fare.');
+    join?.click();
+    await settle();
+    expect(sent('post /rides/queue/join')).toHaveLength(0);
+  });
+
   it('courier sends the fee on the button, and a changed fee is quoted again before anything is sent', async () => {
     let fee = 1160;
     fx.routes['get /courier/orders'] = () => ok([]);
@@ -658,6 +703,116 @@ describe('the price on screen is the price booked', () => {
     await click(sendButton() ?? null);
     expect(sent('post /courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
     expect(sent('post /courier/order').map((c) => bodyOf(c).declaresNoProhibitedItems)).toEqual([true, true]);
+  });
+});
+
+describe('[UI-SWEEP U01] a parcel is booked once', () => {
+  const created = (orderId: string): Reply => ({ status: 201, data: { success: true, data: { orderId, fee: 1160 } } });
+  const sendButton = () => Array.from(host.querySelectorAll('button')).find((b) => /^Send parcel/.test(b.textContent ?? '')) as HTMLElement | undefined;
+  const keysSent = () => sent('post /courier/order').map((c) => c.headers.get('Idempotency-Key'));
+  const courierQuote = (totalFee: number) => ok({ baseFee: 800, distanceFee: 360, sizeSurcharge: 0, speedMultiplier: 1, totalFee, estimatedMinutes: 45, currency: 'GYD', distanceKm: 3 });
+  async function type(el: HTMLInputElement | null, value: string) {
+    expect(el, 'the field is on screen').toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')!.set!.call(el, value);
+      const DomEvent = (el!.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+      el!.dispatchEvent(new DomEvent('input', { bubbles: true }));
+    });
+    await settle();
+  }
+  async function readyParcel() {
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => courierQuote(1160);
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    await type(host.querySelector('input[placeholder="Recipient name"]'), 'Aunty Pat');
+    await type(host.querySelector('input[placeholder="Recipient phone"]'), '+5926001234');
+    await click(byLabel('This parcel has no prohibited items'));
+    expect(sendButton()?.hasAttribute('disabled')).toBe(false);
+  }
+
+  it('the sent parcel REPLACES the form: Back can never reach a filled, armed Send button', async () => {
+    fx.routes['post /courier/order'] = () => created('parcel-1');
+    await readyParcel();
+    await click(sendButton() ?? null);
+    expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'parcel-1' });
+    expect(fx.navigate.mock.calls.filter((c) => c[0] === 'Delivery')).toEqual([]);
+  });
+
+  it('a retry after a lost answer sends the SAME Idempotency-Key (the server replays the one parcel)', async () => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1 ? { status: 0, network: true } : created('parcel-1'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    // The key outlives the screen: a phone killed now retries with it.
+    const [first] = keysSent();
+    expect(first).toMatch(/^parcel_[0-9a-z]+_[0-9a-z]{10}$/);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1')).toContain(first);
+    await click(sendButton() ?? null);
+    expect(keysSent()).toEqual([first, first]);
+    expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'parcel-1' });
+  });
+
+  it('only that parcel\'s own answer retires its key: a parcel sent again later is a new intent', async () => {
+    fx.routes['post /courier/order'] = () => created('parcel-1');
+    await readyParcel();
+    await click(sendButton() ?? null);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null).toBeNull();
+    fx.routes['post /courier/order'] = () => created('parcel-2');
+    await click(sendButton() ?? null);
+    const keys = keysSent();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toMatch(/^parcel_/);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it('a refusal the server wrote nothing for retires the key; a 5xx keeps it for the retry', async () => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1 ? refuse(503, 'COURIER_RETRY_UNAVAILABLE') : refuse(409, 'PARCEL_TOO_BIG'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    const [first] = keysSent();
+    expect(fx.storage.get('swift.courier.requestAttempt.v1')).toContain(first);
+    await click(sendButton() ?? null);
+    expect(keysSent()).toEqual([first, first]);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null).toBeNull();
+    expect(navigation.replace).not.toHaveBeenCalled();
+  });
+
+  // [REVIEW-F #1900 S4-1] The retire set, pinned on both sides: every refusal the
+  // server checks before writing retires the key (the next send is a new
+  // parcel), and any other 4xx keeps it (it might hide a parcel already made).
+  it.each([
+    [400, 'VALIDATION_ERROR'], [413, 'PARCEL_TOO_BIG'], [403, 'ACCOUNT_RESTRICTED'], [422, 'PROHIBITED_PARCEL'],
+    [409, 'PRICE_CHANGED'], [422, 'IDEMPOTENCY_MISMATCH'], [400, 'INVALID_IDEMPOTENCY_KEY'],
+  ] as const)('a %s %s refusal retires the key: the next send is a new intent', async (status, code) => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1
+      ? refuse(status, code, code === 'PRICE_CHANGED' ? { expectedFee: 1160, fee: 1160, currencyCode: 'GYD' } : undefined)
+      : created('parcel-1'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null, 'the refused intent left no key behind').toBeNull();
+    await click(sendButton() ?? null);
+    const keys = keysSent();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toMatch(/^parcel_/);
+    expect(keys[1], 'a fresh key, never the refused one').not.toBe(keys[0]);
+  });
+
+  it.each([
+    [429, 'RATE_LIMITED'], [409, 'COURIER_BUSY'], [404, 'NOT_FOUND'], [400, 'BAD_REQUEST'],
+  ] as const)('a %s %s refusal (not on the list) KEEPS the key for the retry', async (status, code) => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1 ? refuse(status, code) : created('parcel-1'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    const [first] = keysSent();
+    expect(fx.storage.get('swift.courier.requestAttempt.v1'), 'the key outlives the refusal').toContain(first);
+    await click(sendButton() ?? null);
+    expect(keysSent()).toEqual([first, first]);
+    expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'parcel-1' });
   });
 });
 

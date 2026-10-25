@@ -1,12 +1,17 @@
 /**
- * [DOC-1 §18.3 · P18-2] test_expired_liquor_licence_blocks_alcohol_orders — DOC-INV-26.
+ * [DOC-1 §18.3 · P18-2] Documents control what can be sold — DOC-INV-26.
  *
- * Documents control what can be sold. A gated category needs the vendor's
- * licence VALID (approved, unexpired): a tag into it is refused without one
- * (BLOCK_LISTING / BLOCK_ORDER), the feed hides an item whose licence lapsed
- * after it was tagged, and — for alcohol — checkout fails the line too. WARN
- * gates allow and flag. Gate document types are submittable by vendors; a
- * type that still needs a specimen is not (FD-DOC-15).
+ * A gated category needs the vendor's licence VALID (approved, unexpired): a
+ * tag into it is refused without one (BLOCK_LISTING / BLOCK_ORDER), the feed
+ * hides an item whose licence lapsed after it was tagged, and a BLOCK_ORDER
+ * gate fails the checkout line too. WARN gates allow and flag. Gate document
+ * types are submittable by vendors.
+ *
+ * [ROLE-DOCS · owner ruling 21 Oct 2026 — a DELIBERATE change to these pins] No
+ * alcohol or pharmacy gate: alcohol and every medicine are banned outright
+ * (GUARDRAILS §8), so no licence unlocks them and none is collected — a liquor
+ * licence or pharmacy authorisation can no longer be submitted. The BLOCK_ORDER
+ * mechanism is still proven, on a test-only gate.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
@@ -27,16 +32,15 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { seedDocRegistry, registryCode, CATEGORY_GATES, EXTRA_DOC_TYPES } from '../modules/verification/doc-registry';
 import { assertOrderable, blockedCategoryIdsForVendors, submittableGateDocTypes } from '../modules/verification/category-gate';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const TENANT = 'swift-default';
 
 /** §18.3 seed rules, pinned FROM the spec as literals: [category (slug or kind:KIND), document type, enforcement]. */
 const SPEC_GATES: ReadonlyArray<readonly [string, string, string]> = [
-  ['alcohol', 'liquor_licence', 'BLOCK_ORDER'],
-  ['pharmacy', 'pharmacy_authorisation', 'BLOCK_LISTING'],
   ['meat-poultry', 'sanitary_certificate', 'BLOCK_LISTING'],
   ['kind:CUISINE', 'gra_restaurant_licence', 'BLOCK_LISTING'], ['kind:DISH', 'gra_restaurant_licence', 'BLOCK_LISTING'],
   ['kind:CUISINE', 'food_handler_cert', 'BLOCK_LISTING'], ['kind:DISH', 'food_handler_cert', 'BLOCK_LISTING'],
@@ -144,43 +148,57 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
   it('the registry holds the §18.1 types (inactive, provisional) and exactly the §18.3 gate rows', async () => {
     const types = await system(() => app.prisma.docType.findMany({ where: { code: { in: EXTRA_DOC_TYPES.map((t) => registryCode('GY', t.legacyCode)) } } }));
     // + the §3.2 unregistered-trader self-declaration (P3-2), seeded with the addendum types
-    expect(types.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'liquor_licence', 'nis_employer_reg', 'pharmacy_authorisation', 'sanitary_certificate', 'self_declaration_unregistered', 'trade_licence']);
+    // [ROLE-DOCS] the liquor licence, pharmacy authorisation and NIS employer registration are no longer seeded
+    expect(EXTRA_DOC_TYPES.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'sanitary_certificate', 'self_declaration_unregistered', 'trade_licence']);
+    expect(types.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'sanitary_certificate', 'self_declaration_unregistered', 'trade_licence']);
     expect(types.every((t) => !t.isActive)).toBe(true);
-    expect(types.filter((t) => t.needsSpecimen).map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'pharmacy_authorisation']);
+    expect(types.filter((t) => t.needsSpecimen).map((t) => t.legacyCode).sort()).toEqual(['digital_id']);
     const gates = await system(() => app.prisma.categoryDocumentGate.findMany({ where: { countryCode: 'GY' }, include: { requiredDocType: { select: { legacyCode: true } } } }));
     const got = gates.map((g) => [g.categorySlug ?? `kind:${g.categoryKind}`, g.requiredDocType.legacyCode, g.enforcement] as const).sort((a, b) => a.join().localeCompare(b.join()));
     expect(got).toEqual([...SPEC_GATES].sort((a, b) => a.join().localeCompare(b.join())));
     expect(CATEGORY_GATES.length).toBe(SPEC_GATES.length);
   });
 
-  it('test_expired_liquor_licence_blocks_alcohol_orders: the licence gate still judges a liquor licence (valid → not blocking; expired → blocking, BLOCK_ORDER fails the line) — but alcohol is banned outright (GUARDRAILS §8), so no licence ever lists or sells it', async () => {
+  it('[ROLE-DOCS] alcohol has no gate: the ban alone refuses it, and a liquor licence unlocks nothing and cannot be sent', async () => {
     const alcohol = await category('alcohol', 'RETAIL');
     const s = await shop();
     const rum = await item(s.vendorId, s.shelfId, `Demerara rum ${RUN}`);
     // [GUARDRAILS §8, owner 13 Oct 2026] The ban is checked first: the tag is refused with or without a licence.
     await expect(runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM' });
-    const lic = await licence(s.ownerUserId, 'liquor_licence', new Date(Date.now() + 30 * DAY));
-    await expect(runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Swift doesn\'t allow this item: alcohol.' });
-    // A tag filed before the ban (no gate ran): the licence gate still reads the licence…
+    await expect(runWithTenant(TENANT, async () => verification.submitDocument(s.ownerUserId, 'STORE', 'liquor_licence', await ownedVerificationFixture(app.prisma, s.ownerUserId), 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
+    // A licence already on file (sent before this change) unlocks nothing: no gate names alcohol any more.
+    await licence(s.ownerUserId, 'liquor_licence', new Date(Date.now() + 30 * DAY));
+    await expect(runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM' });
+    const gates = await system(() => app.prisma.categoryDocumentGate.findMany({ where: { countryCode: 'GY' }, include: { requiredDocType: { select: { legacyCode: true } } } }));
+    expect(gates.some((g) => g.categorySlug === 'alcohol' || g.requiredDocType.legacyCode === 'liquor_licence')).toBe(false);
+    // A tag filed before the ban (no gate ran) is still never listed or sold.
     await system(() => app.prisma.itemDiscoveryCategory.create({ data: { tenantId: TENANT, itemId: rum.id, categoryId: alcohol.id, source: 'VENDOR' } }));
-    expect((await system(() => blockedCategoryIdsForVendors(app.prisma, TENANT, [s.vendorId]))).get(s.vendorId)?.has(alcohol.id)).toBe(false);
-    await expect(runWithTenant(TENANT, () => assertOrderable(app.prisma, s.vendorId, [{ id: rum.id, name: rum.name }]))).resolves.toBeUndefined();
-    // …and a valid licence unlocks nothing: not listed, not orderable.
-    const listed = await feed('alcohol');
-    expect(listed.statusCode).toBe(200);
-    expect(listed.json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(false);
+    expect((await feed('alcohol')).json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(false);
     const c1 = await customerWithCart(s.vendorId, rum.id);
     await expect(checkout(c1, s.vendorId)).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { reason: 'PROHIBITED' } });
-    // The licence expires at midnight — the sweep marks it, and the gate turns blocking: BLOCK_ORDER fails the line.
-    await system(() => app.prisma.verificationDocument.update({ where: { id: lic.id }, data: { expiresAt: new Date(Date.now() - DAY) } }));
-    await verification.expireLapsedDocuments();
-    expect((await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: lic.id } }))).status).not.toBe('APPROVED');
-    expect((await system(() => blockedCategoryIdsForVendors(app.prisma, TENANT, [s.vendorId]))).get(s.vendorId)?.has(alcohol.id)).toBe(true);
-    await expect(runWithTenant(TENANT, () => assertOrderable(app.prisma, s.vendorId, [{ id: rum.id, name: rum.name }]))).rejects.toMatchObject({ code: 'CATEGORY_LICENCE_LAPSED' });
-    const hidden = await feed('alcohol');
-    expect(hidden.json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(false);
-    const c2 = await customerWithCart(s.vendorId, rum.id);
-    await expect(checkout(c2, s.vendorId)).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { reason: 'PROHIBITED' } });
+  });
+
+  it('BLOCK_ORDER (a test-only gate) still fails the line once the licence lapses after the item was listed', async () => {
+    const shelfCat = await category(`gated-${RUN}`, 'RETAIL');
+    const gate = await system(() => app.prisma.categoryDocumentGate.create({ data: {
+      code: `TEST:${RUN}:block-order`, countryCode: 'GY', categorySlug: shelfCat.slug, requiredDocTypeCode: registryCode('GY', 'sanitary_certificate'),
+      requiredValues: [], enforcement: 'BLOCK_ORDER', note: 'test-only gate (doc1-category-gate.test.ts)',
+    } }));
+    try {
+      const s = await shop();
+      const goods = await item(s.vendorId, s.shelfId, `Gated goods ${RUN}`);
+      await expect(runWithTenant(TENANT, () => discovery.addItemTag(goods.id, shelfCat.slug, 'VENDOR'))).rejects.toMatchObject({ code: 'CATEGORY_GATED' });
+      const lic = await licence(s.ownerUserId, 'sanitary_certificate', new Date(Date.now() + 30 * DAY));
+      await runWithTenant(TENANT, () => discovery.addItemTag(goods.id, shelfCat.slug, 'VENDOR'));
+      await expect(runWithTenant(TENANT, () => assertOrderable(app.prisma, s.vendorId, [{ id: goods.id, name: goods.name }]))).resolves.toBeUndefined();
+      // The licence expires at midnight — the sweep marks it, and the gate turns blocking: BLOCK_ORDER fails the line.
+      await system(() => app.prisma.verificationDocument.update({ where: { id: lic.id }, data: { expiresAt: new Date(Date.now() - DAY) } }));
+      await verification.expireLapsedDocuments();
+      expect((await system(() => blockedCategoryIdsForVendors(app.prisma, TENANT, [s.vendorId]))).get(s.vendorId)?.has(shelfCat.id)).toBe(true);
+      await expect(runWithTenant(TENANT, () => assertOrderable(app.prisma, s.vendorId, [{ id: goods.id, name: goods.name }]))).rejects.toMatchObject({ code: 'CATEGORY_LICENCE_LAPSED' });
+    } finally {
+      await system(() => app.prisma.categoryDocumentGate.delete({ where: { code: gate.code } }));
+    }
   });
 
   it('BLOCK_LISTING (meat) refuses the tag without a sanitary certificate and allows it with one; WARN (an aisle) allows without a trade licence', async () => {
@@ -196,16 +214,17 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
     expect(await system(() => app.prisma.itemDiscoveryCategory.count({ where: { itemId: plantain.id } }))).toBe(1);
   });
 
-  it('pharmacy is disabled platform-wide (FD-DOC-15, and banned outright by GUARDRAILS §8): the tag is refused and the authorisation cannot even be submitted; a liquor licence can be', async () => {
+  it('pharmacy is banned outright (GUARDRAILS §8): the tag is refused, and neither the authorisation nor a liquor licence can be submitted [ROLE-DOCS]', async () => {
     const pharmacy = await category('pharmacy', 'RETAIL');
     const s = await shop();
     const pills = await item(s.vendorId, s.shelfId, `Paracetamol ${RUN}`);
     await expect(runWithTenant(TENANT, () => discovery.addItemTag(pills.id, pharmacy.slug, 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Swift doesn\'t allow this item: medicines.' });
     const submittable = await system(() => submittableGateDocTypes(app.prisma, 'GY'));
-    expect(submittable).toContain('liquor_licence');
+    expect(submittable).not.toContain('liquor_licence');
     expect(submittable).not.toContain('pharmacy_authorisation');
-    await expect(runWithTenant(TENANT, async () => verification.submitDocument(s.ownerUserId, 'STORE', 'pharmacy_authorisation', await ownedVerificationFixture(app.prisma, s.ownerUserId), 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
-    const submitted = await runWithTenant(TENANT, async () => verification.submitDocument(s.ownerUserId, 'STORE', 'liquor_licence', await ownedVerificationFixture(app.prisma, s.ownerUserId), 'v1'));
-    expect(submitted.status).toBe('PENDING');
+    expect([...submittable].sort()).toEqual(['food_handler_cert', 'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence']);
+    for (const docType of ['pharmacy_authorisation', 'liquor_licence']) {
+      await expect(runWithTenant(TENANT, async () => verification.submitDocument(s.ownerUserId, 'STORE', docType, await ownedVerificationFixture(app.prisma, s.ownerUserId), 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
+    }
   });
 });

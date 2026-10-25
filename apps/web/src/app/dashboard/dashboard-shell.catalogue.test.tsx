@@ -37,5 +37,10 @@ describe('the items tab is named for the store type, like the app', () => {
       expect(within(rail).queryByRole('link', { name: other })).toBeNull();
       expect(within(dock).queryByRole('link', { name: other })).toBeNull();
     }
+    // The app's four sections, for an owner (the fixture's role); a Services store's
+    // owner also has Schedule right after Orders (the app's VendorStack R1 tab).
+    const sections = vendorType === 'SERVICE' ? ['Orders', 'Schedule', name, 'Insights', 'Account'] : ['Orders', name, 'Insights', 'Account'];
+    expect(within(dock).getAllByRole('link').map((link) => link.textContent)).toEqual(sections);
+    expect(within(rail).getAllByRole('link').map((link) => link.textContent)).toEqual(expect.arrayContaining(sections));
   });
 });

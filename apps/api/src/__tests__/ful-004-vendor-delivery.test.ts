@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // FUL-004 (fulfillment Part 4) — foundation slice: a vendor can be marked
 // self-delivery-capable (its own courier fulfils DELIVERY orders vs a platform
@@ -35,7 +36,7 @@ beforeAll(async () => {
   await app.ready();
 
   const u = await app.prisma.user.create({
-    data: { phone: `+59200906${String(Math.floor(Math.random() * 90) + 10)}`, firstName: 'Self', lastName: 'Deliver', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: testPhone(), firstName: 'Self', lastName: 'Deliver', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(u.id);
   vendorToken = app.jwt.sign({ userId: u.id, role: 'VENDOR_OWNER', jti: nanoid(8) });

@@ -6,10 +6,12 @@ import { persistRiderCancellationNotice, drainRiderCancellationNotices } from '.
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { Prisma } from '@prisma/client';
+import { assignmentLogWhere } from './store-handover-log';
 import type {
   PrismaClient,
   Order,
@@ -71,13 +73,16 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
-import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgNumber } from '../../utils/mmg-number';
+import { MMG_PAY_TO_STORE_NUMBER, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE, validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
+import { ATTESTABLE_PAYMENT_STATUSES } from '../vendor/mmg-attestation';
+import { isExpiredUnpaidMmgAcceptance, isUnpaidMmgAcceptance, mmgAcceptedClaimedPushCopy, mmgAcceptedPayBy, mmgAcceptedPushCopy, mmgOrderNoun } from './mmg-accept-expiry';
 
 interface CheckoutInput {
   userId: string;
@@ -87,6 +92,10 @@ interface CheckoutInput {
    *  database even if Redis forgot. */
   idempotency?: { key: string; requestHash: string };
   paymentMethod: string;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY only: 'STORE_NUMBER' = the customer pays the
+   *  store's MMG number directly, shown on the order once the store accepts (build 12+, web). Absent =
+   *  an app that knows only the old pay link (builds 9-11), refused while STORE_MMG_PAY_LINK is off. */
+  mmgPayTo?: typeof MMG_PAY_TO_STORE_NUMBER;
   deliveryInstructions?: string;
   tipAmount?: number;
   scheduledFor?: string; // ISO date string
@@ -209,8 +218,14 @@ export function assertPricesAsSeen(
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
-  const checked = validateMmgPayUrl(rawUrl);
+  const checked = validateOfferedStoreMmgPayUrl(rawUrl);
   if (checked.valid) return checked.url;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the store's MMG number.
+  // An app that still asks for the link (builds 9-11) is refused with an MMG_* code — which those
+  // builds already turn into "back to cash" — and a sentence that says what to do.
+  if (checked.reason === 'PAY_LINKS_OFF') {
+    throw new AppError(400, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE);
+  }
   if (checked.reason === 'MISSING') {
     throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
   }
@@ -218,6 +233,14 @@ function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName:
     throw new AppError(503, 'MMG_PAY_LINKS_NOT_CONFIGURED', 'MMG pay links are not configured for this environment yet — choose cash instead.');
   }
   throw new AppError(400, 'MMG_LINK_INVALID', `${vendorName}'s MMG pay link cannot be used safely right now — choose cash instead.`);
+}
+
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG NUMBER a pay-to-number checkout commits to,
+ *  re-checked from the stored row (never trusted as written). */
+function requireCheckoutMmgNumber(rawNumber: string | null | undefined, vendorName: string): string {
+  const number = safeMmgNumber(rawNumber);
+  if (number) return number;
+  throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
 }
 
 /** [REPORT-012 F-012-04] THE post-commit publication policy for cancelling an
@@ -306,11 +329,18 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
 // paid customer→store OUTSIDE Swift, and only the store can attest the money
 // landed (vendor confirm-payment → paymentStatus CAPTURED). Until then the
-// order may not move through fulfilment: not accepted, prepared, readied,
+// order may not move through fulfilment: not prepared, readied,
 // claimed/assigned, taken into custody, delivered, self-delivered, or
 // pickup-completed. The negative paths (CANCELLED / REFUNDED / FAILED) stay
 // open, and the store's confirm-payment action never passes through here — it
 // IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
+//
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD ruling Q1] ACCEPTED no longer waits
+// for the payment: the store ACCEPTS first ("we have it"), which shows the customer
+// the store's MMG number and the exact amount; the customer pays; the store taps
+// "Paid by MMG". Acceptance moves no goods and no rider — PREPARING onward and
+// every rider claim/assignment stay gated until the store confirms the money. A
+// DISPUTED payment (two claims that disagree) still holds acceptance too.
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
 export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
@@ -363,7 +393,11 @@ export function assertCashDiscountSponsored(args: {
  * compiles, which is a stronger guarantee than any test could give.
  */
 export function assertMmgFulfilmentAllowed(
-  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
+  order: {
+    paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null;
+    /** [PAYMENT-SIMPLIFY · Q1] Read only for ACCEPTED; a caller that does not project it keeps the full gate. */
+    mmgAttestedRef?: string | null;
+  },
   target: OrderStatus,
 ): void {
   if (order.paymentMethod !== 'MOBILE_MONEY') return;
@@ -381,12 +415,51 @@ export function assertMmgFulfilmentAllowed(
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
+  // [PAYMENT-SIMPLIFY · Q1] The store may accept an unpaid MMG order; nothing after acceptance may move.
+  // Only an order whose payment can still happen: a store claim an operator rejected ("did not pay",
+  // `mmgAttestedRef` kept on a reopened PENDING row) can never be paid on this order, so it is never
+  // accepted unpaid. Not projected (undefined) fails closed: the payment gate below applies.
+  // [REVIEW-G S4-1 on #1848] Literally "still open": a PENDING or AUTHORIZED payment, never FAILED/REFUNDED/UNKNOWN.
+  if (target === 'ACCEPTED' && order.mmgAttestedRef === null && (ATTESTABLE_PAYMENT_STATUSES as readonly string[]).includes(order.paymentStatus)) return;
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
       'This MMG order can move only after the store confirms the payment landed in its MMG account.',
     );
+  }
+}
+
+/** [O-3 · REVIEW-F S4-2 on #2024] How close to its time a pre-order's accept may also start its
+ *  preparation. Further ahead, the store accepts now and taps "Start preparing" when it is time. */
+export const SCHEDULED_PREP_LEAD_MINUTES = 60;
+
+/**
+ * [O-3 · owner 22 Oct 2026 · STORE_ACCEPT_PATH] May preparation start now, on a
+ * store order the store has just accepted (or, for MMG, just marked "Paid by
+ * MMG")? Every store type: a restaurant's kitchen and a grocery's pick list
+ * both live inside PREPARING. Never a booking (BOOKING_LAW: it is confirmed,
+ * then completed), never a parcel or a ride (no store), and never an MMG order
+ * the payment-first law still holds (unpaid, or two claims that disagree) —
+ * that order stops at ACCEPTED and "Paid by MMG" starts it. A question, never a
+ * gate: the seam re-decides the next hop with its own gates on the locked row.
+ */
+export function preparationMayStart(
+  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'> & { scheduledFor?: Date | null },
+  now: Date = new Date(),
+): boolean {
+  if (order.fulfillment === 'APPOINTMENT') return false;
+  if (order.orderType === 'TAXI' || order.orderType === 'COURIER') return false;
+  // [O-3 · REVIEW-F S4-2 on #2024] A pre-order for later (SCHEDULED_ORDERS_ENABLED, off at launch) is
+  // accepted now and prepared near its time: the walk stops at ACCEPTED while the slot is more than
+  // SCHEDULED_PREP_LEAD_MINUTES away, and the store's "Start preparing" starts it.
+  if (order.scheduledFor && order.scheduledFor.getTime() - now.getTime() > SCHEDULED_PREP_LEAD_MINUTES * 60_000) return false;
+  try {
+    assertMmgFulfilmentAllowed(order, 'PREPARING');
+    return true;
+  } catch (error) {
+    if (error instanceof AppError) return false;
+    throw error;
   }
 }
 
@@ -443,8 +516,10 @@ export function holdWindowMs(): number | null {
   // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
   // env examples say 5 since #792). The code defaulting 2 meant an env that
   // omitted the variable quietly broke the documented customer promise: the
-  // free-cancel window (FREE_CANCEL_WINDOW_MIN = 5) outlived the hold, putting
-  // orders on the vendor board while still free to cancel.
+  // free-cancel window (then FREE_CANCEL_WINDOW_MIN = 5) outlived the hold,
+  // putting orders on the vendor board while still free to cancel. The boot
+  // floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts) since the window after
+  // acceptance became one minute (owner 22 Oct 2026); the hold is unchanged.
   const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
@@ -600,6 +675,12 @@ export interface CanonicalOrderTransitionInput {
   /** Queue-only guard: the worker may cancel PENDING work only after its
    * checkout hold has elapsed. Revalidated from the locked source row. */
   requireHoldExpired?: boolean;
+  /** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] Queue-only guard: the sweep may
+   * cancel an ACCEPTED MMG order only while it is still unpaid (never marked
+   * "Paid by MMG", no rejected claim, no open disagreement) AND its 30 minutes
+   * from acceptance have run out. Re-decided on the locked source row — the
+   * store's "Paid by MMG" takes the same row lock, so the first commit wins. */
+  requireUnpaidMmgAcceptanceExpired?: boolean;
   /** [REPORT-014 F-014-02] Actor bind ON THE LOCKED ROW: the transition
    * commits only while this rider still owns the order. A route-level
    * ownership pre-read cannot survive a watchdog release or reassignment
@@ -644,6 +725,17 @@ export interface CanonicalOrderTransitionInput {
    *  cancel): the one cancellation predicate [cancel-policy.ts] decides on the
    *  LOCKED row, exactly as `cancelOrder` does — free or refused, never a fee. */
   customerCancel?: boolean;
+  /** [O-3 · STORE_ACCEPT_PATH] The next hop of a declared walk, taken through THIS
+   *  seam on this lock and in this commit when `when` holds on the row as this
+   *  hop left it — every gate of the next hop applies to it. The hop must be a
+   *  declared forward edge from `target`; both milestones share one instant. */
+  continueTo?: {
+    target: OrderStatus;
+    note?: string;
+    when: (row: Order) => boolean;
+  };
+  /** [O-3] The instant this transition stamps. Set only by a walk's next hop. */
+  at?: Date;
 }
 
 export interface CanonicalOrderTransitionResult {
@@ -791,7 +883,7 @@ export class OrderService {
       select: RIDER_ASSIGNMENT_SNAPSHOT_SELECT,
     });
     const dispatchAssignmentSequence = await tx.orderStatusLog.count({
-      where: { orderId: input.orderId, status: 'RIDER_ASSIGNED' },
+      where: assignmentLogWhere(input.orderId, 'RIDER_ASSIGNED'),
     });
     return { ...assigned, dispatchAssignmentSequence };
   }
@@ -978,7 +1070,8 @@ export class OrderService {
       // a vendor row lock in the commit transaction, so a concurrent profile
       // edit cannot swap/remove the payment target after this decision.
       if (input.paymentMethod === 'MOBILE_MONEY') {
-        requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) requireCheckoutMmgNumber(vendor.mmgNumber, vendor.name);
+        else requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
       // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
@@ -1244,8 +1337,8 @@ export class OrderService {
     //     stored totals, receipt, spend ledger) reads this one number;
     //   - [REPORT-012 F-012-01] "tip your rider" is delivery money: it rides
     //     the first DELIVERY plan, and a basket with none (pickup/appointment
-    //     only) carries no tip — nor does grandTotal, which feeds the ID gate
-    //     and customer.totalSpent;
+    //     only) carries no tip — nor does grandTotal, which feeds the store's
+    //     call-to-confirm flag and customer.totalSpent;
     //   - each plan's discount share, tip and total (orderTotal) are the
     //     numbers the orders below are written with.
     const priced = priceBasket({
@@ -1263,26 +1356,26 @@ export class OrderService {
 
     const grandTotal = priced.grandTotal;
 
-    // The ID-gate (locked model): at or above the country's USD-equivalent
-    // threshold, an L1 account must verify identity first. L2/L3 flow through.
+    // The country's USD-equivalent ID-gate threshold. [Owner ruling 24 Oct 2026 ~05:55Z — NO
+    // CUSTOMER ID GATE] An order at or above it no longer needs the customer's ID on file (the old
+    // 403 ID_VERIFICATION_REQUIRED here was Swift's own 8 Oct choice, not a legal duty; builds
+    // 11/12 and vc7/vc8 only ever learnt of it from that refusal, so they stop asking). The number
+    // stays: it still sizes the high-value promo gate below, the store's call-to-confirm flag, and
+    // the rider guarantee cap (cash-rules). Never set it to 0 to switch a gate off: `>= 0` holds
+    // for every amount, so 0 would ask EVERY promo for an ID and cover NO rider claim.
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(user.countryCode);
     // [M-36] The order's currency is the buyer's market's — stamped once here
     // so every money column on the row names its unit.
     const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
-    if (user.trustLevel === 'L1' && grandTotal >= gateLocal) {
-      throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need your ID on file. Add it once in the app to lift this limit.`,
-        { threshold: gateLocal, total: grandTotal });
-    }
 
     // SWIFT-162: high-value promo codes are the multi-account (fresh-SIM) abuse
-    // target — the total-gate above misses a big code redeemed on a small NET
-    // basket (a large discount pulls grandTotal back under the threshold). Gate
-    // the discount itself: an L1 account claiming a discount worth at least the
-    // ID-gate threshold must verify identity first, raising the bar from a
-    // throwaway SIM to a verified ID. L2/L3 and ordinary low-value codes flow
-    // through untouched. The threshold is the same CountryConfig ID-gate value —
-    // one trust boundary, tunable per country, no new magic number.
+    // target (a large discount on a small NET basket). Gate the discount itself:
+    // an L1 account claiming a discount worth at least the ID-gate threshold
+    // must put an ID on file first, raising the bar from a throwaway SIM to an
+    // ID. L2/L3 and ordinary low-value codes flow through untouched. The
+    // threshold is the same CountryConfig ID-gate value — one trust boundary,
+    // tunable per country, no new magic number. [24 Oct 2026] Kept: the owner's
+    // ruling removed the order-size and taxi ID gates, not this abuse guard.
     if (user.trustLevel === 'L1' && discount >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
         `This promo needs your ID on file. Add it once in the app and it's yours to keep.`,
@@ -1347,7 +1440,7 @@ export class OrderService {
 
       // [REPORT-013 F-013-01 / REPORT-016 F-016-01] Bind the priced snapshot
       // to the LOCKED cart AGGREGATE, not the parent timestamp. Pricing, the
-      // ID gate, and promo math all ran on a pre-transaction read; any cart
+      // promo ID gate, and promo math all ran on a pre-transaction read; any cart
       // mutation that committed since makes that math a lie about a different
       // basket. `Cart.updatedAt` was an INCOMPLETE token — deleting a
       // CartItem while others remain never touches the parent row, so a
@@ -1504,15 +1597,22 @@ export class OrderService {
       }
 
       let committedMmgPayUrl: string | null = null;
+      let committedMmgNumber: string | null = null;
       let committedMmgRecipientName: string | null = null;
       if (input.paymentMethod === 'MOBILE_MONEY') {
         const paymentPlan = plans[0]!; // multi-vendor MMG was rejected above
         await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${paymentPlan.vendor.id} FOR UPDATE`;
         const currentVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: paymentPlan.vendor.id },
-          select: { name: true, mmgPayUrl: true },
+          select: { name: true, mmgPayUrl: true, mmgNumber: true },
         });
-        committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        // [PAYMENT-SIMPLIFY] The destination is re-read and committed under the vendor row lock:
+        // a concurrent profile edit (or the cool-off applying a new number) cannot swap it.
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) {
+          committedMmgNumber = requireCheckoutMmgNumber(currentVendor.mmgNumber, currentVendor.name);
+        } else {
+          committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        }
         committedMmgRecipientName = currentVendor.name;
       }
 
@@ -1538,9 +1638,8 @@ export class OrderService {
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
         const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
-        const userUses = await tx.order.count({
-          where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-        });
+        // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+        const userUses = await tx.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promoCodeId) });
         if (userUses >= fresh.maxUsesPerUser) {
           throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
         }
@@ -1650,6 +1749,7 @@ export class OrderService {
             // both fields while the vendor row is locked so a later profile
             // edit cannot redirect an already-placed order or relabel its payee.
             mmgPayUrlSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgPayUrl : null,
+            mmgNumberSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgNumber : null,
             mmgRecipientNameSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgRecipientName : null,
             estimatedPrepTime: plan.vendor.estimatedPrepTime,
             // Minutes-to-promise for the legacy field; the promise itself is the truth.
@@ -2273,10 +2373,14 @@ export class OrderService {
       );
     }
 
-    const now = new Date();
+    const now = input.at ?? new Date();
     if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
+    }
+    if (input.requireUnpaidMmgAcceptanceExpired && !isExpiredUnpaidMmgAcceptance(source, now)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', 'Order is paid, or still within its MMG payment window');
     }
     if (input.handover) {
       const failure = await verifyHandoverDecision(tx, source, input.handover);
@@ -2397,6 +2501,11 @@ export class OrderService {
     const mmgUnattestedTerminal = operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && source.paymentStatus === 'PENDING';
+    // [O-3] A walk writes two rows in one commit. Their order must never be a
+    // tie the timeline (and "the newest row names the status") reads by luck:
+    // the first hop's row is stamped at the walk's instant, the next hop's one
+    // millisecond after it. Every other transition keeps the default stamp.
+    const walkLogAt = input.continueTo ? now : input.at ? new Date(input.at.getTime() + 1) : undefined;
     await tx.orderStatusLog.create({
       data: {
         orderId: input.orderId,
@@ -2405,6 +2514,7 @@ export class OrderService {
         note: mmgUnattestedTerminal
           ? `${input.note ?? 'Cancelled'} — MMG payment UNATTESTED at cancellation: if the customer already paid, the store refunds directly`
           : input.note,
+        ...(walkLogAt ? { createdAt: walkLogAt } : {}),
       },
     });
 
@@ -2424,6 +2534,29 @@ export class OrderService {
     }
 
     if (input.withinTransaction) await input.withinTransaction(tx, source);
+
+    // [O-3 · STORE_ACCEPT_PATH] The next hop of a declared walk runs through this
+    // same seam (every gate of that hop: payment-first, booking law, held lines),
+    // on this lock, in this commit — so the two milestones commit or vanish
+    // together, and nothing can observe the order between them.
+    if (input.continueTo) {
+      const next = input.continueTo;
+      if (!ORDER_TRANSITIONS[next.target].includes(input.target)) {
+        throw new Error(`continueTo: ${input.target} -> ${next.target} is not a declared forward edge`);
+      }
+      const reached = await tx.order.findUniqueOrThrow({ where: { id: input.orderId } });
+      if (next.when(reached)) {
+        const hop = await this.stageCanonicalOrderTransition(tx, {
+          orderId: input.orderId,
+          target: next.target,
+          allowedFrom: [input.target],
+          changedBy: input.changedBy,
+          note: next.note,
+          at: now,
+        });
+        if ('handoverFailure' in hop) throw new AppError(hop.handoverFailure.statusCode, hop.handoverFailure.code, hop.handoverFailure.message);
+      }
+    }
 
     const order = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
@@ -2640,7 +2773,7 @@ export class OrderService {
           };
           const verdict = cancellationVerdict(policyOrder, now);
           // [owner #46/#50] Not the customer's to cancel any more (the store
-          // accepted, or the five-minute window of a ride, parcel or booking
+          // accepted, or the one-minute window of a ride, parcel or booking
           // has passed): refused before anything is written, in the words the
           // apps show as-is.
           if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
@@ -2835,6 +2968,10 @@ export class OrderService {
       expectedDriverId?: string | null;
       expectedFulfillment?: FulfillmentType;
       expectedFulfillmentMode?: FulfillmentMode;
+      /** [O-3] See CanonicalOrderTransitionInput.continueTo. The customer is told
+       *  ONCE, in the words of the transition asked for; the live events carry
+       *  the status the order actually reached. */
+      continueTo?: CanonicalOrderTransitionInput['continueTo'];
     },
   ) {
     const target = status as OrderStatus;
@@ -2859,6 +2996,7 @@ export class OrderService {
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
       ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
       ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
+      ...(opts?.continueTo ? { continueTo: opts.continueTo } : {}),
       invalidStatus: (current) => new AppError(
         409,
         'INVALID_TRANSITION',
@@ -2868,8 +3006,12 @@ export class OrderService {
 
     if (replayed) return order;
 
-    log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
-    const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
+    // [O-3] A walk may have gone past the transition asked for: the live events
+    // say where the order IS, so a board or a tracking screen never shows a
+    // stage the order already left.
+    const reached = opts?.continueTo ? order.status : status;
+    log().info({ orderId, orderNumber: order.orderNumber, status: reached, changedBy, vendorId: order.vendorId }, 'order: status changed');
+    const statusEvent = { orderId, status: reached, timestamp: new Date().toISOString() };
     try {
     await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
@@ -2886,7 +3028,7 @@ export class OrderService {
     // Send notifications
     const riderName = order.rider?.user?.firstName || 'Your rider';
     switch (status) {
-      case 'ACCEPTED':
+      case 'ACCEPTED': {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
@@ -2894,12 +3036,32 @@ export class OrderService {
         // the customer's slot inside this transition. Kitchen words on a
         // haircut were the phone's first sign that a SERVICE booking was riding
         // the food order spine.
-        if (order.fulfillment === 'APPOINTMENT') {
+        const mmgPayBy = mmgAcceptedPayBy(order);
+        const mmgClaimedPaid = isUnpaidMmgAcceptance(order) && order.customerMmgClaim === 'PAID';
+        if (mmgPayBy || mmgClaimedPaid) {
+          // [owner 18 Oct 2026 · REVIEW-F S2-1/S3-1b/S4-1] Accepted, not yet paid by MMG (an order or a booking):
+          // nothing goes ahead until "Paid by MMG", and the 30-minute clock starts now — the customer is told to
+          // pay, how much and by when; if they already said "I paid", that it waits for the store. Never the number.
+          const storeName = order.vendor?.name || 'The store';
+          const noun = mmgOrderNoun(order.fulfillment);
+          const payBy = mmgPayBy;
+          const copy = payBy
+            ? mmgAcceptedPushCopy(order.orderNumber, storeName, Number(order.totalAmount), order.currencyCode, payBy, noun)
+            : mmgAcceptedClaimedPushCopy(order.orderNumber, storeName, noun);
+          await this.notifications.send({
+            userId: order.customerId,
+            type: 'ORDER_UPDATE',
+            title: copy.title,
+            body: copy.body,
+            data: { orderId, orderNumber: order.orderNumber, status: 'ACCEPTED', paymentPending: 'MMG' },
+          });
+        } else if (order.fulfillment === 'APPOINTMENT') {
           await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         } else {
           await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         }
         break;
+      }
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         break;
@@ -3362,9 +3524,7 @@ export class OrderService {
     // enforcement point inside the checkout transaction (trial-integrity A5).
     const { clusterMemberIds } = await import('../integrity/identity.service');
     const promoMemberIds = await clusterMemberIds(this.prisma, userId);
-    const userUsage = await this.prisma.order.count({
-      where: { customerId: { in: promoMemberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    const userUsage = await this.prisma.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
     }

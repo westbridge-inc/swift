@@ -2,15 +2,18 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { maskedPhone } from '@/lib/review-center';
+import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
+import { humanise } from '@/lib/labels';
 
 const FILTERS = ['OPEN', 'IN_PROGRESS', 'RESOLVED'] as const;
 
 const CATEGORY_CLS: Record<string, string> = {
-  SAFETY: 'bg-red-500/15 text-red-400',
-  PAYMENT: 'bg-amber-500/15 text-amber-400',
-  ORDER_ISSUE: 'bg-sky-500/15 text-sky-400',
+  SAFETY: 'mc-badge mc-tone-bad',
+  PAYMENT: 'mc-badge mc-tone-warn',
+  ORDER_ISSUE: 'mc-badge mc-tone-info',
 };
 
 // [A-18] Closing a ticket is a decision, so the screen asks for one. The old
@@ -31,6 +34,8 @@ const SAFETY_NOTE_MIN = 20;
 // confirmed in the app. Only these can be completed from the queue.
 const CLOSURE_SUBJECT = 'Account closure request';
 const isClosureRequest = (t: { category?: string; subject?: string }) => t.category === 'ACCOUNT' && t.subject === CLOSURE_SUBJECT;
+
+const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 export default function SupportPage() {
   const qc = useQueryClient();
@@ -59,6 +64,16 @@ export default function SupportPage() {
     },
   });
 
+  // [U57] "Take it" is its own act with its own answer, shown next to ITS
+  // ticket's button. It used to share the close mutation, whose error renders
+  // only inside an open close panel (possibly another ticket's), so a failed
+  // take showed nothing.
+  const take = useMutation({
+    mutationFn: ({ id, expectedStatus }: { id: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
+      resolveSupportTicket(id, 'IN_PROGRESS', undefined, undefined, expectedStatus),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['support'] }),
+  });
+
   /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
   const [completing, setCompleting] = useState<{ id: string; reason: string } | null>(null);
   const closeAccount = useMutation({
@@ -75,46 +90,44 @@ export default function SupportPage() {
   const tickets: any[] = data?.data?.tickets ?? [];
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-bold">Support</h1>
-        <div className="flex gap-1">
+    <div className="mc-page">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <p className="mc-muted">In-app tickets from customers, movers and businesses. Safety first.</p>
+        <div className="mc-tabs mb-0" role="group" aria-label="Tickets">
           {FILTERS.map((f) => (
             <button
               key={f}
+              type="button"
               onClick={() => setFilter(f)}
-              className={`px-2.5 py-1 rounded-lg text-xs ${
-                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
-              }`}
+              aria-pressed={filter === f}
+              className="mc-tab"
             >
-              {f.replaceAll('_', ' ').toLowerCase()}
+              {humanise(f)}
             </button>
           ))}
         </div>
       </div>
-      <p className="text-[var(--muted)] text-sm mb-6">In-app tickets from customers, movers and vendors. Safety first.</p>
-
-      <div className="space-y-3">
+      <div className="mc-list">
         {isLoading ? (
-          <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+          <div className="mc-loading" aria-busy="true">Loading tickets…</div>
         ) : isError ? (
           // [A-18] A failed request is not an empty queue. Saying "no tickets"
           // when the server did not answer hides exactly the reports that matter.
-          <div className="bg-[var(--panel)] rounded-xl border border-red-500/40 p-8 text-center">
-            <p className="font-semibold text-red-400">This queue could not be loaded.</p>
-            <p className="text-sm text-[var(--muted)] mt-1">
+          <div className="mc-card border-l-4 border-l-[var(--mc-bad)]">
+            <p className="mc-text-bad font-semibold">This queue could not be loaded.</p>
+            <p className="mc-muted mt-1">
               There may be open tickets you cannot see. This is not an empty queue.
             </p>
             <button
               onClick={() => void refetch()}
               disabled={isFetching}
-              className="mt-4 px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+              className="mc-btn mt-3"
             >
               {isFetching ? 'Retrying…' : 'Try again'}
             </button>
           </div>
         ) : tickets.length === 0 ? (
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
+          <div className="mc-empty">
             No {filter.replaceAll('_', ' ').toLowerCase()} tickets.
           </div>
         ) : (
@@ -126,30 +139,30 @@ export default function SupportPage() {
             const noteTooShort = isSafety && (closing?.note ?? '').trim().length < SAFETY_NOTE_MIN;
             const cannotClose = !closing?.resolution || (isSafety && noteTooShort);
             return (
-              <div key={t.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className={`px-2.5 py-1 rounded-full text-xs ${CATEGORY_CLS[t.category] ?? 'bg-white/10 text-[var(--muted)]'}`}>
-                    {String(t.category).replaceAll('_', ' ').toLowerCase()}
+              <div key={t.id} className={`mc-card${isSafety ? ' border-l-4 border-l-[var(--mc-bad)]' : ''}`}>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className={CATEGORY_CLS[t.category] ?? 'mc-badge'}>
+                    {humanise(String(t.category))}
                   </span>
-                  <span className="font-semibold">{t.subject}</span>
-                  <span className="text-xs text-[var(--muted)] ml-auto">{new Date(t.createdAt).toLocaleString()}</span>
+                  <span className="mc-card-title">{t.subject}</span>
+                  <span className="mc-muted mc-numbers ml-auto text-xs">{when(t.createdAt)}</span>
                 </div>
-                <p className="text-sm text-[var(--muted)] mt-2 whitespace-pre-wrap">{t.message}</p>
-                <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[var(--muted)]">
+                <p className="mt-2 whitespace-pre-wrap">{t.message}</p>
+                <div className="mc-muted mt-3 flex flex-wrap items-center gap-4">
                   {t.user ? (
-                    <Link href={`/users/${t.user.id}`} className="hover:text-[var(--accent)] transition-colors">
-                      {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {t.user.phone} →
+                    <Link href={`/users/${t.user.id}`} className="font-semibold text-[var(--mc-accent)]">
+                      {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {maskedPhone(t.user.phone)} →
                     </Link>
                   ) : null}
                   {t.orderId ? (
-                    <Link href={`/orders/${t.orderId}`} className="hover:text-[var(--accent)] transition-colors">
+                    <Link href={`/orders/${t.orderId}`} className="font-semibold text-[var(--mc-accent)]">
                       View order →
                     </Link>
                   ) : null}
                   {t.adminNote ? <span className="italic">note: “{t.adminNote}”</span> : null}
                   {t.resolution ? (
-                    <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs">
-                      {String(t.resolution).replaceAll('_', ' ').toLowerCase()}
+                    <span className="mc-badge">
+                      {humanise(String(t.resolution))}
                     </span>
                   ) : null}
                 </div>
@@ -159,18 +172,18 @@ export default function SupportPage() {
                     {!completion ? (
                       <button
                         onClick={() => { closeAccount.reset(); setCompleting({ id: t.id, reason: '' }); }}
-                        className="px-4 py-2 rounded-lg text-sm border border-red-500/40 text-red-400 hover:bg-red-500/10"
+                        className="mc-btn mc-btn-danger"
                       >
                         Complete account closure
                       </button>
                     ) : (
-                      <div className="rounded-lg border border-red-500/40 p-4">
-                        <p className="text-sm font-semibold">Close this account and de-identify the person?</p>
-                        <p className="text-xs text-[var(--muted)] mt-1">
+                      <div className="rounded-[var(--mc-radius-sm)] border border-[rgb(185_28_28/30%)] bg-[var(--mc-bad-soft)] p-4">
+                        <p className="font-semibold">Close this account and de-identify the person?</p>
+                        <p className="mc-muted mt-1 text-xs">
                           This cannot be undone. Financial and legal records are kept. If orders, jobs or cash are still
                           open, the server refuses and says what is outstanding; the request stays open.
                         </p>
-                        <label className="mt-3 block text-xs text-[var(--muted)]" htmlFor={`closure-reason-${t.id}`}>
+                        <label className="mt-3 block text-xs font-semibold" htmlFor={`closure-reason-${t.id}`}>
                           Why you are closing this account (recorded in the audit trail)
                         </label>
                         <textarea
@@ -178,23 +191,28 @@ export default function SupportPage() {
                           value={completion.reason}
                           onChange={(e) => setCompleting({ id: t.id, reason: e.target.value })}
                           rows={2}
-                          className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
+                          aria-describedby={`closure-reason-help-${t.id}`}
+                          className="mc-input mt-1"
                         />
-                        {closeAccount.isError ? (
-                          <p className="mt-2 text-sm text-red-400">{(closeAccount.error as Error).message}</p>
+                        {/* [U56] The server needs at least REASON_MIN characters; say so before sending. */}
+                        <p id={`closure-reason-help-${t.id}`} className="mc-muted mt-1 text-xs">
+                          At least {REASON_MIN} characters ({completion.reason.trim().length} so far).
+                        </p>
+                        {closeAccount.isError && closeAccount.variables?.id === t.id ? (
+                          <p className="mc-alert mt-2">{(closeAccount.error as Error).message}</p>
                         ) : null}
-                        <div className="mt-3 flex gap-2">
+                        <div className="mc-actions">
                           <button
                             onClick={() => closeAccount.mutate({ id: t.id, reason: completion.reason.trim() })}
-                            disabled={closeAccount.isPending || completion.reason.trim().length === 0}
-                            className="px-4 py-2 rounded-lg text-sm bg-red-600 hover:bg-red-600/80 disabled:opacity-50"
+                            disabled={closeAccount.isPending || reasonTooShort(completion.reason)}
+                            className="mc-btn mc-btn-primary"
                           >
                             {closeAccount.isPending ? 'Closing…' : 'Close the account'}
                           </button>
                           <button
                             onClick={() => setCompleting(null)}
                             disabled={closeAccount.isPending}
-                            className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            className="mc-btn"
                           >
                             Cancel
                           </button>
@@ -207,26 +225,30 @@ export default function SupportPage() {
                 {t.status !== 'RESOLVED' && (
                   <div className="mt-4">
                     {!open ? (
-                      <div className="flex gap-2">
+                      <div className="mc-actions mt-0">
                         {t.status === 'OPEN' && (
                           <button
-                            onClick={() => resolve.mutate({ id: t.id, status: 'IN_PROGRESS', expectedStatus: t.status })}
-                            disabled={resolve.isPending}
-                            className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            type="button"
+                            onClick={() => take.mutate({ id: t.id, expectedStatus: t.status })}
+                            disabled={take.isPending}
+                            className="mc-btn"
                           >
-                            Take it
+                            {take.isPending && take.variables?.id === t.id ? 'Taking…' : 'Take it'}
                           </button>
                         )}
                         <button
                           onClick={() => setClosing({ id: t.id, resolution: '', note: '' })}
-                          className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80"
+                          className="mc-btn mc-btn-primary"
                         >
                           Close this ticket
                         </button>
+                        {take.isError && take.variables?.id === t.id ? (
+                          <p role="alert" className="mc-text-bad self-center">{(take.error as Error).message}</p>
+                        ) : null}
                       </div>
                     ) : (
-                      <div className="rounded-lg border border-[var(--border)] p-4">
-                        <p className="text-sm font-semibold">
+                      <div className="rounded-[var(--mc-radius-sm)] border border-[var(--mc-line)] bg-[var(--mc-surface)] p-4">
+                        <p className="font-semibold">
                           {isSafety ? 'Closing a safety report — what was done?' : 'What happened?'}
                         </p>
                         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -234,17 +256,15 @@ export default function SupportPage() {
                             <button
                               key={r.value}
                               onClick={() => setClosing({ ...closing!, resolution: r.value })}
-                              className={`rounded-full px-3 py-1.5 text-xs ${
-                                closing?.resolution === r.value
-                                  ? 'bg-white text-black font-semibold'
-                                  : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
-                              }`}
+                              type="button"
+                              aria-pressed={closing?.resolution === r.value}
+                              className="mc-tab"
                             >
                               {r.label}
                             </button>
                           ))}
                         </div>
-                        <label className="mt-3 block text-xs text-[var(--muted)]" htmlFor={`note-${t.id}`}>
+                        <label className="mt-3 block text-xs font-semibold" htmlFor={`note-${t.id}`}>
                           {isSafety
                             ? `What the reporter will read — required, at least ${SAFETY_NOTE_MIN} characters`
                             : 'What the reporter will read (optional)'}
@@ -254,12 +274,12 @@ export default function SupportPage() {
                           value={closing?.note ?? ''}
                           onChange={(e) => setClosing({ ...closing!, note: e.target.value })}
                           rows={3}
-                          className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
+                          className="mc-input mt-1"
                         />
-                        {resolve.isError ? (
-                          <p className="mt-2 text-sm text-red-400">{(resolve.error as Error).message}</p>
+                        {resolve.isError && resolve.variables?.id === t.id ? (
+                          <p role="alert" className="mc-alert mt-2">{(resolve.error as Error).message}</p>
                         ) : null}
-                        <div className="mt-3 flex gap-2">
+                        <div className="mc-actions">
                           <button
                             onClick={() =>
                               resolve.mutate({
@@ -271,7 +291,7 @@ export default function SupportPage() {
                               })
                             }
                             disabled={resolve.isPending || cannotClose}
-                            className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                            className="mc-btn mc-btn-primary"
                           >
                             {resolve.isPending ? 'Closing…' : 'Close ticket'}
                           </button>
@@ -279,7 +299,7 @@ export default function SupportPage() {
                           <button
                             onClick={() => setClosing(null)}
                             disabled={resolve.isPending}
-                            className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            className="mc-btn"
                           >
                             Cancel
                           </button>

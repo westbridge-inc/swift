@@ -181,6 +181,17 @@ describe('§15.8 revenue dashboard — reconciliation MERGE GATE', () => {
     expect(d.reconciliation.delta).toBe(0);
   });
 
+  it('recognized revenue follows the Guyana week: Sunday 22:00 in Guyana is day 7, not a finished week', async () => {
+    const svc = new AdsRevenueService(app.prisma);
+    const { placement } = await seedPaidCampaign();
+    // Mon 12 Oct 02:00Z is Sunday 11 Oct 22:00 in Guyana: week 1 has served six whole days, week 2 none.
+    const d = await svc.dashboard('swift-default', WEEK1, WEEK2, new Date('2026-10-12T02:00:00Z'));
+    const w1 = d.weeks.find((w) => w.placementId === placement.id && w.weekStart === '2026-10-05')!;
+    const w2 = d.weeks.find((w) => w.placementId === placement.id && w.weekStart === '2026-10-12')!;
+    expect(w1.recognized).toBe(6000);
+    expect(w2.recognized).toBe(0);
+  });
+
   it('a refunded week splits gross/refunded/net and recognizes nothing', async () => {
     const svc = new AdsRevenueService(app.prisma);
     const { price, placement } = await seedPaidCampaign({ refundWeek2: true });
@@ -271,7 +282,7 @@ describe('§9.1 video transport cap (the 5 MB global-limit bug)', () => {
     const member = await makeCustomer();
     const a = await app.prisma.advertiser.create({ data: { companyName: `Vid ${nanoid(6)}`, industry: 'RETAIL', contactName: 'V', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000002', createdByUserId: member.userId, status: 'APPROVED' } });
     advertiserIds.push(a.id);
-    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: member.userId, role: 'OWNER' } });
+    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: member.userId, role: 'OWNER', acceptedAt: new Date() } });
     const p = await app.prisma.adPlacement.create({ data: { key: `v-${nanoid(6)}`, name: 'Hero', tier: 1, mediaKind: 'VIDEO', weeklyPrice: 50000, slotsPerWeek: 1 } });
     placementIds.push(p.id);
     const c = await app.prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: 'VidCamp', cities: ['*'], startWeek: WEEK1, endWeek: WEEK1, status: 'PENDING_REVIEW' } });

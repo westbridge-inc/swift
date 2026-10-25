@@ -24,7 +24,9 @@ export function customerIdFact(doc: Pick<ReviewDocument, 'docType' | 'status' | 
     // A reviewer is named only when the row names one; an older row without it claims nothing.
     return doc.reviewedBy ? 'On file — approved by a reviewer.' : 'On file.';
   }
-  if (doc.status === 'PENDING') return 'Held for a person by the automatic checks — the history below says why. Approving it unlocks big orders; taxi rides also need the customer’s profile photo.';
+  // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Taxi rides and big orders need no ID any more: L2 only
+  // lifts a strike restriction and the high-value promo limit, and the line says exactly that.
+  if (doc.status === 'PENDING') return 'Held for a person by the automatic checks — the history below says why. Approving it puts the ID on file (L2), which lifts a strike restriction and the high-value promo limit.';
   return null;
 }
 
@@ -53,7 +55,7 @@ export function CustomerIdOnFile({ doc, onWithdrawn }: { doc: ReviewDocument; on
     {doc.status === 'APPROVED' && <button disabled={busy} onClick={() => { setReason(''); withdraw.reset(); setOpen(true); }}>Withdraw this ID</button>}
     {open && <Modal title="Withdraw customer ID" busy={busy} onClose={() => setOpen(false)}>
       <h2>Withdraw this customer ID</h2>
-      <p>With no other ID standing, the account goes back to L1: taxi rides and orders over the ID limit lock again, and the next ID they send waits for a person. The page shows the account level the server reports after you confirm.</p>
+      <p>With no other ID standing, the account goes back to L1 (a strike restriction or the high-value promo limit can apply again), and the next ID they send waits for a person. The page shows the account level the server reports after you confirm.</p>
       <form onSubmit={(event) => {
         event.preventDefault();
         if (busy || reasonTooShort(reason) || reason.trim().length > 500) return;

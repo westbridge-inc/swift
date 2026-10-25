@@ -12,6 +12,14 @@ export interface InvariantReport {
   walletsChecked: number;
   walletMismatches: { subscriptionId: string; ledger: number; balance: number }[];
   wrongfulSuspensions: string[]; // auto-healed subscription ids
+  /** [row 167] Subscriptions SUSPENDED although paid through the future that
+   *  the heal did NOT lift, with why: a person decides each one. The heal only
+   *  undoes a suspension billing recorded on a store billing holds, for an
+   *  ACTIVE owner on auto-renew; anything else (an admin, safety or wind-down
+   *  hold on the store, an owner account that is not ACTIVE, auto-renew off,
+   *  no recorded suspension, a billing date before the paid period ends) used
+   *  to be skipped silently, leaving a partner who paid cut off with no page. */
+  paidSuspensionsLeftHeld: { subscriptionId: string; reasons: PaidSuspensionHold[] }[];
   earlyBillingSuspensions: string[]; // historical timing evidence; never clears unrelated restrictions
   enforcementLeaks: string[]; // ACTIVE but unpaid past grace+6h — alert only
   /** Subscriptions whose payer or shared clock could not be read, so neither
@@ -30,9 +38,23 @@ export interface InvariantReport {
   refundPayableMismatches: { subscriptionId: string; ledgerBalance: number; openSetAside: number }[];
 }
 
+/** Why a paid-through suspension was left for a person (row 167). */
+export type PaidSuspensionHold =
+  | 'OWNER_NOT_ACTIVE' | 'AUTO_RENEW_OFF' | 'NO_RECORDED_SUSPENSION' | 'BILLING_DATE_BEFORE_PERIOD_END'
+  | 'STORE_HELD_FOR_ANOTHER_REASON';
+
+/** How many findings the nightly run pages for (queue.ts 'billing-invariants'):
+ *  every list in the report, and a broken trial balance. */
+export function brokenInvariantCount(report: InvariantReport): number {
+  return report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length
+    + report.unjudgedSubscriptions.length + report.paidSuspensionsLeftHeld.length
+    + report.receiptGaps.length + report.ledgerWalletMismatches.length + report.refundPayableMismatches.length
+    + (report.ledgerTrialImbalance ? 1 : 0);
+}
+
 export async function runBillingInvariants(prisma: PrismaClient, now = new Date()): Promise<InvariantReport> {
   const report: InvariantReport = {
-    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
+    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], paidSuspensionsLeftHeld: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
     ledgerTrialImbalance: null, ledgerWalletMismatches: [], refundPayableMismatches: [],
   };
 
@@ -83,14 +105,22 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
   };
   for (const candidate of wrongful) {
     let healed = false;
+    let leftHeld: PaidSuspensionHold[] = [];
     try {
       healed = await prisma.$transaction(async (tx) => {
         const authority = await lockBillingAuthority(tx, candidate.id);
         const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id }, include: { vendor: true } });
         const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}` } });
-        if (sub.status !== 'SUSPENDED' || !sub.autoRenew || authority.userStatus !== 'ACTIVE'
-          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
-          || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
+        // Changed since the scan (paid, healed or lapsed meanwhile): nothing to judge.
+        if (sub.status !== 'SUSPENDED' || sub.currentPeriodEnd <= now) return false;
+        // [row 167] Every other reason not to heal is reported, never a silent skip.
+        const reasons: PaidSuspensionHold[] = [];
+        if (authority.userStatus !== 'ACTIVE') reasons.push('OWNER_NOT_ACTIVE');
+        if (!sub.autoRenew) reasons.push('AUTO_RENEW_OFF');
+        if (!recorded) reasons.push('NO_RECORDED_SUSPENSION');
+        if (sub.nextBillingDate < sub.currentPeriodEnd) reasons.push('BILLING_DATE_BEFORE_PERIOD_END');
+        if (sub.vendor && sub.vendor.suspensionSource !== 'BILLING') reasons.push('STORE_HELD_FOR_ANOTHER_REASON');
+        if (reasons.length > 0) { leftHeld = reasons; return false; }
         await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
         // [SUSPENSION-HEAL · AUD-L8b-003 · owner ruling] The heal gives back
         // everything the billing suspension took, in this transaction: the
@@ -108,6 +138,7 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
       unjudged(candidate.id, err);
     }
     if (healed) report.wrongfulSuspensions.push(candidate.id);
+    if (leftHeld.length > 0) report.paidSuspensionsLeftHeld.push({ subscriptionId: candidate.id, reasons: leftHeld });
   }
 
   // 3. The shared active-time clock also governs the detector. A confirmation

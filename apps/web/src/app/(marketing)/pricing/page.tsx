@@ -96,6 +96,8 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
             <p className="text-sm font-semibold text-[var(--swift-muted)]">
               {list.pricing.countryCode} · prices in {list.pricing.currencyCode}
             </p>
+            {/* [WEB-LAUNCH-CHECK F5] The cards' h3 titles sit under this h2, not straight under the h1. */}
+            <h2 className="sr-only">Weekly rates</h2>
             <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
               {MOVER_CLASSES.map((c) => {
                 const quotes = list.movers.filter((q) => q.tier === c.tier && isOffered(q));

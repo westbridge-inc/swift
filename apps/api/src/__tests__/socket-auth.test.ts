@@ -15,6 +15,7 @@ import {
   transitionUserRoleAuthority,
   transitionUserStatusAuthority,
 } from '../modules/mover-authority';
+import { sessionCredentialDigest } from '../lib/session-credential';
 
 // ---------------------------------------------------------------------------
 // SEC-1 regression — Socket.IO connections must present a valid JWT AND a live
@@ -169,6 +170,7 @@ function waitForSocketDisconnect(socket: Socket, timeoutMs = 4_000): Promise<boo
 }
 
 function holdPostConnectAuthorityRead(token: string) {
+  const tokenDigest = sessionCredentialDigest(token);
   type InteractiveTransaction = (
     operation: (tx: Prisma.TransactionClient) => Promise<unknown>,
     options?: {
@@ -196,7 +198,7 @@ function holdPostConnectAuthorityRead(token: string) {
         && result.some((row) => (
           typeof row === 'object'
           && row !== null
-          && (row as { token?: unknown }).token === token
+          && (row as { token?: unknown }).token === tokenDigest // [Row 231] the row holds the digest
         ))
       ) {
         held = true;

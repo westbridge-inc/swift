@@ -191,16 +191,31 @@ describe('Services — provider verification + qualification badge', () => {
     expect(notMine.statusCode).toBe(404);
   });
 
+  // [R4 · research A8] Advertising legal services is barred to "any person whatsoever": a profile whose own words
+  // offer them is refused whatever trade it names, and nothing is saved; an ordinary profile still saves.
+  it('refuses a profile that offers legal services, whatever trade it names', async () => {
+    const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const bio of ['Carpentry and legal advice', 'Also: Legal-Consultation for land deeds', 'Conveyancing on request', 'Attorney-at-law and handyman']) {
+      const res = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio }, owner.token);
+      expect(res.statusCode, bio).toBe(409);
+      expect(res.json().error, bio).toMatchObject({ code: 'SERVICE_NOT_ALLOWED', message: 'Swift doesn\'t list legal services. Remove them from your profile to continue.' });
+    }
+    expect(await app.prisma.serviceProvider.count({ where: { userId: owner.userId } })).toBe(0);
+    const plain = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio: 'Built-ins, shelves and cabinets.' }, owner.token);
+    expect(plain.statusCode, plain.body).toBe(200);
+  });
+
   it('marks a stored held-category profile unavailable after refreshing its live verification', async () => {
     const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     await runWithoutTenant(() => app.prisma.serviceProvider.create({
-      data: { userId: owner.userId, trade: 'tutor', portfolioPhotos: [], isVerified: true },
+      // [TRADES · 13 Oct 2026] the lawyer is the category still held
+      data: { userId: owner.userId, trade: 'lawyer', portfolioPhotos: [], isVerified: true },
     }));
 
     const mine = await inject('GET', '/api/v1/services/providers/me', undefined, owner.token);
     expect(mine.statusCode).toBe(200);
     expect(mine.json().data).toMatchObject({
-      trade: 'tutor', isVerified: false, categoryUnavailable: true,
+      trade: 'lawyer', isVerified: false, categoryUnavailable: true,
     });
   });
 
@@ -241,9 +256,13 @@ describe('Services — provider verification + qualification badge', () => {
     expect(res.json().data.isVerified).toBe(true);
   });
 
-  it('never turns an applicant-supplied GEI-shaped reference into a verified badge', async () => {
+  it('[ROLE-DOCS] refuses a GEI licence as a qualification (it is the electrician\'s required document) and never verifies a supplied reference', async () => {
     const p = await makeVerifiedProvider('electrician');
-    const qual = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-44821' }, p.token);
+    const gei = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-44821' }, p.token);
+    expect(gei.statusCode).toBe(400);
+    expect(gei.json().error.code).toBe('QUALIFICATION_RETIRED');
+    expect(await app.prisma.serviceQualification.count({ where: { provider: { userId: p.userId }, type: 'GEI_LICENCE' } })).toBe(0);
+    const qual = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'CVQ-44821' }, p.token);
     expect(qual.statusCode).toBe(200);
     expect(qual.json().data.status).toBe('PENDING');
     expect(qual.json().data.trade).toBe('electrician');
@@ -251,17 +270,20 @@ describe('Services — provider verification + qualification badge', () => {
 
     const me = await inject('GET', '/api/v1/services/providers/me', undefined, p.token);
     expect(me.json().data.certified).toBe(false);
-    expect(me.json().data.selfSkilled).toBe(true);
+    // [REVIEW-F #2053 S4-2] the electrician's trade requires the GEI licence, so it is never "Self-skilled": with no
+    // person's check of that licence on record here, the line reads "No trade credential shown".
+    expect(me.json().data.selfSkilled).toBe(false);
+    expect(me.json().data.licenceCheckedOn).toBeNull();
   });
 
-  it('binds credentials to the canonical current trade and rejects a mismatched GEI claim', async () => {
+  it('binds credentials to the canonical current trade and refuses a GEI claim from any trade', async () => {
     const plumber = await makeVerifiedProvider('plumber');
     const mismatch = await inject('POST', '/api/v1/services/providers/qualifications', {
       type: 'GEI_LICENCE',
       referenceNumber: 'GEI-PLUMBER-1',
     }, plumber.token);
     expect(mismatch.statusCode).toBe(400);
-    expect(mismatch.json().error.code).toBe('QUALIFICATION_TRADE_MISMATCH');
+    expect(mismatch.json().error.code).toBe('QUALIFICATION_RETIRED');
 
     const pending = await inject('POST', '/api/v1/services/providers/qualifications', {
       type: 'CVQ',
@@ -469,28 +491,100 @@ describe('Services — risk-tiered browse', () => {
       .toBe(400);
 
     // A held trade and its alias cannot enter the browse/cursor population.
-    for (const trade of ['tutor', 'tutoring']) {
+    for (const trade of ['lawyer', 'attorney']) {
       const held = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
       expect(held.statusCode).toBe(409);
       expect(held.json().error.code).toBe('SERVICE_CATEGORY_UNAVAILABLE');
     }
   });
 
-  it('marks high-risk trades and recommends a licensed provider', async () => {
+  // [R7 · GUARDRAILS §7(4) · owner 15 Oct 2026] The browse page says only what a person on our team checked: the ID and
+  // the current police clearance every listed provider needs, and a licence only with the date a person checked it.
+  // Never "police-cleared" or "background-checked", never a promise of "licensed (Certified)" providers.
+  const HIGH_RISK_GUIDANCE = 'Higher-risk work — every provider here has their ID and a current police clearance on file, checked by a person on our team. A licence shows on a provider only after a person on our team checked it, and those providers are listed first.';
+  const LOW_RISK_GUIDANCE = 'Every provider here has their ID and a current police clearance on file, checked by a person on our team — choose by ratings and reviews.';
+
+  it('marks high-risk trades, says only what a person checked, and dates the licence check', async () => {
     const p = await makeVerifiedProvider('electrician');
-    const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-90011' }, p.token);
+    // [ROLE-DOCS] a CVQ: a GEI licence is the electrician's required document, never a qualification
+    const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'CVQ-90011' }, p.token);
+    const checkedAt = new Date('2026-10-12T15:30:00.000Z');
     await app.prisma.serviceQualification.update({
       where: { id: submitted.json().data.id },
-      data: { status: 'VERIFIED', verifiedAt: new Date() },
+      data: { status: 'VERIFIED', verifiedAt: checkedAt },
     }); // trusted-review authority is emulated directly; applicants cannot do this
 
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const res = await inject('GET', '/api/v1/services/providers?trade=electrician', undefined, customer.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.riskTier).toBe('HIGH');
-    expect(res.json().data.guidance).toMatch(/licensed|certified/i);
+    expect(res.json().data.guidance).toBe(HIGH_RISK_GUIDANCE);
+    expect(res.json().data.guidance).not.toMatch(/police-cleared|background|licensed \(Certified\)/i);
     expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
     expect(res.json().data.providers[0].certified).toBe(true); // licensed listed first
+    // The licence label carries the day a person checked it ("licence on file, checked on [date]").
+    expect(res.json().data.providers[0].licenceCheckedOn).toBe(checkedAt.toISOString());
+  });
+
+  it('a low-risk trade says the same checked facts, and a provider with no checked licence carries no licence date', async () => {
+    await makeVerifiedProvider('cleaner');
+    const res = await inject('GET', '/api/v1/services/providers?trade=cleaner');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.riskTier).toBe('LOW');
+    expect(res.json().data.guidance).toBe(LOW_RISK_GUIDANCE);
+    expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
+    for (const row of res.json().data.providers) expect(row.licenceCheckedOn).toBeNull();
+  });
+
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The licence line also comes from the trade's REQUIRED licence (the GEI licence
+  // of an electrician or a solar installer): "Licence on file, checked on [date]" with the day a PERSON approved it.
+  // An engine's approval (kyc:auto) still lets the provider work (the gate reads the record) but is never shown as a
+  // licence a person checked (GUARDRAILS §7(4)). [REVIEW-F #2053 S4-2] A trade that REQUIRES a licence is never
+  // "Self-skilled" either: an engine-approved licence reads "No trade credential shown" (selfSkilled false, certified
+  // false). [REVIEW-G #2053 S4-2] The approver must be a user of Swift: a marker outside the engine pattern
+  // ('review-pack-v1') is no person. [REVIEW-G #2053 S4-1] The stored selfSkilled column follows the same rule.
+  it('[ROLE-DOCS] a solar installer works only with a GEI licence, and the licence a person approved shows with its date', async () => {
+    const trade = 'solar_generator_inverter_installer';
+    const reviewer = await makeUserWithSession(['ADMIN'], 'ADMIN');
+    const checkedAt = new Date('2026-10-20T14:00:00.000Z');
+    const licensed = async (reviewedBy: string, reviewedAt: Date) => {
+      const u = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(await providerChecklist(app.prisma, u.userId)).toEqual(['national_id', 'police_clearance', 'gei_electrical_licence']);
+      await approveProviderDocs(u.userId);
+      const before = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(before.json().data.isVerified).toBe(false); // no licence, no work
+      await app.prisma.verificationDocument.create({
+        data: { userId: u.userId, role: 'CUSTOMER', docType: 'gei_electrical_licence', fileUrl: 'storage://t/gei.jpg', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1', reviewedBy, reviewedAt },
+      });
+      const after = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(after.json().data.isVerified).toBe(true);
+      return { ...u, providerId: after.json().data.id as string };
+    };
+    const byPerson = await licensed(reviewer.userId, checkedAt);
+    const byEngine = await licensed('kyc:auto', new Date('2026-10-21T09:00:00.000Z'));
+    const byPack = await licensed('review-pack-v1', new Date('2026-10-21T10:00:00.000Z'));
+
+    const res = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.riskTier).toBe('HIGH');
+    const rows = res.json().data.providers as Array<{ id: string; certified: boolean; selfSkilled: boolean; licenceCheckedOn: string | null }>;
+    expect(rows.find((r) => r.id === byPerson.providerId)).toMatchObject({ certified: true, selfSkilled: false, licenceCheckedOn: checkedAt.toISOString() });
+    expect(rows.find((r) => r.id === byEngine.providerId)).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    expect(rows.find((r) => r.id === byPack.providerId)).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    expect(rows[0]!.id).toBe(byPerson.providerId); // a licence a person checked is listed first
+
+    const me = await inject('GET', '/api/v1/services/providers/me', undefined, byPerson.token);
+    expect(me.json().data).toMatchObject({ certified: true, selfSkilled: false });
+    expect(me.json().data.licenceCheckedOn).toBe(checkedAt.toISOString());
+    const engineMe = await inject('GET', '/api/v1/services/providers/me', undefined, byEngine.token);
+    expect(engineMe.json().data).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    const packMe = await inject('GET', '/api/v1/services/providers/me', undefined, byPack.token);
+    expect(packMe.json().data).toMatchObject({ certified: false, selfSkilled: false, licenceCheckedOn: null });
+    // the stored projection (read by the data export) says the same
+    for (const p of [byPerson, byEngine, byPack]) {
+      expect((await app.prisma.serviceProvider.findUnique({ where: { id: p.providerId } }))!.selfSkilled, p.providerId).toBe(false);
+    }
   });
 
   it('the verified-first promise holds mechanically: unverified never list, a CLAIM is not a badge, real certs outrank ratings', async () => {

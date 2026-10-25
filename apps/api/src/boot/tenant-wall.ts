@@ -4,6 +4,7 @@ import {
   tenantPolicyContractGaps, type RlsAttestation,
 } from '../lib/rls-attestation';
 import { rlsAttestationGauge } from '../plugins/observability';
+import { assertOwnerWall, ownerWallLine, ownerWallRefusal, readOwnerWallFacts } from '../lib/owner-rls';
 
 type EnvLike = Record<string, string | undefined>;
 interface BootLog {
@@ -30,5 +31,9 @@ export async function attestTenantWallAtBoot(db: PrismaClient, log: BootLog, env
   log[gaps.length === 0 ? 'info' : 'warn']({ contract, gaps }, `tenant policy contract v${contract.version}: ${gaps.length === 0 ? 'holds' : `${gaps.length} gap(s)`}`);
   assertTenantPolicyContract(contract, env);
   assertTenantWall(rls, await db.tenant.count({ where: { isActive: true } }), env);
+  // [item 20] The owner wall: the switch and the database must agree (refused in production).
+  const owner = await readOwnerWallFacts(db);
+  log[ownerWallRefusal(owner, env) ? 'warn' : 'info']({ owner }, ownerWallLine(owner, env));
+  assertOwnerWall(owner, env);
   return rls;
 }

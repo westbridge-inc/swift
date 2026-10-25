@@ -47,13 +47,16 @@ const TAXI_MOVER_PHONE = `+${runBase + 6}`;
 const BICYCLE_MOVER_PHONE = `+${runBase + 7}`;
 const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
+const CONSENT_ID_PHONE = `+${runBase + 10}`;
+const CONSENT_DOC_PHONE = `+${runBase + 11}`;
+const CONSENT_ID2_PHONE = `+${runBase + 12}`;
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE, CONSENT_ID2_PHONE];
 
 // [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
-// documents; the licence is their photo ID, so the national ID — and, for every mover, the police
-// clearance — are OPTIONAL: accepted for upload, never a gate.
+// documents; the licence is their photo ID. [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] A
+// delivery rider is offered nothing optional any more: no second ID, no police clearance (taxi drivers only).
 const MOVER_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
-const MOVER_OPTIONAL_DOCS = ['national_id', 'police_clearance'];
+const MOVER_OPTIONAL_DOCS: string[] = [];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -293,7 +296,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
     const doc = await app.prisma.verificationDocument.findFirstOrThrow({
-      where: { userId: moverUserId, docType: 'national_id', status: 'PENDING' },
+      where: { userId: moverUserId, docType: 'drivers_licence', status: 'PENDING' },
     });
     rejectedDocId = doc.id;
 
@@ -318,8 +321,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   it('resubmission after rejection creates a fresh PENDING document', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'national_id',
-      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'national_id_v2'),
+      docType: 'drivers_licence',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'drivers_licence_v2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -360,7 +363,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   it('an approved document cannot be submitted again', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'national_id',
+      docType: 'drivers_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'dupe'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -680,13 +683,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity only — no vehicle docs; police clearance optional', async () => {
+  it('asks a bicycle courier for identity only — no vehicle docs, nothing optional', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required;
-    // the police clearance is optional for every mover. The vehicle documents scale away.
+    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required.
+    // [ROLE-DOCS · owner 21 Oct 2026] a delivery rider is not offered a police clearance (taxi drivers only).
     expect(data.checklist).toEqual(['national_id']);
-    expect(data.optional).toEqual(['police_clearance']);
+    expect(data.optional).toEqual([]);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');
@@ -727,6 +730,8 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const u = await signup(FACE_MATCH_PHONE, 'MOVER');
     faceToken = u.tokens.accessToken;
     faceUserId = u.user.id;
+    // [ROLE-DOCS · owner 21 Oct 2026] only a bicycle rider sends a national ID now (a licence holder is not asked)
+    await app.prisma.rider.create({ data: { userId: faceUserId, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } });
   });
 
   it('refuses an ID submission when no profile selfie exists', async () => {
@@ -1164,5 +1169,89 @@ describe('[A-19] the reviewer can see what they are asked to cross-check', () =>
       const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
       expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [R17 · legal research D2/B1/G4, in-app ¶15] The tick before an upload is recorded in the consent ledger,
+// anchored to the tick's exact words, only when the client says it showed it (website, phone build 12). Builds
+// 9-11 send consent: true with no tick: their document is accepted as today and no ledger row is fabricated.
+// ---------------------------------------------------------------------------
+describe('[R17] upload consent ticks are recorded in the consent ledger', () => {
+  const consentRows = (userId: string, documentType: string) => app.prisma.consentRecord.findMany({
+    where: { subjectId: userId, documentType }, select: { documentVersion: true, action: true, subjectType: true, evidence: true },
+  });
+
+  it('a partner document sent with the tick writes a document_processing_consent row; one without writes none; a wrong tick is refused', async () => {
+    const mover = await signup(CONSENT_DOC_PHONE, 'MOVER');
+    const moverUserId = mover.user.id as string;
+    const moverToken = mover.tokens.accessToken as string;
+    const before = (await consentRows(moverUserId, 'document_processing_consent')).length;
+    const plain = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-plain'), consent: true, privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(plain.statusCode, plain.body).toBe(201);
+    expect(await consentRows(moverUserId, 'document_processing_consent')).toHaveLength(before);
+
+    const wrong = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-wrong'), consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
+    }, moverToken);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('CONSENT_TICK_MISMATCH');
+
+    const ticked = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-ticked'), consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1',
+    }, moverToken);
+    expect(ticked.statusCode, ticked.body).toBe(201);
+    const rows = await consentRows(moverUserId, 'document_processing_consent');
+    expect(rows).toHaveLength(before + 1);
+    expect(rows[rows.length - 1]).toMatchObject({ documentVersion: 'v1', action: 'granted', subjectType: 'driver', evidence: { control: 'upload_consent_checkbox', docType: MOVER_DOCS[0] } });
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'document_processing_consent', version: 'v1', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.');
+  });
+
+  it('a customer ID sent with the tick writes a customer_id_consent row (the in-app ¶15 words)', async () => {
+    const customer = await signup(CONSENT_ID_PHONE, 'CUSTOMER');
+    const res = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
+    }, customer.tokens.accessToken);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
+      expect.objectContaining({ documentVersion: 'v1', action: 'granted', subjectType: 'customer' }),
+    ]);
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v1', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.');
+  });
+
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] An ID no longer unlocks taxi rides or larger orders, so
+  // the current app shows new words under their own version (v2); builds that show the v1 words keep sending v1
+  // (the case above), and each tick stays anchored to the words its app showed.
+  it('a customer ID sent with the v2 tick writes a v2 customer_id_consent row whose words promise no unlock', async () => {
+    const customer = await signup(CONSENT_ID2_PHONE, 'CUSTOMER');
+    const res = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id-v2'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v2',
+    }, customer.tokens.accessToken);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
+      expect.objectContaining({ documentVersion: 'v2', action: 'granted', subjectType: 'customer' }),
+    ]);
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v2', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo with my account, as the Privacy Policy explains.');
+    expect(doc.renderedText).not.toMatch(/unlock|taxi|larger orders/i);
+    // A document tick is still not a customer-ID tick, and a customer-ID tick is not a document tick.
+    const wrong = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id-v2-wrong'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1',
+    }, customer.tokens.accessToken);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('CONSENT_TICK_MISMATCH');
   });
 });

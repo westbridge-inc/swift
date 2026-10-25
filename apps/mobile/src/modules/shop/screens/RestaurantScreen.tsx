@@ -12,11 +12,14 @@ import { requestAuthContinuation } from '../../../navigation/authContinuation';
 import { distanceLabel } from '../../../lib/geo';
 import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
 import { forgivingFilter } from '../../../lib/forgivingSearch';
-import { itemPhoto, vendorPhoto } from '../../../lib/images';
+import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
+import { SellerInfo } from '../../../components/SellerInfo';
+import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
+import { STORE_PICKS_TITLE } from '../../../lib/storePick';
 import {
   AddMorph,
   CartBar,
@@ -25,6 +28,7 @@ import {
   CircleChip,
   ErrorState,
   FoodCard,
+  Header,
   HeartBadge,
   IconChip,
   LoadingBlock,
@@ -179,9 +183,12 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             padding: space.md,
           }}
         >
+          {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+              beside the tile; squeezed into 64pt it broke across lines. */}
           <Photo
             uri={itemPhoto(item)}
             label={item.name}
+            showLabel={false}
             style={{ width: 64, height: 64, borderRadius: radius.md }}
             contentFit="cover"
           />
@@ -213,6 +220,16 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
 // Kit 14–20: cover hero + floating chips, white sheet w/ name + info strip,
 // promos row, Recommended/Best-seller rails, then the full menu by category.
 export function RestaurantScreen() {
+  const route = useRoute<any>();
+  // [UI-SWEEP U10 S3-1] A store link or QR goes back to a store page already
+  // in the stack (navigate + pop) and hands the SAME mounted page the new
+  // store. The aisle, menu section, search and open sheets below belong to
+  // ONE store: a new store id is a new page, so store A's menu section can
+  // never empty store B's menu and A's report sheet can never file against B.
+  return <RestaurantStore key={route.params?.vendorId ?? ''} />;
+}
+
+function RestaurantStore() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
@@ -292,7 +309,9 @@ export function RestaurantScreen() {
 
   if (vendor.isLoading) {
     return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <LoadingBlock />
       </View>
     );
@@ -300,6 +319,8 @@ export function RestaurantScreen() {
   if (vendor.isError || !v) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => vendor.refetch()} />
       </View>
     );
@@ -347,7 +368,7 @@ export function RestaurantScreen() {
             colour; nothing here tints the image. */}
         <View>
           <Photo
-            uri={vendorPhoto(v)}
+            uri={vendorPhoto(v, HERO_PHOTO_WIDTH)}
             label={v.name}
             // The store's name is set ON this photo, in the title below — so
             // a store with no cover photo must not print it a second time in
@@ -420,7 +441,7 @@ export function RestaurantScreen() {
                 size={44}
                 active={!!v.isFavorite}
                 onPress={() =>
-                  isAuthenticated ? toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
+                  isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
                 }
               />
               <CircleChip
@@ -666,10 +687,10 @@ export function RestaurantScreen() {
             </>
           ) : (
             <>
-          {/* Recommended rail */}
+          {/* The store's own picks (its isPopular tick), named as such: never "Recommended for you". */}
           {recommended.length > 0 ? (
             <>
-              <SectionHeader title="Recommended for you" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
+              <SectionHeader title={STORE_PICKS_TITLE} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -723,7 +744,7 @@ export function RestaurantScreen() {
             .map((cat: any) =>
               (cat.items?.length ?? 0) > 0 ? (
                 <View key={cat.id}>
-                  <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <SectionPhotoHeader title={cat.name} imageUrl={cat.imageUrl} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
                   <View
                     style={{
                       marginHorizontal: GUTTER,
@@ -778,6 +799,9 @@ export function RestaurantScreen() {
               This store hasn’t published a menu yet.
             </T>
           ) : null}
+
+          {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
 

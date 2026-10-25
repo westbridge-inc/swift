@@ -14,6 +14,14 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 
+/** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
+ *  `failed_payment_<outcome>` when a cash order fails at the door). */
+const STRIKE_REASON: Record<string, string> = {
+  failed_payment_no_show: 'Cash order: nobody at the door',
+  failed_payment_refused: 'Cash order: refused at the door',
+  failed_payment_short_payment: 'Cash order: paid short',
+};
+
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-3] One person.
 //
@@ -108,9 +116,9 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           {name.charAt(0).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1 basis-56">
-          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+          <h2 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
             <Truncate text={name} lines={2} focusable />
-          </h1>
+          </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <StatusBadge group="UserStatus" value={u.status} />
             {(u.roles ?? []).map((r: string) => <span key={r} className="mc-badge">{label('UserRole', r)}</span>)}
@@ -157,7 +165,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
                 {u.strikes.map((s: { id: string; reason: string; createdAt: string }) => (
                   <li key={s.id} className="mc-doc mc-doc-bad">
                     <span className="min-w-0 flex-1">
-                      <span className="block font-semibold">{String(s.reason).replaceAll('_', ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase())}</span>
+                      <span className="block font-semibold">{STRIKE_REASON[s.reason] ?? 'Strike'}</span>
                       <span className="block mc-muted text-xs">{when(s.createdAt, true)}</span>
                     </span>
                   </li>

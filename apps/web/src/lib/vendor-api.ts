@@ -95,6 +95,8 @@ export interface VendorOrder {
   mmgClaimMismatchAt?: string | null;
   placedAt: string;
   appointmentSlot?: string | null;
+  /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
+  respondBy?: string | null;
   acceptedAt?: string | null;
   preparingAt?: string | null;
   readyAt?: string | null;
@@ -102,6 +104,16 @@ export interface VendorOrder {
   totalAmount: number | null;
   /** `Order.subtotalCustomer` — `Decimal(12,2)`; coerced by the seam below. */
   subtotalCustomer: number | null;
+  /** [U25] The money card's lines — `Decimal`s, coerced by the seam below. */
+  subtotalBase?: number | null;
+  deliveryFee?: number | null;
+  tipAmount?: number | null;
+  discount?: number | null;
+  /** [U25] Straight off the order record: why and when it was cancelled. */
+  cancellationReason?: string | null;
+  cancelledAt?: string | null;
+  /** [AF-MOB-006] Detail route only: the order's recovery case (lib/vendor-order-view recoveryView). */
+  custodyRecovery?: unknown;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   /** `Order.deliveryInstructions` — the order-level note the customer typed. */
@@ -109,7 +121,15 @@ export interface VendorOrder {
   estimatedPrepTime?: number | null;
   items: OrderLine[];
   customer?: { id: string; firstName: string | null; lastName: string | null; phone?: string | null; avatar?: string | null } | null;
-  rider?: { user?: { firstName: string | null; lastName: string | null; phone: string | null } | null } | null;
+  rider?: {
+    user?: { firstName: string | null; lastName: string | null; phone: string | null } | null;
+    /** [O-2] The vehicle the store checks at the hand-over, and the rider's photo (a resolved address or null). */
+    vehicleType?: string | null; vehicleMake?: string | null; vehicleModel?: string | null; vehicleColor?: string | null; licensePlate?: string | null; photoUrl?: string | null;
+  } | null;
+  /** [O-2] false when the store's "Ask for the pickup code" is off (absent on an older server = the code is needed). */
+  pickupCodeRequired?: boolean;
+  /** [O-2] When the store tapped "Handed to rider" (absent on an older server, which has no such step). */
+  handedToRiderAt?: string | null;
   /**
    * The two routes select DIFFERENT vendor columns: the board sends
    * `{ id, name, selfDeliveryEnabled }`, the detail sends
@@ -121,6 +141,10 @@ export interface VendorOrder {
   /** Row 52: true when the caller's role at THIS order's store (owner or
    *  manager) may confirm an MMG payment. Both routes send it. */
   canConfirmPayment?: boolean;
+  /** [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes of
+   *  acceptance cancels: when (ISO) and the server's line for it. Null on every other order. */
+  mmgPayBy?: string | null;
+  mmgPayByLine?: string | null;
 
   // ── Never sent — kept as tombstones so the lie cannot come back ──────────
   /** PHANTOM. There is no `total` column; the order total is `totalAmount`. */
@@ -184,6 +208,10 @@ export function normalizeVendorOrder(raw: unknown): VendorOrder {
     ...(order as unknown as VendorOrder),
     totalAmount: toAmount(order['totalAmount']),
     subtotalCustomer: toAmount(order['subtotalCustomer']),
+    subtotalBase: toAmount(order['subtotalBase']),
+    deliveryFee: toAmount(order['deliveryFee']),
+    tipAmount: toAmount(order['tipAmount']),
+    discount: toAmount(order['discount']),
     // Both routes `include: { items: true }`, so this is always an array; the
     // guard only stops a malformed payload from crashing the whole board.
     items: Array.isArray(order['items']) ? order['items'].map(normalizeOrderLine) : [],
@@ -202,6 +230,17 @@ function normalizeCatalogItem(raw: unknown): CatalogItem {
 export const getStores = () =>
   apiFetch(`${V}/stores`).then((r) => r.data as { stores: Store[]; selectedId: string; myRole: string });
 export const getProfile = () => apiFetch(`${V}/profile`).then((r) => r.data);
+// [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the API scans it and redraws
+// it without camera data, then serves it to customers), or taken down. Store managers only.
+type StorePhotoRow = { id: string; logoUrl: string | null; coverImageUrl: string | null };
+export const uploadStorePhoto = (slot: 'logo' | 'cover', file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch(`${V}/profile/${slot}`, { method: 'POST', body: form }).then((r) => r.data as StorePhotoRow);
+};
+export const removeStorePhoto = (slot: 'logo' | 'cover') =>
+  apiFetch(`${V}/profile/${slot}`, { method: 'DELETE' }).then((r) => r.data as StorePhotoRow);
+
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
 // NB: these two routes are registered as `/vendor/toggle-*` UNDER the
@@ -252,9 +291,13 @@ export const setFulfillmentMode = (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_
  *  already recorded against another order. */
 export const confirmPayment = (id: string, reference: string) =>
   apiFetch(`${V}/orders/${id}/confirm-payment`, { method: 'POST', body: JSON.stringify({ reference }) });
-export const completePickup = (id: string, code: string) =>
+// [STORE-DASH · O-2] With the store's pickup code off, no code: JSON drops the undefined key, so the body is {}.
+export const completePickup = (id: string, code?: string) =>
   apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
+/** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
+export const confirmReturnReceived = (id: string) =>
+  apiFetch(`${V}/orders/${id}/recovery/return-received`, { method: 'POST', body: '{}' });
 
 // ── Shelf picking (grocery/goods) ────────────────────────────────────────────
 export const setPicked = (orderId: string, lineId: string, picked: boolean) =>
@@ -310,11 +353,18 @@ export const confirmImport = (csv: string) =>
       imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }>;
       /** [GUARDRAILS §8] Imported rows a banned word is holding for a quick check (absent on older servers). */
       waitingForCheck?: Array<{ row: number; name: string }>; waitingForCheckCount?: number;
+      /** [IMAGES-E2E PR4] Imported rows whose photo address was not used (absent on older servers). */
+      notes?: Array<{ row: number; note: string }>; notesCount?: number;
     },
   );
 
 // ── Analytics + money ────────────────────────────────────────────────────────
 export const getOverview = () => apiFetch(`${V}/analytics/overview`).then((r) => r.data);
+// The app's own reads for the board's revenue pulse and Manage tiles
+// (apps/mobile/src/services/api.ts vendorApi.analyticsRevenue / analyticsOps / qr).
+export const getRevenue = (days = 14) => apiFetch(`${V}/analytics/revenue?days=${days}`).then((r) => r.data);
+export const getOps = (days = 30) => apiFetch(`${V}/analytics/ops?days=${days}`).then((r) => r.data as { avgAcceptMinutes?: number | null } & Record<string, unknown>);
+export const getQr = () => apiFetch(`${V}/qr`).then((r) => r.data as { shortUrl?: string | null; status?: string | null } & Record<string, unknown>);
 export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((r) => r.data);
 // [W-26] A settlement confirmation carries the amount the confirmer says
 // changed hands. The server refuses any figure that is not the ledger's own, so

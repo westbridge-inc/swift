@@ -1,4 +1,8 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
+import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
+import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -12,7 +16,7 @@ import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentenc
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
 import { noteLiveEta } from '../eta/promise';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness, dispatchHoldExpired } from '../dispatch/dispatch-trigger';
@@ -218,6 +222,14 @@ const ARRIVAL_TARGET: Record<string, 'pickup' | 'dropoff'> = {
   arrived: 'dropoff',
 };
 
+/** [O-2 · owner 22 Oct 2026] The rungs whose status-log note records the rider's fix and distance:
+ *  the two arrivals, and "Picked up" (how far from the store the rider said they collected it).
+ *  EVIDENCE ONLY, like the arrivals: nothing is refused, a rider without a fix is never stranded. */
+const POSITION_EVIDENCE_TARGET: Record<string, 'pickup' | 'dropoff'> = {
+  ...ARRIVAL_TARGET,
+  'picked-up': 'pickup',
+};
+
 /** How old a fix may be and still describe where someone is standing. Beyond
  *  this the age is recorded instead of a distance — an hour-old ping turned
  *  into "12 m from the door" is a fabricated measurement, and a fabricated one
@@ -246,7 +258,7 @@ type ArrivalRider = { currentLat: number | null; currentLng: number | null; last
  * lacks a distance is indistinguishable from one written before this existed.
  */
 function arrivalEvidence(slug: string, order: ArrivalOrder, rider: ArrivalRider, now = new Date()): string | null {
-  const target = ARRIVAL_TARGET[slug];
+  const target = POSITION_EVIDENCE_TARGET[slug];
   if (!target) return null;
 
   // Pickup point: the order's own coordinates, falling back to the vendor's.
@@ -283,6 +295,9 @@ const startOfMonth = startOfMonthGY;
 // ---------------------------------------------------------------------------
 
 export async function riderRoutes(app: FastifyInstance) {
+  // [PERF item 3] Job-step taps answer without waiting for the customer's push (lib/push-after-response);
+  // shutdown waits for those pushes under the same cleanup deadline as in-flight requests.
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const floatService = new FloatService(app.prisma);
   const verification = new VerificationService(
@@ -317,7 +332,7 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/handover — the golden rule at the door.
    *  'paid' completes the delivery; 'no_show'/'refused' fails it and files the
    *  evidence; a strike and an automatic guarantee follow only a complete bundle. */
-  app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/orders/:id/handover', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
     // [MASTER-008] The order is this rider's BEFORE anything is replayed: a
@@ -466,6 +481,8 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
@@ -478,8 +495,8 @@ export async function riderRoutes(app: FastifyInstance) {
         stats: {
           totalDeliveries: rider.totalDeliveries,
           totalCourierJobs: rider.totalCourierJobs,
-          averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-          totalRatings: rider.totalRatings,
+          // [COORD 18 Oct, option S] from whole groups of 5 only (rating-groups.ts).
+          ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
           completionRate: rider.completionRate ? Number(rider.completionRate) : null,
           todayEarnings: Number(todayEarnings._sum.amount ?? 0),
           todayDeliveries,
@@ -503,19 +520,21 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    const scan = await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
       folder: `vehicles/${rider.id}`,
     });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'vehicle-photo', fileKey: url, buffer, storage: getStorageProvider() });
 
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },
       data: { vehiclePhotoUrl: url },
       select: { id: true, vehiclePhotoUrl: true },
     });
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   /** PUT /profile — Update vehicle info, profile photo, rider type. */
@@ -604,7 +623,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return updated;
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   // =========================================================================
@@ -1222,10 +1241,11 @@ export async function riderRoutes(app: FastifyInstance) {
         addressLine1: true, city: true,
       },
     },
+    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
     customer: {
       select: {
         id: true,
-        firstName: true, lastName: true, phone: true,
+        firstName: true, phone: true,
       },
     },
     items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
@@ -1307,7 +1327,7 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** POST /orders/:id/accept — Claim an available order. */
-  app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/orders/:id/accept', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
     // price. An older app's `fare` is read (never refused) and ignored: the
@@ -1502,7 +1522,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *   PUT /orders/:id/arrived
    */
   for (const [slug, { from, to, note }] of Object.entries(STATUS_TRANSITIONS)) {
-    app.put(`/orders/:id/${slug}`, { preHandler: [app.authenticate] }, async (request) => {
+    app.put(`/orders/:id/${slug}`, { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
       const { id } = request.params as { id: string };
       const rider = await getRider(app, request.user.userId);
       const order = await getOwnedOrder(app, id, rider.id);
@@ -1535,6 +1555,8 @@ export async function riderRoutes(app: FastifyInstance) {
       // has not set one. What it does is WRITE DOWN what the platform already
       // knew at that moment, so the radius can eventually be chosen from a
       // measured distribution instead of guessed.
+      // [O-2 · owner 22 Oct 2026] "Picked up" records the same evidence (the
+      // distance to the store), and is never refused for it either.
       //
       // The fix is the one already on the rider row — the same persisted fix
       // dispatch reads — so no client sends anything and no rider is stranded
@@ -1583,7 +1605,7 @@ export async function riderRoutes(app: FastifyInstance) {
   }
 
   /** PUT /orders/:id/delivered — Final step: complete delivery, create earnings, free rider. */
-  app.put('/orders/:id/delivered', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/orders/:id/delivered', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const { ridePin, handoverVersion } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
@@ -2228,6 +2250,8 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await payInfo(app.prisma, sub)),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
+        // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+        feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, sub.id),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)
@@ -2284,8 +2308,7 @@ export async function riderRoutes(app: FastifyInstance) {
         currentOrderId: rider.currentOrderId,
         totalDeliveries: rider.totalDeliveries,
         totalCourierJobs: rider.totalCourierJobs,
-        averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-        totalRatings: rider.totalRatings,
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         completionRate: rider.completionRate ? Number(rider.completionRate) : null,
         onlineHoursToday,
         todayDeliveries,

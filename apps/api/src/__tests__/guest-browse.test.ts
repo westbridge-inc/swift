@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { homeCacheKey } from '../modules/user/home-cache';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // Browsing is open to everyone; only ordering/personal data needs an account.
 // Guests (no token) must see Home / vendors / menus / reviews, but be 401'd on
@@ -82,7 +83,7 @@ describe('guest browsing (no account)', () => {
     const rnd = 592_700_000_000 + Math.floor(Math.random() * 280_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
     const user = await app.prisma.user.create({ data: { phone: `+${rnd}`, firstName: 'Empty', lastName: 'Store', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
     const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
-    const v = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Empty Store ${nanoid(6)}`, slug: `empty-${nanoid(8).toLowerCase()}`, vendorType: 'STORE', phone: `+${rnd + 1}`, addressLine1: '1 Empty', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true } });
+    const v = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Empty Store ${wordFreeTag(8)}`, slug: `empty-${nanoid(8).toLowerCase()}`, vendorType: 'STORE', phone: `+${rnd + 1}`, addressLine1: '1 Empty', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true } });
     const inBody = (body: unknown) => JSON.stringify(body).includes(v.id);
     try {
       await app.redis.del(homeCacheKey(undefined, undefined, undefined));
@@ -121,7 +122,7 @@ describe('guest browsing (no account)', () => {
     await app.prisma.tenant.create({ data: { id: dead, name: 'Dead operator', slug: dead, isActive: false } });
     const owner = await app.prisma.user.create({
       data: {
-        phone: `+5926360${String(Math.floor(Math.random() * 9000) + 1000)}`,
+        phone: testPhone(),
         firstName: 'Dead', lastName: 'Owner', tenantId: dead,
         roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never, isPhoneVerified: true,
       },

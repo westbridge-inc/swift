@@ -15,7 +15,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider, SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { customerIdCheck, ON_FILE_REVIEWER } from '../modules/verification/customer-id';
-import { assertL2 } from '../modules/rides/rides.service';
+import * as ridesService from '../modules/rides/rides.service';
 import { FloatService } from '../modules/dispatch/float.service';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
@@ -167,28 +167,59 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     const told = await notices(c.id);
     expect(told.map((n) => n.title)).toContain('Your ID is on file');
     for (const n of told) expect(`${n.title} ${n.body}`).not.toMatch(/verified/i);
-    // Taxi rides also need the profile photo (rides.service SELFIE_REQUIRED): the notice never says
-    // rides are unlocked by the ID alone, nor promises orders "of any size".
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Taxi rides and bigger orders no longer need the ID, so
+    // the notice claims no unlock: it says where the ID is kept. [16 Oct] It never asks for a photo, and never
+    // promises orders "of any size".
     const onFile = told.find((n) => n.title === 'Your ID is on file');
-    expect(onFile?.body).toMatch(/Taxi rides also need your profile photo/);
-    expect(onFile?.body).not.toMatch(/any size|Taxi rides and/);
+    expect(onFile?.body).toBe('Thanks — it is kept with your account, as the Privacy Policy explains.');
+    expect(onFile?.body).not.toMatch(/unlock|taxi|bigger orders|photo|selfie|any size/i);
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('ON_FILE');
   });
 
   // Store builds 9 and 10 (iPhone 9.1, release 14a8cf3b) send exactly { idDocumentUrl, selfieUrl,
   // consent: true, privacyNoticeVersion: 'v1' } after POST /verification/upload; the build reads only
   // success. That payload must keep working (the build under review talks to staging).
-  it('store builds 9 and 10 still send a selfie: their own selfie is accepted (never compared); someone else’s is refused', async () => {
-    const c = await customer();
-    const other = await customer();
-    const foreign = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(other.token, readable()) });
-    expect(foreign.statusCode).toBe(400);
-    expect(foreign.json().error.code).toBe('VERIFICATION_OBJECT_UNAVAILABLE');
-    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  // [ROLE-DOCS · owner ruling 21 Oct 2026 — a DELIBERATE change] The selfie they send is now DROPPED by the
+  // route before the intake: never compared, stored or linked to the ID (a customer never gives a photo). [REVIEW-F
+  // #2001 S3-1] The upload it names is then ERASED when it is the caller's own (crypto-shred + delete + receipt);
+  // anyone else's is never touched. Either way the payload keeps working.
+  it('store builds 9 and 10 still send a selfie: their own is erased after the intake, anyone else’s is untouched, and the ID goes on file', async () => {
+    for (const whose of ['own', 'foreign'] as const) {
+      const c = await customer();
+      const other = await customer();
+      const selfieUrl = await upload(whose === 'own' ? c.token : other.token, readable());
+      const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+      expect(res.json().data.fileUrl).not.toBe(selfieUrl);
+      // nothing anywhere points at the selfie: no document, record or review case was made from it
+      expect(await app.prisma.verificationDocument.count({ where: { fileUrl: selfieUrl } })).toBe(0);
+      const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: selfieUrl } });
+      if (whose === 'own') {
+        expect([envelope.wrappedDek, envelope.shreddedAt instanceof Date]).toEqual([null, true]);
+        expect(await app.prisma.deletionReceipt.count({ where: { subjectId: c.id, docTypeCode: 'unused_customer_selfie' } })).toBe(1);
+      } else {
+        expect([envelope.wrappedDek === null, envelope.shreddedAt]).toEqual([false, null]);
+      }
+    }
+  });
 
-    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(c.token, readable()) });
+  // [REVIEW-G #2001 S3-1] The erase needs more than "the caller's own upload": nothing else may name it. An old app
+  // that sends one of the person's OWN submitted documents as the "selfie" (their own key, their own envelope) must
+  // never erase that document's file — the intake still succeeds, the document keeps its bytes, no receipt is written.
+  it('an old app naming one of the person’s own submitted documents as the selfie never erases that document', async () => {
+    const c = await customer();
+    const licence = await upload(c.token, readable());
+    const doc = await runWithoutTenant(() => app.prisma.verificationDocument.create({
+      data: { userId: c.id, role: 'DRIVER', docType: 'drivers_licence', fileUrl: licence },
+    }));
+    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: licence });
     expect(res.statusCode, res.body).toBe(201);
     expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+    const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: licence } });
+    expect([envelope.wrappedDek === null, envelope.shreddedAt]).toEqual([false, null]);
+    expect(await app.prisma.deletionReceipt.count({ where: { subjectId: c.id, docTypeCode: 'unused_customer_selfie' } })).toBe(0);
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).fileUrl).toBe(licence);
   });
 
   it('a second ID on an account already on file is refused in plain words', async () => {
@@ -199,12 +230,11 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     expect(again.json().error.message).toBe('Your ID is already on file.');
   });
 
-  it('the taxi L2 gate opens on an ID on file, and its refusal speaks of "on file", not verification', () => {
-    expect(() => assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L2', selfieCapturedAt: new Date() })).not.toThrow();
-    let message = '';
-    try { assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L1', selfieCapturedAt: new Date() }); } catch (e) { message = (e as Error).message; }
-    expect(message).toMatch(/ID on file/);
-    expect(message).not.toMatch(/verif/i);
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] The taxi L2 gate (assertL2, "Rides need your ID on
+  // file first") is gone: a ride needs neither an ID nor a photo (16 Oct). An ID on file is optional and stays.
+  it('the taxi ID gate is gone: rides.service has no L2 gate left to call', () => {
+    expect(Object.keys(ridesService)).not.toContain('assertL2');
+    expect(typeof ridesService.assertRideGates).toBe('function');
   });
 });
 
@@ -286,7 +316,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
   it('PROCESSOR_REFERRED: an engine that reads documents and refers one to a person is not overruled', async () => {
     const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
     const c = await customer();
-    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), undefined, 'v1');
+    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), 'v1');
     expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect(String(((await audit(doc.id)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason)).toContain('PROCESSOR_REFERRED');
@@ -301,7 +331,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
     };
     const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), down);
     const c = await customer();
-    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), undefined, 'v1');
+    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), 'v1');
     expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect(String(((await audit(doc.id)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason)).toContain('CHECKS_UNAVAILABLE');
@@ -324,11 +354,10 @@ describe('(1) an automatic check holds the ID for a person', () => {
     expect(approved.statusCode, approved.body).toBe(200);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('CHECKED');
-    // The person-checked notice is truthful too: bigger orders, and taxi rides need the profile photo.
+    // The person-checked notice is truthful too: no unlock claim (owner 24 Oct 2026), and no photo (owner 16 Oct).
     const checked = (await notices(c.id)).find((n) => n.title === 'Identity verified');
-    expect(checked?.body).toMatch(/A person on our team checked your ID/);
-    expect(checked?.body).toMatch(/Taxi rides also need your profile photo/);
-    expect(checked?.body).not.toMatch(/any size/);
+    expect(checked?.body).toBe('A person on our team checked your ID. It is kept with your account, as the Privacy Policy explains.');
+    expect(checked?.body).not.toMatch(/unlock|taxi|bigger orders|photo|selfie|any size/i);
   });
 });
 
@@ -341,9 +370,11 @@ describe('(1) an admin can withdraw an ID at any time — back to L1', () => {
     expect(revoked.statusCode, revoked.body).toBe(200);
     expect(revoked.json().data.accountTrustLevel).toBe('L1');
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
-    // ...and the taxi gate refuses again (the big-order gate keys on the same L1, orders.test).
-    expect(() => assertL2({ id: c.id, tenantId: 't', countryCode: 'GY', trustLevel: 'L1', selfieCapturedAt: new Date() })).toThrow(/ID on file/);
-    expect((await notices(c.id)).map((n) => n.title)).toContain('Your ID is no longer on file');
+    // [Owner ruling 24 Oct 2026] Back at L1 nothing locks again (no taxi or big-order ID gate), so the notice
+    // promises no lock: it says how to add the ID again if the app asks for it.
+    const gone = (await notices(c.id)).find((n) => n.title === 'Your ID is no longer on file');
+    expect(gone?.body).toBe('Our team withdrew the ID on your account. If the app asks for your ID, add it again and a person will look at it.');
+    expect(gone?.body).not.toMatch(/taxi|ID limit|bigger orders|unlock/i);
     expect(await customerIdCheck(app.prisma, c.id, 'L1')).toBe('NOT_ACCEPTED');
 
     const next = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) });
@@ -545,5 +576,75 @@ describe('partner, driver and rider review is UNCHANGED', () => {
     const held = (await submit(checked.token, { idDocumentUrl: await upload(checked.token, jpeg(400, 300)) })).json().data;
     expect((await admin('PUT', `/api/v1/admin/verification/${held.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
     expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { userId: checked.id } })).floatLimit)).toBe(Number(cfg.floatL2));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S2-29 · KYC-DECISION-ATOMIC] A reviewer's decision commits with everything it owes — the L2
+// promotion, its notice, the audit trail — or none of it does. A fault between those steps never
+// leaves a decided document with no trail and no L2 (whose retry then hits "not pending"), and a
+// notice that fails after the commit never turns a committed, audited decision into an error.
+// ---------------------------------------------------------------------------
+describe('[S2-29] a reviewer decision commits with its effects and its trail, or not at all', () => {
+  const heldId = async (c: { id: string; token: string }) => {
+    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.status).toBe('PENDING');
+    return res.json().data as { id: string };
+  };
+  const docRow = (id: string) => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { status: true } });
+  const trail = async (docId: string, action: string) => (await audit(docId)).filter((a) => a.action === action).length;
+  const approve = (docId: string, documentNumber: string) => admin('PUT', `/api/v1/admin/verification/${docId}/approve`, { documentNumber });
+
+  it('a fault between the decision and the L2 promotion leaves nothing half-done, and the retry decides it once', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const number = typedNumber();
+    const fault = vi.spyOn(FloatService.prototype, 'recomputeForUser').mockRejectedValueOnce(new Error('synthetic fault between the decision and the L2 promotion'));
+    let faulted: Awaited<ReturnType<typeof approve>>;
+    let hit = 0;
+    try { faulted = await approve(doc.id, number); hit = fault.mock.calls.length; } finally { fault.mockRestore(); }
+    expect(hit).toBeGreaterThan(0);
+    expect(faulted.statusCode).toBe(500);
+    // Nothing of the decision committed: still pending, still L1, no trail row, no approval notice.
+    expect(await docRow(doc.id)).toEqual({ status: 'PENDING' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(0);
+    expect((await notices(c.id)).map((n) => n.title)).not.toContain('Document approved');
+    // The reviewer's retry decides it — once, completely.
+    const retried = await approve(doc.id, number);
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'APPROVED' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(1);
+    expect((await notices(c.id)).filter((n) => n.title === 'Document approved')).toHaveLength(1);
+  });
+
+  it('a notice that fails after the approval commits never fails it: decided, L2, one trail row', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const outage = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValue(new Error('synthetic notice outage after commit'));
+    let res: Awaited<ReturnType<typeof approve>>;
+    let attempted = 0;
+    try { res = await approve(doc.id, typedNumber()); attempted = outage.mock.calls.length; } finally { outage.mockRestore(); }
+    expect(attempted).toBeGreaterThan(0);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'APPROVED' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(1);
+  });
+
+  it('a rejection commits with its notice and its trail row: a notice outage never strands it', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const outage = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValue(new Error('synthetic notice outage after commit'));
+    let res: Awaited<ReturnType<typeof approve>>;
+    try {
+      res = await admin('PUT', `/api/v1/admin/verification/${doc.id}/reject`, { reason: 'Synthetic: the picture is not an ID' });
+    } finally { outage.mockRestore(); }
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'REJECTED' });
+    expect(await trail(doc.id, 'REJECT_VERIFICATION_DOC')).toBe(1);
+    expect((await notices(c.id)).filter((n) => n.title === 'Document rejected')).toHaveLength(1);
   });
 });

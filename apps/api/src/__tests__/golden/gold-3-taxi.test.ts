@@ -419,16 +419,28 @@ describe('GOLD-3 · TAXI-01 — ride request + queue', () => {
     expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(1);
   });
 
-  it('an L1 customer is refused on request and on queue join, and nothing is written', async () => {
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] This case used to prove an L1 customer was
+  // refused (403 ID_VERIFICATION_REQUIRED) on both paths with nothing written. A taxi ride no longer needs the
+  // customer's ID on file, so the same account now books, and another L1 account waits in the queue.
+  it('an L1 customer (no ID on file) books on request and joins the queue, never asked for an ID', async () => {
     const l1 = await makeUser('Leo', ['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1' });
     const req = await call('POST', '/api/v1/rides/request', l1.token, TRIP);
-    expect(req.statusCode).toBe(403);
-    expect(req.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    const join = await call('POST', '/api/v1/rides/queue/join', l1.token, TRIP);
-    expect(join.statusCode).toBe(403);
-    expect(join.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    expect(await sys(() => app.prisma.order.count({ where: { customerId: l1.userId } }))).toBe(0);
-    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1.userId } }))).toBe(0);
+    expect(req.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(req.statusCode, req.body).toBe(201);
+    const ride = req.json().data.ride as { id: string };
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: l1.userId, orderType: 'TAXI', status: 'PENDING' } }))).toBe(1);
+    // Nobody is on the map: the passenger withdraws the request, so no later case meets this ride.
+    const cancel = await call('POST', `/api/v1/rides/${ride.id}/cancel`, l1.token, {});
+    expect(cancel.statusCode, cancel.body).toBe(200);
+
+    const l1q = await makeUser('Lea', ['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1' });
+    const join = await call('POST', '/api/v1/rides/queue/join', l1q.token, TRIP);
+    expect(join.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(join.statusCode, join.body).toBe(201);
+    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1q.userId, status: 'WAITING' } }))).toBe(1);
+    const leave = await call('POST', '/api/v1/rides/queue/leave', l1q.token, {});
+    expect(leave.statusCode, leave.body).toBe(200);
+    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1q.userId, status: 'WAITING' } }))).toBe(0);
   });
 });
 

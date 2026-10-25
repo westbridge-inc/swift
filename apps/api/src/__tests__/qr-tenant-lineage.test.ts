@@ -5,6 +5,7 @@ import { QrService } from '../modules/qr/qr.service';
 import { TENANT_LINEAGE_TABLES, tenantLineageDdl } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 grantSuiteCapability('ddl');
 
@@ -80,7 +81,7 @@ beforeAll(async () => {
       tenantId, ownerId: vendorOwner.id, name: `Lineage ${tag}`, slug: `lineage-${RUN}-${tag}`, vendorType: 'RESTAURANT',
       status: 'ACTIVE', isVerified: true, addressLine1: '1 Lineage Road', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15,
-      phone: `+5926${String(Math.floor(Math.random() * 900000) + 100000)}`,
+      phone: testPhone(),
     },
     select: { id: true, slug: true },
   });

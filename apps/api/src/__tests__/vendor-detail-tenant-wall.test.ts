@@ -9,10 +9,11 @@ import { beginRequestTenantContext, runAsSystem } from '../plugins/tenant-contex
 import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { publicRoutes } from '../modules/public/public.routes';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // DL-7 / AX324: real queries and real session authentication, with the same
 // request context boundary as server.ts. No vendor/tenant/auth doubles.
-const run = `dl7-${nanoid(10)}`;
+const run = `dl7-${wordFreeTag(10)}`;
 const production = 'swift-default';
 const tenants = ['REVIEW', 'CRAWLER', 'INACTIVE'] as const;
 type Store = { id: string; slug: string; itemId: string; tenantId: string; oldSlug: string };

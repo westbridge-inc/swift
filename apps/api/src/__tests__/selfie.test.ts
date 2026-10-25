@@ -19,11 +19,12 @@ import { registerPublicUploads } from '../utils/public-uploads';
 import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
-// Profile selfie (master plan §3). Failure paths first: booking a ride and
-// going online refuse a selfie-less account with SELFIE_REQUIRED; ordinary
-// checkout does NOT (E27, owner rule: no selfie merely to browse/order); the
-// upload only accepts real camera images; the stored avatar is publicly
-// served; profile PUT can no longer write avatar.
+// Profile selfie (master plan §3). Failure paths first: going online refuses a
+// selfie-less PARTNER with SELFIE_REQUIRED; a CUSTOMER is never asked for a
+// photo — not to order (E27) and not to book a ride (owner ruling 16 Oct 2026:
+// customers take no photos; taxi needs only the ID on file). The upload only
+// accepts real camera images; the stored avatar is publicly served; profile PUT
+// can no longer write avatar.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -126,6 +127,7 @@ afterAll(async () => {
   if (createdUserIds.length > 0) {
     await app.prisma.cartItem.deleteMany({ where: { cart: { customerId: { in: createdUserIds } } } });
     await app.prisma.cart.deleteMany({ where: { customerId: { in: createdUserIds } } });
+    await app.prisma.rideQueueEntry.deleteMany({ where: { customerId: { in: createdUserIds } } });
     await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
@@ -185,22 +187,48 @@ describe('POST /auth/selfie — the only writer of the public photo', () => {
 });
 
 describe('Transact gates refuse a selfie-less account', () => {
-  it('ride request → 403 SELFIE_REQUIRED; passes once the selfie exists', async () => {
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A ride never needs a photo; and since the owner's
+  // 24 Oct 2026 ruling it needs no ID on file either (the last case below).
+  const rideBody = {
+    pickup: CENTRAL, dropoff: SOUTH,
+    pickupAddress: 'Selfie Street 1', dropoffAddress: 'Selfie Street 2',
+  };
+
+  it('a customer with the ID on file and no photo books a ride, and is never asked for one', async () => {
     const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    // Rides also demand L2 (own coverage in trust-tiers.test.ts) — isolate the selfie gate here.
     await app.prisma.user.update({ where: { id: u.userId }, data: { trustLevel: 'L2' } });
-    const body = {
-      pickup: CENTRAL, dropoff: SOUTH,
-      pickupAddress: 'Selfie Street 1', dropoffAddress: 'Selfie Street 2',
-    };
 
-    const blocked = await inject('POST', '/api/v1/rides/request', body, u.token);
-    expect(blocked.statusCode).toBe(403);
-    expect(blocked.json().error.code).toBe('SELFIE_REQUIRED');
+    const booked = await inject('POST', '/api/v1/rides/request', rideBody, u.token);
+    expect(booked.statusCode, booked.body).toBe(201);
+    expect(booked.body).not.toContain('SELFIE_REQUIRED');
+    // …and nothing captured a photo on the way
+    const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } });
+    expect(after.selfieCapturedAt).toBeNull();
+    expect(after.avatar).toBeNull();
+  });
 
-    await postSelfie(u.token);
-    const allowed = await inject('POST', '/api/v1/rides/request', body, u.token);
-    expect(allowed.statusCode).toBe(201);
+  it('a customer with the ID on file and no photo can wait in the taxi queue', async () => {
+    const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await app.prisma.user.update({ where: { id: u.userId }, data: { trustLevel: 'L2' } });
+
+    const joined = await inject('POST', '/api/v1/rides/queue/join', rideBody, u.token);
+    expect(joined.statusCode, joined.body).toBe(201);
+  });
+
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Neither door any more: a customer with no ID on
+  // file (L1) and no photo books a ride and waits in the queue, asked for neither.
+  it('a customer without the ID on file books and queues — asked for neither an ID nor a photo', async () => {
+    for (const url of ['/api/v1/rides/request', '/api/v1/rides/queue/join']) {
+      // One account per path: a live ride would (rightly) keep the same account out of the queue.
+      const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const res = await inject('POST', url, rideBody, u.token);
+      expect(res.body, url).not.toContain('ID_VERIFICATION_REQUIRED');
+      expect(res.body, url).not.toContain('SELFIE_REQUIRED');
+      expect(res.statusCode, `${url} ${res.body}`).toBe(201);
+      const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } });
+      expect(after.trustLevel, url).toBe('L1');
+      expect(after.selfieCapturedAt, url).toBeNull();
+    }
   });
 
   it('checkout needs no selfie (E27): a selfie-less customer places an ordinary order', async () => {

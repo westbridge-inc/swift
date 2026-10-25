@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -176,6 +177,70 @@ const PUBLISHED: Record<
     driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
     vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
   },
+  // [Owner rulings: identity checks by a person only + face matching off; customers take no photos (16 Oct);
+  // R28] Privacy: no outside identity-verification company and no automated document-reading or face
+  // matching (production refuses both), how partner documents and customer IDs are handled, partners-only
+  // registration selfie, a customer is never shown by photo, "confirmation records"; Terms: the taxi
+  // profile-photo sentence gone. The two agreements' words are unchanged: putting 16 October back
+  // reproduces both 2026-10-16 agreement pins exactly. The date re-pins them.
+  '2026-10-17': {
+    terms: 'd738ef0158cb94f532552ca86ee5720f981503f799fc032f7f7bfdd810ecf96d',
+    privacy: '4dfb9d4e5bff08df9a8f11a9c50a05255f8f2c650f757ad9fe99a220e1465c46',
+    driver_agreement: 'fc950f5bafa0e6f108f2681dd31fb5b0e2d924d72cb47deca842abb3fb72dee0',
+    vendor_agreement: '46876ae2bb41d822b5be2b631aa80c1d40070f036423de247703db1529aeb583',
+  },
+  // [#1614 leftover, COORD 17 Oct] Privacy s.6: a customer's own ID is kept while the account is open and
+  // deleted when the account is deleted (it is not on the partner purge schedule). Nothing else changed:
+  // putting 17 October back and removing that one sentence reproduces all four 2026-10-17 pins exactly.
+  // The date re-pins Terms and the two agreements.
+  '2026-10-18': {
+    terms: '7cdf29225b5e5ab6378389ef5a40d805195ef1621fe250efac2b771aee17e65e',
+    privacy: '45a9fa92f2e17c4599fd5e39c78c4551353fde75928a412e5372b3d68c118cdc',
+    driver_agreement: '3d8a81a22b9e4d4606f62a63c3bd8e9636cc14763b313cbdfedcdece56cbd7cb',
+    vendor_agreement: '5830eabd8bed0e94940765c26fe7f7b6920b52c601a9c45d26f0d084842484ed',
+  },
+  // [Owner rulings 21 Oct 2026 · research E4 + B8 · MATERIAL] Terms s.4: the taxi waiting charge paragraph
+  // (GY$300 per full 10 minutes, as rides/taxi-waiting.ts applies it). Privacy: s.1 diagnostics line, s.5 the
+  // phone app's crash reports to Swift's own GlitchTip, s.6 crash and error reports kept 90 days. Nothing else
+  // changed: putting 18 October back and removing those words reproduces all four 2026-10-18 pins exactly.
+  // The date re-pins the two agreements.
+  '2026-10-21': {
+    terms: 'a189ecbea42b30e2a7e116154073298a934c6f591a665b77d051f38d2236355c',
+    privacy: '131bbf6e1c2e9b2f9a2b0062fc1a6e3bc126358e0e59885776cbb31da165ad08',
+    driver_agreement: 'b368004247c5635c9ad085e93e92ce42db23f98b598b385e873b1619689e0fb8',
+    vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
+  },
+  // [Owner ruling 22 Oct 2026 · NON-material pre-launch (COORD 23:14Z)] Terms s.7: a ride, a parcel or a booking
+  // cancels free for one minute after a driver, rider or provider accepts it (was five minutes), as
+  // order/cancel-policy.ts FREE_CANCEL_WINDOW_MIN applies it. Nothing else changed: putting "five minutes" and
+  // 21 October back reproduces all four 2026-10-21 pins exactly. The date re-pins Privacy and the two agreements.
+  '2026-10-22': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: 'ebd6a47d17bdebd135068b1284d48893e1f3d306085e4c04a5e68a90afbe01da',
+    driver_agreement: '77ba8953b63491aa88492edc5ec4fb815466a19c27ac6b5eea69a942102ed69b',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
+  // [ROLE-DOCS · owner 21 Oct 2026 · COORD rulings (A) + 23 Oct 00:59Z, NON-material] On top of 2026-10-22: police
+  // clearance optional for TAXI drivers only (Privacy "With your explicit consent" line; Mover Agreement documents
+  // paragraph). Same day, so the human date is unchanged: Terms and the Business Agreement keep their 2026-10-22 hashes.
+  '2026-10-22.1': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: '9d0eb3b0e6b218d18edbb10630c4fcefeea090043cf5671c2b9ad7658f993ebb',
+    driver_agreement: 'bfbfc55fb330b4d6e095ec3754c76570a8c128d460a7a59b3c4c0c586161b785',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · NON-material] Terms s.2: a customer needs no ID to place
+  // an Order or take a taxi ride (the app asks for one only after repeated failed deliveries or payments, or for a
+  // high-value promotion); Privacy s.2 "(partners and, where they add one, customers)" and s.3 the ID a customer adds;
+  // Child Safety s.4 drops "higher-trust actions (taxi rides and larger orders) need a government ID on file".
+  // Nothing else changed: putting those words and 22 October back reproduces all four 2026-10-22.1 pins exactly (and
+  // Child Safety's served text). The date re-pins the two agreements.
+  '2026-10-25': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: '7a2b01b3dbb2ffc0fd4bfbc384867d584ebeac56bc6c7b9e19a761e13dd8a9dc',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -211,6 +276,13 @@ describe('legal version binding [F-035-08]', () => {
     expect(TERMS).not.toMatch(/service job can be cancelled free until the provider starts/i);
   });
 
+  it('[owner 22 Oct 2026] the Terms state the free cancel window the server applies: one minute after acceptance', () => {
+    // FREE_CANCEL_WINDOW_MIN is the window cancellationVerdict enforces; the Terms must name that number, never another.
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(TERMS).toContain('A ride, a parcel or a booking can be cancelled free at any time while nobody has accepted it, and for one minute after a driver, rider or provider accepts it; after that, contact your driver, rider or provider.');
+    expect(TERMS).not.toMatch(/five minutes after a driver|5 minutes after a driver/i);
+  });
+
   it('the served version is a version this file has pinned', () => {
     expect(
       Object.keys(PUBLISHED),
@@ -229,10 +301,13 @@ describe('legal version binding [F-035-08]', () => {
   });
 
   it('the version is a date stamp, and LAST_UPDATED must move with it (shape check)', () => {
-    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // [ROLE-DOCS · COORD ruling 21 Oct 2026 — a DELIBERATE extension] A second stamp on the same day carries a
+    // same-day suffix (2026-10-22.1): versions compare as strings, so it sorts after 2026-10-22 and before the next
+    // day. The date part still has to match LAST_UPDATED.
+    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     // The human form is rendered into both documents — same date, or the
     // page contradicts its own version.
-    const [y, m, d] = LEGAL_VERSION.split('-').map(Number);
+    const [y, m, d] = LEGAL_VERSION.split('.')[0]!.split('-').map(Number);
     const human = new Date(Date.UTC(y!, m! - 1, d!)).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
     });

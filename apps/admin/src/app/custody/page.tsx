@@ -12,7 +12,8 @@ import {
   fetchCustodyCases,
 } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006] CUSTODY CASES — deliveries that went wrong AFTER pickup.
@@ -38,7 +39,7 @@ const gyd = (n: number) => `GY$${Math.round(n).toLocaleString('en-US')}`;
 
 function CaseDetail({ id }: { id: string }) {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['custody-case', id], queryFn: () => fetchCustodyCase(id) });
+  const caseQ = useQuery({ queryKey: ['custody-case', id], queryFn: () => fetchCustodyCase(id) });
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['custody-case', id] });
     void qc.invalidateQueries({ queryKey: ['custody-cases'] });
@@ -46,19 +47,17 @@ function CaseDetail({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
   const onError = (e: unknown) => setError(e instanceof Error ? e.message : 'The action failed.');
   const claim = useMutation({ mutationFn: () => claimCustodyCase(id), onSuccess: refresh, onError });
-  const direct = useMutation({
-    mutationFn: ({ outcome, reason }: { outcome: Outcome; reason: string }) => directCustodyCase(id, outcome, reason),
-    onSuccess: refresh, onError,
-  });
-  const relay = useMutation({
-    mutationFn: ({ riderId, reason }: { riderId: string; reason: string }) => assignCustodyRelay(id, riderId, reason),
-    onSuccess: refresh, onError,
-  });
-  const back = useMutation({ mutationFn: (reason: string) => confirmCustodyReturn(id, reason), onSuccess: refresh, onError });
-  const busy = claim.isPending || direct.isPending || relay.isPending || back.isPending;
+  // Directing a case, naming a relay rider and confirming a return move goods
+  // that belong to someone else: each is asked in the in-page panel (no browser
+  // prompt), run once, and its refusal stays in view.
+  const actions = useActionRunner(() => refresh());
+  const busy = claim.isPending;
 
-  if (isLoading) return <div className="h-24 rounded-xl bg-[var(--panel)] animate-pulse" />;
-  const k = data?.data;
+  if (caseQ.isLoading) return <div className="mc-loading mt-4" aria-busy="true">Loading the case…</div>;
+  if (caseQ.isError) {
+    return <QueryFailed error={caseQ.error} what="this custody case" onRetry={() => void caseQ.refetch()} retrying={caseQ.isFetching} className="mt-4" />;
+  }
+  const k = caseQ.data?.data;
   if (!k) return null;
   // The server's own marker: a case is open exactly while it has no resolvedAt.
   const open = k.resolvedAt == null;
@@ -70,24 +69,25 @@ function CaseDetail({ id }: { id: string }) {
 
   return (
     <div className="mt-4 space-y-4">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-        <div><span className="text-[var(--muted)]">Holding the goods: </span>{person(k.holder)}</div>
-        <div><span className="text-[var(--muted)]">Relay rider: </span>{k.relayRiderId ? person(k.relay) : '—'}</div>
-        <div><span className="text-[var(--muted)]">Payment: </span>{k.order?.paymentMethod}{k.order?.floatAttached > 0 ? ` · rider fronted ${gyd(k.order.floatAttached)}` : ''}</div>
-        <div><span className="text-[var(--muted)]">Owner: </span>{k.ownerUserId ?? 'nobody yet'}</div>
-        <div><span className="text-[var(--muted)]">Next page at: </span>{open ? new Date(k.deadlineAt).toLocaleString() : '—'}{k.escalationCount ? ` · escalated ${k.escalationCount}×` : ''}</div>
-        <div><span className="text-[var(--muted)]">Reported: </span>{words(k.reason)}{k.reasonNote ? ` — “${k.reasonNote}”` : ''}</div>
+      <div className="grid grid-cols-1 gap-x-6 gap-y-2 rounded-[var(--mc-radius-sm)] bg-[var(--mc-surface)] p-3 md:grid-cols-2">
+        <div><span className="mc-muted">Holding the goods: </span>{person(k.holder)}</div>
+        <div><span className="mc-muted">Relay rider: </span>{k.relayRiderId ? person(k.relay) : '—'}</div>
+        <div><span className="mc-muted">Payment: </span>{k.order?.paymentMethod}{k.order?.floatAttached > 0 ? ` · rider fronted ${gyd(k.order.floatAttached)}` : ''}</div>
+        <div><span className="mc-muted">Owner: </span>{k.ownerUserId ?? 'nobody yet'}</div>
+        <div><span className="mc-muted">Next page at: </span>{open ? new Date(k.deadlineAt).toLocaleString() : '—'}{k.escalationCount ? ` · escalated ${k.escalationCount}×` : ''}</div>
+        <div><span className="mc-muted">Reported: </span>{words(k.reason)}{k.reasonNote ? ` — “${k.reasonNote}”` : ''}</div>
       </div>
       {k.order?.paymentMethod === 'MOBILE_MONEY' ? (
-        <p className="text-sm text-amber-400">MMG-paid: if this order is returned, the store refunds the customer directly — Swift never holds order money.</p>
+        <p className="mc-note mc-note-warn">MMG-paid: if this order is returned, the store refunds the customer directly — Swift never holds order money.</p>
       ) : null}
 
-      {error ? <p className="text-sm text-red-400">{error}</p> : null}
+      {error ? <p role="alert" className="mc-alert">{error}</p> : null}
+      {actions.banner}
 
       {open ? (
-        <div className="flex flex-wrap gap-2">
+        <div className="mc-actions">
           {!k.ownerUserId ? (
-            <button onClick={() => claim.mutate()} disabled={busy} className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] disabled:opacity-50">
+            <button type="button" onClick={() => claim.mutate()} disabled={busy} className="mc-btn mc-btn-primary">
               Take this case
             </button>
           ) : null}
@@ -95,11 +95,14 @@ function CaseDetail({ id }: { id: string }) {
             <button
               key={o}
               disabled={busy}
-              onClick={() => {
-                const reason = askReason({ action: OUTCOME_LABEL[o].toLowerCase(), subject: `order ${k.order?.orderNumber}` });
-                if (reason) direct.mutate({ outcome: o, reason });
-              }}
-              className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+              type="button"
+              onClick={() => void actions.run({
+                title: `${OUTCOME_LABEL[o]} for order ${k.order?.orderNumber}?`,
+                confirmLabel: OUTCOME_LABEL[o],
+                submit: ({ reason }) => directCustodyCase(id, o, reason),
+                success: () => `Order ${k.order?.orderNumber}: ${OUTCOME_LABEL[o].toLowerCase()}.`,
+              })}
+              className="mc-btn"
             >
               {OUTCOME_LABEL[o]}
             </button>
@@ -107,13 +110,16 @@ function CaseDetail({ id }: { id: string }) {
           {k.state === 'RELAY_REQUIRED' ? (
             <button
               disabled={busy}
-              onClick={() => {
-                const riderId = window.prompt('Rider id of the relay rider (from Riders):')?.trim();
-                if (!riderId) return;
-                const reason = askReason({ action: 'name this relay rider', subject: `order ${k.order?.orderNumber}` });
-                if (reason) relay.mutate({ riderId, reason });
-              }}
-              className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] disabled:opacity-50"
+              type="button"
+              onClick={() => void actions.run({
+                title: `Name the relay rider for order ${k.order?.orderNumber}?`,
+                body: <p>The rider collects the goods from whoever holds them now.</p>,
+                confirmLabel: 'Name the relay rider',
+                fields: [{ kind: 'text', name: 'riderId', label: 'Rider id (from Riders)', required: true, maxLength: 64 }],
+                submit: ({ reason, values }) => assignCustodyRelay(id, String(values['riderId']), reason),
+                success: () => 'Relay rider named.',
+              })}
+              className="mc-btn mc-btn-primary"
             >
               Name the relay rider
             </button>
@@ -121,12 +127,15 @@ function CaseDetail({ id }: { id: string }) {
           {k.state === 'RETURN_REQUIRED' && k.order?.status === 'RETURNING' ? (
             <button
               disabled={busy}
-              onClick={() => {
-                if (!window.confirm('Record that the goods are back where they came from? Do this only when the store (or sender) cannot confirm it themselves.')) return;
-                const reason = askReason({ action: 'confirm this return', subject: `order ${k.order?.orderNumber}` });
-                if (reason) back.mutate(reason);
-              }}
-              className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+              type="button"
+              onClick={() => void actions.run({
+                title: `Record that the goods for order ${k.order?.orderNumber} are back where they came from?`,
+                body: <p>Do this only when the store (or sender) cannot confirm it themselves.</p>,
+                confirmLabel: 'Confirm the goods are back',
+                submit: ({ reason }) => confirmCustodyReturn(id, reason),
+                success: () => 'Return confirmed.',
+              })}
+              className="mc-btn"
             >
               Confirm the goods are back
             </button>
@@ -135,8 +144,8 @@ function CaseDetail({ id }: { id: string }) {
       ) : null}
 
       <div>
-        <h3 className="text-sm font-semibold mb-2">Trail</h3>
-        <ol className="space-y-1 text-xs text-[var(--muted)]">
+        <h3 className="mc-label mb-2">Trail</h3>
+        <ol className="mc-muted space-y-1 text-xs">
           {(k.trail ?? []).map((t: any, i: number) => (
             <li key={i}>
               {new Date(t.createdAt).toLocaleString()} — {words(String(t.action).replace(/^CUSTODY_CASE_/, ''))}
@@ -153,49 +162,46 @@ function CaseDetail({ id }: { id: string }) {
 export default function CustodyCasesPage() {
   const [showOpen, setShowOpen] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({ queryKey: ['custody-cases', showOpen], queryFn: () => fetchCustodyCases(showOpen), refetchInterval: 30_000 });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['custody-cases', showOpen], queryFn: () => fetchCustodyCases(showOpen), refetchInterval: 30_000 });
   const rows: any[] = data?.data ?? [];
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-bold">Custody cases</h1>
-        <div className="flex gap-1">
+    <div className="mc-page">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <p className="mc-muted max-w-3xl">
+          Deliveries that went wrong after pickup. Each needs an owner and a decision: hold, send back, or relay. A relay completes
+          only when the relay rider enters the code the holder shows them; a return completes when the store confirms the goods are back.
+        </p>
+        <div className="mc-tabs mb-0" role="group" aria-label="Which cases">
           {([true, false] as const).map((o) => (
-            <button
-              key={String(o)}
-              onClick={() => setShowOpen(o)}
-              className={`px-2.5 py-1 rounded-lg text-xs ${showOpen === o ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'}`}
-            >
-              {o ? 'open' : 'all'}
+            <button key={String(o)} type="button" onClick={() => setShowOpen(o)} aria-pressed={showOpen === o} className="mc-tab">
+              {o ? 'Open' : 'All'}
             </button>
           ))}
         </div>
       </div>
-      <p className="text-[var(--muted)] text-sm mb-6">
-        Deliveries that went wrong after pickup. Each needs an owner and a decision: hold, send back, or relay. A relay completes
-        only when the relay rider enters the code the holder shows them; a return completes when the store confirms the goods are back.
-      </p>
-      <div className="space-y-3">
+      <div className="mc-list">
         {isLoading ? (
-          <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+          <div className="mc-loading" aria-busy="true">Loading custody cases…</div>
+        ) : isError ? (
+          <QueryFailed error={error} what="the custody cases" onRetry={() => void refetch()} retrying={isFetching} />
         ) : rows.length === 0 ? (
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
+          <div className="mc-empty">
             {showOpen ? 'No open custody cases.' : 'No custody cases.'}
           </div>
         ) : (
           rows.map((r) => (
-            <div key={r.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
-              <button className="w-full text-left" onClick={() => setSelected(selected === r.id ? null : r.id)} aria-expanded={selected === r.id}>
-                <div className="flex flex-wrap items-center gap-3">
+            <div key={r.id} className="mc-card">
+              <button type="button" className="w-full min-h-[44px] text-left" onClick={() => setSelected(selected === r.id ? null : r.id)} aria-expanded={selected === r.id}>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <StatusPill value={r.state} />
-                  {r.overdue ? <span className="text-xs font-semibold text-red-400">OVERDUE</span> : null}
-                  <span className="text-sm">Order {r.order?.orderNumber} · {r.order?.vendor?.name ?? 'courier'} · {words(r.reason)}</span>
-                  <span className="text-xs text-[var(--muted)] ml-auto">{new Date(r.createdAt).toLocaleString()}</span>
+                  {r.overdue ? <span className="mc-badge mc-tone-bad">OVERDUE</span> : null}
+                  <span className="font-semibold">Order {r.order?.orderNumber} · {r.order?.vendor?.name ?? 'courier'} · {words(r.reason)}</span>
+                  <span className="mc-muted mc-numbers ml-auto text-xs">{new Date(r.createdAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
                 </div>
               </button>
-              <div className="mt-2 text-sm">
-                <Link href={`/orders/${r.orderId}`} className="text-[var(--muted)] hover:text-[var(--accent)]">View order →</Link>
+              <div className="mt-1">
+                <Link href={`/orders/${r.orderId}`} className="font-semibold text-[var(--mc-accent)]">View order →</Link>
               </div>
               {selected === r.id ? <CaseDetail id={r.id} /> : null}
             </div>

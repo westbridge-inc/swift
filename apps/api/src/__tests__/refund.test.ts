@@ -144,7 +144,14 @@ describe('MMG stays blocked — computed for the record, never executable', () =
 
   it('the picking guard is untouched — this never weakened it', () => {
     const picking = readFileSync(path.join(__dirname, '..', 'modules', 'order', 'picking.service.ts'), 'utf8');
-    expect(picking).toContain("if (order.paymentMethod !== 'MOBILE_MONEY') return;");
+    // [O-4 · owner 22 Oct 2026] The guard now asks orderTotalAdjustable: an MMG total changes only
+    // before acceptance and before any payment can exist; every other MMG case is refused as before.
+    const view = readFileSync(path.join(__dirname, '..', 'modules', 'order', 'substitution-view.ts'), 'utf8');
+    expect(picking).toContain('if (orderTotalAdjustable(order)) return;');
+    // [REVIEW-M S4-1 on #2043] Only cash short-circuits now: card / bank transfer take MMG's rule.
+    expect(view).toContain("if (order.paymentMethod === 'CASH') return true;");
+    expect(view).not.toContain("if (order.paymentMethod !== 'MOBILE_MONEY') return true;");
+    expect(view).toContain("return order.status === 'PENDING'\n    && order.acceptedAt === null\n    && order.paymentStatus === 'PENDING'");
     expect(picking).toContain("'MMG_ADJUSTMENT_UNAVAILABLE'");
     expect(picking).not.toContain('computeRefund');
   });

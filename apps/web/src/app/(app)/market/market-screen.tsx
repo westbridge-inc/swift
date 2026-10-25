@@ -4,7 +4,8 @@ import { Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { getMarketCategories, getMarketDepth, getMarketItems, money, type MarketCategory, type MarketDepth, type MarketItem } from '@/lib/customer';
+import { getMarketDepth, money, type MarketCategory, type MarketDepth, type MarketItem } from '@/lib/customer';
+import { getMarketCategories, getMarketItems } from '@/lib/customer-market';
 
 /** What the server drew into the page (page.tsx), and for which category. */
 export type MarketPageSeed = {
@@ -21,7 +22,8 @@ import { MarketSkeleton, MarketGridSkeleton, CategorySkeleton, MARKET_CARD, MARK
 import { EmptyNote, Photo } from '@/components/order-ui';
 import { Pictogram } from '@/components/glyphs';
 import { launchCity } from '@/lib/web-ordering';
-import { CircleCheck, Plus, Search } from 'lucide-react';
+import { CircleCheck, Search } from 'lucide-react';
+import { AddPlusGlyph } from '@/components/add-plus';
 
 /**
  * [PERF #6] The first row of goods is the first thing a phone shows, so its
@@ -128,7 +130,7 @@ function MarketInner({ seed }: { seed: MarketPageSeed }) {
                     <span className="truncate text-[13px] leading-[18px] text-[var(--swift-muted)]">{item.vendorName}</span>
                     <span className="mt-1 flex items-center justify-between">
                       <span className="sw-money text-[var(--swift-red)]">{money(item.basePrice)}</span>
-                      <span aria-hidden="true" className="grid h-8 w-8 place-items-center rounded-full bg-[var(--swift-red)] text-[var(--swift-white)]"><Plus size={18} /></span>
+                      <AddPlusGlyph />
                     </span>
                   </span>
                 </Link>

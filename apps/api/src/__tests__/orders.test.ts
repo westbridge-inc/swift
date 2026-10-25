@@ -150,6 +150,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  process.env['STORE_MMG_PAY_LINK'] = '1';
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -569,14 +571,21 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     });
 
     it('SWIFT-077: refuses to complete a coded pickup with NO code (was silently allowed)', async () => {
-      const o = await makePickupOrder('READY_FOR_PICKUP', '1234');
-      // RED before SWIFT-077: `code != null` let a missing code through, so the
-      // handover closed without ever verifying the customer's code.
-      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, {}, supermarket.token);
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('MISSING_PICKUP_CODE');
-      const still = await app.prisma.order.findUniqueOrThrow({ where: { id: o.id } });
-      expect(still.status).toBe('READY_FOR_PICKUP'); // not completed
+      // [O-2 · owner 22 Oct 2026] The takeaway code is off by default; SWIFT-077 holds for a store that
+      // turned it ON (store-handover-no-code.test.ts pins the default store's no-code handover).
+      await app.prisma.vendor.update({ where: { id: supermarket.vendorId }, data: { requirePickupCode: true } });
+      try {
+        const o = await makePickupOrder('READY_FOR_PICKUP', '1234');
+        // RED before SWIFT-077: `code != null` let a missing code through, so the
+        // handover closed without ever verifying the customer's code.
+        const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, {}, supermarket.token);
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error.code).toBe('MISSING_PICKUP_CODE');
+        const still = await app.prisma.order.findUniqueOrThrow({ where: { id: o.id } });
+        expect(still.status).toBe('READY_FOR_PICKUP'); // not completed
+      } finally {
+        await app.prisma.vendor.update({ where: { id: supermarket.vendorId }, data: { requirePickupCode: false } });
+      }
     });
 
     it('rejects completing before the order is ready', async () => {
@@ -595,42 +604,31 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     });
   });
 
-  it('blocks an L1 account exactly at the ID-gate threshold, with the boundary just below passing', async () => {
-    // Gate: 50 USD x 209 = 10,450 GYD (from the seeded CountryConfig)
-    const bigId = (await makeItem(supermarket.vendorId, supermarket.categoryId, 'Gate Freezer', 10450)).id;
-    const justUnderId = (await makeItem(supermarket.vendorId, supermarket.categoryId, 'Gate Fan', 10449)).id;
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Orders at or above the old ID-gate threshold
+  // (50 USD x 209 = 10,450 GYD from the seeded CountryConfig) no longer need the customer's ID on file: it was
+  // Swift's own 8 Oct choice, not a legal duty. This case used to prove the 403 at exactly the threshold; it now
+  // proves the same boundary — and well past it — flows for an L1 account, never ID_VERIFICATION_REQUIRED.
+  it('an L1 account (no ID on file) orders at and above the old ID-gate threshold, never asked for an ID', async () => {
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.userId } })).trustLevel).toBe('L1');
+    const atId = (await makeItem(supermarket.vendorId, supermarket.categoryId, 'Gate Freezer', 10450)).id;
+    const farAboveId = (await makeItem(supermarket.vendorId, supermarket.categoryId, 'Gate Generator', 104500)).id;
 
-    // Just under: flows for L1 (PICKUP keeps the total exactly at item price)
-    await addToCart(customer.token, supermarket.vendorId, justUnderId, 1);
-    const under = await inject('POST', '/api/v1/customer/checkout', {
-      paymentMethod: 'CASH',
-      fulfillmentSelections: { [supermarket.vendorId]: 'PICKUP' },
-    }, customer.token);
-    expect(under.statusCode).toBe(200);
-    createdOrderIds.push(under.json().data.order.id);
-
-    // Exactly at: blocked for L1 with a clear upgrade path
-    await addToCart(customer.token, supermarket.vendorId, bigId, 1);
-    const blocked = await inject('POST', '/api/v1/customer/checkout', {
-      paymentMethod: 'CASH',
-      fulfillmentSelections: { [supermarket.vendorId]: 'PICKUP' },
-    }, customer.token);
-    expect(blocked.statusCode).toBe(403);
-    expect(blocked.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] the ID goes on file, it is not "verified" by anyone.
-    expect(blocked.json().error.message).toMatch(/need your ID on file/);
-    expect(blocked.json().error.message).not.toMatch(/verif/i);
-
-    // L2 flows through the same cart
-    await app.prisma.user.update({ where: { id: customer.userId }, data: { trustLevel: 'L2' } });
-    const allowed = await inject('POST', '/api/v1/customer/checkout', {
-      paymentMethod: 'CASH',
-      fulfillmentSelections: { [supermarket.vendorId]: 'PICKUP' },
-    }, customer.token);
-    expect(allowed.statusCode).toBe(200);
-    createdOrderIds.push(allowed.json().data.order.id);
-
-    await app.prisma.user.update({ where: { id: customer.userId }, data: { trustLevel: 'L1' } });
+    for (const [itemId, total] of [[atId, 10450], [farAboveId, 104500]] as const) {
+      // PICKUP keeps the total exactly at the item price
+      await addToCart(customer.token, supermarket.vendorId, itemId, 1);
+      const res = await inject('POST', '/api/v1/customer/checkout', {
+        paymentMethod: 'CASH',
+        fulfillmentSelections: { [supermarket.vendorId]: 'PICKUP' },
+      }, customer.token);
+      expect(res.body).not.toContain('ID_VERIFICATION_REQUIRED');
+      expect(res.statusCode, res.body).toBe(200);
+      const order = res.json().data.order;
+      createdOrderIds.push(order.id);
+      const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(Number(db.totalAmount)).toBe(total);
+    }
+    // The account stays L1: no ID was asked for, and none was put on file.
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.userId } })).trustLevel).toBe('L1');
   });
 
   it('flags risky orders deterministically (new account + high value + odd hours)', async () => {

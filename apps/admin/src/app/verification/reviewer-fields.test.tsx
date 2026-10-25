@@ -69,6 +69,99 @@ describe('reviewer fields required by the approval route', () => {
   });
 });
 
+// [R15 · research A9/D9] A licence or food certificate checked every January: the console asks for the
+// YEAR printed on it — never a printed or invented expiry — and sends only that; the server sets the date.
+describe('[R15] certificate-year documents', () => {
+  it.each(['food_handler_cert', 'gei_electrical_licence', 'pest_control_operator_licence', 'eating_house_registration'])('%s asks for the certificate year and sends it', async (docType) => {
+    const fetch = fixture(docType, ['certificateYear']);
+    const { user } = renderWithQuery(<VerificationPage />);
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    fireEvent.load(await screen.findByRole('img'));
+    expect(screen.queryByLabelText('Expiry printed on the document')).toBeNull();
+    const approve = () => screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve().disabled).toBe(true);
+    const year = new Date().getFullYear();
+    // a year that has not started, a long-gone one, or not a year at all keeps Approve locked
+    for (const typed of [String(year + 1), String(year - 2), '20', 'abcd']) {
+      fireEvent.change(screen.getByLabelText('Year printed on the certificate'), { target: { value: typed } });
+      expect(approve().disabled, typed).toBe(true);
+    }
+    fireEvent.change(screen.getByLabelText('Year printed on the certificate'), { target: { value: String(year) } });
+    expect(approve().disabled).toBe(false);
+    await user.click(approve());
+    await user.type(screen.getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({ certificateYear: year });
+  });
+});
+
+// [R16 · research D7] A business registration: the reviewer says what it is; a yearly business name also
+// carries its year (checked every January); a company's incorporation certificate never expires.
+describe('[R16] business registration kind', () => {
+  async function open(docType = 'business_registration') {
+    const fetch = fixture(docType, ['registrationKind', 'certificateYear']);
+    const rendered = renderWithQuery(<VerificationPage />);
+    await rendered.user.click(await screen.findByRole('button', { name: 'Review' }));
+    await rendered.user.click(screen.getByRole('button', { name: 'View document' }));
+    fireEvent.load(await screen.findByRole('img'));
+    return { fetch, user: rendered.user };
+  }
+  const approve = () => screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+
+  it('a company sends only its kind (no year, no date)', async () => {
+    const { fetch, user } = await open();
+    expect(approve().disabled).toBe(true);
+    expect(screen.queryByLabelText('Year printed on the certificate')).toBeNull();
+    await user.selectOptions(screen.getByLabelText('What this certificate is'), 'COMPANY');
+    expect(screen.queryByLabelText('Year printed on the certificate')).toBeNull();
+    expect(approve().disabled).toBe(false);
+    await user.click(approve());
+    await user.type(screen.getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({ registrationKind: 'COMPANY' });
+  });
+
+  it('a business name needs this year typed, and sends its kind and year', async () => {
+    const { fetch, user } = await open();
+    await user.selectOptions(screen.getByLabelText('What this certificate is'), 'BUSINESS_NAME');
+    expect(approve().disabled).toBe(true);
+    const year = new Date().getFullYear();
+    fireEvent.change(screen.getByLabelText('Year printed on the certificate'), { target: { value: String(year - 2) } });
+    expect(approve().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Year printed on the certificate'), { target: { value: String(year) } });
+    expect(approve().disabled).toBe(false);
+    await user.click(approve());
+    await user.type(screen.getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({ registrationKind: 'BUSINESS_NAME', certificateYear: year });
+  });
+});
+
+// [ROLE-DOCS · owner 21 Oct 2026] An own-name declaration: approved only on the reviewer's own check of the store name
+// against the owner's ID (Business Names (Registration) Act s.3); the server refuses it otherwise.
+describe('[ROLE-DOCS] own-name declaration', () => {
+  it('approval waits for the reviewer\'s tick, and sends it', async () => {
+    const fetch = fixture('own_name_declaration', ['ownNameConfirmed']);
+    const { user } = renderWithQuery(<VerificationPage />);
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    fireEvent.load(await screen.findByRole('img'));
+    const approve = () => screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve().disabled).toBe(true);
+    await user.click(screen.getByLabelText('Own name checked against the ID'));
+    expect(approve().disabled).toBe(false);
+    await user.click(approve());
+    await user.type(screen.getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({ ownNameConfirmed: true });
+  });
+});
+
 describe('PDF approval requires confirmed inline evidence', () => {
   const settings = (window as unknown as { happyDOM: { settings: { disableIframePageLoading: boolean } } }).happyDOM.settings;
   let previous: boolean;

@@ -61,8 +61,9 @@ export const RIDER_COUNTERPARTY_SELECT = {
   licensePlate: true,
   vehiclePhotoUrl: true,
   profilePhotoUrl: true,
-  averageRating: true,
-  totalRatings: true,
+  // [COORD 18 Oct, option S] Never the courier's LIVE averageRating/totalRatings: they move with each single
+  // rating, so a store or sender comparing deliveries could tie a customer's rating to one trip. The star a
+  // customer sees comes from whole groups of 5 (rating-groups.ts shownSurface); no client read these.
   totalDeliveries: true,
 } as const;
 

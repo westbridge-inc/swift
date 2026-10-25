@@ -5,10 +5,10 @@ import { firstInvalidTwilioConfig } from './twilio-identity';
 import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
 import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
-import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
+import { identitySalt } from '../modules/integrity/normalize';
 import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
@@ -177,6 +177,12 @@ export function assertWallLoginConfig(env: Record<string, string | undefined>): 
   }
 }
 
+/** [DS214 D1 · B1/S4 · CANCEL-WINDOW 22 Oct 2026] The shortest LIFECYCLE_V2 order hold production boots with:
+ *  the settled five-minute hold (Total Audit build order; ORDER_HOLD_MINUTES default 5). Its own number since the
+ *  owner cut the free-cancel window AFTER acceptance to one minute (FREE_CANCEL_WINDOW_MIN): the hold BEFORE
+ *  acceptance did not change, so neither does this boot floor. */
+export const ORDER_HOLD_FLOOR_MIN = 5;
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -234,13 +240,18 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // When the hold is on, a set-but-unparseable window makes holdWindowMs()
   // return null — the same silent hold-off — so that too refuses, never
   // silently defaults. [DS214 D1] And the hold may never be SHORTER than the
-  // free-cancel window it protects (FREE_CANCEL_WINDOW_MIN): a shorter hold
-  // puts an order on the vendor board while the customer may still cancel it
-  // free, which is exactly the REPORT-036 defect (order.service.ts holdWindowMs).
+  // settled five-minute hold (ORDER_HOLD_FLOOR_MIN): a shorter hold puts an
+  // order on the vendor board early, which is exactly the REPORT-036 defect
+  // (order.service.ts holdWindowMs).
+  // [CANCEL-WINDOW · owner 22 Oct 2026] This floor used to read
+  // FREE_CANCEL_WINDOW_MIN, which was also five. The free-cancel window after
+  // acceptance is now ONE minute; the hold before acceptance is a different
+  // timer the owner did not change, so the floor keeps its own number and
+  // this guard refuses exactly what it refused before (never relaxed silently).
   if (lifecycleV2 === '1' && env['ORDER_HOLD_MINUTES'] !== undefined) {
     const holdMinutes = Number(env['ORDER_HOLD_MINUTES']);
-    if (!Number.isFinite(holdMinutes) || holdMinutes < FREE_CANCEL_WINDOW_MIN) {
-      throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the ${FREE_CANCEL_WINDOW_MIN}-minute free-cancel window when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor while the customer may still cancel free. Set ORDER_HOLD_MINUTES=${FREE_CANCEL_WINDOW_MIN} or unset it. Refusing to start.`);
+    if (!Number.isFinite(holdMinutes) || holdMinutes < ORDER_HOLD_FLOOR_MIN) {
+      throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the settled ${ORDER_HOLD_FLOOR_MIN}-minute order hold when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor before the hold the app counts down has ended. Set ORDER_HOLD_MINUTES=${ORDER_HOLD_FLOOR_MIN} or unset it. Refusing to start.`);
     }
   }
 
@@ -257,20 +268,16 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: OTP_HASH_SECRET or JWT_SECRET must be at least 32 characters in production — OTP records require a keyed HMAC. Refusing to start.');
   }
 
-  // Identity must never silently select the deterministic test adapter. Its
-  // marker URLs can approve a user, so a missing production variable is a
-  // security failure, not a reasonable default.
+  // Launch verification is human review only. Require an explicit production
+  // setting; neither external processors nor synthetic approvals are allowed.
   const kycProvider = env['KYC_PROVIDER'];
-  // [FD-DOC-3b (b) · 2026-09-07] `manual` = on-shore human review; it approves nothing, so it is
-  // as safe as a real provider here. `sandbox` self-approves and stays forbidden.
-  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer' && kycProvider !== 'manual') {
-    throw new Error('FATAL: KYC_PROVIDER must be didit, idanalyzer or manual in production; sandbox/unset can self-approve test identities. Refusing to start.');
+  if (kycProvider !== 'manual') {
+    throw new Error('FATAL: KYC_PROVIDER must be manual in production; launch verification requires human review. Refusing to start.');
   }
-  if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
-    throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');
-  }
-  if (kycProvider === 'idanalyzer' && !env['ID_ANALYZER_API_KEY']) {
-    throw new Error('FATAL: ID_ANALYZER_API_KEY is required when KYC_PROVIDER=idanalyzer. Refusing to start.');
+  // Face matching stays OFF (owner ruling; GUARDRAILS §8): the biometric switch
+  // cannot be turned on in production, whatever engine is configured.
+  if (env['FEATURE_BIOMETRIC_FACE_MATCH'] === '1') {
+    throw new Error('FATAL: FEATURE_BIOMETRIC_FACE_MATCH=1 is refused in production; identity checks are done by a person, with no automated face matching. Refusing to start.');
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
@@ -350,13 +357,29 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
       if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
     }
-    if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
-      throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
-    }
+    // [S1 · SWITCHES 21 Oct, Option A] Live MMG here means the checkout page, its lookup and
+    // reversals: none of them depends on the merchant reference round trip
+    // (MMG_REFERENCE_ROUNDTRIP_VERIFIED). That flag only proves the PUSH rail, which production
+    // refuses outright below, so it is no longer a condition of booting live.
     const mmgUrl = env['MMG_API_URL'];
     if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
       throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
     }
+    // [22 Oct, COORD ruling] Production never pushes (refused below), so with MMG live the checkout
+    // page is the only MMG way to pay: live MMG with the checkout off would leave no partner a way to
+    // pay with MMG. The fee pause also holds then (fee-pause.ts); this refusal is the belt to that brace.
+    if (env['MMG_CHECKOUT_ENABLED'] !== '1') {
+      throw new Error('FATAL: MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1: production never sends MMG charge requests, so the MMG checkout page is the only MMG way to pay. Switch both on together, or set MMG_DRIVER=disabled (every weekly fee is then paused). Refusing to start.');
+    }
+  }
+
+  // [S1 · SWITCHES 21 Oct, Option A] The MMG push rail (Swift sending a charge request to a
+  // partner's phone) is refused in production for now: the weekly fee is paid on the MMG checkout
+  // page only (GUARDRAILS §1), and the push rail's reference round trip is unproven. Only unset,
+  // empty or 0 boots; any other value of the switch is refused, whatever the driver.
+  const pushSwitch = env['MMG_PUSH_RAIL_ON'];
+  if (pushSwitch !== undefined && pushSwitch !== '' && pushSwitch !== '0') {
+    throw new Error('FATAL: MMG_PUSH_RAIL_ON must be unset or 0 in production: the MMG push rail (automatic charge requests to a partner\'s phone) is not allowed; the weekly fee is paid on the MMG checkout page. Refusing to start.');
   }
 
   // SWIFT-012: the 'dev' notification provider logs OTP SMS to the console
@@ -478,6 +501,10 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
   assertQrConfig(env);
+  // [row 331 · CONFIG-GUARDS] The identity-signal HMAC key (phone, document
+  // number, plate, device hashes): refused at boot, not at the first identity
+  // capture. The same contract as the hasher; the value is never echoed.
+  identitySalt(env);
   assertPlacesConfig(env);
 }
 

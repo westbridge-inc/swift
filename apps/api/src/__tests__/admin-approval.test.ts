@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
@@ -10,10 +10,11 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import {
-  APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, requiresApproval,
+  APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, markApplied, requiresApproval,
 } from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { ACCESS_COOKIE, BROWSER_CLIENT_HEADER, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-005] A SETTLEMENT WAS ONE PERSON'S SAY-SO.
@@ -37,7 +38,7 @@ const userIds: string[] = [];
 const REASON = 'Bank confirmed the transfer cleared on the 3rd, reference GY-88213';
 
 async function makeAdmin(permissions: string[]): Promise<{ token: string; userId: string }> {
-  const phone = `+59274${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Approver', lastName: `A${RUN}${userIds.length}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
@@ -99,6 +100,18 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
   }, 'test-cleanup:admin-approval');
   await app.close();
+});
+
+// [U06] One ask per act while it stands: an ask left PENDING or APPROVED by
+// one case would (rightly) refuse the next case's ask on the same key with 409
+// APPROVAL_ALREADY_OPEN. Each case is its own act, so each starts with no
+// standing ask on the shared key, as if the earlier one had been withdrawn.
+// admin-approval-duplicate.test.ts proves the refusal itself.
+beforeEach(async () => {
+  await runWithoutTenant(() => app.prisma.privilegedApproval.updateMany({
+    where: { entityId: CONFIG_KEY, status: { in: ['PENDING', 'APPROVED'] } },
+    data: { status: 'CANCELLED' },
+  }), 'test-reset:admin-approval');
 });
 
 describe('[ADM-005] one person cannot move money alone', () => {
@@ -253,6 +266,70 @@ describe('[ADM-005] the queue a second admin works', () => {
     const theirs = await call(approver.token, 'GET', '/api/v1/admin/approvals');
     const seen = (theirs.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === approvalId)!;
     expect(seen['isOwnRequest']).toBe(false);
+  });
+
+  // [Owner, admin-staging 25 Oct] A request past its expiry kept status PENDING (nothing moves the column but a later
+  // decide), so it sat under 'Pending' with an 'expired' label while the 'Expired' tab missed it. The queue now
+  // reports and files it by what it IS: past its expiry, an open request (pending, or approved but not applied) is
+  // EXPIRED, and it can never be decided or applied.
+  describe('a request past its expiry is EXPIRED, wherever it is listed', () => {
+    const list = async (status?: string) => {
+      const res = await call(approver.token, 'GET', `/api/v1/admin/approvals?limit=50${status ? `&status=${status}` : ''}`);
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json() as { data: Array<Record<string, unknown>>; pagination: { total: number } };
+    };
+    const lapse = (id: string) => app.prisma.privilegedApproval.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+
+    it('a lapsed PENDING request is out of the Pending tab (and its count) and in the Expired tab, reported EXPIRED; deciding it is refused', async () => {
+      const asked = await writeConfig(requester.token, { rate: 31 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      await lapse(approvalId);
+
+      for (const view of [await list(), await list('PENDING')]) {
+        expect(view.data.map((r) => r['id'])).not.toContain(approvalId);
+      }
+      const expired = (await list('EXPIRED')).data.find((r) => r['id'] === approvalId);
+      expect(expired).toMatchObject({ id: approvalId, status: 'EXPIRED', isOwnRequest: false });
+
+      const tried = await decide(approver.token, approvalId, true);
+      expect(tried.statusCode).toBe(409);
+      expect(tried.json().error.message).toMatch(/expired/);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('EXPIRED');
+      expect(await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }).then((r) => r?.value)).not.toEqual({ rate: 31 });
+    });
+
+    it('an APPROVED request that lapsed before it was applied is out of the Approved tab, in the Expired tab, and can never be applied', async () => {
+      const asked = await writeConfig(requester.token, { rate: 32 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await decide(approver.token, approvalId, true)).json().data.status).toBe('APPROVED');
+      await lapse(approvalId);
+
+      expect((await list('APPROVED')).data.map((r) => r['id'])).not.toContain(approvalId);
+      expect((await list('EXPIRED')).data.find((r) => r['id'] === approvalId)).toMatchObject({ status: 'EXPIRED', approvedBy: approver.userId });
+
+      const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+      expect(applied.statusCode).toBe(403);
+      expect(applied.json().error.message).toMatch(/expired/);
+      const row = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
+      expect([row.status, row.appliedAt]).toEqual(['APPROVED', null]);
+      expect(await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }).then((r) => r?.value)).not.toEqual({ rate: 32 });
+    });
+
+    it('the spend itself refuses a lapsed approval: markApplied\'s compare-and-set carries the expiry', async () => {
+      const asked = await writeConfig(requester.token, { rate: 34 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await decide(approver.token, approvalId, true)).json().data.status).toBe('APPROVED');
+      await lapse(approvalId);
+      expect(await markApplied(app.prisma, approvalId)).toBe(false);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
+    });
+
+    it('a request still inside its time stays where it was (control)', async () => {
+      const asked = await writeConfig(requester.token, { rate: 33 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await list()).data.find((r) => r['id'] === approvalId)).toMatchObject({ status: 'PENDING' });
+      expect((await list('EXPIRED')).data.map((r) => r['id'])).not.toContain(approvalId);
+    });
   });
 });
 

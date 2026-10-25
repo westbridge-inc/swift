@@ -43,6 +43,8 @@ describe('the allowlist', () => {
       'POSTGRES_PASSWORD', 'DATABASE_URL',
       'JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'MEILISEARCH_KEY',
       'TWILIO_API_KEY_SECRET', 'SMTP_PASS',
+      // [R22] The token Twilio signs inbound STOP requests with (verification only).
+      'TWILIO_WEBHOOK_AUTH_TOKEN',
       'MMG_API_KEY', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET',
       // The MMG hosted checkout: the reply-opening private key and the secret
       // key sealed inside every request token.
@@ -102,6 +104,7 @@ describe('the allowlist census — no secret the API reads can fall back to the 
   /** Secret-shaped by spelling, settings by nature. Each carries its reason. */
   const NON_SECRET: Record<string, string> = {
     DEV_OTP_BYPASS: 'a development switch (0/1), refused in production by the boot guard',
+    MALWARE_SCAN_BYPASS: 'the scanner-down emergency switch (1 = on; "PASS" is from bypass): a setting, not a secret; every upload it lets through is recorded as scan debt and rescanned',
     MASTER_KEK_ESCROW_FINGERPRINT: 'the sha256 of the key bytes, recorded beside the key on purpose so a stale escrow is caught',
     NOT_MY_DRIVER_AUTHORITY_KILL: 'a kill switch for a dispatch rule',
     SOCKET_AUTH_RECHECK_MS: 'a timing for the socket re-authentication sweep',
@@ -164,6 +167,7 @@ describe('the allowlist census — no secret the API reads can fall back to the 
     APP_STORE_URL: 'a public store listing',
     PLAY_STORE_URL: 'a public store listing',
     AWS_S3_ENDPOINT: 'object-storage endpoint; the keys travel as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY',
+    TWILIO_INBOUND_SMS_URL: 'this deployment\'s own public inbound-SMS webhook address, exactly as set on the Twilio number; Twilio signs over it with TWILIO_WEBHOOK_AUTH_TOKEN, and no credential rides in it',
   };
   const urlLike = [...reads.keys()].filter((n) => URL_LIKE.test(n) && !PUBLIC_PREFIX.test(n)).sort();
 

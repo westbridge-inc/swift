@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
@@ -249,19 +250,22 @@ describe('Courier — create, track, deliver', () => {
       data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
     });
 
-    // The rider uploaded a photo in custody (issued URL recorded), then the job went back pre-custody.
-    await app.prisma.order.update({
-      where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED' },
-    });
-    const issued = await issueProof(created.orderId, moverUser.userId);
-    await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'RIDER_ASSIGNED' } });
+    // [row 264] A job never goes back from custody (the database refuses PICKED_UP -> RIDER_ASSIGNED),
+    // so the pre-custody case comes first: assigned, never picked up, yet carrying the issued-URL record
+    // an upload in custody writes (courierProofIssuedUrl / courierProofIssuedRiderId).
+    await walkOrderStatus(app.prisma, created.orderId, 'RIDER_ASSIGNED', { riderId: rider.id, paymentStatus: 'CAPTURED' });
+    const recorded = `storage://synthetic/courier-proof/${created.orderId}/pre-custody.png`;
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { courierProofIssuedUrl: recorded, courierProofIssuedRiderId: rider.id } });
     // Pre-custody: assigned but never picked up — DELIVERED is unreachable even
-    // WITH a genuine issued photo. Custody is the gate.
+    // WITH the job's own issued photo. Custody is the gate.
     const preCustody = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
-      { proofPhotoUrl: issued }, moverUser.token);
+      { proofPhotoUrl: recorded }, moverUser.token);
     expect(preCustody.statusCode).toBe(409);
     expect(preCustody.json().error.code).toBe('PARCEL_NOT_IN_CUSTODY');
+
+    // The rider picks the parcel up and uploads a photo in custody (issued URL recorded).
+    await walkOrderStatus(app.prisma, created.orderId, 'PICKED_UP');
+    const issued = await issueProof(created.orderId, moverUser.userId);
 
     // Foreign object: a URL the server never ISSUED — even one embedding the
     // folder name — is refused (exact-match, not substring).
@@ -601,6 +605,27 @@ describe('[§8 · #67] a parcel is screened against the prohibited-items list', 
     expect((await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Banks birthday card' }, sender.token)).statusCode).toBe(201);
     const pack = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Banks 6 pack' }, sender.token);
     expect(pack.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry this parcel: Swift never delivers alcohol. If it\'s something else, describe it in other words.' });
+  });
+
+  // [R4 · owner 15 Oct] The expanded permanent list reaches parcels too; legal-services words are a listing rule only.
+  it('the expanded list: explosives, pesticides, raw gold, firearms, wildlife, counterfeits and currency are refused', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const [packageDescription, label] of [
+      ['Box of squibs', 'fireworks and explosives'], ['Bottle of paraquat', 'pesticides and toxic chemicals'],
+      ['Raw gold', 'raw gold, diamonds and precious stones'], ['9mm ammo', 'firearms, ammunition and replicas'],
+      ['A pair of twa twa birds', 'protected wildlife'], ['Counterfeit perfume', 'counterfeit goods'],
+      ['Foreign currency for my aunt', 'currency and payment cards'],
+    ] as const) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
+      expect(res.statusCode, packageDescription).toBe(409);
+      expect(res.json().error).toMatchObject({
+        code: 'PROHIBITED_PARCEL',
+        message: `Swift can't carry this parcel: Swift never delivers ${label}. If it's something else, describe it in other words.`,
+      });
+    }
+    expect(await parcelsOf(sender.userId)).toBe(0);
+    const ok = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Fruit basket for my lawyer' }, sender.token);
+    expect(ok.statusCode, ok.body).toBe(201);
   });
 
   // [Legal research A10 · R1] Courier = goods only: letters, documents and mail are the Post Office's to carry in

@@ -7,6 +7,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { NotificationService } from '../modules/notification/notification.service';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // Real routes and PostgreSQL; authentication, sockets and push are synthetic.
 let app: FastifyInstance;
@@ -105,8 +106,10 @@ describe('driver pickup authority survives no assignment change', () => {
       const pending = app.inject({ method: 'PUT', url: `/driver/rides/${order.id}/${endpoint}`, headers: { 'test-actor': mover.id } }).then((r) => r);
       await pause.waiting;
       try {
-        await app.prisma.order.update({ where: { id: order.id }, data: { driverId: null, status: 'PENDING', acceptedAt: null } });
-        await app.prisma.order.update({ where: { id: order.id }, data: { driverId: next.driver!.id, status: order.status, acceptedAt: new Date() } });
+        // Release, then reassign along declared edges only: the database refuses an undeclared jump
+        // (#1740's transition guard), so PENDING -> DRIVER_EN_ROUTE goes through DRIVER_ASSIGNED.
+        await walkOrderStatus(app.prisma, order.id, 'PENDING', { driverId: null, acceptedAt: null });
+        await walkOrderStatus(app.prisma, order.id, order.status, { driverId: next.driver!.id, acceptedAt: new Date() });
       } finally { pause.resume(); }
       const response = await pending;
       expect(response.statusCode, response.body).toBe(409);

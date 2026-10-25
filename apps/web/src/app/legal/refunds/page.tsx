@@ -20,7 +20,7 @@ import { site, launch } from '@/site.config';
  * week at a time, no paying ahead (was a four-week limit).
  */
 
-const UPDATED = '16 October 2026';
+const UPDATED = '17 October 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -59,12 +59,12 @@ export default function RefundsPage() {
         <li>
           <b>After the business accepts it</b>, the order can no longer be cancelled in the app. Contact the business to
           change or cancel it: the app shows the phone number the business published. You can still cancel it free in
-          the app if no rider could be found for it, or if it is running very late (for example, 30 minutes past the
+          the app if no rider could be found for it, or if it is running very late (for example, 60 minutes past the
           time you were promised).
         </li>
         <li>
           <b>Rides, parcels and bookings</b> can be cancelled free at any time while nobody has accepted them, and for
-          5 minutes after a driver, rider or provider accepts them. After that, contact your driver, rider or provider.
+          1 minute after a driver, rider or provider accepts them. After that, contact your driver, rider or provider.
           You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
         </li>
         <li>

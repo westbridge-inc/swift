@@ -156,9 +156,11 @@ export function AddStopRow({ canAdd, maxStops, onAdd }: { canAdd: boolean; maxSt
 }
 
 /** The fare line under the ride options when the trip has stops: ONE fare for
- *  the whole trip, said before the passenger confirms — no per-stop fee. */
+ *  the whole trip, said before the passenger confirms — no per-stop fee, and a
+ *  skipped stop never lowers it (owner v1 rule; REVIEW-M S4-2: said at the
+ *  quote, not only in the notice after the skip). */
 export function oneFareLine(stopCount: number): string {
-  return `One fare for the whole trip with ${stopCount === 1 ? '1 stop' : `${stopCount} stops`} · cash to the driver. No extra fee for stops.`;
+  return `One fare for the whole trip with ${stopCount === 1 ? '1 stop' : `${stopCount} stops`} · pay the driver cash or MMG at drop-off. No extra fee for stops, and the fare stays the same if a stop is skipped.`;
 }
 
 /** The quoted route, leg by leg (the estimate's `legs`, in route order). */

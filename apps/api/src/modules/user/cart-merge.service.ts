@@ -1,5 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { getTenantId } from '../../plugins/tenant-context';
 import { AppError } from '../../utils/errors';
 import { checkoutRequestHash } from '../order/checkout-outbox';
@@ -14,7 +14,7 @@ export const cartMergeSchema = z.object({
     clientLineId: id, vendorId: id, itemId: id,
     quantity: z.number().int().min(1).max(99),
     expectedUnitPrice: z.number().int().min(0).max(99999999),
-    selectedOptions: z.record(z.union([id, z.array(id).max(50)])).optional(),
+    selectedOptions: z.record(z.string(), z.union([id, z.array(id).max(50)])).optional(),
   })).min(1).max(100),
 }).superRefine(({ lines }, ctx) => {
   if (new Set(lines.map(l => l.clientLineId)).size !== lines.length) ctx.addIssue({ code: 'custom', message: 'Each basket line needs its own identifier.' });

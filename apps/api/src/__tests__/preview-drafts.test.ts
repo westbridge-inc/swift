@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { publicRoutes } from '../modules/public/public.routes';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Preview drafts (gated-trials spec §B2): with PREVIEW_MODE on, a store that
@@ -19,7 +20,7 @@ import { publicRoutes } from '../modules/public/public.routes';
 
 let app: FastifyInstance;
 let token: string;
-const marker = `pvdraft${nanoid(4).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
+const marker = `pvdraft${wordFreeTag(8)}`;
 let pendingVendorId: string;
 let pendingSlug: string;
 let suspendedVendorId: string;
@@ -28,7 +29,7 @@ let ownerId: string;
 const vendorIds: string[] = [];
 
 async function makeVendor(overrides: Record<string, unknown>) {
-  const suffix = nanoid(6).toLowerCase();
+  const suffix = wordFreeTag(8).toLowerCase();
   const v = await app.prisma.vendor.create({
     data: {
       ownerId,
@@ -75,7 +76,7 @@ beforeAll(async () => {
 
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Draft', lastName: 'Owner',
       roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never,
       isPhoneVerified: true,

@@ -22,7 +22,7 @@ export interface ReviewDocument {
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
   previousDecision?: PreviousDecision | null;
-  reviewerTypes?: Array<'documentNumber' | 'issuedOn'>;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind' | 'ownNameConfirmed'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
   user?: {
@@ -45,7 +45,10 @@ const LABELS: Record<string, string> = {
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
   // [MC-PR2] checklist photo types the queue and the activation checklist both name
-  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
+  storefront_photo: 'Storefront photo', own_name_declaration: 'Own-name declaration (no business registration)', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
+  // [TRADES · 13 Oct 2026; R15] service-trade documents
+  pest_control_operator_licence: 'PTCCB pest-control operator licence', pesticide_applicator_certificate: 'PTCCB applicator certificate',
+  eating_house_registration: 'Eating-house registration', gei_electrical_licence: 'GEI electrical licence',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
@@ -78,6 +81,29 @@ const REVIEWER_HINTS: Record<string, string> = {
   vehicle_insurance: "Read 'Limitations as to use': it must permit use for hire or reward (taxi: passengers for hire; delivery: commercial use). A policy for social, domestic and pleasure use only is rejected as 'Insurance does not permit use for hire or reward'.",
 };
 export const reviewerHint = (type: string): string | undefined => REVIEWER_HINTS[type];
+
+/**
+ * [TRADES · 13 Oct 2026] What the reviewer checks on a service-trade document, in plain words.
+ * A person decides every one of these; nothing here approves anything. `role` is the document's
+ * filing role: a service provider's documents are filed under CUSTOMER (their super-app account).
+ */
+// [R15 · research A9/D9] The licences and food certificates checked again every January: the reviewer
+// types the YEAR printed on the certificate, and only this year's (or, until 16 January, last year's) passes.
+const REVIEW_NOTES: Record<string, string> = {
+  pest_control_operator_licence: 'Pesticides and Toxic Chemicals Control Board licence to run a pest-control business, in this person’s name. Type the year it is for; it is checked again every January.',
+  pesticide_applicator_certificate: 'PTCCB commercial applicator certificate (urban/domestic) for this person. Valid two years from issue.',
+  eating_house_registration: 'The Georgetown Town Clerk’s eating-house registration for this year (renewed each 1 January). Outside Georgetown is not accepted yet. Type the year it is for.',
+  food_handler_cert: 'Food handler’s certificate for this year, with the issuing office (for a chef or caterer: the Mayor and City Council of Georgetown). Never a medical certificate. Type the year it is for.',
+  gei_electrical_licence: 'Government Electrical Inspectorate licence in this person’s name. Type the year it is for; it is checked again every January.',
+  // [owner 16 Oct 2026] a store's yearly licences: the same January re-check as a business name
+  gra_restaurant_licence: 'GRA restaurant licence for this store. Type the year it is for; it is checked again every January.',
+  sanitary_certificate: 'Sanitary certificate for this store’s premises. Type the year it is for; it is checked again every January.',
+  trade_licence: 'Trade licence for this store. Type the year it is for; it is checked again every January.',
+};
+/** `role` is kept for callers; [owner 16 Oct] no note depends on it since the heavy-equipment operator is held. */
+export function reviewNote(docType: string, _role: string): string | null {
+  return REVIEW_NOTES[docType] ?? null;
+}
 export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';
 export const vehicleLabel = (type: string) => LABELS[type] ?? 'Vehicle';
 const OUTCOMES: Record<string, string> = { APPROVED: 'Approved', REJECTED: 'Rejected', PENDING: 'Awaiting review', EXPIRED: 'Expired', APPROVE: 'Approved', REJECT: 'Rejected', REQUEST_INFO: 'More information requested', ESCALATE: 'Sent for another review', SECOND_REVIEW: 'Awaiting a second reviewer', ACTIVE: 'Active', REVOKED: 'Revoked' };

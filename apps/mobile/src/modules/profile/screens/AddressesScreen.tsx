@@ -6,6 +6,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useAddresses, useDeleteAddress, useSetCartAddress, useSetDefaultAddress } from '../../../hooks/customer';
 import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { errorMessage } from '../../../lib/apiError';
 
 // Address book, in kit row-card language. With route.params.selectFor==='cart'
 // a tap binds the address to the server-side cart and returns to it.
@@ -50,7 +51,8 @@ export function AddressesScreen() {
           style: 'destructive',
           onPress: () =>
             remove.mutate(a.id, {
-              onError: () => Alert.alert('Could not remove it', 'Check your connection and try again.'),
+              // [#1907 review S4-1] A refusal with its own words says them.
+              onError: (err) => Alert.alert('Could not remove it', errorMessage(err, 'Check your connection and try again.')),
             }),
         },
       ],
@@ -59,9 +61,19 @@ export function AddressesScreen() {
 
   const rows: any[] = Array.isArray(addresses.data) ? addresses.data : (addresses.data?.addresses ?? []);
 
+  // [UI-SWEEP U34] One pick at a time: the rows lock while the basket's
+  // address is being set (the tapped one says so), so a second tap can never
+  // race the first; a failure says it failed and unlocks the list.
+  const picking = React.useRef(false);
+  const pickingId = setCartAddress.isPending ? (setCartAddress.variables as string | undefined) : undefined;
   const pick = (a: any) => {
-    if (!selectForCart) return;
-    setCartAddress.mutate(a.id, { onSuccess: () => navigation.goBack() });
+    if (!selectForCart || picking.current) return;
+    picking.current = true;
+    setCartAddress.mutate(a.id, {
+      onSuccess: () => navigation.goBack(),
+      onError: (err) => Alert.alert('Could not use this address', errorMessage(err, 'Check your connection and try again.')),
+      onSettled: () => { picking.current = false; },
+    });
   };
 
   return (
@@ -86,7 +98,11 @@ export function AddressesScreen() {
             keyExtractor={(a) => a.id}
             contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
             renderItem={({ item: a }) => (
-              <Pressable onPress={() => pick(a)} disabled={!selectForCart}>
+              <Pressable
+                onPress={() => pick(a)}
+                disabled={!selectForCart || setCartAddress.isPending}
+                accessibilityState={{ disabled: !selectForCart || setCartAddress.isPending, busy: pickingId === a.id }}
+              >
                 {({ pressed }) => (
                   <Card
                     style={{
@@ -94,7 +110,7 @@ export function AddressesScreen() {
                       alignItems: 'center',
                       gap: space.md,
                       padding: space.md,
-                      opacity: pressed ? 0.8 : 1,
+                      opacity: pressed ? 0.8 : setCartAddress.isPending && pickingId !== a.id ? 0.5 : 1,
                       borderWidth: selectForCart ? 1 : 0,
                       borderColor: color.border.subtle,
                     }}
@@ -125,7 +141,11 @@ export function AddressesScreen() {
                       </T>
                     </View>
                     {selectForCart ? (
-                      <Feather name="chevron-right" size={18} color={color.text.muted} />
+                      pickingId === a.id ? (
+                        <T variant="caption" tone="muted">Saving…</T>
+                      ) : (
+                        <Feather name="chevron-right" size={18} color={color.text.muted} />
+                      )
                     ) : (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
                         {a.isDefault ? null : (

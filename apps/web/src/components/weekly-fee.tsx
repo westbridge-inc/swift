@@ -77,7 +77,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
           {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
         </button>
       </section>}
-      <CardPay family={family} storeId={storeId} card={card} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
+      <CardPay family={family} storeId={storeId} card={card} latestSession={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
     <h2 className="text-lg font-bold">Recent checkouts</h2>
@@ -92,5 +92,10 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
         {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
       </div>;
     }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
+    <h2 className="text-lg font-bold">Receipts</h2>
+    {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
+    {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
+      {r.lines.map((line, i) => <p key={i} className={i === 0 ? 'font-semibold' : undefined}>{line}</p>)}
+    </div>) : <p className="text-sm text-[var(--swift-muted)]">No receipts yet.</p>}
   </section>;
 }

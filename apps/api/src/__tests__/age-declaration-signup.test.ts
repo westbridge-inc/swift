@@ -12,6 +12,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { requestOtp, registrationProofFor } from './helpers/otp';
 import { SIGNUP_CONTINUATION_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { AGE_DECLARATION_V1, AGE_DECLARATION_VERSION } from '../modules/auth/age-declaration';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 15 Oct 2026 · Terms "You must be at least 18 years old" · Privacy §8] A sign-up
@@ -26,7 +27,7 @@ const ORIGIN = 'http://localhost:3001';
 const WEB = { 'x-swift-client': 'web', origin: ORIGIN } as const;
 const RUN = nanoid(6).toLowerCase();
 const userIds: string[] = [];
-const newPhone = () => `+59276${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const newPhone = () => testPhone();
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 
 beforeAll(async () => {

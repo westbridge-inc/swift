@@ -11,7 +11,8 @@
  * unchanged — the API keeps running its own workers.
  *
  * Socket emits from jobs reach user/vendor/order rooms through the Socket.IO
- * Redis adapter (production), exactly like the in-process topology; the local
+ * Redis adapter (production, loadtest/staging, development: see
+ * utils/worker-socket-adapter.ts), exactly like the in-process topology; the local
  * io instance here is a broadcast-only handle with no HTTP listener.
  */
 // FIRST: secrets delivered as files (NAME_FILE) become NAME in this process
@@ -27,7 +28,8 @@ import { initSentry } from './plugins/observability';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
-import { isProduction } from './utils/runtime-mode';
+import { setAppLogger } from './utils/logger';
+import { attachWorkerSocketAdapter } from './utils/worker-socket-adapter';
 import { createScopedProcessClient } from './plugins/prisma';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
@@ -42,6 +44,10 @@ async function main() {
   initSentry();
 
   const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info', redact: loggerRedactConfig, serializers: loggerSerializers });
+  // [M013] Deep services log through utils/logger's log(), which is console
+  // until a process hands it a logger (app.ts does for the API). Without this
+  // every log() line inside a job printed raw error text with no redaction.
+  setAppLogger(log);
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
     maxRetriesPerRequest: null,
   });
@@ -58,6 +64,8 @@ async function main() {
   // [S3-L1] Only on a database of this process's own kind (its
   // deployment_identity), before any job runs; a refusal exits 1 (below).
   await assertDeploymentIdentityMatchesMode(prisma);
+  // [Row 312 · COORD 22 Oct] The rescan job's payload failures start the same shared cool-down the API reads.
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(redis)); }
 
   const io = new Server();
   const adapterConns: Redis[] = [];
@@ -140,21 +148,8 @@ async function main() {
     await attestSystemLoginAtBoot(prisma, log);
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
-    if (isProduction()) {
-      const { createAdapter } = await import('@socket.io/redis-adapter');
-      const pub = redis.duplicate();
-      const sub = redis.duplicate();
-      adapterConns.push(pub, sub);
-      for (const [kind, connection] of [['publish', pub], ['subscribe', sub]] as const) {
-        connection.on('error', (err) => log.error({ err, kind }, 'Socket.IO Redis adapter error'));
-      }
-      await withTimeout(
-        Promise.all(adapterConns.map((connection) => connection.ping())),
-        startupTimeoutMs,
-        'Socket.IO Redis adapter startup',
-      );
-      io.adapter(createAdapter(pub, sub));
-    }
+    // Production, loadtest (staging) and development: job emits reach the API's sockets through Redis.
+    await attachWorkerSocketAdapter({ io, redis, log, startupTimeoutMs }, adapterConns);
 
     runtime = await initializeJobRuntime({ prisma, io, redis, log }, { runWorkers: true });
     log.info(

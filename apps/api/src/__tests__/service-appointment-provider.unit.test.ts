@@ -187,6 +187,12 @@ async function providerHost(rows: Row[]) {
     alertDelivery: { updateMany: async () => ({ count: 0 }) },
     notification: { updateMany: async () => ({ count: 0 }) },
     platformConfig: { findUnique: async () => null, findMany: async () => [] },
+    // [O-4] The accept re-reads the order's lines on the locked row (no open customer question,
+    // something left to accept): the fixture order's own lines.
+    orderItem: {
+      findMany: async (args: { where: { orderId: string } }) =>
+        ((store.rows.find((r) => r['id'] === args.where.orderId)?.['items'] as Row[] | undefined) ?? []),
+    },
   });
   const host = await hostRoutes(vendorRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
   return { ...host, store, prisma };

@@ -604,7 +604,6 @@ describe('Axios auth interceptor integration', () => {
       }, accountA),
       verificationApi.submitIdentity({
         idDocumentUrl: '/a-id.jpg',
-        selfieUrl: '/a-selfie.jpg',
         consent: true,
         privacyNoticeVersion: 'v1',
       }, accountA),
@@ -782,6 +781,64 @@ describe('weekly fee MMG transport', () => {
     await expect(request).rejects.toThrow('paying account changed');
     await expect(client.start('tap-key-2')).rejects.toThrow('paying account changed');
     auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
+  });
+});
+
+describe('weak-network uploads', () => {
+  it('gives uploads 90 seconds without extending ordinary writes', async () => {
+    const seen: number[] = [];
+    setAdapter(async (config) => {
+      seen.push(config.timeout!);
+      return response(config, 200, { data: { url: 'fixture-photo' } });
+    });
+    const form = new FormData();
+    await authApi.uploadSelfie(form, accountA);
+    await verificationApi.upload(form, accountA);
+    await courierApi.uploadProof('job', form, accountA);
+    await courierApi.uploadPickupProof('job', form, accountA);
+    await courierApi.returnProof('job', form, accountA);
+    await riderApi.uploadHandoverPhoto('job', form, accountA);
+    await driverApi.uploadHandoverPhoto('job', form, accountA);
+    await api.post('/ordinary-write', {});
+    expect(seen).toEqual([90000, 90000, 90000, 90000, 90000, 90000, 90000, 10000]);
+  });
+  it('retries a lost upload response once with the same photo', async () => {
+    const bodies: unknown[] = [];
+    setAdapter(async (config) => {
+      bodies.push(config.data);
+      if (bodies.length === 1) throw new AxiosError('fixture timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { url: 'fixture-photo' } });
+    });
+    const form = new FormData();
+    form.append('file', 'fixture-image');
+    await verificationApi.upload(form, accountA);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+  });
+  it('does not retry under a replacement account', async () => {
+    let attempts = 0;
+    setAdapter(async (config) => {
+      attempts++;
+      auth.current = accountB;
+      throw new AxiosError('fixture timeout', 'ECONNABORTED', config);
+    });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+  it.each([400, 403, 413, 422, 500])('does not retry a server response (%i)', async (status) => {
+    let attempts = 0;
+    setAdapter(async (config) => {
+      attempts++;
+      throw new AxiosError('fixture rejection', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+  it('stops after one automatic retry', async () => {
+    let attempts = 0;
+    setAdapter(async (config) => { attempts++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(2);
   });
 });
 

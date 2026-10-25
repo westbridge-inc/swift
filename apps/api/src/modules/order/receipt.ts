@@ -29,12 +29,18 @@ type ReceiptOrder = {
   totalAmount: unknown;
   deliveryAddress: string | null;
   vendor: { name: string; addressLine1: string; city: string; phone: string } | null;
+  /** [Triage row 248 · R3 · CAA s.70] Who sold: the store's seller block (verification/storefront-seller.ts), the same
+   *  legal name, address and published phone its store page shows. Null = Swift holds none on file for it, and the
+   *  receipt names the store by its trading name and address only (never a guess). */
+  seller?: { legalName: string | null; address: string | null; phone: string | null } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
-  items: Array<{ name: string; quantity: number; totalCustomer: unknown }>;
+  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null }>;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
   currencyCode?: string | null;
   /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
   fareBreakdown?: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null;
+  /** [TAXI multi-stop 8/8] A ride's stops in order (absent for a ride without them). */
+  stops?: Array<{ sequence: number; address: string; skipped: boolean }> | null;
   /** [L02 · row 34] The cash the rider stated at the door, and how far short a
    *  handover was made (the rider bore the difference). */
   doorCashCollectedAmount?: unknown;
@@ -43,6 +49,14 @@ type ReceiptOrder = {
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** "Sold by" — the seller's legal name, address and phone when on file; otherwise the store's own name and address. */
+function soldBy(vendor: NonNullable<ReceiptOrder['vendor']>, seller: ReceiptOrder['seller'] | null): string {
+  const name = seller?.legalName ?? vendor.name;
+  const address = seller?.address ?? `${vendor.addressLine1}, ${vendor.city}`;
+  const phone = seller?.phone ? ` · ${esc(seller.phone)}` : '';
+  return `Sold by ${esc(name)} — ${esc(address)}${phone}`;
+}
 
 export function renderReceiptHtml(order: ReceiptOrder): string {
   // [M-36] The order names its currency; the receipt renders it through the
@@ -78,11 +92,16 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
           : shortCash
             ? `Paid ${formatMoney(order.doorCashCollectedAmount, currency, { whole: true })} in cash on delivery (${formatMoney(shortfall, currency, { whole: true })} not collected)`
             : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
+  // [SUBSTITUTION · owner 17 Oct] A line that came off the order (the store
+  // removed it, the customer declined the swap, or nobody answered in time)
+  // was never charged: the receipt says so and prices it at nothing, so the
+  // rows add up to the Items total the order actually carries.
+  const removed = (i: { subStatus?: string | null }) => i.subStatus === 'REFUNDED' || i.subStatus === 'REJECTED';
   const rows = order.items
     .map(
       (i) => `<tr>
-        <td>${i.quantity}× ${esc(i.name)}</td>
-        <td class="num">${money(i.totalCustomer)}</td>
+        <td>${i.quantity}× ${esc(i.name)}${removed(i) ? ' (removed, not charged)' : ''}</td>
+        <td class="num">${money(removed(i) ? 0 : i.totalCustomer)}</td>
       </tr>`,
     )
     .join('\n');
@@ -120,9 +139,10 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <h1>Receipt · ${esc(order.orderNumber)}</h1>
   <div class="meta">
     ${customerName ? `${esc(customerName)}<br>` : ''}
-    ${order.vendor ? `${esc(order.vendor.name)} — ${esc(order.vendor.addressLine1)}, ${esc(order.vendor.city)}<br>` : ''}
+    ${order.vendor ? `${soldBy(order.vendor, order.seller ?? null)}<br>` : ''}
     ${new Date(order.placedAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}<br>
     ${esc(paidHow)}
+    ${order.stops && order.stops.length > 0 ? `<br>Stops: ${order.stops.map((st) => `${st.sequence}. ${esc(st.address)}${st.skipped ? ' (skipped)' : ''}`).join(' · ')}` : ''}
   </div>
   <table>
     ${rows}

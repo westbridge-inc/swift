@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
@@ -47,6 +48,12 @@ export function MoverAccountScreen({ navigation }: any) {
   const setBilling = useSetMoverBillingMethod(kind, stepUp.withStepUp);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
+  // [Row 312 · REVIEW-F S4-1] While the malware scanner is down a new vehicle photo is stored unscanned and
+  // the server withholds it until its rescan answers clean (vehiclePhotoUrl null + vehiclePhotoScan). Say
+  // what happened instead of "Add photo". An older server sends no vehiclePhotoScan: as before.
+  const photoScan = (profile as { vehiclePhotoScan?: unknown } | null | undefined)?.vehiclePhotoScan;
+  const photoWaiting = !profile?.vehiclePhotoUrl && photoScan === 'AWAITING';
+  const photoFailed = !profile?.vehiclePhotoUrl && photoScan === 'FAILED';
   const qc = useQueryClient();
   // [ALG-34] The MMG pay link is where the money goes: the server asks this
   // session to confirm it holds the phone (the code sheet), then STAGES the
@@ -118,7 +125,8 @@ export function MoverAccountScreen({ navigation }: any) {
     <Screen>
       <Header title="Account" />
       <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        {/* Profile */}
+        {/* Profile. Every card below stacks with marginTop space.md and no
+            marginBottom — one gap between cards (owner 17 Oct: two touched). */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
             <T variant="title" tone="onBrand">
@@ -149,9 +157,7 @@ export function MoverAccountScreen({ navigation }: any) {
 
         {/* Movement R9 — Standing (daily-folded; today's ratings never show) */}
         {standingQ.data ? (
-          <View style={{ marginTop: space.md }}>
-            <StandingCard data={standingQ.data} />
-          </View>
+          <StandingCard data={standingQ.data} style={{ marginTop: space.md, marginBottom: 0 }} />
         ) : null}
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
@@ -174,26 +180,39 @@ export function MoverAccountScreen({ navigation }: any) {
                 </T>
               </View>
               <LinkText
-                label={uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl || photoWaiting ? 'Change photo' : photoFailed ? 'Upload again' : 'Add photo'}
                 onPress={pickVehiclePhoto}
               />
             </View>
-            {!profile?.vehiclePhotoUrl ? (
+            {photoWaiting ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Photo waiting for a file check. Customers see it once it clears.
+              </T>
+            ) : photoFailed ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                This photo didn’t pass our file check. Upload a new photo.
+              </T>
+            ) : !profile?.vehiclePhotoUrl ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Add a clear photo of your vehicle — customers see it the moment you accept.
               </T>
             ) : null}
             {uploadVehiclePhoto.isError ? (
-              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-                Upload failed — try a different photo.
-              </T>
+              <View style={{ marginTop: space.sm }}>
+                <T variant="caption" tone="error">Upload failed — your selected photo is kept for retry.</T>
+                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" onPress={() => uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
+              </View>
             ) : null}
           </Card>
         ) : null}
 
-        {isDriver ? (
+        {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+            drop-off, cash or MMG: the card shows only while the server says the link
+            is on (DRIVER_MMG_PAY_LINK). Off, or a server that does not say, means no card. */}
+        {isDriver && (profile as { mmgPayLinkEnabled?: unknown } | null | undefined)?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="rides"
+            style={{ marginTop: space.md, marginBottom: 0 }}
             value={profile?.mmgPayUrl}
             pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
             saving={saveMmgLink.isPending}
@@ -225,6 +244,7 @@ export function MoverAccountScreen({ navigation }: any) {
             onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
           <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData')} />
+          <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>
@@ -257,7 +277,7 @@ export function MoverAccountScreen({ navigation }: any) {
             </T>
           </View>
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-            Swift only charges a flat weekly fee — no commission on any fare, ever. You&apos;re paid in cash, on every job.
+            Swift only charges a flat weekly fee — no commission on orders. You&apos;re paid directly by the customer: in cash, or into your own MMG account where you offer it.
           </T>
         </Card>
 

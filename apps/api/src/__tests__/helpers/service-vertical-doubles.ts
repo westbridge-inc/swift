@@ -375,6 +375,7 @@ export function serviceBooking(id: string, extra: Row = {}): Row {
     fulfillment: 'APPOINTMENT',
     fulfillmentMode: null,
     fulfillmentModeVersion: 0,
+    riderAssignmentVersion: 0,
     status: 'PENDING',
     customerId: 'user-customer',
     customer: { id: 'user-customer', firstName: 'Ama' },

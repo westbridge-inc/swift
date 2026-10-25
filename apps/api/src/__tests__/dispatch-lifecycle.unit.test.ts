@@ -3,10 +3,11 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { mmgDispatchBlocked } from '../modules/order/mmg-claim.service';
+import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../modules/order/mmg-claim.service';
 import { drainCheckoutOutbox, persistDispatchCommandInTransaction } from '../modules/order/checkout-outbox';
 import { readOfferItinerary } from '../modules/rides/taxi-stops-read';
 import { offerCardAddresses } from '../modules/dispatch/board-privacy';
+import { assignmentLogWhere } from '../modules/order/store-handover-log';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -15,7 +16,9 @@ const source = ts.createSourceFile('dispatch.ts', sourceText, ts.ScriptTarget.La
 const klass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === 'DispatchService')!;
 const helperNames = new Set(['parseOfferValue', 'journalAuthorityWhere', 'deliveryAuthorityVersionFromAttempt', 'riderDeliveryAuthorityVersionFromAttempt', 'deliveryOfferAttemptId', 'offerValue', 'offerKey', 'moverOfferKey', 'offerPendingKey', 'offerPublishingKey', 'offerRecoveryKey', 'offerEpochKey', 'offersSentKey', 'offerOutcomeKey', 'reconciledKey',
   // [DISPATCH 1/3] the claim-refusal classifier acceptOffer runs on every refusal
-  'ORDER_HELD_CLAIM_CODES', 'LOST_RACE_CLAIM_CODES', 'MOVER_INELIGIBLE_CLAIM_CODES', 'classifyClaimRefusal', 'claimRefusalMarksTheMover', 'isUniqueViolationOn']);
+  'ORDER_HELD_CLAIM_CODES', 'LOST_RACE_CLAIM_CODES', 'MOVER_INELIGIBLE_CLAIM_CODES', 'classifyClaimRefusal', 'claimRefusalMarksTheMover', 'isUniqueViolationOn',
+  // [PAYMENT-SIMPLIFY] reconcileStuckDispatch's candidate filter, now one exported function (it skips unpaid MMG orders).
+  'stuckDispatchEligibleWhere']);
 const helpers = source.statements.filter(n =>
   (ts.isFunctionDeclaration(n) && helperNames.has(n.name?.text ?? '')) ||
   (ts.isVariableStatement(n) && n.declarationList.declarations.some(d => helperNames.has(d.name.getText(source))))
@@ -51,6 +54,11 @@ const context = vm.createContext({
   // [ORDER-SPINE S1-6] dispatchOrder's direct-MMG offer gate — the production
   // predicate itself, not a copy (these orders are CASH, so it lets them by).
   mmgDispatchBlocked,
+  // [O-2] the assignment-episode count's predicate — the production one itself (the store's
+  // "Handed to rider" row never counts as an assignment).
+  assignmentLogWhere,
+  // [PAYMENT-SIMPLIFY] the stuck reconciler's MMG filter — the production predicate itself (these orders are CASH).
+  mmgDispatchEligibleWhere,
   // [TAXI multi-stop 3/8] the offer card's stops — the production reader itself
   // (these rides have no stops, so it reads nothing and adds nothing).
   readOfferItinerary,

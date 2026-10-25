@@ -1,8 +1,12 @@
-import { View } from 'react-native';
+import { useState } from 'react';
+import { Pressable, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { EmptyState, Spinner, T } from '../../kit';
+import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
+import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
+import { OwnNameCard } from './OwnNameCard';
+import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
@@ -10,6 +14,8 @@ import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalD
  *  theme maps no numeric spacing, so it was never a token. Named here so the
  *  bar and its fill cannot drift apart. */
 const TRACK_HEIGHT = 6;
+/** [ROLE-DOCS] The signed "I trade under my own name" declaration (the server's OWN_NAME_DOC_TYPE). */
+const OWN_NAME_DOC = 'own_name_declaration';
 
 /**
  * Renders GET /verification/status?role= as the "Required steps" checklist.
@@ -24,13 +30,18 @@ export function DocumentChecklist({
   isLoading,
   isError,
   onRetry,
+  storeName,
 }: {
   role: string;
   status: any;
+  /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
+  storeName?: string | null;
   isLoading?: boolean;
   isError?: boolean;
   onRetry?: () => void;
 }) {
+  // [R17] uploads wait for the consent tick (unticked to start); a hook, so before the early returns
+  const [consented, setConsented] = useState(false);
   if (isLoading) {
     return (
       <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
@@ -92,8 +103,21 @@ export function DocumentChecklist({
         Required steps
       </T>
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
-        Upload these to activate your account. We review within 24 hours.
+        {/* [Owner 15 Oct 2026] no promise faster than the support hours allow */}
+        Upload these to activate your account. We review them Monday to Saturday, 8:00–20:00 Guyana time.
       </T>
+      {/* [R17 · legal research D2/B1] an unticked tick before any upload; the API records it in the consent ledger */}
+      <Pressable
+        onPress={() => setConsented((c) => !c)}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: consented }}
+        accessibilityLabel={DOCUMENT_CONSENT_TEXT}
+        testID="document-consent-tick"
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}
+      >
+        <BrandCheckbox checked={consented} onToggle={() => setConsented((c) => !c)} />
+        <T variant="label" tone="muted" style={{ flex: 1 }}>{DOCUMENT_CONSENT_TEXT}</T>
+      </Pressable>
       {isTaxiChecklist(checklist) ? (
         <T variant="label" style={{ marginBottom: space.sm }}>
           {TAXI_TWO_LICENCES}
@@ -136,8 +160,23 @@ export function DocumentChecklist({
       </View>
       {checklist.map((docType) => {
         const doc = latestDoc(docType);
+        // [ROLE-DOCS · owner 21 Oct 2026] the own-name declaration is signed in the app, never uploaded
+        if (docType === OWN_NAME_DOC) {
+          return !doc || doc.status === 'REJECTED' ? (
+            <View key={docType}>
+              {doc ? <T variant="caption" tone="error">{doc.reviewNote ?? 'Your own-name declaration was not accepted.'}</T> : null}
+              <OwnNameCard role={role} mode="sign" storeName={storeName} />
+            </View>
+          ) : (
+            <View key={docType} style={{ paddingVertical: space.sm }}>
+              <T variant="label" weight="bold">I trade under my own name</T>
+              <T variant="caption" tone="muted">{doc.status === 'APPROVED' ? 'Checked by a person on our team.' : 'Signed — a person on our team is checking it against your ID.'}</T>
+            </View>
+          );
+        }
         return (
           <DocumentUploadCard
+            consented={consented}
             key={docType}
             role={role}
             docType={docType}
@@ -151,6 +190,9 @@ export function DocumentChecklist({
           />
         );
       })}
+      {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
+      {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
+        ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}
       {optional.length > 0 ? (
         <View style={{ marginTop: space.md }}>
           <T variant="heading" style={{ marginBottom: space.xs }}>
@@ -163,6 +205,7 @@ export function DocumentChecklist({
             const doc = latestDoc(docType);
             return (
               <DocumentUploadCard
+                consented={consented}
                 key={docType}
                 role={role}
                 docType={docType}

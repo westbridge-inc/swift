@@ -1,12 +1,14 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { POLL } from '../lib/pollPolicy';
 import { runBillingMutation } from '../lib/billingMutation';
 import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
 import { currentDevicePosition } from '../services/devicePosition';
-import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
+import { TAXI_STOPS_CAPABILITY, maxStopsFrom, rideStops } from '../lib/taxiItinerary';
+import { skippedStopsKey } from '../lib/routeLine';
 import { track } from '../lib/analytics';
 import {
   publishMoverLocation,
@@ -55,6 +57,7 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
 }
 
 export type { MoverKind } from '../lib/moverLocation';
+import { boardPaused } from '../lib/moverBoard';
 
 /** [TAXI multi-stop] Has THIS server advertised rides with stops
  *  (GET /rides/capabilities, maxStops > 0)? Every failure is "no". */
@@ -191,7 +194,8 @@ export function useUploadVehiclePhoto(kind: MoverKind | null) {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', file as unknown as Blob);
+      form.append('file', await prepareUploadImage(file) as unknown as Blob);
+      requireAuthSessionForPrincipal(owner);
       const result = await unwrap(svc(kind as MoverKind).uploadVehiclePhoto(form, current));
       requireAuthSessionForPrincipal(owner);
       return result;
@@ -276,13 +280,15 @@ export function useDemand<T = any>(kind: MoverKind | null, point?: { lat: number
   return pv ? PV.previewQuery(PV.PREVIEW_DEMAND) : q;
 }
 
-export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
+/** The job board; it rests while a taxi driver is on a ride (lib/moverBoard). */
+export function useAvailableJobs(kind: MoverKind | null, online: boolean, onRide = false) {
   const pv = usePreview();
+  const open = online && !boardPaused(kind, onRide);
   const q = useQuery({
     queryKey: ['mover', 'available', kind],
     queryFn: () => unwrap(svc(kind as MoverKind).available()),
-    enabled: !!kind && online && !pv,
-    refetchInterval: () => online ? POLL.moverAvailable() : false,
+    enabled: !!kind && open && !pv,
+    refetchInterval: () => open ? POLL.moverAvailable() : false,
   });
   return pv ? PV.previewQuery(PV.PREVIEW_AVAILABLE) : q;
 }
@@ -307,6 +313,10 @@ export type RunSummary = {
   next: { orderId: string; vendorName: string | null; status: string };
 };
 
+/** A stacked rider's live legs. One read for every observer of the query, so
+ *  a read-only observer (the live job feed) never brings a different fetch. */
+export const activeLegsQueryFn = () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs());
+
 /**
  * [B6] Every live leg — the primary first — plus the run summary. The singular
  * case is `useActiveJob` untouched: one leg, no run, the same query. Taxi is
@@ -317,17 +327,29 @@ export function useActiveJobs(kind: MoverKind | null) {
   const pv = usePreview();
   const single = useActiveJob(kind);
   const stacked = kind === 'RIDER' && !pv;
+  // [PERF partner #5] A rider's legs exist only while the rider has a job (the server keeps the
+  // active pointer on a live leg). An idle rider used to read both the active job and the legs
+  // every 12 s; now the legs are read only while the active job is there, and an idle rider is
+  // never shown a finished run's legs. The active read keeps its own poll (it also heals a
+  // stale pointer on the server).
+  const onJob = !!single.data;
   const legsQ = useQuery({
     queryKey: ['mover', 'active', kind, 'legs'],
-    queryFn: () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs()),
-    enabled: stacked,
+    queryFn: activeLegsQueryFn,
+    enabled: stacked && onJob,
     refetchInterval: POLL.moverLegs,
   });
   const fromSingle: any[] = single.data ? [single.data] : [];
-  if (!stacked) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  if (!stacked || !onJob) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  // [S3-1] The legs cache can still hold the run that just finished when the next job starts. The
+  // current run's legs always include the active job (the server keeps the pointer on a live leg),
+  // so an answer without it is the old run's: until the new legs arrive, the active job is shown
+  // alone, never the old run's stops or cash to collect.
+  const activeId = (single.data as { id?: unknown }).id;
+  const current = (legsQ.data?.legs as any[] | undefined)?.some((leg) => leg?.id === activeId) ? legsQ.data : undefined;
   return {
-    legs: (legsQ.data?.legs as any[] | undefined) ?? fromSingle,
-    run: legsQ.data?.run ?? null,
+    legs: (current?.legs as any[] | undefined) ?? fromSingle,
+    run: current?.run ?? null,
     refetch: legsQ.refetch,
   };
 }
@@ -422,10 +444,24 @@ export function useGoOffline(kind: MoverKind) {
   const m = useMutation({ mutationFn: () => unwrap(svc(kind).goOffline()), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
   return pv ? PV.previewMutation() : m;
 }
+/**
+ * [PERF partner #2] What a job step's button waits for: the active job, the
+ * thing the job screen shows next. TanStack Query awaits the promise a
+ * mutation's onSuccess returns, and the steps used to return the refetch of
+ * EVERY mounted mover read (Home stays mounted under the job screen: both
+ * profile probes, which retry twice, today's and the week's earnings, demand,
+ * the job board). The button spun until the slowest of them came back, though
+ * the step had already succeeded. The other reads still refresh, at once, in
+ * the background; only the wait is narrower.
+ */
+export function refreshAfterJobStep(qc: QueryClient): Promise<void> {
+  void qc.invalidateQueries({ queryKey: ['mover'], predicate: (query) => query.queryKey[1] !== 'active' });
+  return qc.invalidateQueries({ queryKey: ['mover', 'active'] });
+}
 export function useAcceptJob(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ id }: { id: string }) => unwrap(svc(kind).accept(id)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ id }: { id: string }) => unwrap(svc(kind).accept(id)), onSuccess: () => refreshAfterJobStep(qc) });
   return pv ? PV.previewMutation() : m;
 }
 /** Accept a dispatch OFFER (the offer card), not a board grab. Hits
@@ -434,7 +470,7 @@ export function useAcceptJob(kind: MoverKind) {
 export function useAcceptOffer(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, offerAttemptId)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, offerAttemptId)), onSuccess: () => refreshAfterJobStep(qc) });
   return pv ? PV.previewMutation() : m;
 }
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next
@@ -497,7 +533,8 @@ export async function evidenceFix(owner: AuthSessionSnapshot) {
 export async function uploadHandoverPhoto(kind: MoverKind, orderId: string, uri: string, owner: AuthSessionSnapshot): Promise<string> {
   const session = requireAuthSessionForPrincipal(owner);
   const form = new FormData();
-  form.append('file', { uri, name: 'handover.jpg', type: 'image/jpeg' } as any);
+  form.append('file', await prepareUploadImage({ uri, name: 'handover.jpg', type: 'image/jpeg' }) as any);
+  requireAuthSessionForPrincipal(owner);
   const result = await unwrap<{ url: string }>(svc(kind).uploadHandoverPhoto(orderId, form, session));
   requireAuthSessionForPrincipal(owner);
   if (!result?.url) throw new Error('Photo upload did not return an issued artifact.');
@@ -536,7 +573,7 @@ export function useDriverAction() {
         void qc.invalidateQueries({ queryKey: ['mover'] });
         return;
       }
-      return qc.invalidateQueries({ queryKey: ['mover'] });
+      return refreshAfterJobStep(qc);
     },
   });
   return pv ? PV.previewMutation() : m;
@@ -601,7 +638,7 @@ export function useRiderAction() {
         }
       }
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+    onSuccess: () => refreshAfterJobStep(qc),
   });
   return pv ? PV.previewMutation() : m;
 }
@@ -899,9 +936,36 @@ export function useTaxiStopAction() {
     },
     // The screen says what went wrong in its own words; no second toast.
     meta: { silent: true },
-    onSettled: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+    onSettled: () => refreshAfterJobStep(qc),
   });
   return pv ? PV.previewMutation() : m;
+}
+
+/**
+ * [TAXI route line · MAPS-CHECK G1] The road through a driver's taxi ride
+ * (GET /driver/rides/:id/route), for the map. Read once per ride and per
+ * skipped stop — never polled, and outside the ['mover'] keys so a job step
+ * does not ask again. Any failure, a server from before the read, or preview
+ * answers null: the map keeps its straight heading line (lib/routeLine).
+ */
+export function useDriverRouteLine(job: any) {
+  const pv = usePreview();
+  const rideId = typeof job?.id === 'string' && job.id ? job.id as string : null;
+  const skipped = skippedStopsKey(rideStops(job));
+  return useQuery({
+    queryKey: ['driverRouteLine', rideId, skipped],
+    queryFn: async () => {
+      try {
+        return await unwrap(driverApi.rideRoute(rideId as string));
+      } catch {
+        return null;
+      }
+    },
+    enabled: !!rideId && !pv,
+    staleTime: 5 * 60_000,
+    retry: false,
+    meta: { silent: true },
+  });
 }
 
 // The live offer cards (the dispatch:offer stream, the queue, recovery, render

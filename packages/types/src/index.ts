@@ -13,3 +13,5 @@ export type { ServiceBookingMode, ServiceCategoryDocument, ServiceCategory, Serv
 export * from './market-time';
 export * from './mmg-checkout-support';
 export * from './service-job';
+export * from './category-icon';
+export * from './order-words';
