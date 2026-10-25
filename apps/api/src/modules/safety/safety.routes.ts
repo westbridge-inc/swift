@@ -261,9 +261,10 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: rows };
   });
   // [DRILL-STORM] A drill nobody acknowledged is closed as FAILED and stops paging; it stays
-  // visible here — it is evidence the paging path or the on-call rota failed. Platform operators only.
+  // visible here — it is evidence the paging path or the on-call rota failed. Platform operators
+  // only: the role the account HOLDS decides, never the app's mode [ADMIN-ROLE · REVIEW-G #2096].
   app.get('/ops-alerts/failed-drills', auth, async (request) => {
-    if (!isPlatformResponder(request.user.role)) throw new ForbiddenError('Failed drills are for platform operators.');
+    if (!isPlatformResponder(opsRoleOf(request))) throw new ForbiddenError('Failed drills are for platform operators.');
     const rows = await runWithoutTenant(() => app.prisma.opsAlert.findMany({
       where: { kind: 'DRILL', closeReason: DRILL_FAILED_REASON },
       orderBy: { createdAt: 'desc' }, take: 50,
