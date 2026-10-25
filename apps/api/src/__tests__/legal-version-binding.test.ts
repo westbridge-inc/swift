@@ -229,6 +229,30 @@ const PUBLISHED: Record<
     driver_agreement: 'bfbfc55fb330b4d6e095ec3754c76570a8c128d460a7a59b3c4c0c586161b785',
     vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
   },
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · NON-material] Terms s.2: a customer needs no ID to place
+  // an Order or take a taxi ride (the app asks for one only after repeated failed deliveries or payments, or for a
+  // high-value promotion); Privacy s.2 "(partners and, where they add one, customers)" and s.3 the ID a customer adds;
+  // Child Safety s.4 drops "higher-trust actions (taxi rides and larger orders) need a government ID on file".
+  // Nothing else changed: putting those words and 22 October back reproduces all four 2026-10-22.1 pins exactly (and
+  // Child Safety's served text). The date re-pins the two agreements.
+  '2026-10-25': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: '7a2b01b3dbb2ffc0fd4bfbc384867d584ebeac56bc6c7b9e19a761e13dd8a9dc',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
+  // [O-1 · COORD 25 Oct 15:20Z — MATERIAL] Privacy only: section 5 Sharing says how Swift-bridged calling works while
+  // Swift's call service is switched on (no number shown between the people on an order in the current app and
+  // website; Swift rings each side; press 1; never recorded; a call record with no phone number) and names Twilio as
+  // the processor that connects the calls; section 6 says how long a call record is kept. Same day as 2026-10-25, so
+  // LAST_UPDATED is unchanged and the Terms and both agreements keep their 2026-10-25 hashes. Taking those three
+  // additions back out reproduces the 2026-10-25 Privacy pin exactly.
+  '2026-10-25.1': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: 'ec292043689e125609c24ae26868ec0aa1d8e1d1e903c3ba87f60d0c678f2c63',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

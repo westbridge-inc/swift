@@ -16,6 +16,7 @@ import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-text';
 import { SEARCH_DB_BUDGET_MS, boundedRead, isOutOfTime } from './search-budget';
+import { consoleRoleOf } from '../auth/console-role';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -661,7 +662,8 @@ export async function searchRoutes(app: FastifyInstance) {
   // Re-sync search index (admin). Thrown errors get the standard envelope +
   // real status codes from the global handler (a 200-with-error body doesn't).
   app.post('/search/sync', { preHandler: [app.authenticate] }, async (request) => {
-    if (request.user.role !== 'SUPER_ADMIN' && request.user.role !== 'ADMIN') {
+    // [ADMIN-ROLE] the admin role the account holds, never the app's active mode
+    if (!consoleRoleOf(request.heldRoles)) {
       throw new ForbiddenError('Admin only');
     }
 

@@ -345,6 +345,42 @@ describe('the account export', () => {
     for (const leak of [`Stop One ${MARK}`, `Stop Two ${MARK}`, `Their Stop ${MARK}`]) expect(JSON.stringify(driverData)).not.toContain(leak);
   });
 
+  // [REVIEW-M S3 on #2027 · follow-up] For a sole trader the store's phone, email, address and map pin can be the
+  // owner's own contact and home place: the owner's file carries the record of each store they OWN (read through the
+  // ownership), with what they set for it. Never another owner's store, never a store they only work at, never a
+  // staff note, a hold or who placed it.
+  it('gives a store owner the record of each store they own: contact, place, payment details and settings; never another owner’s store or a staff note', async () => {
+    const owner = await person();
+    const otherOwner = await person();
+    const worker = await person();
+    const mine = await store(owner);
+    const theirs = await store(otherOwner);
+    await app.prisma.vendor.update({ where: { id: mine.id }, data: {
+      email: `owner-${MARK}@example.test`, addressLine2: `Back Room ${MARK}`, publicPhone: '+5926001299', mmgNumber: '+5926001288',
+      refundRule: `Refunds within a day ${MARK}`, tradesUnderOwnName: true, tierNote: `staff note ${MARK}`, mmgCheckoutHeldReason: `held for review ${MARK}`, mmgCheckoutHeldAt: new Date(),
+    } });
+    await app.prisma.vendor.update({ where: { id: theirs.id }, data: { addressLine1: `Their Street ${MARK}`, email: `theirs-${MARK}@example.test` } });
+    await app.prisma.vendorStaff.create({ data: { vendorId: mine.id, userId: worker, role: 'STAFF', invitedBy: owner } });
+
+    const data = await service().exportData(owner) as unknown as Record<string, Array<Record<string, unknown>>> & { coverage: Record<string, unknown> };
+    expect(data['storesOwned']).toEqual([expect.objectContaining({
+      id: mine.id, name: mine.name, vendorType: 'SUPERMARKET', phone: '+5926001234', publicPhone: '+5926001299', email: `owner-${MARK}@example.test`,
+      addressLine1: '1 Store Street', addressLine2: `Back Room ${MARK}`, city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
+      mmgNumber: '+5926001288', refundRule: `Refunds within a day ${MARK}`,
+      // [ROLE-DOCS #2046 · second merger] the owner's own declared name basis is their own setting
+      tradesUnderOwnName: true,
+    })]);
+    expect(data.coverage['storesOwned']).toEqual({ rows: 1, complete: true });
+    const text = JSON.stringify(data);
+    for (const leak of [theirs.id, `Their Street ${MARK}`, `theirs-${MARK}@example.test`, `staff note ${MARK}`, `held for review ${MARK}`, '"tierNote"', '"mmgCheckoutHeldAt"', '"tenantId"', '"ownerId"']) {
+      expect(text, leak).not.toContain(leak);
+    }
+    // Someone who only works at the store gets no store record.
+    const workerData = await service().exportData(worker) as unknown as Record<string, unknown[]>;
+    expect(workerData['storesOwned']).toEqual([]);
+    expect(JSON.stringify(workerData)).not.toContain(`Back Room ${MARK}`);
+  });
+
   it('gives a rider their work record, never the customer’s address', async () => {
     const riderUser = await person();
     const customer = await person();

@@ -308,6 +308,44 @@ describe('[O-1] starting a call', () => {
     expect((await bridge(riderP.token, o.id, 'customer')).statusCode).toBe(200);
   });
 
+  it('two taps at the same moment start exactly one call and write one row', async () => {
+    const o = await liveFood();
+    const [a, b] = await Promise.all([bridge(diner.token, o.id, 'rider'), bridge(riderP.token, o.id, 'customer')]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    expect(await system(() => app.prisma.callSession.count({ where: { orderId: o.id } }))).toBe(1);
+    expect(placed).toHaveLength(1);
+    const live = a.statusCode === 200 ? a : b;
+    await hook('status', live.json().data.callId, { CallStatus: 'completed' });
+  });
+
+  // [REVIEW-M S4-2 · REVIEW-G2 S4-3] Starting a call takes the order's row lock first, so the attempt count and the
+  // insert of one start can never interleave with another start's: while someone else holds the order row, a start waits.
+  it('a start waits for the order row: the attempt count and the insert are one step per order', async () => {
+    const o = await liveFood();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const gotLock = new Promise<void>((r) => { locked = r; });
+    // FOR NO KEY UPDATE: it blocks the start's FOR UPDATE but not the foreign-key check of the call row it
+    // inserts (FOR KEY SHARE), so only the start's own lock can make it wait here.
+    const holder = system(() => app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${o.id} FOR NO KEY UPDATE`;
+      locked();
+      await held;
+    }, { timeout: 20_000 }));
+    await gotLock;
+    const start = bridge(diner.token, o.id, 'rider');
+    const first = await Promise.race([start.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 1500))]);
+    expect(first, 'the start must wait for the order row').toBe('waiting');
+    expect(placed).toHaveLength(0);
+    release();
+    await holder;
+    const res = await start;
+    expect(res.statusCode, res.body).toBe(200);
+    expect(placed).toHaveLength(1);
+    await hook('status', res.json().data.callId, { CallStatus: 'completed' });
+  });
+
   it('the per-order cap counts ATTEMPTS, connected or not (CALL_RELAY_MAX_ATTEMPTS_PER_ORDER)', async () => {
     const o = await liveFood();
     for (let i = 0; i < 3; i += 1) {
@@ -385,6 +423,55 @@ describe('[O-1] the call itself: Press 1 on both legs', () => {
     expect((await callNotices(riderP.id)).length).toBe(before);
     // a late gather after the end dials nothing
     expect((await hook('leg1-gather', callId, { Digits: '1' })).body).not.toContain('<Dial');
+  });
+
+  it('[REVIEW-M S4-3] a terminal status callback after the callee\'s 1 ends the call, never turns it NOT_CONNECTED', async () => {
+    const o = await liveFood();
+    const { callId } = (await bridge(diner.token, o.id, 'rider')).json().data;
+    await hook('leg1-gather', callId, { Digits: '1' });
+    await hook('screen-gather', callId, { Digits: '1' });
+    await hook('status', callId, { CallStatus: 'completed', CallDuration: '61' });
+    const row = await session(callId);
+    expect(row.status).toBe('CONNECTED');
+    expect(row.endedAt).not.toBeNull();
+    expect(row.connectedAt).not.toBeNull();
+  });
+
+  // [REVIEW-G2 S4-1] The Dial is the one answer that carries the callee's number. A replayed or duplicate
+  // 'caller pressed 1' (Twilio retries a webhook it did not see answered) must never dial a second time.
+  it('a duplicate "caller pressed 1" never dials twice, in sequence or at the same moment', async () => {
+    const o = await liveFood();
+    const { callId } = (await bridge(diner.token, o.id, 'rider')).json().data;
+    const first = await hook('leg1-gather', callId, { Digits: '1' });
+    expect(first.body).toContain('<Dial');
+    const again = await hook('leg1-gather', callId, { Digits: '1' });
+    expect(again.body).not.toContain('<Dial');
+    expect(again.body).not.toContain(riderP.phone);
+    expect(again.body).toContain('<Hangup/>');
+    await hook('dial-done', callId, { DialCallStatus: 'no-answer' });
+
+    const o2 = await liveFood();
+    const second = (await bridge(diner.token, o2.id, 'rider')).json().data.callId;
+    const both = await Promise.all([hook('leg1-gather', second, { Digits: '1' }), hook('leg1-gather', second, { Digits: '1' })]);
+    expect(both.filter((r) => r.body.includes('<Dial')).length).toBe(1);
+    expect(both.filter((r) => r.body.includes(riderP.phone)).length).toBe(1);
+    await hook('dial-done', second, { DialCallStatus: 'no-answer' });
+  });
+
+  // [REVIEW-G2 S4-2] The callee's "Press 1" prompt belongs to a call whose caller has confirmed, and to nothing else.
+  it('the screen prompt is given only to a call whose caller pressed 1 and that is still going', async () => {
+    const o = await liveFood();
+    const { callId } = (await bridge(diner.token, o.id, 'rider')).json().data;
+    const early = await hook('screen', callId, {});
+    expect(early.body).not.toContain('<Gather');
+    expect(early.body).toContain('<Hangup/>');
+    await hook('leg1-gather', callId, { Digits: '1' });
+    expect((await hook('screen', callId, {})).body).toContain('<Gather');
+    await hook('dial-done', callId, { DialCallStatus: 'busy' });
+    const late = await hook('screen', callId, {});
+    expect(late.body).not.toContain('<Gather');
+    expect(late.body).toContain('<Hangup/>');
+    expect((await hook('screen-gather', callId, { Digits: '1' })).body).not.toBe('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   });
 
   it('any key but 1 on leg 1 ends it without dialling', async () => {

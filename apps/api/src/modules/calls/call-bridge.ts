@@ -225,6 +225,9 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
   let sessionId: string;
   try {
     sessionId = await deps.prisma.$transaction(async (tx) => {
+      // [REVIEW-M S4-2] One start at a time per order: the count below and the insert see the same rows,
+      // so the attempt cap is exact even when a first attempt failed at once and two taps race.
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
       // A call the provider never reported finished cannot hold the order's one live slot for ever.
       const stale = new Date(now.getTime() - CALL_STALE_AFTER_MS);
       await tx.callSession.updateMany({
@@ -360,9 +363,15 @@ export async function handleVoiceStep(
     }
     case 'status': {
       if (!ended && event.callStatus && TERMINAL_CALL_STATUSES.has(event.callStatus)) {
+        // The status is in each WHERE (REVIEW-M S4-3): a callee's 1 that lands while this runs is never
+        // overwritten as NOT_CONNECTED; a connected call is only ended.
         await deps.prisma.callSession.updateMany({
-          where: { id: session.id, endedAt: null },
-          data: session.status === CALL_STATUS.CONNECTED ? { endedAt: now } : notConnected,
+          where: { id: session.id, endedAt: null, status: { not: CALL_STATUS.CONNECTED } },
+          data: notConnected,
+        });
+        await deps.prisma.callSession.updateMany({
+          where: { id: session.id, endedAt: null, status: CALL_STATUS.CONNECTED },
+          data: { endedAt: now },
         });
       }
       return { step: null };

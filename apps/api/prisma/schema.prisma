@@ -1549,6 +1549,10 @@ model Vendor {
   /// signed self-declaration; set to REGISTERED only by a VALID registration record.
   tier                    VendorTier               @default(REGISTERED)
   tierChangedAt           DateTime?
+  /// [ROLE-DOCS · owner 21 Oct 2026] The store trades under its owner's own name (Business Names (Registration)
+  /// Act s.3: a true surname with only first names or initials needs no registration): its checklist asks for the
+  /// signed own-name declaration (vendor/own-name.ts) instead of a business registration. Set only by that signature.
+  tradesUnderOwnName      Boolean                  @default(false)
   tierNote                String?
   // [REPORT-013 F-013-07] WHO suspended the store: 'BILLING' (non-payment,
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
@@ -4051,6 +4055,48 @@ model StorageOrphan {
 
   @@index([tenantId, purgedAt])
   @@map("storage_orphans")
+}
+
+/// [Row 312 · COORD rulings 21-22 Oct] An upload stored WITHOUT a clean malware scan: evidence (safety
+/// evidence, delivery or handover proof: never refused, stored ONLY in the held quarantine folder) or a
+/// mover's upload under the MALWARE_SCAN_BYPASS=1 emergency switch (lib/upload-scan-debt.ts). The
+/// upload-rescan job scans it once clamd answers: a positive is moved to quarantine and paged; held
+/// evidence that scans clean is released (its bytes moved to their normal folder). No person or tenant
+/// id and never the content: the object key, the file's sha256, and the outcome. Platform-wide, like the
+/// scanner itself. NOTE: an object key is a storage path, and some embed an owner's id (e.g. a liveness
+/// selfie's folder): a bypass row forgets it when it closes clean; an evidence row keeps its key (order
+/// folders) because it maps the issued key to where the bytes now live.
+model UploadScanDebt {
+  id            String    @id @default(cuid())
+  /// The upload surface (lib/malware-scan.ts UploadSurface).
+  surface       String
+  /// 'evidence' (safety evidence, delivery or handover proof: never refused) | 'bypass' (MALWARE_SCAN_BYPASS=1).
+  reason        String
+  /// The stored object (for evidence: the held key every record was issued). A bypass row forgets it
+  /// once closed clean; a quarantined sealed one keeps it (its key row is found by it).
+  fileKey       String?
+  /// The stored bytes are envelope-encrypted (encrypted_objects row keyed by fileKey).
+  sealed        Boolean   @default(false)
+  sha256        String
+  attempts      Int       @default(0)
+  createdAt     DateTime  @default(now())
+  rescannedAt   DateTime?
+  /// CLEAN | FOUND | UNSCANNABLE | GONE (erased before the rescan) | SHREDDED (sealed, key shredded)
+  /// | HELD (evidence that could not be scanned: kept in the quarantine, never served or admitted,
+  /// paged until a platform admin retries its scan and it answers CLEAN)
+  result        String?
+  signature     String?
+  quarantinedAt DateTime?
+  quarantineKey String?
+  /// Held evidence that scanned CLEAN left the quarantine at this time...
+  releasedAt    DateTime?
+  /// ...and its bytes now live here (the records keep the issued fileKey and resolve it through this row).
+  releasedKey   String?
+
+  @@index([rescannedAt, createdAt])
+  @@index([reason, rescannedAt])
+  @@index([fileKey])
+  @@map("upload_scan_debts")
 }
 
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by

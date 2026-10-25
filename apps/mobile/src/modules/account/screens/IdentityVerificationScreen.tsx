@@ -43,9 +43,11 @@ function UploadRow({
   );
 }
 
-// [Owner ruling 8 Oct 2026 — CUSTOMER ID] The ID alone: no selfie, no face match (a profile
-// photo is asked only before a taxi ride). The ID goes on file at once unless the server's
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] The ID alone: no selfie, no face match (16 Oct: a
+// customer takes no photos at all). The ID goes on file at once unless the server's
 // automatic checks hold it for a person — the result screen says which, never "verified".
+// [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Optional: taxi rides and bigger orders no
+// longer need it; the server asks only after repeated failed deliveries/payments or for a big promo.
 export function IdentityVerificationScreen({ navigation }: any) {
   const upload = useUploadFile();
   const submit = useSubmitIdentity();
@@ -120,7 +122,7 @@ export function IdentityVerificationScreen({ navigation }: any) {
       </View>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
-          Needed once for taxi rides and bigger orders. Upload a clear photo of your government ID — no selfie needed. It goes on file right away; sometimes a person checks it first.
+          Optional — you don’t need an ID to order or to take a taxi. The app asks for one only after repeated failed deliveries or payments, or for a high-value promo code. Upload a clear photo of your government ID — no selfie needed. It goes on file right away; sometimes a person checks it first.
         </T>
         <UploadRow title="Government ID" done={!!idUrl} busy={picking === 'id'} onPress={() => pick('id')} />
 

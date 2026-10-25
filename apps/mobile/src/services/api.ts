@@ -1,3 +1,4 @@
+import { OWN_NAME_DECLARATION_VERSION } from '../lib/ownNameCopy';
 import axios, { type AxiosRequestConfig } from 'axios';
 import {
   SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
@@ -970,7 +971,8 @@ export const verificationApi = {
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
     // [ROLE-DOCS · owner 21 Oct 2026] the ID alone: a customer never gives a photo (the server drops build 9's selfieUrl)
-    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
+    // [Owner ruling 24 Oct 2026] the current app sends the customer_id_v2 tick; v1 is build 12's own
+    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' | 'customer_id_v2' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
@@ -1246,6 +1248,10 @@ export const vendorApi = {
   profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
+  /** [ROLE-DOCS · owner 21 Oct 2026] Sign "I trade under my own name" (in place of a business registration). */
+  signOwnName: () => api.post('/vendor/onboarding/own-name', { accept: true, attestationVersion: OWN_NAME_DECLARATION_VERSION }),
+  /** [ROLE-DOCS] Use a registered business name instead: the store asks for its registration again. */
+  dropOwnName: () => api.delete('/vendor/onboarding/own-name'),
   // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
   toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
   toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),

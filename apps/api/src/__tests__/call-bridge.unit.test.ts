@@ -8,7 +8,7 @@ import {
   CALL_TIME_LIMIT_SECONDS,
   readCallRelayConfig,
 } from '../modules/calls/call-relay-switch';
-import { CALL_WORDS, pairAllowed, roleWords } from '../modules/calls/call-bridge';
+import { CALL_WORDS, handleVoiceStep, pairAllowed, roleWords } from '../modules/calls/call-bridge';
 import { assertSafeBootConfig } from '../utils/boot-config';
 import { SECRET_FILE_NAMES } from '../utils/secret-files';
 import { PROCESSOR_REGISTER } from '../modules/legal/processor-register';
@@ -247,5 +247,27 @@ describe('[O-1] calls are never recorded', () => {
     expect([...code.matchAll(/\bRecord: /g)].map((m) => code.slice(m.index!, m.index! + 15))).toEqual(["Record: 'false'"]);
     const provider = readFileSync(join(__dirname, '..', 'providers/voice/call-provider.ts'), 'utf8');
     expect(provider).not.toMatch(/\brecord\??:/i);
+  });
+});
+
+// [REVIEW-M S4-3] The status callback reads the call, then writes. If the callee's 1 lands in between, the
+// write must not turn a connected call into NOT_CONNECTED: the status is in the WHERE, not only in the read.
+describe('[O-1] a terminal status callback racing the callee\'s 1', () => {
+  it('every write that marks NOT_CONNECTED is conditioned on the call not being CONNECTED', async () => {
+    const writes: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+    const stale = { id: 'ckstaleread000000000000000', status: 'CALLER_CONFIRMED', endedAt: null, orderId: 'o1', callerRole: 'customer', calleeRole: 'rider' };
+    const prisma = {
+      callSession: {
+        findUnique: async () => stale,
+        updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => { writes.push(args); return { count: 0 }; },
+      },
+    } as never;
+    const read = readCallRelayConfig(full());
+    if (!read.ok) throw new Error('the test configuration is incomplete');
+    const deps = { prisma, provider: twilio(), config: read.config, notifications: { send: async () => '' } };
+    await handleVoiceStep(deps, 'status', stale.id, { fields: { CallStatus: ['completed'], CallDuration: ['40'] } }, true);
+    const marks = writes.filter((w) => w.data['status'] === 'NOT_CONNECTED');
+    expect(marks.length).toBeGreaterThan(0);
+    for (const w of marks) expect(w.where['status'], JSON.stringify(w.where)).toEqual({ not: 'CONNECTED' });
   });
 });

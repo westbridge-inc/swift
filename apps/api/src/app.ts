@@ -164,9 +164,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Custom plugins
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
+  // [Row 312 · COORD 22 Oct] The upload scanner's payload-failure cool-down is shared by every API
+  // replica (and the worker) through Redis, so a file that crashes clamd on one replica cannot make the
+  // next upload on another look "down".
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(app.redis)); }
   await app.register(authPlugin);
   await app.register(socketPlugin);
   runtimeReadiness.checkRealtime = app.checkSocketAdapterReady;
+  // [Row 312 · COORD 23 Oct] A photo stored while the scanner was down (the bypass) leaves NO response,
+  // on any surface, before its rescan answers CLEAN (lib/photo-scan-filter.ts). Root hook, before any route.
+  { const { registerUploadPhotoScan } = await import('./lib/photo-scan-filter'); registerUploadPhotoScan(app); }
 
   // Multi-tenancy: give every request a fresh tenant store BEFORE any auth runs,
   // so `authenticate` can bind the caller's tenant without leaking across
@@ -270,14 +277,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // [Row 312] The upload malware scanner, detail only: 'off' (dark), 'ok', or 'down' (every upload is
     // refused 503 until it answers; the worker's watch pages ops). It never turns the API's status
     // degraded: everything but uploads still works, and the probes must not take the API down with it.
-    const { malwareScannerStatus } = await import('./lib/malware-scan');
+    const { malwareScanBypassOn, malwareScanEnabled, malwareScannerStatus } = await import('./lib/malware-scan');
     const malwareScanner = (await malwareScannerStatus(process.env, { timeoutMs: 2_000 })).state;
+    // [COORD 21 Oct] The emergency switch, so the doctor can shout while it is on.
+    const malwareScanBypass = malwareScanEnabled() && malwareScanBypassOn();
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
       malwareScanner,
+      malwareScanBypass,
       routing,
       // [PLACES-LOUD] Address search: last known status and the last failure's class and
       // Google status words (never a key or a query). Detail-gated like the rest.

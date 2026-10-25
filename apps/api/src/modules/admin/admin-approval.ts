@@ -35,6 +35,21 @@ export const APPROVAL_HEADER = 'x-swift-approval';
 /** CANCELLED: the requester withdrew it [OWNER #13]. */
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
 
+/** [Owner, admin-staging 25 Oct] Statuses a request can still move from: past its expiry each one is EXPIRED. */
+const LAPSES: readonly string[] = ['PENDING', 'APPROVED'];
+
+/** What a request IS now: an open one past its expiry is EXPIRED, whatever its column still says. */
+export function effectiveApprovalStatus(row: { status: string; expiresAt: Date }, now: Date): string {
+  return LAPSES.includes(row.status) && row.expiresAt.getTime() <= now.getTime() ? 'EXPIRED' : row.status;
+}
+
+/** The rows of one approvals view, by the status each row IS now (effectiveApprovalStatus). */
+export function approvalsViewWhere(view: ApprovalStatus, now: Date): Prisma.PrivilegedApprovalWhereInput {
+  if (LAPSES.includes(view)) return { status: view, expiresAt: { gt: now } };
+  if (view === 'EXPIRED') return { OR: [{ status: 'EXPIRED' }, { status: { in: [...LAPSES] }, expiresAt: { lte: now } }] };
+  return { status: view };
+}
+
 export interface ApprovalSubject {
   readonly method: string;
   readonly routeUrl: string;
@@ -390,7 +405,8 @@ export async function resolveApproval(
 /** The compare-and-set that IS the authorisation: APPROVED -> APPLIED, once. */
 export async function markApplied(prisma: PrismaClient, approvalId: string, now = new Date()): Promise<boolean> {
   const spent = await prisma.privilegedApproval.updateMany({
-    where: { id: approvalId, status: 'APPROVED' },
+    // [Owner, admin-staging 25 Oct] The expiry is part of the compare-and-set too: a lapsed approval never spends.
+    where: { id: approvalId, status: 'APPROVED', expiresAt: { gt: now } },
     data: { status: 'APPLIED', appliedAt: now },
   });
   return spent.count === 1;
@@ -423,7 +439,8 @@ export async function decideApproval(
 
   const status: ApprovalStatus = decision.approve ? 'APPROVED' : 'REJECTED';
   const decided = await prisma.privilegedApproval.updateMany({
-    where: { id: approvalId, status: 'PENDING' },
+    // [Owner, admin-staging 25 Oct] Decided only while still inside its time, checked in the write itself.
+    where: { id: approvalId, status: 'PENDING', expiresAt: { gt: now } },
     data: { status, approvedBy: decider.userId, decisionNote: decision.note ?? null, decidedAt: now },
   });
   if (decided.count !== 1) return { ok: false, code: 'already-decided' };
