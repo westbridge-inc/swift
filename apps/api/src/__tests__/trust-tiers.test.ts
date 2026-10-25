@@ -207,6 +207,9 @@ describe('L3 is earned on completed history', () => {
 describe('Auto-approved KYC documents lapse', () => {
   it('kyc:auto approval stamps a default expiry on expiring doc types', async () => {
     const u = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    // [ROLE-DOCS · owner 21 Oct 2026] a police clearance is a TAXI driver's optional document now: give the mover a car
+    await app.prisma.driver.create({ data: { userId: u.userId, vehicleType: 'CAR', vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2020,
+      vehicleColor: 'Grey', licensePlate: `HD-${u.userId.slice(-6)}`, driverLicenseUrl: 'storage://synthetic/dl.jpg', vehicleInsuranceUrl: 'storage://synthetic/ins.jpg' } });
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'police_clearance',

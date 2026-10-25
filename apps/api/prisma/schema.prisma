@@ -1524,6 +1524,9 @@ model Vendor {
   /// courier (vs a platform rider). Default off — existing vendors are
   /// platform-rider-only until they opt in.
   selfDeliveryEnabled     Boolean                  @default(false)
+  /// [O-2 · owner 22 Oct 2026] The takeaway pickup code: OFF by default for every store type (the store
+  /// checks the customer's first name + order number and taps "Handed to customer"); a store may turn it on.
+  requirePickupCode       Boolean                  @default(false)
   /// FUL-007: kitchen-capacity guard. When set, new orders are refused once
   /// the vendor already holds this many in-flight (still-in-kitchen) orders —
   /// server-computed so it can't be gamed. Null = unlimited (current behavior).

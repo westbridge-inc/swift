@@ -62,6 +62,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     why: 'Terms section 7 shortens the free cancel window for a ride, a parcel or a booking from five minutes to one minute after a driver, rider or provider accepts it. It does take time from customers, but it lands before launch: no customer has used Swift under the five-minute window, so nobody is asked again.',
   },
   {
+    // [ROLE-DOCS · owner 21 Oct 2026; COORD rulings 21 Oct (NON-material) + 23 Oct 00:59Z (stamped above 2026-10-22)]
+    version: '2026-10-22.1',
+    why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
+  },
+  {
     // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · non-material: it removes a requirement]
     version: '2026-10-25',
     why: 'Swift asks for less: taxi rides and larger orders no longer need a customer\u2019s ID on file. The Terms, the Privacy Policy and the Child Safety page now say so, and say when the app still asks for an ID (after repeated failed deliveries or payments, or for a high-value promotion). No one loses anything and no one is asked for more.',
