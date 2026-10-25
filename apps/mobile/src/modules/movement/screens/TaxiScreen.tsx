@@ -1406,7 +1406,8 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
     && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
     && !pinVerified;
   // [owner #50] The server's verdict decides (`canCancel` on the ride read):
-  // free while no driver has accepted, inside the five minutes after acceptance (owner ruling 14 Oct), or when
+  // free while no driver has accepted, inside the free-cancel window after acceptance (one minute, owner ruling 22 Oct;
+  // the server's FREE_CANCEL_WINDOW_MIN decides), or when
   // the driver is very late — otherwise the passenger contacts the driver. A
   // server that does not say yet leaves the old status rule in charge.
   const serverAllowsCancel = typeof ride.canCancel === 'boolean' ? ride.canCancel : true;
