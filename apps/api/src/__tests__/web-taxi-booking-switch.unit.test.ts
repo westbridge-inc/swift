@@ -32,7 +32,7 @@ vi.mock('../modules/order/order.service', () => ({ OrderService: class {} }));
 vi.mock('../modules/safety/sos.service', () => ({ SosService: class {} }));
 vi.mock('../modules/dispatch/dispatch.service', () => ({ makeDispatchService: () => ({}) }));
 vi.mock('../modules/rides/rides.service', () => ({
-  createRideRequest: fakes.createRide, assertRideGates: fakes.gates, assertL2: vi.fn(),
+  createRideRequest: fakes.createRide, assertRideGates: fakes.gates,
   rideRequestReceiptKey: (key: string) => `taxi-request:${key}`,
   rideRequestClaimKey: (userId: string, key: string) => `ride-request:idem:${userId}:${key}`,
   replayRideRequestAnswer: (result: unknown) => result,

@@ -54,9 +54,12 @@ describe('[human-only identity] the Privacy Policy names only what production ca
 });
 
 describe('[customers take no photos] the words say a customer never needs a photo, and no partner rule changed', () => {
-  it('Terms: no profile photo for taxi; the ID on file stays', () => {
+  // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Since 2026-10-25 taxi rides and larger Orders need no ID either;
+  // the Terms say when the app still asks for one.
+  it('Terms: no profile photo for taxi, and no ID for taxi rides or larger Orders', () => {
     expect(TERMS).not.toMatch(/taxi rides also need a profile photo/);
-    expect(TERMS).toContain('higher-value Orders and all taxi rides additionally require a government-issued ID on file, requested in the app when it becomes necessary. A customer never needs a photo.');
+    expect(TERMS).not.toMatch(/higher-value Orders and all taxi rides additionally require/);
+    expect(TERMS).toContain('An account requires a phone number verified by SMS code. A customer needs no ID to place an Order or take a taxi ride; the app asks for a government-issued ID on file only after repeated failed deliveries or payments, or to use a high-value promotion. A customer never needs a photo.');
   });
 
   it('Privacy: the registration selfie is for partners and advertisers; a customer is never shown by photo', () => {

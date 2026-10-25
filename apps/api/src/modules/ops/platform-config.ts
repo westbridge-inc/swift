@@ -79,8 +79,10 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  2026-10-21.1 [ROLE-DOCS · owner 21 Oct]: 2026-10-16.1 with the optional
  *  national ID gone for every mover, the optional police clearance kept for
  *  taxi drivers only (MOVER_TAXI_EXTRA_OPTIONAL; MOVER_OPTIONAL removed), and
- *  the unused CUSTOMER_L2 list removed. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-21.1';
+ *  the unused CUSTOMER_L2 list removed.
+ *  2026-10-21.2 [ROLE-DOCS · owner 21 Oct]: 2026-10-21.1 plus the own-name
+ *  store lists (RESTAURANT_OWN_NAME, SUPERMARKET_OWN_NAME, STORE_OWN_NAME). */
+export const PLATFORM_CONFIG_VERSION = '2026-10-21.2';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -187,6 +189,12 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
     // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
     // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
+    // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's OWN name (Business Names (Registration) Act,
+    // Cap. 90:05, s.3: a true surname with only first names or initials needs no registration) gives the signed own-name
+    // declaration in place of the business registration; everything else is unchanged (vendor/own-name.ts).
+    RESTAURANT_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    SUPERMARKET_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
+    STORE_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
     RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
     SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],

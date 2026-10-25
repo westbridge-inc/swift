@@ -161,7 +161,10 @@ describe('[Row 117] with web booking on, the customer books at the fare on the b
   });
 
   it.each([
-    ['ID_VERIFICATION_REQUIRED', 403, 'Your first ride needs your ID on file. Add your ID in the Swift app (Account), then book here.'],
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] The server no longer asks for an ID on file before a ride.
+    // The page has no "add your ID" answer: a refusal it does not know (an older server's, say) shows the
+    // server's own words, and books nothing.
+    ['ID_VERIFICATION_REQUIRED', 403, 'server words'],
     ['RIDE_IN_PROGRESS', 409, 'You already have a ride in progress.'],
     ['DUPLICATE_REQUEST', 409, 'This ride is already being requested — hold on.'],
   ])('%s is said in plain words and books nothing', async (code, status, words) => {

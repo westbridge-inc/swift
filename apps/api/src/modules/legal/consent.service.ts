@@ -1,5 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
+import type { OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 
 /**
  * [DCR-1 NR-1] The consent ledger.
@@ -26,6 +27,9 @@ export type ConsentDocumentType =
   | 'location_bg_consent'
   /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
   | 'unregistered_trader_declaration'
+  /** [ROLE-DOCS · owner 21 Oct 2026] "I trade under my own name" (vendor/own-name.ts; Business Names Act s.3).
+   *  The same code as its document: the registry's text names it (DOC-INV-2). */
+  | typeof OWN_NAME_DOC_TYPE
   /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
   | 'document_processing_consent'
   | 'customer_id_consent'

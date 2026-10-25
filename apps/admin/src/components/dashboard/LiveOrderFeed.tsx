@@ -7,16 +7,16 @@ import { label } from '@/lib/labels';
 import { DataUnavailable } from './DataUnavailable';
 
 const STATUS_COLORS: Record<string, string> = {
-  PENDING: 'bg-red-500',
-  ACCEPTED: 'bg-yellow-500',
-  PREPARING: 'bg-yellow-500',
-  READY_FOR_PICKUP: 'bg-blue-500',
-  RIDER_ASSIGNED: 'bg-blue-500',
-  PICKED_UP: 'bg-indigo-500',
-  EN_ROUTE_DELIVERY: 'bg-indigo-500',
-  DELIVERED: 'bg-green-500',
-  COMPLETED: 'bg-green-500',
-  CANCELLED: 'bg-gray-500',
+  PENDING: 'bg-[var(--mc-bad)]',
+  ACCEPTED: 'bg-[var(--mc-warn)]',
+  PREPARING: 'bg-[var(--mc-warn)]',
+  READY_FOR_PICKUP: 'bg-[var(--mc-info)]',
+  RIDER_ASSIGNED: 'bg-[var(--mc-info)]',
+  PICKED_UP: 'bg-[var(--mc-info)]',
+  EN_ROUTE_DELIVERY: 'bg-[var(--mc-info)]',
+  DELIVERED: 'bg-[var(--mc-good)]',
+  COMPLETED: 'bg-[var(--mc-good)]',
+  CANCELLED: 'bg-[var(--mc-line-strong)]',
 };
 
 export function LiveOrderFeed() {
@@ -34,11 +34,11 @@ export function LiveOrderFeed() {
   const blind = !orders && (isError || !isLoading);
 
   return (
-    <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-      <h3 className="text-lg font-semibold mb-4">Live Order Feed</h3>
+    <div className="mc-card">
+      <h3 className="mc-section-title">Live order feed</h3>
       <div className="space-y-2 max-h-80 overflow-auto">
         {isLoading ? (
-          <p className="text-[var(--muted)] text-sm" role="status">Loading recent orders…</p>
+          <p className="mc-muted" role="status">Loading recent orders…</p>
         ) : blind ? (
           <DataUnavailable
             what="The order feed"
@@ -47,14 +47,14 @@ export function LiveOrderFeed() {
             onRetry={() => void refetch()}
           />
         ) : orders && orders.length === 0 ? (
-          <p className="text-[var(--muted)] text-sm">No recent orders</p>
+          <p className="mc-muted">No recent orders</p>
         ) : (
           orders!.map((order: any) => (
-            <Link key={order.id} href={`/orders/${order.id}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
-              <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[order.status] || 'bg-gray-500'}`} />
-              <span className="text-sm font-mono">#{order.orderNumber}</span>
-              <span className="text-xs text-[var(--muted)]">{label('OrderStatus', order.status)}</span>
-              <span className="text-xs text-[var(--muted)] ml-auto">
+            <Link key={order.id} href={`/orders/${order.id}`} className="flex min-h-[44px] items-center gap-3 rounded-[var(--mc-radius-sm)] p-2 hover:bg-[var(--mc-surface)]">
+              <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_COLORS[order.status] || 'bg-[var(--mc-line-strong)]'}`} />
+              <span className="mc-numbers font-semibold">#{order.orderNumber}</span>
+              <span className="mc-muted text-xs">{label('OrderStatus', order.status)}</span>
+              <span className="mc-numbers mc-muted ml-auto text-xs">
                 ${Number(order.totalAmount).toLocaleString()}
               </span>
             </Link>
