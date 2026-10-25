@@ -100,18 +100,18 @@ export async function revealOrderPartyPhone(deps: OrderContactDeps, input: Order
   if (!order) throw new NotFoundError('Order', input.orderId);
 
   const subject = input.party === 'customer'
-    ? (order.customer ? { kind: 'user' as const, id: order.customer.id, phone: order.customer.phone } : null)
+    ? (order.customer ? { holder: 'user' as const, id: order.customer.id, phone: order.customer.phone } : null)
     : input.party === 'store'
-      ? (order.vendor ? { kind: 'vendor' as const, id: order.vendor.id, phone: order.vendor.phone } : null)
+      ? (order.vendor ? { holder: 'vendor' as const, id: order.vendor.id, phone: order.vendor.phone } : null)
       : (order.rider?.user
-        ? { kind: 'user' as const, id: order.rider.user.id, phone: order.rider.user.phone }
-        : order.driver?.user ? { kind: 'user' as const, id: order.driver.user.id, phone: order.driver.user.phone } : null);
+        ? { holder: 'user' as const, id: order.rider.user.id, phone: order.rider.user.phone }
+        : order.driver?.user ? { holder: 'user' as const, id: order.driver.user.id, phone: order.driver.user.phone } : null);
 
   const changes = {
     reason,
     party: input.party,
     orderNumber: order.orderNumber,
-    ...(subject ? (subject.kind === 'vendor' ? { vendorId: subject.id } : { subjectUserId: subject.id }) : {}),
+    ...(subject ? (subject.holder === 'vendor' ? { vendorId: subject.id } : { subjectUserId: subject.id }) : {}),
   };
   const audit = { userId: input.actorId, entity: 'Order', entityId: order.id, ipAddress: input.ip, userAgent: input.userAgent };
 

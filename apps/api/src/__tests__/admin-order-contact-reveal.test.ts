@@ -12,7 +12,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { testPhone } from './helpers/fixture-ids';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { purgeAuditLogs } from '../lib/audit-immutability';
+import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { maskOrderPartyPhones, revealOrderPartyPhone } from '../modules/admin/order-contact';
 
@@ -105,8 +105,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
-    await purgeAuditLogs(app.prisma, { entityId: { in: orderIds } }, 'test-cleanup:admin-order-contact-reveal');
-    await app.prisma.sensitiveReadLog.deleteMany({ where: { subjectId: { in: orderIds } } });
+    await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: orderIds } }, { userId: { in: userIds } }] }, 'test-cleanup:admin-order-contact-reveal');
+    // ADM-007 rows are append-only: the test purge door, as every admin suite does.
+    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'test-cleanup:admin-order-contact-reveal').catch(() => 0);
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     await app.prisma.rider.deleteMany({ where: { id: riderId } });
     await app.prisma.driver.deleteMany({ where: { id: driverId } });
