@@ -2243,6 +2243,8 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    const fee = await payInfo(app.prisma, sub);
     return {
       success: true,
       data: {
@@ -2251,7 +2253,9 @@ export async function riderRoutes(app: FastifyInstance) {
         // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
-        ...(await payInfo(app.prisma, sub)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, sub, fee, now),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).

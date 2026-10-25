@@ -10,6 +10,7 @@ import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { billDateLabel } from '@/lib/bill-date';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -217,7 +218,7 @@ export default function SubscriptionsPage() {
             ) : (
               rows.map((s: any) => {
                 const h = holder(s);
-                const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
+                const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? (billDateLabel(s.nextBillingDate) === 'Due since' ? `due since ${new Date(s.nextBillingDate).toLocaleDateString()}` : new Date(s.nextBillingDate).toLocaleDateString()) : '—';
                 const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
                 // [Review S2-1] Every payout record for this set-aside was refused, expired or failed:
                 // record it again; the release stays refused (a payout may have been sent, Q-1527).
