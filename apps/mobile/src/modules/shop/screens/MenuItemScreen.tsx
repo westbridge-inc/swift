@@ -29,9 +29,17 @@ import {
   QtyStepper,
   SectionHeader,
   T,
+  TonePill,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { STORE_PICK } from '../../../lib/storePick';
+import { ItemDescription } from '../components/ItemDescription';
+
+/** [P35 · board 4b] "Craft & Kind · Georgetown": the store's name, and its city when it has one. */
+export function storeLine(store: { name?: string | null; city?: string | null }): string {
+  const city = store.city?.trim();
+  return city ? `${store.name ?? ''} · ${city}` : (store.name ?? '');
+}
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -267,6 +275,16 @@ export function MenuItemScreen() {
           }}
         >
           <T variant="title">{item.name}</T>
+          {/* [P35 · board 4b] The store this item is sold by, where it is, and whether a person approved its papers
+              (the store row's isVerified; an older server sends nothing and the pill stays away). */}
+          {vendor.data?.name ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, marginTop: space.xs }}>
+              <T variant="caption" tone="muted" numberOfLines={1}>
+                {storeLine(vendor.data)}
+              </T>
+              {vendor.data?.isVerified === true ? <TonePill label="Verified seller" tone="success" /> : null}
+            </View>
+          ) : null}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.sm }}>
             {/* [Wave 3 audit · law 3] Money is INK, never brand — maroon is
                 reserved for the acts (the CTA below), not the numbers. */}
@@ -329,9 +347,9 @@ export function MenuItemScreen() {
           {item.description ? (
             <>
               <SectionHeader title="Description" style={{ marginTop: space['2xl'] }} />
-              <T variant="body" tone="muted" style={{ marginTop: space.md }}>
-                {item.description}
-              </T>
+              <View style={{ marginTop: space.md }}>
+                <ItemDescription text={item.description} />
+              </View>
             </>
           ) : null}
 
