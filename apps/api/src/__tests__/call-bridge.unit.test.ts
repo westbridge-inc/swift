@@ -13,6 +13,9 @@ import { assertSafeBootConfig } from '../utils/boot-config';
 import { SECRET_FILE_NAMES } from '../utils/secret-files';
 import { PROCESSOR_REGISTER } from '../modules/legal/processor-register';
 import { testPhone } from './helpers/fixture-ids';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { CallStep } from '../providers/voice/call-provider';
 
 // ---------------------------------------------------------------------------
 // [O-1] The call bridge's pure parts: the documents Twilio runs, the request
@@ -196,5 +199,53 @@ describe('[O-1] who may ask Swift to call whom', () => {
     expect(roleWords('customer', 'FOOD_DELIVERY')).toBe('your customer');
     expect(roleWords('rider', 'COURIER')).toBe('your rider');
     expect(roleWords('store', 'FOOD_DELIVERY')).toBe('the store');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [O-1 · owner ruling] A Swift call is NEVER recorded. Not an option, not a
+// setting: no code path can ask the provider to record, store or transcribe.
+// ---------------------------------------------------------------------------
+describe('[O-1] calls are never recorded', () => {
+  const RECORDING = /record-from|record="(?!do-not-record")|<Record\b|<Conference\b|recordingStatusCallback|RecordingStatusCallback|transcribe|<Stream\b|<Siprec\b/i;
+  const steps: CallStep[] = [
+    { verb: 'confirm', prompt: CALL_WORDS.callerPrompt, next: `${BASE}/leg1-gather?s=c1`, noInput: CALL_WORDS.noKey },
+    { verb: 'dial', say: CALL_WORDS.connecting, to: testPhone(), callerId: CALLER_ID, screen: `${BASE}/screen?s=c1`, done: `${BASE}/dial-done?s=c1`, ringSeconds: CALL_RING_SECONDS, limitSeconds: CALL_TIME_LIMIT_SECONDS },
+    { verb: 'connect' },
+    { verb: 'hangup', say: CALL_WORDS.notReached },
+  ];
+
+  it('every document Swift can answer with: the one <Dial> says record="do-not-record", and nothing else records', () => {
+    for (const step of steps) {
+      const body = twilio().render(step).body;
+      expect(body, step.verb).not.toMatch(RECORDING);
+      const records = [...body.matchAll(/\brecord="([^"]*)"/g)].map((m) => m[1]);
+      expect(records, step.verb).toEqual(step.verb === 'dial' ? ['do-not-record'] : []);
+    }
+  });
+
+  it('placing a call says Record=false and asks for no recording callback', async () => {
+    let form = new URLSearchParams();
+    const http = (async (_url: string, init: RequestInit) => {
+      form = new URLSearchParams(String(init.body));
+      return new Response(JSON.stringify({ sid: `CA${'f'.repeat(32)}` }), { status: 201 });
+    }) as unknown as typeof fetch;
+    await twilio(http).placeCall({ to: testPhone(), callerId: CALLER_ID, answerUrl: `${BASE}/leg1?s=c1`, statusUrl: `${BASE}/status?s=c1`, ringSeconds: 25, limitSeconds: 1800 });
+    expect(form.getAll('Record')).toEqual(['false']);
+    for (const key of form.keys()) expect(key, key).not.toMatch(/^Recording|Transcri/);
+  });
+
+  it('the source: no recording verb, attribute, option or callback anywhere in the bridge, and no record field on a step', () => {
+    const src = (dir: string) => readdirSync(join(__dirname, '..', dir)).filter((f) => f.endsWith('.ts')).map((f) => readFileSync(join(__dirname, '..', dir, f), 'utf8'));
+    const code = [...src('providers/voice'), ...src('modules/calls')].join('\n');
+    expect(code.length).toBeGreaterThan(5000);
+    expect(code).not.toMatch(RECORDING);
+    // exactly one record attribute in the whole bridge, and it is the literal do-not-record
+    expect([...code.matchAll(/\brecord="/g)]).toHaveLength(1);
+    expect(code).toContain('record="do-not-record"');
+    // Record on the Calls API is the literal 'false', never a variable
+    expect([...code.matchAll(/\bRecord: /g)].map((m) => code.slice(m.index!, m.index! + 15))).toEqual(["Record: 'false'"]);
+    const provider = readFileSync(join(__dirname, '..', 'providers/voice/call-provider.ts'), 'utf8');
+    expect(provider).not.toMatch(/\brecord\??:/i);
   });
 });
