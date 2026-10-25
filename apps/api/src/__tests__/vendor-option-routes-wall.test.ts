@@ -23,7 +23,7 @@ import { testPrismaClient } from './helpers/test-prisma-client';
 import { sessionCredentialDigest } from '../lib/session-credential';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles by raw DDL.
 grantSuiteCapability('ddl');
@@ -32,6 +32,8 @@ const TEST_URL = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localh
 const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND'] as const;
 const priorEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+// Store names are read by the prohibited-items checker: digits only (checked-names.test.ts).
+const NAME_TAG = wordFreeTag();
 const PRODUCTION = 'swift-default';
 const TENANT_B = `optwall-b-${RUN}`;
 const DAY = 86_400_000;
@@ -62,7 +64,7 @@ async function store(tenantId: string, label: string) {
   } });
   const vendorOwner = await owner.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await owner.vendor.create({ data: {
-    ownerId: vendorOwner.id, name: `${label} Store ${RUN}`, slug: `optwall-${label.toLowerCase()}-${RUN}`, vendorType: 'RESTAURANT', phone: testPhone(),
+    ownerId: vendorOwner.id, name: `${label} Store ${NAME_TAG}`, slug: `optwall-${label.toLowerCase()}-${RUN}`, vendorType: 'RESTAURANT', phone: testPhone(),
     addressLine1: 'Synthetic Lane', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
     status: 'ACTIVE', tenantId,
   } });
