@@ -74,9 +74,10 @@ describe('configured human-review approval flow never exports document reference
     await system(async () => {
       const mover = await applicant('MOVER');
       const id = await service.submitDocument(mover, 'MOVER', 'national_id', await ownedVerificationFixture(app.prisma, mover), 'v1');
-      const clearance = await service.submitDocument(mover, 'MOVER', 'police_clearance', await ownedVerificationFixture(app.prisma, mover), 'v1');
+      // [ROLE-DOCS] a delivery rider is no longer offered a police clearance: a taxi document stands in for the rejection leg
+      const clearance = await service.submitDocument(mover, 'MOVER', 'hire_car_driver_licence', await ownedVerificationFixture(app.prisma, mover), 'v1');
       const customer = await applicant('CUSTOMER');
-      const identity = await service.submitIdentity(customer, await ownedVerificationFixture(app.prisma, customer), await ownedVerificationFixture(app.prisma, customer, 'selfie'), 'v1');
+      const identity = await service.submitIdentity(customer, await ownedVerificationFixture(app.prisma, customer), 'v1');
       for (const doc of [id, clearance, identity]) {
         expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
         expect(doc.kycRef).toMatch(/^manual_/);

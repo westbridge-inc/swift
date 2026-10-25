@@ -59,8 +59,13 @@ const providerProfileSchema = z.object({
   bio: z.string().trim().max(2000).optional(),
   portfolioPhotos: z.array(z.string().max(2048)).max(20).optional(),
 });
+// [ROLE-DOCS · owner 21 Oct 2026] No GEI_LICENCE here: an electrician's GEI licence is a REQUIRED
+// checklist document (gei_electrical_licence), reviewed by a person with its January re-check. Asking for it
+// again as an optional "qualification" collected the same licence twice. The enum value stays in the
+// database type for history; the API no longer accepts it (QUALIFICATION_RETIRED).
+const RETIRED_QUALIFICATION_TYPES = new Set(['GEI_LICENCE']);
 const qualificationSchema = z.object({
-  type: z.enum(['GEI_LICENCE', 'CVQ', 'GTEE', 'CITY_AND_GUILDS', 'OTHER']),
+  type: z.enum(['CVQ', 'GTEE', 'CITY_AND_GUILDS', 'OTHER']),
   referenceNumber: z.string().trim().max(120).optional(),
 });
 const browseSchema = z.object({
@@ -376,6 +381,10 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   /** POST /providers/qualifications — add a trade qualification (earns the badge). */
   app.post('/providers/qualifications', auth, async (request) => {
+    const asked = (request.body as { type?: unknown } | null | undefined)?.type;
+    if (typeof asked === 'string' && RETIRED_QUALIFICATION_TYPES.has(asked)) {
+      throw new AppError(400, 'QUALIFICATION_RETIRED', 'Your GEI electrical licence goes in your Documents checklist, where a person checks it. It is not added as a qualification.');
+    }
     const body = qualificationSchema.parse(request.body);
     const userId = request.user.userId;
     const qual = await app.prisma.$transaction(async (tx) => {

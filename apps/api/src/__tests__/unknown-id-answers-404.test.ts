@@ -136,11 +136,10 @@ describe('(b) vendor: an option group whose item the wall hides is a 404', () =>
     ['DELETE', () => `/option-groups/${groupId}`, undefined],
     ['POST', () => `/option-groups/${groupId}/options`, { name: 'Huge', additionalPrice: 200 }],
   ] as const)('%s option group route', async (method, path, payload) => {
-    const real = vendorApp.prisma.optionGroup.findUnique.bind(vendorApp.prisma.optionGroup);
-    const spy = vi.spyOn(vendorApp.prisma.optionGroup, 'findUnique').mockImplementation((async (args: never) => {
-      const row = await real(args);
-      return row ? { ...(row as object), item: null } : row; // what row-level security returns for another tenant's item
-    }) as never);
+    // The lookup asks for the group THROUGH this store's unarchived item; when the wall
+    // hides that item, the lookup finds no row. (The real walled login is measured in
+    // vendor-option-routes-wall.test.ts; this double stands in for it on the owner login.)
+    const spy = vi.spyOn(vendorApp.prisma.optionGroup, 'findFirst').mockImplementation((async () => null) as never);
     try {
       const res = await vendorApp.inject({ method, url: `/api/v1/vendor${path()}`, ...(payload ? { payload } : {}), headers: headers() });
       expect(res.statusCode, res.body).toBe(404);
@@ -153,11 +152,7 @@ describe('(b) vendor: an option group whose item the wall hides is a 404', () =>
     ['PUT', () => `/options/${optionId}`, { name: 'Renamed' }],
     ['DELETE', () => `/options/${optionId}`, undefined],
   ] as const)('%s option route', async (method, path, payload) => {
-    const real = vendorApp.prisma.option.findUnique.bind(vendorApp.prisma.option);
-    const spy = vi.spyOn(vendorApp.prisma.option, 'findUnique').mockImplementation((async (args: never) => {
-      const row = await real(args) as (Record<string, unknown> & { optionGroup?: Record<string, unknown> }) | null;
-      return row ? { ...row, optionGroup: { ...(row.optionGroup ?? {}), item: null } } : row;
-    }) as never);
+    const spy = vi.spyOn(vendorApp.prisma.option, 'findFirst').mockImplementation((async () => null) as never);
     try {
       const res = await vendorApp.inject({ method, url: `/api/v1/vendor${path()}`, ...(payload ? { payload } : {}), headers: headers() });
       expect(res.statusCode, res.body).toBe(404);

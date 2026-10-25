@@ -269,7 +269,9 @@ async function handlers(h: ReturnType<typeof harness>, routes: typeof verificati
 }
 
 describe('verification object containment at real service boundaries', () => {
-  it.each(['same-tenant', 'cross-tenant'].flatMap((tenancy) => ['checklist', 'id', 'selfie'].map((input) => [tenancy, input])))('%s B upload cannot enter A %s processing', async (tenancy, input) => {
+  // [ROLE-DOCS · owner 21 Oct 2026] no 'selfie' input any more: the customer-ID intake takes the ID alone (the
+  // route drops build 9's selfieUrl unread), so there is no selfie key for B's upload to enter by.
+  it.each(['same-tenant', 'cross-tenant'].flatMap((tenancy) => ['checklist', 'id'].map((input) => [tenancy, input])))('%s B upload cannot enter A %s processing', async (tenancy, input) => {
     const h = harness();
     if (tenancy === 'same-tenant') h.people.get(B)!.tenantId = 'tenant-a';
     // B really uploads through the existing handler before A supplies its key.
@@ -279,7 +281,7 @@ describe('verification object containment at real service boundaries', () => {
     await routes.get('post /upload')!(uploadRequest(B));
     expect(h.db.encryptedObject.create).toHaveBeenCalledOnce();
     const attempt = input === 'checklist' ? h.service.submitDocument(A, 'MOVER', 'vehicle_registration', key(B), '1')
-      : h.service.submitIdentity(A, key(input === 'id' ? B : A), key(input === 'selfie' ? B : A), '1');
+      : h.service.submitIdentity(A, key(B), '1');
     await expect(attempt).rejects.toMatchObject(unavailable);
     expect(h.provider.verifyDocument).not.toHaveBeenCalled();
     expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
@@ -421,12 +423,11 @@ describe('verification object containment at real service boundaries', () => {
   });
 
   // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] "no face match": a customer's ID reaches the
-  // document check alone, even with the biometric switch on. An owned selfie (store build 9 still
-  // sends one) is still proven to be the caller's own upload, and then never compared or sent.
-  it('owned identity (with an owned selfie) reaches the document check — never a face match', async () => {
+  // document check alone, even with the biometric switch on. [ROLE-DOCS · owner 21 Oct 2026] the intake
+  // takes no selfie at all (store build 9's is dropped by the route, unread).
+  it('owned identity reaches the document check — never a face match', async () => {
     const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
-    const selfie = key(A, 's'); h.objects.set(selfie, { ...h.objects.get(key(A))!, fileKey: selfie });
-    await expect(h.service.submitIdentity(A, key(A), selfie, '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
+    await expect(h.service.submitIdentity(A, key(A), '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
     expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
     expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
   });
