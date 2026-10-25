@@ -7,7 +7,7 @@ import { hopDocState } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, OWN_NAME_DOC_TYPE, OWN_NAME_TIER, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
@@ -201,6 +201,9 @@ export interface ReviewerTypedInput {
   certificateYear?: number;
   /** [R16] A business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation. */
   registrationKind?: RegistrationKind;
+  /** [ROLE-DOCS · owner 21 Oct 2026] An own-name declaration: the reviewer confirms, from the owner's ID, that the store's
+   *  name is the owner's true surname with only first names or initials (Business Names (Registration) Act s.3). */
+  ownNameConfirmed?: boolean;
   /** The reviewer console's contract: the fields this type needs must be typed. */
   required?: boolean;
 }
@@ -709,7 +712,14 @@ export class VerificationService {
     fileUrl: string,
     privacyNoticeVersion: string,
     authenticatedRole?: string,
+    /** [ROLE-DOCS · security review] Set ONLY by the signed own-name route (vendor.routes POST /onboarding/own-name). */
+    internal: { ownNameSigned?: true } = {},
   ) {
+    // [ROLE-DOCS · owner 21 Oct 2026 · security review] An own-name declaration is the signed words the owner ticked,
+    // filed by its own route — never an uploaded file. Refused before anything is read or recorded.
+    if (docType === OWN_NAME_DOC_TYPE && internal.ownNameSigned !== true) {
+      throw new AppError(400, 'OWN_NAME_SIGNED_ONLY', 'The own-name declaration is signed in the app, under Documents. It cannot be uploaded.');
+    }
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true, updatedAt: true },
@@ -744,7 +754,9 @@ export class VerificationService {
     if (roleKey === 'MOVER') {
       checklist = await this.moverSubmittableChecklist(user.countryCode, userId);
     } else {
-      const required = await this.checklistFor(userId, user.countryCode, roleKey);
+      const required = roleKey === 'RESTAURANT' || roleKey === 'SUPERMARKET' || roleKey === 'STORE'
+        ? await this.storeSubmittableChecklist(userId, user.countryCode, roleKey)
+        : await this.checklistFor(userId, user.countryCode, roleKey);
       checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
     }
     if (!checklist.includes(docType)) {
@@ -847,6 +859,9 @@ export class VerificationService {
     // set, a collision, an unvalidated document, or unknown / low confidence.
     const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType, authority));
     result = gateAutoApproval(result, extraction, registryType);
+    // [ROLE-DOCS · security review] Fail closed: no engine, auto-approval or auto-rejection decides an own-name
+    // declaration. A person compares the name with the owner's ID (approveDocument requires ownNameConfirmed).
+    if (docType === OWN_NAME_DOC_TYPE && result.status !== 'pending_manual') result = { ...result, status: 'pending_manual' as const };
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.createDocumentLively({
@@ -1156,6 +1171,12 @@ export class VerificationService {
       // that year and checked again every January (the store goes offline on 16 January if it is not
       // renewed). A company's certificate of incorporation never expires: nothing is set for it (the console
       // keys no date for a business registration).
+      // [ROLE-DOCS · owner 21 Oct 2026] An own-name declaration is approved only on the reviewer's own check of the name
+      // against the owner's ID. Never by default: an internal caller that does not say so cannot approve one either.
+      if (candidate.docType === OWN_NAME_DOC_TYPE && typed.ownNameConfirmed !== true) {
+        throw new AppError(400, 'OWN_NAME_CONFIRMATION_REQUIRED',
+          'Confirm, from the owner\u2019s ID, that the store\u2019s name is their true surname with nothing added except their first names or initials. If it is not, reject the declaration: the store must register its business name.');
+      }
       if (REGISTRATION_DOC_TYPES.includes(candidate.docType) && (typed.required || typed.registrationKind !== undefined)) {
         if (typed.registrationKind === 'BUSINESS_NAME') expiresAt = certificateYearRecheck(typed.certificateYear);
         else if (typed.registrationKind !== 'COMPANY') {
@@ -1685,7 +1706,8 @@ export class VerificationService {
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         ...(noneStands
-          ? { title: 'Your ID is no longer on file', body: 'Our team withdrew the ID on your account. Taxi rides and orders over the ID limit need a new ID — add it in the app and a person will look at it.' }
+          // [Owner ruling 24 Oct 2026] Nothing locks again at L1 (no taxi or order-size ID gate): no lock is promised.
+          ? { title: 'Your ID is no longer on file', body: 'Our team withdrew the ID on your account. If the app asks for your ID, add it again and a person will look at it.' }
           : { title: 'An ID on your account was withdrawn', body: 'Our team withdrew one of the IDs on your account. Another ID is still on file.' }),
         audience: 'customer',
         data: { kind: 'verification_rejected' },
@@ -1836,6 +1858,7 @@ export class VerificationService {
     roleKey: ChecklistRole,
     vehicleHint?: VehicleType,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
       const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId, db)) ?? 'MOTORCYCLE';
@@ -1851,7 +1874,7 @@ export class VerificationService {
     }
     // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
     // unregistered requirement set; everyone else the standard one.
-    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, db), db);
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, roleKey, db, vendorId), db);
   }
 
   /**
@@ -1880,10 +1903,30 @@ export class VerificationService {
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 
-  /** UNREGISTERED when any store the owner holds is on that tier; otherwise undefined (standard). */
-  private async vendorTierOf(userId: string, db: Prisma.TransactionClient | PrismaClient): Promise<string | undefined> {
-    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
-    return owner && owner.vendors.length > 0 ? 'UNREGISTERED' : undefined;
+  /** UNREGISTERED when any store the owner holds is on that tier. [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-G #2046 S2-1,
+   *  COORD 23 Oct: PER STORE] OWN_NAME is a property of ONE store: a store's own gate (`vendorId`) reads that store's
+   *  flag, so a trading-name store of the same type keeps needing its business registration (BNA s.3(b)). Without a
+   *  store (the owner's Documents view) it is OWN_NAME only when every store of the type trades under the owner's own
+   *  name — while any one does not, the registration is asked for. Otherwise undefined (standard). */
+  private async vendorTierOf(userId: string, roleKey: ChecklistRole, db: Prisma.TransactionClient | PrismaClient, vendorId?: string): Promise<string | undefined> {
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, tier: true, vendorType: true, tradesUnderOwnName: true } } } });
+    if (!owner) return undefined;
+    if (owner.vendors.some((v) => v.tier === 'UNREGISTERED')) return 'UNREGISTERED';
+    if (vendorId !== undefined) {
+      const store = owner.vendors.find((v) => v.id === vendorId);
+      return store && store.vendorType === roleKey && store.tradesUnderOwnName ? OWN_NAME_TIER : undefined;
+    }
+    const ofType = owner.vendors.filter((v) => v.vendorType === roleKey);
+    return ofType.length > 0 && ofType.every((v) => v.tradesUnderOwnName) ? OWN_NAME_TIER : undefined;
+  }
+
+  /** [ROLE-DOCS · per store] What a store owner may SUBMIT for the role: the owner-level list plus each store's own
+   *  list (an own-name store's declaration while a trading-name store of the type still asks for the registration). */
+  private async storeSubmittableChecklist(userId: string, countryCode: string, roleKey: ChecklistRole): Promise<string[]> {
+    const lists = [await this.checklistFor(userId, countryCode, roleKey)];
+    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, vendorType: true } } } });
+    for (const v of (owner?.vendors ?? []).filter((x) => x.vendorType === roleKey)) lists.push(await this.checklistFor(userId, countryCode, roleKey, undefined, this.prisma, v.id));
+    return [...new Set(lists.flat())];
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
@@ -1943,6 +1986,10 @@ export class VerificationService {
     // store's gate is unchanged: only its home-visit bookings wait for the clearance.
     let checklist = gate;
     let homeVisits: { offered: boolean; cleared: boolean } | undefined;
+    // [ROLE-DOCS · owner 21 Oct 2026] A store says on what its name stands: its owner's OWN name (the declaration in
+    // place of a business registration), the self-declared tier, or a registered business name. Additive field.
+    const nameBasis = roleKey === 'RESTAURANT' || roleKey === 'SUPERMARKET' || roleKey === 'STORE'
+      ? ((await this.vendorTierOf(userId, roleKey, this.prisma)) ?? 'REGISTERED') : undefined;
     if (roleKey === 'SERVICE') {
       const { homeVisitsCleared, ownerOffersHomeVisits } = await import('./home-visits');
       const [offered, cleared] = await Promise.all([ownerOffersHomeVisits(this.prisma, userId), homeVisitsCleared(this.prisma, userId)]);
@@ -2019,6 +2066,7 @@ export class VerificationService {
       // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
+      ...(nameBasis ? { nameBasis } : {}),
     };
   }
 
@@ -2036,11 +2084,13 @@ export class VerificationService {
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<boolean> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
+    // [ROLE-DOCS · per store] a store's gate passes its id: its own name basis decides its list
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db, vendorId);
     return this.isVerifiedForList(userId, checklist, db);
   }
 
@@ -2094,10 +2144,11 @@ export class VerificationService {
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<Date | null> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return null;
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db, vendorId);
     return this.evidenceValidUntilForList(userId, checklist, db);
   }
 
@@ -2143,12 +2194,12 @@ export class VerificationService {
   async activationChecklist(
     userId: string,
     roleKey: ChecklistRole,
-    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient } = {},
+    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient; vendorId?: string } = {},
   ): Promise<ActivationChecklist> {
     const db = options.db ?? this.prisma;
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return { checklist: [], items: [], complete: false };
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db, options.vendorId);
     const evidence = await this.approvedEvidence(db, userId, checklist, new Date());
     const approved = new Set(evidence.map((e) => e.docType));
     const approvedUntil = new Map<string, string | null>();
@@ -2201,7 +2252,7 @@ export class VerificationService {
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
     const ownerUserId = vendor.owner.userId;
-    const checklist = await this.activationChecklist(ownerUserId, role, { db });
+    const checklist = await this.activationChecklist(ownerUserId, role, { db, vendorId });
     const engaged = await disclosureGateEngaged(db, vendor.owner.user.countryCode);
     // The projection's own compile, with the same payer and tenant authority it names — and only
     // when the gate is engaged, as in the projection: a disengaged gate decides nothing, so no
@@ -2315,7 +2366,7 @@ export class VerificationService {
     const country = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true, tenantId: true } });
     const disclosureGate = country ? await disclosureGateEngaged(db, country.countryCode) : false;
     for (const vendor of owner.vendors) {
-      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
+      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
       // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
       if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
@@ -2332,7 +2383,7 @@ export class VerificationService {
         if (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL') {
           await this.subscriptions.startTrialForVendor(vendor.id, db);
         }
-        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
+        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
         await db.vendor.update({
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
@@ -3070,10 +3121,10 @@ export class VerificationService {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(basis === 'ON_FILE'
-        // Truthful: the ID unlocks bigger orders and taxi rides. [Owner ruling 16 Oct] A customer never
-        // needs a photo — a ride needs only the ID on file (rides.service assertL2).
-        ? { title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' }
-        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders and taxi rides are unlocked now.' }),
+        // Truthful: [Owner ruling 24 Oct 2026] taxi rides and bigger orders no longer need the ID, so the
+        // notice claims no unlock; it says where the ID is kept. [16 Oct] A customer never needs a photo.
+        ? { title: 'Your ID is on file', body: 'Thanks — it is kept with your account, as the Privacy Policy explains.' }
+        : { title: 'Identity verified', body: 'A person on our team checked your ID. It is kept with your account, as the Privacy Policy explains.' }),
       audience: 'customer',
       data: { kind: 'verification_l2' },
     });
@@ -3315,7 +3366,7 @@ export class VerificationService {
     if (!owner) return;
 
     for (const vendor of owner.vendors) {
-      const stillVerified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole);
+      const stillVerified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, this.prisma, vendor.id);
       if (!stillVerified) {
         await this.prisma.vendor.update({
           where: { id: vendor.id },

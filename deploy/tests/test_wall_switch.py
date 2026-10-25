@@ -100,7 +100,9 @@ class RehearsalComposeRendered(unittest.TestCase):
 
     def test_its_own_internal_network_volumes_and_secrets_and_nothing_public(self):
         model = compose_render(*self.FILES, project='swift-rehearsal', profiles=('web', 'admin'))
-        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True}})
+        # [Row 312] Plus the copy's own internal scanner network (its clamd has no egress network here).
+        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True},
+                                             'scanner': {'name': 'swift-rehearsal_scanner', 'ipam': {}, 'internal': True}})
         for volume in model['volumes'].values():
             self.assertTrue(volume['name'].startswith('swift-rehearsal_'), volume)
         # [Row 312] The copy's own upload malware scanner (no secret: it reads none).
@@ -108,7 +110,8 @@ class RehearsalComposeRendered(unittest.TestCase):
         for name, service in model['services'].items():
             with self.subTest(service=name):
                 self.assertNotIn('ports', service)
-                self.assertEqual(list(service['networks']), ['private'])
+                expected = {'clamd': ['scanner'], 'api': ['private', 'scanner'], 'worker': ['private', 'scanner']}.get(name, ['private'])
+                self.assertEqual(sorted(service['networks']), expected)
                 sources = [v['source'] for v in service.get('volumes', []) if v['type'] == 'bind']
                 self.assertNotIn('/run/swift-secrets', sources)
                 if name not in ('redis', 'clamd'):
