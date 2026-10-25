@@ -9,8 +9,10 @@
  * order collected at the counter (COMPLETED with no delivery time), when it was completed (its status log); else when
  * it was placed. Guyana keeps UTC-4 all year (no daylight saving), so a Guyana day runs 04:00 to 04:00 UTC.
  *
- * How it is laid out: the sales lines of the GRA's VAT return, form G0002 v1 (GRA, 2020; sources in the lane's VAT-LAW
- * notes): line 15 zero-rated sales, 16 exempt sales, 17 standard-rated sales excluding VAT, 18 VAT charged. VAT Act
+ * How it is laid out: the sales lines of the GRA's VAT return (form G0002 v1, GRA 2020, and the GRA's online VAT return
+ * page gra.gov.gy/optimal/vat, which states the same lines): line 15 zero-rated sales ("the total consideration for all
+ * your zero-rated supplies"), 16 exempt sales, 17 standard-rated sales excluding VAT ("the tax-exclusive value"), 18 VAT
+ * charged ("the total output tax due"). Line 19 (adjustments) and line 20 (total output VAT) stay the accountant's. VAT Act
  * Cap. 81:05 s.2 makes the tax period a calendar month and s.31(1) has the store lodge its return by the 21st of the
  * next month. Swift NEVER files: the report says so, and covers only the store's sales through Swift.
  *
@@ -29,7 +31,7 @@ export const VAT_REPORT_NOTES: readonly string[] = [
   'Each order counts on the Guyana day you supplied it: delivered, or collected at your counter. Cancelled orders, and orders placed while your prices carried no VAT, are not in it.',
   'Each order’s figures are the ones its Swift receipt prints. Zero-rated and exempt sales are the goods’ prices before any discount, as on the receipts.',
   'Returns and refunds after delivery are not taken off here; your accountant records them on the return’s adjustment lines.',
-  'The line numbers are those of the GRA VAT return form G0002 (version 1, 2020). Your accountant checks them against the form in use.',
+  'The line numbers are those of the GRA VAT return (form G0002, and the GRA’s online VAT return page). Your accountant checks them against the form in use.',
 ];
 
 /** The sales lines of the GRA VAT return (form G0002 v1) this report fills, in the form's own words. */
