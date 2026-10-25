@@ -1,4 +1,4 @@
-import { sellerVerifiedNow } from '../vendor/seller-verified';
+import { SELLER_VERIFIED_SELECT, sellerVerifiedNow } from '../vendor/seller-verified';
 import { servedPhotoAddress } from '../../utils/photo-address';
 import { FastifyInstance } from 'fastify';
 import { resolvePublicMarketTenant } from '../search/search-scope';
@@ -224,7 +224,7 @@ export async function publicRoutes(app: FastifyInstance) {
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // [P35] Read only to compute isVerified below; never sent (stripped before the spread).
-        activationValidUntil: true,
+        ...SELLER_VERIFIED_SELECT,
         // The app already shows guests the street address (pickup needs it);
         // the detail page gets it, the crawlable directory list stays city-level.
         addressLine1: true,
@@ -289,12 +289,12 @@ export async function publicRoutes(app: FastifyInstance) {
 
     // [P35 · board 4b] "Verified seller" on the website: PUBLIC_WHERE already requires isVerified, and the
     // documents' wall-clock bound must still hold (seller-verified.ts). The bound itself is not published.
-    const { activationValidUntil, ...publicVendor } = vendor;
+    const { activationValidUntil, isSynthetic, owner, ...publicVendor } = vendor;
     return {
       success: true,
       data: {
         ...publicVendor,
-        isVerified: sellerVerifiedNow({ isVerified: true, activationValidUntil }),
+        isVerified: sellerVerifiedNow({ isVerified: true, activationValidUntil, isSynthetic, owner }),
         seller,
         // Present when the request arrived on a retired slug, so the caller can correct its URL.
         ...(vendor.slug === request.params.slug ? {} : { canonicalSlug: vendor.slug }),

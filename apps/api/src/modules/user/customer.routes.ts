@@ -1657,6 +1657,8 @@ export async function customerRoutes(app: FastifyInstance) {
         },
         operatingHours: true,
         images: true,
+        // [P35] The owner's synthetic markers, read only to compute isVerified (seller-verified.ts); never sent.
+        owner: { select: { user: { select: { isSynthetic: true, syntheticRunId: true } } } },
       },
     });
 

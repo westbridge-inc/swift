@@ -311,4 +311,21 @@ describe('[P35] isVerified on the store page is current, on both reads', () => {
     expect((await appView(vendorId)).isVerified).toBe(true);
     expect((await webView(slug)).isVerified).toBe(true);
   });
+
+  // [REVIEW-F #2112 S2-1] A store-review or demo store is fiction nobody checked: never "Verified seller", even with
+  // every other fact in order. Store-side marker (review pack) and owner-side marker (demo seed) each withhold it.
+  it('a store whose owner is from a synthetic run (the demo seed) is never verified, on both reads', async () => {
+    const { userId, vendorId, slug } = await store(4102);
+    await setStore(vendorId, { isVerified: true, activationValidUntil: new Date(Date.now() + 30 * DAY) });
+    expect((await appView(vendorId)).isVerified).toBe(true);
+
+    // (A synthetic STORE cannot exist in this production tenant — the database refuses it [STA-1 DL-4]; review-pack
+    // stores live in the REVIEW tenant. seller-verified.unit.test.ts proves the store-side marker withholds the claim.)
+    await system(() => app.prisma.user.update({ where: { id: userId }, data: { syntheticRunId: 'seed-demo' } }));
+    expect((await appView(vendorId)).isVerified).toBe(false);
+    const web = await webView(slug);
+    expect(web.isVerified).toBe(false);
+    for (const key of ['owner', 'isSynthetic', 'activationValidUntil']) expect(web).not.toHaveProperty(key);
+  });
 });
+
