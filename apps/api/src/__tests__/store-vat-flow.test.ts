@@ -402,6 +402,14 @@ describe('5. VAT inside the price: storefront, cart, checkout', () => {
     expect(classes.get(soapId)).toBe('STANDARD');
     expect(classes.get(riceId)).toBe('ZERO_RATED');
   });
+
+  it('the store’s order board carries the frozen VAT as NUMBERS, never Decimal strings ([S1] money on the wire)', async () => {
+    const res = await vendorCall('GET', '/orders');
+    expect(res.statusCode, res.body).toBe(200);
+    const row = (res.json().data as Array<Record<string, unknown>>).find((o) => o['id'] === vatOrderId);
+    expect(row, 'the VAT order is on the board').toBeTruthy();
+    expect(row).toMatchObject({ vatAmount: 123, vatStandardGoods: 1000, vatZeroRatedGoods: 600, vatExemptGoods: 0, vatBase: 1000, vatRateBps: 1400 });
+  });
 });
 
 describe('6. the goods change, the VAT follows (one recompute)', () => {

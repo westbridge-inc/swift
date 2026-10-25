@@ -635,6 +635,8 @@ const ORDER_MONEY_FIELDS = [
   'subtotalBase', 'subtotalMarkup', 'subtotalCustomer',
   'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount',
   'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal',
+  // [STORE-VAT · owner O-5] The VAT included in a VAT store's goods, and the goods by class (null on every other order).
+  'vatAmount', 'vatStandardGoods', 'vatZeroRatedGoods', 'vatExemptGoods', 'vatBase',
 ] as const;
 
 /** Every `Decimal` money column on `model OrderItem`. */
