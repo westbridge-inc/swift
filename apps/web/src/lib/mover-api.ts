@@ -29,13 +29,27 @@ export const getRiderProfile = () => absentOrThrow<Record<string, unknown>>(apiF
 export const getDriverProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile'));
 
 // ── Earnings ────────────────────────────────────────────────────────────────
-export const getRiderSummary = () => absentOrThrow<{
+/** Today / this week / this month / all time, each { total, count } — the SAME shape on the rider and the driver
+ *  route (driver.routes SWIFT-080), the one the phone's Earnings screen reads. */
+export interface EarningsSummary {
   today: { total: number; count: number };
   thisWeek: { total: number; count: number };
   thisMonth: { total: number; count: number };
   allTime: { total: number; count: number };
   pendingPayout: number;
-}>(apiFetch('/api/v1/rider/earnings/summary'));
+}
+export const getRiderSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/rider/earnings/summary'));
+/** [P36 · board 13d / W3] A taxi driver's office shows the same four windows as the phone (it showed all-time only). */
+export const getDriverSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/driver/earnings/summary'));
+
+/** [P36 · board 13d "Download statement"] The phone's earnings statement: the server mints a short-lived signed
+ *  path (?link=1) that opens without the session, the same link the phone's in-app browser opens. */
+export const getEarningsStatementPath = (role: 'rider' | 'driver') =>
+  apiFetch(`/api/v1/${role}/earnings/statement?link=1`).then((r) => {
+    const path = (r.data as { path?: unknown } | null | undefined)?.path;
+    if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('Statement link missing from the response.');
+    return path;
+  });
 
 export const getRiderEarnings = (page = 1) =>
   apiFetch(`/api/v1/rider/earnings?page=${page}&limit=25`).then((r) => ({
