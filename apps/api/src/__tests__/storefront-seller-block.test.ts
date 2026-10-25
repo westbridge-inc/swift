@@ -290,3 +290,25 @@ describe('[row 248] the order receipt says who sold', () => {
     expect(html).not.toContain('trading as');
   });
 });
+
+// [P35 · board 4b · GUARDRAILS §4/§8 · REVIEW-G #2112 S4-1] "Verified seller" only while a person-approved document
+// is CURRENT: the server serves isVerified = the row's isVerified AND activationValidUntil (the soonest document
+// expiry) still in the future, on the app's and the website's store reads alike. The bound itself is never sent.
+describe('[P35] isVerified on the store page is current, on both reads', () => {
+  it('papers current: true; papers lapsed minutes ago (column not yet re-projected): false; no bound on file: the column', async () => {
+    const { vendorId, slug } = await store(4101);
+    await setStore(vendorId, { isVerified: true, activationValidUntil: new Date(Date.now() + 30 * DAY) });
+    expect((await appView(vendorId)).isVerified).toBe(true);
+    expect((await webView(slug)).isVerified).toBe(true);
+
+    await setStore(vendorId, { isVerified: true, activationValidUntil: new Date(Date.now() - 5 * 60_000) });
+    expect((await appView(vendorId)).isVerified).toBe(false);
+    const web = await webView(slug);
+    expect(web.isVerified).toBe(false);
+    expect(web).not.toHaveProperty('activationValidUntil');
+
+    await setStore(vendorId, { isVerified: true, activationValidUntil: null });
+    expect((await appView(vendorId)).isVerified).toBe(true);
+    expect((await webView(slug)).isVerified).toBe(true);
+  });
+});

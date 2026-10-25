@@ -82,6 +82,7 @@ import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
+import { sellerVerifiedNow } from '../vendor/seller-verified';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
@@ -1768,9 +1769,9 @@ export async function customerRoutes(app: FastifyInstance) {
         // serves), but a store the PLATFORM has suspended, or one it has not yet
         // approved, must not have Swift advertising a way to reach it.
         publicPhone: publishedStorePhone(vendor),
-        // [P35 · board 4b] "Verified seller": a person approved this store's papers. From the column, because this
-        // route also resolves a store that is not customer-visible (a direct link to a paused store).
-        isVerified: vendor.isVerified,
+        // [P35 · board 4b] "Verified seller": a person approved this store's papers AND they are still current
+        // (seller-verified.ts). From the row, because this route also resolves a store that is not customer-visible.
+        isVerified: sellerVerifiedNow(vendor),
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
         ...ratingSurface,
