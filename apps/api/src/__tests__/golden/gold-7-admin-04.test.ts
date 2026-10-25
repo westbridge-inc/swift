@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import type { OrderStatus, PaymentMethod, UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
@@ -9,7 +9,11 @@ import { socketPlugin } from '../../plugins/socket';
 import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { adminRoutes } from '../../modules/admin/admin.routes';
+import { auditClientInCleanup } from '../helpers/cleanup-transaction';
+import { assertFixtureReferences, lockFixtureParents } from '../helpers/cleanup-parents';
+import { trackMessageInserts } from '../helpers/insert-ownership';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
+import { proveMessageRefusal } from '../helpers/cleanup-race';
 import { startGoldenWorker } from './gold-7-worker';
 
 // ---------------------------------------------------------------------------
@@ -19,22 +23,26 @@ import { startGoldenWorker } from './gold-7-worker';
 // G5-F6 interrupted-import recovery stays pinned in gold-5-admin-finance.
 // Provider/device-only: live wallet acceptance and real notice delivery.
 //
-// +5920979nnn: checked against src phone literals/generators; GOLD-7a uses
-// 0971..0976 and 0978, weekly fees use 0977. Only Date is controlled; BullMQ
+// +5920979 with a run-unique numeric suffix; GOLD-7a uses 0971..0976 and
+// 0978, weekly fees use 0977. Only Date is controlled; BullMQ
 // and timers stay real. The historical window must contain no foreign sale,
 // and every foreign digest must survive unchanged. No sweep is mocked.
 // ---------------------------------------------------------------------------
 
-const PHONE_PREFIX = '+5920979';
+const PHONE_PREFIX = `+5920979${customAlphabet('0123456789', 5)()}`;
 const FIXTURE = 'gold7-admin04-fixture';
-const TENANT = 'gold7-admin04-tenant';
+const TENANT = `gold7-admin04-${nanoid(12).toLowerCase()}`;
 const DAY = 86_400_000;
 const NOW = new Date('2000-01-12T16:00:00.000Z');
 const PERIOD_START = new Date('2000-01-03T04:00:00.000Z');
 const PERIOD_END = new Date('2000-01-10T04:00:00.000Z');
 let app: FastifyInstance;
+let messageInserts: ReturnType<typeof trackMessageInserts>;
 let worker: Awaited<ReturnType<typeof startGoldenWorker>> | undefined;
 let seq = 0;
+const userIds: string[] = [];
+const vendorIds: string[] = [];
+const orderIds: string[] = [];
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
 async function actor(role: UserRole) {
@@ -45,6 +53,7 @@ async function actor(role: UserRole) {
     ...(role === 'ADMIN' && { admin: { create: { permissions: ['*'] } } }),
     ...(role === 'CUSTOMER' && { customer: { create: {} } }),
   } }));
+  userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role, jti: nanoid(8) });
   await sys(() => app.prisma.session.create({ data: {
     userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `${FIXTURE}-${seq}`,
@@ -62,23 +71,30 @@ function call(method: 'GET' | 'PUT', url: string, token: string, payload?: Recor
 
 async function purge() {
   await sys(async () => {
-    const ids = (await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } })).map((u) => u.id);
-    const vendors = (await app.prisma.vendor.findMany({ where: { tenantId: TENANT }, select: { id: true } })).map((v) => v.id);
-    const digests = (await app.prisma.settlement.findMany({ where: { vendorId: { in: vendors } }, select: { id: true } })).map((d) => d.id);
-    const sessions = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
-    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: digests } }] }, 'test-cleanup:gold7-admin04');
-    await app.prisma.privilegedApproval.deleteMany({ where: { tenantId: TENANT } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.alertDelivery.deleteMany({ where: { recipientId: { in: ids } } });
-    await app.prisma.settlement.deleteMany({ where: { vendorId: { in: vendors } } });
-    await app.prisma.order.deleteMany({ where: { tenantId: TENANT } });
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendors } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-    await app.prisma.tenant.deleteMany({ where: { id: TENANT } });
+    const ids = [...userIds];
+    let vendors: string[] = [];
+    let sessions: string[] = [];
+    await app.prisma.$transaction(async (tx) => {
+      const parents = await lockFixtureParents(tx, ids, vendorIds);
+      vendors = parents.vendorIds;
+      await assertFixtureReferences(tx, 'GOLD-7 ADMIN04', ids, parents, orderIds, [...messageInserts.notificationIds]);
+      if (await tx.subscription.count({ where: { vendorId: { in: parents.vendorIds } } })) throw new Error('Foreign vendor subscriptions block fixture cleanup');
+      const digests = (await tx.settlement.findMany({ where: { vendorId: { in: vendors } }, select: { id: true } })).map((d) => d.id);
+      sessions = (await tx.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
+      await purgeAuditLogs(auditClientInCleanup(tx), { OR: [{ userId: { in: ids } }, { entityId: { in: digests } }] }, 'test-cleanup:gold7-admin04');
+      await tx.privilegedApproval.deleteMany({ where: { tenantId: TENANT } });
+      await tx.notification.deleteMany({ where: { id: { in: [...messageInserts.notificationIds] } } });
+      await tx.alertDelivery.deleteMany({ where: { id: { in: [...messageInserts.alertIds] } } });
+      await tx.settlement.deleteMany({ where: { vendorId: { in: vendors } } });
+      await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+      await tx.vendor.deleteMany({ where: { id: { in: vendors } } });
+      await tx.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+      await tx.session.deleteMany({ where: { userId: { in: ids } } });
+      await tx.admin.deleteMany({ where: { userId: { in: ids } } });
+      await tx.customer.deleteMany({ where: { userId: { in: ids } } });
+      await tx.user.deleteMany({ where: { id: { in: ids } } });
+      await tx.tenant.deleteMany({ where: { id: TENANT } });
+    }, { timeout: 30_000 });
     const owned = new Set([...ids, ...vendors, ...sessions]);
     let cursor = '0';
     do {
@@ -103,7 +119,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  await purge();
+  messageInserts = trackMessageInserts(app.prisma);
   // The production scan covers all tenants. Refuse a window that could create
   // somebody else's digest instead of narrowing or replacing that scan.
   expect(await sys(() => app.prisma.orderStatusLog.count({ where: {
@@ -119,7 +135,7 @@ afterAll(async () => {
   const finish = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (error) { errors.push(error); } };
   if (worker) await finish(() => worker!.close());
   await finish(() => new Promise((resolve) => setTimeout(resolve, 300)));
-  if (app) { await finish(purge); await finish(() => app.close()); }
+  if (app) { await finish(purge); await finish(() => { messageInserts.restore(); return app.close(); }); }
   vi.useRealTimers();
   if (errors.length) throw new AggregateError(errors, 'GOLD-7 finance fixture cleanup failed');
 });
@@ -136,14 +152,16 @@ describe('GOLD-7 · ADMIN-04 — weekly sales digest [G7-R4]', () => {
       vendorType: 'RESTAURANT', phone: owner.phone, addressLine1: '7 Golden Lane', city: 'Georgetown',
       region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true,
     } }));
+    vendorIds.push(vendor.id);
     async function sale(base: number, fee: number, method: PaymentMethod, at: Date, status: OrderStatus = 'COMPLETED') {
-      await sys(() => app.prisma.order.create({ data: {
+      const order = await sys(() => app.prisma.order.create({ data: {
         tenantId: TENANT, orderNumber: `G7DG-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
         customerId: customer.userId, vendorId: vendor.id, status, deliveryAddress: '7 Golden Lane', deliveryLat: 6.8, deliveryLng: -58.15,
         subtotalBase: base, subtotalMarkup: 0, subtotalCustomer: base, deliveryFee: fee, totalAmount: base + fee,
         paymentMethod: method, paymentStatus: method === 'MOBILE_MONEY' ? 'CLAIMED' : 'CAPTURED', placedAt: at, createdAt: at,
         ...(status === 'COMPLETED' && { statusHistory: { create: { status: 'COMPLETED', createdAt: at, note: 'GOLD-7 completed sale fixture' } } }),
       } }));
+      orderIds.push(order.id);
     }
     await sale(1500, 200, 'CASH', new Date(PERIOD_START.getTime() + DAY));
     await sale(2300, 300, 'MOBILE_MONEY', new Date(PERIOD_START.getTime() + 2 * DAY));
@@ -206,4 +224,40 @@ describe('GOLD-7 · ADMIN-04 — weekly sales digest [G7-R4]', () => {
     expect(notices[0]!.body).toContain('this is your record, not a payout');
     expect(await foreign()).toEqual(foreignBefore);
   });
+
+  it('leaves a prior run’s tenant order in place when this run cleans up', async () => {
+    const peerTenantId = 'gold7-admin04-tenant';
+    const existing = await sys(() => app.prisma.tenant.findUnique({ where: { id: peerTenantId } }));
+    if (!existing) await sys(() => app.prisma.tenant.create({ data: {
+      id: peerTenantId, slug: peerTenantId, name: 'Prior finance run',
+    } }));
+    const peer = await sys(() => app.prisma.user.create({ data: {
+      phone: `+5920980${customAlphabet('0123456789', 7)()}`,
+      firstName: 'Prior', lastName: 'Finance', roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
+    } }));
+    const order = await sys(() => app.prisma.order.create({ data: {
+      tenantId: peerTenantId, orderNumber: `G7PEER-${nanoid(10)}`,
+      orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: peer.id,
+      status: 'PENDING', deliveryAddress: 'Peer Lane', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 1200, subtotalMarkup: 0, subtotalCustomer: 1200,
+      deliveryFee: 0, totalAmount: 1200, paymentMethod: 'CASH',
+    } }));
+    try {
+      await purge();
+      expect(await sys(() => app.prisma.order.findUnique({ where: { id: order.id } }))).toEqual(order);
+    } finally {
+      await sys(() => app.prisma.order.deleteMany({ where: { id: order.id } }));
+      await sys(() => app.prisma.user.deleteMany({ where: { id: peer.id } }));
+      if (!existing) await sys(() => app.prisma.tenant.deleteMany({ where: { id: peerTenantId } }));
+    }
+  });
+});
+
+it('owns ADMIN04 messages only after successful inserts and refuses existing and late peer notices atomically', async () => {
+  await sys(() => app.prisma.tenant.upsert({ where: { id: TENANT }, create: { id: TENANT, slug: TENANT, name: 'Golden Finance' }, update: {} }));
+  const customer = await actor('CUSTOMER');
+  const order = await sys(() => app.prisma.order.create({ data: { tenantId: TENANT, customerId: customer.userId, orderNumber: `G7MSG-${nanoid(16)}`, orderType: 'COURIER', fulfillment: 'DELIVERY', status: 'PENDING',
+    deliveryAddress: 'Fixture Lane', deliveryLat: 6.8, deliveryLng: -58.15, subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 1200, totalAmount: 1200, paymentMethod: 'CASH' } }));
+  orderIds.push(order.id);
+  await proveMessageRefusal(app.prisma, purge, customer.userId, order.id);
 });
