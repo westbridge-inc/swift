@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { createHash } from 'node:crypto';
 import { pricingDefaults, pricingPayloadHash, readPricingConfig } from '../modules/country/pricing-config';
 
@@ -15,7 +15,7 @@ import { pricingDefaults, pricingPayloadHash, readPricingConfig } from '../modul
 // ---------------------------------------------------------------------------
 
 const Q4 = 'Q4';
-const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
+const prisma = testPrismaClient();
 type Courier = { baseFee: number; perKmRate: number; sizeSurcharge: Record<string, number>; speedMultiplier: Record<string, number> };
 const base = () => pricingDefaults('COURIER_RATES') as unknown as Courier;
 

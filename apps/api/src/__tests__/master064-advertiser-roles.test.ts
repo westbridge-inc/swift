@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -30,7 +30,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const raw = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
+const raw = testPrismaClient();
 const userIds: string[] = [];
 const advertiserIds: string[] = [];
 let seq = 0;
