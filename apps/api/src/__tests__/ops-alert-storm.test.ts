@@ -355,3 +355,22 @@ describe('[DRILL-STORM 3] many old open alerts never produce a burst', () => {
     expect(await inbox(responder, 'ops_alert_drill_failed')).toHaveLength(1);
   }, 120_000);
 });
+
+describe('[DRILL-STORM · console] an acknowledgement is audited', () => {
+  it('the acknowledgement writes who acknowledged which page to the append-only audit log, in the same transaction as the receipt', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const page = await open(mine, 'PLATFORM', t0, [responder]);
+    const res = await app.inject({ method: 'POST', url: `/api/v1/safety/ops-alerts/${page}/ack`, headers: { authorization: `Bearer ${responder.token}`, 'content-type': 'application/json' }, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.acknowledged).toBe(true);
+    const audit = await runWithoutTenant(() => app.prisma.auditLog.findMany({ where: { entity: 'OpsAlert', entityId: page } }), 'test-read:drill-storm');
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ userId: responder.userId, action: 'OPS_ALERT_ACKNOWLEDGED' });
+    expect(audit[0]!.changes).toMatchObject({ kind: 'PLATFORM', sosAlertId: null, tenantId: null });
+    // a second acknowledgement acknowledges nothing and audits nothing
+    const again = await app.inject({ method: 'POST', url: `/api/v1/safety/ops-alerts/${page}/ack`, headers: { authorization: `Bearer ${responder.token}`, 'content-type': 'application/json' }, payload: {} });
+    expect(again.json().data.acknowledged).toBe(false);
+    expect(await runWithoutTenant(() => app.prisma.auditLog.count({ where: { entity: 'OpsAlert', entityId: page } }), 'test-read:drill-storm')).toBe(1);
+  });
+});

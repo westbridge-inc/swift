@@ -261,7 +261,7 @@ export async function acknowledgeOpsAlert(
   const now = input.now ?? new Date();
   // [DRILL-STORM] A closed alert (a FAILED drill, an emergency that ended) is
   // a record: a late acknowledgement never turns it into an acknowledged one.
-  const alerts = await prisma.opsAlert.findMany({ where: { ...(input.opsAlertId ? { id: input.opsAlertId } : {}), ...(input.sosAlertId ? { sosAlertId: input.sosAlertId } : {}), acknowledgedAt: null, closedAt: null }, select: { id: true, tenantId: true } });
+  const alerts = await prisma.opsAlert.findMany({ where: { ...(input.opsAlertId ? { id: input.opsAlertId } : {}), ...(input.sosAlertId ? { sosAlertId: input.sosAlertId } : {}), acknowledgedAt: null, closedAt: null }, select: { id: true, tenantId: true, kind: true, sosAlertId: true } });
   const acknowledged: string[] = []; const refused: string[] = [];
   for (const a of alerts) {
     const { where: audience } = await adminAudienceFor(prisma, a.tenantId);
@@ -277,6 +277,9 @@ export async function acknowledgeOpsAlert(
         const res = await tx.opsAlert.updateMany({ where: { id: a.id, acknowledgedAt: null, closedAt: null }, data: { acknowledgedAt: now, acknowledgedBy: input.userId } });
         // Someone else acknowledged first: roll this receipt back with it.
         if (res.count !== 1) throw new AckLost();
+        // [DRILL-STORM] Who acknowledged which page, and when, on the append-only audit log too
+        // (the console's Audit log), in the same transaction as the receipt.
+        await tx.auditLog.create({ data: { userId: input.userId, action: 'OPS_ALERT_ACKNOWLEDGED', entity: 'OpsAlert', entityId: a.id, changes: { kind: a.kind, sosAlertId: a.sosAlertId, tenantId: a.tenantId } } });
         return true;
       });
       if (won) { acknowledged.push(a.id); opsAlertCounter.labels('acknowledged').inc(); } else { refused.push(a.id); opsAlertCounter.labels('ack_refused_no_receipt').inc(); }
