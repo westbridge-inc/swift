@@ -178,6 +178,23 @@ describe('own checkout reopen affordance', () => {
     expect(posts).toEqual(['/api/v1/vendor/subscription/mmg-checkout/own-open/reopen', '/api/v1/vendor/subscription/mmg-checkout/own-open/reopen']);
     expect(assign).toHaveBeenCalledWith('https://checkout.test/same-page'); view.unmount();
   });
+
+  it("at Swift's deadline Back goes away on this browser's clock and the fee is read again, even while the server still grants it", async () => {
+    const expiresAt = new Date(Date.now() + 2_000).toISOString();
+    const c = { ref: 'own-open', status: 'OPEN', expiresAt, amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' };
+    let feeReads = 0;
+    mockApi(({ url }) => {
+      if (url.pathname.endsWith('/own-open')) return { body: { success: true, data: c } };
+      feeReads += 1;
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByRole('button', { name: "Back to MMG's page" });
+    const before = feeReads;
+    await waitFor(() => expect(screen.queryByRole('button', { name: "Back to MMG's page" })).toBeNull(), { timeout: 4_000 });
+    await waitFor(() => expect(feeReads).toBeGreaterThan(before), { timeout: 3_000 });
+    expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull(); view.unmount();
+  }, 10_000);
   it.each(['OPEN', 'EXPIRED', 'CONFIRMING', 'HELD'])('%s without a reopen grant has no Pay or Back, even with a stale live action', async (status) => {
     const c = { ref: 'blocked-ref', status, expiresAt: '2099-01-01T12:00:00Z', amountGyd: 1200, subscriptionStatus: 'ACTIVE' };
     mockApi(({ url }) => ({ body: { success: true, data: url.pathname.endsWith('/blocked-ref') ? c : { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: null, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } }));
