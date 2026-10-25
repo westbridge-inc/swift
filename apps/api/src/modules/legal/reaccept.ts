@@ -47,8 +47,8 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
     // [O-1 · owner rulings 22-24 Oct 2026 · COORD 25 Oct 15:20Z: MATERIAL — a new processor flow (Twilio, for calls)]
     version: '2026-10-25.1',
     summary: [
-      'Privacy: when Swift’s call service is switched on, you call the other people on an order through Swift. Swift rings your phone from its own number, the person you call presses 1 to connect, and neither of you sees the other’s number. Twilio connects these calls.',
-      'Privacy: calls through Swift are never recorded. For each call Swift keeps who asked for it (as a role on the order), when, and whether it connected, never a phone number; the record of a call you asked for is deleted with your account.',
+      'Privacy: when Swift’s call service is switched on, you call the other people on an order through Swift. Swift rings your phone from its own number and you press 1; then the person you call presses 1 to connect, and in the current app neither of you sees the other’s number. Twilio connects these calls.',
+      'Privacy: calls through Swift are never recorded. For each call Swift keeps who asked for it (their account and their role on the order), the role they called, when, and whether it connected, never a phone number; the record of a call you asked for is deleted with your account.',
     ],
   },
 ];

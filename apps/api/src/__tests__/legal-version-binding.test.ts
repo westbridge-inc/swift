@@ -249,7 +249,7 @@ const PUBLISHED: Record<
   // additions back out reproduces the 2026-10-25 Privacy pin exactly.
   '2026-10-25.1': {
     terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
-    privacy: 'a0f7c76cce96fcb88bfc95ca36af05273a4299b7ec59938c1804c58953e73cf9',
+    privacy: 'ec292043689e125609c24ae26868ec0aa1d8e1d1e903c3ba87f60d0c678f2c63',
     driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
     vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
   },
