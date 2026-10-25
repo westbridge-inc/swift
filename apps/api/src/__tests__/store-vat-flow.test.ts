@@ -14,7 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { PickingService } from '../modules/order/picking.service';
-import { approveStoreVat, type DocumentDecider } from '../modules/store-vat/store-vat-decisions';
+import { approveStoreVat, rejectStoreVat, type DocumentDecider } from '../modules/store-vat/store-vat-decisions';
 import { VAT_CERTIFICATE_DOC_TYPE } from '../modules/store-vat/store-vat';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { ownedVerificationFixture } from './helpers/verification-object';
@@ -329,6 +329,24 @@ describe('4. a PERSON decides', () => {
       certificateDocId, typedVatNumber: VAT_NUMBER, registeredName: 'Vat Corner Trading', effectiveFrom: new Date('2026-01-01'), nameMatchesStore: true,
     }, async () => {})).rejects.toMatchObject({ code: 'REVIEWER_RECUSED' });
     expect((await vendorRow()).vatStatus).toBe('PENDING');
+  });
+
+  it('refused: recusal holds when a person ALREADY approved the certificate too (the store decision is the only check left)', async () => {
+    const checked = await app.prisma.verificationDocument.create({ data: {
+      userId: ownerUserId, role: 'VENDOR_OWNER', docType: VAT_CERTIFICATE_DOC_TYPE, fileUrl: `test/${RUN}/checked`,
+      status: 'APPROVED', state: 'COMMITTED', reviewedBy: reviewerId, reviewedAt: new Date(),
+    } as never });
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { vatCertificateDocId: checked.id } });
+    try {
+      await expect(approveStoreVat(app.prisma, verification as unknown as DocumentDecider, vendorId, ownerUserId, {
+        certificateDocId: checked.id, typedVatNumber: VAT_NUMBER, registeredName: 'Vat Corner Trading', effectiveFrom: new Date('2026-01-01'), nameMatchesStore: true,
+      }, async () => {})).rejects.toMatchObject({ code: 'REVIEWER_RECUSED' });
+      await expect(rejectStoreVat(app.prisma, verification as unknown as DocumentDecider, vendorId, ownerUserId, 'Rejecting my own store', async () => {}))
+        .rejects.toMatchObject({ code: 'REVIEWER_RECUSED' });
+      expect((await vendorRow()).vatStatus).toBe('PENDING');
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { vatCertificateDocId: certificateDocId } });
+    }
   });
 
   it('refused: a certificate only a MACHINE approved never backs a VAT approval', async () => {

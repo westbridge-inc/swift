@@ -25,8 +25,9 @@ export interface MoneyColumn {
   unit: MoneyUnit;
 }
 
-/** The regex the census applies to a Decimal field's name to call it money-ish. */
-export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding/i;
+/** The regex the census applies to a Decimal field's name to call it money-ish. [STORE-VAT] `vat` and `goods`: a store's
+ *  VAT and its goods by VAT class are money (Order.vatBase / vatStandardGoods / vatExemptGoods match no other word). */
+export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding|vat|goods/i;
 
 export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'AdBooking', field: 'amount', unit: 'MAJOR_2DP' },
