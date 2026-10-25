@@ -3,6 +3,10 @@
 // trimmed, 8-200 characters of letters, digits, spaces and common punctuation. Never a control character
 // (no line breaks, no tabs) and nothing a reference never needs (< > { } | \ ` $ and the like).
 // The ONE rule: the admin console checks it before asking for approval, the API enforces it.
+// Imported by PATH ('@swift/types/src/evidence-reference'), never through the package index, so no
+// web page's bundle grows. The compiled API cannot load this source-only package at run time, so it keeps
+// a copy in apps/api/src/modules/billing/evidence-reference.ts; confirmation-evidence-reference.test.ts
+// pins the two equal.
 
 export const EVIDENCE_REFERENCE_MIN = 8;
 export const EVIDENCE_REFERENCE_MAX = 200;

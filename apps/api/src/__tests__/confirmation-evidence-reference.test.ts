@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
-import * as shared from '@swift/types';
+import * as apiRule from '../modules/billing/evidence-reference';
+// Test-only value import of the console's copy (the compiled API never loads it: runtime-package-imports census).
+import * as consoleRule from '@swift/types/src/evidence-reference';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -23,7 +25,7 @@ import { testPhone } from './helpers/fixture-ids';
 // control characters (no line breaks) and nothing a reference never needs.
 // ---------------------------------------------------------------------------
 
-const problem = (shared as { evidenceReferenceProblem?: (raw: string) => string | null }).evidenceReferenceProblem;
+const problem = (apiRule as { evidenceReferenceProblem?: (raw: string) => string | null }).evidenceReferenceProblem;
 
 describe('the one evidence-reference rule', () => {
   it('accepts a normal human reference: spaces, brackets, a hash, commas, an apostrophe', () => {
@@ -38,6 +40,16 @@ describe('the one evidence-reference rule', () => {
       expect(problem!(bad), JSON.stringify(bad)).not.toBeNull();
     }
     expect(problem!('y'.repeat(200))).toBeNull();
+  });
+});
+
+describe('the API copy and the console copy are the same rule (they cannot drift)', () => {
+  it('same bounds, same shape, same answers', () => {
+    expect([apiRule.EVIDENCE_REFERENCE_MIN, apiRule.EVIDENCE_REFERENCE_MAX]).toEqual([consoleRule.EVIDENCE_REFERENCE_MIN, consoleRule.EVIDENCE_REFERENCE_MAX]);
+    expect([apiRule.EVIDENCE_REFERENCE_SHAPE.source, apiRule.EVIDENCE_REFERENCE_SHAPE.flags]).toEqual([consoleRule.EVIDENCE_REFERENCE_SHAPE.source, consoleRule.EVIDENCE_REFERENCE_SHAPE.flags]);
+    for (const sample of ['MMG ref 4417 (statement #3, 24 Oct)', 'short', 'line one\nline two', '<b>ref 12345</b>', 'x'.repeat(201), '   ref 123   ', 'É-transfer réf 2025']) {
+      expect(apiRule.evidenceReferenceProblem(sample), JSON.stringify(sample)).toBe(consoleRule.evidenceReferenceProblem(sample));
+    }
   });
 });
 

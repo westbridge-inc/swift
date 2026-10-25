@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorCode, errorDetails, errorStatus, fetchConfirmationApprovals, fetchPaymentConfirmations, requestConfirmationResolution, type PaymentConfirmation } from '@/lib/api';
 import type { ApprovalRow } from '@/lib/approvals';
 import { checkReason } from '@/lib/reason-rules';
-import { EVIDENCE_REFERENCE_MAX, evidenceReferenceProblem } from '@swift/types';
+import { EVIDENCE_REFERENCE_MAX, evidenceReferenceProblem } from '@swift/types/src/evidence-reference';
 import { useConfirmationRequestLocks, type ConfirmationRequestLocks } from '@/lib/confirmation-request-locks';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { MutationError } from '@/components/MutationError';

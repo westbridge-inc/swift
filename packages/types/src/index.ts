@@ -15,4 +15,3 @@ export * from './mmg-checkout-support';
 export * from './service-job';
 export * from './category-icon';
 export * from './order-words';
-export * from './evidence-reference';
