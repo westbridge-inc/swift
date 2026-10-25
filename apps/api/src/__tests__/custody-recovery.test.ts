@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { customerTimeline } from '../modules/order/customer-timeline';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -392,6 +393,10 @@ describe('[AF-MOB-006] a second mover cannot collect before the atomic transfer'
     expect(verified?.changes).toMatchObject({ fromRiderId: holder.rider.id, toRiderId: relay.rider.id, floatMoved: 3000 });
     const log = await app.prisma.orderStatusLog.findFirst({ where: { orderId: order.id, note: { startsWith: 'Custody handed to a relay rider' } } });
     expect(log?.changedBy).toBe(relay.user.id);
+    // [REVIEW-G2 S4-1 on #2080] The handoff position is evidence for support, never the customer's to read: the note
+    // carries it in the one ' — gps:LAT,LNG' form every mover step uses, and the customer's timeline cuts it.
+    expect(log?.note).toMatch(/ — gps:-?\d/);
+    expect(customerTimeline([log!]).map((r) => r.note)).toEqual(["Custody handed to a relay rider — holder's handoff code verified"]);
 
     // An offline retry with the same key gets the original answer, not a second attempt.
     const retry = await transfer(relay.token, caseId, code, { 'idempotency-key': key });

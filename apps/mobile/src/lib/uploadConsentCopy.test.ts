@@ -24,7 +24,11 @@ describe('the phone upload ticks', () => {
 
   it('the checklist: an unticked tick, and every card waits for it', () => {
     const list = SRC('components', 'onboarding', 'DocumentChecklist.tsx');
-    expect(list).toMatch(/const \[consented, setConsented\] = useState\(false\);/);
+    // [DOC-CONSENT] Unticked unless the person ticks it on this visit or their own grant is on record (the server's
+    // ledger); DocumentChecklist.consent.navigation.test.ts renders both ways and every "not on record" answer.
+    expect(list).toMatch(/const \[choice, setChoice\] = useState<boolean \| null>\(null\);/);
+    expect(list).toMatch(/const consented = choice \?\? record\.given;/);
+    expect(list).toMatch(/const record = documentConsentOnRecord\(status\);/);
     expect(list).toMatch(/\{DOCUMENT_CONSENT_TEXT\}/);
     expect((list.match(/consented=\{consented\}/g) ?? []).length).toBe((list.match(/<DocumentUploadCard\b/g) ?? []).length);
     const card = SRC('components', 'onboarding', 'DocumentUploadCard.tsx');

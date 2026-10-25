@@ -949,6 +949,10 @@ export const servicesApi = {
     api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
+/** [DOC-CONSENT S4] How the person gave the document tick for this upload: ticked on this visit, shown from their own
+ *  grant on record, or the prompt a police clearance asks first. The API records it as the ledger row's evidence. */
+export type UploadConsentVia = 'checkbox' | 'record' | 'prompt';
+
 // Verification (mounted at /api/v1/verification)
 export const verificationApi = {
   status: (role: string, vehicleType?: string) =>
@@ -963,6 +967,8 @@ export const verificationApi = {
     privacyNoticeVersion: string;
     /** [R17] the tick shown before the upload (recorded in the consent ledger). */
     consentTick?: 'document_v1';
+    /** [DOC-CONSENT S4] how that tick was given (an older API ignores it). */
+    consentVia?: UploadConsentVia;
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
