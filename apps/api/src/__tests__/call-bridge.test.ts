@@ -308,6 +308,16 @@ describe('[O-1] starting a call', () => {
     expect((await bridge(riderP.token, o.id, 'customer')).statusCode).toBe(200);
   });
 
+  it('two taps at the same moment start exactly one call and write one row', async () => {
+    const o = await liveFood();
+    const [a, b] = await Promise.all([bridge(diner.token, o.id, 'rider'), bridge(riderP.token, o.id, 'customer')]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    expect(await system(() => app.prisma.callSession.count({ where: { orderId: o.id } }))).toBe(1);
+    expect(placed).toHaveLength(1);
+    const live = a.statusCode === 200 ? a : b;
+    await hook('status', live.json().data.callId, { CallStatus: 'completed' });
+  });
+
   it('the per-order cap counts ATTEMPTS, connected or not (CALL_RELAY_MAX_ATTEMPTS_PER_ORDER)', async () => {
     const o = await liveFood();
     for (let i = 0; i < 3; i += 1) {
