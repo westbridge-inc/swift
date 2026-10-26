@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_DOCUMENT_CHECKLISTS, PLATFORM_CONFIG_VERSION, SERVICE_TRADE_LAUNCH_FLOOR } from '../modules/ops/platform-config';
 import { vendorActivationNext, vendorActivationRefusal } from '../modules/admin/vendor-activation';
 import { feePausePredicate } from '../modules/billing/mmg-pause';
-import { FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies } from '../modules/vendor/food-handlers';
+import { FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, attestedStoreIds, foodHandlerTickApplies } from '../modules/vendor/food-handlers';
 import { FOOD_HANDLER_ATTESTATION_TYPE } from '../modules/verification/doc-registry';
 import { storefrontSeller } from '../modules/verification/storefront-seller';
 import type { DisclosureBlock } from '../modules/verification/storefront-disclosure';
@@ -58,6 +58,20 @@ describe('[FOOD-PERMIT] who ticks', () => {
   it('the words are the owner’s, at a pinned version', () => {
     expect(FOOD_HANDLERS_TICK_V1).toBe('Everyone who handles food here holds a current food handler’s certificate.');
     expect(FOOD_HANDLERS_VERSION).toBe('v1');
+  });
+});
+
+// [REVIEW-G #2062 S4-2] Which tick stands: only a grant of the CURRENT words. A grant of other (older) words counts for
+// nothing, so when new words ship every restaurant is asked to tick again.
+describe('[FOOD-PERMIT] which tick counts: the current words only', () => {
+  type Row = { action: string; documentVersion: string; evidence: unknown };
+  const ledger = (rows: Row[]) => ({ consentRecord: { findMany: async () => rows } }) as unknown as Parameters<typeof attestedStoreIds>[0];
+
+  it('a grant of older words counts for nothing; a grant of the current words stands', async () => {
+    for (const action of ['granted', 're_granted']) {
+      expect(await attestedStoreIds(ledger([{ action, documentVersion: 'v0', evidence: { vendorId: 'store-1' } }]), 'owner-1', ['store-1']), action).toEqual(new Set());
+      expect(await attestedStoreIds(ledger([{ action, documentVersion: FOOD_HANDLERS_VERSION, evidence: { vendorId: 'store-1' } }]), 'owner-1', ['store-1']), action).toEqual(new Set(['store-1']));
+    }
   });
 });
 

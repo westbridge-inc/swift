@@ -292,3 +292,42 @@ describe('[row 248] the order receipt says who sold', () => {
     expect(html).not.toContain('trading as');
   });
 });
+
+// [P35 · board 4b · GUARDRAILS §4/§8 · REVIEW-G #2112 S4-1] "Verified seller" only while a person-approved document
+// is CURRENT: the server serves isVerified = the row's isVerified AND activationValidUntil (the soonest document
+// expiry) still in the future, on the app's and the website's store reads alike. The bound itself is never sent.
+describe('[P35] isVerified on the store page is current, on both reads', () => {
+  it('papers current: true; papers lapsed minutes ago (column not yet re-projected): false; no bound on file: the column', async () => {
+    const { vendorId, slug } = await store(4101);
+    await setStore(vendorId, { isVerified: true, activationValidUntil: new Date(Date.now() + 30 * DAY) });
+    expect((await appView(vendorId)).isVerified).toBe(true);
+    expect((await webView(slug)).isVerified).toBe(true);
+
+    await setStore(vendorId, { isVerified: true, activationValidUntil: new Date(Date.now() - 5 * 60_000) });
+    expect((await appView(vendorId)).isVerified).toBe(false);
+    const web = await webView(slug);
+    expect(web.isVerified).toBe(false);
+    expect(web).not.toHaveProperty('activationValidUntil');
+
+    await setStore(vendorId, { isVerified: true, activationValidUntil: null });
+    expect((await appView(vendorId)).isVerified).toBe(true);
+    expect((await webView(slug)).isVerified).toBe(true);
+  });
+
+  // [REVIEW-F #2112 S2-1] A store-review or demo store is fiction nobody checked: never "Verified seller", even with
+  // every other fact in order. Store-side marker (review pack) and owner-side marker (demo seed) each withhold it.
+  it('a store whose owner is from a synthetic run (the demo seed) is never verified, on both reads', async () => {
+    const { userId, vendorId, slug } = await store(4102);
+    await setStore(vendorId, { isVerified: true, activationValidUntil: new Date(Date.now() + 30 * DAY) });
+    expect((await appView(vendorId)).isVerified).toBe(true);
+
+    // (A synthetic STORE cannot exist in this production tenant — the database refuses it [STA-1 DL-4]; review-pack
+    // stores live in the REVIEW tenant. seller-verified.unit.test.ts proves the store-side marker withholds the claim.)
+    await system(() => app.prisma.user.update({ where: { id: userId }, data: { syntheticRunId: 'seed-demo' } }));
+    expect((await appView(vendorId)).isVerified).toBe(false);
+    const web = await webView(slug);
+    expect(web.isVerified).toBe(false);
+    for (const key of ['owner', 'isSynthetic', 'activationValidUntil']) expect(web).not.toHaveProperty(key);
+  });
+});
+
