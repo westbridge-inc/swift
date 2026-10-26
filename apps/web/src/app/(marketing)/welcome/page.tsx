@@ -7,7 +7,8 @@ import {
 import { Section } from '@/components/site';
 import { OrderOnTheWeb } from '@/components/order-on-the-web';
 import { BrowserOrderingNote } from '@/components/browser-ordering-note';
-import { launch, showAppStoreBadges, SITE_ORIGIN } from '@/site.config';
+import { AppStoreLinks } from '@/components/app-store-links';
+import { launch, SITE_ORIGIN } from '@/site.config';
 import { CANCEL_FREE_SHORT } from '@/lib/cancel-policy-copy';
 
 /**
@@ -112,14 +113,13 @@ export default function WelcomePage() {
             </Link>
           </div>
 
-          {/* No store badges until an app exists. Saying so plainly reads as
-              confidence; a dead badge reads as carelessness — and is a review flag. */}
-          {!showAppStoreBadges && (
-            <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              <BrowserOrderingNote open="Order from stores in your phone's browser, tracking included." /> Taxi rides
-              require the Swift mobile app.
-            </p>
-          )}
+          <p className="mt-6 text-sm text-[var(--swift-muted)]">
+            <BrowserOrderingNote open="Order from stores in your phone's browser, tracking included." /> Taxi rides
+            require the Swift mobile app.
+          </p>
+          {/* [G11] No store link until the apps are live in both stores. A dead
+              link reads as carelessness — and is a review flag. */}
+          <AppStoreLinks className="mt-4" />
         </div>
       </Section>
 

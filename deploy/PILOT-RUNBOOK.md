@@ -380,6 +380,13 @@ What the public names get:
   redeploy as usual); no rebuild is needed, and closing it again is the same
   one change. The staging name always keeps the full marketplace.
 
+The App Store and Google Play links follow their own switch, `APP_STORES`
+in deploy/.env (empty by default: every page says "Store download links will
+appear here when available"). Set `APP_STORES=live` (exactly that; pilot-up
+refuses anything else) only once BOTH stores show the app live, then recreate
+the website container as above; no rebuild. Like the front door it governs
+the public names only: the staging name never shows store links.
+
 What the front door is: presentation-only. It decides what the website shows
 on the public names. The API stays open to the apps, and to any API client, by
 design; the door does not change who can place an order through the API.

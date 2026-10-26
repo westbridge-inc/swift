@@ -194,6 +194,13 @@ case "$(env_value WEB_ORDERING)" in
   "" | live) ;;
   *) die "WEB_ORDERING must be live or empty" ;;
 esac
+# [G11] The website's App Store and Google Play links switch, read by the site
+# while it runs: `live` (only once both stores show the app live), or nothing
+# (no store link). A near miss would quietly keep the links off, so it is refused.
+case "$(env_value APP_STORES)" in
+  "" | live) ;;
+  *) die "APP_STORES must be live or empty" ;;
+esac
 [ "$(env_value MAPS_PROVIDER)" = osrm ] || die "pilot requires MAPS_PROVIDER=osrm"
 [ "$(env_value OSRM_URL)" = http://osrm:5000 ] || die "OSRM_URL must use the private routing service"
 # Secrets are not in this file (the encrypted store holds them; checked below

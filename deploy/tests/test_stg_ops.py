@@ -892,10 +892,14 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         # site's pre-launch switch, read while it runs (closed unless WEB_ORDERING=live),
         # and [#1608] the Android signing fingerprint it publishes in
         # /.well-known/assetlinks.json: a public value, empty unless deploy/.env sets it.
+        # [G11] And the App Store / Google Play links switch, read while it runs
+        # (no store link unless APP_STORES=live).
         # No other setting, and never a settings file, reaches the website.
         self.assertEqual(sorted((web.get("environment") or {}).keys()),
-                         ["ANDROID_CERT_SHA256", "NODE_OPTIONS", "SWIFT_WEB_ORDERING"])
+                         ["ANDROID_CERT_SHA256", "NODE_OPTIONS", "SWIFT_APP_STORES", "SWIFT_WEB_ORDERING"])
         self.assertEqual(web["environment"]["SWIFT_WEB_ORDERING"], "")
+        self.assertEqual(web["environment"]["SWIFT_APP_STORES"], "")
+        self.assertNotIn("NEXT_PUBLIC_APP_STORES", web["build"]["args"])
         self.assertEqual(web["environment"]["ANDROID_CERT_SHA256"], "")
         self.assertNotIn("env_file", web)
         self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web["build"]["args"])
@@ -1306,7 +1310,7 @@ class Q11PilotUpWebsite(unittest.TestCase):
         self.store = " ".join(sorted(set(re.findall(r"_FILE: /run/secrets/([A-Z][A-Z0-9_]*)", compose))
                                      | {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}))
 
-    def run_pilot(self, web_host=None, alias=None, web_aliases=None, web_ordering=None, **extra):
+    def run_pilot(self, web_host=None, alias=None, web_aliases=None, web_ordering=None, app_stores=None, **extra):
         settings = (f"PILOT_ENV=staging\nAPI_HOST={API_HOST}\nMAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\n"
                     "BACKUP_BUCKET=test-backups\nNODE_ENV=development\nCORS_ORIGIN=https://staging.example.com\n")
         if web_host is not None:
@@ -1317,6 +1321,8 @@ class Q11PilotUpWebsite(unittest.TestCase):
             settings += f"WEB_ALIAS_HOSTS={web_aliases}\n"
         if web_ordering is not None:
             settings += f"WEB_ORDERING={web_ordering}\n"
+        if app_stores is not None:
+            settings += f"APP_STORES={app_stores}\n"
         (self.here / ".env").write_text(settings)
         env = os.environ.copy()
         env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
@@ -1464,6 +1470,22 @@ class Q11PilotUpWebsite(unittest.TestCase):
                 result, calls = self.run_pilot(WEB_HOST, web_ordering=value)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("WEB_ORDERING must be live or empty", result.stderr)
+                self.assertEqual(calls, [])
+
+    # [G11] The store links switch: `live` or nothing. A near miss would quietly
+    # keep the links off on Release day, so it is refused before anything changes.
+    def test_the_store_links_switch_is_live_or_nothing(self):
+        for value in ("", "live"):
+            with self.subTest(app_stores=value):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, app_stores=value)
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        for value in ("Live", "LIVE", "true", "1", "yes", "soon"):
+            with self.subTest(app_stores=value):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, app_stores=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("APP_STORES must be live or empty", result.stderr)
                 self.assertEqual(calls, [])
 
     def test_a_site_that_does_not_build_leaves_the_running_stack_untouched(self):
@@ -2330,6 +2352,17 @@ class PublicSiteWebAliasHosts(unittest.TestCase):
         example = (DEPLOY / ".env.deploy.example").read_text()
         self.assertRegex(example, r"(?m)^WEB_ALIAS_HOSTS=$")
         self.assertRegex(example, r"(?m)^WEB_ORDERING=$")
+        # [G11] The store links switch: documented, empty (no store link) by default.
+        self.assertRegex(example, r"(?m)^APP_STORES=$")
+
+    def test_the_website_reads_the_store_links_switch_at_run_time_off_by_default(self):
+        # [G11] Like the pre-launch switch: the running site's own environment,
+        # never a build argument, so turning the store links on at Release
+        # recreates the website container and never rebuilds it.
+        web = service_block(DEPLOY / "docker-compose.yml", "web")
+        self.assertIn("SWIFT_APP_STORES: ${APP_STORES:-}", web)
+        self.assertNotIn("NEXT_PUBLIC_APP_STORES", web)
+        self.assertNotRegex(dockerfile_stages(WEB_DOCKERFILE)["build"], r"(?m)^ARG \S*APP_STORES")
 
 
 # ===========================================================================

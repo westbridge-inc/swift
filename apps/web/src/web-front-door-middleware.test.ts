@@ -117,10 +117,10 @@ describe('[Item 7 · S1] one switch, read by the server while it runs, failing c
     const { GET } = await load<{ GET: () => Response }>('app/api/launch-state/route.ts');
     let response = GET();
     expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(await response.json()).toEqual({ webOrdering: 'soon' });
+    expect(await response.json()).toEqual({ webOrdering: 'soon', appStores: 'soon' });
     vi.stubEnv('SWIFT_WEB_ORDERING', 'live');
     response = GET();
-    expect(await response.json()).toEqual({ webOrdering: 'live' });
+    expect(await response.json()).toEqual({ webOrdering: 'live', appStores: 'soon' });
   });
 
   it('governs the public hosts only: staging, previews and local runs keep the full marketplace', async () => {
