@@ -4,7 +4,7 @@ import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../stores/authStore';
 import { guardVendorOperation } from './useVendorMutation';
 import { useUploadFile } from './verification';
-import { bound, unwrap, type StoreVatView } from './storeVat';
+import { bound, previewReadOnly, unwrap, type StoreVatView } from './storeVat';
 
 // [STORE-VAT · owner O-5] The store's GRA VAT certificate, sent from the phone (OWNER only). Kept apart from
 // hooks/storeVat.ts so the screens that only READ the store's VAT never load the document upload.
@@ -18,14 +18,14 @@ export function useSendVatCertificate() {
   const upload = useUploadFile();
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   return useMutation({
-    mutationFn: guardVendorOperation(async (file: { uri: string; name: string; type: string }) => {
+    mutationFn: guardVendorOperation(previewReadOnly(async (file: { uri: string; name: string; type: string }) => {
       const owner = requireAuthSessionSnapshot();
       const fileUrl = await upload.mutateAsync({ ...file, authSession: owner });
       const current = requireAuthSessionForPrincipal(owner);
       return bound(storeId, () => unwrap<StoreVatView>(vendorApi.sendVatCertificate(
         { fileUrl, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'document_v1' }, current, storeId,
       )));
-    }),
+    })),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'vat'] }),
   });
 }
