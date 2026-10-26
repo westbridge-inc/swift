@@ -5,6 +5,7 @@ import { evaluateMoverDocuments, lockMoverDocuments, type MoverDocumentVerdict }
 import { normalizeRegistrationMark } from '../verification/subjects';
 import { FloatService } from '../dispatch/float.service';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
 // [CARS-DELIVER · owner 8 Oct 2026 ~23:30 GYT + 25 Oct 22:33Z] A verified taxi driver's car can ALSO take
@@ -26,6 +27,13 @@ import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 // Mover Agreement §7: "anyone delivering must hold insurance that permits use for hire or reward").
 // Store orders only (riderType DELIVERY): parcels stay with riders, as the owner's ruling names
 // "food/shop deliveries".
+//
+// [PR4 · "or get both", COORD ruling 26 Oct] "Taxi + deliveries" (drivers.takesDeliveries): while the taxi profile
+// is online and free, the delivery profile is ALSO a delivery candidate, located where the taxi is (the delivery
+// candidate search, dispatch.service). Accepting a delivery PROMOTES it inside the claim's own transaction (taxi
+// supply retired, the delivery profile online on the same device session, work app -> deliveries, marked
+// returnsToTaxi); when its deliveries end the account RETURNS to taxi work with deliveries on
+// (car-deliveries-return.ts). Still one job at a time; the taxi pool, taxi GO and taxi claims are untouched.
 // ---------------------------------------------------------------------------
 
 type Tx = Prisma.TransactionClient;
@@ -47,6 +55,8 @@ export interface CarDeliveriesStatus {
   reason: CarDeliveriesReason | null;
   /** The car the deliveries would run on, as the mover's vehicle picker names it. */
   vehicle: { type: VehicleType; label: string } | null;
+  /** [PR4] "Taxi + deliveries" is on: store delivery offers also come while the taxi is online and free. */
+  takesDeliveries: boolean;
 }
 
 /** A Rider row on a passenger vehicle is a taxi car's delivery profile (onboarding never makes one otherwise). */
@@ -107,7 +117,7 @@ function carDeliveryNeedsTaxi(): AppError {
 /** GET /driver/deliveries — what the driver's account screen shows. Reads only. */
 export async function carDeliveriesStatus(db: Db, userId: string): Promise<CarDeliveriesStatus> {
   const [driver, rider] = await Promise.all([
-    db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    db.driver.findUnique({ where: { userId }, select: { vehicleType: true, takesDeliveries: true } }),
     db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
   ]);
   if (!driver) throw new NotFoundError('Driver');
@@ -118,7 +128,7 @@ export async function carDeliveriesStatus(db: Db, userId: string): Promise<CarDe
     : rider && !enabled
       ? 'OTHER_DELIVERY_VEHICLE'
       : !carCanDeliver(driver.vehicleType) ? 'VEHICLE' : null;
-  return { available: reason === null, enabled, reason, vehicle };
+  return { available: reason === null, enabled, reason, vehicle, takesDeliveries: enabled && driver.takesDeliveries };
 }
 
 /**
@@ -233,4 +243,104 @@ export async function lockCarDeliveryAuthority(tx: Tx, userId: string): Promise<
     return { allowed: false, reason: 'docs', validUntil: null };
   }
   return verdict;
+}
+
+// ---------------------------------------------------------------------------
+// [PR4] "Taxi + deliveries"
+// ---------------------------------------------------------------------------
+
+/** The code "Taxi + deliveries" is refused in before "Deliveries too" is set up. */
+export const DELIVERIES_NOT_SET_UP = 'DELIVERIES_NOT_SET_UP';
+
+/**
+ * PUT /driver/deliveries/mode — turn "taxi + deliveries" on or off. On needs the switch (the route refuses first
+ * while it is off), an active account and a delivery profile on this taxi car; off is always allowed. Under the
+ * User, then Rider, then Driver locks. It changes no supply: an online taxi stays exactly as it is.
+ */
+export async function setTaxiAndDeliveries(prisma: PrismaClient, userId: string, on: boolean): Promise<CarDeliveriesStatus> {
+  await prisma.$transaction(async (tx) => {
+    const users = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT "status"::text AS "status" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
+    if (!users[0]) throw new NotFoundError('User');
+    await tx.$queryRaw`SELECT "id" FROM "riders" WHERE "userId" = ${userId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT "id" FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
+    const [driver, rider] = await Promise.all([
+      tx.driver.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
+      tx.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    if (!driver) throw new NotFoundError('Driver');
+    if (on) {
+      if (users[0].status !== 'ACTIVE') throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'Your account must be active before you can take work.');
+      if (!rider || !isCarDeliveryProfile(rider.vehicleType)) {
+        throw new AppError(409, DELIVERIES_NOT_SET_UP, 'Add deliveries first, then turn on taxi rides and deliveries together.');
+      }
+      if (!carCanDeliver(driver.vehicleType)) throw new AppError(403, 'VEHICLE_NOT_OFFERED', 'This vehicle cannot take deliveries on Swift.');
+    }
+    await tx.driver.update({ where: { id: driver.id }, data: { takesDeliveries: on } });
+  });
+  return carDeliveriesStatus(prisma, userId);
+}
+
+/** A delivery profile's live legs, counted from the orders table (the one truth). */
+async function liveLegs(db: Db, riderId: string): Promise<number> {
+  return db.order.count({ where: { riderId, status: { notIn: [...TERMINAL_ORDER_STATUSES] } } });
+}
+
+/**
+ * canReceiveOffer's answer for a delivery profile that is NOT online itself: may it still receive a delivery offer
+ * because its taxi is online, free and on "taxi + deliveries"? Only while the switch is on, and never with a live
+ * delivery leg (one job at a time).
+ */
+export async function canTakeDeliveryFromTaxi(db: Db, riderId: string): Promise<boolean> {
+  if (!carDeliveriesEnabled()) return false;
+  const rider = await db.rider.findUnique({ where: { id: riderId }, select: { userId: true, vehicleType: true, isOnline: true } });
+  if (!rider || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return false;
+  const taxis = await db.driver.count({
+    where: {
+      userId: rider.userId, takesDeliveries: true, isOnline: true, isAvailable: true, currentRideId: null,
+      locationSessionId: { not: null }, user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
+    },
+  });
+  return taxis === 1 && (await liveLegs(db, riderId)) === 0;
+}
+
+/**
+ * The delivery claim (claimOrder, RIDER pool) for an account whose taxi is online on "taxi + deliveries": PROMOTE
+ * the delivery profile inside the claim's transaction, after its User and Order locks (then Rider, then Driver):
+ * the car re-synced from the taxi profile, taxi supply retired, the delivery profile online on the taxi's device
+ * session and position, marked to return to taxi work, and the work app -> deliveries. Returns the retired taxi
+ * profile's id, or null when this is not such a claim (the claim then refuses as before). If anything later in
+ * the claim refuses, the whole transaction — this promotion with it — rolls back.
+ */
+export async function promoteDeliveryFromTaxi(tx: Tx, userId: string, riderId: string): Promise<{ driverId: string } | null> {
+  if (!carDeliveriesEnabled()) return null;
+  const riders = await tx.$queryRaw<Array<{ userId: string; vehicleType: VehicleType; isOnline: boolean }>>`
+    SELECT "userId", "vehicleType", "isOnline" FROM "riders" WHERE "id" = ${riderId} FOR UPDATE`;
+  const rider = riders[0];
+  if (!rider || rider.userId !== userId || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return null;
+  const drivers = await tx.$queryRaw<Array<{
+    id: string; takesDeliveries: boolean; isOnline: boolean; isAvailable: boolean; currentRideId: string | null;
+    locationSessionId: string | null; currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null;
+  }>>`
+    SELECT "id", "takesDeliveries", "isOnline", "isAvailable", "currentRideId", "locationSessionId",
+           "currentLat", "currentLng", "lastLocationUpdate"
+    FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
+  const taxi = drivers[0];
+  if (!taxi || !taxi.takesDeliveries || !taxi.isOnline || !taxi.isAvailable || taxi.currentRideId
+    || !taxi.locationSessionId || taxi.currentLat == null || taxi.currentLng == null) return null;
+  const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "sessions" WHERE "id" = ${taxi.locationSessionId} AND "userId" = ${userId} AND "expiresAt" > NOW() FOR SHARE`;
+  if (!sessions[0]) return null;
+  if ((await liveLegs(tx, riderId)) > 0) return null;
+  await syncCarDeliveryProfile(tx, userId);
+  await tx.$executeRaw`
+    UPDATE "drivers" SET "isOnline" = false, "isAvailable" = false, "locationSessionId" = NULL, "updatedAt" = clock_timestamp()
+    WHERE "id" = ${taxi.id}`;
+  await tx.$executeRaw`
+    UPDATE "riders" SET "isOnline" = true, "isAvailable" = true, "locationSessionId" = ${taxi.locationSessionId},
+      "currentLat" = ${taxi.currentLat}, "currentLng" = ${taxi.currentLng}, "lastLocationUpdate" = ${taxi.lastLocationUpdate},
+      "returnsToTaxi" = true, "updatedAt" = clock_timestamp()
+    WHERE "id" = ${riderId}`;
+  await tx.user.update({ where: { id: userId }, data: { activeRole: 'RIDER', lastMoverRole: 'RIDER' } });
+  return { driverId: taxi.id };
 }

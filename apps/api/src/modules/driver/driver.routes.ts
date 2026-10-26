@@ -12,7 +12,7 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { carDeliveriesEnabled, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
-import { carDeliveriesStatus, enableCarDeliveries } from './car-deliveries';
+import { carDeliveriesStatus, enableCarDeliveries, setTaxiAndDeliveries } from './car-deliveries';
 import { passengersOnlyRefusal } from '../dispatch/concurrency-policy';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -357,6 +357,16 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!carDeliveriesEnabled()) throw passengersOnlyRefusal();
     await getDriver(request.user.userId);
     return { success: true, data: await enableCarDeliveries(app.prisma, request.user.userId) };
+  });
+
+  /** [CARS-DELIVER PR4] PUT /deliveries/mode { takesDeliveries } — "taxi + deliveries": store delivery offers also
+   *  come while this taxi is online and free (car-deliveries.ts). Turning it ON is refused while CAR_DELIVERIES is
+   *  off, before anything is read or written; turning it off is always allowed. */
+  app.put('/deliveries/mode', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { takesDeliveries } = z.object({ takesDeliveries: z.boolean() }).parse(request.body ?? {});
+    if (takesDeliveries && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    return { success: true, data: await setTaxiAndDeliveries(app.prisma, request.user.userId, takesDeliveries) };
   });
 
   /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on

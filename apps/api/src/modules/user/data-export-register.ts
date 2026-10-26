@@ -315,11 +315,11 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'riderProfile', model: 'Rider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'returnsToTaxi', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
   },
   {
     category: 'driverProfile', model: 'Driver', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'takesDeliveries', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceProviderProfile', model: 'ServiceProvider', by: ['userId'], key: 'id',

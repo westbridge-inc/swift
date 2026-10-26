@@ -1298,6 +1298,10 @@ model Rider {
   completionRate           Float                    @default(100.0)
   /// % of dispatch offers accepted (EMA) — feeds candidate scoring
   acceptanceRate           Float                    @default(100.0)
+  /// [CARS-DELIVER] This delivery profile went online from "taxi + deliveries" (a delivery accepted from taxi
+  /// work): when its deliveries end, the account returns to taxi work with deliveries on (COORD ruling 26 Oct).
+  /// A delivery GO started by the mover clears it. False on every row today.
+  returnsToTaxi            Boolean                  @default(false)
   /// D.3 float gate — max vendor-cash this rider may front at once (derived from
   /// User.trustLevel via CountryConfig.floatL1/L2/L3); committedFloat = currently
   /// outstanding across live CASH orders. availableFloat = floatLimit - committedFloat.
@@ -1380,6 +1384,10 @@ model Driver {
   /// until the app says otherwise: an app that predates stops is never handed
   /// one. Nothing sets or reads it yet.
   taxiStopsCapable         Boolean          @default(false)
+  /// [CARS-DELIVER · owner 8 Oct "or get both"] "Taxi + deliveries": while this taxi profile is online and free,
+  /// its car's delivery profile (the account's Rider row) is also offered store deliveries. Only while the
+  /// CAR_DELIVERIES switch is on (modules/driver/car-deliveries.ts); false = taxi rides only, every row today.
+  takesDeliveries          Boolean          @default(false)
   /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
   /// consumer handles null. bodyType from the make/model fleet mapping
   /// (UNKNOWN surfaces one-tap classification in admin — never guessed
