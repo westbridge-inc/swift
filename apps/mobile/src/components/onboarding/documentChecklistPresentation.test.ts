@@ -52,7 +52,8 @@ describe('a document waiting for review', () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const card = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentUploadCard.tsx'), 'utf8');
-    expect(card).toMatch(/<Pressable disabled=\{approved \|\| upload\.isPending \|\| !consented\} onPress=\{pending \? confirmReplace : pick\}>/);
+    // [POLICE-CLEARANCE CONSENT] `canUpload` = the list's tick, or a police clearance's own (uploadConsentCopy.test).
+    expect(card).toMatch(/<Pressable disabled=\{approved \|\| upload\.isPending \|\| !canUpload\} onPress=\{pending \? confirmReplace : pick\}>/);
     expect(card).toMatch(/Replace this document\?/);
     const list = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentChecklist.tsx'), 'utf8');
     // Required AND optional documents both say "Replaced — waiting for review" (a police clearance can be replaced too).

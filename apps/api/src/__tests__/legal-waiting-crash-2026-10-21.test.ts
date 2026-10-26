@@ -86,8 +86,9 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
   // 2026] 2026-10-25 (non-material: no customer ID for taxi rides or larger orders) is served on top of those.
   // [O-1 · COORD 25 Oct] 2026-10-25.1 (material: Swift-bridged calling, Twilio for calls) is served on top of all of
   // these and is now the newest material version; 2026-10-21 stays material, and stays the newest one below it.
-  it('2026-10-21 is a material version, the newest one below the served 2026-10-25.1 (material: calls)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-25.1');
+  // [POLICE-CLEARANCE CONSENT] 2026-10-25.2 (non-material) is served on top: the newest material version stays 2026-10-25.1.
+  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-25.2', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-25.2');
     expect(materialVersion('2026-10-25')).toBe('2026-10-21');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-25.1');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');

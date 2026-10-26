@@ -11,7 +11,7 @@ import { FOOD_HANDLERS_DOC } from './foodHandlers';
 import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
-import { SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord } from './documentConsentRecord';
+import { SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord, policeClearanceWordsFrom } from './documentConsentRecord';
 import type { UploadConsentVia } from '../../services/api';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
@@ -59,6 +59,9 @@ export function DocumentChecklist({
   // [DOC-CONSENT S4] Each upload tells the ledger how the tick was given: ticked on this visit, or shown from the record
   // (a card that asks again records its prompt instead).
   const consentVia: UploadConsentVia = choice === true ? 'checkbox' : 'record';
+  // [POLICE-CLEARANCE CONSENT] A police clearance has its OWN tick, in the API's words (none from an older API).
+  const policeWords = policeClearanceWordsFrom(status);
+  const policeConsentFor = (docType: string) => (docType === 'police_clearance' ? policeWords : null);
   if (isLoading) {
     return (
       <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
@@ -207,6 +210,7 @@ export function DocumentChecklist({
             consented={consented}
             askConsentFirst={askConsentFirst(docType)}
             consentVia={consentVia}
+            policeConsent={policeConsentFor(docType)}
             key={docType}
             role={role}
             docType={docType}
@@ -238,6 +242,7 @@ export function DocumentChecklist({
                 consented={consented}
                 askConsentFirst={askConsentFirst(docType)}
                 consentVia={consentVia}
+                policeConsent={policeConsentFor(docType)}
                 key={docType}
                 role={role}
                 docType={docType}

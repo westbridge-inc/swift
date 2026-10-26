@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   currentPosition: vi.fn(),
   uploadVerification: vi.fn(),
   submitDocument: vi.fn(),
+  withdrawPoliceClearance: vi.fn(),
   submitIdentity: vi.fn(),
   becomePartner: vi.fn(),
   changeVehicle: vi.fn(),
@@ -100,6 +101,7 @@ vi.mock('../services/api', () => ({
     upload: mocks.uploadVerification,
     submitDocument: mocks.submitDocument,
     submitIdentity: mocks.submitIdentity,
+    withdrawPoliceClearance: mocks.withdrawPoliceClearance,
   },
   partnerApi: { become: mocks.becomePartner, changeVehicle: mocks.changeVehicle },
   vendorApi: { signOwnName: mocks.signOwnName },
@@ -158,7 +160,7 @@ import {
   useSelectMoverKind,
   useUploadVehiclePhoto,
 } from './mover';
-import { useBecomePartner, useChangeVehicle, useUploadDocument } from './verification';
+import { useBecomePartner, useChangeVehicle, useUploadDocument, useWithdrawPoliceClearance } from './verification';
 import { useCourierPickupProof, useCourierProof } from './courier';
 
 function deferred<T>() {
@@ -332,6 +334,38 @@ describe('multi-step authenticated mutation ownership', () => {
     mocks.submitDocument.mockClear();
     await mutation.mutationFn({ docType: 'drivers_licence', file });
     expect(mocks.submitDocument.mock.calls[0]![0]).not.toHaveProperty('consentVia');
+  });
+
+  it('[POLICE-CLEARANCE CONSENT] a police clearance sends its own tick and the words\' version, never the document tick', async () => {
+    mocks.uploadVerification.mockResolvedValue({ data: { data: { url: '/private/pc.jpg' } } });
+    mocks.submitDocument.mockResolvedValue({ data: { data: { id: 'pc-1' } } });
+    const mutation = useUploadDocument('MOVER') as unknown as CapturedMutation<{
+      docType: string; file: { uri: string; name: string; type: string }; consent?: { tick: 'police_clearance_v1'; version: string };
+    }>;
+    await mutation.mutationFn({ docType: 'police_clearance', file: { uri: 'file://pc.jpg', name: 'pc.jpg', type: 'image/jpeg' }, consent: { tick: 'police_clearance_v1', version: 'taxi-v1-30d' } });
+    const body = mocks.submitDocument.mock.calls[0]![0];
+    expect(body).toMatchObject({ docType: 'police_clearance', consentTick: 'police_clearance_v1', consentVersion: 'taxi-v1-30d' });
+  });
+
+  it('[DOC-CONSENT S4 · REVIEW-F] a consent the API refused (no longer on record, or changed words) re-reads the checklist; other failures do not', () => {
+    const mutation = useUploadDocument('MOVER') as unknown as { onError?: (error: unknown) => void };
+    const refused = (code: string) => ({ response: { data: { error: { code } } } });
+    mutation.onError?.(refused('CONSENT_NOT_ON_RECORD'));
+    mutation.onError?.(refused('CONSENT_WORDS_CHANGED'));
+    expect(mocks.invalidateQueries).toHaveBeenCalledTimes(2);
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['verification', 'MOVER'] });
+    mocks.invalidateQueries.mockClear();
+    mutation.onError?.(refused('BAD_TYPE'));
+    mutation.onError?.(new Error('offline'));
+    expect(mocks.invalidateQueries).not.toHaveBeenCalled();
+  });
+
+  it('[POLICE-CLEARANCE CONSENT] withdrawing asks the API for this checklist, as the signed-in account, and refreshes the checklist', async () => {
+    mocks.withdrawPoliceClearance.mockResolvedValue({ data: { data: { withdrawn: 1, kept: 0 } } });
+    const mutation = useWithdrawPoliceClearance('MOVER') as unknown as CapturedMutation<void, { withdrawn: number; kept: number }>;
+    await expect(mutation.mutationFn(undefined)).resolves.toEqual({ withdrawn: 1, kept: 0 });
+    expect(mocks.withdrawPoliceClearance).toHaveBeenCalledWith('MOVER', accountA);
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['verification', 'MOVER'] });
   });
 
   it('rejects a delayed A document picker before uploading as B', async () => {
