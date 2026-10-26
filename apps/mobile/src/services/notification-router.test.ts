@@ -309,9 +309,10 @@ const CENSUS: Case[] = [
   { k: 'not_my_driver_discrepancy', d: { missingCase: [], missingDispatch: [], repaired: [] }, to: null, why: 'admins — [S-13] a not-my-driver decision lacked its case or its dispatch command; an ops surface' },
   { k: 'trip_share_rotated', d: { ...O }, to: { screen: 'Taxi' }, why: 'sharer — [S-16 · PUSH-ROUTING] their share link was reset and the body says to share the trip again; only the Taxi screen shares a trip. It routed by orderId to Delivery, a screen a ride never renders on (the guardian_checkin lesson)' },
   { k: 'trip_share_ended', d: { outcome: 'STOPPED_BY_RIDER' }, to: HOME, why: 'HOME: guardian — [L10 §2] the trip someone shared with them ended (stopped, completed, cancelled, or contact lost); they follow a trip, they own no order, so the notice is the whole message' },
-  { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
-  { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
-  { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: null, why: 'admins — [R19] a child-safety report pages operations; the moderation queue is an ops surface' },
+  { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [S-19 · DRILL-STORM] a page nobody acknowledged: it opens on the Ops alerts screen, where it is acknowledged (it used to open nothing, so it could only be stopped from a computer)' },
+  { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [S-19 · DRILL-STORM] the paging drill is acknowledged where a real page is' },
+  { k: 'ops_alert_drill_failed', d: { opsAlertId: 'a1', opsAlertIds: ['a1'], count: 1 }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [DRILL-STORM] a drill nobody acknowledged within its window was closed as FAILED; the notice opens Ops alerts, where its failed drill is named and the next drill is acknowledged' },
+  { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [R19 · DRILL-STORM] a child-safety report is an ops page: acknowledged on Ops alerts (the moderation queue stays on the console)' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
   { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
   { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
@@ -321,11 +322,11 @@ const CENSUS: Case[] = [
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_rider_no_show', d: { ...O, riderId: 'r1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] a rider accepted and never picked up; the order went back to dispatch' },
   { k: 'ops_rider_waiting', d: { ...O, riderId: 'r1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] a rider is waiting at a store that has not marked the order ready' },
-  { k: 'ops_rider_waiting_long', d: { ...O, riderId: 'r1', waitedMinutes: 61, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] the loud ops-alert page: a rider has waited 3 release windows at a store that is not ready; a person decides' },
+  { k: 'ops_rider_waiting_long', d: { ...O, riderId: 'r1', waitedMinutes: 61, opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [OF-33 · DRILL-STORM] the loud ops-alert page: a rider has waited 3 release windows at a store that is not ready; a person decides — the page is acknowledged on Ops alerts (the order screen was the CUSTOMER tracking screen)' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
   { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
-  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — partial cash could not be handed back and remains with the rider for operations' },
+  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [DRILL-STORM] partial cash could not be handed back and remains with the rider; it is an ops page, acknowledged on Ops alerts' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 
@@ -563,6 +564,21 @@ const DOCUMENT_COPIES: Array<[Record<string, unknown>, Dest]> = DOCUMENT_KINDS.f
   // An advertiser account has no documents screen: its home, on purpose.
   [{ kind, intent: 'advertiser' }, HOME],
 ]);
+
+describe('[DRILL-STORM] an ops page opens the Ops alerts screen at that page', () => {
+  it('an SOS page (the ops alert the SOS opened rides in its payload) opens Ops alerts, not the order', () => {
+    expect(destinationFor({ kind: 'sos_active', orderId: 'o1', sosAlertId: 's1', opsAlertId: 'ops-1' })).toEqual({ screen: 'OpsAlerts', params: { opsAlertId: 'ops-1' } });
+  });
+  it('the collapsed re-page and a platform page open at the page they name', () => {
+    expect(destinationFor({ kind: 'ops_alert_escalated', opsAlertId: 'ops-2', opsAlertIds: ['ops-2', 'ops-3'], count: 2 })).toEqual({ screen: 'OpsAlerts', params: { opsAlertId: 'ops-2' } });
+    expect(destinationFor({ kind: 'safety_sweep_slo', workType: 'safety-lane', stalled: true, opsAlertId: 'ops-4' })).toEqual({ screen: 'OpsAlerts', params: { opsAlertId: 'ops-4' } });
+  });
+  it('a payload without an ops alert routes exactly as before; an empty or non-string id is not an ops page', () => {
+    expect(destinationFor({ kind: 'sos_active', orderId: 'o1', sosAlertId: 's1' })).toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'sos_active', orderId: 'o1', opsAlertId: '' })).toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'ops_alert_drill', opsAlertId: 42 })).toBeNull();
+  });
+});
 
 describe('the census: every kind the API sends has an asserted destination', () => {
   it('routes each one exactly where this table says', () => {

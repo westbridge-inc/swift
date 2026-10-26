@@ -34,6 +34,7 @@ import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { FEE_SELLER, type FeeSeller } from './fee-seller';
+import { checkExpiredNoReplyHolds } from './mmg-expired-hold-check';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
@@ -942,6 +943,14 @@ export class MmgCheckoutService {
         } catch (err) {
           log().error({ err, checkoutId: row.id }, '[MMG checkout] verification failed; it stays due and is retried');
         }
+      }
+      // [HOLD-AUTO · owner 25 Oct] An expired checkout nobody ever answered for
+      // is closed as not paid only when MMG's own records show no payment for
+      // it (mmg-expired-hold-check.ts); anything less leaves it to the admins.
+      try {
+        await checkExpiredNoReplyHolds(this.prisma, { lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject }, clock());
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] the expired-checkout check failed; it is retried on the next poll');
       }
       try {
         await this.reconcileUnappliedPages(clock());

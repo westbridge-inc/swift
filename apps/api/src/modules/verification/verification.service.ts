@@ -56,6 +56,9 @@ import {
 } from '../services/services.service';
 import { insertNoticeFor, publicPhoneAsked } from '../../lib/owner-wall-notices';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
+import { randomUUID } from 'node:crypto';
+import { VAT_CERTIFICATE_DOC_TYPE, storeVatEnabled } from '../store-vat/store-vat';
+import { revokeStoreVatForCertificate } from '../store-vat/store-vat-decisions';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
@@ -427,11 +430,15 @@ export type DecisionWithin = (tx: Prisma.TransactionClient, decided: Verificatio
 export const APPROVAL_TAIL = 'APPROVAL_TAIL';
 
 /** The words of the decision notices — one place, for the in-transaction and the direct sends. */
+/** [STORE-VAT] The words a notice uses for a document type ("VAT", not "vat", for the store's VAT certificate). */
+function docTypeWords(docType: string): string {
+  return docType === VAT_CERTIFICATE_DOC_TYPE ? 'VAT registration certificate' : docType.replace(/_/g, ' ');
+}
 export function approvedNotice(docType: string): { title: string; body: string } {
-  return { title: 'Document approved', body: `Your ${docType.replace(/_/g, ' ')} has been approved.` };
+  return { title: 'Document approved', body: `Your ${docTypeWords(docType)} has been approved.` };
 }
 export function rejectedNotice(docType: string, reason?: string): { title: string; body: string } {
-  return { title: 'Document rejected', body: `Your ${docType.replace(/_/g, ' ')} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.` };
+  return { title: 'Document rejected', body: `Your ${docTypeWords(docType)} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.` };
 }
 
 function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
@@ -712,8 +719,10 @@ export class VerificationService {
     fileUrl: string,
     privacyNoticeVersion: string,
     authenticatedRole?: string,
-    /** [ROLE-DOCS · security review] Set ONLY by the signed own-name route (vendor.routes POST /onboarding/own-name). */
-    internal: { ownNameSigned?: true } = {},
+    /** [ROLE-DOCS · security review] `ownNameSigned`: set ONLY by the signed own-name route (vendor.routes POST /onboarding/own-name).
+     *  [STORE-VAT] `storeVatCertificate`: set ONLY by the store-VAT certificate route (vendor.routes POST /vat/certificate); the
+     *  generic document route can never file one. */
+    internal: { ownNameSigned?: true; storeVatCertificate?: true } = {},
   ) {
     // [ROLE-DOCS · owner 21 Oct 2026 · security review] An own-name declaration is the signed words the owner ticked,
     // filed by its own route — never an uploaded file. Refused before anything is read or recorded.
@@ -737,6 +746,14 @@ export class VerificationService {
     if (isNeverAcceptedDocType(docType)) {
       throw new AppError(400, 'DOC_TYPE_NOT_ACCEPTED', 'Swift does not accept medical documents. Remove it and upload the document your checklist asks for.');
     }
+    // [STORE-VAT · owner O-5] A store's GRA VAT certificate: outside every checklist (no config change), filed only
+    // through the store's own VAT route, only for a store role, only while STORE_VAT is on. It is never sent to a
+    // document processor and never decided by a machine: it waits for a PERSON (store-vat-decisions.ts), and it
+    // never counts toward a store's activation (no checklist names it).
+    const vatCertificate = docType === VAT_CERTIFICATE_DOC_TYPE;
+    if (vatCertificate && (internal.storeVatCertificate !== true || roleKey === 'MOVER' || !storeVatEnabled())) {
+      throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
+    }
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
     if (authority && authority.userUpdatedAt.getTime() !== user.updatedAt.getTime()) throw moverAuthorityChanged();
@@ -759,7 +776,7 @@ export class VerificationService {
         : await this.checklistFor(userId, user.countryCode, roleKey);
       checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
     }
-    if (!checklist.includes(docType)) {
+    if (!vatCertificate && !checklist.includes(docType)) {
       // [DOC-1 §18.3] A document type a category gate names in this country is
       // submittable by a vendor even when no checklist lists it — a shop that wants
       // to sell alcohol uploads its liquor licence. Never a type that still needs
@@ -788,7 +805,8 @@ export class VerificationService {
       const vehicleIds = vehicle ? [...new Set([vehicle.subjectId, await rootSubjectId(this.prisma, vehicle.subjectId)])] : [];
       sameVehicle = { OR: [{ subjectId: null }, ...(vehicleIds.length > 0 ? [{ subjectId: { in: vehicleIds } }] : [])] };
     }
-    const alreadyApproved = await this.prisma.verificationDocument.findFirst({
+    // [STORE-VAT] A new VAT certificate is always a new claim (a changed number, a renewal): never "already verified".
+    const alreadyApproved = vatCertificate ? null : await this.prisma.verificationDocument.findFirst({
       where: {
         userId,
         docType,
@@ -818,8 +836,11 @@ export class VerificationService {
     assertKeyServiceForAccess('intake');
     // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
-    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
-    if (identityFaceMatchLeg(docType)) {
+    // [STORE-VAT] The VAT certificate leaves for no engine: it is queued for a person, as the manual engine queues.
+    if (!vatCertificate) assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
+    if (vatCertificate) {
+      result = { status: 'pending_manual' as const, referenceToken: `manual_${randomUUID()}` };
+    } else if (identityFaceMatchLeg(docType)) {
       const selfieUrl = await resolveSignupSelfie(this.prisma, userId);
       // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
       result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl }));
@@ -1675,6 +1696,8 @@ export class VerificationService {
         status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: `REVOKED: ${reason}`,
       });
       if (!won) throw new AppError(409, 'NOT_COMMITTED', 'Only a committed (approved) document can be revoked');
+      // [STORE-VAT] A withdrawn VAT certificate withdraws the VAT of the store resting on it, in this transaction.
+      if (doc.docType === VAT_CERTIFICATE_DOC_TYPE) await revokeStoreVatForCertificate(tx, docId, adminId, reason);
       if (doc.docType === IDENTITY_DOC_TYPE) {
         // [Owner ruling 8 Oct 2026 — CUSTOMER ID] A withdrawal is a person's decision and must outlive
         // the row: the customer can erase a withdrawn ID (it becomes PURGED), and the next upload must

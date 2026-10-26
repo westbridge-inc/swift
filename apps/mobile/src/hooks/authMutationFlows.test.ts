@@ -315,6 +315,25 @@ describe('multi-step authenticated mutation ownership', () => {
     expect(mocks.submitDocument).not.toHaveBeenCalled();
   });
 
+  it('[DOC-CONSENT S4] a document upload tells the API how its consent was given, and names nothing when the screen did not say', async () => {
+    mocks.uploadVerification.mockResolvedValue({ data: { data: { url: '/private/doc.jpg' } } });
+    mocks.submitDocument.mockResolvedValue({ data: { data: { id: 'doc-1' } } });
+    const mutation = useUploadDocument('MOVER') as unknown as CapturedMutation<{
+      docType: string;
+      file: { uri: string; name: string; type: string };
+      consentVia?: 'checkbox' | 'record' | 'prompt';
+    }>;
+    const file = { uri: 'file://licence.jpg', name: 'licence.jpg', type: 'image/jpeg' };
+    for (const consentVia of ['checkbox', 'record', 'prompt'] as const) {
+      mocks.submitDocument.mockClear();
+      await mutation.mutationFn({ docType: 'drivers_licence', file, consentVia });
+      expect(mocks.submitDocument).toHaveBeenCalledWith(expect.objectContaining({ consentTick: 'document_v1', consentVia }), expect.anything());
+    }
+    mocks.submitDocument.mockClear();
+    await mutation.mutationFn({ docType: 'drivers_licence', file });
+    expect(mocks.submitDocument.mock.calls[0]![0]).not.toHaveProperty('consentVia');
+  });
+
   it('rejects a delayed A document picker before uploading as B', async () => {
     const mutation = useUploadDocument('MOVER') as unknown as CapturedMutation<{
       docType: string;

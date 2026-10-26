@@ -15,6 +15,7 @@ vi.mock('../../../mobile/src/services/deep-links', () => ({ installDeepLinkHandl
 vi.mock('../../../mobile/src/services/attribution', () => ({ ensureFirstLaunchClaim: vi.fn(), flushAttributedDestination: vi.fn() }));
 vi.mock('../../../mobile/src/navigation/navigationRef', () => ({ navigationRef: { isReady: () => false }, safeNavigate: vi.fn() }));
 vi.mock('../../../mobile/src/screens/QrOutcomeScreen', () => ({ QrOutcomeScreen: () => <span>QR outcome</span> }));
+vi.mock('../../../mobile/src/screens/OpsAlertsScreen', () => ({ OpsAlertsScreen: () => null }));
 vi.mock('../../../mobile/src/screens/auth/RolePickerScreen', () => ({ RolePickerScreen: () => null }));
 vi.mock('../../../mobile/src/screens/auth/SelfieCaptureScreen', () => ({ SelfieCaptureScreen: () => null }));
 vi.mock('../../../mobile/src/screens/auth/SessionHoldScreen', () => ({ SessionHoldScreen: () => null }));

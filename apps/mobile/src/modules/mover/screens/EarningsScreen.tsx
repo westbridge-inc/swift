@@ -14,7 +14,8 @@ import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 import { weeksCovered } from '../../../lib/billing';
-import { subscriptionWords } from '../../../lib/weeklyFee';
+import { feeStatusOf, type FeeSubscription } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
@@ -236,23 +237,12 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
   const status = serverText(source['status'])?.toUpperCase();
   const isTrial = source['isTrialActive'] === true;
   const isGrace = source['isInGracePeriod'] === true;
-  const pill = isTrial
-    ? { label: 'Free trial', tone: 'info' as const }
-    : isGrace
-      ? { label: 'Grace period', tone: 'warning' as const }
-      : status === 'ACTIVE'
-        ? { label: 'Active', tone: 'success' as const }
-        : status === 'PAST_DUE'
-          ? { label: 'Past due', tone: 'warning' as const }
-          : status === 'SUSPENDED' || status === 'CHURNED'
-            ? { label: status === 'SUSPENDED' ? 'Suspended' : 'Churned', tone: 'error' as const }
-        : status
-          ? { label: subscriptionWords(status), tone: 'neutral' as const } // [UI-SWEEP U73] the Billing words, never the code
-          : undefined;
+  // [FEE-STATUS · owner 25 Oct] The pill and the line come from where the fee stands (the API's
+  // feeStatus): a card read "Active · next bill 13 Oct" on 25 October. Never the code, never "Active"
+  // or a next bill on a date that has passed. [UI-SWEEP U73] the words, never the code.
+  const feeStatus = status ? feeStatusOf(source as unknown as FeeSubscription) : null;
+  const pill = feeStatus ? feeStatusPill(feeStatus.state) : undefined;
   const rate = serverNumber(source['weeklyFeeGyd'] ?? source['customRate'] ?? source['weeklyRate']);
-  const trialEnd = serverDate(source['trialEndDate']);
-  const graceEnd = serverDate(source['gracePeriodEnd']);
-  const nextBill = serverDate(source['nextBillingDate']);
   const needsAttention = isGrace || status === 'PAST_DUE' || status === 'SUSPENDED' || status === 'CHURNED';
 
   return (
@@ -261,29 +251,14 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
         <T variant="heading">Your weekly fee</T>
         {pill ? <TonePill label={pill.label} tone={pill.tone} /> : null}
       </View>
-      {isTrial && trialEnd ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Trial ends {dateLabel(trialEnd)}
-        </T>
-      ) : null}
-      {isGrace && graceEnd ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Pay by {dateLabel(graceEnd)} to keep going online
-        </T>
-      ) : null}
-      {rate != null || nextBill ? (
+      {rate != null ? (
         <View style={{ flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', gap: space.xs, marginTop: space.sm }}>
-          {rate != null ? <T variant="numM">{money(rate)}</T> : null}
-          {rate != null ? (
-            <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
-          ) : null}
-          {nextBill ? (
-            <T variant="caption" tone="muted">
-              {rate != null ? '· next bill ' : 'Next bill '}{dateLabel(nextBill)}
-            </T>
-          ) : null}
+          <T variant="numM">{money(rate)}</T>
+          <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
         </View>
       ) : null}
+      {feeStatus ? <T variant="label" tone="muted" style={{ marginTop: space.sm }} testID="earnings-fee-status">{feeStatus.headline}</T> : null}
+      {feeStatus?.detail ? <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeStatus.detail}</T> : null}
       <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
         The flat fee is Swift&apos;s only charge — every fare stays yours.
       </T>

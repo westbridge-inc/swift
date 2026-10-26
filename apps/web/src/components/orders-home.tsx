@@ -15,8 +15,8 @@ import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { catalogueName } from '@/lib/catalogue-name';
 import {
-  DAY_LABELS, billingSummary, canAttestPayment, financialDeltaLabel, fmtWhen, guyanaDate, guyanaDayKey, hasTrailingGuyanaDays, hoursSummary,
-  numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, subscriptionTone, windowTotals,
+  DAY_LABELS, canAttestPayment, financialDeltaLabel, fmtWhen, guyanaDate, guyanaDayKey, hasTrailingGuyanaDays, hoursSummary,
+  numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, windowTotals,
 } from '@/lib/vendor-hub';
 import {
   acceptOrder, completePickup, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markDelivered, markPreparing, markReady,
@@ -31,7 +31,7 @@ import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../
 import { HANDOVER_WORDS, withHandoverSteps } from '../../../mobile/src/modules/vendor/storeHandover';
 import { handedToRider } from '@/lib/store-handover-api';
 import { RiderHandoverLine } from './rider-handover-line';
-import { subscriptionWords } from '@/lib/subscription-words';
+import { billingHeadline, billingPill } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
@@ -331,9 +331,9 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
           badgeLabel={qrStatus ? `QR: ${qrStatusWords(qrStatus)}` : undefined} />
         <Tile icon={History} label="Order history" detail={rollingOrders == null ? 'Past orders' : `${rollingOrders} recent orders`} href="#other-orders" onClick={onOrderHistory} />
         {owner ? (
-          <Tile icon={Receipt} label="Billing" detail={subQ.isError && !sub ? 'Billing unavailable' : billingSummary(sub)} href="/dashboard/weekly-fee"
-            badge={sub ? <Pill tone={subscriptionTone(sub)}>{subscriptionWords(String(sub.status ?? ''))}</Pill> : undefined}
-            badgeLabel={sub ? `Subscription: ${subscriptionWords(String(sub.status ?? ''))}` : undefined} />
+          <Tile icon={Receipt} label="Billing" detail={subQ.isError && !sub ? 'Billing unavailable' : billingHeadline(sub)} href="/dashboard/weekly-fee"
+            badge={sub ? <Pill tone={billingPill(sub).tone}>{billingPill(sub).label}</Pill> : undefined}
+            badgeLabel={sub ? `Subscription: ${billingPill(sub).label}` : undefined} />
         ) : (
           <Tile icon={UserCog} label="Account" detail="Store settings & hours" href="/dashboard/settings" />
         )}

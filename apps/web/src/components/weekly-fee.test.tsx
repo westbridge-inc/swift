@@ -30,7 +30,7 @@ describe('rendered weekly fee', () => {
   });
   it.each(['live', 'off', 'absent'])('MMG %s controls the actual button; deprecated fields cannot render', async (state) => {
     mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: state === 'absent' ? undefined : [{ id: 'MMG_CHECKOUT', state, amountGyd: 1200, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }], sanFormatted: 'private-number', payCashSteps: ['Go to MMG agent'], activationCopy: 'instant restoration' } } }));
-    const view = renderWithQuery(<WeeklyFee family="vendor" />); await screen.findByText('Nothing due right now: your next bill is 6 Oct 2026');
+    const view = renderWithQuery(<WeeklyFee family="vendor" />); await screen.findByText('Nothing to pay for the week from 6 Oct 2026'); // [FEE-STATUS] was 'Nothing due right now: your next bill is 6 Oct 2026', a passed date
     const button = screen.queryByRole('button', { name: 'Pay GY$1,200 with MMG' });
     if (state === 'live') expect(button).toBeTruthy(); else expect(button).toBeNull();
     expect(document.body.textContent).not.toMatch(/coming soon|private-number|MMG agent|instant restoration|card/i); view.unmount();
@@ -92,7 +92,7 @@ describe('rendered weekly fee', () => {
       if (order !== 'focus before storage') storage();
       if (order !== 'storage only') window.dispatchEvent(new Event('focus'));
     });
-    await screen.findByText('GY$3,400 due now');
+    await screen.findByText('Payment due now'); await screen.findByText('GY$3,400 to pay.');
     if (order === 'focus before storage') act(storage);
     expect(calls.some(([url, store]) => url.endsWith('/ref-A') && store === 'store-B')).toBe(false);
     expect(document.body.textContent).not.toContain('Paid:');

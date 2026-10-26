@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutReferences, checkoutWords, dueLine, FeeCheckoutSession, feeExpiry, reopenableMmg, liveMmg, pollDelay, REOPEN_ALREADY_PAID, REOPEN_REFUSED, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weekly-fee';
+import { checkoutReferences, checkoutWords, feeStatusOf, FeeCheckoutSession, feeExpiry, reopenableMmg, liveMmg, pollDelay, REOPEN_ALREADY_PAID, REOPEN_REFUSED, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weekly-fee';
 const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: status === 'OPEN' ? '2099-09-29T13:00:00Z' : '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];
@@ -15,10 +15,38 @@ describe('weekly fee contract', () => {
     expect(liveMmg({ status: 'ACTIVE', payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, { id: 'CARD', state: 'off' }] })).toBeUndefined();
     expect(liveMmg({ status: 'ACTIVE' })).toBeUndefined();
   });
-  it('renders the amount due without inventing zero or a next bill', () => {
-    expect(dueLine({ status: 'ACTIVE' })).toBe('Amount due unavailable.');
-    expect(dueLine({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z' })).toBe('Nothing due right now: your next bill is 6 Oct 2026');
-    expect(dueLine({ status: 'PAST_DUE', amountDueGyd: '1200.50', gracePeriodEnd: '2026-10-01T12:00:00Z' })).toBe('GY$1,200.5 due by 1 Oct 2026');
+  // [FEE-STATUS · owner 25 Oct 2026] The store's screen read "Nothing due right now: your next bill is 13 Oct
+  // 2026" on 25 October (the old dueLine). The API's words lead; an older API's row is worded by the same rules.
+  const NOW = Date.parse('2026-10-25T16:52:00Z');
+  it('renders the amount due without inventing zero, and a date that has passed is never a next bill', () => {
+    expect(feeStatusOf({ status: 'ACTIVE', nextBillingDate: '2026-10-14T00:26:00Z' }, NOW).headline).toBe('Amount due unavailable.');
+    const owner = feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-14T00:26:00Z' }, NOW);
+    expect(owner).toMatchObject({ state: 'COVERED', headline: 'Nothing to pay for the week from 13 Oct 2026' });
+    expect(JSON.stringify(owner)).not.toMatch(/next bill|active until|nothing due right now/i);
+    // A date still ahead is the next fee's: only the API says "Paid until" (on a captured payment's word).
+    const ahead = feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-11-01T00:26:00Z' }, NOW);
+    expect(ahead).toMatchObject({ state: 'UPCOMING', headline: 'Next weekly fee due on 31 Oct 2026' });
+    expect(JSON.stringify(ahead)).not.toMatch(/paid/i);
+    expect(feeStatusOf({ status: 'ACTIVE', amountDueGyd: 15000, nextBillingDate: '2026-10-14T00:26:00Z' }, NOW))
+      .toMatchObject({ state: 'DUE', headline: 'Payment due since 13 Oct 2026', detail: 'GY$15,000 to pay.' });
+    expect(feeStatusOf({ status: 'PAST_DUE', amountDueGyd: '1200.50', nextBillingDate: '2026-10-24T12:00:00Z', gracePeriodEnd: '2026-10-26T12:00:00Z' }, NOW).detail)
+      .toBe('GY$1,200.5 to pay. Pay by 26 Oct 2026 to keep receiving work.');
+    expect(feeStatusOf({ status: 'PAST_DUE', amountDueGyd: 1200, nextBillingDate: '2026-10-20T12:00:00Z', gracePeriodEnd: '2026-10-22T12:00:00Z' }, NOW).detail).toBe('GY$1,200 to pay.');
+  });
+  it("the API's feeStatus is shown as sent, never re-derived", () => {
+    const sent = { state: 'CHECKING' as const, headline: 'Checking your payment of GY$15,000 (began 16 Oct 2026)', detail: "Don't pay again while we check.", date: '2026-10-16T21:20:43.000Z' };
+    expect(feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-14T00:26:00Z', feeStatus: sent }, NOW)).toBe(sent);
+    expect(feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-14T00:26:00Z', feeStatus: { ...sent, headline: '' } }, NOW).state).toBe('COVERED');
+  });
+  it('checking, suspended, stopped, trial and closed say so in plain words', () => {
+    const held = { ref: 'r', status: 'HELD' as const, amountGyd: 15000, currencyCode: 'GYD' as const, createdAt: '2026-10-16T21:20:43Z', expiresAt: '2026-10-16T21:50:43Z', confirmedAt: null, subscriptionStatus: 'ACTIVE' };
+    expect(feeStatusOf({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-14T00:26:00Z', latestMmgCheckout: held }, NOW).headline).toBe('Checking your payment of GY$15,000 (began 16 Oct 2026)');
+    expect(feeStatusOf({ status: 'SUSPENDED', amountDueGyd: 15000, nextBillingDate: '2026-10-14T00:26:00Z' }, NOW))
+      .toMatchObject({ headline: 'Account suspended', detail: 'GY$15,000 due since 13 Oct 2026. Pay it to start receiving work again.' });
+    expect(feeStatusOf({ status: 'PAUSED', amountDueGyd: 0, autoRenew: false }, NOW).headline).toBe('Weekly billing stopped');
+    expect(feeStatusOf({ status: 'TRIAL', isTrialActive: true, amountDueGyd: 0, trialEndDate: '2026-11-05T15:00:00Z', nextBillingDate: '2026-11-05T15:00:00Z' }, NOW).headline).toBe('Free trial until 5 Nov 2026');
+    expect(feeStatusOf({ status: 'TRIAL', isTrialActive: true, amountDueGyd: 15000, trialEndDate: '2026-10-20T15:00:00Z', nextBillingDate: '2026-10-20T15:00:00Z' }, NOW).headline).toBe('Payment due since 20 Oct 2026');
+    expect(feeStatusOf({ status: 'CANCELLED' }, NOW).headline).toBe('Subscription closed');
   });
   it.each([
     ['OPEN', 'Finish paying on the MMG page.'], ['CONFIRMING', "Confirming your payment with MMG. Don't pay again."],
