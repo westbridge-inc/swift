@@ -5,7 +5,6 @@ import { evaluateMoverDocuments, lockMoverDocuments, type MoverDocumentVerdict }
 import { normalizeRegistrationMark } from '../verification/subjects';
 import { FloatService } from '../dispatch/float.service';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
-import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
 // [CARS-DELIVER · owner 8 Oct 2026 ~23:30 GYT + 25 Oct 22:33Z] A verified taxi driver's car can ALSO take
@@ -279,68 +278,4 @@ export async function setTaxiAndDeliveries(prisma: PrismaClient, userId: string,
     await tx.driver.update({ where: { id: driver.id }, data: { takesDeliveries: on } });
   });
   return carDeliveriesStatus(prisma, userId);
-}
-
-/** A delivery profile's live legs, counted from the orders table (the one truth). */
-async function liveLegs(db: Db, riderId: string): Promise<number> {
-  return db.order.count({ where: { riderId, status: { notIn: [...TERMINAL_ORDER_STATUSES] } } });
-}
-
-/**
- * canReceiveOffer's answer for a delivery profile that is NOT online itself: may it still receive a delivery offer
- * because its taxi is online, free and on "taxi + deliveries"? Only while the switch is on, and never with a live
- * delivery leg (one job at a time).
- */
-export async function canTakeDeliveryFromTaxi(db: Db, riderId: string): Promise<boolean> {
-  if (!carDeliveriesEnabled()) return false;
-  const rider = await db.rider.findUnique({ where: { id: riderId }, select: { userId: true, vehicleType: true, isOnline: true } });
-  if (!rider || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return false;
-  const taxis = await db.driver.count({
-    where: {
-      userId: rider.userId, takesDeliveries: true, isOnline: true, isAvailable: true, currentRideId: null,
-      locationSessionId: { not: null }, user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
-    },
-  });
-  return taxis === 1 && (await liveLegs(db, riderId)) === 0;
-}
-
-/**
- * The delivery claim (claimOrder, RIDER pool) for an account whose taxi is online on "taxi + deliveries": PROMOTE
- * the delivery profile inside the claim's transaction, after its User and Order locks (then Rider, then Driver):
- * the car re-synced from the taxi profile, taxi supply retired, the delivery profile online on the taxi's device
- * session and position, marked to return to taxi work, and the work app -> deliveries. Returns the retired taxi
- * profile's id, or null when this is not such a claim (the claim then refuses as before). If anything later in
- * the claim refuses, the whole transaction — this promotion with it — rolls back.
- */
-export async function promoteDeliveryFromTaxi(tx: Tx, userId: string, riderId: string): Promise<{ driverId: string } | null> {
-  if (!carDeliveriesEnabled()) return null;
-  const riders = await tx.$queryRaw<Array<{ userId: string; vehicleType: VehicleType; isOnline: boolean }>>`
-    SELECT "userId", "vehicleType", "isOnline" FROM "riders" WHERE "id" = ${riderId} FOR UPDATE`;
-  const rider = riders[0];
-  if (!rider || rider.userId !== userId || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return null;
-  const drivers = await tx.$queryRaw<Array<{
-    id: string; takesDeliveries: boolean; isOnline: boolean; isAvailable: boolean; currentRideId: string | null;
-    locationSessionId: string | null; currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null;
-  }>>`
-    SELECT "id", "takesDeliveries", "isOnline", "isAvailable", "currentRideId", "locationSessionId",
-           "currentLat", "currentLng", "lastLocationUpdate"
-    FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
-  const taxi = drivers[0];
-  if (!taxi || !taxi.takesDeliveries || !taxi.isOnline || !taxi.isAvailable || taxi.currentRideId
-    || !taxi.locationSessionId || taxi.currentLat == null || taxi.currentLng == null) return null;
-  const sessions = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT "id" FROM "sessions" WHERE "id" = ${taxi.locationSessionId} AND "userId" = ${userId} AND "expiresAt" > NOW() FOR SHARE`;
-  if (!sessions[0]) return null;
-  if ((await liveLegs(tx, riderId)) > 0) return null;
-  await syncCarDeliveryProfile(tx, userId);
-  await tx.$executeRaw`
-    UPDATE "drivers" SET "isOnline" = false, "isAvailable" = false, "locationSessionId" = NULL, "updatedAt" = clock_timestamp()
-    WHERE "id" = ${taxi.id}`;
-  await tx.$executeRaw`
-    UPDATE "riders" SET "isOnline" = true, "isAvailable" = true, "locationSessionId" = ${taxi.locationSessionId},
-      "currentLat" = ${taxi.currentLat}, "currentLng" = ${taxi.currentLng}, "lastLocationUpdate" = ${taxi.lastLocationUpdate},
-      "returnsToTaxi" = true, "updatedAt" = clock_timestamp()
-    WHERE "id" = ${riderId}`;
-  await tx.user.update({ where: { id: userId }, data: { activeRole: 'RIDER', lastMoverRole: 'RIDER' } });
-  return { driverId: taxi.id };
 }

@@ -17,7 +17,7 @@ import { readOfferItinerary } from '../rides/taxi-stops-read';
 import { taxiStopsAppUpdateRequired } from '../rides/taxi-stop-rules';
 import { offerCardAddresses, type CoarseStop } from './board-privacy';
 import { closeOnlineSession, startOnlineSession } from '../rider/online-hours';
-import { canTakeDeliveryFromTaxi, promoteDeliveryFromTaxi } from '../driver/car-deliveries';
+import { canTakeDeliveryFromTaxi, promoteDeliveryFromTaxi } from '../driver/car-deliveries-supply';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
@@ -1234,6 +1234,11 @@ export class DispatchService {
             AND d."lastLocationUpdate" >= ${locationFreshSince}
             AND u."status" = 'ACTIVE'
             AND u."activeRole" IN ('MOVER', 'DRIVER')
+            -- [SECURITY · PR4 HIGH] delivery GO's gates: a profile photo, and neither profile identity-locked or
+            -- safety-suspended (the selfie-check freshness is the offer gate's, canTakeDeliveryFromTaxi).
+            AND u."selfieCapturedAt" IS NOT NULL
+            AND r."livenessLockedAt" IS NULL AND r."safetySuspendedAt" IS NULL
+            AND d."livenessLockedAt" IS NULL AND d."safetySuspendedAt" IS NULL
             ${tenantFilter}
             ${selfFilter}
             ${vehicleFilter}
