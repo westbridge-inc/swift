@@ -31,6 +31,7 @@ import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import { StoreVatSection } from '../StoreVatSection';
 import { StorePhotosCard } from '../../../components/StorePhotosCard';
 import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
@@ -287,6 +288,9 @@ export function VendorAccountScreen() {
         {isOwner && !guestSample && store ? <StoreLocationCard store={store} /> : null}
 
         {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} storeName={store?.name} /> : null}
+
+        {/* [STORE-VAT · owner O-5] The business's VAT registration is the owner's to give; a sample store has none. */}
+        {isOwner && !samplePreview && store ? <StoreVatSection style={{ marginBottom: space.lg }} /> : null}
 
         {isManager ? <StoreQrCard /> : null}
 

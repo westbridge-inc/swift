@@ -14,6 +14,7 @@ import { RefundRuleCard } from './refund-rule-card';
 import { FoodHandlersCard } from './food-handlers-card';
 import { StorePhotosCard } from './store-photos-card';
 import { VatCard } from './vat-card';
+import { VatReportLink } from './vat-report-link';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -288,6 +289,7 @@ export default function SettingsPage() {
       {/* [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's owner ticks for its food handlers */}
       <FoodHandlersCard storeId={storeId} isOwner={isOwner} vendorType={p?.vendorType} />
       <VatCard storeId={storeId} />
+      <VatReportLink storeId={storeId} />
       <SubscriptionCard isOwner={isOwner} />
       <SettlementsCard />
       <HoursEditor />

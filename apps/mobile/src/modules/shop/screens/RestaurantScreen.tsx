@@ -14,6 +14,7 @@ import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
 import { forgivingFilter } from '../../../lib/forgivingSearch';
 import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { itemVatNote, storefrontVat, storefrontVatLine, type StorefrontVat } from '../../../lib/storeVat';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
 import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
@@ -111,6 +112,7 @@ function ProductTile({
   onSetQty,
   onOpen,
   busy,
+  vat = null,
 }: {
   item: any;
   line: any;
@@ -118,6 +120,8 @@ function ProductTile({
   onSetQty: (qty: number) => void;
   onOpen: () => void;
   busy: boolean;
+  /** [STORE-VAT] The store's VAT (null for every store but a person-approved VAT store). */
+  vat?: StorefrontVat | null;
 }) {
   const hasOptions = (item.optionGroups?.length ?? 0) > 0;
   const out = item.stockQuantity === 0;
@@ -143,6 +147,7 @@ function ProductTile({
       ) : null}
       <View style={{ marginTop: 2, gap: 4 }}>
         <Money amount={item.customerPrice ?? item.basePrice} tone={out ? 'muted' : 'brand'} numberOfLines={1} />
+        {itemVatNote(vat, item) ? <T variant="micro" tone="faint">{itemVatNote(vat, item)}</T> : null}
         {out ? (
           <T variant="micro" tone="warning">
             Sold out
@@ -166,7 +171,7 @@ function ProductTile({
 
 /** Service listing row: what it costs, how long it takes, where it happens —
  *  tapping opens the booking screen (slots), never a qty flow. */
-function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
+function ServiceRow({ item, onOpen, vat = null }: { item: any; onOpen: () => void; vat?: StorefrontVat | null }) {
   const cfg = (item.bookingConfig ?? {}) as { durationMinutes?: number; serviceMode?: string };
   const modeLabel =
     cfg.serviceMode === 'MOBILE' ? 'Comes to you' : cfg.serviceMode === 'BOTH' ? 'Your choice' : 'At their place';
@@ -203,6 +208,7 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
               {/* [law 3] Money is ink — maroon stays on the acts. */}
               <Money amount={item.customerPrice ?? item.basePrice} />
+              {itemVatNote(vat, item) ? <T variant="micro" tone="faint">{itemVatNote(vat, item)}</T> : null}
             </View>
           </View>
           <View style={{ alignItems: 'center', gap: 2 }}>
@@ -260,6 +266,8 @@ function RestaurantStore() {
   const updateCartItem = useUpdateCartItem();
 
   const v = vendor.data;
+  // [STORE-VAT · owner O-5] Only a store whose VAT a person approved sends `vat`; every other store (and an older server) shows none.
+  const storeVat = storefrontVat(v?.vat);
   const categories: any[] = useMemo(() => v?.categories ?? [], [v?.categories]);
   const allItems = useMemo(() => categories.flatMap((c: any) => c.items ?? []), [categories]);
   const recommended = useMemo(() => allItems.filter((i: any) => i.isPopular).slice(0, 8), [allItems]);
@@ -345,6 +353,7 @@ function RestaurantStore() {
       image={itemPhoto(item)}
       name={item.name}
       priceLabel={money(item.customerPrice ?? item.basePrice)}
+      priceNote={itemVatNote(storeVat, item)}
       onPress={() => openItem(item)}
     />
   );
@@ -658,6 +667,7 @@ function RestaurantStore() {
                   <ProductTile
                     key={item.id}
                     item={item}
+                    vat={storeVat}
                     line={lineFor(item.id)}
                     busy={addToCart.isPending || updateCartItem.isPending}
                     onOpen={() => openItem(item)}
@@ -681,7 +691,7 @@ function RestaurantStore() {
               <SectionHeader title="Services" style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
               <View style={{ paddingHorizontal: GUTTER, paddingTop: space.lg, gap: space.md }}>
                 {allItems.map((item: any) => (
-                  <ServiceRow key={item.id} item={item} onOpen={() => openItem(item)} />
+                  <ServiceRow key={item.id} item={item} vat={storeVat} onOpen={() => openItem(item)} />
                 ))}
               </View>
             </>
@@ -766,6 +776,7 @@ function RestaurantStore() {
                           name={item.name}
                           description={item.description}
                           price={item.customerPrice ?? item.basePrice}
+                          priceNote={itemVatNote(storeVat, item)}
                           image={itemPhoto(item)}
                           soldOut={item.stockQuantity === 0}
                           qty={qty}
@@ -801,6 +812,12 @@ function RestaurantStore() {
           ) : null}
 
           {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {/* [STORE-VAT · VAT Act s.90(2)] A person-approved VAT store's prices include VAT, and the page says so. */}
+          {storefrontVatLine(storeVat) ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.lg, marginHorizontal: GUTTER }}>
+              {storefrontVatLine(storeVat)}
+            </T>
+          ) : null}
           {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
