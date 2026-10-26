@@ -8,6 +8,7 @@ import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as Crypto from 'expo-crypto';
 import {
   Card,
   Chip,
@@ -44,6 +45,8 @@ import {
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
+import { vatClassChoices, type VatClass } from '../../../lib/storeVat';
+import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
 
@@ -257,9 +260,13 @@ function StockAdjustRow({ item }: { item: any }) {
   const [open, setOpen] = useState(false);
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState<'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN'>('RECEIVED');
+  // [MASTER-025] One key per adjustment as entered: tapping Apply again after a
+  // failure cannot move stock twice; changing the entry is a new adjustment.
+  const [commandKey, setCommandKey] = useState(() => Crypto.randomUUID());
   const adjust = useVendorMutation({
-    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }),
+    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }, commandKey),
     onSuccess: () => {
+      setCommandKey(Crypto.randomUUID());
       setOpen(false);
       setDelta('');
       qc.invalidateQueries({ queryKey: ['vendor', 'menu'] });
@@ -286,10 +293,10 @@ function StockAdjustRow({ item }: { item: any }) {
   }
   return (
     <View style={{ gap: space.sm }}>
-      <InlineInput value={delta} onChangeText={setDelta} placeholder="+50 received, -3 damaged" keyboardType="default" />
+      <InlineInput value={delta} onChangeText={(v) => { setDelta(v); setCommandKey(Crypto.randomUUID()); }} placeholder="+50 received, -3 damaged" keyboardType="default" />
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
         {(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN'] as const).map((r) => (
-          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => setReason(r)} style={{ height: 32, paddingHorizontal: space.md }} />
+          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => { setReason(r); setCommandKey(Crypto.randomUUID()); }} style={{ height: 32, paddingHorizontal: space.md }} />
         ))}
       </View>
       {adjust.isError ? (
@@ -329,8 +336,15 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const [photoErr, setPhotoErr] = useState<string | null>(null);
 
   // Service businesses configure a bookable appointment instead of stock.
-  const { store } = useVendorProfile();
+  const { store, myRole } = useVendorProfile();
   const isService = store?.vendorType === 'SERVICE';
+  // [STORE-VAT · owner O-5] The owner of a store that told Swift it is VAT-registered gives each item its VAT class.
+  // A sample preview has no VAT; a manager does not see it (the business's tax registration is the owner's).
+  const samplePreview = useVendorPreview((st) => st.previewType) != null;
+  const storeVat = useStoreVat(myRole === 'OWNER' && !samplePreview);
+  const vatRate = storeVat.data && storeVat.data.status !== 'NONE' ? storeVat.data.ratePercent : null;
+  const vatEffective = storeVat.data?.effective === true;
+  const [vatClass, setVatClass] = useState<VatClass>((existing?.vatClass as VatClass | undefined) ?? 'STANDARD');
   const existingBooking = (existing?.bookingConfig ?? {}) as any;
   const [duration, setDuration] = useState<number>(existingBooking.durationMinutes ?? 30);
   const [days, setDays] = useState<number[]>(() => {
@@ -431,6 +445,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               sku: sku.trim() || undefined,
               unit: unit.trim() || undefined,
               bulk,
+              // [STORE-VAT] Sent only when the owner sees the choice; otherwise the item keeps its class.
+              ...(vatRate != null ? { vatClass } : {}),
               // '' clears tracking (null) so a vendor can stop tracking stock.
               stockQuantity: stock.trim() === '' ? null : Number.isFinite(stockNum as number) ? stockNum : undefined,
               lowStockThreshold: lowStock.trim() === '' ? null : Number(lowStock) >= 0 ? Number(lowStock) : undefined,
@@ -608,6 +624,22 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                       : 'Fits in a delivery bag with room to spare.'}
                 </T>
               </View>
+              {vatRate != null ? (
+                <View>
+                  <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+                    VAT on this item
+                  </T>
+                  <Segmented
+                    options={vatClassChoices(vatRate, vatEffective).map((c) => ({ key: c.value, label: c.value === 'STANDARD' ? 'Standard' : c.value === 'ZERO_RATED' ? 'Zero-rated' : 'Exempt' }))}
+                    value={vatClass}
+                    onChange={(k) => setVatClass(k as VatClass)}
+                  />
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {vatClassChoices(vatRate, vatEffective).find((c) => c.value === vatClass)?.label}. You choose each item’s VAT class and
+                    are responsible for it; check with the GRA.
+                  </T>
+                </View>
+              ) : null}
               <InlineInput value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
               <InlineInput value={lowStock} onChangeText={setLowStock} placeholder="Low-stock alert at (e.g. 5)" keyboardType="number-pad" />
               {stock.trim() !== '' ? (

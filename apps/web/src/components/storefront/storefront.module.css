@@ -1195,3 +1195,34 @@
     scroll-behavior: auto;
   }
 }
+
+/* [P35 · board 4b] The item sheet's seller line, the clamped description and its Read more. */
+.sheetSeller {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--swift-space-sm);
+  margin: 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.modalDescriptionClamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.readMore {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--swift-red);
+  font: inherit;
+  font-size: var(--swift-type-caption);
+  font-weight: 600;
+  cursor: pointer;
+}

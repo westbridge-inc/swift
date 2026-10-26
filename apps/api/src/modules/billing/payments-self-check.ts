@@ -10,7 +10,7 @@ import {
   serializeCheckoutRequest,
 } from '../../providers/mmg/mmg-checkout';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
-import { PowerTranzCardRailProvider, PowerTranzConfigError, powerTranzConfigFromEnv } from '../../providers/card/powertranz-provider';
+import { POWERTRANZ_ENV, PowerTranzCardRailProvider, PowerTranzConfigError, powerTranzConfigFromEnv } from '../../providers/card/powertranz-provider';
 
 // ---------------------------------------------------------------------------
 // [PT-5] The owner's payments self-check, run ON THE SERVER after the
@@ -58,9 +58,26 @@ export async function connectSelfCheckRedis(url: string | undefined): Promise<Re
   }
 }
 
-/** What a FAIL may say about configuration: the names of the settings it mentions, nothing else. */
+/**
+ * [REVIEW-G S4-1 on #1524] The ONLY names a FAIL line may print: the settings
+ * the card and MMG loaders read or name (a census test keeps this list equal
+ * to them, so a new setting is never silently dropped). Every configuration
+ * message today holds names, never values; the allow-list keeps a FAIL line
+ * clean even if a later message put a value shaped like a setting name into
+ * its text.
+ */
+export const SELF_CHECK_SETTING_NAMES: ReadonlySet<string> = new Set<string>([
+  'CARD_RAIL_PROVIDER', 'CARD_RAIL_ENVIRONMENT', 'CARD_RAIL_ACCOUNT', 'API_PUBLIC_URL',
+  ...POWERTRANZ_ENV.secrets, ...POWERTRANZ_ENV.settings,
+  'MMG_DRIVER', 'MMG_CHECKOUT_ENABLED', 'MMG_CHECKOUT_URL', 'MMG_CHECKOUT_CREATION_ZONE',
+  'MMG_CHECKOUT_MERCHANT_ID', 'MMG_CHECKOUT_CLIENT_ID', 'MMG_CHECKOUT_MERCHANT_NAME', 'MMG_CHECKOUT_SECRET_KEY',
+  'MMG_CHECKOUT_RETURN_ORIGIN', 'MMG_CHECKOUT_PUBLIC_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_PRIVATE_KEY_FILE',
+]);
+
+/** What a FAIL may say about configuration: the known settings it mentions, nothing else. */
 function settingNames(message: string): string {
-  const names = [...new Set(message.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) ?? [])];
+  const mentioned = message.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) ?? [];
+  const names = [...new Set(mentioned.filter((name) => SELF_CHECK_SETTING_NAMES.has(name)))];
   return names.length ? ` (${names.join(', ')})` : '';
 }
 

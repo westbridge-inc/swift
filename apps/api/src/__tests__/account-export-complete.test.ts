@@ -353,11 +353,14 @@ describe('the account export', () => {
     const owner = await person();
     const otherOwner = await person();
     const worker = await person();
+    // [REVIEW-G2 S4-1 on #2078] The staff member who placed a checkout hold is another person: never in the owner's file.
+    const holdPlacer = await person();
     const mine = await store(owner);
     const theirs = await store(otherOwner);
     await app.prisma.vendor.update({ where: { id: mine.id }, data: {
       email: `owner-${MARK}@example.test`, addressLine2: `Back Room ${MARK}`, publicPhone: '+5926001299', mmgNumber: '+5926001288',
       refundRule: `Refunds within a day ${MARK}`, tradesUnderOwnName: true, tierNote: `staff note ${MARK}`, mmgCheckoutHeldReason: `held for review ${MARK}`, mmgCheckoutHeldAt: new Date(),
+      mmgCheckoutHeldById: holdPlacer,
     } });
     await app.prisma.vendor.update({ where: { id: theirs.id }, data: { addressLine1: `Their Street ${MARK}`, email: `theirs-${MARK}@example.test` } });
     await app.prisma.vendorStaff.create({ data: { vendorId: mine.id, userId: worker, role: 'STAFF', invitedBy: owner } });
@@ -372,7 +375,7 @@ describe('the account export', () => {
     })]);
     expect(data.coverage['storesOwned']).toEqual({ rows: 1, complete: true });
     const text = JSON.stringify(data);
-    for (const leak of [theirs.id, `Their Street ${MARK}`, `theirs-${MARK}@example.test`, `staff note ${MARK}`, `held for review ${MARK}`, '"tierNote"', '"mmgCheckoutHeldAt"', '"tenantId"', '"ownerId"']) {
+    for (const leak of [theirs.id, `Their Street ${MARK}`, `theirs-${MARK}@example.test`, `staff note ${MARK}`, `held for review ${MARK}`, '"tierNote"', '"mmgCheckoutHeldAt"', '"tenantId"', '"ownerId"', holdPlacer, '"mmgCheckoutHeldById"']) {
       expect(text, leak).not.toContain(leak);
     }
     // Someone who only works at the store gets no store record.

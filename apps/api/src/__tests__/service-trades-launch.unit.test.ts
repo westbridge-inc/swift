@@ -39,6 +39,8 @@ const EXPECTED: Record<string, string[]> = {
   tutor: [...BASE],
   // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI electrical licence, like an electrician
   solar_generator_inverter_installer: [...BASE, 'gei_electrical_licence'],
+  // [ROLE-DOCS · REVIEW-G #2053 S4-4 · FOOD-PERMIT PR] the electrician's GEI licence is a floor too (a stored edit cannot strip it)
+  electrician: [...BASE, 'gei_electrical_licence'],
 };
 const OPENED = Object.keys(EXPECTED) as ServiceTradeId[];
 /** [R15] research A9: UNSURE — held, with the lawyer. [owner 16 Oct] the heavy-equipment operator too. [owner 21 Oct] AC & refrigeration + mover. */
@@ -61,8 +63,9 @@ function fakeDb(trade: string, lists: Record<string, string[]>, bio: string | nu
 }
 
 describe('[TRADES · R15] the research-confirmed trades open with their own checks; the UNSURE ones stay held', () => {
-  it('exactly the six decided trades open with their own floor', () => {
-    expect(OPENED).toHaveLength(6);
+  // [FOOD-PERMIT PR · REVIEW-G #2053 S4-4] the electrician (already open) now has its own floor too: seven
+  it('exactly the seven decided trades open with their own floor', () => {
+    expect(OPENED).toHaveLength(7);
     for (const trade of OPENED) {
       expect(isServiceCategoryOperational(trade), trade).toBe(true);
       expect(requireCanonicalServiceTrade(trade), trade).toBe(trade);

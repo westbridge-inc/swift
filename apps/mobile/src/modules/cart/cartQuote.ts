@@ -1,5 +1,6 @@
 import type { CartQuoteChoices } from '../../services/api';
 import { errorMessage } from '../../lib/apiError';
+import { cartVat, cartVatLine } from '../../lib/storeVat';
 
 /**
  * [E01 · E09] The cart screen's half of "the total shown is the total charged".
@@ -30,6 +31,8 @@ export interface CartQuoteStore {
   minOrderAmount: number;
   meetsMinimum: boolean;
   amountToMinimum?: number;
+  /** [STORE-VAT · owner O-5] The VAT INCLUDED in this store's goods (a person-approved VAT store only); null otherwise. */
+  vat?: unknown;
 }
 export interface CartQuote {
   items?: Array<{ vendorId?: unknown; fulfillment?: unknown }>;
@@ -261,4 +264,18 @@ export function pricesAsSeen(
       : [];
   });
   return { expectedTotal: total, expectedLines: lines };
+}
+
+/**
+ * [STORE-VAT · owner O-5] One note per person-approved VAT store in the basket: the VAT INSIDE its goods, from the
+ * server's quote (never computed here). The total above already includes it; nothing is added. Empty for every
+ * other store, and for an older server that sends no `vat`.
+ */
+export function cartVatRows(quote: CartQuote | null | undefined): Array<{ vendorId: string; text: string }> {
+  const stores = quote?.vendors ?? [];
+  const rows = stores.flatMap((s) => {
+    const line = cartVatLine(cartVat(s.vat));
+    return line ? [{ vendorId: s.vendorId, name: s.name, line }] : [];
+  });
+  return rows.map((r) => ({ vendorId: r.vendorId, text: stores.length > 1 ? `${r.name}: ${r.line.charAt(0).toLowerCase()}${r.line.slice(1)}` : r.line }));
 }

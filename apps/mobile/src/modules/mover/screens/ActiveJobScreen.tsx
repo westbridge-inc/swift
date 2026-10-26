@@ -26,7 +26,7 @@ import { haversineKm, streetEtaMin } from '../../../lib/geo';
 // are still with the vendor. `showBagIsWaiting` is why the counter signal no
 // longer survives past custody — see that file.
 import { riderStep, showBagIsWaiting, legStopLabel } from '../../../lib/riderLeg';
-import { money } from '../../../lib/money';
+import { money, moneyIn } from '../../../lib/money';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
@@ -34,6 +34,8 @@ import { CallParty } from '../../../components/CallParty';
 import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
+import { DOOR_CODE_REFUSALS, doorCashDue, doorCashRecordCopy, doorCashReturnOnJob } from '../../../lib/doorCash';
+import { DoorCash } from '../DoorCash';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { driverMapLine } from '../../../lib/routeLine';
@@ -421,6 +423,10 @@ export function ActiveJobScreen({ navigation }: any) {
   const courierFee = jobAmount(job);
   const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
   const returning = jobStatus === 'RETURNING';
+  // [L02 · row 56] The partial cash the server recorded at this door (handed
+  // back, still held by the rider, or settled by operations) — its figures.
+  const returnCash = returning && !isCourier ? doorCashReturnOnJob(job) : null;
+  const returnCashWords = returnCash ? doorCashRecordCopy(returnCash, (n) => moneyIn(n, doorCashDue(job)?.currency ?? 'GYD')) : null;
   // The store owes the rider fee PLUS any prepaid tip on MMG — the settlement
   // ledger records fee + tip, so the door copy must claim the same number
   // [REPORT-006 carryover: fee-only copy under-claimed the rider's pay].
@@ -638,6 +644,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // ceremony. The value never appears on this screen: only the entry boxes.
   // The server is the authority (MISSING_PIN / INVALID_PIN / MAX_ATTEMPTS come
   // back as error toasts); a legacy order without a PIN completes as before.
+  // Only a refusal OF THE CODE marks the code boxes: a cash-amount refusal at
+  // the same door is answered in its own popup [L02 · row 56].
+  const pinRefused = riderAct.isError && DOOR_CODE_REFUSALS.has(String((riderAct as { error?: any }).error?.response?.data?.error?.code ?? ''));
   const doorPinCeremony = (
     <View style={{ marginBottom: space.md }}>
       <View style={{ alignItems: 'center', marginBottom: space.md }}>
@@ -646,7 +655,7 @@ export function ActiveJobScreen({ navigation }: any) {
           Ask {custName ?? 'the customer'} for their delivery code
         </T>
       </View>
-      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={riderAct.isError} autoFocus={false} />
+      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={pinRefused} autoFocus={false} />
       <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
         Their code proves you handed the order to the right person.
       </T>
@@ -1080,6 +1089,25 @@ export function ActiveJobScreen({ navigation }: any) {
                   onPress={() => setReturnConfirm(true)}
                 />
               </>
+            ) : returning ? (
+              // [L02 · row 56] A goods order going back to the store (the
+              // customer couldn't pay in full, or a recovery decision): the door
+              // is closed, nothing is collected, and the partial cash the
+              // server recorded at the door is read back as it stands.
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                  <Feather name="rotate-ccw" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                    This order is going back to the store. Don't hand it over to the customer.
+                  </T>
+                </View>
+                {returnCash ? (
+                  <View testID="door-cash-return-record" style={{ borderRadius: radius.lg, backgroundColor: withAlpha(returnCashWords!.held ? color.warning : color.success, 0.12), borderWidth: 1, borderColor: withAlpha(returnCashWords!.held ? color.warning : color.success, 0.4), padding: space.md, marginBottom: space.md }}>
+                    <T variant="label" weight="bold" style={{ color: dk.text }}>{returnCashWords!.title}</T>
+                    <T variant="caption" style={{ color: dk.text, marginTop: 2 }}>{returnCashWords!.body}</T>
+                  </View>
+                ) : null}
+              </>
             ) : doorBlocked ? (
               <>
                 {/* [MOB-023 · F-106-03] No hand-over, nothing collected, nothing
@@ -1126,9 +1154,21 @@ export function ActiveJobScreen({ navigation }: any) {
                 {/* CASH: the ONLY completion path is capturing the money, which
                     hands over + completes the delivery server-side. No plain
                     "mark delivered" here — the server refuses a cash order that
-                    wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
-                {doorPinCeremony}
-                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover', pin }, { onError: onPinRefused }), { loading: riderAct.isPending, disabled: busy })}
+                    wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered.
+                    [L02 · row 56] The rider states the cash actually taken (or
+                    that the customer can't pay in full) and confirms it; the
+                    server decides and records it, with the door's version. */}
+                <DoorCash
+                  key={job.id}
+                  job={job}
+                  pin={pin}
+                  busy={busy}
+                  pending={riderAct.isPending}
+                  submit={(fields, handlers) => riderAct.mutate({ id: job.id, action: 'handover', ...fields, handoverVersion: door.version ?? undefined }, handlers)}
+                  onDoorRefused={onPinRefused}
+                >
+                  {doorPinCeremony}
+                </DoorCash>
                 {/* [M-29] The door's other outcome — the rail existed on the
                     server (strike + guarantee claim) with no way to reach it. */}
                 <PillButton

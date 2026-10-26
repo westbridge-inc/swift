@@ -32,7 +32,7 @@ import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
 import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
-import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
+import { FEE_RESTORE_LINE, feeDueLine, guyanaDay, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
@@ -4903,7 +4903,10 @@ export class BillingService {
         userId: payerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Subscription due soon',
-        body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due on ${sub.nextBillingDate.toISOString().slice(0, 10)}.${mmgLine ? ` ${mmgLine}` : ''}`,
+        // [FEE-STATUS · owner 25 Oct 2026] The day as a partner in Guyana reads it (a fee due 02:00 UTC
+        // falls due the evening before there: the UTC date named a day late), and the money as every fee
+        // notice writes it (fee-notice-copy.ts).
+        body: `Your weekly fee of ${formatMoney(Number(this.amountFor(sub)), sub.currencyCode)} is due on ${guyanaDay(sub.nextBillingDate)}.${mmgLine ? ` ${mmgLine}` : ''}`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_reminder', subscriptionId: sub.id },
         feeStageKey: `upcoming:${periodKey}`,

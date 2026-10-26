@@ -26,7 +26,7 @@ import { registrationProofFor } from './helpers/otp';
 // ---------------------------------------------------------------------------
 
 const runBase = 592_089_000_000 + Math.floor(Math.random() * 900_000);
-const PHONES = { ticked: `+${runBase + 1}`, plain: `+${runBase + 2}`, words: `+${runBase + 3}`, subject: `+${runBase + 4}` };
+const PHONES = { ticked: `+${runBase + 1}`, plain: `+${runBase + 2}`, words: `+${runBase + 3}`, subject: `+${runBase + 4}`, via: `+${runBase + 5}`, claim: `+${runBase + 6}` };
 const ALL_PHONES = Object.values(PHONES);
 const WORDS = UPLOAD_CONSENT.document_v1;
 
@@ -175,5 +175,59 @@ describe('[DOC-CONSENT] GET /verification/status says whether the document tick 
     for (const role of ['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']) {
       expect(await documentConsentOnRecord(app.prisma, mover.userId, role), role).toEqual({ tick: 'document_v1', given: false, givenAt: null });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DOC-CONSENT S4 · REVIEW-G2 S4-1] The ledger says how each upload's consent was given. The phone now shows a tick
+// from the person's record and asks again for a police clearance, so "upload_consent_checkbox" was no longer always
+// true. The upload names its source (`consentVia`): the box ticked on this visit, the box shown from the person's own
+// grant on record, or the police-clearance prompt. An upload that names none (builds 9-12, the website) keeps
+// "upload_consent_checkbox". A "record" claim is checked against the ledger: with no grant on record the upload is
+// refused before anything is stored, so the evidence can never claim a grant that is not there.
+// ---------------------------------------------------------------------------
+describe('[DOC-CONSENT] the ledger records the true source of each upload consent', () => {
+  const lastEvidence = async (userId: string) => (await app.prisma.consentRecord.findFirstOrThrow({
+    where: { subjectType: 'driver', subjectId: userId, documentType: WORDS.documentType }, orderBy: { capturedAt: 'desc' },
+  })).evidence as Record<string, unknown>;
+  const send = async (who: { userId: string; token: string }, marker: string, extra: Record<string, unknown>) => inject('POST', '/api/v1/verification/documents', {
+    role: 'MOVER', docType: 'drivers_licence', fileUrl: await ownedVerificationFixture(app.prisma, who.userId, marker),
+    consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1', ...extra,
+  }, who.token);
+
+  it('a tick on this visit, a tick shown from the record, the police-clearance prompt, and an upload that names none', async () => {
+    const mover = await signup(PHONES.via);
+    for (const [marker, extra, control] of [
+      ['via-none', {}, 'upload_consent_checkbox'],
+      ['via-checkbox', { consentVia: 'checkbox' }, 'upload_consent_checkbox'],
+      ['via-record', { consentVia: 'record' }, 'upload_consent_on_record'],
+      ['via-prompt', { consentVia: 'prompt' }, 'upload_consent_prompt'],
+    ] as const) {
+      const res = await send(mover, marker, extra);
+      expect(res.statusCode, `${marker} ${res.body}`).toBe(201);
+      expect(await lastEvidence(mover.userId), marker).toMatchObject({ control, path: 'verification', docType: 'drivers_licence' });
+    }
+    const odd = await send(mover, 'via-odd', { consentVia: 'nudge' });
+    expect(odd.statusCode).toBe(400);
+  });
+
+  it('a "record" claim with no grant on record is refused, and nothing is stored or recorded', async () => {
+    const mover = await signup(PHONES.claim);
+    const docs = () => app.prisma.verificationDocument.count({ where: { userId: mover.userId } });
+    const before = { docs: await docs(), rows: await ledgerCount(mover.userId) };
+    const refused = await send(mover, 'claim-none', { consentVia: 'record' });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('CONSENT_NOT_ON_RECORD');
+    expect({ docs: await docs(), rows: await ledgerCount(mover.userId) }).toEqual(before);
+
+    // Given, then withdrawn: the record no longer holds a grant, so the claim is refused again.
+    expect((await send(mover, 'claim-tick', { consentVia: 'checkbox' })).statusCode).toBe(201);
+    expect((await send(mover, 'claim-on-record', { consentVia: 'record' })).statusCode).toBe(201);
+    await app.prisma.$transaction((tx) => recordConsent(tx, {
+      subjectType: 'driver', subjectId: mover.userId, documentType: WORDS.documentType, version: WORDS.version, action: 'withdrawn', surface: 'ios',
+      evidence: { control: 'doc_consent_test' },
+    }));
+    const after = await send(mover, 'claim-withdrawn', { consentVia: 'record' });
+    expect(after.statusCode).toBe(409);
   });
 });

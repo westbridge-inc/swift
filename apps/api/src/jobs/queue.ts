@@ -939,11 +939,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { getChannels } = await import('../providers/notifications/channels');
       const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
       await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-      const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
-      // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+      const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[], drillsFailed: [] as string[] }));
+      // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's.
+      // [DRILL-STORM] Once per alert, at its first escalation (the ladder re-pages after that); the
+      // per-alert dedupe key keeps a retried tick from paging anyone twice.
       for (const id of esc.platformPage) {
         await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
-          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Acknowledge it in Mission Control > Ops alerts.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true }, dedupeKey: `ops-alert-overdue:${id}` }),
         ).catch(() => {});
       }
       await scanOpsAlerts(ctx.prisma).catch(() => null);

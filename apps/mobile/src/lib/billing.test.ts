@@ -15,6 +15,7 @@ import {
   isPlanPaused,
   billingStoppedLine,
   resumeBillingMethod,
+  stopBillingConfirmBody,
 } from './billing';
 
 describe('billingPhase', () => {
@@ -78,6 +79,23 @@ describe('[E12] a paused plan says how to come back, not a date already past', (
     expect(billingStoppedLine({ status: 'PAUSED', autoRenew: false }, 'store', now)).toMatch(/paused .* Resume to start again/);
     expect(billingStoppedLine({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-27T00:00:00Z' }, 'driver', now))
       .toMatch(/^You keep working until /);
+  });
+});
+
+describe('[FEE-STATUS] the Stop weekly billing confirm never says "keeps working until" a passed date', () => {
+  const now = Date.parse('2026-10-25T16:52:00Z');
+  it('a period still ahead keeps working until its end', () => {
+    expect(stopBillingConfirmBody({ status: 'ACTIVE', currentPeriodEnd: '2026-10-30T12:00:00Z' }, 'store', now))
+      .toBe('Your store keeps working until 30 Oct. After that, the store stops receiving work and no more weekly fees are charged. You can resume billing anytime.');
+  });
+  it('a period that has ended says work stops when billing stops (the owner\'s store: ended 14 Oct)', () => {
+    const body = stopBillingConfirmBody({ status: 'ACTIVE', currentPeriodEnd: '2026-10-14T00:26:00Z' }, 'store', now);
+    expect(body).toBe('The week you paid for has ended, so your store stops receiving work as soon as you stop billing. No more weekly fees are charged. You can resume billing anytime.');
+    expect(body).not.toMatch(/until 1[34] Oct/);
+  });
+  it('a suspended plan keeps its own words; a missing end names the period', () => {
+    expect(stopBillingConfirmBody({ status: 'SUSPENDED' }, 'driver', now)).toMatch(/^Your driver is already paused\./);
+    expect(stopBillingConfirmBody({ status: 'ACTIVE' }, 'rider', now)).toMatch(/keeps working until the end of the current period\./);
   });
 });
 

@@ -105,6 +105,7 @@ vi.mock('../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: () => null }
 vi.mock('../../components/MmgNumberCard', () => ({ MmgNumberCard: () => null }));
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
 vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
+vi.mock('./StoreVatSection', () => ({ StoreVatSection: () => null })); // [STORE-VAT] a child section, stubbed like its siblings
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));
 vi.mock('../../components/StorePhotosCard', () => ({ StorePhotosCard: () => null }));
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStopControl: () => null }));

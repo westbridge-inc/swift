@@ -12,7 +12,8 @@ import type { NotificationAudience, NotificationPayload } from '../notification/
 // A party to a live order taps "Call via Swift". Swift rings THEM first (leg 1)
 // from Swift's own number; only when they press 1 does Swift ring the other
 // party (leg 2), who hears "Swift call about your order. Press 1 to connect."
-// and is connected only on their own 1. Neither side ever learns the other's
+// (a parcel recipient: "about a delivery for you") and is connected only on
+// their own 1. Neither side ever learns the other's
 // number: both are read from the order's rows at the moment each leg is
 // dialled and handed only to the voice provider; a call_sessions row never
 // holds one.
@@ -53,6 +54,8 @@ export type CallStepName = (typeof CALL_STEPS)[number];
 export const CALL_WORDS = {
   callerPrompt: 'Swift is connecting your call about your order. Press 1 to continue.',
   calleePrompt: 'Swift call about your order. Press 1 to connect.',
+  // [REVIEW-F S4-1] The parcel recipient did not place the order: a delivery for them is what is true.
+  recipientPrompt: 'Swift call about a delivery for you. Press 1 to connect.',
   noKey: 'No key was pressed. Goodbye.',
   connecting: 'Connecting you now.',
   notReached: "We couldn't reach them. Try again, or message them in chat.",
@@ -186,7 +189,8 @@ async function warnOfCall(
       title: 'Swift is calling you',
       body: leg === 1
         ? `Swift is calling you now about your order ${order.orderNumber}, to connect you with ${about}. Answer, then press 1.`
-        : `Swift is calling you about your order ${order.orderNumber}: ${about}. Answer, then press 1 to connect.`,
+        // [REVIEW-F S4-2 · owner copy 22 Oct] "Your rider/customer/store is calling you through Swift".
+        : `${about.charAt(0).toUpperCase()}${about.slice(1)} is calling you through Swift about your order ${order.orderNumber}. Answer, then press 1 to connect.`,
       // callOrderId, never orderId: an older app opens itself, not a screen that cannot show this order.
       data: { kind: 'call_incoming', callOrderId: order.id, orderType: order.orderType, from: otherRole, leg },
       dedupeKey: `call:${callId}:${leg}`,
@@ -340,7 +344,8 @@ export async function handleVoiceStep(
     }
     case 'screen': {
       if (ended || session.status !== CALL_STATUS.CALLER_CONFIRMED) return hangup();
-      return { step: { verb: 'confirm', prompt: CALL_WORDS.calleePrompt, next: webhookUrl(deps.config, 'screen-gather', session.id), noInput: CALL_WORDS.noKey } };
+      const prompt = session.calleeRole === 'recipient' ? CALL_WORDS.recipientPrompt : CALL_WORDS.calleePrompt;
+      return { step: { verb: 'confirm', prompt, next: webhookUrl(deps.config, 'screen-gather', session.id), noInput: CALL_WORDS.noKey } };
     }
     case 'screen-gather': {
       if (ended || session.status !== CALL_STATUS.CALLER_CONFIRMED || event.digits !== '1') return hangup();

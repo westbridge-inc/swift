@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DOCUMENT_CONSENT_TICK, SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord } from './documentConsentRecord';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,18 @@ describe('documentConsentOnRecord', () => {
     ]) {
       expect(documentConsentOnRecord(status), JSON.stringify(status)).toEqual({ given: false, givenAt: null });
     }
+  });
+
+  describe('in Guyana time, whatever zone the phone is set to (like the other partner dates)', () => {
+    // [DOC-CONSENT S4 · REVIEW-F] A phone set far from Guyana (UTC+14 here) read the day in its own zone.
+    let zone: string | undefined;
+    beforeAll(() => { zone = process.env['TZ']; process.env['TZ'] = 'Pacific/Kiritimati'; });
+    afterAll(() => { if (zone === undefined) delete process.env['TZ']; else process.env['TZ'] = zone; });
+    it('late evening in Georgetown is still that day', () => {
+      expect(new Date('2026-10-26T02:30:00.000Z').getDate(), 'the phone\'s own zone is ahead of Guyana').toBe(26);
+      expect(documentConsentGivenLine('2026-10-26T02:30:00.000Z')).toBe('You ticked this on 25 Oct 2026.');
+      expect(documentConsentGivenLine('2026-10-25T04:00:00.000Z')).toBe('You ticked this on 25 Oct 2026.');
+    });
   });
 
   it('says the tick is the person\'s own', () => {

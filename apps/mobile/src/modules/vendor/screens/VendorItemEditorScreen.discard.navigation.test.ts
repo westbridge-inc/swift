@@ -66,6 +66,8 @@ vi.mock('react-native-screens', async () => {
 });
 
 vi.mock('expo-image', () => ({ Image: () => null }));
+// [MASTER-025] the stock row mints its adjustment key with expo-crypto (native).
+vi.mock('expo-crypto', () => ({ randomUUID: () => 'stock-adjust-key' }));
 vi.mock('expo-image-picker', () => ({
   MediaTypeOptions: { Images: 'Images' },
   requestMediaLibraryPermissionsAsync: vi.fn(), requestCameraPermissionsAsync: vi.fn(),
@@ -105,6 +107,7 @@ vi.mock('../shared', async () => {
   };
 });
 vi.mock('../../../services/api', () => ({ vendorApi: {} }));
+vi.mock('../../../hooks/storeVat', () => ({ useStoreVat: () => ({ data: undefined }) })); // [STORE-VAT] owner-only read, no VAT here
 vi.mock('../../../hooks/useVendorMutation', () => ({ useVendorMutation: () => ({ mutate: vi.fn(), isPending: false }) }));
 vi.mock('../../../hooks/vendorops', () => {
   const idle = () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false });

@@ -18,7 +18,7 @@ import { assertFailureSource, captureHandoverEvidence, handoverBinding } from '.
 import { type HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, assertEvidenceComplete, coveredAmountFor,
-  drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
+  assertRlpOperator, drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
 } from './rlp';
 
 // ---------------------------------------------------------------------------
@@ -925,8 +925,10 @@ export class CashRulesService {
     });
     if (!existing) throw new NotFoundError('ReimbursementClaim', claimId);
     const attested = assertClaimAmountAttested(existing.amount, paidAmount);
-    const claimOrder = await this.prisma.order.findUnique({ where: { id: existing.orderId }, select: { customer: { select: { countryCode: true } } } });
+    const claimOrder = await this.prisma.order.findUnique({ where: { id: existing.orderId }, select: { tenantId: true, customer: { select: { countryCode: true } } } });
     if (!claimOrder) throw new NotFoundError('Order', existing.orderId);
+    // [#2079 follow-up] Swift's reserve pays Swift's claims only: another operator's is refused first.
+    assertRlpOperator(claimOrder.tenantId);
 
     // [DOC-1 §31.4 · DOC-INV-47 · P31-1] Nobody pays without the bundle, and nobody
     // auto-pays a suspended mover. The bundle is re-derived from the artefacts NOW —
@@ -949,7 +951,7 @@ export class CashRulesService {
       status: 'PAID', paidAt: new Date(), paymentRef: reference, paidAmount: attested,
       paidById: adminId, reviewedBy: existing?.reviewedBy ?? adminId,
     }, onAudit, async (tx) => {
-      const drawn = await drawReserveForPayout(tx, { countryCode, claimId, amount: Number(existing.amount), byId: adminId });
+      const drawn = await drawReserveForPayout(tx, { countryCode, claimId, amount: Number(existing.amount), byId: adminId, tenantId: claimOrder.tenantId });
       return { reserveBalanceAfter: drawn.balanceAfter };
     }, async (tx) => {
       await lockIdentityAuthority(tx);
