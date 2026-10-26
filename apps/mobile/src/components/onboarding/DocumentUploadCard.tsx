@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Alert, Linking, Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
@@ -13,6 +14,9 @@ import {
 import type { AuthSessionSnapshot } from '../../lib/authSession';
 import { pendingDocumentLabel } from './documentChecklistPresentation';
 import { docLabel } from './docLabels';
+import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
+import { SENSITIVE_CONSENT_ASK } from './documentConsentRecord';
+import type { UploadConsentVia } from '../../services/api';
 
 const label = docLabel;
 /** Friendly document name for other surfaces (suspension banners etc.); the names live in ./docLabels. */
@@ -43,6 +47,8 @@ export function DocumentUploadCard({
   optionalHint,
   hint,
   consented = false,
+  askConsentFirst = false,
+  consentVia = 'checkbox',
 }: {
   role: string;
   docType: string;
@@ -60,6 +66,12 @@ export function DocumentUploadCard({
   hint?: string;
   /** [R17] The checklist's consent tick is given: only then can a document be uploaded. */
   consented?: boolean;
+  /** [DOC-CONSENT · DPA s.9(1)(a), research D1] The tick on screen stands only on the person's record and this
+   *  document is sensitive (a police clearance): ask for the consent again, in the ledger's words, before the photo. */
+  askConsentFirst?: boolean;
+  /** [DOC-CONSENT S4] How the checklist's tick was given (ticked on this visit, or shown from the record); the
+   *  police-clearance prompt overrides it with 'prompt'. Sent with the upload so the ledger says it truly. */
+  consentVia?: UploadConsentVia;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -74,11 +86,14 @@ export function DocumentUploadCard({
   // the server keeps the old copy for audit and the reviewer sees only the newest.
   const pendingLabel = pendingDocumentLabel(replaced, submittedAt);
 
+  // [DOC-CONSENT S4] How the consent for the photo being picked was given: set when the photo choice opens.
+  const consentSource = useRef<UploadConsentVia>(consentVia);
   const send = (a: ImagePicker.ImagePickerAsset, authSession: AuthSessionSnapshot) =>
     upload.mutate({
       docType,
       file: { uri: a.uri, name: a.fileName ?? `${docType}.jpg`, type: a.mimeType ?? 'image/jpeg' },
       authSession,
+      consentVia: consentSource.current,
     });
 
 
@@ -149,7 +164,8 @@ function explainPermissionDenied(
 
   // Docs are photographed at the counter/kerb more often than they sit in the
   // gallery — offer the camera first, library as the alternative.
-  const pick = () =>
+  const choosePhoto = (via: UploadConsentVia) => {
+    consentSource.current = via;
     Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
       ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
       : 'Add a clear, well-lit photo. All corners visible, no glare.', [
@@ -158,6 +174,16 @@ function explainPermissionDenied(
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
     ]);
+  };
+  // [DOC-CONSENT] The start of every upload (a first one, a re-upload, a replacement). A sensitive document whose
+  // tick stands only on the record asks first, in the exact words the ledger anchors the upload to; only
+  // "I consent" goes on to the photo. Every other upload starts at the photo, as before.
+  const pick = askConsentFirst
+    ? () => Alert.alert(label(docType), `${SENSITIVE_CONSENT_ASK}\n\n${DOCUMENT_CONSENT_TEXT}`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'I consent', onPress: () => choosePhoto('prompt') },
+    ])
+    : () => choosePhoto(consentVia);
   const confirmReplace = () =>
     Alert.alert('Replace this document?', 'Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.', [
       { text: 'Cancel', style: 'cancel' },

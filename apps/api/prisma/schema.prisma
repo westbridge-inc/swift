@@ -5626,6 +5626,13 @@ model OpsAlert {
   acknowledgedBy  String?
   escalationLevel Int                 @default(0)
   lastEscalatedAt DateTime?
+  /// [DRILL-STORM] The escalation level the on-call phones were last texted about, and when.
+  /// Re-texts are collapsed (one text covers every owed alert) and spaced (OPS_ALERT_REPAGE_MAX_PER_HOUR).
+  oncallTextedLevel Int               @default(0)
+  oncallTextedAt  DateTime?
+  /// [DRILL-STORM] Which on-call list that text went to (a short hash of the configured numbers, never a number):
+  /// the spacing is per list, so a changed list is texted at once.
+  oncallTextedList String?
   closedAt        DateTime?
   closeReason     String?
   createdAt       DateTime            @default(now())
@@ -5635,6 +5642,7 @@ model OpsAlert {
   @@index([acknowledgedAt, closedAt, ackDeadlineAt])
   @@index([tenantId, createdAt])
   @@index([sosAlertId])
+  @@index([oncallTextedList, oncallTextedAt])
   @@map("ops_alerts")
 }
 
@@ -5649,11 +5657,16 @@ model OpsAlertRecipient {
   seenAt         DateTime?
   ackedAt        DateTime?
   smsSentAt      DateTime?
+  /// [DRILL-STORM] The escalation level this person was last re-paged about, and when. A person is
+  /// re-paged at most OPS_ALERT_REPAGE_MAX_PER_HOUR times an hour, every owed alert in ONE push.
+  pagedLevel     Int       @default(0)
+  lastPagedAt    DateTime?
   createdAt      DateTime  @default(now())
 
   @@unique([opsAlertId, userId])
   @@index([tenantId, opsAlertId])
   @@index([notificationId])
+  @@index([userId, lastPagedAt])
   @@map("ops_alert_recipients")
 }
 

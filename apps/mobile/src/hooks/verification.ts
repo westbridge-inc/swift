@@ -1,6 +1,6 @@
 import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { verificationApi, partnerApi, vendorApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, vendorApi, type UploadConsentVia, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
@@ -214,10 +214,12 @@ export function useSubmitIdentity() {
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ docType, file, authSession }: {
+    mutationFn: async ({ docType, file, authSession, consentVia }: {
       docType: string;
       file: { uri: string; name: string; type: string };
       authSession?: AuthSessionSnapshot;
+      /** [DOC-CONSENT S4] how the checklist's tick was given for this upload (the ledger records it). */
+      consentVia?: UploadConsentVia;
     }) => {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
@@ -235,6 +237,7 @@ export function useUploadDocument(role: string) {
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
           // [R17] the checklist's tick (build 12) is recorded in the consent ledger
           consentTick: 'document_v1',
+          ...(consentVia ? { consentVia } : {}),
         }, current),
       );
       requireAuthSessionForPrincipal(owner);

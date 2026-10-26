@@ -5,8 +5,10 @@ import { HANDED_TO_RIDER_NOTE } from './store-handover-log';
  * (" — gps:…", " — no GPS fix on file", the stale/not-geocoded variants all start with one of the
  * two). It is the rider's position, kept for support and appeals; the customer's timeline never
  * shows it.
+ * [REVIEW-G2 S4-1 on #2080] Custody relay handoff notes written before they used gpsEvidence carry
+ * " — GPS 6.80000,-58.15000": cut too (a GPS followed by a number, never the word in a sentence).
  */
-const POSITION_EVIDENCE_SUFFIX = / — (?:gps:-?\d|no GPS fix on file)[\s\S]*$/;
+const POSITION_EVIDENCE_SUFFIX = / — (?:gps:-?\d|GPS -?\d|no GPS fix on file)[\s\S]*$/;
 
 /** [REVIEW-F S4-2 on #2055] A step note as a customer or passenger reads it: the position evidence cut. */
 export function withoutPositionEvidence(note: string | null): string | null {

@@ -5,6 +5,7 @@ import { setSelectedStore } from '@/lib/auth';
 import * as vendorApi from '@/lib/vendor-api';
 import SettingsPage from './page';
 import { storeCheckLabel } from './store-check';
+import { feeDate } from '@/lib/weekly-fee';
 
 // ---------------------------------------------------------------------------
 // [GUARDRAILS §7(4)] The settings card names the SELECTED store and says what
@@ -73,10 +74,13 @@ describe('dashboard settings: the store card', () => {
 // `trialEndsAt` the server never sends (the column is trialEndDate). Synthetic.
 // ---------------------------------------------------------------------------
 
+const AHEAD = new Date(Date.now() + 6 * 86_400_000).toISOString();
 const subscriptionRow = (over: Record<string, unknown> = {}) => ({
   id: 'sub-1', vendorId: 'store-1', status: 'ACTIVE', weeklyRate: '5000.00', customRate: '3000.00', weeklyFeeGyd: 3000,
   isTrialActive: false, trialEndDate: null, isInGracePeriod: false, gracePeriodEnd: null,
-  currentPeriodEnd: '2026-10-20T04:00:00.000Z', nextBillingDate: '2026-10-26T16:00:00.000Z',
+  // [FEE-STATUS] The next fee's date is AHEAD of now (it was a fixed 26 Oct, which passes): a passed date
+  // never reads as a next bill, and a date alone never reads as paid.
+  currentPeriodEnd: AHEAD, nextBillingDate: AHEAD,
   ...over,
 });
 
@@ -98,18 +102,22 @@ describe('dashboard settings: the subscription card (U18 / U20 / U46)', () => {
     const card = await subscriptionCard();
     expect(card.textContent).toContain(`$${(3000).toLocaleString()}/week`);
     expect(card.textContent).not.toContain(`$${(5000).toLocaleString()}`);
-    // The next bill is the phone's nextBillingDate, not the period end.
-    expect(card.textContent).toContain('next bill 26 Oct 2026');
+    // The next fee is the phone's nextBillingDate, not the period end, and a date is never read as paid.
+    expect(card.textContent).toContain(`Next weekly fee due on ${feeDate(AHEAD)}`);
+    expect(card.textContent).not.toMatch(/paid/i);
     expect(card.textContent).toContain('Status: Active');
   });
 
   it('says the status in words, and shows a trial from the column the server sends', async () => {
-    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'PAST_DUE' })) });
+    // [FEE-STATUS] As the API sends it: the amount due rides with the row. A week past its date says so.
+    const passed = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'PAST_DUE', amountDueGyd: 3000, nextBillingDate: passed })) });
     setSelectedStore('store-1');
     const { unmount } = renderWithQuery(<SettingsPage />);
     let card = await subscriptionCard();
-    expect(card.textContent).toContain('Status: Weekly fee overdue');
-    expect(card.textContent).not.toMatch(/PAST_DUE/);
+    expect(card.textContent).toContain('Status: Payment due');
+    expect(card.textContent).toContain(`Payment due since ${feeDate(passed)}`);
+    expect(card.textContent).not.toMatch(/PAST_DUE|next bill/);
     unmount();
     vi.restoreAllMocks();
 
@@ -117,7 +125,7 @@ describe('dashboard settings: the subscription card (U18 / U20 / U46)', () => {
     renderWithQuery(<SettingsPage />);
     card = await subscriptionCard();
     expect(card.textContent).toContain('Status: Free trial');
-    expect(card.textContent).toContain(`Trial ends 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
   });
 
   it('a failed read is not "no subscription": it says it could not check, and retries', async () => {
