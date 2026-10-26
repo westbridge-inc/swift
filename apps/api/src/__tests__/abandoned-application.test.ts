@@ -407,6 +407,21 @@ describe('[Row 249 · REVIEW-M S4-3 · COORD] an open fraud, safety, compliance 
       .toMatchObject({ wrappedDek: expect.anything(), shreddedAt: null });
   });
 
+  // [REVIEW-M #2118 S4-1] The contract for any caller's check: one that THROWS destroys nothing (the purge fails loudly;
+  // the bytes, the key and the row stay). The sweep's openCaseKeeps never throws (an error reads as an open case).
+  it('a caller’s check that throws destroys nothing: the purge fails, the document stays whole', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    await expect(system(() => service([u]).purgeDocumentNow(
+      { id: d.id, userId: u, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: 'swift-default' } },
+      ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, keeps: async () => { throw new Error('synthetic check failure'); } },
+    ))).rejects.toThrow('synthetic check failure');
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+    expect(await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: d.fileUrl }, select: { wrappedDek: true, shreddedAt: true } })))
+      .toMatchObject({ wrappedDek: expect.anything(), shreddedAt: null });
+  });
+
   it('a document with no stored file: the check runs in the purge transaction itself (true keeps it, false purges it)', async () => {
     const u = await person('RIDER');
     const d = await system(() => app.prisma.verificationDocument.create({ data: {
