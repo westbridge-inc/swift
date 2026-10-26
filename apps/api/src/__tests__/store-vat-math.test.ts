@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { orderVat, vatInsideWhole } from '../modules/store-vat/vat-math';
 import { STORE_VAT_FRACTION, STORE_VAT_RATE_BPS, STORE_VAT_RATE_PERCENT } from '../modules/store-vat/vat-rate';
 import { STORE_VAT_MODES_OFFERED, storeVatEffective, storeVatEnabled } from '../modules/store-vat/store-vat';
+import { approveStoreVat } from '../modules/store-vat/store-vat-decisions';
+import { vatDiscountFor } from '../modules/store-vat/order-vat';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] The VAT arithmetic and the ONE predicate, pure.
@@ -136,7 +138,50 @@ describe('the switch and the ONE predicate', () => {
     expect(storeVatEffective(row, env as Record<string, string>, now)).toBe(false);
   });
 
+  // [REVIEW-M #2085 S4-1] The certificate's effective date is a GUYANA calendar day: VAT starts at 00:00 Guyana time, not
+  // at 00:00 UTC (20:00 the evening before in Guyana).
+  it('the effective date is a Guyana calendar day (not 20:00 the evening before)', () => {
+    const fromMarch = { ...approved, vatEffectiveFrom: new Date('2026-03-01T00:00:00Z') };
+    expect(storeVatEffective(fromMarch, on, new Date('2026-03-01T01:00:00Z'))).toBe(false); // 21:00 on 28 Feb in Guyana
+    expect(storeVatEffective(fromMarch, on, new Date('2026-03-01T03:59:59Z'))).toBe(false); // 23:59:59 on 28 Feb
+    expect(storeVatEffective(fromMarch, on, new Date('2026-03-01T04:00:00Z'))).toBe(true); //  00:00 on 1 Mar
+  });
+
+  it('a person cannot approve a certificate whose effective date is still tomorrow in Guyana', async () => {
+    const input = { certificateDocId: 'doc', typedVatNumber: '012345678', registeredName: 'Shop Ltd', effectiveFrom: new Date('2026-03-01T00:00:00Z'), nameMatchesStore: true as const };
+    // 22:00 on 28 Feb in Guyana (already 1 Mar in UTC): refused before anything is read.
+    await expect(approveStoreVat(null as never, null as never, 'vendor', 'admin', input, async () => {}, on, new Date('2026-03-01T02:00:00Z')))
+      .rejects.toMatchObject({ code: 'VAT_EFFECTIVE_IN_FUTURE' });
+  });
+
   it('this release offers only "prices already include VAT"', () => {
     expect([...STORE_VAT_MODES_OFFERED]).toEqual(['PRICES_INCLUDE_VAT']);
+  });
+});
+
+// [REVIEW-M #2085 S3-1] VAT Act s.2: the store's consideration is what is "paid or payable ... by any person, directly or
+// indirectly", less discounts the supplier allows. A discount SWIFT funds is paid to the store by Swift (billing
+// sales-components: sponsorReceivable), so it never lowers the store's VAT; only a discount the STORE gives does.
+describe('who paid for a goods discount decides whether it lowers the store’s VAT', () => {
+  const lines = [{ id: 'a', amount: 1000, vatClass: 'STANDARD' as const }, { id: 'b', amount: 600, vatClass: 'ZERO_RATED' as const }];
+
+  it('a discount the STORE funded: its stored line shares lower the base (1000 - 200 = 800 -> 98)', () => {
+    const d = vatDiscountFor({ funder: 'VENDOR', goodsDiscount: 200, lineAllocations: [{ orderItemId: 'a', goods: 200 }, { orderItemId: 'b', goods: 0 }] }, 0);
+    expect(orderVat({ lines, ...d })).toMatchObject({ vatBase: 800, vatAmount: 98 });
+  });
+
+  it('a discount SWIFT funded: nothing comes off (the store is paid the full price) -> 1000 -> 123', () => {
+    const d = vatDiscountFor({ funder: 'PLATFORM', goodsDiscount: 200, lineAllocations: [{ orderItemId: 'a', goods: 200 }] }, 0);
+    expect(orderVat({ lines, ...d })).toMatchObject({ vatBase: 1000, vatAmount: 123 });
+  });
+
+  it('a store discount without stored shares is split across the lines like the redemption would be', () => {
+    const d = vatDiscountFor({ funder: 'VENDOR', goodsDiscount: 160, lineAllocations: null }, 0);
+    expect(orderVat({ lines, ...d }).vatBase).toBe(900); // 1000 of 1600 carries 100 of the 160
+  });
+
+  it('no redemption but a goods discount on the order: billing counts it as the store’s own, and so does VAT', () => {
+    expect(orderVat({ lines, ...vatDiscountFor(null, 160) }).vatBase).toBe(900);
+    expect(orderVat({ lines, ...vatDiscountFor(null, 0) })).toMatchObject({ vatBase: 1000, vatAmount: 123 });
   });
 });

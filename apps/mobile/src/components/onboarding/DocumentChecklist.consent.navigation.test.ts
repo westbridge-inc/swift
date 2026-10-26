@@ -46,6 +46,8 @@ vi.mock('../../kit', async () => {
 });
 // [ROLE-DOCS] The own-name card belongs to business checklists and talks to the server itself: out of this test.
 vi.mock('./OwnNameCard', () => ({ OwnNameCard: () => null }));
+// [FOOD-PERMIT #2062] the food handlers tick card is a sibling like OwnNameCard (its own tests: foodHandlers.test.ts)
+vi.mock('./FoodHandlersCard', () => ({ FoodHandlersCard: () => null }));
 vi.mock('./DocumentUploadCard', async () => {
   const R = await import('react');
   return {

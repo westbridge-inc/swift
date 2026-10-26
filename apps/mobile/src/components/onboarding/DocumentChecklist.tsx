@@ -6,6 +6,8 @@ import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { OwnNameCard } from './OwnNameCard';
+import { FoodHandlersCard } from './FoodHandlersCard';
+import { FOOD_HANDLERS_DOC } from './foodHandlers';
 import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
@@ -183,6 +185,8 @@ export function DocumentChecklist({
         </View>
       </View>
       {checklist.map((docType) => {
+        // [FOOD-PERMIT · owner 24 Oct 2026] the food handlers step is a tick (the server's words), never an upload
+        if (docType === FOOD_HANDLERS_DOC) return <FoodHandlersCard key={docType} role={role} status={status} />;
         const doc = latestDoc(docType);
         // [ROLE-DOCS · owner 21 Oct 2026] the own-name declaration is signed in the app, never uploaded
         if (docType === OWN_NAME_DOC) {

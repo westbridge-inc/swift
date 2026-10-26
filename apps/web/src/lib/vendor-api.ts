@@ -260,6 +260,7 @@ export const toggleOpen = (isCurrentlyOpen: boolean) =>
 export const toggleOrders = (acceptingOrders: boolean) =>
   apiFetch(`${V}/vendor/toggle-orders`, { method: 'PUT', body: JSON.stringify({ acceptingOrders }) });
 export const getHours = () => apiFetch(`${V}/hours`).then((r) => r.data);
+
 export const putHours = (hours: Array<{ dayOfWeek: number; openTime?: string; closeTime?: string; isClosed: boolean }>) =>
   apiFetch(`${V}/hours`, { method: 'PUT', body: JSON.stringify({ hours }) });
 export const getSubscription = () => apiFetch(`${V}/subscription`).then((r) => r.data);
