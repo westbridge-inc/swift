@@ -44,8 +44,21 @@
 #   3. no earlier than 12 hours after the request was issued (the seed refuses
 #      an early run and says when it may run), and within its 48 hours:
 #        SEED_SOLO=1 SEED_PLAN_APPROVALS='[<the line>]' ./deploy/seed-production.sh <sha>
-# Solo never covers anything else (a later change, or a second admin).
-# Approvals expire and are single-use. The pinned keys reach the seed container
+# [SOLO RE-SEED] Owner ruling 26 Oct (D1, under 30 Sep #13 SOLO MODE): while
+# the owner is the ONLY admin, a LATER re-seed may be approved by them alone:
+#   1. SEED_SOLO=1 ./deploy/seed-production.sh <sha>  on a database that has
+#      its SUPER_ADMIN prints a solo re-seed request (its own words), exit 2;
+#   2. the owner signs it with seed-approve.sh;
+#   3. SEED_SOLO=1 SEED_PLAN_APPROVALS='[<the line>]' ./deploy/seed-production.sh <sha>
+#      STARTS a 12-hour wait and emails and texts the owner (exit 4);
+#   4. the same command, in the owner's own terminal, no earlier than 12 hours
+#      later: the admins are counted again, a sign-in code is texted to the
+#      owner's phone and typed here (not shown), and the plan applies.
+#   SEED_SOLO_CANCEL=1 ./deploy/seed-production.sh <sha> cancels every waiting
+#   solo re-seed (no approval, phone, email or FX needed).
+# A second admin turns solo off: a waiting re-seed never runs; two people.
+# The first-seed solo never covers anything else (a later change, or a
+# second admin). Approvals expire and are single-use. The pinned keys reach the seed container
 # only as a file from the encrypted store.
 set -euo pipefail
 
@@ -90,10 +103,20 @@ case "$PILOT_ENV" in
   staging | production) ;;
   *) die "PILOT_ENV must be staging or production" ;;
 esac
+# [SOLO RE-SEED] Exactly 1, or unset/empty: cancel every waiting solo re-seed
+# on this database. The brake needs no approval, no phone, no email, no FX.
+SOLO_CANCEL=""
+case "${SEED_SOLO_CANCEL:-}" in
+  "") ;;
+  1) [ "$PILOT_ENV" = production ] ||
+       die "SEED_SOLO_CANCEL is for the production seed ceremony only (a staging seed has no solo re-seed)"
+     SOLO_CANCEL=1 ;;
+  *) die "SEED_SOLO_CANCEL must be exactly 1 (cancel every waiting solo re-seed) or unset" ;;
+esac
 if [ "$PILOT_ENV" = production ]; then
   [ "$(env_value NODE_ENV | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')" = production ] ||
     die "PILOT_ENV=production needs NODE_ENV=production: the production spine is never seeded in another posture"
-  [[ "${SEED_FX_GYD_PER_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "${SEED_FX_GYD_PER_USD}" =~ [1-9] ]] ||
+  [ -n "$SOLO_CANCEL" ] || { [[ "${SEED_FX_GYD_PER_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "${SEED_FX_GYD_PER_USD}" =~ [1-9] ]]; } ||
     die "set SEED_FX_GYD_PER_USD (today's GYD per USD, a positive number) in the environment: production records the rate the operator observed, never a constant"
 fi
 # [SOLO SEED] Exactly 1, or unset/empty; solo is the production ceremony only.
@@ -104,7 +127,7 @@ case "${SEED_SOLO:-}" in
   *) die "SEED_SOLO must be exactly 1 (one approver, 12-hour cooling-off) or unset" ;;
 esac
 SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
-[ -n "$SEED_ADMIN_PHONE" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
+[ -n "$SEED_ADMIN_PHONE" ] || [ -n "$SOLO_CANCEL" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
 # +592600 is DEMO_PHONE_PREFIX (apps/api/src/modules/ops/purge-plan.ts): the
 # range every demo seed mints. The demo purge selects by the synthetic marker
 # only (the range is a live carrier range), but a real SUPER_ADMIN inside it
@@ -118,7 +141,8 @@ SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 # SUPER_ADMIN. Personal data: typed at a hidden prompt (or exported after
 # `read -rs`), never an argument, never printed or logged. The signed request
 # shows it masked and binds its digest, so print and apply must get the same.
-if [ "$PILOT_ENV" = production ]; then
+# [SOLO RE-SEED] The cancel needs none (SOLO_CANCEL).
+if [ "$PILOT_ENV" = production ] && [ -z "$SOLO_CANCEL" ]; then
   if [ -z "${SEED_ADMIN_EMAIL:-}" ] && [ -t 0 ]; then
     printf "The owner's admin email (typed, not shown): " >&2
     IFS= read -rs SEED_ADMIN_EMAIL
@@ -195,4 +219,10 @@ export SWIFT_TAG="$SHA"
 # read, the approval lines): every build and progress line goes to stderr,
 # so `> request.txt` captures exactly what is signed.
 "${COMPOSE[@]}" build seed >&2 || die "the seed ceremony image could not be built"
+# [SOLO RE-SEED] A solo run with its signed line may ask for the owner's
+# sign-in code on this terminal (one line on stdin): keep it off the screen.
+if [ "${SEED_SOLO:-}" = 1 ] && [ -n "$SEED_PLAN_APPROVALS" ] && [ -t 0 ]; then
+  stty -echo
+  trap 'stty echo' EXIT
+fi
 "${COMPOSE[@]}" run --rm --no-TTY seed

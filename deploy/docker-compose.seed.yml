@@ -54,7 +54,29 @@ services:
       SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}
       # [SOLO SEED] Exactly 1 asks for (and applies) the one-person approval
       # of the seed that mints the first SUPER_ADMIN; empty is two people.
+      # [SOLO RE-SEED] On a database that has its SUPER_ADMIN, exactly 1 is the
+      # owner's solo re-seed (12-hour wait, sign-in code; seed-plan.ts).
       SEED_SOLO: ${SEED_SOLO:-}
+      # [SOLO RE-SEED] Exactly 1 cancels every waiting solo re-seed.
+      SEED_SOLO_CANCEL: ${SEED_SOLO_CANCEL:-}
+      # [SOLO RE-SEED] The owner's notices (email and text) and the sign-in
+      # code leave through the stack's own providers, set in deploy/.env as the
+      # api's are; the two secrets arrive as files from the store. An empty
+      # value is unset to the seed (seed-production.ts). Without working email
+      # and texts a solo re-seed refuses; the two-person ceremony never uses them.
+      NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_API_KEY_SID: ${TWILIO_API_KEY_SID:-}
+      TWILIO_API_KEY_SECRET_FILE: ${TWILIO_API_KEY_SECRET_FILE:-}
+      TWILIO_FROM: ${TWILIO_FROM:-}
+      TWILIO_MESSAGING_SERVICE_SID: ${TWILIO_MESSAGING_SERVICE_SID:-}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_TLS: ${SMTP_TLS:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS_FILE: ${SMTP_PASS_FILE:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     networks: [private]

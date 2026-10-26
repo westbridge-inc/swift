@@ -1,12 +1,21 @@
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { targetFingerprint, type TargetFingerprint } from './purge-plan';
 import { seedPlanCounter } from '../../plugins/observability';
 import { rescueIncentiveRefusal } from '../dispatch/rescue-incentive-guard';
 import {
   approvalRequest, consumeApprovals, parseApproverKeys, promotionSubject, SOLO_DEFAULT_LIFETIME_MS, SOLO_SHOW_LINE, verifyApprovals, verifySoloApproval,
+  SOLO_COOLING_OFF_MS, SOLO_RESEED_SHOW_LINE, verifySoloReseedApproval,
   type RequestFacts, type SignedApproval, type VerifiedApproval,
 } from './approver-signatures';
+import { approverRoster, emailChannelConfigured, guyanaTime, sendSoloEmail, sendSoloText } from '../admin/solo-approval';
+import { soloQuietUntil } from '../admin/admin-email-change';
+import { getChannels } from '../../providers/notifications/channels';
+import { smsAccepted } from '../../providers/notifications/sms-outcome';
+import { smsDestinationAllowed } from '../../utils/sms-budget';
+import { generateOtp } from '../../utils/otp';
+import { firstInvalidTwilioConfig } from '../../utils/twilio-identity';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // [R048-005] PRODUCTION SEEDING IS A VERSIONED, APPROVED CONFIG CHANGE.
@@ -174,6 +183,11 @@ export interface RequestContext {
   /** [SOLO SEED] One pinned person approves, after a 12-hour cooling-off:
    *  only the production seed that mints the first SUPER_ADMIN (approver-signatures.ts). */
   solo?: boolean;
+  /** [SOLO RE-SEED] One pinned person approves a LATER production re-seed
+   *  while they are the only admin: a cancellable 12-hour wait from when they
+   *  are told, and a sign-in code at apply (startSoloReseed, applySeedPlan).
+   *  Needs the admin phone and email; never together with `solo`. */
+  soloReseed?: boolean;
 }
 
 const E164 = /^\+[1-9]\d{6,14}$/;
@@ -202,13 +216,19 @@ export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): Requ
   if (ctx.adminEmail != null && !validAdminEmail(ctx.adminEmail)) throw new SeedRefused('EMAIL_INVALID', 'the admin email is not an email address');
   if (ctx.adminEmail && !ctx.adminPhone) throw new SeedRefused('EMAIL_WITHOUT_ADMIN', 'the admin email is written only on the first SUPER_ADMIN the plan mints; set the admin phone too');
   if (ctx.solo && !ctx.adminPhone) throw new SeedRefused('SOLO_NOT_ALLOWED', 'a solo approval covers only the seed that mints the first SUPER_ADMIN; set the admin phone, or use the two-person ceremony');
+  // [SOLO RE-SEED] Its own words: the phone that gets the sign-in code and the
+  // notices, and the line that says one person, a cancellable wait, a code.
+  if (ctx.solo && ctx.soloReseed) throw new SeedRefused('SOLO_MODE_AMBIGUOUS', 'a request is either the first-seed solo or a solo re-seed, never both');
+  if (ctx.soloReseed && (!ctx.adminPhone || !ctx.adminEmail)) throw new SeedRefused('SOLO_NOT_ALLOWED', "a solo re-seed names the only admin's phone and email (the sign-in code and the notices go to them); set both, or use the two-person ceremony");
+  const reseedAdminLine = ctx.soloReseed && ctx.adminPhone ? `admin phone: ending ${phoneTail(ctx.adminPhone)}, the only admin, gets the sign-in code and the notices` : null;
   const fx = ctx.fxGydPerUsd ?? null;
   const shows = [
     databaseLine(plan.target),
     `config: ${plan.configVersion} (${plan.configDigest.slice(0, 16)}), ${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'}, FX ${fx === null ? 'not set' : `${fx} GYD per USD`}`,
-    `admin phone: ${ctx.adminPhone ? `ending ${phoneTail(ctx.adminPhone)} becomes the first SUPER_ADMIN if there is none` : 'none'}`,
+    reseedAdminLine ?? `admin phone: ${ctx.adminPhone ? `ending ${phoneTail(ctx.adminPhone)} becomes the first SUPER_ADMIN if there is none` : 'none'}`,
     ...(ctx.adminEmail ? [`admin email: ${emailShown(ctx.adminEmail)} is set on that account if it has no email`] : []),
     ...(ctx.solo ? [SOLO_SHOW_LINE] : []),
+    ...(ctx.soloReseed ? [SOLO_RESEED_SHOW_LINE] : []),
     ...plan.changes.map((ch) => {
       const where = ch.table === 'countryConfig' ? `${ch.table} ${ch.key}.${ch.field}` : `${ch.table} ${ch.key}`;
       return 'from' in ch ? `change: ${ch.op} ${where}: ${shown(ch.from)} -> ${shown(ch.to)}` : `change: ${ch.op} ${where}`;
@@ -227,7 +247,7 @@ export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): Requ
  * public keys, and at apply it rebuilds these words and requires them exactly.
  */
 export function planApprovalRequest(plan: SeedPlan, ctx: RequestContext = {}, now = new Date()): string {
-  return ctx.solo ? approvalRequest(planRequestFacts(plan, ctx), now, SOLO_DEFAULT_LIFETIME_MS) : approvalRequest(planRequestFacts(plan, ctx), now);
+  return ctx.solo || ctx.soloReseed ? approvalRequest(planRequestFacts(plan, ctx), now, SOLO_DEFAULT_LIFETIME_MS) : approvalRequest(planRequestFacts(plan, ctx), now);
 }
 
 export interface ApplyOptions {
@@ -245,6 +265,10 @@ export interface ApplyOptions {
   actor?: string;
   /** Test seam: a pause at a named boundary inside the transaction (the race proof holds both seeders here). */
   failpoint?: (boundary: string) => Promise<void>;
+  /** [SOLO RE-SEED] How the sign-in code the owner types is read back
+   *  (seed-production.ts: one line from its terminal). The code itself is made,
+   *  texted to the owner's phone and checked here, never by the caller. */
+  readSignInCode?: (prompt: string) => Promise<string>;
 }
 export interface ApplyResult { applied: number; noop: boolean; configVersion: string; digest: string; firstAdmin: { userId: string } | null }
 
@@ -268,7 +292,13 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   if (target.digest !== plan.target.digest) { seedPlanCounter.labels('refused_target').inc(); throw new SeedRefused('TARGET_MISMATCH', `this database (${target.database} on ${target.host}, ${target.deploymentId}/${target.environment}) is not the plan's target`); }
   if (target.environment === 'unknown') { seedPlanCounter.labels('refused_target').inc(); throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first'); }
   let verified: VerifiedApproval[] = [];
-  if (target.environment === 'production') {
+  // [SOLO RE-SEED] Its own gate (soloReseedGate): one signed line, a started
+  // and uncancelled wait that has ended, still the only admin, a sign-in code.
+  let reseed: SoloReseedGate | null = null;
+  if (target.environment === 'production' && opts.request?.soloReseed) {
+    reseed = await soloReseedGate(prisma, plan, opts);
+    verified = [reseed.verified];
+  } else if (target.environment === 'production') {
     // [SOLO SEED] Solo covers only the seed that mints the first SUPER_ADMIN:
     // once one exists, every production change keeps two people.
     if (opts.request?.solo && (await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) {
@@ -281,7 +311,7 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   }
   let applied: { count: number; firstAdmin: { userId: string } | null };
   try {
-    applied = await runPlanTransaction(prisma, desired, plan, verified, opts);
+    applied = await runPlanTransaction(prisma, desired, plan, verified, opts, reseed);
   } catch (err) {
     if (err instanceof SeedRefused && err.code === 'PLAN_DRIFT') {
       const drift = err as SeedRefused & { planned?: number; current?: number };
@@ -347,7 +377,7 @@ async function mintSignedFirstAdmin(tx: Prisma.TransactionClient, plan: SeedPlan
   return { userId: u.id };
 }
 
-async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions): Promise<{ count: number; firstAdmin: { userId: string } | null }> {
+async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions, reseed: SoloReseedGate | null = null): Promise<{ count: number; firstAdmin: { userId: string } | null }> {
   const approvers = verified.map((v) => v.approver);
   return prisma.$transaction(async (tx) => {
     // two seeders serialise here; the loser then sees the winner's writes as drift and is refused
@@ -361,7 +391,10 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
     // [PROD-PATH] Single use, under the same lock as the change: an approval
     // already consumed is refused, even after a rollback of the data.
     const solo = plan.target.environment === 'production' && opts.request?.solo === true;
-    if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor }, solo ? 'solo' : 'two-person');
+    // [SOLO RE-SEED] Under the same lock as the change: still the only admin,
+    // and the wait still standing (not cancelled, not used), or nothing lands.
+    if (reseed) await soloReseedRecheck(tx, plan, reseed, opts.request!);
+    if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor }, solo || reseed ? 'solo' : 'two-person');
     for (const ch of plan.changes) {
       if (ch.table === 'platformConfig') {
         const want = desired.platformConfig.find((c) => c.key === ch.key)!;
@@ -388,9 +421,320 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
     // SUPER_ADMIN: if this transaction minted none (one appeared meanwhile),
     // nothing of it lands and the approval is not used up.
     if (solo && !firstAdmin) throw new SeedRefused('SOLO_NOT_ALLOWED', 'a solo approval covers only the seed that mints the first SUPER_ADMIN, and none was minted (one exists now); use the two-person ceremony');
-    await audit(tx, plan, plan.changes.length === 0 ? 'NOOP' : 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, ...(solo ? { solo: true } : {}), changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
+    await audit(tx, plan, plan.changes.length === 0 ? 'NOOP' : 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, ...(solo ? { solo: true } : {}), ...(reseed ? { solo: true, soloReseed: true, signInCode: true } : {}), changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
+    // [SOLO RE-SEED] Its own audit row, then the owner's email and text LAST:
+    // a notice that cannot go rolls the whole re-seed back (approval unspent).
+    if (reseed) await soloReseedApplied(tx, plan, reseed, opts);
     return { count: plan.changes.length, firstAdmin };
+  }, reseed ? SOLO_RESEED_TX : undefined);
+}
+
+// ---------------------------------------------------------------------------
+// [SOLO RE-SEED] A later production re-seed, approved by the owner alone
+// ---------------------------------------------------------------------------
+//
+// Owner ruling 26 Oct 2026 (PROD-SESSION D1), under the 30 Sep ruling #13
+// SOLO MODE: there is no second person, so while the owner is the ONLY admin a
+// later production settings re-seed may be approved by them alone, under the
+// same solo ceremony the app uses (admin/solo-approval.ts):
+//   1. one pinned key signs a request whose words say it is a solo re-seed
+//      (SOLO_RESEED_SHOW_LINE) and name the only admin's phone and email;
+//   2. the signed line STARTS a 12-hour wait (startSoloReseed): an
+//      append-only audit row, an email and a text to the owner, in one
+//      transaction — a notice that cannot go means nothing starts;
+//   3. until the seed runs, the wait can be cancelled (cancelSoloReseeds,
+//      and three wrong or late sign-in codes cancel it too);
+//   4. after the wait the apply counts the admins again (still exactly one:
+//      the owner), texts a fresh sign-in code to the owner's phone and needs
+//      it typed back within five minutes, then — inside the plan's own locked
+//      transaction — counts again, consumes the approval with its signed
+//      record, writes the changes and the audit, and emails and texts the
+//      owner LAST (a notice that cannot go rolls the whole re-seed back).
+// The moment a second admin exists, solo is off: a waiting re-seed never runs
+// and the two-person ceremony is the only way (no grandfathering). The wait is
+// fixed at 12 hours, never a setting: a seed must not shorten its own wait.
+// The first-seed solo (above) and the two-person ceremony are unchanged.
+
+/** The append-only audit action of a solo re-seed's wait: REQUESTED, CODE_REFUSED, CANCELLED, APPLIED. */
+export const SOLO_RESEED_ACTION = 'SEED_SOLO_RESEED';
+/** How long a texted sign-in code may take to be typed back. */
+export const SOLO_RESEED_CODE_TTL_MS = 5 * 60 * 1000;
+/** Wrong or late codes for one re-seed before it is cancelled for good. */
+export const SOLO_RESEED_MAX_WRONG_CODES = 3;
+/** An SMTP dialogue and a text are each capped at 8 s; the transaction outlives them. */
+const SOLO_RESEED_TX = { timeout: 30_000, maxWait: 10_000 } as const;
+
+interface OnlyAdmin { id: string; phone: string; email: string }
+interface SoloReseedGate { verified: VerifiedApproval; owner: OnlyAdmin; eligibleAt: Date }
+interface SoloReseedRows { requested: { detail: Prisma.JsonValue } | null; cancelled: boolean; applied: boolean; wrongCodes: number }
+
+const json = (v: unknown) => v as Prisma.InputJsonValue;
+
+/** Every row of one re-seed's wait, keyed by the approval it consumes. */
+async function soloReseedRows(db: Pick<PrismaClient, 'privilegedChangeAudit'> | Prisma.TransactionClient, consumption: string): Promise<SoloReseedRows & { consumed: boolean }> {
+  const rows = await db.privilegedChangeAudit.findMany({ where: { action: SOLO_RESEED_ACTION, planDigest: consumption }, select: { event: true, detail: true }, orderBy: { createdAt: 'asc' } });
+  const consumed = await db.privilegedChangeAudit.count({ where: { action: 'SEED_APPROVAL_CONSUMED', planDigest: consumption } });
+  const requested = rows.find((r) => r.event === 'REQUESTED') ?? null;
+  return {
+    requested: requested ? { detail: requested.detail } : null,
+    cancelled: rows.some((r) => r.event === 'CANCELLED'),
+    applied: rows.some((r) => r.event === 'APPLIED'),
+    wrongCodes: rows.filter((r) => r.event === 'CODE_REFUSED').length,
+    consumed: consumed > 0,
+  };
+}
+
+/**
+ * The owner, as the ONE admin who exists, read live (approverRoster: every
+ * admin account that can sign in, any tenant, whatever role is active; over-
+ * counting switches solo off, the safe direction). The request's phone must
+ * be theirs, and the notices must be able to reach them: their account email
+ * is the address the request names, unchanged for seven days, and their phone
+ * is one a text can reach.
+ */
+async function onlyAdmin(db: Pick<PrismaClient, 'user'> | Prisma.TransactionClient, phone: string, email: string, now: Date): Promise<OnlyAdmin> {
+  const roster = await approverRoster(db);
+  if (roster.length === 0) throw new SeedRefused('SOLO_NO_ADMIN', 'there is no admin yet: the first production seed uses the first-seed solo approval (SEED_SOLO=1 with no SUPER_ADMIN), not a solo re-seed');
+  if (roster.length > 1) {
+    throw new SeedRefused('SOLO_SECOND_ADMIN', `another admin exists (${roster.length} admin accounts), so this change needs two people: use the two-person ceremony (without SEED_SOLO). Solo approval is only for while the owner is the only admin; nothing ran`);
+  }
+  const only = roster[0]!;
+  const user = await db.user.findUnique({ where: { id: only.userId }, select: { id: true, phone: true, email: true, emailChangedAt: true } });
+  if (!user || only.role !== 'SUPER_ADMIN' || user.phone !== phone) {
+    throw new SeedRefused('SOLO_NOT_OWNER', 'the only admin is not the owner account this request names (by its phone); nothing ran');
+  }
+  const address = user.email?.trim() ?? '';
+  if (!address) throw new SeedRefused('SOLO_NO_EMAIL', "a solo re-seed emails the owner when it starts and when it runs, and the owner's account has no email; nothing ran");
+  if (address.toLowerCase() !== email.toLowerCase()) throw new SeedRefused('SOLO_EMAIL_MISMATCH', "the owner's account email is not the address the signed request names (the notices go to the account's address); nothing ran");
+  const quietUntil = soloQuietUntil(user.emailChangedAt, now);
+  if (quietUntil) throw new SeedRefused('SOLO_EMAIL_RECENT', `the owner's account email changed in the last seven days, so solo approval is off until ${quietUntil.toISOString()}; nothing ran`);
+  if (!smsDestinationAllowed(user.phone)) throw new SeedRefused('SOLO_SMS_UNAVAILABLE', "a solo re-seed texts the owner's phone, and this phone cannot be texted; nothing ran");
+  return { id: user.id, phone: user.phone, email: address };
+}
+
+/**
+ * Can the owner's notices and sign-in code actually leave? The email needs a
+ * working provider (production: SMTP); in production the text needs Twilio,
+ * exactly as the API's boot demands it (boot-config.ts). Null when ready, or
+ * which one is not. No notice, no solo: the send itself is still the authority.
+ */
+export function soloNoticeChannelsReady(env: Record<string, string | undefined> = process.env): 'email' | 'text' | null {
+  if (!emailChannelConfigured(env)) return 'email';
+  if (isProduction(env) && ((env['NOTIFICATION_PROVIDER'] ?? 'dev') !== 'twilio' || firstInvalidTwilioConfig(env) !== null)) return 'text';
+  return null;
+}
+
+function assertNoticeChannels(): void {
+  const missing = soloNoticeChannelsReady();
+  if (missing === 'email') throw new SeedRefused('SOLO_EMAIL_UNAVAILABLE', "a solo re-seed emails the owner when it starts and when it runs, and this seed's email is not set up; nothing ran");
+  if (missing === 'text') throw new SeedRefused('SOLO_SMS_UNAVAILABLE', "a solo re-seed texts the owner and needs a sign-in code by text, and this seed's texts are not set up; nothing ran");
+}
+
+const reseedWords = (plan: SeedPlan) => `config ${plan.configVersion}, ${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'}`;
+const CANCEL_STEP = 'SEED_SOLO_CANCEL=1 ./deploy/seed-production.sh <the deployed SHA>';
+
+/**
+ * Start the wait for one signed solo re-seed. Everything commits together or
+ * not at all: the started row (with when it may run), the owner's email and
+ * the owner's text, sent LAST inside the transaction. Refused unless the plan
+ * is this database's, the line is one pinned key's over exactly these words,
+ * it was never started, cancelled or used, the owner is the only admin and
+ * the notices can go, and the request outlives the wait.
+ */
+export async function startSoloReseed(prisma: PrismaClient, databaseUrl: string, desired: DesiredConfig, plan: SeedPlan, opts: ApplyOptions = {}): Promise<{ eligibleAt: Date; expiresAt: Date }> {
+  refuseLockedDials(desired);
+  const { digest: carried, ...body } = plan;
+  if (seedPlanDigest(body) !== carried) throw new SeedRefused('PLAN_TAMPERED', 'the plan body does not match its digest');
+  if (plan.configDigest !== sha256(canonical(desired))) throw new SeedRefused('CONFIG_MISMATCH', `the plan was built for configuration ${plan.configVersion}; the code now holds different desired data — plan again`);
+  const target = await targetFingerprint(prisma, databaseUrl);
+  if (target.digest !== plan.target.digest) throw new SeedRefused('TARGET_MISMATCH', `this database (${target.database} on ${target.host}, ${target.deploymentId}/${target.environment}) is not the plan's target`);
+  if (target.environment !== 'production') throw new SeedRefused('SOLO_NOT_ALLOWED', 'a solo re-seed is the production ceremony only (elsewhere the plan applies without approvals)');
+  const ctx = opts.request;
+  if (!ctx?.soloReseed) throw new SeedRefused('SOLO_NOT_ALLOWED', 'this is not a solo re-seed request');
+  if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a solo re-seed needs its one signed approval');
+  if (plan.changes.length === 0) throw new SeedRefused('SOLO_NOTHING_TO_CHANGE', `production already holds configuration ${plan.configVersion}: there is nothing to re-seed, and nothing started`);
+  const now = opts.now ?? new Date();
+  const verified = verifySoloReseedApproval(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, ctx), now);
+  const rows = await soloReseedRows(prisma, verified.consumption);
+  if (rows.applied || rows.consumed) throw new SeedRefused('APPROVAL_REPLAYED', `approval by ${verified.approver} was already used; sign a new request`);
+  if (rows.cancelled) throw new SeedRefused('SOLO_CANCELLED', 'this solo re-seed was cancelled and never runs; print and sign a new request');
+  if (rows.requested) throw new SeedRefused('SOLO_ALREADY_STARTED', `this solo re-seed is already waiting; it may run from ${String((rows.requested.detail as { eligibleAt?: unknown } | null)?.eligibleAt ?? '?')}`);
+  const eligibleAt = new Date(now.getTime() + SOLO_COOLING_OFF_MS);
+  if (eligibleAt.getTime() >= Date.parse(verified.expires)) {
+    throw new SeedRefused('SOLO_REQUEST_TOO_OLD', `this request expires at ${verified.expires}, before its 12-hour wait would end (${eligibleAt.toISOString()}); print and sign a new one`);
+  }
+  const owner = await onlyAdmin(prisma, ctx.adminPhone!, ctx.adminEmail!, now);
+  assertNoticeChannels();
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
+    const again = await soloReseedRows(tx, verified.consumption);
+    if (again.requested || again.cancelled || again.applied || again.consumed) throw new SeedRefused('SOLO_ALREADY_STARTED', 'this solo re-seed was started (or ended) by another run just now');
+    // Counted again under the lock that starts the wait; the notices go where the account says NOW.
+    const still = await onlyAdmin(tx, ctx.adminPhone!, ctx.adminEmail!, now);
+    if (still.id !== owner.id) throw new SeedRefused('SOLO_NOT_OWNER', 'the only admin changed while the wait was starting; nothing started');
+    await tx.privilegedChangeAudit.create({ data: {
+      action: SOLO_RESEED_ACTION, planDigest: verified.consumption, event: 'REQUESTED', target: json(plan.target),
+      detail: json({
+        plan: plan.digest, configVersion: plan.configVersion, configDigest: plan.configDigest, changes: plan.changes.length,
+        approver: verified.approver, fingerprint: verified.fingerprint, nonce: verified.nonce, issued: verified.issued, expires: verified.expires,
+        startedAt: now.toISOString(), eligibleAt: eligibleAt.toISOString(), coolOffHours: SOLO_COOLING_OFF_MS / 3_600_000, userId: still.id,
+      }),
+      actor: opts.actor ?? null,
+    } });
+    await sendSoloEmail(still.email, 'Swift: a production settings re-seed is waiting for your solo approval', [
+      'A production settings re-seed was started for you to approve alone, because you are the only admin:',
+      '',
+      `  Configuration: ${plan.configVersion} (${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'})`,
+      `  Database: ${plan.target.database} (${plan.target.environment})`,
+      `  Signed by: ${verified.approver}`,
+      `  Started: ${guyanaTime(now)}`,
+      '',
+      `It can run after ${guyanaTime(eligibleAt)}, and only with a sign-in code texted to your phone at that moment. Nothing changes before then.`,
+      '',
+      `To stop it, run this on the production server: ${CANCEL_STEP}`,
+      'or never type the code. If you did not start this, cancel it and make a new seed approval key.',
+    ].join('\n'));
+    await sendSoloText(still.phone,
+      `Swift admin: a production settings re-seed (${reseedWords(plan)}) was started for your solo approval. ` +
+      `It can run after ${guyanaTime(eligibleAt)}, only with a code texted to you. If this was not you, cancel it on the server: SEED_SOLO_CANCEL=1.`);
+  }, SOLO_RESEED_TX);
+  return { eligibleAt, expiresAt: new Date(verified.expires) };
+}
+
+/** One waiting solo re-seed a cancel stopped, as the operator is shown it. */
+export interface CancelledSoloReseed { plan: string; configVersion: string; changes: number; approver: string; startedAt: string; eligibleAt: string }
+
+/**
+ * Cancel every solo re-seed still waiting in THIS database: each gets a
+ * CANCELLED row and never runs (a new one needs a new signed request). The
+ * brake needs no approval, no code and no notice: stopping is always allowed.
+ * [Security review M2] It finds every started, uncancelled, unused wait in the
+ * audit table itself — never by the target digest, which follows the
+ * connection string's spelling (localhost vs 127.0.0.1), so no form of the
+ * address can make it miss one (fail closed). Returns each one it cancelled.
+ */
+export async function cancelSoloReseeds(prisma: PrismaClient, databaseUrl: string, opts: { actor?: string; reason?: string } = {}): Promise<CancelledSoloReseed[]> {
+  const target = await targetFingerprint(prisma, databaseUrl);
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
+    const started = await tx.privilegedChangeAudit.findMany({ where: { action: SOLO_RESEED_ACTION, event: 'REQUESTED' }, select: { planDigest: true, detail: true }, orderBy: { createdAt: 'asc' } });
+    const cancelled: CancelledSoloReseed[] = [];
+    for (const { planDigest, detail } of started) {
+      const rows = await soloReseedRows(tx, planDigest);
+      if (rows.cancelled || rows.applied || rows.consumed) continue;
+      const d = (detail ?? {}) as Record<string, unknown>;
+      const one: CancelledSoloReseed = {
+        plan: String(d['plan'] ?? '?'), configVersion: String(d['configVersion'] ?? '?'), changes: Number(d['changes'] ?? 0),
+        approver: String(d['approver'] ?? '?'), startedAt: String(d['startedAt'] ?? '?'), eligibleAt: String(d['eligibleAt'] ?? '?'),
+      };
+      await tx.privilegedChangeAudit.create({ data: { action: SOLO_RESEED_ACTION, planDigest, event: 'CANCELLED', target: json(target), detail: json({ reason: opts.reason ?? 'cancelled by the operator', ...one }), actor: opts.actor ?? null } });
+      cancelled.push(one);
+    }
+    return cancelled;
   });
+}
+
+/**
+ * The fresh sign-in code (the app's step-up, for a run on the server): six
+ * random digits texted to the owner's phone — never stored, never printed —
+ * typed back within five minutes, compared in constant time. A wrong, late or
+ * missing code is recorded; the third cancels this re-seed for good.
+ */
+async function confirmSignInCode(prisma: PrismaClient, owner: OnlyAdmin, verified: VerifiedApproval, plan: SeedPlan, opts: ApplyOptions): Promise<void> {
+  if (!opts.readSignInCode) {
+    throw new SeedRefused('SIGN_IN_CODE_REQUIRED', "a solo re-seed runs only with a sign-in code texted to the owner's phone and typed back; this run cannot read one (run it in the owner's own terminal); nothing ran");
+  }
+  const code = generateOtp();
+  let sent: unknown;
+  try {
+    sent = await getChannels().sms.sendSms(owner.phone, `Your Swift confirmation code is ${code}. It applies the production settings re-seed you approve alone (${reseedWords(plan)}) now. If you did not start it, do not share the code.`);
+  } catch {
+    throw new SeedRefused('SOLO_SMS_UNAVAILABLE', 'the sign-in code could not be texted; nothing ran. Try again later');
+  }
+  if (!smsAccepted(sent)) throw new SeedRefused('SOLO_SMS_UNAVAILABLE', 'the sign-in code could not be texted; nothing ran. Try again later');
+  const sentAt = Date.now();
+  const typed = (await opts.readSignInCode(`A sign-in code was texted to the phone ending ${phoneTail(owner.phone)}. Type it (it is not shown) and press Enter: `)).trim();
+  const late = Date.now() - sentAt > SOLO_RESEED_CODE_TTL_MS;
+  if (!late && /^\d{6}$/.test(typed) && timingSafeEqual(Buffer.from(typed), Buffer.from(code))) return;
+  const wrong = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
+    await tx.privilegedChangeAudit.create({ data: { action: SOLO_RESEED_ACTION, planDigest: verified.consumption, event: 'CODE_REFUSED', target: json(plan.target), detail: json({ plan: plan.digest, why: late ? 'late' : typed ? 'wrong' : 'none' }), actor: opts.actor ?? null } });
+    const count = (await soloReseedRows(tx, verified.consumption)).wrongCodes;
+    if (count >= SOLO_RESEED_MAX_WRONG_CODES) {
+      await tx.privilegedChangeAudit.create({ data: { action: SOLO_RESEED_ACTION, planDigest: verified.consumption, event: 'CANCELLED', target: json(plan.target), detail: json({ reason: `${count} wrong or late sign-in codes` }), actor: opts.actor ?? null } });
+    }
+    return count;
+  });
+  if (wrong >= SOLO_RESEED_MAX_WRONG_CODES) throw new SeedRefused('SOLO_CANCELLED', `${wrong} wrong or late sign-in codes: this solo re-seed is cancelled for good and never runs; nothing ran`);
+  throw new SeedRefused('SIGN_IN_CODE_WRONG', `the sign-in code was ${late ? 'typed too late' : 'not right'}; nothing ran (${SOLO_RESEED_MAX_WRONG_CODES - wrong} more before this re-seed is cancelled). Run it again for a new code`);
+}
+
+/**
+ * Everything a solo re-seed needs before its transaction, cheapest first so a
+ * refusal that needs no code never sends one: the one signed line over these
+ * words, a started wait that was neither cancelled nor used and has ended,
+ * still the only admin, notices that can go, then the sign-in code.
+ */
+async function soloReseedGate(prisma: PrismaClient, plan: SeedPlan, opts: ApplyOptions): Promise<SoloReseedGate> {
+  const now = opts.now ?? new Date();
+  const ctx = opts.request!;
+  if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a solo re-seed needs its one signed approval');
+  const verified = verifySoloReseedApproval(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, ctx), now);
+  const rows = await soloReseedRows(prisma, verified.consumption);
+  if (rows.applied || rows.consumed) throw new SeedRefused('APPROVAL_REPLAYED', `approval by ${verified.approver} was already used; sign a new request`);
+  if (!rows.requested) throw new SeedRefused('SOLO_NOT_STARTED', 'this solo re-seed has not started its 12-hour wait yet (running it with its signed line starts the wait and tells the owner)');
+  if (rows.cancelled) throw new SeedRefused('SOLO_CANCELLED', 'this solo re-seed was cancelled and never runs; print and sign a new request');
+  const detail = (rows.requested.detail ?? {}) as { eligibleAt?: unknown; userId?: unknown; fingerprint?: unknown; approver?: unknown };
+  // [Security review M1] The wait belongs to the one pinned key that started it
+  // (the row is found by a key over that key's fingerprint and the request, so
+  // this holds by construction; checked in words too).
+  if (detail.fingerprint !== verified.fingerprint || detail.approver !== verified.approver) {
+    throw new SeedRefused('SOLO_KEY_CHANGED', 'this solo re-seed was started with another pinned key; nothing ran');
+  }
+  const startedEligible = typeof detail.eligibleAt === 'string' ? Date.parse(detail.eligibleAt) : NaN;
+  if (!Number.isFinite(startedEligible)) throw new SeedRefused('SOLO_NOT_STARTED', 'the started wait of this solo re-seed is unreadable; cancel it and start a new one');
+  // Never sooner than 12 hours after the request was signed for, either.
+  const eligibleAt = new Date(Math.max(startedEligible, Date.parse(verified.issued) + SOLO_COOLING_OFF_MS));
+  if (now.getTime() < eligibleAt.getTime()) {
+    throw new SeedRefused('COOLING_OFF', `this solo re-seed may run from ${eligibleAt.toISOString()} (${guyanaTime(eligibleAt)}; a 12-hour wait from when it started), until ${verified.expires}`);
+  }
+  const owner = await onlyAdmin(prisma, ctx.adminPhone!, ctx.adminEmail!, now);
+  if (detail.userId !== owner.id) throw new SeedRefused('SOLO_NOT_OWNER', 'the owner account told when this wait started is not the only admin now; nothing ran');
+  assertNoticeChannels();
+  await confirmSignInCode(prisma, owner, verified, plan, opts);
+  return { verified, owner, eligibleAt };
+}
+
+/** Inside the plan's transaction, under its lock: still standing, still the only admin. */
+async function soloReseedRecheck(tx: Prisma.TransactionClient, plan: SeedPlan, reseed: SoloReseedGate, ctx: RequestContext): Promise<void> {
+  const rows = await soloReseedRows(tx, reseed.verified.consumption);
+  if (rows.cancelled) throw new SeedRefused('SOLO_CANCELLED', 'this solo re-seed was cancelled while it was being applied; nothing ran');
+  if (rows.applied || rows.consumed) throw new SeedRefused('APPROVAL_REPLAYED', `approval by ${reseed.verified.approver} was already used; sign a new request`);
+  const still = await onlyAdmin(tx, ctx.adminPhone!, ctx.adminEmail!, new Date());
+  if (still.id !== reseed.owner.id) throw new SeedRefused('SOLO_NOT_OWNER', 'the only admin changed while the re-seed was being applied; nothing ran');
+}
+
+/** Its audit row, then the owner's email and text, last in the plan's transaction. */
+async function soloReseedApplied(tx: Prisma.TransactionClient, plan: SeedPlan, reseed: SoloReseedGate, opts: ApplyOptions): Promise<void> {
+  const at = new Date();
+  await tx.privilegedChangeAudit.create({ data: {
+    action: SOLO_RESEED_ACTION, planDigest: reseed.verified.consumption, event: 'APPLIED', target: json(plan.target),
+    detail: json({ plan: plan.digest, configVersion: plan.configVersion, changes: plan.changes.length, approver: reseed.verified.approver, userId: reseed.owner.id, signInCode: true, appliedAt: at.toISOString() }),
+    actor: opts.actor ?? null,
+  } });
+  await sendSoloEmail(reseed.owner.email, 'Swift: production settings re-seed applied (solo approval)', [
+    'The production settings re-seed you approved alone was applied, with a sign-in code texted to your phone:',
+    '',
+    `  Configuration: ${plan.configVersion} (${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'})`,
+    `  Database: ${plan.target.database} (${plan.target.environment})`,
+    `  Signed by: ${reseed.verified.approver}`,
+    `  Applied: ${guyanaTime(at)}`,
+    '',
+    'If this was not you: sign out of every device, make a new seed approval key, and check the audit (it keeps the signed record).',
+  ].join('\n'));
+  await sendSoloText(reseed.owner.phone,
+    `Swift admin: the production settings re-seed (${reseedWords(plan)}) you approved alone was applied at ${guyanaTime(at)} with the code texted to you. ` +
+    'If this was not you, make a new seed approval key now.');
 }
 
 // ---------------------------------------------------------------------------

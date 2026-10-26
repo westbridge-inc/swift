@@ -596,6 +596,85 @@ class SeedSoloCeremony(SeedBreakGlassCeremony):
     def test_the_compose_override_passes_solo_with_an_empty_default(self):
         self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
 
+    # [SOLO RE-SEED] Owner ruling 26 Oct (D1, under 30 Sep #13 SOLO MODE): while
+    # the owner is the only admin, a LATER re-seed may be approved by them alone
+    # (12-hour cancellable wait, sign-in code; enforced by the seed itself,
+    # seed-solo-reseed.test.ts). The script passes the cancel through, needs no
+    # personal data or FX for it, and keeps the typed sign-in code off the screen.
+    def reseed_production(self):
+        (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV cancel=[$SEED_SOLO_CANCEL] solo=[$SEED_SOLO] phone=[$SEED_ADMIN_PHONE] email=[$SEED_ADMIN_EMAIL] fx=[$SEED_FX_GYD_PER_USD]" >> "$CALL_LOG"; [ -t 0 ] && stty -a >> "$CALL_LOG" 2>&1; exit 0;; *) exit 0;; esac')
+
+    def test_the_cancel_reaches_the_seed_without_a_phone_an_email_or_fx(self):
+        self.reseed_production()
+        result = self.run_script(SEED_SOLO_CANCEL="1", SEED_ADMIN_EMAIL="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV cancel=[1] solo=[] phone=[] email=[] fx=[]", self.log.read_text())
+        self.assertNotIn("admin email", result.stderr)
+
+    def test_without_the_cancel_the_production_requirements_stand(self):
+        self.reseed_production()
+        result = self.run_script(SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_FX_GYD_PER_USD", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+        result = self.run_script(SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_ADMIN_PHONE", result.stderr)
+
+    def test_the_cancel_is_the_production_ceremony_only(self):
+        result = self.run_script(SEED_SOLO_CANCEL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_SOLO_CANCEL is for the production seed ceremony only", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_the_cancel_is_exactly_1_or_unset(self):
+        self.reseed_production()
+        for value in ("yes", "true", "0", " 1", "2"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script(SEED_SOLO_CANCEL=value, SEED_ADMIN_EMAIL="")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_SOLO_CANCEL must be exactly 1", result.stderr)
+                self.assertNotIn("run --rm", self.log.read_text())
+
+    def test_the_compose_override_carries_the_cancel_and_the_notice_providers_from_deploy_env(self):
+        override = (DEPLOY / "docker-compose.seed.yml").read_text()
+        self.assertIn("SEED_SOLO_CANCEL: ${SEED_SOLO_CANCEL:-}", override)
+        for name in ("NOTIFICATION_PROVIDER", "TWILIO_ACCOUNT_SID", "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET_FILE", "TWILIO_FROM",
+                     "TWILIO_MESSAGING_SERVICE_SID", "EMAIL_PROVIDER", "SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USER", "SMTP_PASS_FILE", "EMAIL_FROM"):
+            self.assertIn(f"{name}: ${{{name}:-}}", override)
+        # The two secrets only ever as files from the store, never a value.
+        self.assertIsNone(re.search(r"(?m)^\s*(TWILIO_API_KEY_SECRET|SMTP_PASS)\s*:", override))
+
+    def test_a_notice_setting_exported_in_the_shell_is_refused(self):
+        # One configuration: the seed's providers come from deploy/.env, never this shell.
+        self.reseed_production()
+        result = self.run_script(SEED_SOLO_CANCEL="1", SEED_ADMIN_EMAIL="", SMTP_HOST="mail.example.invalid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SMTP_HOST is set in this shell", result.stderr)
+        self.assertNotIn("run --rm", self.log.read_text())
+
+    def test_on_a_terminal_a_solo_run_with_its_line_keeps_the_typed_code_off_the_screen(self):
+        import pty
+        self.reseed_production()
+        main, sub = pty.openpty()
+        self.addCleanup(os.close, main)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA, "SEED_ADMIN_PHONE": "+5920400001",
+                    "SEED_FX_GYD_PER_USD": "209", "SEED_ADMIN_EMAIL": self.OWNER_EMAIL, "SEED_SOLO": "1", "STORE_NAMES": "SEED_APPROVER_KEYS",
+                    "SEED_PLAN_APPROVALS": '[{"approver":"owner","request":"cg==","signature":"cw=="}]'})
+        try:
+            result = subprocess.run(["bash", str(self.deploy / "seed-production.sh"), self.SHA], env=env, stdin=sub, text=True, capture_output=True, timeout=20)
+            after = subprocess.run(["stty", "-a"], stdin=sub, text=True, capture_output=True, timeout=5).stdout
+        finally:
+            os.close(sub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        during = self.log.read_text()
+        self.assertIn("ENV cancel=[] solo=[1]", during)
+        self.assertRegex(during, r"(^|\s)-echo(\s|$)")         # hidden while the seed may read the code
+        self.assertNotRegex(after, r"(^|\s)-echo(\s|$)")       # and shown again afterwards
+
 
 
 # ===========================================================================

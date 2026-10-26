@@ -1246,7 +1246,8 @@ must be pinned first (section 6b, step 1).
 
 **Solo mode (owner ruling, 13 Oct): one approver while there is no second
 admin.** Only for the seed that mints the FIRST SUPER_ADMIN (none exists, and
-SEED_ADMIN_PHONE is set); anything else on production keeps two people.
+SEED_ADMIN_PHONE is set); anything else on production keeps two people,
+except the solo re-seed below.
 SEED_APPROVER_KEYS may then pin just the one approver's key.
 
    a. Request: `SEED_SOLO=1` with the same command as step 1. The request says,
@@ -1277,6 +1278,38 @@ SEED_APPROVER_KEYS may then pin just the one approver's key.
    The request file and the signed line therefore carry the masked email and
    its digest: personal data. Keep them with the owner's private stand-up
    evidence only, never in tickets, chat, logs or the repository.
+
+**Solo re-seed (owner ruling, 26 Oct, under the 13 Oct solo mode): a LATER
+production re-seed approved by the owner alone, while the owner is the ONLY
+admin.** On a database that already has its SUPER_ADMIN, `SEED_SOLO=1` is the
+solo re-seed. SEED_ADMIN_PHONE is the owner's own phone (the only admin's)
+and the owner's email must be the one on that account: the sign-in code and
+the notices go to them. The seed container sends them through the stack's own
+email and text providers (deploy/.env, as the API's); without working email
+and texts a solo re-seed refuses.
+
+   a. Request: `SEED_SOLO=1` with the same command as step 1 (exit 2). Its
+      words say solo re-seed, the 12-hour wait from when it starts, that it
+      can be cancelled, and the sign-in code; valid 48 hours from issue.
+   b. The owner signs it on their own computer (section 6b, step 3).
+   c. Start the wait (exit 4): the same command with `SEED_PLAN_APPROVALS='[<the one line>]'`.
+      An append-only audit row (SEED_SOLO_RESEED REQUESTED), an email and a
+      text to the owner, all or nothing. It prints from when it may run.
+   d. To cancel at any time before it runs (no approval, phone, email or FX):
+
+          SEED_SOLO_CANCEL=1 ./deploy/seed-production.sh "$SHA"
+
+   e. No earlier than 12 hours after c, before the request expires, the same
+      command as c, in the OWNER's own terminal: the seed counts the admins
+      again (exactly one, the owner, or it refuses: two people then), texts a
+      sign-in code to the owner's phone and reads it from the terminal (not
+      shown; five minutes; three wrong or late codes cancel the re-seed),
+      then applies the plan in one transaction, counting again, consuming the
+      approval with its signed record, and emailing and texting the owner
+      last (a notice that cannot go rolls it all back).
+
+   A second admin turns solo off: a waiting re-seed never runs, and only the
+   two-person ceremony above applies.
 
 4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
    signatures). If the production store still holds it, from 5 Oct, remove
