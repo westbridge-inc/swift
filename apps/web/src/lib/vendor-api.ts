@@ -255,6 +255,7 @@ export const toggleOpen = (isCurrentlyOpen: boolean) =>
 export const toggleOrders = (acceptingOrders: boolean) =>
   apiFetch(`${V}/vendor/toggle-orders`, { method: 'PUT', body: JSON.stringify({ acceptingOrders }) });
 export const getHours = () => apiFetch(`${V}/hours`).then((r) => r.data);
+
 export const putHours = (hours: Array<{ dayOfWeek: number; openTime?: string; closeTime?: string; isClosed: boolean }>) =>
   apiFetch(`${V}/hours`, { method: 'PUT', body: JSON.stringify({ hours }) });
 export const getSubscription = () => apiFetch(`${V}/subscription`).then((r) => r.data);
@@ -331,8 +332,6 @@ export const updateItem = (id: string, body: Record<string, unknown>) =>
   apiFetch(`${V}/items/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 export const setItemAvailability = (id: string, isAvailable: boolean) =>
   apiFetch(`${V}/items/${id}/availability`, { method: 'PUT', body: JSON.stringify({ isAvailable }) });
-export const adjustStock = (id: string, delta: number, reason: 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN', note?: string) =>
-  apiFetch(`${V}/items/${id}/adjust`, { method: 'POST', body: JSON.stringify({ delta, reason, ...(note ? { note } : {}) }) });
 
 // ── CSV / Excel import (the desktop star) ────────────────────────────────────
 export const templateUrl = () => `${V}/items/import/template`;

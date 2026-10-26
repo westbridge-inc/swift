@@ -502,6 +502,9 @@ export function useDeclineOffer(kind: MoverKind) {
   return pv ? PV.previewMutation() : m;
 }
 export type FareOutcome = 'paid' | 'refused' | 'no_show';
+/** [L02 · row 34/56] The rider's door adds "the customer can't pay in full"
+ *  (no hand-over; the order goes back to the store). Rides never send it. */
+export type RiderDoorOutcome = FareOutcome | 'short_payment';
 export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover' | 'handback';
 export type DriverActionInput =
   | { id: string; action: Exclude<DriverAction, 'handover' | 'handback'>; pin?: string }
@@ -583,11 +586,11 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin, photoUrl, authSession }: {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin, photoUrl, authSession, collectedAmount, cashReturned, handedOverShort }: {
       id: string;
       action: RiderAction;
       reason?: string;
-      outcome?: FareOutcome;
+      outcome?: RiderDoorOutcome;
       photoUrl?: string;
       authSession?: AuthSessionSnapshot;
       handoverVersion?: string;
@@ -595,6 +598,12 @@ export function useRiderAction() {
        *  Omitted when empty so the server answers MISSING_PIN rather than a
        *  schema refusal; never sent for the failed outcomes (no_show/refused). */
       pin?: string;
+      /** [L02 · row 56] The cash the rider states at the door (lib/doorCash
+       *  builds these; the server decides what they mean). Absent = the
+       *  older, unstated door. */
+      collectedAmount?: number;
+      cashReturned?: boolean;
+      handedOverShort?: boolean;
     }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
@@ -615,7 +624,15 @@ export function useRiderAction() {
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current));
+          // [L02 · row 56] The stated door cash and the door's version travel
+          // only when the screen supplies them; a field it leaves out is never sent.
+          const doorCash = {
+            ...(collectedAmount !== undefined ? { collectedAmount } : {}),
+            ...(cashReturned !== undefined ? { cashReturned } : {}),
+            ...(handedOverShort ? { handedOverShort: true as const } : {}),
+            ...(handoverVersion ? { handoverVersion } : {}),
+          };
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}), ...doorCash }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }
