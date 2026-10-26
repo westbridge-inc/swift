@@ -211,6 +211,8 @@ const E = {
   feeReversal: { model: 'mmgFeeReversal', fields: ['state', 'heldReason', 'resolution', 'resolvedBy', 'failedAt', 'reversedAt', 'walletDebitedAt'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
+  // [STORE-VAT] A store's VAT decision (the number itself is never named in the trail's diff).
+  storeVat: { model: 'vendor', routeParam: 'vendorId', fields: ['vatStatus', 'vatEffectiveFrom', 'vatReviewedAt'] },
   // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
   returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
   claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt', 'paymentRef', 'paidAmount', 'reviewedAt'] },
@@ -489,6 +491,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /verification/:id/approve': reviewed(c('C3', 'verification.decide', E.verification)),
   'PUT /verification/:id/reject': reviewed(c('C3', 'verification.decide', E.verification)),
   'PUT /verification/:id/revoke': reviewed(c('C3', 'verification.decide', E.verification)),
+  // [STORE-VAT · owner O-5] A store's VAT certificate: decided by a document reviewer, like every document.
+  'GET /store-vat/pending': c('C0', 'verification.read'),
+  'POST /store-vat/:vendorId/approve': reviewed(c('C3', 'verification.decide', E.storeVat)),
+  'POST /store-vat/:vendorId/reject': reviewed(c('C3', 'verification.decide', E.storeVat)),
+  'POST /store-vat/:vendorId/revoke': reviewed(c('C3', 'verification.decide', E.storeVat)),
   'GET /verification/:id/document-url': reviewed(c('C1', 'verification.document.read')),
   // [DOC-1 §20.2 · P20-2] the custody narrative is metadata about a document, never its content — still a logged read
   'GET /verification/:id/custody': c('C1', 'verification.custody.read'),
