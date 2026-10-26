@@ -503,6 +503,21 @@ describe('never: a reply, a settlement, a provider payment or a second-admin req
     }
   });
 
+  it('an untied reply written before the page existed is not its reply (another suite\'s or an earlier page\'s): closed on MMG\'s word', async () => {
+    await confirmedControl();
+    const { row } = await abandoned();
+    const before = await app.prisma.mmgCheckoutObservation.create({ data: {
+      intentId: null, source: 'RETURN', detail: 'success', failure: 'INVALID_RESPONSE', createdAt: new Date(row.createdAt.getTime() - MIN),
+    } });
+    strayObservationIds.push(before.id);
+    try {
+      await service.pollIntents(at(row, FIRST_CHECK + MIN));
+      expect(await holdOf(row.id)).toMatchObject({ status: 'PROVEN_UNPAID', resolvedBy: ACTOR });
+    } finally {
+      await app.prisma.mmgCheckoutObservation.delete({ where: { id: before.id } });
+    }
+  });
+
   it('[REVIEW-M S3-1] an untied reply after our deadline and its half hour, but before the check, keeps it too', async () => {
     await confirmedControl();
     const { row } = await abandoned();

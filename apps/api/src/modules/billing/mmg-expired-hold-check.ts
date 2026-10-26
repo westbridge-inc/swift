@@ -134,7 +134,8 @@ async function blockerOf(db: Db, holdId: string, c: CheckoutFacts, now: Date): P
   const replies = await db.mmgCheckoutObservation.count({ where: { OR: [
     { intentId: c.id, source: { in: ['RETURN', 'NOTIFY'] } },
     { intentId: null, source: { in: ['RETURN', 'NOTIFY'] }, failure: { in: ['NO_TOKEN', 'INVALID_RESPONSE'] },
-      createdAt: { gte: new Date(c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS), lte: now } },
+      // Both times are the database's own: a reply written before the page existed is never its reply.
+      createdAt: { gte: c.createdAt, lte: now } },
   ] } });
   if (replies > 0) return 'REPLY_ON_RECORD';
   const money = await db.providerPayment.count({ where: { OR: [
