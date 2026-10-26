@@ -12,6 +12,8 @@
  */
 import type { Prisma, PrismaClient, DiscoveryCategoryKind, GateEnforcement } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { FOOD_HANDLER_CERT_DOC_TYPE } from './doc-registry';
+import { foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -47,13 +49,28 @@ export async function holdsValidDocument(prisma: Db, ownerUserId: string, legacy
   return doc !== null;
 }
 
-export async function vendorOwnerContext(prisma: Db, vendorId: string): Promise<{ ownerUserId: string; countryCode: string }> {
-  const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { owner: { select: { user: { select: { id: true, countryCode: true } } } } } });
+/** The store a gate is judged for: its owner, its market, and [FOOD-PERMIT] whether it is a registered restaurant. */
+export interface GateContext { ownerUserId: string; countryCode: string; store?: { vendorId: string; vendorType: string; tier: string | null } }
+
+export async function vendorOwnerContext(prisma: Db, vendorId: string): Promise<GateContext> {
+  const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { vendorType: true, tier: true, owner: { select: { user: { select: { id: true, countryCode: true } } } } } });
   if (!vendor) throw new AppError(404, 'NOT_FOUND', 'Vendor not found');
-  return { ownerUserId: vendor.owner.user.id, countryCode: vendor.owner.user.countryCode };
+  return { ownerUserId: vendor.owner.user.id, countryCode: vendor.owner.user.countryCode, store: { vendorId, vendorType: vendor.vendorType, tier: vendor.tier } };
 }
 
-export async function gateVerdicts(prisma: Db, ctx: { ownerUserId: string; countryCode: string }, categories: readonly GateCategory[], now = new Date()): Promise<GateVerdict[]> {
+/**
+ * Does the store hold what the gate asks for? The owner's VALID document — or, [FOOD-PERMIT · owner 24 Oct 2026] for
+ * the food handler's certificate at a REGISTERED restaurant, its owner's tick that everyone who handles food there
+ * holds a current one (vendor/food-handlers.ts): the certificate is optional there, the tick is what made it live. A
+ * home cook, or any other store selling prepared food, still needs the certificate itself.
+ */
+async function storeHolds(prisma: Db, ctx: GateContext, legacyCode: string, now: Date): Promise<boolean> {
+  if (await holdsValidDocument(prisma, ctx.ownerUserId, legacyCode, now)) return true;
+  if (legacyCode !== FOOD_HANDLER_CERT_DOC_TYPE || ctx.store === undefined || !foodHandlerTickApplies(ctx.store)) return false;
+  return storeAttested(prisma, ctx.ownerUserId, ctx.store.vendorId);
+}
+
+export async function gateVerdicts(prisma: Db, ctx: GateContext, categories: readonly GateCategory[], now = new Date()): Promise<GateVerdict[]> {
   const gates = await enforcedGates(prisma, ctx.countryCode, now);
   const validity = new Map<string, boolean>();
   const verdicts: GateVerdict[] = [];
@@ -61,7 +78,7 @@ export async function gateVerdicts(prisma: Db, ctx: { ownerUserId: string; count
     for (const gate of gates) {
       if (!gateApplies(gate, category)) continue;
       const code = gate.requiredDocType.legacyCode;
-      if (!validity.has(code)) validity.set(code, await holdsValidDocument(prisma, ctx.ownerUserId, code, now));
+      if (!validity.has(code)) validity.set(code, await storeHolds(prisma, ctx, code, now));
       verdicts.push({ gateCode: gate.code, category, enforcement: gate.enforcement, requiredDocType: code, requiredDisplayName: gate.requiredDocType.displayName, ok: validity.get(code)! });
     }
   }

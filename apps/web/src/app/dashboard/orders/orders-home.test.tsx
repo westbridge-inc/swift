@@ -78,7 +78,9 @@ function hubApi(opts: Opts = {}) {
     ] } };
     if (path === '/vendor/hours') return { body: { success: true, data: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })) } };
     if (path === '/vendor/qr') return { body: { success: true, data: { shortUrl: 'https://swift.test/s/SAMPLE', status: 'ACTIVE' } } };
-    if (path === '/vendor/subscription') return { body: { success: true, data: { status: 'ACTIVE', nextBillingDate: '2026-10-18T12:00:00Z' } } };
+    // [FEE-STATUS] As the API answers for a week past its date: its own words (feeStatus), never "Next bill <passed date>".
+    if (path === '/vendor/subscription') return { body: { success: true, data: { status: 'ACTIVE', nextBillingDate: '2026-10-18T12:00:00Z',
+      feeStatus: { state: 'DUE', headline: 'Payment due since 18 Oct 2026', detail: 'GY$15,000 to pay.', date: '2026-10-18T12:00:00.000Z' } } } };
     if (path === '/vendor/orders') return { body: { success: true, data: orders, meta: { total: orders.length } } };
     if (path.startsWith('/vendor/orders/')) return { body: { success: true, data: orders.find((o) => `/vendor/orders/${(o as { id: string }).id}` === path) ?? orders[0] } };
     return { status: 404, body: { success: false } };
@@ -162,9 +164,10 @@ describe('the Orders home copies the app', () => {
     expect(tile('My QR & number').textContent).toContain('Active');
     expect(tile('My QR & number').textContent).not.toContain('ACTIVE');
     await waitFor(() => expect(tile('Order history').textContent).toContain('31 recent orders'));
-    await waitFor(() => expect(tile('Billing').textContent).toMatch(/Next bill \d+ Oct/));
+    await waitFor(() => expect(tile('Billing').textContent).toContain('Payment due since 18 Oct 2026'));
     expect(tile('Billing').getAttribute('href')).toBe('/dashboard/weekly-fee');
-    expect(tile('Billing').textContent).toContain('Active');
+    expect(tile('Billing').textContent).toContain('Payment due');
+    expect(tile('Billing').textContent).not.toMatch(/Next bill|\bActive\b/);
     expect(tile('Billing').textContent).not.toContain('ACTIVE');
   });
 

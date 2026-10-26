@@ -107,8 +107,9 @@ describe('[R048-005] the plan applies once; a replay changes nothing', () => {
     // trades the research marks UNSURE held again as 2026-10-15.2 (R15), and the heavy-equipment operator
     // held too as 2026-10-16.1 (owner, 16 Oct); [ROLE-DOCS · owner 21 Oct] the mover and customer lists retired as
     // 2026-10-21.1, the own-name store lists added as 2026-10-21.2, and the solar installer's GEI licence as
-    // 2026-10-22.1 (production follows only when the owner signs a new seed plan; no boot check compares versions).
-    expect(desiredPlatformConfig().version).toBe('2026-10-22.1');
+    // 2026-10-22.1, and [FOOD-PERMIT · owner 24 Oct] a registered restaurant's food handler's certificate optional as
+    // 2026-10-24.1 (production follows only when the owner signs a new seed plan; no boot check compares versions).
+    expect(desiredPlatformConfig().version).toBe('2026-10-24.1');
   });
 
   it.each(['create', 'policy'] as const)('seeds owner-confirmed emergency numbers for the Guyana %s path', (path) => {

@@ -34,6 +34,7 @@ import { encryptBuffer, generateDek, getKeyProvider, resetKeyProviderForTests } 
 import { packCiphertext } from '../modules/verification/extraction-ledger';
 import { OPERATOR as OPERATOR_FACTS, OPERATOR_ADDRESS } from '../modules/legal/operator';
 import { wordFreeTag } from './helpers/fixture-ids';
+import { giveFoodHandlersTick } from './helpers/food-handlers-tick';
 
 grantSuiteCapability('ddl');
 
@@ -142,6 +143,9 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
 
   it('DOC-INV-27: once the business types are active, a store with an incomplete block cannot go live; complete it and it activates', async () => {
     const { userId, vendorId } = await store(3);
+    // [FOOD-PERMIT] a registered restaurant also needs its owner's food handlers tick: given up front, so the block
+    // alone decides below
+    await system(() => giveFoodHandlersTick(app.prisma, userId, vendorId));
     const checklist = await checklistFor(userId);
     for (const t of checklist.filter((x) => x !== 'owner_national_id')) await approved(userId, t);
     const beforeGate = await system(() => disclosureGateEngaged(app.prisma, 'GY'));

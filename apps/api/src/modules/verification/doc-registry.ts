@@ -798,6 +798,13 @@ export type RegistrationKind = (typeof REGISTRATION_KINDS)[number];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** [ROLE-DOCS · owner 21 Oct 2026] The signed "I trade under my own name" declaration. Registry text (DOC-INV-2). */
 export const OWN_NAME_DOC_TYPE = 'own_name_declaration';
+/** [FOOD-PERMIT · owner ruling 24 Oct 2026] A food handler's certificate. Required of a home cook (the self-declared
+ *  tier), a chef and a caterer; OPTIONAL for a registered restaurant, which ticks the statement below instead. */
+export const FOOD_HANDLER_CERT_DOC_TYPE = 'food_handler_cert';
+/** [FOOD-PERMIT · owner ruling 24 Oct 2026] A registered restaurant's owner ticks "Everyone who handles food here holds
+ *  a current food handler's certificate." (vendor/food-handlers.ts). Not a document and on no list: a statement in the
+ *  consent ledger, asked of the store by code, which the store status shows as a step. Registry text (DOC-INV-2). */
+export const FOOD_HANDLER_ATTESTATION_TYPE = 'food_handler_attestation';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 /** [VERIFY-DOCS · owner rulings 1–3, 6 Oct 2026] The character document: optional for movers (an approved, current one is

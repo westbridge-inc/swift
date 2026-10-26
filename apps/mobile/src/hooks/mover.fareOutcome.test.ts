@@ -77,7 +77,9 @@ describe('the rider action', () => {
   it('the door handover rides the same seam and accepts the failed outcomes explicitly', () => {
     // [MKT-F057] The customer-held door PIN rides the same body; the failed
     // outcomes still carry no PIN.
-    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current)");
+    // [L02 · row 56] ...and the stated door cash, only when the screen supplies it
+    // (behaviour: mover.doorCash.test.ts).
+    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}), ...doorCash }, current)");
     expect(hook).toContain('evidenceFix(owner)');
   });
 });

@@ -16,6 +16,7 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
+import { billDateLabel } from '@/lib/bill-date';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-1 pilot] One store, the whole story — and every action
@@ -368,7 +369,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                 <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
                 <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
                 {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
-                {sub.nextBillingDate ? <Row label="Next bill">{when(sub.nextBillingDate)}</Row> : null}
+                {sub.nextBillingDate ? <Row label={billDateLabel(sub.nextBillingDate)}>{when(sub.nextBillingDate)}</Row> : null}
               </dl>
             ) : (
               <p className="mc-muted">No subscription yet. It starts when the store goes live.</p>

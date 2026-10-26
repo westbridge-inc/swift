@@ -141,6 +141,14 @@ export async function publicPhoneAsked(tx: TxRaw, userId: string, vendorId: stri
   return row?.asked === true;
 }
 
+/** [FOOD-PERMIT] Does this person already hold a notice under this dedupe key? Read inside the caller's transaction
+ *  through the narrow action that already answers it (swift_owner_wall_notice_id); the caller reads plainly with the
+ *  wall off, like publicPhoneAsked. */
+export async function noticeHeld(tx: TxRaw, userId: string, dedupeKey: string): Promise<boolean> {
+  const [held] = await tx.$queryRaw<Array<{ id: string | null }>>`SELECT public.swift_owner_wall_notice_id(${userId}, ${dedupeKey}) AS id`;
+  return (held?.id ?? null) !== null;
+}
+
 /** [#1905 erasure] Remove every notice of a person being erased, from inside the erasure transaction (which
  *  holds their users row lock), whoever runs it: the person, an admin closing the account, the retry sweep.
  *  Returns how many. [row 622] The action refuses (throws) unless the account carries the erasure tombstone,

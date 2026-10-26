@@ -24,10 +24,11 @@ export function documentConsentOnRecord(status: unknown): DocumentConsentRecord 
   return { given: true, givenAt: typeof givenAt === 'string' && !Number.isNaN(Date.parse(givenAt)) ? givenAt : null };
 }
 
-/** Under a tick shown from the record: it is the person's own, and when they gave it. */
+/** Under a tick shown from the record: it is the person's own, and when they gave it — the day in Guyana, like the
+ *  other partner dates (lib/weeklyFee), whatever zone the phone is set to. */
 export function documentConsentGivenLine(givenAt: string | null): string {
   if (!givenAt) return 'You ticked this before.';
-  const on = new Date(givenAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const on = new Date(givenAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' });
   return `You ticked this on ${on}.`;
 }
 

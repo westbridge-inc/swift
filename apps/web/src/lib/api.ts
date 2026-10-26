@@ -104,6 +104,8 @@ export interface StorefrontSeller {
   payment: { cash: true; storeMmg: boolean };
   refundRule: string | null;
   statutoryRights: string;
+  /** [FOOD-PERMIT] a current food handler's certificate is on file (absent from an older API) */
+  foodHandlerCertificate?: boolean;
 }
 
 export interface StorefrontDetail extends StorefrontSummary {
