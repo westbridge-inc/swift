@@ -23,7 +23,10 @@ function sentence(reason: string): string {
 export function storeVatApprovedNotice(v: { registeredName: string; number: string; effectiveFrom: Date; ratePercent?: number }): { title: string; body: string } {
   return {
     title: 'Your VAT is approved',
-    body: `A person at Swift checked your GRA VAT certificate. From ${calendarDay(v.effectiveFrom)}, your prices include VAT at `
+    // [REVIEW-F #2102 S4-1] Approval needs the effective date to have arrived, so it is often in the past: the date is the
+    // certificate's, and VAT is in the store's prices from now on (orders placed before approval carry none).
+    body: `A person at Swift checked your GRA VAT certificate. Your certificate is in effect from ${calendarDay(v.effectiveFrom)}. `
+      + 'From now on, your prices include VAT at '
       + `${v.ratePercent ?? STORE_VAT_RATE_PERCENT}% and your receipts say “VAT charged by ${v.registeredName} · VAT reg. no. ${v.number}”. `
       + 'Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
   };
