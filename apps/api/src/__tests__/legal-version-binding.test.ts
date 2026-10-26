@@ -229,9 +229,9 @@ const PUBLISHED: Record<
     driver_agreement: 'bfbfc55fb330b4d6e095ec3754c76570a8c128d460a7a59b3c4c0c586161b785',
     vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
   },
-  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · NON-material] Terms s.2: a customer needs no ID to place
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · NON-material] Terms s.3: a customer needs no ID to place
   // an Order or take a taxi ride (the app asks for one only after repeated failed deliveries or payments, or for a
-  // high-value promotion); Privacy s.2 "(partners and, where they add one, customers)" and s.3 the ID a customer adds;
+  // high-value promotion); Privacy s.1 "(partners and, where they add one, customers)" and s.3 the ID a customer adds;
   // Child Safety s.4 drops "higher-trust actions (taxi rides and larger orders) need a government ID on file".
   // Nothing else changed: putting those words and 22 October back reproduces all four 2026-10-22.1 pins exactly (and
   // Child Safety's served text). The date re-pins the two agreements.
