@@ -53,6 +53,8 @@ interface ItemRow {
   totalOrdered: number;
   sortOrder: number;
   optionGroups: OptionGroupRow[];
+  /** [STORE-VAT] The store's class for the item; shipped only for a store whose VAT a person approved. */
+  vatClass?: string;
 }
 
 interface CategoryRow {
@@ -92,7 +94,7 @@ function publicOptionGroup(g: OptionGroupRow) {
   };
 }
 
-export function publicStorefrontItem(item: ItemRow) {
+export function publicStorefrontItem(item: ItemRow, vat = false) {
   // Zero markup — customers pay the vendor base price (revenue = subscriptions).
   const price = Number(item.basePrice);
   return {
@@ -117,17 +119,20 @@ export function publicStorefrontItem(item: ItemRow) {
     totalOrdered: item.totalOrdered,
     sortOrder: item.sortOrder,
     optionGroups: item.optionGroups.map(publicOptionGroup),
+    // [STORE-VAT · owner O-5] Only on an approved VAT store's page: the price above INCLUDES VAT for a STANDARD item
+    // (the screen shows "incl. VAT"); a ZERO_RATED or EXEMPT item carries none. Absent everywhere else.
+    ...(vat ? { vatClass: item.vatClass ?? 'STANDARD' } : {}),
   };
 }
 
-export function publicStorefrontCategory(cat: CategoryRow) {
+export function publicStorefrontCategory(cat: CategoryRow, vat = false) {
   return {
     id: cat.id,
     name: cat.name,
     description: cat.description,
     imageUrl: servedPhotoAddress(cat.imageUrl),
     sortOrder: cat.sortOrder,
-    items: cat.items.map(publicStorefrontItem),
+    items: cat.items.map((item) => publicStorefrontItem(item, vat)),
   };
 }
 
