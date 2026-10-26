@@ -201,7 +201,7 @@ describe('own checkout reopen affordance', () => {
     const c = (ref: string) => ({ ref, status: 'OPEN', expiresAt: '2099-10-08T23:30:00Z', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' });
     mockApi(({ url }) => {
       const read = url.pathname.match(/mmg-checkout\/([^/]+)$/);
-      if (read) return { body: { success: true, data: c(read[1]) } };
+      if (read) return { body: { success: true, data: c(read[1] ?? '') } };
       return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c(latest), reopenableMmgCheckout: { ref: 'own-open', expiresAt: '2099-10-08T23:30:00Z' } } } };
     });
     const view = renderWithQuery(<WeeklyFee family="vendor" />);
