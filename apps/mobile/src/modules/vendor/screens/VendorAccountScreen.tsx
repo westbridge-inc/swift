@@ -825,7 +825,9 @@ function StaffSection() {
         <PillButton
           label="Remove"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={removeStaff.isPending}
           onPress={() => {
+            if (removeStaff.isPending) return;
             const id = removing!.id;
             setRemoving(null);
             removeStaff.mutate(id);

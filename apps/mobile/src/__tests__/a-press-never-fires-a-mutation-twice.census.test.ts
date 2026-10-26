@@ -369,6 +369,7 @@ const PENDING_ELSEWHERE: Record<string, string> = {};
 /** Reviewed: a second fire is harmless or impossible. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {
   'modules/cart/screens/CartScreen.tsx | setTip.mutate <- <Pressable onPress>': 'Choosing Pickup sets the tip to 0 (a value, not a toggle): a second identical request leaves the same state, and checkout submits zero itself.',
+  'modules/vendor/screens/VendorOps.tsx | orderAction.mutate <- <VendorOrderCard onAction>': 'Held per order: each card gets busy={pendingIds.has(o.id)}, and usePendingOrderIds (hooks/vendorops.ts) reads the pending ORDER_ACTION_KEY mutations (useMutationState, status pending), which this scanner does not follow into another file; VendorOrderCard disables and spins its step buttons on busy. A repeated step is also refused by the server (the order has already moved on).',
 };
 
 /** Calls the scanner cannot trace to a press, checked by hand. Every entry must still match an untraced call. */
@@ -376,6 +377,9 @@ const UNTRACED: Record<string, string> = {
   'modules/cart/screens/CartScreen.tsx | placeOrder.mutate': 'onOrder is also kept in a ref (onOrderLatest) for the pickup-confirm Alert button (the system dialog fires once); its own Place order press is judged, and usePlaceOrder refuses a second order while one is in flight (its inFlight ref).',
   'modules/chat/screens/ConversationScreen.tsx | reportContent.mutate': 'An ActionSheet item (object onPress): kit/action-sheet runs onClose() before the item, so the sheet and its buttons are gone after the first tap.',
   'modules/shop/screens/RestaurantScreen.tsx | reportContent.mutate': 'An ActionSheet item (object onPress): the item closes the sheet first (setReportOpen(false)) and kit/action-sheet runs onClose() before it.',
+  'modules/mover/screens/ActiveJobScreen.tsx | riderAct.mutate': 'Handed to DoorCash as its submit prop with pending={riderAct.isPending}: DoorCash returns early while pending (its confirm) and its Confirm buttons are loading={pending}.',
+  'modules/mover/screens/MoverHomeScreen.tsx | goOnline.mutateAsync': 'Called inside the options object handed to prepareMoverOnline by startOnline, which returns early on busyToggle (preparingOnline, set true first, or goOnline/goOffline pending); the GO control is also disabled={busyToggle}.',
+  'modules/vendor/screens/VendorOrderDetailScreen.tsx | returnReceived.mutate': 'An object action handed to CustodyRecoveryNotice with pending: returnReceived.isPending; the notice renders it as a PillButton loading and disabled on pending.',
 };
 
 const RESULT = census(Object.fromEntries(sources(SRC).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')])));

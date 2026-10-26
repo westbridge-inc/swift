@@ -27,6 +27,7 @@ import {
 import { DAY_LABELS, GUTTER, InlineInput, SubHeader } from '../shared';
 import { vendorApi } from '../../../services/api';
 import { toast } from '../../../kit/toast';
+import { useRowHold } from '../../../lib/useRowHold';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import {
   useVendorProfile,
@@ -104,10 +105,12 @@ function ModifiersSection({ item }: { item: any }) {
     setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
   };
 
+  // [BUG-GUARDS C2] Each option's x waits for its own delete (a second tap on it is ignored); another option's x goes through.
+  const holdRow = useRowHold();
   const removeOption = (groupId: string, optionId: string) => {
     if (readOnly) return;
     const owner = requireAuthSessionSnapshot();
-    delOption.mutate({ id: optionId, authSession: owner }, {
+    holdRow(optionId, () => delOption.mutateAsync({ id: optionId, authSession: owner }, {
       onSuccess: () => {
         try {
           requireAuthSessionForPrincipal(owner);
@@ -118,7 +121,7 @@ function ModifiersSection({ item }: { item: any }) {
           // The editor belongs to an older account and is being unmounted.
         }
       },
-    });
+    }).catch(() => undefined)); // a failed delete is told by the app's mutation error notice; the row is released for another try
   };
 
   return (
@@ -229,8 +232,9 @@ function ModifiersSection({ item }: { item: any }) {
         <PillButton
           label="Delete"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={delGroup.isPending}
           onPress={() => {
-            if (readOnly) return;
+            if (readOnly || delGroup.isPending) return;
             const gid = removeGroupId!;
             setRemoveGroupId(null);
             const owner = requireAuthSessionSnapshot();
