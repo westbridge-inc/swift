@@ -72,6 +72,7 @@ const PRIVATE_PAGES = [
   'dashboard/insights/page.tsx',
   'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
+  'dashboard/settings/vat-report/page.tsx', // [O-5] a store's own VAT report (its order numbers and VAT figures)
   'dashboard/weekly-fee/page.tsx',
   'portal/page.tsx',
   'portal/account/page.tsx',
