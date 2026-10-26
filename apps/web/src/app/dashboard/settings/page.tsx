@@ -11,6 +11,7 @@ import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
+import { FoodHandlersCard } from './food-handlers-card';
 import { StorePhotosCard } from './store-photos-card';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -283,6 +284,8 @@ export default function SettingsPage() {
 
       <StorePhotosCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
+      {/* [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's owner ticks for its food handlers */}
+      <FoodHandlersCard storeId={storeId} isOwner={isOwner} vendorType={p?.vendorType} />
       <SubscriptionCard isOwner={isOwner} />
       <SettlementsCard />
       <HoursEditor />

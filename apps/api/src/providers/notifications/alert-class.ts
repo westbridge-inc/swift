@@ -113,7 +113,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
     'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'ad_team_invite', 'review_response', 'rating_removed', 'category_request_resolved',
-    'category_backfill_review', 'vendor_tier_promoted', 'vendor_needs_public_phone', 'support_update', 'store_pin_moved',
+    'category_backfill_review', 'vendor_tier_promoted', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
     'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
     // Operations pages (admins)
