@@ -118,12 +118,12 @@ describe('[O-5] the certificate', () => {
     expect(screen.queryByRole('button', { name: 'Choose the certificate' })).toBeNull();
   });
 
-  it('the consent words are the API’s recorded document_v1 words, word for word', () => {
+  it('the consent words are the API’s recorded document_v1 words, word for word', async () => {
     const api = readFileSync(join(process.cwd(), '..', 'api', 'src', 'modules', 'verification', 'upload-consent.ts'), 'utf8');
-    const card = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'settings', 'vat-card.tsx'), 'utf8');
     const apiText = /document_v1: \{[\s\S]*?text: '([^']+)'/.exec(api)?.[1];
-    const label = /<span>\s*(I consent to Swift processing this document[\s\S]*?)<\/span>\s*<\/label>/.exec(card)?.[1]
-      ?.replace(/\{' '\}/g, ' ').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    // Read from the card as the store owner sees it (the tick's whole label, the privacy-notice link's words included).
+    setup(owner, view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
+    const label = (await screen.findByRole('checkbox')).closest('label')?.textContent?.replace(/\s+/g, ' ').trim();
     expect(apiText).toBeTruthy();
     expect(label).toBe(apiText);
   });
