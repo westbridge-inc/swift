@@ -13,6 +13,12 @@
  *  - tenant B's owner gets 404 from all five routes for the production
  *    store's option group and option, and nothing about them changes;
  *  - control: the production store's own owner still edits them (200).
+ *
+ * [REVIEW-G S4-1 on #2072] The wall hides another TENANT before the store
+ * check is reached, so the case above never pins the store check itself, the
+ * one guard against a SAME-tenant IDOR. A second store in the production
+ * tenant (Charlie) is the attacker there: its owner sees the same tenant's
+ * rows, and only the lookup's store match turns Alpha's ids into 404.
  * Synthetic fixtures only.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -45,8 +51,8 @@ let app: FastifyInstance;
 let tenant: TenantModule;
 let prismaModule: typeof import('../plugins/prisma');
 
-const ids = { aOwnerUser: '', bOwnerUser: '', aVendorOwner: '', bVendorOwner: '', group: '', option: '' };
-const tokens = { a: '', b: '' };
+const ids = { aOwnerUser: '', bOwnerUser: '', cOwnerUser: '', aVendorOwner: '', bVendorOwner: '', cVendorOwner: '', group: '', option: '' };
+const tokens = { a: '', b: '', c: '' };
 
 async function sessionFor(userId: string, role: string): Promise<string> {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
@@ -84,8 +90,10 @@ beforeAll(async () => {
 
   const a = await store(PRODUCTION, 'Alpha');
   const b = await store(TENANT_B, 'Bravo');
+  const c = await store(PRODUCTION, 'Charlie');
   ids.aOwnerUser = a.user.id; ids.aVendorOwner = a.vendorOwner.id;
   ids.bOwnerUser = b.user.id; ids.bVendorOwner = b.vendorOwner.id;
+  ids.cOwnerUser = c.user.id; ids.cVendorOwner = c.vendorOwner.id;
   const category = await owner.category.create({ data: { vendorId: a.vendor.id, name: 'Synthetic Menu' } });
   const item = await owner.item.create({ data: { vendorId: a.vendor.id, categoryId: category.id, name: 'Synthetic Pepperpot', basePrice: 1500 } });
   const group = await owner.optionGroup.create({
@@ -120,6 +128,7 @@ beforeAll(async () => {
   await app.ready();
   tokens.a = await sessionFor(ids.aOwnerUser, 'VENDOR_OWNER');
   tokens.b = await sessionFor(ids.bOwnerUser, 'VENDOR_OWNER');
+  tokens.c = await sessionFor(ids.cOwnerUser, 'VENDOR_OWNER');
 }, 120_000);
 
 afterAll(async () => {
@@ -131,8 +140,8 @@ afterAll(async () => {
     for (const k of ENV_KEYS) {
       if (priorEnv[k] === undefined) delete process.env[k]; else process.env[k] = priorEnv[k];
     }
-    const users = [ids.aOwnerUser, ids.bOwnerUser].filter(Boolean);
-    const vendorOwners = [ids.aVendorOwner, ids.bVendorOwner].filter(Boolean);
+    const users = [ids.aOwnerUser, ids.bOwnerUser, ids.cOwnerUser].filter(Boolean);
+    const vendorOwners = [ids.aVendorOwner, ids.bVendorOwner, ids.cVendorOwner].filter(Boolean);
     await owner.option.deleteMany({ where: { optionGroup: { item: { vendor: { ownerId: { in: vendorOwners } } } } } });
     await owner.optionGroup.deleteMany({ where: { item: { vendor: { ownerId: { in: vendorOwners } } } } });
     await owner.item.deleteMany({ where: { vendor: { ownerId: { in: vendorOwners } } } });
@@ -150,17 +159,30 @@ afterAll(async () => {
 const call = (method: 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: Record<string, unknown>) =>
   app.inject({ method, url: `/api/v1/vendor${url}`, headers: { authorization: `Bearer ${token}` }, ...(payload === undefined ? {} : { payload }) });
 
+const ROUTES = [
+  ['PUT /option-groups/:id', 'PUT', () => `/option-groups/${ids.group}`, { name: 'Renamed by another store' }],
+  ['DELETE /option-groups/:id', 'DELETE', () => `/option-groups/${ids.group}`, undefined],
+  ['POST /option-groups/:groupId/options', 'POST', () => `/option-groups/${ids.group}/options`, { name: 'Added by another store', additionalPrice: 1 }],
+  ['PUT /options/:id', 'PUT', () => `/options/${ids.option}`, { name: 'Renamed by another store' }],
+  ['DELETE /options/:id', 'DELETE', () => `/options/${ids.option}`, undefined],
+] as const;
+
 describe('[Row 300 · T3] option routes on the walled login: another tenant gets 404, never 500', () => {
-  it.each([
-    ['PUT /option-groups/:id', 'PUT', () => `/option-groups/${ids.group}`, { name: 'Renamed by tenant B' }],
-    ['DELETE /option-groups/:id', 'DELETE', () => `/option-groups/${ids.group}`, undefined],
-    ['POST /option-groups/:groupId/options', 'POST', () => `/option-groups/${ids.group}/options`, { name: 'Added by tenant B', additionalPrice: 1 }],
-    ['PUT /options/:id', 'PUT', () => `/options/${ids.option}`, { name: 'Renamed by tenant B' }],
-    ['DELETE /options/:id', 'DELETE', () => `/options/${ids.option}`, undefined],
-  ] as const)('%s', async (_label, method, url, payload) => {
+  it.each(ROUTES)('%s', async (_label, method, url, payload) => {
     const before = await snapshot();
 
     const res = await call(method, url(), tokens.b, payload);
+
+    expect(res.statusCode, res.body).toBe(404);
+    expect(res.json().success).toBe(false);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  // [REVIEW-G S4-1 on #2072] Same tenant, other store: the wall lets the rows through, the store check answers.
+  it.each(ROUTES)('another store in the SAME tenant: %s answers 404 and changes nothing', async (_label, method, url, payload) => {
+    const before = await snapshot();
+
+    const res = await call(method, url(), tokens.c, payload);
 
     expect(res.statusCode, res.body).toBe(404);
     expect(res.json().success).toBe(false);

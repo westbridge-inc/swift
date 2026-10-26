@@ -85,6 +85,18 @@ describe('the card self-check', () => {
     expect(gw.paths).not.toContain('/api/spi/payment');
   });
 
+  it('[REVIEW-G S4-2 on #1524] the sandbox page record the check leaves in Redis is gone within an hour (a named TTL), not kept for the 30-day card record retention', async () => {
+    const before = new Set(await redis.keys('ptz:selfcheck:s:*'));
+    const lines = await runPaymentsSelfCheck(['card'], CARD_ENV, { redis, fetch: gateway().fetch });
+    expect(formatSelfCheck(lines)).toContain('OK   card: hosted payment page set up');
+    const made = (await redis.keys('ptz:selfcheck:s:*')).filter((k) => !before.has(k));
+    expect(made).toHaveLength(1);
+    const ttl = await redis.pttl(made[0]!);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(60 * 60_000);
+    expect(await redis.hmget(made[0]!, 'spiToken', 'redirectData', 'completion')).toEqual([null, null, 'abandoned']);
+  });
+
   it('refused credentials, an unreachable gateway, an unknown page: FAIL lines that never carry a value', async () => {
     const gw = gateway({ alive: false, credentials: false, page: false });
     const printed = formatSelfCheck(await runPaymentsSelfCheck(['card'], CARD_ENV, { redis, fetch: gw.fetch }));

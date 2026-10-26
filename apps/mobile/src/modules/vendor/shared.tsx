@@ -764,7 +764,8 @@ export function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => voi
   const behind = !blocked && (sub.isInGracePeriod || status === 'PAST_DUE');
   if (!blocked && !behind) return null;
   const due = numericFact(sub.amountDueGyd);
-  const deadline = sub.gracePeriodEnd ? fmtDate(sub.gracePeriodEnd) : null;
+  // [FEE-STATUS] A grace deadline that has passed is never a "due by" date.
+  const deadline = sub.gracePeriodEnd && new Date(sub.gracePeriodEnd).getTime() > Date.now() ? fmtDate(sub.gracePeriodEnd) : null;
 
   return (
     <View
