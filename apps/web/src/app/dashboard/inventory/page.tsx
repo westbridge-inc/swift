@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
 import { getCategories, getItems, getProfile, money, setItemAvailability, updateItem, type CatalogItem, type VatClass } from '@/lib/vendor-api';
-import { getStoreVat } from '@/lib/store-vat-api';
+import { getStoreVat } from '@/lib/store-vat-read';
 import { adjustStock } from '@/lib/stock-adjust';
 import { Pictogram } from '@/components/glyphs';
 import { DataUnavailable } from '@/components/data-unavailable';
@@ -13,7 +13,8 @@ import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
 import { instantSwitch } from '@/lib/instant-toggle';
-import { GRA_VAT_URL, vatClassWords } from '@/lib/store-vat-words';
+import { GRA_VAT_URL } from '@/lib/gra-vat-url';
+import { vatClassWords } from './vat-class-words';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 

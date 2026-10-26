@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
 import * as vendorApi from '@/lib/vendor-api';
 import * as storeVatApi from '@/lib/store-vat-api';
-import type { StoreVatView } from '@/lib/store-vat-api';
+import * as storeVatRead from '@/lib/store-vat-read';
+import type { StoreVatView } from '@/lib/store-vat-read';
 import { VatCard, vatStatusLine } from './vat-card';
 
 // ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ const manager = { myRole: 'MANAGER', vendors: [{ id: 'store-1', name: 'Sample Sh
 
 function setup(profile: unknown, vat: StoreVatView) {
   vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile as never);
-  vi.spyOn(storeVatApi, 'getStoreVat').mockResolvedValue(vat);
+  vi.spyOn(storeVatRead, 'getStoreVat').mockResolvedValue(vat);
   return renderWithQuery(<VatCard storeId="store-1" />);
 }
 afterEach(() => { vi.restoreAllMocks(); });
@@ -34,13 +35,13 @@ describe('[O-5] who sees the VAT card', () => {
   it('a manager never sees it (the business’s tax registration is the owner’s to give)', async () => {
     setup(manager, view());
     await waitFor(() => expect(vendorApi.getProfile).toHaveBeenCalled());
-    expect(storeVatApi.getStoreVat).not.toHaveBeenCalled();
+    expect(storeVatRead.getStoreVat).not.toHaveBeenCalled();
     expect(screen.queryByText('VAT')).toBeNull();
   });
 
   it('hidden while Swift’s VAT switch is off and the store never claimed VAT', async () => {
     setup(owner, view({ available: false }));
-    await waitFor(() => expect(storeVatApi.getStoreVat).toHaveBeenCalled());
+    await waitFor(() => expect(storeVatRead.getStoreVat).toHaveBeenCalled());
     expect(screen.queryByText('Is your business VAT-registered with the GRA?')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'VAT' })).toBeNull();
   });

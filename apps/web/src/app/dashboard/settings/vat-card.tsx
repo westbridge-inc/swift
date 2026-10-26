@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getProfile } from '@/lib/vendor-api';
-import { getStoreVat, sendVatCertificate, updateStoreVat, type StoreVatView } from '@/lib/store-vat-api';
+import { sendVatCertificate, updateStoreVat } from '@/lib/store-vat-api';
+import { getStoreVat, type StoreVatView } from '@/lib/store-vat-read';
 import { LEGAL_URL } from '@/lib/api';
 import { storeKey } from '@/lib/store-scope';
-import { GRA_VAT_URL, calendarDay } from '@/lib/store-vat-words';
+import { GRA_VAT_URL } from '@/lib/gra-vat-url';
+import { calendarDay } from '@/lib/store-vat-words';
 
 
 
