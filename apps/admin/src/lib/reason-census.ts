@@ -72,6 +72,12 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
   { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /verification/:id/revoke', helper: 'revokeDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  // [STORE-VAT · owner O-5] A store's VAT: the reviewer types what the GRA certificate says; a refusal or withdrawal says why.
+  { route: 'POST /store-vat/:vendorId/approve', helper: 'approveStoreVat',
+    args: ['vnd_1', { certificateDocId: 'doc_1', vatNumber: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01', nameMatchesStore: true }],
+    requiredBodyKeys: ['certificateDocId', 'vatNumber', 'registeredName', 'effectiveFrom', 'nameMatchesStore'] },
+  { route: 'POST /store-vat/:vendorId/reject', helper: 'rejectStoreVat', args: ['vnd_1'], requiredBodyKeys: ['reason'] },
+  { route: 'POST /store-vat/:vendorId/revoke', helper: 'revokeStoreVat', args: ['vnd_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
   { route: 'PUT /staff/:userId/catalogue-approver', helper: 'setCatalogueApprover', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 

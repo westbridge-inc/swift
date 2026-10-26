@@ -4,6 +4,7 @@ import { renderWithQuery } from '@/test/test-utils';
 import { setSelectedStore } from '@/lib/auth';
 import * as vatReport from '@/lib/vat-report';
 import * as vendorApi from '@/lib/vendor-api';
+import * as storeVatRead from '@/lib/store-vat-read';
 import SettingsPage from './page';
 import { storeCheckLabel } from './store-check';
 import { feeDate } from '@/lib/weekly-fee';
@@ -30,6 +31,7 @@ function stubReads() {
   vi.spyOn(vendorApi, 'getSubscription').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(vendorApi, 'getCashSettlements').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(vendorApi, 'getHours').mockReturnValue(new Promise(() => {}) as never); vi.spyOn(vatReport, 'getStoreVatStatus').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT PR4] the VAT report link
+  vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card
 }
 
 afterEach(() => {
@@ -90,6 +92,7 @@ function stubSettings({ role = 'OWNER', subscription, settlements }: { role?: st
   const sub = vi.spyOn(vendorApi, 'getSubscription').mockImplementation((subscription ?? (() => new Promise(() => {}))) as never);
   const cash = vi.spyOn(vendorApi, 'getCashSettlements').mockImplementation((settlements ?? (() => Promise.resolve({ unsettled: [], summary: { owed: 0, count: 0 } }))) as never);
   vi.spyOn(vendorApi, 'getHours').mockReturnValue(new Promise(() => {}) as never); vi.spyOn(vatReport, 'getStoreVatStatus').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT PR4] the VAT report link
+  vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card
   return { sub, cash };
 }
 
@@ -271,6 +274,7 @@ describe('dashboard settings: operating hours (U50)', () => {
     vi.spyOn(vendorApi, 'getCashSettlements').mockReturnValue(new Promise(() => {}) as never);
     vi.spyOn(vendorApi, 'getHours').mockResolvedValue([{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00', isClosed: false }] as never);
     vi.spyOn(vatReport, 'getStoreVatStatus').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT PR4] the VAT report link
+    vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card
     const put = vi.spyOn(vendorApi, 'putHours')
       .mockRejectedValueOnce(new Error('Hours could not be saved'))
       .mockResolvedValue({} as never);
