@@ -27,14 +27,29 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 /** [S4] "1 job", never "1 jobs". */
 const jobsLabel = (n: number) => `${n} ${n === 1 ? 'job' : 'jobs'}`;
 
-/** [P36 · 13d / W3] The four windows the phone shows, for one role. */
-function SummaryTiles({ s }: { s: EarningsSummary }) {
+/** [Board 13a "CASH COLLECTED"] This week's cash kept from cash jobs, as the server sent it; undefined (older API, or
+ *  junk) leaves the tile out — never a guessed $0. */
+function cashThisWeek(s: EarningsSummary): number | undefined {
+  const v = s.cashInHand?.thisWeek;
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/** [P36 · 13d / W3] The four windows the phone shows, for one role, and the phone's CASH COLLECTED tile (13a). */
+function SummaryTiles({ s, role }: { s: EarningsSummary; role: 'rider' | 'driver' }) {
+  const cash = cashThisWeek(s);
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <Stat label="Today" value={money(s.today.total)} sub={jobsLabel(s.today.count)} />
       <Stat label="This week" value={money(s.thisWeek.total)} sub={jobsLabel(s.thisWeek.count)} />
       <Stat label="This month" value={money(s.thisMonth.total)} sub={jobsLabel(s.thisMonth.count)} />
       <Stat label="All time" value={money(s.allTime.total)} sub={jobsLabel(s.allTime.count)} />
+      {cash !== undefined && (
+        <Stat
+          label="Cash collected"
+          value={money(cash)}
+          sub={role === 'driver' ? 'Cash fares this week' : 'Kept this week after paying stores'}
+        />
+      )}
     </div>
   );
 }
@@ -165,14 +180,14 @@ export default function PortalHome() {
       {isRider && summary.isError && (
         <DataUnavailable what="your earnings" error={summary.error} onRetry={() => void summary.refetch()} />
       )}
-      {isRider && s && <SummaryTiles s={s} />}
+      {isRider && s && <SummaryTiles s={s} role="rider" />}
       {isRider && <StatementButton role="rider" label={isDriver ? 'Get delivery earnings statement' : 'Get earnings statement'} />}
 
       {isRider && isDriver && <h2 className="sw-heading">Taxi rides</h2>}
       {isDriver && driverEarn.isError && (
         <DataUnavailable what="your taxi earnings" error={driverEarn.error} onRetry={() => void driverEarn.refetch()} />
       )}
-      {isDriver && driverEarn.data && <SummaryTiles s={driverEarn.data} />}
+      {isDriver && driverEarn.data && <SummaryTiles s={driverEarn.data} role="driver" />}
       {isDriver && <StatementButton role="driver" label={isRider ? 'Get taxi earnings statement' : 'Get earnings statement'} />}
 
       {/* [W-10] `settlements.data?.unsettled ?? []` made a failed read look

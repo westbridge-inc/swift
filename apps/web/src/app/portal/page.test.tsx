@@ -197,3 +197,47 @@ describe('[P36] the taxi driver office matches the phone', () => {
     expect(tab.location.href).toBe('about:blank');
   });
 });
+
+// ---------------------------------------------------------------------------
+// [Board 13a "CASH COLLECTED" · owner 25 Oct 22:33Z] The office mirrors the phone's fourth tile: this week's cash the
+// mover kept from cash jobs, the server's cashInHand figure (never computed here), worded per role, and left out when
+// an older API sends nothing — never a guessed $0.
+// ---------------------------------------------------------------------------
+function cashOffice(roles: { rider: boolean; driver: boolean }, cash: { rider?: unknown; driver?: unknown }) {
+  return mockApi(({ url }) => {
+    const path = url.pathname;
+    if (path === '/api/v1/rider/profile') return roles.rider ? { body: { data: { id: 'rider-1' } } } : { status: 404, body: { error: 'No rider profile' } };
+    if (path === '/api/v1/driver/profile') return roles.driver ? { body: { data: { id: 'driver-1' } } } : { status: 404, body: { error: 'No driver profile' } };
+    if (path === '/api/v1/rider/earnings/summary') return { body: { data: { ...windows(1000), ...(cash.rider === undefined ? {} : { cashInHand: cash.rider }) } } };
+    if (path === '/api/v1/driver/earnings/summary') return { body: { data: { ...windows(1500), ...(cash.driver === undefined ? {} : { cashInHand: cash.driver }) } } };
+    if (path === '/api/v1/rider/subscription' || path === '/api/v1/driver/subscription') return { body: { data: { status: 'ACTIVE', weeklyRate: '8000.00' } } };
+    if (path === '/api/v1/rider/cash-settlements') return { body: { data: { unsettled: [], settled: [], summary: { owed: 0, count: 0 } } } };
+    throw new Error(`Unexpected request: ${path}`);
+  });
+}
+
+describe('[board 13a] the office shows CASH COLLECTED like the phone', () => {
+  it("a rider: this week's cash kept after paying stores, from the server's figure", async () => {
+    cashOffice({ rider: true, driver: false }, { rider: { today: 700, thisWeek: 2300, thisMonth: 2400, allTime: 2800 } });
+    renderWithQuery(<PortalHome />);
+    const label = await screen.findByText('Cash collected');
+    expect(label.parentElement?.textContent).toContain('$2,300');
+    expect(label.parentElement?.textContent).toContain('Kept this week after paying stores');
+  });
+
+  it("a driver: this week's cash fares", async () => {
+    cashOffice({ rider: false, driver: true }, { driver: { today: 0, thisWeek: 0, thisMonth: 0, allTime: 0 } });
+    renderWithQuery(<PortalHome />);
+    const label = await screen.findByText('Cash collected');
+    expect(label.parentElement?.textContent).toContain('$0');
+    expect(label.parentElement?.textContent).toContain('Cash fares this week');
+  });
+
+  it('an older API that sends no figure (or junk) shows no tile, never $0', async () => {
+    cashOffice({ rider: true, driver: true }, { driver: { thisWeek: 'n/a' } });
+    renderWithQuery(<PortalHome />);
+    expect(await screen.findByRole('heading', { name: 'Taxi rides' })).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('$1,500')).toBeTruthy());
+    expect(screen.queryByText('Cash collected')).toBeNull();
+  });
+});
