@@ -57,10 +57,14 @@ function openAt(url: string) {
   (window as unknown as { happyDOM: { setURL(_u: string): void } }).happyDOM.setURL(url);
 }
 
+/** Every link on the page whose HOST is a store (parsed, never a substring match). */
+const STORE_HOSTS = new Set(['apps.apple.com', 'play.google.com']);
 function storeHrefs(container: HTMLElement): string[] {
   return [...container.querySelectorAll('a')]
     .map((a) => a.getAttribute('href') ?? '')
-    .filter((href) => href.includes('apps.apple.com') || href.includes('play.google.com'));
+    .filter((href) => {
+      try { return STORE_HOSTS.has(new URL(href, 'https://swiftgy.com').hostname); } catch { return false; }
+    });
 }
 
 afterEach(() => {
