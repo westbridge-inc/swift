@@ -434,6 +434,17 @@ export type DecisionWithin = (tx: Prisma.TransactionClient, decided: Verificatio
  *  reviewer-typed identity capture (which runs on the system login, in its own transaction). */
 export const APPROVAL_TAIL = 'APPROVAL_TAIL';
 
+/**
+ * [STORE-VAT · REVIEW-F #2085 S4] ONE door for a VAT certificate decision: the Store VAT decision
+ * (store-vat-decisions.ts), where the reviewer types the VAT number, the registered name and the date the certificate
+ * shows, and the store's VAT and the certificate are decided together. The generic document decisions refuse it.
+ */
+function assertStoreVatDoor(docType: string, decision: { storeVatDecision?: true }): void {
+  if (docType === VAT_CERTIFICATE_DOC_TYPE && decision.storeVatDecision !== true) {
+    throw new AppError(409, 'DECIDE_IN_STORE_VAT', 'Decide a VAT certificate in Store VAT, where you type the VAT number, the registered name and the date it shows.');
+  }
+}
+
 /** The words of the decision notices — one place, for the in-transaction and the direct sends. */
 /** [STORE-VAT] The words a notice uses for a document type ("VAT", not "vat", for the store's VAT certificate). */
 function docTypeWords(docType: string): string {
@@ -1151,7 +1162,7 @@ export class VerificationService {
   // Manual review queue (admin)
   // -------------------------------------------------------------------------
 
-  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview, typed: ReviewerTypedInput = {}, decision: { within?: DecisionWithin } = {}) {
+  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview, typed: ReviewerTypedInput = {}, decision: { within?: DecisionWithin; storeVatDecision?: true } = {}) {
     // [DOC-1 §21.1 · P21] No approvals without the key service (production): fail closed.
     assertKeyServiceForAccess('approval');
     // [A-19] Read the candidate first: the expiry decision needs the document's
@@ -1162,6 +1173,7 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    assertStoreVatDoor(candidate.docType, decision);
     // [DOC-1 §8.6 · R16] Recusal before anything the reviewer typed is judged: a recused reviewer is told so, never
     // asked for a certificate's year or a registration's kind first. (The decision boundary checks it again.)
     await assertNotRecused(this.prisma, adminId, candidate.userId);
@@ -1253,11 +1265,15 @@ export class VerificationService {
           documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
         } });
       }
-      const notice = await insertNoticeFor(tx, {
-        userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
-        data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
-      });
-      this.projectionNotices.get(tx)?.push(notice.id);
+      // (A VAT certificate's store hears from its Store VAT decision, in VAT words: approving the certificate alone
+      // changes nothing for its customers.)
+      if (decided.docType !== VAT_CERTIFICATE_DOC_TYPE) {
+        const notice = await insertNoticeFor(tx, {
+          userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
+          data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
+        });
+        this.projectionNotices.get(tx)?.push(notice.id);
+      }
       if (decision.within) await decision.within(tx, decided);
     });
 
@@ -1288,7 +1304,9 @@ export class VerificationService {
     return updated;
   }
 
-  async rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: RejectionReasonCode, decision: { within?: DecisionWithin } = {}) {
+  async rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: RejectionReasonCode, decision: { within?: DecisionWithin; storeVatDecision?: true } = {}) {
+    const kind = await this.prisma.verificationDocument.findUnique({ where: { id: docId }, select: { docType: true } });
+    if (kind) assertStoreVatDoor(kind.docType, decision);
     // Templated reason codes (onboarding spec §9.3): the code drives a clear,
     // consistent opening line; the reviewer's free text adds the specifics.
     const template = reasonCode ? REJECTION_TEMPLATES[reasonCode] : null;
@@ -1322,11 +1340,13 @@ export class VerificationService {
     }, { reviewerId: adminId, reasonCode, note: fullReason, fraud }, async (tx, decided) => {
       // [S2-29 · KYC-DECISION-ATOMIC] The notice and the caller's audit rows commit with the
       // rejection. The actor hears the category's text only; for the fraud class that is the generic message.
-      const notice = await insertNoticeFor(tx, {
-        userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
-        data: { kind: 'verification_rejected' },
-      });
-      this.projectionNotices.get(tx)?.push(notice.id);
+      if (decided.docType !== VAT_CERTIFICATE_DOC_TYPE) {
+        const notice = await insertNoticeFor(tx, {
+          userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
+          data: { kind: 'verification_rejected' },
+        });
+        this.projectionNotices.get(tx)?.push(notice.id);
+      }
       if (decision.within) await decision.within(tx, decided);
     });
     return updated;
@@ -1707,7 +1727,10 @@ export class VerificationService {
       });
       if (!won) throw new AppError(409, 'NOT_COMMITTED', 'Only a committed (approved) document can be revoked');
       // [STORE-VAT] A withdrawn VAT certificate withdraws the VAT of the store resting on it, in this transaction.
-      if (doc.docType === VAT_CERTIFICATE_DOC_TYPE) await revokeStoreVatForCertificate(tx, docId, adminId, reason);
+      // [REVIEW-F #2085 S4] Each store is told in VAT words; this transaction publishes its notices after the commit.
+      if (doc.docType === VAT_CERTIFICATE_DOC_TYPE) {
+        for (const id of await revokeStoreVatForCertificate(tx, docId, adminId, reason)) this.projectionNotices.get(tx)?.push(id);
+      }
       if (doc.docType === IDENTITY_DOC_TYPE) {
         // [Owner ruling 8 Oct 2026 — CUSTOMER ID] A withdrawal is a person's decision and must outlive
         // the row: the customer can erase a withdrawn ID (it becomes PURGED), and the next upload must
@@ -1745,7 +1768,8 @@ export class VerificationService {
         audience: 'customer',
         data: { kind: 'verification_rejected' },
       });
-    } else {
+    } else if (doc.docType !== VAT_CERTIFICATE_DOC_TYPE) {
+      // (A VAT certificate's store was told above, in VAT words.)
       await this.notifyRejection(doc.userId, doc.docType, 'the approval was withdrawn');
     }
     return revoked;
