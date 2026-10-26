@@ -52,6 +52,23 @@ function lineShares(raw: unknown): Map<string, number> | undefined {
   return shares;
 }
 
+/**
+ * [REVIEW-M #2085 S3-1] The goods discount that lowers the STORE's VAT. VAT Act s.2: the store's consideration is what is
+ * "paid or payable ... by any person, directly or indirectly", less the discounts the supplier allows. A discount Swift
+ * funds is paid to the store by Swift (billing sales-components: sponsorReceivable), so it never lowers the store's VAT;
+ * only a discount the STORE gives does (funder VENDOR). An order with a goods discount but no redemption row is the
+ * store's own, as billing counts it (sales-components). Returns what orderVat takes.
+ */
+export function vatDiscountFor(
+  redemption: { funder: string; goodsDiscount: unknown; lineAllocations: unknown } | null | undefined,
+  orderGoodsDiscount: number,
+): { lineGoodsDiscounts?: ReadonlyMap<string, number>; goodsDiscount?: number } {
+  if (!redemption) return { goodsDiscount: Math.max(0, orderGoodsDiscount) };
+  if (redemption.funder !== 'VENDOR') return { goodsDiscount: 0 };
+  const shares = lineShares(redemption.lineAllocations);
+  return shares ? { lineGoodsDiscounts: shares } : { goodsDiscount: Math.max(0, Number(redemption.goodsDiscount) || 0) };
+}
+
 /** The order columns the VAT amounts are written to (Decimal, like every money column). */
 export function orderVatAmountFields(result: OrderVatResult) {
   return {
@@ -65,26 +82,30 @@ export function orderVatAmountFields(result: OrderVatResult) {
 
 /**
  * Write the order's VAT from its lines as they stand. A no-op (null) for an order frozen without VAT.
- * The goods discount each line carries is the share the promo redemption stored (M-33), so the VAT is on what
- * the customer is actually charged for the goods.
+ * The goods discount comes off only when the STORE funded it (vatDiscountFor), by the line shares the promo
+ * redemption stored (M-33); a discount Swift pays for leaves the store's VAT on the full goods price.
  */
 export async function recomputeOrderVat(db: Db, orderId: string): Promise<OrderVatResult | null> {
   const order = await db.order.findUnique({
     where: { id: orderId },
     select: {
       vatRateBps: true,
+      discount: true,
       items: { select: { id: true, totalCustomer: true, vatClass: true, subStatus: true } },
-      promoRedemption: { select: { lineAllocations: true } },
+      promoRedemption: { select: { funder: true, goodsDiscount: true, lineAllocations: true } },
     },
   });
   if (!order || order.vatRateBps == null) return null;
+  const lines = order.items.map((it) => ({
+    id: it.id,
+    amount: REMOVED_SUB_STATUSES.has(it.subStatus) ? 0 : Number(it.totalCustomer),
+    vatClass: (it.vatClass ?? 'STANDARD') as VatClassName,
+  }));
+  const goods = lines.reduce((sum, l) => sum + l.amount, 0);
   const result = orderVat({
-    lines: order.items.map((it) => ({
-      id: it.id,
-      amount: REMOVED_SUB_STATUSES.has(it.subStatus) ? 0 : Number(it.totalCustomer),
-      vatClass: (it.vatClass ?? 'STANDARD') as VatClassName,
-    })),
-    lineGoodsDiscounts: lineShares(order.promoRedemption?.lineAllocations) ?? new Map(),
+    lines,
+    // Only a discount the STORE gave lowers its VAT (vatDiscountFor); a Swift-funded one never does.
+    ...vatDiscountFor(order.promoRedemption, Math.min(goods, Number(order.discount) || 0)),
     // The rate the order froze, never today's: a later rate change never reaches a placed order.
     rateBps: order.vatRateBps,
   });
@@ -103,11 +124,13 @@ export interface CartVat {
 
 /**
  * [cart quote] The VAT inside each approved VAT store's goods, by the same function checkout freezes with
- * (`orderVat`, the goods discount split across the lines). Stores whose VAT is not in effect get no entry.
+ * (`orderVat`, the STORE-funded goods discount split across the lines). Stores whose VAT is not in effect get no entry.
  */
 export async function cartVatByVendor(
   db: Pick<Prisma.TransactionClient, 'vendor'>,
-  plans: ReadonlyArray<{ vendorId: string; goodsDiscount: number; lines: ReadonlyArray<{ id: string; amount: number; vatClass: string | null | undefined }> }>,
+  /** `storeFundedGoodsDiscount`: only the share of a discount the STORE gives (funder VENDOR); a Swift-funded promo
+   *  never lowers the store's VAT (vatDiscountFor). */
+  plans: ReadonlyArray<{ vendorId: string; storeFundedGoodsDiscount: number; lines: ReadonlyArray<{ id: string; amount: number; vatClass: string | null | undefined }> }>,
   env: Record<string, string | undefined> = process.env,
   now: Date = new Date(),
 ): Promise<Map<string, CartVat>> {
@@ -119,7 +142,7 @@ export async function cartVatByVendor(
     if (!effective.has(plan.vendorId)) continue;
     const vat = orderVat({
       lines: plan.lines.map((l) => ({ id: l.id, amount: l.amount, vatClass: (l.vatClass === 'ZERO_RATED' || l.vatClass === 'EXEMPT' ? l.vatClass : 'STANDARD') as VatClassName })),
-      goodsDiscount: plan.goodsDiscount,
+      goodsDiscount: plan.storeFundedGoodsDiscount,
     });
     out.set(plan.vendorId, {
       included: vat.vatAmount, ratePercent: STORE_VAT_RATE_PERCENT,

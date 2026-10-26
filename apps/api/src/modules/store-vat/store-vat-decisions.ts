@@ -18,7 +18,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { assertNotRecused } from '../verification/recusal';
 import {
-  STORE_VAT_MODES_OFFERED, STORE_VAT_SELECT, VAT_CERTIFICATE_DOC_TYPE, storeVatEffective, storeVatEnabled,
+  STORE_VAT_MODES_OFFERED, STORE_VAT_SELECT, VAT_CERTIFICATE_DOC_TYPE, inEffectOn, storeVatEffective, storeVatEnabled,
 } from './store-vat';
 import { STORE_VAT_RATE_PERCENT, STORE_VAT_SOURCES } from './vat-rate';
 
@@ -204,7 +204,8 @@ export async function approveStoreVat(
   if (!typed) throw new AppError(400, 'VAT_NUMBER_REQUIRED', 'Type the VAT registration number printed on the certificate.');
   const effectiveFrom = startOfUtcDay(input.effectiveFrom);
   if (Number.isNaN(effectiveFrom.getTime())) throw new AppError(400, 'VAT_EFFECTIVE_DATE_REQUIRED', 'Type the effective date printed on the certificate.');
-  if (effectiveFrom.getTime() > now.getTime()) {
+  // [REVIEW-M #2085 S4-1] "In the future" on the Guyana calendar, as the predicate reads it.
+  if (!inEffectOn(effectiveFrom, now)) {
     throw new AppError(400, 'VAT_EFFECTIVE_IN_FUTURE', 'That certificate is not in effect yet. Approve it on or after its effective date.');
   }
 

@@ -6,10 +6,11 @@
  * a total, so the money an order charges is unchanged by this module: it only says how much of the goods
  * price is the store's VAT.
  *
- * Rule (vat-rate.ts): per ORDER, VAT = half-up to whole GYD of (standard-rated goods actually charged)
- * x 14/114. "Actually charged" = each standard line's amount less its share of the goods discount
- * (utils/order-total allocateAcrossLines, the same split the promo redemption stores), floored at zero;
- * a removed line counts nothing. Zero-rated and exempt goods carry no VAT and are reported separately
+ * Rule (vat-rate.ts): per ORDER, VAT = half-up to whole GYD of (the store's consideration for its standard-rated
+ * goods) x 14/114: each standard line's amount less its share of a discount THE STORE gave (utils/order-total
+ * allocateAcrossLines, the same split the promo redemption stores), floored at zero; a removed line counts nothing.
+ * A discount Swift funds is paid to the store by Swift, so it never lowers the store's VAT (VAT Act s.2; the caller
+ * passes only the store-funded discount: order-vat.ts vatDiscountFor). Zero-rated and exempt goods carry no VAT and are reported separately
  * (VAT Regulations reg. 10(d)). Delivery pay, tips, waiting charges and Swift's own fees are never goods
  * and never carry a store's VAT.
  *

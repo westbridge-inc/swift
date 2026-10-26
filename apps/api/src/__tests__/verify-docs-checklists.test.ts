@@ -499,6 +499,9 @@ describe('[VERIFY-DOCS] services follow the home-visit rule; marketplace tradesp
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_OPTIONAL']).toEqual(['police_clearance']);
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER']).toEqual(['national_id', 'police_clearance']);
     // [VERIFY-DOCS · ruling 7] the TIN certificate left every store list
-    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT']).toEqual(['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo']);
+    // [FOOD-PERMIT · owner ruling 24 Oct 2026 — a DELIBERATE change] the food handler's certificate is optional for a
+    // registered restaurant (RESTAURANT_OPTIONAL); its owner ticks for its food handlers instead
+    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT']).toEqual(['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'storefront_photo']);
+    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT_OPTIONAL']).toEqual(['food_handler_cert']);
   });
 });
