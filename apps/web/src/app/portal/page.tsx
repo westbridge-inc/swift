@@ -103,7 +103,8 @@ export default function PortalHome() {
   const rider = useQuery({ queryKey: ['p-rider'], queryFn: getRiderProfile, retry: 0 });
   const driver = useQuery({ queryKey: ['p-driver'], queryFn: getDriverProfile, retry: 0 });
   const summary = useQuery({ queryKey: ['p-summary'], queryFn: getRiderSummary, enabled: !!rider.data, retry: 0 });
-  const driverSummary = useQuery({ queryKey: ['p-driver-summary'], queryFn: getDriverSummary, enabled: !!driver.data, retry: 0 });
+  // The taxi driver's four windows; the name stays `driverEarn` (the [W-10] census checks every money read's error state).
+  const driverEarn = useQuery({ queryKey: ['p-driver-summary'], queryFn: getDriverSummary, enabled: !!driver.data, retry: 0 });
   const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data, retry: 0 });
   const driverSub = useQuery({ queryKey: ['p-driver-sub'], queryFn: getDriverSubscription, enabled: !!driver.data, retry: 0 });
   const settlements = useQuery({ queryKey: ['p-settlements'], queryFn: getRiderCashSettlements, enabled: !!rider.data, retry: 0 });
@@ -168,10 +169,10 @@ export default function PortalHome() {
       {isRider && <StatementButton role="rider" label={isDriver ? 'Get delivery earnings statement' : 'Get earnings statement'} />}
 
       {isRider && isDriver && <h2 className="sw-heading">Taxi rides</h2>}
-      {isDriver && driverSummary.isError && (
-        <DataUnavailable what="your taxi earnings" error={driverSummary.error} onRetry={() => void driverSummary.refetch()} />
+      {isDriver && driverEarn.isError && (
+        <DataUnavailable what="your taxi earnings" error={driverEarn.error} onRetry={() => void driverEarn.refetch()} />
       )}
-      {isDriver && driverSummary.data && <SummaryTiles s={driverSummary.data} />}
+      {isDriver && driverEarn.data && <SummaryTiles s={driverEarn.data} />}
       {isDriver && <StatementButton role="driver" label={isRider ? 'Get taxi earnings statement' : 'Get earnings statement'} />}
 
       {/* [W-10] `settlements.data?.unsettled ?? []` made a failed read look
