@@ -338,6 +338,6 @@ Pressing a button sends the browser to the return page, exactly as a real provid
   - the production API root (the guide says it is provided after staging is validated);
   - enabling `PanToken` on a Pay now.
 - The UI (a separate lane builds it against this contract and the simulator).
-- The credential setup tool (PT-5, for MMG and the card provider together): `deploy/owner/swift-payments-setup.command`.
+- The credential setup tool (PT-5, for MMG and the card provider together): `deploy/owner/swift-payments-setup.command`. Its server self-check prints OK / FAIL lines naming only known settings (`SELF_CHECK_SETTING_NAMES`); the sandbox page it sets up (Redis prefix `ptz:selfcheck:`) is abandoned at once and its record expires after one hour (`SELF_CHECK_RECORD_TTL_MS`).
 
 Changes to this contract are made here first, in the same PR as the code that changes.

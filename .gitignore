@@ -95,3 +95,7 @@ deploy/routing-conf/vroom/access.log
 
 # OpenNext build output (contains per-build preview-mode keys; never commit)
 .open-next/
+
+# Python bytecode (local test runs) never enters the repo.
+__pycache__/
+*.pyc
