@@ -66,6 +66,8 @@ vi.mock('react-native-screens', async () => {
 });
 
 vi.mock('expo-image', () => ({ Image: () => null }));
+// [MASTER-025] the stock row mints its adjustment key with expo-crypto (native).
+vi.mock('expo-crypto', () => ({ randomUUID: () => 'stock-adjust-key' }));
 vi.mock('expo-image-picker', () => ({
   MediaTypeOptions: { Images: 'Images' },
   requestMediaLibraryPermissionsAsync: vi.fn(), requestCameraPermissionsAsync: vi.fn(),
