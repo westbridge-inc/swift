@@ -14,6 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { makeDispatchService, type DispatchService } from '../modules/dispatch/dispatch.service';
 import { reserveRiderLeg } from '../modules/dispatch/concurrency-policy';
+import { enableCarDeliveries } from '../modules/driver/car-deliveries';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { grantStepUp } from './helpers/step-up';
@@ -309,6 +310,35 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
     expect(other.json().error.code).toBe('DELIVERY_PROFILE_OTHER_VEHICLE');
     expect(other.json().error.message).toContain('motorbike');
     expect((await riderOf(dual.userId))!.vehicleType).toBe('MOTORCYCLE');
+  });
+
+  it('[REVIEW-G #2128 S4-1] the store-review demo account never gains delivery work — refused before anything is written', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const REVIEW = `cars-review-${nanoid(6).toLowerCase()}`;
+    await sys(() => app.prisma.tenant.create({ data: { id: REVIEW, name: 'Cars review fiction', slug: REVIEW, kind: 'REVIEW' } }));
+    const driver = await makeTaxiDriver();
+    try {
+      await sys(() => app.prisma.user.update({ where: { id: driver.userId }, data: { tenantId: REVIEW } }));
+      const before = await userOf(driver.userId);
+      await expect(sys(() => enableCarDeliveries(app.prisma, driver.userId))).rejects.toMatchObject({ statusCode: 403, code: 'REVIEW_DEMO_NO_NEW_ROLES' });
+      expect(await riderOf(driver.userId)).toBeNull();
+      expect(await userOf(driver.userId)).toEqual(before);
+    } finally {
+      // Back to the production tenant (a REVIEW tenant makes the row synthetic; production rows never are).
+      await sys(() => app.prisma.user.update({ where: { id: driver.userId }, data: { tenantId: 'swift-default', isSynthetic: false } }));
+      await sys(() => app.prisma.tenant.deleteMany({ where: { id: REVIEW } }));
+    }
+  });
+
+  it('[REVIEW-G #2128 S4-2] a suspended, banned or closed account cannot add delivery work — nothing written', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    for (const status of ['SUSPENDED', 'BANNED', 'DEACTIVATED'] as const) {
+      const driver = await makeTaxiDriver();
+      await sys(() => app.prisma.user.update({ where: { id: driver.userId }, data: { status } }));
+      await expect(sys(() => enableCarDeliveries(app.prisma, driver.userId)), status).rejects.toMatchObject({ statusCode: 403, code: 'ACCOUNT_NOT_ACTIVE' });
+      expect(await riderOf(driver.userId), status).toBeNull();
+      expect((await userOf(driver.userId)).roles, status).not.toContain('RIDER');
+    }
   });
 
   it('end to end: switch to deliveries, go online, get a store order, claim it on the delivery profile (never driverId); back to taxi retires delivery supply', async () => {
