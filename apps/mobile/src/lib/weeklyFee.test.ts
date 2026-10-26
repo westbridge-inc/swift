@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutReferences, checkoutWords, feeStatusOf, FeeCheckoutSession, feeExpiry, reopenableMmg, liveMmg, pollDelay, REOPEN_ALREADY_PAID, REOPEN_REFUSED, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
+import { checkoutReferences, checkoutWords, feeStatusOf, FeeCheckoutSession, liveMmg, pollDelay, REOPEN_REFUSED, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
+import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from './weeklyFeeReopen';
 const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: status === 'OPEN' ? '2099-09-29T13:00:00Z' : '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];

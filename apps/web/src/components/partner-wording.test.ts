@@ -13,7 +13,7 @@ const ROOTS = ['app/dashboard', 'app/portal', 'app/advertiser'];
 const FILES = ['components/console-shell.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
   // The weekly-fee page every partner pays through, and its MMG and card words (lib/card-fee.ts
   // is byte-identical to the phone copy by census; both now say "kept for your next weekly fee").
-  'components/weekly-fee.tsx', 'components/weekly-fee-reopen.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/card-fee.ts',
+  'components/weekly-fee.tsx', 'components/weekly-fee-reopen.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/weekly-fee-reopen.ts', 'lib/card-fee.ts',
   'lib/subscription-words.ts',
   // Everything else a console draws: the new-order takeover, the Switch app
   // sheet, the error and notice blocks, and the API helpers whose messages

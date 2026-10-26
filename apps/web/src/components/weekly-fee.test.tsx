@@ -195,6 +195,22 @@ describe('own checkout reopen affordance', () => {
     await waitFor(() => expect(feeReads).toBeGreaterThan(before), { timeout: 3_000 });
     expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull(); view.unmount();
   }, 10_000);
+  it('a grant naming another checkout than the one on screen shows no Back: the Back card checks the grant itself', async () => {
+    // [size budget] The rule (reopenableMmg) now runs inside the on-demand Back card, so this pins it there.
+    let latest = 'own-open';
+    const c = (ref: string) => ({ ref, status: 'OPEN', expiresAt: '2099-10-08T23:30:00Z', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' });
+    mockApi(({ url }) => {
+      const read = url.pathname.match(/mmg-checkout\/([^/]+)$/);
+      if (read) return { body: { success: true, data: c(read[1]) } };
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c(latest), reopenableMmgCheckout: { ref: 'own-open', expiresAt: '2099-10-08T23:30:00Z' } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByRole('button', { name: "Back to MMG's page" });
+    latest = 'newer-open';
+    await act(async () => { await view.queryClient.invalidateQueries({ queryKey: ['weekly-fee'] }); });
+    await waitFor(() => expect(screen.queryByRole('button', { name: "Back to MMG's page" })).toBeNull());
+    expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull(); view.unmount();
+  });
   it.each(['OPEN', 'EXPIRED', 'CONFIRMING', 'HELD'])('%s without a reopen grant has no Pay or Back, even with a stale live action', async (status) => {
     const c = { ref: 'blocked-ref', status, expiresAt: '2099-01-01T12:00:00Z', amountGyd: 1200, subscriptionStatus: 'ACTIVE' };
     mockApi(({ url }) => ({ body: { success: true, data: url.pathname.endsWith('/blocked-ref') ? c : { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: null, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } }));

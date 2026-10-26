@@ -34,21 +34,6 @@ export function feeDate(value?: string | null): string {
 export function liveMmg(sub?: FeeSubscription | null) {
   return sub?.payActions?.find((a): a is Extract<PayAction, { state: 'live' }> => a.id === 'MMG_CHECKOUT' && a.state === 'live');
 }
-/** Only the server grants reopen; OPEN by itself never grants another Pay. */
-export function reopenableMmg(sub?: FeeSubscription | null, current?: CheckoutStatus | null, now = Date.now()) {
-  const grant = sub?.reopenableMmgCheckout;
-  const latest = sub?.latestMmgCheckout;
-  const shown = current ?? latest;
-  if (!grant || latest?.ref !== grant.ref || latest.status !== 'OPEN' || shown?.ref !== grant.ref || shown.status !== 'OPEN'
-    || !(Date.parse(grant.expiresAt) > now) || !(Date.parse(latest.expiresAt) > now)) return undefined;
-  return grant;
-}
-/** Swift's own time limit for the checkout (not the lifetime of MMG's page, which MMG has not documented). */
-export function feeExpiry(value: string): string {
-  return `Swift keeps this checkout open until ${new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Guyana' })} (Guyana time).`;
-}
-/** Shown on the Back card: a reopened page must never invite a second payment. */
-export const REOPEN_ALREADY_PAID = "Already paid on MMG's page? Don't pay again — we'll confirm it with MMG.";
 /** A Back tap the server refused, or answered with anything but that checkout's open page. */
 export const REOPEN_REFUSED = "We couldn't reopen that MMG page. Its latest status is shown here.";
 /** [FEE-STATUS · owner 25 Oct 2026] Where the weekly fee stands. A store read "Nothing due right now: your next
