@@ -153,6 +153,7 @@ export function useMoverKind() {
       refetching: false,
       error: null,
       ambiguous: false,
+      dual: false,
       refetch: async () => {},
     };
   }
@@ -173,6 +174,8 @@ export function useMoverKind() {
     loading,
     refetching: driver.isFetching || rider.isFetching,
     error,
+    // [CARS-DELIVER] The account holds both a taxi and a delivery profile (it can switch work modes).
+    dual: !!driver.data && !!rider.data,
     refetch: async () => {
       await Promise.all([driver.refetch(), rider.refetch()]);
     },

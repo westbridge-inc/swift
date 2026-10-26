@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { DeliveriesTooCard } from '../DeliveriesTooCard';
 import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
@@ -39,7 +40,7 @@ export function MoverAccountScreen({ navigation }: any) {
     body: 'You’ll go offline, and a job you haven’t picked up yet goes back to dispatch. Your earnings, vehicle and documents stay with your account.',
   });
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
-  const { kind, profile } = useMoverKind();
+  const { kind, profile, dual } = useMoverKind();
   const standingQ = useMoverStanding<any>(kind);
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
@@ -224,6 +225,10 @@ export function MoverAccountScreen({ navigation }: any) {
             onCancelPending={() => cancelPendingMmgLink.mutate()}
           />
         ) : null}
+
+        {/* [CARS-DELIVER] "Deliveries too" — shown only when the server says the taxi car can deliver now
+            (CAR_DELIVERIES on) or already does; the work-mode switch for an account with both. */}
+        <DeliveriesTooCard kind={kind ?? null} hasTaxiProfile={isDriver || dual === true} style={{ marginTop: space.md }} />
 
         {/* Ops rows */}
         <Card style={{ marginTop: space.md, paddingVertical: space.sm }}>
