@@ -2,7 +2,7 @@ import fp from 'fastify-plugin';
 import { reviewGate } from '../modules/review/gate';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { TenantKind } from '@prisma/client';
+import type { TenantKind, UserRole } from '@prisma/client';
 import { enterOwner, enterTenant } from './prisma';
 import { runWithTenant } from './tenant-context';
 import { resolveIdentityById } from '../modules/auth/preauth-identity';
@@ -28,6 +28,11 @@ declare module 'fastify' {
     /** [REVIEW-PARTNER] The authenticated caller's tenant KIND, read with the session
      *  (null for a guest). The store-review fiction's money refusals key on it. */
     tenantKind: TenantKind | null;
+    /** [ADMIN-ROLE] The roles the authenticated account HOLDS (users.roles),
+     *  read with the session on every request (null for a guest). Console
+     *  authority is decided from these (auth/console-role.ts), never from
+     *  `user.role`, which is the app's active mode. */
+    heldRoles: readonly UserRole[] | null;
   }
 }
 
@@ -80,6 +85,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   app.decorateRequest('authSessionId', null);
   app.decorateRequest('authCredentialSource', null);
   app.decorateRequest('tenantKind', null);
+  app.decorateRequest('heldRoles', null);
   const authService = new AuthService(app);
 
   /**
@@ -152,6 +158,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       // Role switching intentionally keeps the session alive, so reconcile the
       // principal from the locked database model on every protected request.
       request.user.role = session.user.activeRole;
+      request.heldRoles = session.user.roles;
       request.authSessionId = session.id;
       request.authCredentialSource = credentialSource;
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
@@ -167,6 +174,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       request.authSessionId = null;
       request.authCredentialSource = null;
       request.tenantKind = null;
+      request.heldRoles = null;
       // [F-250] "I could not REACH the session store" is not "your token is
       // invalid". The bare catch here reported every infrastructure failure —
       // a saturated connection pool, an unreachable database — as UNAUTHORIZED,
@@ -221,6 +229,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       ) {
         request.authSessionId = null;
         request.authCredentialSource = null;
+        request.heldRoles = null;
         (request as { user?: unknown }).user = undefined;
       } else if (
         requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
@@ -229,9 +238,11 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         await logoutInTenant(session);
         request.authSessionId = null;
         request.authCredentialSource = null;
+        request.heldRoles = null;
         (request as { user?: unknown }).user = undefined;
       } else {
         request.user.role = session.user.activeRole;
+        request.heldRoles = session.user.roles;
         request.authSessionId = session.id;
         request.authCredentialSource = credentialSource;
         enterTenant(session.user.tenantId);
@@ -251,6 +262,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       }
       request.authSessionId = null;
       request.authCredentialSource = null;
+      request.heldRoles = null;
       (request as { user?: unknown }).user = undefined;
     }
     // [STA-1 DL-9] A reviewer whose session died is told so even on a public

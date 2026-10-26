@@ -25,8 +25,9 @@ export interface MoneyColumn {
   unit: MoneyUnit;
 }
 
-/** The regex the census applies to a Decimal field's name to call it money-ish. */
-export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding/i;
+/** The regex the census applies to a Decimal field's name to call it money-ish. [STORE-VAT] `vat` and `goods`: a store's
+ *  VAT and its goods by VAT class are money (Order.vatBase / vatStandardGoods / vatExemptGoods match no other word). */
+export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding|vat|goods/i;
 
 export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'AdBooking', field: 'amount', unit: 'MAJOR_2DP' },
@@ -109,6 +110,12 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Order', field: 'taxiFareTotal', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'tipAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'totalAmount', unit: 'MAJOR_WHOLE' },
+  // [STORE-VAT · owner O-5] The VAT included in a VAT store's goods and the goods by class: whole GYD, like the goods.
+  { model: 'Order', field: 'vatAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatBase', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatExemptGoods', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatStandardGoods', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatZeroRatedGoods', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'basePrice', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'markedUpPrice', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'markupAmount', unit: 'MAJOR_WHOLE' },

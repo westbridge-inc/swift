@@ -25,6 +25,9 @@ import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
+import { storeVatEffective } from '../store-vat/store-vat';
+import { STORE_VAT_RATE_PERCENT } from '../store-vat/vat-rate';
+import { cartVatByVendor } from '../store-vat/order-vat';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
 import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
@@ -82,12 +85,14 @@ import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
+import { sellerVerifiedNow } from '../vendor/seller-verified';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { counterpartPhone } from '../calls/counterpart-phone';
 import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
@@ -398,6 +403,7 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true, fulfillment: true,
+              vatClass: true,
               // [F4] Everything the one option validator reads, so the quote
               // marks a line whose choice sold out exactly as checkout refuses it.
               optionGroups: {
@@ -597,6 +603,16 @@ async function buildCartResponse(
   const priced = priceWith((p) => p.deliveryFee);
   const discount = priced.discount;
   const totalAmount = sumOf(priced.perPlan.map((p) => p.total));
+  // [STORE-VAT · owner O-5] The VAT INSIDE each approved VAT store's goods (never added: the totals above are
+  // unchanged), by the same function and discount split checkout freezes. Only a discount the STORE gives lowers its
+  // VAT (REVIEW-M #2085 S3-1, VAT Act s.2): a Swift-funded promo is paid to the store, so it counts in full.
+  const vatByVendor = await cartVatByVendor(app.prisma, plans.map((p, i) => ({
+    vendorId: p.vendorId,
+    storeFundedGoodsDiscount: promo?.funder === 'VENDOR' ? (priced.perPlan[i]!.allocation?.goods ?? 0) : 0,
+    lines: itemDetails.filter((d) => d.vendorId === p.vendorId && d.isAvailable).map((d) => ({
+      id: d.id, amount: d.lineTotal, vatClass: cart.items.find((ci) => ci.id === d.id)?.item.vatClass ?? 'STANDARD',
+    })),
+  })));
   let promoInfo: { code: string; discountType: string; description: string } | null = null;
   if (promoCodeRecord) {
     promoInfo = {
@@ -657,6 +673,8 @@ async function buildCartResponse(
       minOrderAmount: p.minOrderAmount,
       meetsMinimum: p.meetsMinimum,
       amountToMinimum: p.amountToMinimum,
+      // [STORE-VAT] Additive: null unless this store's VAT is approved; then the VAT included in its goods.
+      vat: vatByVendor.get(p.vendorId) ?? null,
     })),
     subtotalBase,
     subtotalMarkup,
@@ -1655,6 +1673,8 @@ export async function customerRoutes(app: FastifyInstance) {
         },
         operatingHours: true,
         images: true,
+        // [P35] The owner's synthetic markers, read only to compute isVerified (seller-verified.ts); never sent.
+        owner: { select: { user: { select: { isSynthetic: true, syntheticRunId: true } } } },
       },
     });
 
@@ -1702,13 +1722,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [GUARDRAILS §8] Prohibited items (banned, or held for a check) are not on the menu;
     // a section they emptied goes with them (a section empty before stays as it was).
     const hiddenOnMenu = await hiddenAmong(app.prisma, vendor.categories.flatMap((cat) => cat.items.map((i) => i.id)));
+    // [STORE-VAT · owner O-5] The ONE predicate: VAT shows only for a store whose VAT a person approved.
+    const vatShown = storeVatEffective(vendor);
     const categories = vendor.categories
       .filter((cat) => cat.isActive)
       .flatMap((cat) => {
         const items = cat.items.filter((i) => !hiddenOnMenu.has(i.id));
         return items.length === 0 && cat.items.length > 0 ? [] : [{ ...cat, items }];
       })
-      .map(publicStorefrontCategory);
+      .map((cat) => publicStorefrontCategory(cat, vatShown));
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1767,6 +1789,9 @@ export async function customerRoutes(app: FastifyInstance) {
         // serves), but a store the PLATFORM has suspended, or one it has not yet
         // approved, must not have Swift advertising a way to reach it.
         publicPhone: publishedStorePhone(vendor),
+        // [P35 · board 4b] "Verified seller": a person approved this store's papers AND they are still current
+        // (seller-verified.ts). From the row, because this route also resolves a store that is not customer-visible.
+        isVerified: sellerVerifiedNow(vendor),
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
         ...ratingSurface,
@@ -1785,6 +1810,10 @@ export async function customerRoutes(app: FastifyInstance) {
         deliveryFee,
         etaMin,
         promos: activePromos,
+        // [STORE-VAT · owner O-5] Additive: null unless a person approved this store's VAT. Then every STANDARD item's
+        // price INCLUDES VAT (VAT Act s.90(2)) and the screen marks it "incl. VAT"; the rate comes from here, never a
+        // literal in the app.
+        vat: vatShown ? { pricesIncludeVat: true as const, ratePercent: STORE_VAT_RATE_PERCENT } : null,
         // [Row 272] The field every phone build from 9 on reads (RestaurantScreen: the
         // "N promos available" row). Same list as `promos`, kept for older readers.
         activePromos,
@@ -2657,7 +2686,7 @@ export async function customerRoutes(app: FastifyInstance) {
       include: {
         vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
         customer: { select: { firstName: true, lastName: true } },
-        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true } },
+        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true, vatClass: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2968,7 +2997,8 @@ export async function customerRoutes(app: FastifyInstance) {
           // [S1 response-shaping] the mover's personal number is a handover
           // convenience, not a permanent gift: null once the order is closed,
           // exactly like the live coordinates two lines below.
-          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
+          // [O-1] Only an installed store build is sent it (it dials it); a bridge-aware client calls through Swift.
+          phone: liveLocationVisible(order.status) ? counterpartPhone(request, order.rider.user?.phone) : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what

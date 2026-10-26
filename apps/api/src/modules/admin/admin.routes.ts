@@ -39,6 +39,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { EVIDENCE_REFERENCE_MAX, EVIDENCE_REFERENCE_MIN, EVIDENCE_REFERENCE_SHAPE } from '../billing/evidence-reference';
 import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
@@ -62,6 +63,7 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { consoleRoleOf } from '../auth/console-role';
 import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
 import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
@@ -680,6 +682,21 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   };
 
+  // [ADMIN-ROLE] The console acts under the admin role the account HOLDS
+  // (users.roles, read with the session on this very request), never the
+  // phone app's active mode: an admin whose phone is in rider mode still runs
+  // the console, and an account whose admin role is removed is refused on its
+  // next call. `request.user.role` becomes that admin role for the rest of the
+  // request, so the capability engine, the two-person rule, the founder check
+  // and the audit trail all see the authority actually used. authenticate()
+  // resets it to the active mode, so every guard that re-authenticates binds
+  // it again. Returns null (and binds nothing) for an account holding none.
+  const bindConsoleRole = (request: any): string | null => {
+    const role = consoleRoleOf(request.heldRoles);
+    if (role) request.user.role = role;
+    return role;
+  };
+
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
     // The production server opens this store globally. Admin routes also do it
@@ -688,7 +705,7 @@ export async function adminRoutes(app: FastifyInstance) {
     beginRequestTenantContext();
     await app.authenticate(request, reply);
     if (reply.sent) return;
-    if (!['ADMIN', 'SUPER_ADMIN'].includes(request.user.role)) {
+    if (!bindConsoleRole(request)) {
       throw new ForbiddenError('Admin access required');
     }
     requireTenantId();
@@ -701,6 +718,9 @@ export async function adminRoutes(app: FastifyInstance) {
   const founderGuard = async (request: any, reply: any) => {
     await app.authenticate(request, reply);
     if (reply.sent) return;
+    // [ADMIN-ROLE] Judged on the admin role the account HOLDS (bound for the
+    // request); an account holding none is judged on nothing, never its mode.
+    if (!bindConsoleRole(request)) request.user.role = '';
     assertFounderAccess(request.user.role);
   };
 
@@ -1669,6 +1689,8 @@ export async function adminRoutes(app: FastifyInstance) {
         checklist: { items: goLive.checklist.items, complete: goLive.checklist.complete },
         disclosure: goLive.disclosure,
         ready: goLive.ready,
+        // [FOOD-PERMIT] a registered restaurant's owner tick (required to go live), never its words or ledger row
+        foodHandlers: goLive.foodHandlers,
         next,
       },
     };
@@ -5505,7 +5527,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
     const body = z.object({ sourceId: z.string().min(1), epoch: z.number().int().positive(), clockVersion: z.number().int().nonnegative(),
       decision: z.enum(['UNPAID', 'PAID']), providerPaymentId: z.string().min(1).optional(),
-      evidenceReference: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:/-]+$/),
+      // [Owner, admin-staging 25 Oct] The one rule the console checks too (billing/evidence-reference.ts): a trimmed human reference.
+      evidenceReference: z.string().trim().min(EVIDENCE_REFERENCE_MIN).max(EVIDENCE_REFERENCE_MAX).regex(EVIDENCE_REFERENCE_SHAPE),
       reason: z.string().trim().min(8).max(500),
     }).strict().parse(request.body);
     const { resolveFinanceConfirmation } = await import('../billing/confirmation-finance');
@@ -6214,6 +6237,64 @@ export async function adminRoutes(app: FastifyInstance) {
     // the console says "back to L1" only when it is (another customer ID may still stand).
     const after = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { trustLevel: true } });
     return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
+  });
+
+  // ── [STORE-VAT · owner O-5] A store's VAT: a PERSON decides ─────────────
+  // The store's GRA VAT certificate is approved only here, by a document reviewer who types the VAT number and the
+  // registered name printed on it and its effective date (store-vat-decisions.ts). The certificate's own document
+  // decision and the store's VAT decision commit in ONE transaction, with the trail (auditIn + auditWithin).
+  const storeVatApproveSchema = z.object({
+    certificateDocId: z.string().min(1).max(64),
+    vatNumber: z.string().trim().min(1).max(40),
+    registeredName: z.string().trim().min(2).max(200),
+    effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    nameMatchesStore: z.literal(true),
+    reason: z.string().max(500).optional(),
+  });
+  const storeVatReasonSchema = z.object({ reason: z.string().trim().min(3).max(500) });
+
+  app.get('/store-vat/pending', { preHandler: [adminGuard] }, async () => {
+    const { pendingStoreVat } = await import('../store-vat/store-vat-decisions');
+    return { success: true, data: await pendingStoreVat(tenantPrisma) };
+  });
+
+  app.post('/store-vat/:vendorId/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatApproveSchema.parse(request.body);
+    const { approveStoreVat } = await import('../store-vat/store-vat-decisions');
+    const data = await approveStoreVat(tenantPrisma, verification, vendorId, request.user.userId, {
+      certificateDocId: body.certificateDocId,
+      typedVatNumber: body.vatNumber,
+      registeredName: body.registeredName,
+      effectiveFrom: new Date(`${body.effectiveFrom}T00:00:00.000Z`),
+      nameMatchesStore: body.nameMatchesStore,
+    }, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, 'APPROVE_STORE_VAT', 'Vendor', vendorId, facts, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    }, process.env, new Date(), (id) => notifications.publishPersisted(id));
+    return { success: true, data };
+  });
+
+  app.post('/store-vat/:vendorId/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatReasonSchema.parse(request.body);
+    const { rejectStoreVat } = await import('../store-vat/store-vat-decisions');
+    const data = await rejectStoreVat(tenantPrisma, verification, vendorId, request.user.userId, body.reason, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, 'REJECT_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    }, process.env, new Date(), (id) => notifications.publishPersisted(id));
+    return { success: true, data };
+  });
+
+  app.post('/store-vat/:vendorId/revoke', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatReasonSchema.parse(request.body);
+    const { revokeStoreVat, storeVatView } = await import('../store-vat/store-vat-decisions');
+    await revokeStoreVat(tenantPrisma, vendorId, request.user.userId, body.reason, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, 'REVOKE_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    }, new Date(), (id) => notifications.publishPersisted(id));
+    return { success: true, data: await storeVatView(tenantPrisma, vendorId) };
   });
 
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────

@@ -104,10 +104,15 @@ export interface StorefrontSeller {
   payment: { cash: true; storeMmg: boolean };
   refundRule: string | null;
   statutoryRights: string;
+  /** [FOOD-PERMIT] a current food handler's certificate is on file (absent from an older API) */
+  foodHandlerCertificate?: boolean;
 }
 
 export interface StorefrontDetail extends StorefrontSummary {
   addressLine1: string;
+  /** [P35 · board 4b] A person approved the store's documents and they are still current (server-computed).
+   *  Absent from an older API: the page then says nothing about verification. */
+  isVerified?: boolean;
   /** Absent from an API older than R3. */
   seller?: StorefrontSeller | null;
   operatingHours: Array<{ dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }>;

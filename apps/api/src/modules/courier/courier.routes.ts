@@ -32,6 +32,7 @@ import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 import { POSTAL_REFUSAL, postalItem } from './postal-items';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -393,7 +394,8 @@ export default async function courierRoutes(app: FastifyInstance) {
     // licence to keep watching the courier.
     // [S1 response-shaping] the sender's past parcel is not a licence to keep
     // the courier's coordinates — nor their personal phone.
-    return { success: true, data: { ...redactCounterpartyPhone(redactLiveLocation(order)), courierTrackingToken: null } };
+    // [O-1] And a bridge-aware client is sent the courier's number not even while live.
+    return { success: true, data: { ...withCounterpartPhones(request, redactCounterpartyPhone(redactLiveLocation(order))), courierTrackingToken: null } };
   });
 
   /** Sender controls rotate/revoke without recovering bearer secrets. */

@@ -605,6 +605,40 @@ export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId:
 /** Launch switches the API reads from its server environment (read-only). */
 export interface LaunchSwitches { staffInviteAccept?: boolean }
 export const fetchConfig = (): Promise<Envelope<ConfigRow[]> & { switches?: LaunchSwitches }> => apiFetch('/api/v1/admin/config');
+// ── [DRILL-STORM · S-19] Ops alerts: a page that waits for a person to acknowledge it ──
+// The same rule as every other surface: a SUPER_ADMIN lists and acknowledges every alert (the platform's and every
+// tenant's); a tenant's ADMIN only their own tenant's. The server decides; the console shows what it is given.
+export type OpsAlertKind = 'SOS' | 'DRILL' | 'PLATFORM';
+export interface OpsAlertRecipientRow { userId: string; deliveredAt: string | null; seenAt: string | null; ackedAt?: string | null }
+export interface OpsAlertRow {
+  id: string;
+  tenantId: string | null;
+  kind: OpsAlertKind;
+  sosAlertId: string | null;
+  title: string;
+  body: string;
+  ackDeadlineAt: string;
+  escalationLevel: number;
+  lastEscalatedAt: string | null;
+  createdAt: string;
+  recipients: OpsAlertRecipientRow[];
+}
+export interface FailedDrillRow {
+  id: string;
+  title: string;
+  createdAt: string;
+  ackDeadlineAt: string;
+  closedAt: string;
+  escalationLevel: number;
+  recipients: OpsAlertRecipientRow[];
+}
+export const fetchOpsAlerts = (): Promise<Envelope<OpsAlertRow[]>> => apiFetch('/api/v1/safety/ops-alerts');
+export const fetchFailedDrills = (): Promise<Envelope<FailedDrillRow[]>> => apiFetch('/api/v1/safety/ops-alerts/failed-drills');
+export const acknowledgeOpsAlert = (id: string): Promise<Envelope<{ acknowledged: boolean }>> =>
+  apiFetch(`/api/v1/safety/ops-alerts/${encodeURIComponent(id)}/ack`, { method: 'POST', body: '{}' });
+export const runOpsAlertDrill = (): Promise<Envelope<{ opsAlertId: string; recipients: number; reached: number }>> =>
+  apiFetch('/api/v1/safety/ops-alerts/drill', { method: 'POST', body: '{}' });
+
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
 export const approveVendor = (id: string, reason: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT', reason });

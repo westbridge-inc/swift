@@ -21,6 +21,7 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
+import { billDateLabel } from '@/lib/bill-date';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-2] Rider (delivery/courier) and driver (taxi) pages.
@@ -252,7 +253,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
                 <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
                 <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
                 {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
-                {sub.nextBillingDate ? <Row label="Next bill">{when(sub.nextBillingDate)}</Row> : null}
+                {sub.nextBillingDate ? <Row label={billDateLabel(sub.nextBillingDate)}>{when(sub.nextBillingDate)}</Row> : null}
               </dl>
             ) : (
               <p className="mc-muted">No subscription yet. It starts when their documents are verified.</p>

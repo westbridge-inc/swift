@@ -159,6 +159,9 @@ const TRADE_NOTES: Partial<Record<ServiceTradeId, readonly string[]>> = {
   chef: ['Georgetown only for now. Your food handler’s certificate must be this year’s, from the Mayor and City Council of Georgetown. It is checked again every January.'],
   caterer: ['Georgetown only for now. Your food handler’s certificate and eating-house registration must be this year’s, from the Mayor and City Council of Georgetown. They are checked again every January.'],
   pest_control: ['Your Pesticides and Toxic Chemicals Control Board licence is checked again every January.'],
+  // [ROLE-DOCS · REVIEW-G #2053 S4-4] the electrician's GEI licence is now a floor (ops/platform-config), so its
+  // catalogue entry lists its documents like the solar installer's, with the same yearly re-check (R16)
+  electrician: ['Your GEI electrical licence is checked again every January.'],
   // [ROLE-DOCS · PR 3] the same yearly re-check as an electrician's GEI licence (R16)
   solar_generator_inverter_installer: ['Your GEI electrical licence is checked again every January.'],
 };

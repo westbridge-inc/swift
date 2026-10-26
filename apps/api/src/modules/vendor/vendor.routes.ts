@@ -7,6 +7,10 @@ import { assertHandoverRequestBudget } from '../handover/handover-request-budget
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from '../../lib/zod';
+import { VAT_CLASSES } from '../store-vat/vat-math';
+import { storeVatNumberChanged } from '../store-vat/store-vat-decisions';
+import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from '../verification/upload-consent';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
@@ -40,6 +44,7 @@ import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '..
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
 import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, OWN_NAME_DECLARATION_VERSION, OWN_NAME_VENDOR_TYPES, renderOwnNamePdf, storeNameIsOwnName } from './own-name';
+import { FOOD_HANDLERS_CONSENT_TYPE, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies, storeAttested } from './food-handlers';
 import { DECLARATION_DOC_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
@@ -91,6 +96,7 @@ import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { resolveAvatarUrls } from '../../utils/avatar-url';
 import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
@@ -237,6 +243,10 @@ const createItemSchema = z.object({
   sortOrder: z.number().int().min(0).optional(),
   fulfillment: z.enum(['DELIVERY', 'PICKUP', 'APPOINTMENT']).optional(),
   bookingConfig: bookingConfigSchema.optional(),
+  // [STORE-VAT · owner O-5] The item's VAT class, the store's call (it is told it is responsible). Optional: an older
+  // app never sends it, and the item keeps its class (STANDARD for a new one). It carries VAT only for a store whose
+  // VAT a person approved.
+  vatClass: z.enum(VAT_CLASSES).optional(),
   optionGroups: z
     .array(optionGroupInputSchema.extend({ options: z.array(optionInputSchema).max(100) }))
     .max(50)
@@ -632,6 +642,8 @@ const ORDER_MONEY_FIELDS = [
   'subtotalBase', 'subtotalMarkup', 'subtotalCustomer',
   'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount',
   'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal',
+  // [STORE-VAT · owner O-5] The VAT included in a VAT store's goods, and the goods by class (null on every other order).
+  'vatAmount', 'vatStandardGoods', 'vatZeroRatedGoods', 'vatExemptGoods', 'vatBase',
 ] as const;
 
 /** Every `Decimal` money column on `model OrderItem`. */
@@ -727,7 +739,7 @@ export function assertNoOpenCustomerQuestion(
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
-async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string) {
+async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string, request: { headers: Record<string, string | string[] | undefined> }) {
   const { vendorIds } = await resolveVendor(app, userId);
   const order = await app.prisma.order.findUnique({
     where: { id: orderId },
@@ -746,6 +758,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       // [COORD 17 Oct] The store order screen's Call button: first name + phone, never the last name.
+      // [O-1] The customer's and rider's phones go only to an installed store build (below).
       customer: { select: { id: true, firstName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
@@ -761,7 +774,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
   if ((order.holdExpiresAt && order.holdExpiresAt > new Date()) || cancelledWhileHeld(order)) {
     throw new NotFoundError('Order', orderId);
   }
-  return order;
+  // [O-1 · owner 19:40Z] A bridge-aware store screen calls through Swift: no personal number.
+  return withCounterpartPhones(request, order);
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,6 +1480,61 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };
   });
 
+  // =========================================================================
+  // [STORE-VAT · owner O-5] The store's VAT: its answer, its certificate, and what a person decided. OWNER only
+  // (the business's tax registration is the owner's to give, like vatRegistrationNumber). Nothing a customer sees
+  // changes until a person approves the certificate (store-vat-decisions.ts).
+  // =========================================================================
+
+  /** GET /vat — the store's VAT as its owner sees it (status, mode, the approved details, the rate, the sources). */
+  app.get('/vat', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const { storeVatView } = await import('../store-vat/store-vat-decisions');
+    return { success: true, data: await storeVatView(app.prisma, vendorId) };
+  });
+
+  /** PUT /vat — "Is your business VAT-registered with the GRA?" No = VAT off at once. Yes = the number (as on the
+   *  certificate) and how the prices relate to VAT; the store waits for a person. */
+  app.put('/vat', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = z.object({
+      registered: z.boolean(),
+      vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
+      mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']).optional(),
+    }).strict().parse(request.body);
+    const { updateStoreVatSettings } = await import('../store-vat/store-vat-decisions');
+    return { success: true, data: await updateStoreVatSettings(app.prisma, vendorId, body) };
+  });
+
+  /** POST /vat/certificate — the store's GRA VAT registration certificate (uploaded first through
+   *  /verification/upload, like every document). Filed for a PERSON's review, never sent to a document processor. */
+  app.post('/vat/certificate', auth, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = z.object({
+      fileUrl: z.string().min(5).max(2048),
+      consent: z.literal(true),
+      privacyNoticeVersion: z.string().min(1).max(20),
+      consentTick: z.enum(UPLOAD_CONSENT_TICKS).optional(),
+    }).strict().parse(request.body);
+    const { storeVatEnabled, VAT_CERTIFICATE_DOC_TYPE } = await import('../store-vat/store-vat');
+    const { linkVatCertificate, STORE_VAT_OFF_CODE } = await import('../store-vat/store-vat-decisions');
+    if (!storeVatEnabled()) {
+      throw new AppError(409, STORE_VAT_OFF_CODE, 'VAT settings are not available on Swift right now. Your prices stay exactly as you typed them.');
+    }
+    const userId = request.user.userId;
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { vendorType: true, vatStatus: true } });
+    if (vendor.vatStatus === 'NONE') {
+      throw new AppError(409, 'VAT_NOT_CLAIMED', 'First say your business is VAT-registered and type its VAT number, then send the certificate.');
+    }
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+    const doc = await verification.submitDocument(userId, role, VAT_CERTIFICATE_DOC_TYPE, body.fileUrl, body.privacyNoticeVersion, request.user.role, { storeVatCertificate: true });
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId, tick: body.consentTick, subjectType: consentSubjectForRole(role), surface: consentSurfaceOf(request), ip: request.ip, docType: VAT_CERTIFICATE_DOC_TYPE });
+    }
+    reply.code(201);
+    return { success: true, data: await linkVatCertificate(app.prisma, vendorId, doc) };
+  });
+
   /**
    * [ROLE-DOCS · owner ruling 21 Oct 2026] POST /onboarding/own-name — the owner of a store that trades under their
    * OWN name (Business Names (Registration) Act s.3: their true surname, with nothing added except their first names
@@ -1558,6 +1627,58 @@ export async function vendorRoutes(app: FastifyInstance) {
     await verification.reprojectVendorActivation(userId);
     const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
     return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
+  });
+
+  /** GET /vat/report?from=YYYY-MM-DD&to=YYYY-MM-DD — [STORE-VAT · PR4] the store's VAT report for its accountant: its
+   *  own supplied VAT orders, by Guyana day, as the sales lines of the GRA VAT return. OWNER only (the business's tax
+   *  figures). Read from the VAT each order froze; Swift never files the return. */
+  app.get('/vat/report', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const query = z.object({ from: z.string().max(10), to: z.string().max(10) }).strict().parse(request.query);
+    const { storeVatReport } = await import('../store-vat/vat-report');
+    return { success: true, data: await storeVatReport(app.prisma, vendorId, query.from, query.to) };
+  });
+
+  /**
+   * [FOOD-PERMIT · owner ruling 24 Oct 2026] POST /onboarding/food-handlers — the owner of a REGISTERED restaurant
+   * ticks, for the selected store: "Everyone who handles food here holds a current food handler's certificate."
+   * (vendor/food-handlers.ts). The words are published as their own versioned document and the tick is a row in the
+   * consent ledger (append-only): who (the owner), which store (evidence.vendorId), when, the words' version and hash.
+   * A store that was waiting only for it goes live now (the activation projection), not at the next daily belt.
+   * Refused for a home cook (self-declared tier: the certificate itself is required) and every other store type.
+   * Ticking again changes nothing. Owner only.
+   */
+  app.post('/onboarding/food-handlers', auth, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const userId = request.user.userId;
+    z.object({ accept: z.literal(true), attestationVersion: z.literal(FOOD_HANDLERS_VERSION) }).parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, vendorType: true, tier: true } });
+    if (!foodHandlerTickApplies(vendor)) {
+      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', vendor.vendorType === 'RESTAURANT'
+        ? 'A self-declared food seller uploads their own food handler’s certificate under Documents. This tick is for registered restaurants.'
+        : 'Only a restaurant confirms its food handlers.');
+    }
+    await publishLegalDocumentOnce(app.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
+    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
+    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
+    const recorded = await app.prisma.$transaction(async (tx) => {
+      // One tick per store at a time: the store row is the lock, and the tick is decided again under it.
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendor.id} FOR UPDATE /* food-handlers-tick */`;
+      if (await storeAttested(tx, userId, vendor.id)) return false;
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: userId, documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION,
+        action: 'granted', surface, ip: request.ip,
+        evidence: { vendorId: vendor.id, storeName: vendor.name, control: 'checkbox', attestedAt: new Date().toISOString() },
+      });
+      return true;
+    });
+    if (recorded) {
+      // A failure here never undoes the tick: the daily belt makes the store live.
+      await verification.reprojectVendorActivation(userId)
+        .catch((err) => request.log.warn({ err, vendorId: vendor.id }, 'go-live projection after the food handlers tick is held for the belt'));
+    }
+    reply.code(recorded ? 201 : 200);
+    return { success: true, data: { foodHandlers: { vendorId: vendor.id, attested: true, version: FOOD_HANDLERS_VERSION }, status: await verification.getStatus(userId, 'RESTAURANT') } };
   });
 
   /**
@@ -1702,6 +1823,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
+      // [STORE-VAT] A new VAT number is a new claim: an approval for another number stops standing.
+      if (vatRegistrationNumber !== undefined) await storeVatNumberChanged(tx, vendorId, vatRegistrationNumber);
       const noticeId = pin && before
         ? await recordStorePinMove(tx, { vendorId, before, to: pin, actorUserId: request.user.userId, actorRole: access.role })
         : null;
@@ -1998,7 +2121,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ack — explicit acknowledgement without accept/reject. */
   app.put<{ Params: IdParam }>('/orders/:id/ack', auth, async (request) => {
-    await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert. [Q10]
     // Only AFTER the ownership check: it used to run first, so any signed-in
     // account naming an order id stamped that store receipt, then got a 404.
@@ -2065,21 +2188,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
-    const data = orders.map((order) => redactCustomerContact({
+    const data = orders.map((order) => withCounterpartPhones(request, redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       ...handover.get(order.id),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       ...storeMmgPayBy(order),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
-    }));
+    })));
 
     return { success: true, ...paginatedResponse(data, total, pagination) };
   });
 
   /** GET /orders/:id — Full order detail */
   app.get<{ Params: IdParam }>('/orders/:id', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // The takeover polls this read: the response-SLA deadline is computed here,
     // from the same inputs the auto-cancel job was enqueued with.
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
@@ -2097,7 +2220,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  confirms the goods came back. Closes the return (RETURNED) through the
    *  canonical seam, which resolves the case and frees the rider. */
   app.post<{ Params: IdParam }>('/orders/:id/recovery/return-received', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     if (order.orderType === 'COURIER') {
       throw new AppError(409, 'NOT_A_STORE_RETURN', 'A courier parcel goes back to its sender, not to a store.');
     }
@@ -2109,7 +2232,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/accept — Accept an incoming order */
   app.put<{ Params: IdParam }>('/orders/:id/accept', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
@@ -2289,7 +2412,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
     // complete-appointment. Marking it "preparing" sent the customer kitchen
@@ -2318,7 +2441,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
     // that already sits in PREPARING is not reopened into the kitchen path.
@@ -2380,7 +2503,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  = "get a rider instead" — which dispatches a rider if none is assigned yet,
    *  the fallback that stops a self-delivery order dying in the kitchen. */
   app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     const { mode } = fulfillmentModeSchema.parse(request.body);
     if (order.fulfillment !== 'DELIVERY') {
@@ -2455,7 +2578,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/items/:lineId/picked — staff tick a shelf-picked line. */
   app.put('/orders/:id/items/:lineId/picked', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    await resolveOwnedOrder(app, request.user.userId, id, request);
     const { picked } = z.object({ picked: z.boolean() }).parse(request.body);
     const line = await picking.setPicked(id, lineId, picked);
     return { success: true, data: line };
@@ -2465,7 +2588,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
   app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id, request);
     const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
     const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
     await ackPreAcceptQuestion(order, request.user.userId);
@@ -2476,7 +2599,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  comes off the order, totals shrink, stock goes back on the shelf. */
   app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id, request);
     // [O-4] On a waiting order this ASKS the customer (continue without it, or cancel); after the
     // accept it removes the line at once, as before.
     const line = await picking.refundLine(id, lineId, request.user.userId);
@@ -2494,7 +2617,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   }
 
   /** POST /items/:id/adjust — reasoned stock movement (received/damaged/…),
-   *  atomic and logged. The audit trail behind quantity-on-hand. */
+   *  atomic and logged. The audit trail behind quantity-on-hand.
+   *
+   *  [MASTER-025] ONE command. The canonical movement, the adjustment record
+   *  and the availability edges commit in one transaction — a failure in any
+   *  of them leaves the stock unmoved, so an error answer is the truth. With an
+   *  `Idempotency-Key` the adjustment record is the command's durable receipt
+   *  (unique per item): a retry of the same command returns the committed
+   *  movement instead of moving stock again; the same key naming a different
+   *  adjustment is refused; a new key is a new, intentional adjustment. */
   app.post<{ Params: IdParam }>('/items/:id/adjust', auth, async (request) => {
     const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const body = z.object({
@@ -2502,12 +2633,37 @@ export async function vendorRoutes(app: FastifyInstance) {
       reason: z.enum(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN']),
       note: z.string().max(300).optional(),
     }).parse(request.body);
+    const rawKey = request.headers['idempotency-key'];
+    if (rawKey !== undefined && (typeof rawKey !== 'string' || rawKey.length < 8 || rawKey.length > 128)) {
+      throw new AppError(400, 'INVALID_IDEMPOTENCY_KEY', 'The Idempotency-Key header must be 8 to 128 characters');
+    }
+    const commandKey = typeof rawKey === 'string' ? rawKey : null;
+    const note = body.note ?? null;
 
     const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds }, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.id);
     if (item.stockQuantity == null) {
       throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
     }
+
+    const answer = async (adjustment: { movementId: string | null }, replayed: boolean) => {
+      const fresh = await app.prisma.item.findUnique({ where: { id: item.id }, select: { stockQuantity: true, isAvailable: true } });
+      return { success: true, data: { adjustment, movementId: adjustment.movementId, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable, replayed } };
+    };
+    /** The committed receipt for this command, if there is one — refused when
+     *  the key already named a different adjustment. */
+    const committedReceipt = async () => {
+      if (!commandKey) return null;
+      const receipt = await app.prisma.stockAdjustment.findUnique({ where: { itemId_commandKey: { itemId: item.id, commandKey } } });
+      if (!receipt) return null;
+      if (receipt.delta !== body.delta || receipt.reason !== body.reason || (receipt.note ?? null) !== note || receipt.createdBy !== request.user.userId) {
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key already named a different stock adjustment — use a new key for a new adjustment');
+      }
+      return receipt;
+    };
+
+    const prior = await committedReceipt();
+    if (prior) return answer(prior, true);
 
     // [MKT-2] Through the single writer, so the vendor's own correction lands in
     // the same ledger as the sales it is correcting. Still guarded: stock can't
@@ -2518,32 +2674,40 @@ export async function vendorRoutes(app: FastifyInstance) {
     // disagreeing, which is the exact failure the ledger exists to prevent.
     // Mirror the inventory engine's edges in the SAME transaction as the movement: zero hides, restock un-hides —
     // never a banned item, judged under the item's row lock with the write. [GUARDRAILS §8 · DS1266 S3 · DS1267 S4]
-    await app.prisma.$transaction(async (tx) => {
-      await applyStockMovement(tx, {
+    // [MASTER-025] The adjustment record (the command's receipt) commits in the
+    // same transaction too, so an error answer means nothing moved.
+    let replayed = false;
+    const adjustment = await app.prisma.$transaction(async (tx) => {
+      const moved = await applyStockMovement(tx, {
         itemId: item.id,
         delta: body.delta,
         reason: body.reason,
         actorId: request.user.userId,
-        note: body.note ?? null,
+        note,
       });
       await tx.item.updateMany({
         where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
         data: { isAvailable: false, autoHiddenAt: new Date() },
       });
       await unhideRestocked(tx, item.id);
-    }).catch((err) => {
+      return tx.stockAdjustment.create({
+        data: { itemId: item.id, delta: body.delta, reason: body.reason, note, createdBy: request.user.userId, commandKey, movementId: moved.movementId },
+      });
+    }).catch(async (err) => {
       if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
         throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
       }
+      // A concurrent submission of the same command committed first: this one
+      // rolled back whole, and answers with that command's receipt.
+      if (commandKey && (err as { code?: unknown }).code === 'P2002') {
+        const winner = await committedReceipt();
+        if (winner) { replayed = true; return winner; }
+      }
       throw err;
     });
-
-    const adjustment = await app.prisma.stockAdjustment.create({
-      data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
-    });
-    const fresh = await app.prisma.item.findUnique({ where: { id: item.id }, select: { stockQuantity: true, isAvailable: true } });
+    if (replayed) return answer(adjustment, true);
     scheduleVendorSearchSync(app, item.vendorId);
-    return { success: true, data: { adjustment, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable } };
+    return answer(adjustment, false);
   });
 
   /** GET /items/low-stock — everything at/under its threshold. */
@@ -2567,7 +2731,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Swift; this only records confirmation + tells the customer live. MMG orders
    *  only (cash is settled at handover). Idempotent. */
   app.post<{ Params: IdParam }>('/orders/:id/confirm-payment', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER may confirm an MMG
     // payment; STAFF may not. Checked first, before any read-back or write, so
     // a refused tap leaves the order exactly as it was.
@@ -2776,7 +2940,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  holds the order and asks Swift to search again (fresh radius, cleared
    *  decline memory). No-op while an offer is already live. */
   app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
@@ -2797,7 +2961,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
@@ -2830,7 +2994,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Courier/parcel and taxi are never here (no store); a self-delivery has no Swift rider. */
   // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
   app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // [REVIEW-G S4-4 on #2055] Like every other in-flight store action: a closed (or non-billing
     // suspended) store's staff cannot tap.
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
@@ -2874,7 +3038,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
@@ -2901,7 +3065,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
    *  carries the cash-capture gate and the PIN check. */
   app.put<{ Params: IdParam }>('/orders/:id/delivered', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
       throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
@@ -2923,7 +3087,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
   app.put<{ Params: IdParam }>('/orders/:id/reject', tap, async (request) => {
-    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
@@ -3165,6 +3329,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         sortOrder,
         ...(body.fulfillment ? { fulfillment: body.fulfillment } : {}),
         ...(body.bookingConfig ? { bookingConfig: body.bookingConfig as object } : {}),
+        ...(body.vatClass !== undefined ? { vatClass: body.vatClass } : {}),
         optionGroups: body.optionGroups?.length
           ? {
               create: body.optionGroups.map((group, gi) => ({
@@ -3685,6 +3850,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.description !== undefined && { description: body.description?.trim() }),
           ...(photo === null && { imageUrl: null }),
           ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
+          ...(body.vatClass !== undefined && { vatClass: body.vatClass }),
           ...(body.sku !== undefined && { sku: body.sku }),
           ...(body.unit !== undefined && { unit: body.unit }),
           ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
@@ -4430,21 +4596,24 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    if (!subscription) return { success: true, data: null };
+    const fee = await payInfo(app.prisma, subscription);
     return {
       success: true,
-      data: subscription
-        ? {
-            ...subscription,
-            // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-            ...(await sanDisplay(app.prisma, subscription)),
-            ...(await payInfo(app.prisma, subscription)),
-            // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
-            weeklyRate: Number(subscription.weeklyRate),
-            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
-            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
-          }
-        : null,
+      data: {
+        ...subscription,
+        // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
+        ...(await sanDisplay(app.prisma, subscription)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, subscription, fee),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
+        weeklyRate: Number(subscription.weeklyRate),
+        // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+        feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
+      },
     };
   });
 

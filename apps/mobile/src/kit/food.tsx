@@ -114,6 +114,7 @@ export function FoodCard({
   image,
   name,
   priceLabel,
+  priceNote,
   rating,
   ratingBucket,
   topRated,
@@ -128,6 +129,8 @@ export function FoodCard({
   image: string | null;
   name: string;
   priceLabel?: string;
+  /** [STORE-VAT · owner O-5] A short note under the price ("incl. VAT"), from lib/storeVat. */
+  priceNote?: string | null;
   /** number = show stars · null = the "New" face · undefined = no star line. */
   rating?: number | null;
   ratingBucket?: string;
@@ -190,6 +193,7 @@ export function FoodCard({
               {priceLabel}
             </T>
           ) : null}
+          {priceLabel && priceNote ? <T variant="micro" tone="faint">{priceNote}</T> : null}
           {/* RatingMeta now returns null when it has nothing to say, so this
               no longer needs to guess. The old guard dropped the WHOLE line
               whenever rating was absent — which is why the Popular rail never

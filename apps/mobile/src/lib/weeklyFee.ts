@@ -1,4 +1,8 @@
 // MMG-CHECKOUT-API ca425ee7, plus the receipt references of section 5. Kept identical across the two independently built apps.
+import { feeDate, feeMoney, feeStatusOf, type FeeStatus, type FeeStatusState } from './fee-status';
+// [REVIEW-F S4-1 · FEE-STATUS] The fee status words live in ./fee-status (small, so the web's Orders home can use them).
+export { feeDate, feeMoney, feeStatusOf };
+export type { FeeStatus, FeeStatusState };
 export type FeeFamily = 'vendor' | 'rider' | 'driver';
 export type CheckoutState = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
@@ -15,6 +19,9 @@ export interface CheckoutStatus {
 export interface FeeSubscription {
   id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
   currentPeriodEnd?: string | null; gracePeriodEnd?: string | null;
+  weeklyFeeGyd?: number | string; isTrialActive?: boolean; trialEndDate?: string | null; isInGracePeriod?: boolean; autoRenew?: boolean;
+  /** [FEE-STATUS] Where the fee stands, in the API's words (billing/fee-status.ts). Absent from an older API. */
+  feeStatus?: FeeStatus | null;
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
   /** [owner legal plan R12] The weekly-fee receipts, printed by the API (one source for every screen). */
   feeReceipts?: FeeReceipt[];
@@ -23,21 +30,8 @@ export interface FeeSubscription {
 }
 export interface FeeReceipt { receiptNumber: string; lines: string[] }
 export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl: string | null; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
-export const feeMoney = (n: number) => `GY$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-export function feeDate(value?: string | null): string {
-  return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' }) : '';
-}
 export function liveMmg(sub?: FeeSubscription | null) {
   return sub?.payActions?.find((a): a is Extract<PayAction, { state: 'live' }> => a.id === 'MMG_CHECKOUT' && a.state === 'live');
-}
-export function dueLine(sub: FeeSubscription): string {
-  const raw = sub.amountDueGyd;
-  const due = raw != null && raw !== '' ? Number(raw) : NaN;
-  if (!Number.isFinite(due)) return 'Amount due unavailable.';
-  const date = feeDate(sub.nextBillingDate ?? sub.currentPeriodEnd);
-  if (due <= 0) return `Nothing due right now${date ? `: your next bill is ${date}` : '.'}`;
-  const by = feeDate(sub.gracePeriodEnd ?? sub.nextBillingDate ?? sub.currentPeriodEnd);
-  return `${feeMoney(due)} due${by ? ` by ${by}` : ' now'}`;
 }
 export function subscriptionWords(status: string): string {
   return ({ TRIAL: 'Free trial', ACTIVE: 'Active', PAST_DUE: 'Weekly fee overdue', SUSPENDED: 'Account suspended', CHURNED: 'Account inactive', PAUSED: 'Weekly billing paused', CANCELLED: 'Subscription closed' } as Record<string, string>)[status] ?? 'Status unavailable';

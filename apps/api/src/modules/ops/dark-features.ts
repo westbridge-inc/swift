@@ -141,6 +141,18 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'money',
   },
   {
+    // [STORE-VAT · owner O-5, 24 Oct 2026] Built for launch, OFF until switched on deliberately. Even ON, nothing a
+    // customer sees changes for a store until a PERSON approves its GRA VAT certificate.
+    key: 'store_vat',
+    setting: 'STORE_VAT',
+    source: 'env',
+    enabledWhen: '1',
+    title: "A VAT-registered store's VAT (14%, inside its prices, shown on its receipts)",
+    whileOff:
+      "No store can say it is VAT-registered, send its GRA VAT certificate, or be approved for VAT; every store's prices, carts, checkouts and receipts show no VAT, exactly as before. Orders already placed with VAT keep the VAT they froze on their receipts. Swift's own fees stay \"Not a VAT invoice\" either way.",
+    impact: 'money',
+  },
+  {
     key: 'mover_push_required',
     setting: 'MOVER_PUSH_REQUIRED',
     source: 'env',
@@ -161,6 +173,31 @@ export const DARK_FEATURES: DarkFeature[] = [
     whileOff:
       "A passenger pays the driver directly at drop-off, in cash or by MMG, with no in-app pay link: the trip-end screen shows no 'Pay with MMG' button, the driver's Account screen shows no MMG pay link card, and a new link is refused. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
     impact: 'money',
+  },
+  {
+    // [O-1 · owner 24 Oct 2026] The Swift call bridge. Ships OFF; on only after a real test call
+    // rings and Press 1 connects on Digicel AND GTT.
+    key: 'call_relay',
+    setting: 'CALL_RELAY',
+    source: 'env',
+    // On only at '1' with blanks ignored (modules/calls/call-relay-switch.ts reads it so).
+    enabledWhenPattern: /^1$/,
+    title: 'Calls through Swift (the call bridge)',
+    whileOff:
+      "Calls are not routed through Swift. Every app, old store builds and new, keeps the other party's number on a live order and dials it directly, exactly as before, and in-app chat works as always. Kept OFF until a real Swift test call rings and Press 1 connects on a Digicel phone and a GTT phone (owner, 24 Oct 2026).",
+    impact: 'product',
+  },
+  {
+    // [O-1 · owner 22 Oct 2026] ON until store builds 9-12 / vc7-vc8 are retired (launch checklist).
+    key: 'counterpart_phones_to_old_apps',
+    setting: 'COUNTERPART_PHONES_TO_OLD_APPS',
+    source: 'env',
+    // On unless the trimmed value is exactly '0' (modules/calls/counterpart-phone.ts reads it so).
+    enabledWhenPattern: /^(?!0$)/,
+    title: "Old app builds still get the other party's number",
+    whileOff:
+      "Takes effect only while CALL_RELAY is on; while the call bridge is off every app keeps the other party's number whatever this says. With the bridge on: no app is sent another person's personal phone number, so phones on store builds 9-12 (iPhone) and vc7-vc8 (Android) show no Call button for the rider, driver, customer or store on a live order and use chat or support instead. Builds that know the Swift call bridge are not affected (with the bridge on they are never sent a number). Set to 0 only when those builds are retired.",
+    impact: 'product',
   },
   {
     key: 'web_taxi_booking',

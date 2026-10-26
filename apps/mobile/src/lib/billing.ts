@@ -97,6 +97,21 @@ export function billingStoppedLine(sub: any, who: 'store' | 'driver' | 'rider', 
     : 'No more weekly fees will be charged.';
 }
 
+/** [E12 · FEE-STATUS] The "Stop weekly billing?" confirm: what stopping does, from the server's period
+ *  end. A paid period that has already ended is never "keeps working until" its date (the operate gate
+ *  refuses a stopped plan's work from the period end: subscription/operate-gate.ts). */
+export function stopBillingConfirmBody(sub: any, who: 'store' | 'driver' | 'rider', now = Date.now()): string {
+  if (isBlocked(sub)) {
+    return `Your ${who} is already paused. Stopping means no more weekly fees will be charged — what you owe still stands until you pay it. You can resume billing anytime.`;
+  }
+  const end = sub?.currentPeriodEnd ? new Date(sub.currentPeriodEnd).getTime() : Number.NaN;
+  if (Number.isFinite(end) && end <= now) {
+    return `The week you paid for has ended, so your ${who} stops receiving work as soon as you stop billing. No more weekly fees are charged. You can resume billing anytime.`;
+  }
+  const periodEnd = shortDate(sub?.currentPeriodEnd);
+  return `Your ${who} keeps working until ${periodEnd || 'the end of the current period'}. After that, the ${who} stops receiving work and no more weekly fees are charged. You can resume billing anytime.`;
+}
+
 /** [E12] The rail a resume returns to: the one billing was stopped on. A
  *  legacy CARD subscription has no self-serve card enrollment, so it resumes
  *  on the prepaid CASH path — the only rails the boundary accepts. */

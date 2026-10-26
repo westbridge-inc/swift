@@ -667,6 +667,12 @@ export const safetyApi = {
   /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
    *  the driver pending identity review, opens the incident. */
   notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
+  /** [DRILL-STORM · S-19] The pages (SOS, operations pages, drills) waiting for a responder to
+   *  acknowledge them, and the acknowledgement that stops their re-pages. The server decides who
+   *  may — the admin role the account HOLDS, whatever mode the app is in — and the phone shows
+   *  what it is given. */
+  opsAlerts: () => api.get('/safety/ops-alerts'),
+  acknowledgeOpsAlert: (id: string) => api.post(`/safety/ops-alerts/${encodeURIComponent(id)}/ack`, {}),
   /**
    * §7.1 shift identity check — multipart selfie in, the outcome ladder out
    * ({ outcome: PASS|BORDERLINE|FAIL|…, allowedOnline, attemptsLeft? }).
@@ -949,6 +955,10 @@ export const servicesApi = {
     api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
+/** [DOC-CONSENT S4] How the person gave the document tick for this upload: ticked on this visit, shown from their own
+ *  grant on record, or the prompt a police clearance asks first. The API records it as the ledger row's evidence. */
+export type UploadConsentVia = 'checkbox' | 'record' | 'prompt';
+
 // Verification (mounted at /api/v1/verification)
 export const verificationApi = {
   status: (role: string, vehicleType?: string) =>
@@ -963,6 +973,8 @@ export const verificationApi = {
     privacyNoticeVersion: string;
     /** [R17] the tick shown before the upload (recorded in the consent ledger). */
     consentTick?: 'document_v1';
+    /** [DOC-CONSENT S4] how that tick was given (an older API ignores it). */
+    consentVia?: UploadConsentVia;
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
@@ -1061,7 +1073,20 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
+    body: {
+      outcome: 'paid' | 'no_show' | 'refused' | 'short_payment';
+      gps: { lat: number; lng: number };
+      photoUrl?: string;
+      ridePin?: string;
+      /** [L02 · row 56] The cash taken at the door, whole GYD (api cash/door-cash.ts decides what it means). */
+      collectedAmount?: number;
+      /** 'short_payment' with partial cash only: true = handed back; false = the rider still holds it (operations follow up). */
+      cashReturned?: boolean;
+      /** 'paid' only: the goods were already handed over for less than due. */
+      handedOverShort?: true;
+      /** The door authority version the screen rendered; a stale one is refused. */
+      handoverVersion?: string;
+    },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
@@ -1238,6 +1263,8 @@ export interface VendorItemInput {
   bulk?: 'normal' | 'bulky' | 'very_bulky';
   stockQuantity?: number;
   imageUrl?: string;
+  /** [STORE-VAT · owner O-5] The store's VAT class for the item; omitted = unchanged (STANDARD for a new item). */
+  vatClass?: 'STANDARD' | 'ZERO_RATED' | 'EXEMPT';
 }
 
 export const vendorApi = {
@@ -1248,6 +1275,11 @@ export const vendorApi = {
   signOwnName: () => api.post('/vendor/onboarding/own-name', { accept: true, attestationVersion: OWN_NAME_DECLARATION_VERSION }),
   /** [ROLE-DOCS] Use a registered business name instead: the store asks for its registration again. */
   dropOwnName: () => api.delete('/vendor/onboarding/own-name'),
+  /** [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant's owner ticks, for ONE store (named by its id, so the tick
+   *  never lands on whichever store happens to be selected): everyone who handles food there holds a current food
+   *  handler's certificate. `version` is the server's (GET /verification/status → foodHandlerAttestation). */
+  tickFoodHandlers: (vendorId: string, version: string) =>
+    api.post('/vendor/onboarding/food-handlers', { accept: true, attestationVersion: version }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
   // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
   toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
   toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
@@ -1264,8 +1296,10 @@ export const vendorApi = {
     api.post(`/vendor/orders/${orderId}/items/${lineId}/substitute`, { substituteItemId }),
   refundLine: (orderId: string, lineId: string) =>
     api.post(`/vendor/orders/${orderId}/items/${lineId}/refund-line`, {}),
-  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }) =>
-    api.post(`/vendor/items/${itemId}/adjust`, body),
+  /** [MASTER-025] `commandKey` names ONE adjustment: a retry with the same key
+   *  returns the committed movement instead of moving stock again. */
+  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }, commandKey?: string) =>
+    api.post(`/vendor/items/${itemId}/adjust`, body, commandKey ? { headers: { 'Idempotency-Key': commandKey } } : undefined),
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
@@ -1295,6 +1329,13 @@ export const vendorApi = {
   returnReceived: (id: string) => api.post(`/vendor/orders/${id}/recovery/return-received`, {}),
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
+  /** [STORE-VAT · owner O-5] The store's VAT (OWNER only): its answer, its certificate, and what a person decided. */
+  vat: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/vat', capturedVendorAuthConfig(session, storeId)),
+  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.put('/vendor/vat', data, capturedVendorAuthConfig(session, storeId)),
+  /** The certificate file was uploaded first (/verification/upload); this files it for a PERSON's check. */
+  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.post('/vendor/vat/certificate', data, capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedVendorAuthConfig(session, storeId)),

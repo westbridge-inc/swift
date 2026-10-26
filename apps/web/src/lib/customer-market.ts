@@ -7,7 +7,8 @@ import { publicGet, type MarketCategory, type MarketItem } from './customer';
 import { retailCategories } from './browse-keys';
 
 export function getMarketItems(params: { category?: string; cursor?: string }): Promise<{ items: MarketItem[]; nextCursor: string | null }> {
-  const qs = new URLSearchParams({ sort: 'popular' });
+  // [P35 · board 4a] Newest first, as the phone's Market (useMarketItems sort 'new'): the shelf is "New arrivals".
+  const qs = new URLSearchParams({ sort: 'new' });
   if (params.category) qs.set('category', params.category);
   if (params.cursor) qs.set('cursor', params.cursor);
   return publicGet(`/api/v1/market/items?${qs}`);
