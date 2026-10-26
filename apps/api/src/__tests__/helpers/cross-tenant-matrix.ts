@@ -16,6 +16,10 @@ import { sessionCredentialDigest } from '../../lib/session-credential';
 //      carries a marker string; a body containing it is a leak), and
 //   2. after the whole sweep, no production row has changed (a digest of
 //      every fixture row, taken before and after).
+// A money or platform admin route answers 202 APPROVAL_REQUIRED before its
+// handler runs, so the attacker's ask is APPROVED by a second administrator of
+// the attacker's own tenant and re-sent with the approval: the handler itself
+// is then fired at the production objects too (the approval leg).
 // The same sweep runs on the owner login and on the walled login (the
 // production CONTRACT posture), from two suites that share this harness.
 // ---------------------------------------------------------------------------
@@ -59,6 +63,8 @@ export interface World {
     optionGroup: string; option: string; cart: string; cartItem: string; booking: string; subscription: string; claim: string;
   };
   attackers: Array<{ label: string; userId: string; role: UserRole }>;
+  /** [REVIEW-M #2069 S3-1] An attacker's same-tenant colleague who approves its two-person asks (the approval leg). */
+  approvers: Record<string, { userId: string; role: UserRole }>;
   cleanup: () => Promise<void>;
 }
 
@@ -156,9 +162,11 @@ export async function seedWorld(owner: PrismaClient): Promise<World> {
   // A tenant ADMIN, not SUPER_ADMIN: a SUPER_ADMIN is the PLATFORM responder, unscoped on purpose for SOS
   // (TA-S0-004, safety.routes.ts isPlatformResponder), so it is no cross-tenant attacker.
   const bAdmin = await user(tenantB, ['ADMIN'], 'TenantB Admin', { admin: { create: { permissions: ['*'] } } });
+  // Tenant B's SECOND administrator: approves the first one's two-person asks, so the gated handlers run.
+  const bApprover = await user(tenantB, ['ADMIN'], 'TenantB Approver', { admin: { create: { permissions: ['*'] } } });
 
   const victimUsers = [customer.id, ownerUser.id, staffUser.id, riderUser.id, driverUser.id];
-  const attackerUsers = [reviewCustomer.id, reviewRider.id, reviewDriver.id, bOwner.id, bAdmin.id];
+  const attackerUsers = [reviewCustomer.id, reviewRider.id, reviewDriver.id, bOwner.id, bAdmin.id, bApprover.id];
   return {
     run, mark, review, tenantB,
     victim: {
@@ -176,6 +184,7 @@ export async function seedWorld(owner: PrismaClient): Promise<World> {
       { label: 'tenant-B store owner', userId: bOwner.id, role: 'VENDOR_OWNER' },
       { label: 'tenant-B admin', userId: bAdmin.id, role: 'ADMIN' },
     ],
+    approvers: { [bAdmin.id]: { userId: bApprover.id, role: 'ADMIN' } },
     cleanup: async () => {
       const all = [...victimUsers, ...attackerUsers];
       const swallow = () => undefined;
@@ -282,6 +291,19 @@ export function skipped(method: string, url: string): boolean {
 }
 
 export interface Finding { attacker: string; method: string; url: string; status: number; why: string }
+/** The approval leg's tally: asks (202 with an approval id), asks the colleague APPROVED, re-sends, re-sends the gate
+ *  let through to the handler (the approval is spent: APPLIED), and the re-sends' statuses. */
+export interface ApprovalLeg { asked: number; approved: number; resent: number; reached: number; byStatus: Record<string, number> }
+
+/** The approval id a 202 APPROVAL_REQUIRED answer names, or null. */
+function approvalIdOf(body: string): string | null {
+  try {
+    const id = (JSON.parse(body) as { error?: { details?: { approvalId?: unknown } } })?.error?.details?.approvalId;
+    return typeof id === 'string' && id ? id : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Fire every route at the production objects as every attacker. */
 export async function sweep(
@@ -290,7 +312,7 @@ export async function sweep(
   w: World,
   routes: Array<{ method: string; url: string }>,
   attacker: World['attackers'][number],
-): Promise<{ findings: Finding[]; fired: number; byStatus: Record<string, number>; firstRefused: string | null; unanswered: string[] }> {
+): Promise<{ findings: Finding[]; fired: number; byStatus: Record<string, number>; firstRefused: string | null; unanswered: string[]; approvals: ApprovalLeg }> {
   let token = await mintToken(app, owner, attacker);
   // Positive control: the attacker really is signed in, as itself. A refused token would turn
   // every authenticated route into a 401 and the whole sweep into a vacuous pass.
@@ -304,17 +326,24 @@ export async function sweep(
   let fired = 0;
   let firstRefused: string | null = null;
   const unanswered: string[] = [];
+  const approver = w.approvers[attacker.userId];
+  let approverToken: string | null = null;
+  const approvals: ApprovalLeg = { asked: 0, approved: 0, resent: 0, reached: 0, byStatus: {} };
+  const tally = (key: string) => { approvals.byStatus[key] = (approvals.byStatus[key] ?? 0) + 1; };
   let previous = '(start)';
   const seen = new Set<string>();
   for (const { method, url } of routes) {
     if (skipped(method, url) || seen.has(`${method} ${url}`)) continue;
     seen.add(`${method} ${url}`);
     const path = materialize(url, w);
-    const fire = (bearer: string) => {
+    const fire = (bearer: string, approvalId?: string) => {
       const opts: InjectOptions = {
         method: method as InjectOptions['method'],
         url: method === 'GET' || method === 'DELETE' ? `${path}${path.includes('?') ? '&' : '?'}${query}` : path,
-        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'x-vendor-id': w.victim.vendor, 'x-swift-reason': 'matrix probe' },
+        headers: {
+          authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'x-vendor-id': w.victim.vendor, 'x-swift-reason': 'matrix probe',
+          ...(approvalId ? { 'x-swift-approval': approvalId } : {}),
+        },
       };
       if (method !== 'GET' && method !== 'DELETE') opts.payload = body;
       return app.inject(opts);
@@ -333,8 +362,39 @@ export async function sweep(
     if (res.statusCode >= 200 && res.statusCode < 300 && res.body.includes(w.mark)) {
       findings.push({ attacker: attacker.label, method, url, status: res.statusCode, why: 'a 2xx answer carries production data' });
     }
+    // [REVIEW-M #2069 S3-1 · the approval leg] A two-person route answered 202 before its handler ran: the
+    // attacker's same-tenant colleague approves, and the attacker re-sends the exact request with the approval
+    // (the gate's own path: fingerprint and reason checked again), so the HANDLER now meets the production objects.
+    const approvalId = res.statusCode === 202 && approver ? approvalIdOf(res.body) : null;
+    if (res.statusCode === 202 && approver && !approvalId) tally('202 without an approval id');
+    if (approvalId && approver) {
+      approvals.asked += 1;
+      approverToken ??= await mintToken(app, owner, approver);
+      const decide = await app.inject({
+        method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`,
+        headers: { authorization: `Bearer ${approverToken}`, 'content-type': 'application/json', 'x-swift-reason': 'matrix probe' },
+        payload: { approve: true, note: 'matrix approval leg' },
+      });
+      const decided = decide.statusCode === 200 ? (JSON.parse(decide.body) as { data?: { status?: string } }).data?.status : undefined;
+      if (decided !== 'APPROVED') tally(`decide ${decide.statusCode} ${decided ?? ''}`.trim());
+      else {
+        approvals.approved += 1;
+        let again = await fire(token, approvalId);
+        if (again.statusCode === 401) { token = await mintToken(app, owner, attacker); again = await fire(token, approvalId); }
+        approvals.resent += 1;
+        tally(String(again.statusCode));
+        // The gate spends an approval only when it lets the request through to the handler.
+        const spent = await owner.privilegedApproval.findUnique({ where: { id: approvalId }, select: { status: true } });
+        if (spent?.status === 'APPLIED') approvals.reached += 1;
+        else tally(`not let through (${spent?.status ?? 'gone'})`);
+        if (again.statusCode === 429 || again.statusCode >= 500) unanswered.push(`approved ${again.statusCode} ${method} ${url}`);
+        if (again.statusCode >= 200 && again.statusCode < 300 && again.body.includes(w.mark)) {
+          findings.push({ attacker: attacker.label, method, url, status: again.statusCode, why: 'an approved two-person ask, re-sent, carries production data' });
+        }
+      }
+    }
   }
-  return { findings, fired, byStatus, firstRefused, unanswered };
+  return { findings, fired, byStatus, firstRefused, unanswered, approvals };
 }
 
 /** Every production fixture row, as it stands. */
