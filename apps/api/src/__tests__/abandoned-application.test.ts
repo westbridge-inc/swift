@@ -358,6 +358,85 @@ describe('[Row 249 · REVIEW-M S4-3 · COORD] an open fraud, safety, compliance 
     expect(await sweep(later(41), u)).toMatchObject({ purged: 1 });
   });
 
+  // [REVIEW-M #2011 S4-1 · COORD F4] The re-check also runs for EACH document, inside the transaction that destroys its
+  // key, under the person's lock. Before, one check ran before the whole purge loop: a case opened while an earlier
+  // document's bytes were being deleted and probed (storage calls, outside any lock) let the later documents go.
+  it('a case opened while an earlier document is being deleted keeps the documents not yet destroyed', async () => {
+    const u = await person('RIDER');
+    const first = await doc(u, 'RIDER', 'REJECTED', 100);
+    const second = await doc(u, 'RIDER', 'REJECTED', 100, 'vehicle_insurance');
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+    // the first document's bytes are deleted from storage (after its key is shredded); a case opens meanwhile
+    const remove = storage.delete.bind(storage);
+    const deleting = vi.spyOn(storage, 'delete').mockImplementationOnce(async (key: string) => {
+      await incident(u);
+      return remove(key);
+    });
+    try {
+      expect(await sweep(later(14.01), u)).toMatchObject({ noticed: 0, purged: 1 });
+    } finally {
+      deleting.mockRestore();
+    }
+    // the one already being deleted is gone; the other is kept whole: its row, its bytes and its key
+    const after = await Promise.all([first, second].map(async (d) => ({ d, purgedAt: (await docOf(d.id)).purgedAt })));
+    expect(after.filter((x) => x.purgedAt !== null)).toHaveLength(1);
+    const kept = after.find((x) => x.purgedAt === null)!.d;
+    expect(await stored(kept.fileUrl)).toBe(true);
+    expect(await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: kept.fileUrl }, select: { wrappedDek: true, shreddedAt: true } })))
+      .toMatchObject({ wrappedDek: expect.anything(), shreddedAt: null });
+  });
+
+  it('the caller’s check runs while the person’s row is locked, before the key is destroyed; true destroys nothing', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    let lockedWhenChecked = -1;
+    const outcome = await system(() => service([u]).purgeDocumentNow(
+      { id: d.id, userId: u, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: 'swift-default' } },
+      ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, keeps: async (tx) => {
+        // the person's row lock (FOR UPDATE) shows as this backend's row-share lock on users
+        lockedWhenChecked = (await tx.$queryRaw<Array<{ n: number }>>`
+          SELECT count(*)::int AS n FROM pg_locks WHERE pid = pg_backend_pid() AND relation = 'users'::regclass AND mode = 'RowShareLock'`)[0]!.n;
+        return true;
+      } },
+    ));
+    expect(lockedWhenChecked).toBe(1);
+    expect(outcome).toBe('NOT_PURGED');
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+    expect(await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: d.fileUrl }, select: { wrappedDek: true, shreddedAt: true } })))
+      .toMatchObject({ wrappedDek: expect.anything(), shreddedAt: null });
+  });
+
+  // [REVIEW-M #2118 S4-1] The contract for any caller's check: one that THROWS destroys nothing (the purge fails loudly;
+  // the bytes, the key and the row stay). The sweep's openCaseKeeps never throws (an error reads as an open case).
+  it('a caller’s check that throws destroys nothing: the purge fails, the document stays whole', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    await expect(system(() => service([u]).purgeDocumentNow(
+      { id: d.id, userId: u, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: 'swift-default' } },
+      ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, keeps: async () => { throw new Error('synthetic check failure'); } },
+    ))).rejects.toThrow('synthetic check failure');
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+    expect(await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: d.fileUrl }, select: { wrappedDek: true, shreddedAt: true } })))
+      .toMatchObject({ wrappedDek: expect.anything(), shreddedAt: null });
+  });
+
+  it('a document with no stored file: the check runs in the purge transaction itself (true keeps it, false purges it)', async () => {
+    const u = await person('RIDER');
+    const d = await system(() => app.prisma.verificationDocument.create({ data: {
+      userId: u, role: 'RIDER', docType: 'driver_license', fileUrl: '', state: 'REJECTED', createdAt: new Date(Date.now() - 100 * DAY), reviewedAt: new Date(Date.now() - 100 * DAY), reviewedBy: 'abandon-test',
+    } }));
+    const purge = (keeps: boolean) => system(() => service([u]).purgeDocumentNow(
+      { id: d.id, userId: u, fileUrl: '', docType: d.docType, user: { tenantId: 'swift-default' } },
+      ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, keeps: async () => keeps },
+    ));
+    expect(await purge(true)).toBe('NOT_PURGED');
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await purge(false)).toBe('PURGED');
+    expect((await docOf(d.id)).purgedAt).not.toBeNull();
+  });
+
   it('an unreadable case census reads as an open case: nothing is noticed or deleted', async () => {
     const u = await person('RIDER');
     const d = await doc(u, 'RIDER', 'REJECTED', 100);

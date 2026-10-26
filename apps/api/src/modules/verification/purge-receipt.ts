@@ -74,12 +74,16 @@ export async function shredAndProbe(prisma: VerificationObjectStore, storage: St
  * ever runs under a lock, so a stalled store cannot outlive the transaction and let a hold in
  * before the destruction lands. A missing person row is never a pass: no lock, no destruction.
  * `still` narrows what "still purgeable" means for the caller (retention due, image not purged).
+ * `keeps` is a caller's check that cannot be a row filter (the abandoned-application sweep: an open case naming the
+ * person, REVIEW-M #2011 S4-1): it runs in this same transaction, under the lock, right before the key is destroyed;
+ * true keeps the document (nothing destroyed: null). A check that throws destroys nothing either.
  */
 export async function shredUnlessHeld(
   db: Pick<PrismaClient, '$transaction'> & VerificationObjectStore,
   storage: StorageProvider,
   ref: VerificationObjectReference & { documentId: string },
   still: Prisma.VerificationDocumentWhereInput = {},
+  keeps?: (tx: Prisma.TransactionClient) => Promise<boolean>,
 ): Promise<PurgeEvidence | null> {
   const meta = await db.$transaction(async (tx) => {
     await bindTenantTransaction(tx);
@@ -91,6 +95,7 @@ export async function shredUnlessHeld(
       where: { id: ref.documentId, userId: ref.userId, legalHoldId: null, ...still }, select: { id: true },
     });
     if (!live.some((d) => d.id === ref.documentId)) return null;
+    if (keeps && (await keeps(tx))) return null;
     // A purge that shredded this key and then could not finish (store unreachable, probe failed)
     // left the person's own envelope keyless: finish destroying it rather than strand it.
     const prior = await tx.encryptedObject.findUnique({ where: { fileKey: ref.fileKey } });
