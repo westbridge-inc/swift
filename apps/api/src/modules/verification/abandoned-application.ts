@@ -82,7 +82,7 @@ export const OPEN_CASE_CENSUS = [
 export type OpenCaseKind = (typeof OPEN_CASE_CENSUS)[number];
 
 /** Every open case naming this person, by census name. Throws on any lookup error (the caller keeps). */
-export async function openCasesOf(db: PrismaClient, userId: string): Promise<OpenCaseKind[]> {
+export async function openCasesOf(db: PrismaClient | Prisma.TransactionClient, userId: string): Promise<OpenCaseKind[]> {
   const [docs, rider, driver, owner, member] = await Promise.all([
     db.verificationDocument.findMany({ where: { userId }, select: { id: true } }),
     db.rider.findUnique({ where: { userId }, select: { id: true } }),
@@ -149,8 +149,9 @@ export async function openCasesOf(db: PrismaClient, userId: string): Promise<Ope
   return open;
 }
 
-/** True while any open case names the person; any error reads as an open case (fail toward keeping). */
-export async function openCaseKeeps(db: PrismaClient, userId: string): Promise<boolean> {
+/** True while any open case names the person; any error reads as an open case (fail toward keeping). `db` may be the
+ *  purge's own transaction (verification.service purgeDocumentNow `keeps`: the re-check under the person's lock). */
+export async function openCaseKeeps(db: PrismaClient | Prisma.TransactionClient, userId: string): Promise<boolean> {
   try {
     return (await runAsSystem('verification:abandoned-case-census', () => openCasesOf(db, userId))).length > 0;
   } catch {
