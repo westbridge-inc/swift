@@ -417,3 +417,56 @@ describe('[TAXI multi-stop 8/8] a ride with stops', () => {
     expect(screen.queryByTestId('ride-stop-1')).toBeNull();
   });
 });
+
+describe('[O-1] party phones are masked; the full number is an audited reveal', () => {
+  // Fictional numbers in the server's masked form (+592•••••NNNN) and in full.
+  const MASKED = '+592•••••0042';
+  const FULL = '+5920600042';
+  const withParties = {
+    ...order,
+    customer: { id: 'cust-1', firstName: 'Ann', lastName: 'Lee', phone: MASKED },
+    vendor: { id: 'vendor-1', name: 'Test Store', phone: '+592•••••0043' },
+  };
+
+  it('shows the masked number and never asks the server for the full one on its own', async () => {
+    const fetchMock = mockApi(orderHandler(() => { throw new Error('no other request expected'); }, withParties));
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    expect(await screen.findByText(MASKED)).toBeTruthy();
+    expect(screen.queryByText(FULL)).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Show number' })).toHaveLength(2);
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('party-phone'))).toBe(true);
+  });
+
+  it('"Show number" asks why, sends the reason in x-swift-reason to the party door, then shows the full number', async () => {
+    const fetchMock = mockApi(orderHandler((request) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/orders/order-1/party-phone') {
+        return { body: { success: true, data: { party: 'customer', phone: FULL, auditId: 'audit-1' } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    }, withParties));
+    const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    await screen.findByText(MASKED);
+    await user.click(screen.getAllByRole('button', { name: 'Show number' })[0]!);
+    const panel = await screen.findByRole('dialog');
+    expect(within(panel).getByRole('heading').textContent).toBe("Show the customer's full number for order ORDER-TEST-1?");
+    await giveReason(user, panel, 'Customer rang support: the rider cannot find the gate');
+    await user.click(within(panel).getByRole('button', { name: 'Show number' }));
+    expect(await screen.findByText(FULL)).toBeTruthy();
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('party-phone'))!;
+    const url = new URL(String(call[0]));
+    expect(url.searchParams.get('party')).toBe('customer');
+    expect(new Headers(call[1]?.headers).get('x-swift-reason')).toBe('Customer rang support: the rider cannot find the gate');
+    expect(screen.getByText('Read recorded in the audit log')).toBeTruthy();
+  });
+
+  it('a closed panel sends nothing and the number stays masked', async () => {
+    const fetchMock = mockApi(orderHandler(() => { throw new Error('no other request expected'); }, withParties));
+    const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    await screen.findByText(MASKED);
+    await user.click(screen.getAllByRole('button', { name: 'Show number' })[0]!);
+    const panel = await screen.findByRole('dialog');
+    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('party-phone'))).toBe(true);
+    expect(screen.queryByText(FULL)).toBeNull();
+  });
+});

@@ -5273,7 +5273,11 @@ export class BillingService {
     return out;
   }
 
-  /** Why a held rise no longer matches its subscription, or null while it still does. */
+  /** Why a held rise no longer matches its subscription, or null while it still does.
+   *  [COORD ruling R4 · REVIEW-M #2021 S4-1] A WAIVED fee is deliberately not an obstacle here. A waiver in place
+   *  before the notice drops the rise (tellFeeRise: nothing is told for a waived fee). A waiver given AFTER the notice
+   *  leaves the told rise standing: nothing is charged while the week is waived, the told fee applies from the date it
+   *  was told for (at least 14 days' notice), and the waived week is never charged back (fee-rise-notice.test.ts). */
   private feeRiseObstacle(sub: Subscription | null, held: HeldFeeRise): string | null {
     if (!sub) return 'GONE';
     if (sub.status === 'CANCELLED') return 'PLAN_ENDED';

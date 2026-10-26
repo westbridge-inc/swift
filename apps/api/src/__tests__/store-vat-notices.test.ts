@@ -7,7 +7,7 @@ describe('store VAT notices', () => {
   it('approval: the date, the rate, the receipt words, and the item classes to check', () => {
     expect(storeVatApprovedNotice({ registeredName: 'Shop Ltd', number: '012345678', effectiveFrom: new Date('2026-01-01T00:00:00Z') })).toEqual({
       title: 'Your VAT is approved',
-      body: 'A person at Swift checked your GRA VAT certificate. From 1 Jan 2026, your prices include VAT at 14% and your receipts say '
+      body: 'A person at Swift checked your GRA VAT certificate. Your certificate is in effect from 1 Jan 2026. From now on, your prices include VAT at 14% and your receipts say '
         + '“VAT charged by Shop Ltd · VAT reg. no. 012345678”. Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
     });
   });

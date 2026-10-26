@@ -40,3 +40,23 @@ export const SENSITIVE_DOC_TYPES: ReadonlySet<string> = new Set(['police_clearan
 
 /** What the card says above the consent words when it asks again. */
 export const SENSITIVE_CONSENT_ASK = 'A police clearance is sensitive, so Swift asks again before this upload.';
+
+/**
+ * [POLICE-CLEARANCE CONSENT · DPA s.9(1)(a), legal research D1/D2] A police clearance's OWN consent, in the API's
+ * words (GET /verification/status `policeClearanceConsent`): they say what is true right now (what Swift records,
+ * when the image goes, the withdrawal), so the phone never bakes them in — it shows them, sends their version, and
+ * the API refuses words that changed. Anything malformed, or an older API with none, is "no words": the card then
+ * keeps the document tick and the ask above, exactly as before.
+ */
+export const POLICE_CLEARANCE_TICK = 'police_clearance_v1';
+export type PoliceClearanceWords = { tick: typeof POLICE_CLEARANCE_TICK; version: string; text: string; withdrawConfirm: string };
+
+const filled = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+
+export function policeClearanceWordsFrom(status: unknown): PoliceClearanceWords | null {
+  const words = status && typeof status === 'object' ? (status as { policeClearanceConsent?: unknown }).policeClearanceConsent : undefined;
+  if (!words || typeof words !== 'object') return null;
+  const { tick, version, text, withdrawConfirm } = words as Record<string, unknown>;
+  if (tick !== POLICE_CLEARANCE_TICK || !filled(version, 40) || !filled(text, 2000) || !filled(withdrawConfirm, 500)) return null;
+  return { tick: POLICE_CLEARANCE_TICK, version, text, withdrawConfirm };
+}

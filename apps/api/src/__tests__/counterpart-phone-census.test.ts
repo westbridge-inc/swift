@@ -45,6 +45,7 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'utils/counterparty.ts': { count: 1, why: 'the opt-in itself (riderCounterpartySelect withPhone)' },
   'modules/calls/call-bridge.ts': { count: 5, why: `${INTERNAL} (the Swift call bridge: each party's number, and the caller's own, read at the moment a leg is dialled and handed only to the voice provider; never in a response, a push or a call_sessions row)` },
   'modules/admin/admin.routes.ts': { count: 24, why: OPS },
+  'modules/admin/order-contact.ts': { count: 4, why: `${OPS}: masked on the order desk; one party's full number only through the audited reveal (reason + audit row before the value)` },
   'modules/admin/solo-approval.ts': { count: 1, why: INTERNAL },
   'modules/ads/advertiser.service.ts': { count: 1, why: `${OWN} (advertiser team: accepted members only)` },
   'modules/auth/auth.routes.ts': { count: 2, why: OWN },

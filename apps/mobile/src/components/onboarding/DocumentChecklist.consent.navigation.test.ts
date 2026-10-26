@@ -19,7 +19,7 @@ import { createRoot } from 'react-dom/client';
 // ---------------------------------------------------------------------------
 
 const fx = vi.hoisted(() => ({
-  cards: {} as Record<string, { consented?: boolean; askConsentFirst?: boolean; consentVia?: string }>,
+  cards: {} as Record<string, { consented?: boolean; askConsentFirst?: boolean; consentVia?: string; policeConsent?: unknown }>,
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 vi.mock('react-native', async () => {
@@ -51,8 +51,11 @@ vi.mock('./FoodHandlersCard', () => ({ FoodHandlersCard: () => null }));
 vi.mock('./DocumentUploadCard', async () => {
   const R = await import('react');
   return {
-    DocumentUploadCard: (p: { docType: string; consented?: boolean; askConsentFirst?: boolean; consentVia?: string }) => {
-      fx.cards[p.docType] = { consented: p.consented, askConsentFirst: p.askConsentFirst, ...(p.consentVia === undefined ? {} : { consentVia: p.consentVia }) };
+    DocumentUploadCard: (p: { docType: string; consented?: boolean; askConsentFirst?: boolean; consentVia?: string; policeConsent?: unknown }) => {
+      fx.cards[p.docType] = {
+        consented: p.consented, askConsentFirst: p.askConsentFirst, ...(p.consentVia === undefined ? {} : { consentVia: p.consentVia }),
+        ...(p.policeConsent === undefined ? {} : { policeConsent: p.policeConsent }),
+      };
       return R.createElement('div', { 'data-doc': p.docType });
     },
   };
@@ -165,5 +168,17 @@ describe('[DOC-CONSENT] the document tick shows the person\'s own recorded choic
     await mount(statusWith());
     await press();
     for (const d of REQUIRED) expect(fx.cards[d]?.consentVia, d).toBe('checkbox');
+  });
+
+  it('[POLICE-CLEARANCE CONSENT] the police card gets the API\'s own words (only well-formed ones); no other card does', async () => {
+    const words = { tick: 'police_clearance_v1', version: 'taxi-v1-30d', text: 'Optional. I choose to upload my police clearance.', withdrawConfirm: 'Swift deletes it.' };
+    await mount({ ...statusWith(undefined, ['police_clearance']), policeClearanceConsent: { ...words, kind: 'taxi' } });
+    expect(fx.cards['police_clearance']?.policeConsent).toEqual(words);
+    for (const d of REQUIRED) expect(fx.cards[d]?.policeConsent ?? null, d).toBeNull();
+    for (const bad of [null, {}, { ...words, tick: 'document_v1' }, { ...words, version: '' }, { ...words, text: '' }, { ...words, withdrawConfirm: 7 }, 'words']) {
+      await unmount();
+      await mount({ ...statusWith(undefined, ['police_clearance']), policeClearanceConsent: bad });
+      expect(fx.cards['police_clearance']?.policeConsent ?? null, JSON.stringify(bad)).toBeNull();
+    }
   });
 });

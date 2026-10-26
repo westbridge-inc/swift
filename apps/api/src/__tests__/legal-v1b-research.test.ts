@@ -171,8 +171,10 @@ describe('one version for the whole batch', () => {
   // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts); [ROLE-DOCS · owner 21 Oct
   // 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-22.1; [owner 24 Oct
   // 2026] no customer ID for taxi rides or larger orders (Terms s.2, Privacy ¶15 + s.2, Child Safety) as 2026-10-25;
-  // [O-1 · COORD 25 Oct, material] Swift-bridged calling and Twilio for calls (Privacy s.5 + s.6) as 2026-10-25.1.
-  it('is 2026-10-25.1', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-25.1');
+  // [O-1 · COORD 25 Oct, material] Swift-bridged calling and Twilio for calls (Privacy s.5 + s.6) as 2026-10-25.1;
+  // [POLICE-CLEARANCE CONSENT · COORD 25 Oct, non-material] what is kept of a police clearance and its withdrawal
+  // (Privacy s.6) as 2026-10-25.2.
+  it('is 2026-10-25.2', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-25.2');
   });
 });

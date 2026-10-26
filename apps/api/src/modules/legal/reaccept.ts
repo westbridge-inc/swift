@@ -79,6 +79,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-25',
     why: 'Swift asks for less: taxi rides and larger orders no longer need a customer\u2019s ID on file. The Terms, the Privacy Policy and the Child Safety page now say so, and say when the app still asks for an ID (after repeated failed deliveries or payments, or for a high-value promotion). No one loses anything and no one is asked for more.',
   },
+  {
+    // [POLICE-CLEARANCE CONSENT · owner 25 Oct 2026 · COORD 25 Oct 22:17Z: NON-material]
+    version: '2026-10-25.2',
+    why: 'Privacy section 6 now says what Swift keeps of a police clearance (only whether it was clear and the date it was issued), that its image is deleted soon after the check, and that the person can withdraw it at any time in the app. It narrows what is kept and adds a right; it takes nothing from anyone and asks no one for more.',
+  },
 ];
 
 /**

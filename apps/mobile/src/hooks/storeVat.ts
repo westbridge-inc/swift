@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { vendorApi } from '../services/api';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { getAuthSessionSnapshot, requireAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
+import { useVendorPreview } from '../stores/vendorPreview';
+import { previewMutation } from '../lib/vendorPreviewData';
 import { guardVendorOperation } from './useVendorMutation';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,19 @@ export function bound<T>(storeId: string | null, run: (session: ReturnType<typeo
   });
 }
 
+/** [REVIEW-G #2103 S4-2] A VAT write sends nothing in a sample preview, checked at the send (as guardVendorOperation checks
+ *  the store). The screens hide VAT in a preview too; this is the hook-layer guard. It says preview is read-only, as every
+ *  preview write does. */
+export function previewReadOnly<A extends unknown[], R>(send: (...args: A) => Promise<R>): (...args: A) => Promise<R | undefined> {
+  return async (...args) => {
+    if (useVendorPreview.getState().previewType != null) {
+      await previewMutation().mutateAsync();
+      return undefined;
+    }
+    return send(...args);
+  };
+}
+
 export function useStoreVat(enabled: boolean) {
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   const principal = useAuthStore((s) => s.user?.id);
@@ -56,11 +71,11 @@ export function useUpdateStoreVat() {
   const qc = useQueryClient();
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   return useMutation({
-    mutationFn: guardVendorOperation((answer: { registered: boolean; vatRegistrationNumber?: string }) =>
+    mutationFn: guardVendorOperation(previewReadOnly((answer: { registered: boolean; vatRegistrationNumber?: string }) =>
       bound(storeId, (session) => unwrap<StoreVatView>(vendorApi.updateVat(
         answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, mode: 'PRICES_INCLUDE_VAT' } : { registered: false },
         session, storeId,
-      )))),
+      ))))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'vat'] }),
   });
 }
