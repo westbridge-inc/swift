@@ -11,11 +11,15 @@ const tiles = screen.slice(screen.indexOf('label="ALL TIME"'), screen.indexOf('R
 describe('[board 13a] CASH COLLECTED tile', () => {
   it("shows the server's this-week cash in hand, only when the server sent it", () => {
     expect(screen).toContain('const cashThisWeek = cashInHandThisWeek(summaryQ.data);');
-    expect(tiles).toMatch(/\{cashThisWeek != null \? \(\s*<StatTile\s+label="CASH COLLECTED"\s+total=\{cashThisWeek\}/);
+    expect(tiles).toMatch(/\{cashThisWeek != null \? \(\s*<StatTile label="CASH COLLECTED" total=\{cashThisWeek\} sub="This week" \/>/);
   });
 
-  it('says what the figure is for each role', () => {
-    expect(tiles).toContain("sub={isDriver ? 'Cash fares this week' : 'Kept this week after paying stores'}");
+  it('says what the figure is for each role, whole, under the row (the tile sub is one line) [REVIEW-F S3-1]', () => {
+    const caption = tiles.slice(tiles.indexOf('label="CASH COLLECTED"'));
+    expect(caption).toMatch(/\{cashThisWeek != null \? \(\s*<T variant="caption"/);
+    expect(caption).toContain("'Cash collected this week: the fares passengers paid you in cash.'");
+    expect(caption).toContain("'Cash collected this week, after paying stores for the goods.'");
+    expect(caption).not.toMatch(/numberOfLines/);
   });
 
   it('sits in the row beside ALL TIME (the 2 x 2 grid of the board)', () => {

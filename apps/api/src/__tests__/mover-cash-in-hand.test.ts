@@ -34,6 +34,10 @@ let riderId = '';
 let riderToken = '';
 let driverId = '';
 let driverToken = '';
+// [REVIEW-G #2117 S4-1] Another rider and driver in the SAME tenant, with cash jobs of their own: each figure is the
+// caller's own jobs only.
+let otherRiderId = '';
+let otherDriverId = '';
 
 async function user(first: string, roles: UserRole[], active: UserRole) {
   seq += 1;
@@ -117,17 +121,30 @@ beforeAll(async () => {
   vendorId = vendor.id;
   customerUserId = (await user('Cust', ['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole)).id;
 
-  const r = await user('Rida', ['MOVER', 'CUSTOMER'] as UserRole[], 'MOVER' as UserRole);
-  riderId = (await app.prisma.rider.create({ data: { userId: r.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 40_000 } })).id;
-  riderToken = await session(r.id, 'MOVER');
+  const newRider = async (first: string) => {
+    const u = await user(first, ['MOVER', 'CUSTOMER'] as UserRole[], 'MOVER' as UserRole);
+    const id = (await app.prisma.rider.create({ data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 40_000 } })).id;
+    return { userId: u.id, id };
+  };
+  const newDriver = async (first: string) => {
+    const u = await user(first, ['MOVER', 'CUSTOMER'] as UserRole[], 'MOVER' as UserRole);
+    const id = (await app.prisma.driver.create({ data: {
+      userId: u.id, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2021, vehicleColor: 'Silver',
+      licensePlate: `CI-${nanoid(4)}`, rideClass: 'ECONOMY', documentsVerified: true,
+      driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
+    } })).id;
+    return { userId: u.id, id };
+  };
 
-  const d = await user('Driva', ['MOVER', 'CUSTOMER'] as UserRole[], 'MOVER' as UserRole);
-  driverId = (await app.prisma.driver.create({ data: {
-    userId: d.id, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2021, vehicleColor: 'Silver',
-    licensePlate: `CI-${nanoid(4)}`, rideClass: 'ECONOMY', documentsVerified: true,
-    driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
-  } })).id;
-  driverToken = await session(d.id, 'MOVER');
+  const r = await newRider('Rida');
+  riderId = r.id;
+  riderToken = await session(r.userId, 'MOVER');
+  otherRiderId = (await newRider('Ridb')).id;
+
+  const d = await newDriver('Driva');
+  driverId = d.id;
+  driverToken = await session(d.userId, 'MOVER');
+  otherDriverId = (await newDriver('Drivb')).id;
 });
 
 afterAll(async () => {
@@ -136,8 +153,8 @@ afterAll(async () => {
     const ids = orders.map((o) => o.id);
     await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: ids } } }).catch(() => {});
     await app.prisma.order.deleteMany({ where: { id: { in: ids } } }).catch(() => {});
-    if (riderId) await app.prisma.rider.deleteMany({ where: { id: riderId } }).catch(() => {});
-    if (driverId) await app.prisma.driver.deleteMany({ where: { id: driverId } }).catch(() => {});
+    await app.prisma.rider.deleteMany({ where: { id: { in: [riderId, otherRiderId].filter(Boolean) } } }).catch(() => {});
+    await app.prisma.driver.deleteMany({ where: { id: { in: [driverId, otherDriverId].filter(Boolean) } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
   }, 'test:mover-cash-in-hand:cleanup');
@@ -159,6 +176,7 @@ describe('[board 13a] cash in hand on the earnings summary', () => {
     await job({ mover: { riderId }, method: 'CASH', subtotal: 0, fee: 1200, courier: true });                  // courier fee: 1,200, no store
     await job({ mover: { riderId }, method: 'CASH', subtotal: 0, fee: 900, courier: true, captured: false });  // never captured: none
     await job({ mover: { riderId }, method: 'CASH', subtotal: 2000, fee: 400, thenTo: 'REFUNDED' });          // store refunded later: 400 stays
+    await job({ mover: { riderId: otherRiderId }, method: 'CASH', subtotal: 1000, fee: 9_000 });              // another rider's: never mine
 
     expect((await summary('rider')).cashInHand).toEqual({ today: 2300, thisWeek: 2300, thisMonth: 2300, allTime: 2800 });
   });
@@ -167,6 +185,7 @@ describe('[board 13a] cash in hand on the earnings summary', () => {
     await job({ mover: { driverId }, method: 'CASH', subtotal: 1500, fee: 0, taxi: true });
     await job({ mover: { driverId }, method: 'CASH', subtotal: 2500, fee: 0, taxi: true, captured: false }); // never captured: none
     await job({ mover: { driverId }, method: 'MOBILE_MONEY', subtotal: 3000, fee: 0, taxi: true });          // paid by MMG: none
+    await job({ mover: { driverId: otherDriverId }, method: 'CASH', subtotal: 7_000, fee: 0, taxi: true });  // another driver's: never mine
     const data = await summary('driver');
     expect(data.cashInHand).toEqual({ today: 1500, thisWeek: 1500, thisMonth: 1500, allTime: 1500 });
     // The rider's figure never takes the driver's rides, and the driver's never takes the rider's deliveries.

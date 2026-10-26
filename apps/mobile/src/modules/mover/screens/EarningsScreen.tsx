@@ -480,13 +480,17 @@ export function EarningsScreen({ navigation }: any) {
               sub={allTimeDetail}
             />
             {cashThisWeek != null ? (
-              <StatTile
-                label="CASH COLLECTED"
-                total={cashThisWeek}
-                sub={isDriver ? 'Cash fares this week' : 'Kept this week after paying stores'}
-              />
+              <StatTile label="CASH COLLECTED" total={cashThisWeek} sub="This week" />
             ) : null}
           </View>
+          {/* [REVIEW-F #2117 S3-1] The tile's sub is one line, so what the figure means sits under the row, whole. */}
+          {cashThisWeek != null ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              {isDriver
+                ? 'Cash collected this week: the fares passengers paid you in cash.'
+                : 'Cash collected this week, after paying stores for the goods.'}
+            </T>
+          ) : null}
 
           {breakdown ? (
             <Card style={{ marginTop: space.md }}>
