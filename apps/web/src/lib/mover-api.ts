@@ -37,6 +37,9 @@ export interface EarningsSummary {
   thisMonth: { total: number; count: number };
   allTime: { total: number; count: number };
   pendingPayout: number;
+  /** [Board 13a "CASH COLLECTED"] The cash kept from cash jobs per window (api dispatch/cash-in-hand.ts). Absent from
+   *  an older API, so optional and never defaulted to 0. */
+  cashInHand?: { today: unknown; thisWeek: unknown; thisMonth: unknown; allTime: unknown };
 }
 export const getRiderSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/rider/earnings/summary'));
 /** [P36 · board 13d / W3] A taxi driver's office shows the same four windows as the phone (it showed all-time only). */
