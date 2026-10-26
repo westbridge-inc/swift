@@ -43,6 +43,12 @@ describe('[O-1] the words', () => {
     expect(bridgeErrorText('SOMETHING_NEW')).toMatch(/could not place the call/);
     expect(CALL_WORDS.startedHow).toMatch(/press 1/);
   });
+  it('after a tap, it says only what is true for every app: both phones show Swift\'s number (REVIEW-F #2092 S4-1)', () => {
+    // While older apps still get counterpart numbers (COUNTERPART_PHONES_TO_OLD_APPS), "neither of you sees the
+    // other's number" can be false; what both phones show on this call is Swift's number.
+    expect(CALL_WORDS.startedHow).toContain("Both phones show Swift's number.");
+    expect(CALL_WORDS.startedHow).not.toMatch(/neither/i);
+  });
 });
 
 describe('[O-1] wiring', () => {

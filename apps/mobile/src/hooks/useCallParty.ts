@@ -5,8 +5,10 @@ import { CALL_WORDS, bridgeErrorText, callChoice, saveNumberTip, type CallConfig
 
 // [O-1] One answer per app run for a few minutes: the switch changes rarely, and a failed read means
 // "behave as today" (dial the number the server sent, if any) — never a dead Call button.
+// [REVIEW-F #2092 S4-2] Only a GOOD answer is kept: with the bridge on the server sends no number, so a
+// remembered failure would hide every Call button for minutes. A failure is asked again next time.
 const CONFIG_TTL_MS = 5 * 60_000;
-let cached: { at: number; value: CallConfig | null } | null = null;
+let cached: { at: number; value: CallConfig } | null = null;
 let inflight: Promise<CallConfig | null> | null = null;
 /** Loaded on first use, like the notification router does: screens that show a Call button do not pull the API client in at import. */
 const calls = async () => (await import('../services/api')).callsApi;
@@ -16,7 +18,7 @@ export async function loadCallConfig(now = Date.now()): Promise<CallConfig | nul
   inflight ??= calls().then((api) => api.config())
     .then((res) => { const d = res.data?.data; return d && typeof d.enabled === 'boolean' ? { enabled: d.enabled, callerId: d.callerId ?? null } : null; })
     .catch(() => null)
-    .then((value) => { cached = { at: Date.now(), value }; inflight = null; return value; });
+    .then((value) => { cached = value ? { at: Date.now(), value } : null; inflight = null; return value; });
   return inflight;
 }
 

@@ -7,7 +7,7 @@ import { apiFetch, ApiRequestError } from '@/lib/auth';
  *   "Call" is a tel: link.
  * - Bridge ON: the API sends no personal number. "Call via Swift" asks Swift to connect the call:
  *   Swift rings the signed-in person's own phone first; they answer and press 1, then Swift rings
- *   the other person. Neither sees the other's number.
+ *   the other person. Both phones show Swift's number.
  * - Neither: no Call button (chat and support remain).
  */
 
@@ -30,7 +30,8 @@ export function callChoice(config: CallConfig | null | undefined, phone: string 
 export const CALL_WORDS = {
   viaSwift: 'Call via Swift',
   calling: 'Calling…',
-  started: 'Swift is calling your phone now. Answer, then press 1. Swift will then ring them. Neither of you sees the other’s number.',
+  // [REVIEW-F #2092 S4-1] True for every app (older apps may still get counterpart numbers).
+  started: 'Swift is calling your phone now. Answer, then press 1. Swift will then ring them. Both phones show Swift’s number.',
 } as const;
 
 export function saveNumberTip(callerId: string | null | undefined): string | null {
@@ -51,10 +52,17 @@ export function bridgeErrorText(code: string | null | undefined): string {
 const CONFIG_TTL_MS = 5 * 60_000;
 let cached: { at: number; value: Promise<CallConfig | null> } | null = null;
 
-/** The switch as the API reports it, cached for a few minutes. A failed read is "off": the page behaves exactly as today. */
+/**
+ * The switch as the API reports it, cached for a few minutes. A failed read is "off": the page behaves exactly as today.
+ * [REVIEW-F #2092 S4-2] Only a GOOD answer stays cached (asks at the same moment share one request); a failure is
+ * forgotten as soon as it settles, so one blip never hides the Call buttons for minutes while the bridge is on.
+ */
 export function fetchCallConfig(now = Date.now()): Promise<CallConfig | null> {
-  if (!cached || now - cached.at >= CONFIG_TTL_MS) cached = { at: now, value: readCallConfig() };
-  return cached.value;
+  if (cached && now - cached.at < CONFIG_TTL_MS) return cached.value;
+  const entry = { at: now, value: readCallConfig() };
+  cached = entry;
+  void entry.value.then((value) => { if (!value && cached === entry) cached = null; });
+  return entry.value;
 }
 
 /** Tests only. */

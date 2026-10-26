@@ -39,7 +39,9 @@ export function callChoice(config: CallConfig | null | undefined, phone: string 
 export const CALL_WORDS = {
   viaSwift: 'Call via Swift',
   started: 'Swift is calling you now',
-  startedHow: 'Answer, then press 1. Swift will then ring them. Neither of you sees the other\'s number.',
+  // [REVIEW-F #2092 S4-1] True for every app: while older apps still get counterpart numbers, "neither of
+  // you sees the other's number" can be false; on this call both phones show Swift's number.
+  startedHow: 'Answer, then press 1. Swift will then ring them. Both phones show Swift\'s number.',
   failedTitle: 'Call not started',
 } as const;
 

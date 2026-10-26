@@ -43,6 +43,8 @@ export function CallPartyButton({ orderId, target, phone, label, className, note
       <button
         type="button"
         className={className}
+        // [REVIEW-F #2092 S4-3] two "Call via Swift" buttons on one page each say whom they call
+        aria-label={ariaLabel ? `${ariaLabel} via Swift` : undefined}
         disabled={busy}
         onClick={async () => {
           if (!orderId || busy) return;
