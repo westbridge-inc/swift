@@ -50,8 +50,33 @@ export function saveNumberTip(callerId: string | null | undefined): string | nul
   return callerId ? `Swift calls come from ${callerId}. Save it in your contacts as “Swift” so you know it’s us.` : null;
 }
 
+/**
+ * [O-1 · COORD 26 Oct] The courier rider's call to the PARCEL RECIPIENT. They did not place the order, so
+ * their card says who they are in role words, and Swift rings them "about a delivery for you" (what they
+ * hear). This app has never shown the number the sender typed for them, so it is never dialled from here:
+ * the control exists only while calls go through Swift.
+ */
+export const RECIPIENT_CALL_WORDS = {
+  title: 'Parcel recipient',
+  subtitle: 'Swift rings them about their delivery',
+  a11y: 'Call the parcel recipient via Swift',
+} as const;
+
+/** The recipient has no Swift account and no chat: a refusal offers the sender's chat or support instead. */
+function recipientRefusal(code: string | null | undefined): string {
+  switch (code) {
+    case 'CALL_RELAY_OFF': return 'Calls through Swift are not on yet. Message the sender in chat, or ask support to reach the recipient.';
+    case 'CALL_ORDER_NOT_LIVE': return 'This delivery is finished, so Swift can no longer connect a call. Ask support if you need to reach the recipient.';
+    case 'CALL_IN_PROGRESS': return 'A Swift call on this order is already ringing. Answer it, or try again in a minute.';
+    case 'CALL_LIMIT_REACHED': return 'Swift has connected as many calls as it can for this order. Message the sender in chat, or ask support.';
+    case 'CALL_NO_NUMBER': return 'Swift has no number for the recipient. Message the sender in chat, or ask support.';
+    default: return 'Swift could not place the call right now. Try again, or message the sender in chat.';
+  }
+}
+
 /** The server's refusal, in the person's words. Unknown codes get a safe general line. */
-export function bridgeErrorText(code: string | null | undefined): string {
+export function bridgeErrorText(code: string | null | undefined, target?: CallTarget): string {
+  if (target === 'recipient') return recipientRefusal(code);
   switch (code) {
     case 'CALL_RELAY_OFF': return 'Calls through Swift are not on yet. Message them in chat, or ask support to connect you.';
     case 'CALL_ORDER_NOT_LIVE': return 'This order is finished, so Swift can no longer connect a call. Message them in chat or ask support.';

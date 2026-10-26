@@ -53,7 +53,7 @@ export function useCallParty(input: { orderId?: string | null; target: CallTarge
       toast.success(CALL_WORDS.started, [CALL_WORDS.startedHow, saveNumberTip(config?.callerId)].filter(Boolean).join(' '));
     } catch (e) {
       const code = (e as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
-      toast.error(CALL_WORDS.failedTitle, bridgeErrorText(code));
+      toast.error(CALL_WORDS.failedTitle, bridgeErrorText(code, target));
     } finally {
       setBusy(false);
     }

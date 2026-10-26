@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CALL_BRIDGE_HEADER, CALL_WORDS, bridgeErrorText, callChoice, saveNumberTip } from './callBridge';
+import { CALL_BRIDGE_HEADER, CALL_WORDS, RECIPIENT_CALL_WORDS, bridgeErrorText, callChoice, saveNumberTip } from './callBridge';
 
 // ---------------------------------------------------------------------------
 // [O-1 · owner 24 Oct 06:00Z] Bridge OFF (the launch state): exactly today's
@@ -51,6 +51,25 @@ describe('[O-1] the words', () => {
   });
 });
 
+describe('[O-1] the parcel recipient (the courier rider calls them through Swift)', () => {
+  it('they did not place the order: their card says so in role words, and Swift rings them about their delivery', () => {
+    expect(RECIPIENT_CALL_WORDS.title).toBe('Parcel recipient');
+    expect(RECIPIENT_CALL_WORDS.subtitle).toBe('Swift rings them about their delivery');
+    expect(RECIPIENT_CALL_WORDS.a11y).toBe('Call the parcel recipient via Swift');
+    expect(Object.values(RECIPIENT_CALL_WORDS).join(' ')).not.toMatch(/your order|customer/i);
+  });
+  it('a refusal never offers a chat with the recipient (they have no account): the sender\'s chat, or support', () => {
+    for (const code of ['CALL_RELAY_OFF', 'CALL_ORDER_NOT_LIVE', 'CALL_IN_PROGRESS', 'CALL_LIMIT_REACHED', 'CALL_NO_NUMBER', 'SOMETHING_NEW', undefined]) {
+      const words = bridgeErrorText(code, 'recipient');
+      expect(words, String(code)).not.toMatch(/message them in chat/i);
+      expect(words, String(code)).toMatch(/sender|support|Answer it|try again/i);
+    }
+    expect(bridgeErrorText('CALL_NO_NUMBER', 'recipient')).toMatch(/no number for the recipient/);
+    // everyone else keeps their words
+    expect(bridgeErrorText('CALL_LIMIT_REACHED', 'rider')).toBe(bridgeErrorText('CALL_LIMIT_REACHED'));
+  });
+});
+
 describe('[O-1] wiring', () => {
   const src = (p: string) => readFileSync(join(__dirname, '..', p), 'utf8');
 
@@ -74,5 +93,12 @@ describe('[O-1] wiring', () => {
       expect(text, `${file} ${target}`).toContain(target);
       expect(text, file).not.toMatch(/tel:\$\{(cust|rider|driver\.user|phone)\b/);
     }
+  });
+
+  it('the courier rider\'s recipient control is Swift-only: it is handed no number, and the app never reads the recipient\'s', () => {
+    const screen = src('modules/mover/screens/ActiveJobScreen.tsx');
+    expect(screen).toMatch(/<CallParty orderId=\{job\?\.id\} target="recipient" phone=\{null\}/);
+    // no build has ever shown or dialled the number the sender typed; with the bridge off this keeps it so
+    expect(screen).not.toMatch(/courierRecipientPhone/);
   });
 });

@@ -32,6 +32,7 @@ import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { CallParty } from '../../../components/CallParty';
 import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
+import { RECIPIENT_CALL_WORDS } from '../../../lib/callBridge';
 import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { DOOR_CODE_REFUSALS, doorCashDue, doorCashRecordCopy, doorCashReturnOnJob } from '../../../lib/doorCash';
@@ -849,6 +850,35 @@ export function ActiveJobScreen({ navigation }: any) {
                   )}
                 </Pressable>
               </DCard>
+            ) : null}
+            {/* [O-1 · COORD 26 Oct] Courier: the parcel recipient, through Swift only. No build has shown or
+                dialled the number the sender typed for them, so it is handed no number: with the bridge off
+                there is no control (exactly today); with it on, Swift rings them "about a delivery for you". */}
+            {isCourier ? (
+              <CallParty orderId={job?.id} target="recipient" phone={null} dialFailText="Couldn't start the call — ask support to reach the recipient.">
+                {(call) => (
+                  <DCard style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
+                    <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft }}>
+                      <Feather name="package" size={18} color={dk.accent} />
+                    </View>
+                    <View style={{ flex: 1, marginLeft: space.md }}>
+                      <T variant="body" weight="bold" numberOfLines={1} style={{ color: dk.text }}>
+                        {RECIPIENT_CALL_WORDS.title}
+                      </T>
+                      <T variant="caption" style={{ color: dk.muted }}>
+                        {RECIPIENT_CALL_WORDS.subtitle}
+                      </T>
+                    </View>
+                    <Pressable onPress={call.onPress} disabled={call.busy} hitSlop={6} accessibilityRole="button" accessibilityLabel={RECIPIENT_CALL_WORDS.a11y} accessibilityHint={call.hint}>
+                      {({ pressed }) => (
+                        <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed || call.busy ? 0.7 : 1 }}>
+                          <Feather name="phone" size={17} color={dk.success} />
+                        </View>
+                      )}
+                    </Pressable>
+                  </DCard>
+                )}
+              </CallParty>
             ) : null}
             {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
             {cust ? <SwiftCallNumberTip /> : null}
