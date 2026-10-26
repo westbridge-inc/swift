@@ -10,7 +10,9 @@ import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lo
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesStatus, enableCarDeliveries } from './car-deliveries';
+import { passengersOnlyRefusal } from '../dispatch/concurrency-policy';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
@@ -338,6 +340,22 @@ export async function driverRoutes(app: FastifyInstance) {
       actor: 'DRIVER', entityId: me.id, userId: request.user.userId, keepSessionId: request.authSessionId,
     });
     return { success: true, data };
+  });
+
+  /** [CARS-DELIVER] GET /deliveries — "Deliveries too": can this taxi car take store deliveries as well, and
+   *  is it set up? While CAR_DELIVERIES is off the answer is { available: false, reason: 'SWITCH_OFF' } and
+   *  the phone shows nothing (taxi cars carry passengers only until counsel verifies goods carriage). */
+  app.get('/deliveries', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId);
+    return { success: true, data: await carDeliveriesStatus(app.prisma, request.user.userId) };
+  });
+
+  /** [CARS-DELIVER] POST /deliveries — set up "Deliveries too": a delivery profile on this verified taxi car
+   *  (car-deliveries.ts). Refused while CAR_DELIVERIES is off, before anything is read or written. */
+  app.post('/deliveries', { preHandler: [app.authenticate] }, async (request) => {
+    if (!carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    await getDriver(request.user.userId);
+    return { success: true, data: await enableCarDeliveries(app.prisma, request.user.userId) };
   });
 
   /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on

@@ -1,7 +1,8 @@
 import { Prisma, type PrismaClient, type UserRole, type VehicleType, type RideClass } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
-import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
+import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isPassengerVehicle, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
+import { followTaxiCar } from '../driver/car-deliveries';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
 import { alignStoredVehicleKind, papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
@@ -378,9 +379,12 @@ export class PartnerService {
       }
 
       // The vehicle in use now: the profile the mover pointer names, else the one that exists.
-      const current: MoverRole = user.lastMoverRole === 'DRIVER' && driver
+      // [CARS-DELIVER] A taxi car's delivery profile only mirrors the taxi profile's car: that car is the one in use.
+      const current: MoverRole = rider && driver && isPassengerVehicle(rider.vehicleType)
         ? 'DRIVER'
-        : user.lastMoverRole === 'RIDER' && rider ? 'RIDER' : rider ? 'RIDER' : 'DRIVER';
+        : user.lastMoverRole === 'DRIVER' && driver
+          ? 'DRIVER'
+          : user.lastMoverRole === 'RIDER' && rider ? 'RIDER' : rider ? 'RIDER' : 'DRIVER';
       const currentProfile = (current === 'DRIVER' ? driver : rider)!;
       const previousVehicleType = currentProfile.vehicleType;
       const next = input.vehicle;
@@ -444,6 +448,9 @@ export class PartnerService {
         await tx.rider.update({
           where: { id: created.id },
           data: {
+            // [CARS-DELIVER] A taxi car's delivery profile (store orders only) that now carries a goods vehicle
+            // is an ordinary rider: it serves both kinds of work, as onboarding provisions one.
+            ...(rider && isPassengerVehicle(rider.vehicleType) ? { riderType: 'BOTH' as const } : {}),
             vehicleType: input.vehicleType,
             // The details describe THIS vehicle or nothing: a bicycle keeps no plate of the canter it replaced.
             vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year,
@@ -459,7 +466,12 @@ export class PartnerService {
       // really uses — not one they no longer drive — decides how that plate's papers are judged.
       const movedPlate = (retiredPlate: string | null) => normalizeRegistrationMark(retiredPlate ?? '') !== ''
         && samePlate(retiredPlate, details.licensePlate);
-      if (target === 'DRIVER' && rider) {
+      // [CARS-DELIVER] A taxi car's delivery profile (a Rider row on a passenger vehicle, car-deliveries.ts) is
+      // the car's mirror: it follows the new car, offline and with the taxi profile's (now cleared) grant.
+      const carTwin = target === 'DRIVER' && !!rider && isPassengerVehicle(rider.vehicleType);
+      if (carTwin) {
+        await followTaxiCar(tx, rider!.id, targetId, retire);
+      } else if (target === 'DRIVER' && rider) {
         await tx.rider.update({ where: { id: rider.id }, data: {
           ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
           ...(movedPlate(rider.licensePlate) ? { licensePlate: null } : {}),
@@ -490,7 +502,7 @@ export class PartnerService {
 
       // VEHICLE DOCUMENTS FOLLOW VEHICLES: keep only documents bound to a plate this
       // account still carries after the change.
-      const keptPlates = [newPlate, target === 'DRIVER' ? rider?.licensePlate : driver?.licensePlate]
+      const keptPlates = [newPlate, target === 'DRIVER' ? (carTwin ? newPlate : rider?.licensePlate) : driver?.licensePlate]
         .map((plate) => normalizeRegistrationMark(plate ?? ''))
         .filter((plate) => plate.length > 0);
       const keptSubjects = new Set<string>();
