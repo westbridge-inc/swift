@@ -67,8 +67,9 @@ describe('the web board helpers are the app\'s, word for word', () => {
     expect(billingHeadline(null)).toBe('Subscription not active');
     // [FEE-STATUS] The tile read "Next bill 13 Oct" on 25 October: it now says what the API says, and
     // without the API's words names the state, never a date it cannot vouch for.
-    expect(billingHeadline({ status: 'ACTIVE', feeStatus: { state: 'DUE', headline: 'Payment due since 13 Oct 2026' } })).toBe('Payment due since 13 Oct 2026');
-    expect(billingHeadline({ status: 'ACTIVE' })).toBe('Active');
+    expect(billingHeadline({ status: 'ACTIVE', feeStatus: { state: 'DUE', headline: 'Payment due since 13 Oct 2026', detail: null, date: null } })).toBe('Payment due since 13 Oct 2026');
+    // [REVIEW-F S4-1] Without feeStatus and without the row's dates or amount, the tile says it cannot tell.
+    expect(billingHeadline({ status: 'ACTIVE' })).toBe('Amount due unavailable.');
     expect(windowTotals([], 7).prev).toBeNull();
   });
 });
