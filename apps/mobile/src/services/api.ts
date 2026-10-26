@@ -667,6 +667,12 @@ export const safetyApi = {
   /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
    *  the driver pending identity review, opens the incident. */
   notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
+  /** [DRILL-STORM · S-19] The pages (SOS, operations pages, drills) waiting for a responder to
+   *  acknowledge them, and the acknowledgement that stops their re-pages. The server decides who
+   *  may — the admin role the account HOLDS, whatever mode the app is in — and the phone shows
+   *  what it is given. */
+  opsAlerts: () => api.get('/safety/ops-alerts'),
+  acknowledgeOpsAlert: (id: string) => api.post(`/safety/ops-alerts/${encodeURIComponent(id)}/ack`, {}),
   /**
    * §7.1 shift identity check — multipart selfie in, the outcome ladder out
    * ({ outcome: PASS|BORDERLINE|FAIL|…, allowedOnline, attemptsLeft? }).
@@ -1283,8 +1289,10 @@ export const vendorApi = {
     api.post(`/vendor/orders/${orderId}/items/${lineId}/substitute`, { substituteItemId }),
   refundLine: (orderId: string, lineId: string) =>
     api.post(`/vendor/orders/${orderId}/items/${lineId}/refund-line`, {}),
-  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }) =>
-    api.post(`/vendor/items/${itemId}/adjust`, body),
+  /** [MASTER-025] `commandKey` names ONE adjustment: a retry with the same key
+   *  returns the committed movement instead of moving stock again. */
+  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }, commandKey?: string) =>
+    api.post(`/vendor/items/${itemId}/adjust`, body, commandKey ? { headers: { 'Idempotency-Key': commandKey } } : undefined),
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
