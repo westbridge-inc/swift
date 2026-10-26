@@ -129,6 +129,12 @@ afterAll(async () => {
   await app.close();
 });
 
+// [REVIEW-F #2111 S3-1] What the app says before a withdrawal, true to the code: the clearance stops counting now and
+// is deleted with only a note kept — unless the law requires Swift to keep it (a legal hold keeps the bytes, never
+// their use: verification.routes /police-clearance/withdraw answers keptForLegalHold).
+const TAXI_WITHDRAW = 'Swift stops using your police clearance now and deletes it, keeping only a note that it was withdrawn. If the law requires Swift to keep it, it is kept but no longer used for your account. Your account is no longer recorded as police-cleared.';
+const HOME_WITHDRAW = 'Swift stops using your police clearance now and deletes it, keeping only a note that it was withdrawn. If the law requires Swift to keep it, it is kept but no longer used for your account. Your home visits pause until a new one is approved.';
+
 describe('[POLICE-CLEARANCE] its own words, true when shown', () => {
   it('a taxi driver\'s are optional; a home-visit provider\'s say why; other checklists have none', async () => {
     expect(policeClearanceKind('MOVER')).toBe('taxi');
@@ -143,6 +149,12 @@ describe('[POLICE-CLEARANCE] its own words, true when shown', () => {
     expect(home).toMatchObject({ kind: 'home', version: 'home-v1-30d' });
     expect(home!.text).toBe('Needed because I will visit customers\' homes. I choose to upload my police clearance. A person at Swift checks it and records only whether it was clear and the date it was issued. Swift deletes the image within 31 days of that check. I can withdraw it at any time; Swift then deletes it, keeps only a note that it was withdrawn, and pauses my home visits until a new one is approved. Swift keeps more only where the law requires.');
     expect(await policeClearanceConsentFor(settings(), 'RESTAURANT')).toBeNull();
+    // [REVIEW-F #2111 S3-1] The withdrawal confirmation names the legal-hold exception; it is not part of the words
+    // ticked (the version and the recorded text stay as they are).
+    expect(taxi!.withdrawConfirm).toBe(TAXI_WITHDRAW);
+    expect(home!.withdrawConfirm).toBe(HOME_WITHDRAW);
+    expect(taxi!.withdrawConfirm.length).toBeLessThanOrEqual(500); // the phone refuses longer (policeClearanceWordsFrom)
+    expect(home!.withdrawConfirm.length).toBeLessThanOrEqual(500);
   });
 
   it('the days follow the retention settings (the longer of the image and the rejected-document windows), and new days are new words', async () => {
@@ -162,7 +174,7 @@ describe('[POLICE-CLEARANCE] its own words, true when shown', () => {
     expect(s.optional).toContain('police_clearance');
     expect(s.policeClearanceConsent).toMatchObject({ tick: POLICE_CLEARANCE_TICK, version: 'taxi-v1-30d' });
     expect(s.policeClearanceConsent!.text).toMatch(/^Optional\. I choose to upload my police clearance\./);
-    expect(s.policeClearanceConsent!.withdrawConfirm).toBe('Swift deletes your police clearance now and keeps only a note that it was withdrawn. Your account is no longer recorded as police-cleared.');
+    expect(s.policeClearanceConsent!.withdrawConfirm).toBe(TAXI_WITHDRAW);
   });
 });
 

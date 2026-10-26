@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DOCUMENT_CONSENT_TICK, SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord, policeClearanceWordsFrom } from './documentConsentRecord';
+import { DOCUMENT_CONSENT_TICK, SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord, policeClearanceWordsFrom, policeWithdrawOutcome } from './documentConsentRecord';
 
 // ---------------------------------------------------------------------------
 // [DOC-CONSENT] Reading the server's `documentConsent`: only the person's own grant to THESE words counts, and
@@ -78,6 +78,40 @@ describe('[POLICE-CLEARANCE CONSENT] policeClearanceWordsFrom', () => {
       { policeClearanceConsent: { ...words, text: 'w'.repeat(2001) } }, { policeClearanceConsent: { ...words, withdrawConfirm: '' } },
     ]) {
       expect(policeClearanceWordsFrom(status), JSON.stringify(status)?.slice(0, 80)).toBeNull();
+    }
+  });
+});
+
+describe('[REVIEW-F #2111 S3-1] policeWithdrawOutcome: what the phone says after a withdrawal, from the API\'s answer', () => {
+  const withdrawn = 'Police clearance withdrawn';
+  it('deleted: says so, and that only a note is kept', () => {
+    expect(policeWithdrawOutcome({ withdrawn: 1, keptForLegalHold: 0, deletionPending: 0 })).toEqual({
+      title: withdrawn, message: 'It is deleted. Swift keeps only a note that it was withdrawn.',
+    });
+  });
+  it('kept for a legal hold: says it is kept, plainly, and no longer used', () => {
+    for (const answer of [{ withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 }, { withdrawn: 2, keptForLegalHold: 1, deletionPending: 1 }]) {
+      expect(policeWithdrawOutcome(answer), JSON.stringify(answer)).toEqual({
+        title: withdrawn, message: 'Swift must keep it for a legal reason, so it is not deleted. It is no longer used for your account.',
+      });
+    }
+  });
+  it('deletion not confirmed by storage yet: never claims it is deleted', () => {
+    const outcome = policeWithdrawOutcome({ withdrawn: 1, keptForLegalHold: 0, deletionPending: 1 });
+    expect(outcome).toEqual({
+      title: withdrawn,
+      message: 'It is no longer used for your account. Swift has not confirmed the file is deleted yet; ask Swift support if you want it checked.',
+    });
+    expect(outcome.message).not.toMatch(/It is deleted/);
+  });
+  it('nothing was on file: says nothing was withdrawn', () => {
+    expect(policeWithdrawOutcome({ withdrawn: 0, keptForLegalHold: 0, deletionPending: 0 })).toEqual({
+      title: 'Nothing to withdraw', message: 'No police clearance is on file to withdraw.',
+    });
+  });
+  it('an answer it cannot read claims no deletion, only what the withdrawal always does', () => {
+    for (const answer of [undefined, null, {}, 'ok', { withdrawn: 1, kept: 0 }, { withdrawn: 1, keptForLegalHold: '0', deletionPending: 0 }, { withdrawn: -1, keptForLegalHold: 0, deletionPending: 0 }]) {
+      expect(policeWithdrawOutcome(answer), JSON.stringify(answer)).toEqual({ title: withdrawn, message: 'It is no longer used for your account.' });
     }
   });
 });
