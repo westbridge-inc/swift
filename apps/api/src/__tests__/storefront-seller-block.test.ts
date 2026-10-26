@@ -129,6 +129,8 @@ describe('[R3] every store page carries the seller block', () => {
       payment: { cash: true, storeMmg: false },
       refundRule: 'Bring it back within 3 days with your receipt for a refund.',
       statutoryRights: STATUTORY,
+      // [FOOD-PERMIT] no food handler's certificate on file for this store
+      foodHandlerCertificate: false,
     };
     expect((await appView(vendorId)).seller).toEqual(expected);
     expect((await webView(slug)).seller).toEqual(expected);
@@ -136,7 +138,7 @@ describe('[R3] every store page carries the seller block', () => {
 
   it('only what is on file: a fact Swift does not hold is null (the page says "Ask the store"), never invented', async () => {
     const { vendorId, slug } = await store(2, { publicPhone: null });
-    const bare = { legalName: null, address: '2 Robb Street, Lacytown', phone: null, payment: { cash: true, storeMmg: false }, refundRule: null, statutoryRights: STATUTORY };
+    const bare = { legalName: null, address: '2 Robb Street, Lacytown', phone: null, payment: { cash: true, storeMmg: false }, refundRule: null, statutoryRights: STATUTORY, foodHandlerCertificate: false };
     expect((await appView(vendorId)).seller).toEqual(bare);
     expect((await webView(slug)).seller).toEqual(bare);
   });
