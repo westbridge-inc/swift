@@ -48,6 +48,17 @@ export const SOLO_COOLING_OFF_MS = 12 * 60 * 60 * 1000;
 /** A solo request stays usable 36 hours after its cooling-off ends. */
 export const SOLO_DEFAULT_LIFETIME_MS = 48 * 60 * 60 * 1000;
 export const SOLO_SHOW_LINE = 'approval: one person (solo mode, there is no second admin yet); it runs no earlier than 12 hours after it was issued';
+/**
+ * [SOLO RE-SEED] Owner ruling 26 Oct 2026 (D1, under 30 Sep #13 SOLO MODE):
+ * there is no second person, so a LATER production settings re-seed may be
+ * approved by the owner alone while they are the ONLY admin — one pinned key,
+ * a 12-hour wait that starts when the owner is told (email and text) and can be
+ * cancelled until the seed runs, and a fresh sign-in code texted to the owner's
+ * phone at the moment it runs; the apply counts the admins again. The signer
+ * reads this line, so a first-seed or two-person request never passes as a
+ * solo re-seed, nor the reverse (seed-plan.ts startSoloReseed/applySeedPlan).
+ */
+export const SOLO_RESEED_SHOW_LINE = 'approval: one person (solo re-seed, you are the only admin); it runs no earlier than 12 hours after you start it, can be cancelled until then, and needs a sign-in code texted to the admin phone';
 /** An approver's name as it is pinned: short, lowercase, no spaces. */
 export const APPROVER_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 
@@ -289,6 +300,31 @@ export function verifySoloApproval(
     throw new ApprovalRefused('COOLING_OFF', `this solo approval was issued at ${verified.issued}; it may run from ${new Date(runsFrom).toISOString()} (a 12-hour cooling-off), until ${verified.expires}`);
   }
   return [verified];
+}
+
+/**
+ * [SOLO RE-SEED] Exactly ONE approval, by the ONE pinned person, over exactly
+ * this change, whose words include SOLO_RESEED_SHOW_LINE (the caller's
+ * `expect` carries it). [Security review M1] The store must pin exactly one
+ * key, the owner's: two pinned keys are the two-person world, and a solo
+ * re-seed is refused there. The wait is NOT measured here: it runs from when
+ * the owner was told (the started row, seed-plan.ts, which also records this
+ * key's fingerprint and the owner's account), never from the signature alone,
+ * and the caller also requires the sign-in code and the only-admin count.
+ */
+export function verifySoloReseedApproval(
+  approvals: SignedApproval[],
+  pinned: Map<string, PinnedApprover>,
+  expect: RequestFacts,
+  now = new Date(),
+): VerifiedApproval {
+  if (pinned.size < 1) throw new ApprovalRefused('APPROVERS_NOT_PINNED', 'SEED_APPROVER_KEYS must pin the owner\'s own key');
+  if (pinned.size > 1) {
+    throw new ApprovalRefused('SOLO_TWO_PINNED', `SEED_APPROVER_KEYS pins ${pinned.size} approvers: that is the two-person ceremony (without SEED_SOLO). A solo re-seed needs exactly one pinned key, the owner's`);
+  }
+  if (approvals.length !== 1) throw new ApprovalRefused('SOLO_ONE_APPROVAL', 'a solo re-seed is exactly one signed line; two people use the two-person ceremony (without SEED_SOLO)');
+  if (!expect.shows.includes(SOLO_RESEED_SHOW_LINE)) throw new ApprovalRefused('SOLO_NOT_ALLOWED', 'this change is not described as a solo re-seed');
+  return verifyOne(approvals[0]!, pinned, expect, now);
 }
 
 /**

@@ -524,8 +524,8 @@ export interface SpineOptions extends ApplyOptions {
 /** [PROD-PATH] What the approvers of a spine plan see beside the changes: the
  *  FX rate this very seed uses (the one the desired data was built with) and
  *  the first admin's phone. Printing and applying both use this, so they agree. */
-export function spineRequestContext(adminPhone?: string | null, solo = false, adminEmail?: string | null): RequestContext {
-  return { fxGydPerUsd: seedFxRate(), adminPhone: adminPhone ?? null, ...(adminEmail ? { adminEmail } : {}), ...(solo ? { solo: true } : {}) };
+export function spineRequestContext(adminPhone?: string | null, solo = false, adminEmail?: string | null, soloReseed = false): RequestContext {
+  return { fxGydPerUsd: seedFxRate(), adminPhone: adminPhone ?? null, ...(adminEmail ? { adminEmail } : {}), ...(solo ? { solo: true } : {}), ...(soloReseed ? { soloReseed: true } : {}) };
 }
 
 /**
@@ -542,7 +542,7 @@ export async function seedPlatformSpine(prisma: PrismaClient, opts: SpineOptions
   const desired = desiredPlatformConfig();
   const plan = await buildSeedPlan(prisma, databaseUrl, desired);
   if (opts.onPlan) await opts.onPlan(plan);
-  const result = await applySeedPlan(prisma, databaseUrl, desired, plan, { ...opts, request: spineRequestContext(opts.request?.adminPhone, opts.request?.solo === true, opts.request?.adminEmail) });
+  const result = await applySeedPlan(prisma, databaseUrl, desired, plan, { ...opts, request: spineRequestContext(opts.request?.adminPhone, opts.request?.solo === true, opts.request?.adminEmail, opts.request?.soloReseed === true) });
   if (opts.onApplied) await opts.onApplied(result);
   return plan;
 }
