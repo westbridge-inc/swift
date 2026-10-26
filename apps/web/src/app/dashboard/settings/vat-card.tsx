@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getProfile, getStoreVat, sendVatCertificate, updateStoreVat, type StoreVatView } from '@/lib/vendor-api';
+import { getProfile } from '@/lib/vendor-api';
+import { getStoreVat, sendVatCertificate, updateStoreVat, type StoreVatView } from '@/lib/store-vat-api';
 import { LEGAL_URL } from '@/lib/api';
 import { storeKey } from '@/lib/store-scope';
 import { GRA_VAT_URL, calendarDay } from '@/lib/store-vat-words';

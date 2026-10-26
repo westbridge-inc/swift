@@ -1,10 +1,11 @@
 'use client';
 
-import { Suspense, memo, useCallback, useDeferredValue, useMemo, useState } from 'react';
+import { memo, useCallback, useDeferredValue, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
-import { getCategories, getItems, getProfile, getStoreVat, money, setItemAvailability, updateItem, type CatalogItem, type VatClass } from '@/lib/vendor-api';
+import { getCategories, getItems, getProfile, money, setItemAvailability, updateItem, type CatalogItem, type VatClass } from '@/lib/vendor-api';
+import { getStoreVat } from '@/lib/store-vat-api';
 import { adjustStock } from '@/lib/stock-adjust';
 import { Pictogram } from '@/components/glyphs';
 import { DataUnavailable } from '@/components/data-unavailable';
@@ -12,12 +13,7 @@ import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
 import { instantSwitch } from '@/lib/instant-toggle';
-import { lazyRetry } from '@/lib/chunk-retry';
-
-// [STORE-VAT · perf-budget] The VAT class control and its words are their own chunk, fetched only for the owner of a store
-// that told Swift it is VAT-registered: the Products page stays inside its first-load budget.
-const VatClassSelect = lazyRetry(() => import('./item-vat').then((module) => ({ default: module.VatClassSelect })));
-const VatClassNotice = lazyRetry(() => import('./item-vat').then((module) => ({ default: module.VatClassNotice })));
+import { GRA_VAT_URL, vatClassWords } from '@/lib/store-vat-words';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -141,9 +137,15 @@ const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPric
       {i.stockQuantity == null ? <span>Stock untracked</span> : <button onClick={() => onAdjust(adjusting ? null : i.id)} className="sw-link-btn min-h-8">{i.stockQuantity} in stock · Adjust stock</button>}
       {i.sku && <span>SKU: {i.sku}</span>}
       {vatRate != null && (
-        <Suspense fallback={null}>
-          <VatClassSelect itemId={i.id} name={i.name} vatClass={i.vatClass} ratePercent={vatRate} effective={vatEffective} disabled={vatPending} onVatClass={onVatClass} />
-        </Suspense>
+        <select
+          aria-label={`VAT class: ${i.name}`}
+          value={i.vatClass ?? 'STANDARD'}
+          disabled={vatPending}
+          onChange={(e) => onVatClass(i.id, e.target.value as VatClass)}
+          className="min-h-8 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-2 text-[13px]"
+        >
+          {vatClassWords(vatRate, vatEffective).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
       )}
     </div>
     {adjusting && <StockAdjust item={i} onDone={() => { onAdjust(null); onSaved(); }} />}
@@ -256,7 +258,13 @@ export default function InventoryPage() {
       {items.isError && <DataUnavailable what="your menu" error={items.error} onRetry={() => void items.refetch()} />}
       {categories.isError && <DataUnavailable what="your menu categories" error={categories.error} onRetry={() => void categories.refetch()} />}
       {vat.isError && <DataUnavailable what="your VAT settings" error={vat.error} onRetry={() => void vat.refetch()} />}
-      {vatRate != null && <Suspense fallback={null}><VatClassNotice /></Suspense>}
+      {vatRate != null && (
+        <p className="text-sm text-[var(--swift-muted)]">
+          You choose each item&apos;s VAT class, and you are responsible for it. Most goods are standard-rated; some basic
+          foods and household goods are zero-rated, and some supplies are exempt. Check with the{' '}
+          <a href={GRA_VAT_URL} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">GRA</a>.
+        </p>
+      )}
       {items.isLoading && <div className="sw-empty" role="status"><span className="sw-skeleton h-24 w-full" />Loading your menu…</div>}
       {!items.isLoading && !items.isError && !list.length && <p className="sw-board-empty">No items match.</p>}
       <div className="grid gap-x-8 wide:grid-cols-2">

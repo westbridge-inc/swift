@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest } from '@/test/test-utils';
-import { sendVatCertificate } from './vendor-api';
+import { sendVatCertificate } from './store-vat-api';
 
 // [STORE-VAT · REVIEW-G #2087 S4-1] The VAT certificate is uploaded through the ordinary document upload, then filed by
 // the store's VAT route WITH the recorded consent tick: the server treats the tick as optional, so losing it here would

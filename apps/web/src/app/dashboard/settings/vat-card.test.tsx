@@ -5,7 +5,8 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
 import * as vendorApi from '@/lib/vendor-api';
-import type { StoreVatView } from '@/lib/vendor-api';
+import * as storeVatApi from '@/lib/store-vat-api';
+import type { StoreVatView } from '@/lib/store-vat-api';
 import { VatCard, vatStatusLine } from './vat-card';
 
 // ---------------------------------------------------------------------------
@@ -24,7 +25,7 @@ const manager = { myRole: 'MANAGER', vendors: [{ id: 'store-1', name: 'Sample Sh
 
 function setup(profile: unknown, vat: StoreVatView) {
   vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile as never);
-  vi.spyOn(vendorApi, 'getStoreVat').mockResolvedValue(vat);
+  vi.spyOn(storeVatApi, 'getStoreVat').mockResolvedValue(vat);
   return renderWithQuery(<VatCard storeId="store-1" />);
 }
 afterEach(() => { vi.restoreAllMocks(); });
@@ -33,25 +34,25 @@ describe('[O-5] who sees the VAT card', () => {
   it('a manager never sees it (the business’s tax registration is the owner’s to give)', async () => {
     setup(manager, view());
     await waitFor(() => expect(vendorApi.getProfile).toHaveBeenCalled());
-    expect(vendorApi.getStoreVat).not.toHaveBeenCalled();
+    expect(storeVatApi.getStoreVat).not.toHaveBeenCalled();
     expect(screen.queryByText('VAT')).toBeNull();
   });
 
   it('hidden while Swift’s VAT switch is off and the store never claimed VAT', async () => {
     setup(owner, view({ available: false }));
-    await waitFor(() => expect(vendorApi.getStoreVat).toHaveBeenCalled());
+    await waitFor(() => expect(storeVatApi.getStoreVat).toHaveBeenCalled());
     expect(screen.queryByText('Is your business VAT-registered with the GRA?')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'VAT' })).toBeNull();
   });
 
   it('switch off with a record: the status shows and the owner can still turn VAT off (asked once for an approved store)', async () => {
     setup(owner, view({ available: false, status: 'APPROVED', effective: false, vatRegistrationNumber: '012345678' }));
-    vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view({ available: false }));
+    vi.spyOn(storeVatApi, 'updateStoreVat').mockResolvedValue(view({ available: false }));
     await userEvent.click(await screen.findByRole('button', { name: 'Turn VAT off' }));
     expect((await screen.findByRole('alert')).textContent).toMatch(/ends your approval/);
-    expect(vendorApi.updateStoreVat).not.toHaveBeenCalled();
+    expect(storeVatApi.updateStoreVat).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
-    await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
+    await waitFor(() => expect(storeVatApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
     expect(screen.queryByText('Is your business VAT-registered with the GRA?')).toBeNull();
   });
 });
@@ -59,7 +60,7 @@ describe('[O-5] who sees the VAT card', () => {
 describe('[O-5] the owner’s answer', () => {
   it('Yes + the number: saved with "prices already include VAT" (the only way offered); nothing changes until a person checks', async () => {
     setup(owner, view());
-    vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
+    vi.spyOn(storeVatApi, 'updateStoreVat').mockResolvedValue(view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
     expect(await screen.findByText('Not VAT-registered: your prices and receipts show no VAT.')).toBeTruthy();
     await userEvent.click(screen.getByRole('radio', { name: 'Yes' }));
     const save = screen.getByRole('button', { name: 'Save and send for checking' });
@@ -68,34 +69,34 @@ describe('[O-5] the owner’s answer', () => {
     expect(screen.queryByText(/add VAT at checkout/i)).toBeNull();
     expect(screen.getByText(/Adding VAT at checkout is not available yet/)).toBeTruthy();
     await userEvent.click(save);
-    await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: true, vatRegistrationNumber: '012345678', mode: 'PRICES_INCLUDE_VAT' }));
+    await waitFor(() => expect(storeVatApi.updateStoreVat).toHaveBeenCalledWith({ registered: true, vatRegistrationNumber: '012345678', mode: 'PRICES_INCLUDE_VAT' }));
     expect(await screen.findByText(/Send your GRA VAT registration certificate below/)).toBeTruthy();
   });
 
   it('No on a store that claimed VAT turns it off', async () => {
     setup(owner, view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
-    vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view());
+    vi.spyOn(storeVatApi, 'updateStoreVat').mockResolvedValue(view());
     await userEvent.click(await screen.findByRole('radio', { name: 'No' }));
     await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
-    await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
+    await waitFor(() => expect(storeVatApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
   });
 
   // [REVIEW-F #2087 S4] Re-approval needs a person: turning off an APPROVED store's VAT asks once, in words.
   it('No on an APPROVED store asks once before turning VAT off', async () => {
     setup(owner, view({ status: 'APPROVED', effective: true, mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678',
       approved: { number: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01T00:00:00.000Z', reviewedAt: null } }));
-    vi.spyOn(vendorApi, 'updateStoreVat').mockResolvedValue(view());
+    vi.spyOn(storeVatApi, 'updateStoreVat').mockResolvedValue(view());
     await userEvent.click(await screen.findByRole('radio', { name: 'No' }));
     await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
     expect((await screen.findByRole('alert')).textContent).toMatch(/a person at Swift must check your certificate again/);
-    expect(vendorApi.updateStoreVat).not.toHaveBeenCalled();
+    expect(storeVatApi.updateStoreVat).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
-    await waitFor(() => expect(vendorApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
+    await waitFor(() => expect(storeVatApi.updateStoreVat).toHaveBeenCalledWith({ registered: false }));
   });
 
   it('a refusal is shown in the server’s own words', async () => {
     setup(owner, view());
-    vi.spyOn(vendorApi, 'updateStoreVat').mockRejectedValue(new Error('Type your VAT registration number exactly as it is on your GRA certificate.'));
+    vi.spyOn(storeVatApi, 'updateStoreVat').mockRejectedValue(new Error('Type your VAT registration number exactly as it is on your GRA certificate.'));
     await userEvent.click(await screen.findByRole('radio', { name: 'Yes' }));
     await userEvent.type(screen.getByLabelText('VAT registration number (exactly as on your GRA certificate)'), 'abc');
     await userEvent.click(screen.getByRole('button', { name: 'Save and send for checking' }));
@@ -106,14 +107,14 @@ describe('[O-5] the owner’s answer', () => {
 describe('[O-5] the certificate', () => {
   it('the file can be chosen only after the consent tick, and goes to the store’s VAT route', async () => {
     setup(owner, view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
-    vi.spyOn(vendorApi, 'sendVatCertificate').mockResolvedValue(view({ status: 'PENDING', certificate: { id: 'doc-1', status: 'PENDING', state: 'COMMITTED', reviewNote: null, createdAt: '2026-10-25T00:00:00Z', reviewedAt: null } }));
+    vi.spyOn(storeVatApi, 'sendVatCertificate').mockResolvedValue(view({ status: 'PENDING', certificate: { id: 'doc-1', status: 'PENDING', state: 'COMMITTED', reviewNote: null, createdAt: '2026-10-25T00:00:00Z', reviewedAt: null } }));
     const choose = await screen.findByRole('button', { name: 'Choose the certificate' });
     expect((choose as HTMLButtonElement).disabled).toBe(true);
     await userEvent.click(screen.getByRole('checkbox'));
     expect((choose as HTMLButtonElement).disabled).toBe(false);
     const file = new File(['%PDF-1.4'], 'certificate.pdf', { type: 'application/pdf' });
     await userEvent.upload(screen.getByLabelText('VAT certificate file'), file);
-    await waitFor(() => expect(vendorApi.sendVatCertificate).toHaveBeenCalledWith(file));
+    await waitFor(() => expect(storeVatApi.sendVatCertificate).toHaveBeenCalledWith(file));
     expect(await screen.findByText(/waiting for a person at Swift to check it/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Choose the certificate' })).toBeNull();
   });
