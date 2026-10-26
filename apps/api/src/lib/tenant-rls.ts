@@ -127,6 +127,8 @@ export const TENANT_TABLES = [
   'custody_recovery_cases',
   // [TAXI waiting charge] One ride's waiting terms and frozen charge, walled like the ride.
   'taxi_ride_waiting',
+  // [O-1] A Swift call-bridge attempt on an order, walled like the order.
+  'call_sessions',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -316,6 +318,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'custody_recovery_cases', trigger: 'custody_recovery_cases_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [TAXI waiting charge] one hop: a ride's waiting row inherits the tenant of its ride (the same shape)
   { table: 'taxi_ride_waiting', trigger: 'taxi_ride_waiting_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [O-1] one hop: a call-bridge attempt inherits the tenant of the order it is about (the same shape)
+  { table: 'call_sessions', trigger: 'call_sessions_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },

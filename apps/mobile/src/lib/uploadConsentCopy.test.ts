@@ -33,7 +33,10 @@ describe('the phone upload ticks', () => {
     expect((list.match(/consented=\{consented\}/g) ?? []).length).toBe((list.match(/<DocumentUploadCard\b/g) ?? []).length);
     const card = SRC('components', 'onboarding', 'DocumentUploadCard.tsx');
     expect(card).toMatch(/consented = false,/);
-    expect(card).toMatch(/disabled=\{approved \|\| upload\.isPending \|\| !consented\}/);
+    // [POLICE-CLEARANCE CONSENT] the card waits for its tick: the list's, or a police clearance's own
+    expect(card).toMatch(/disabled=\{approved \|\| upload\.isPending \|\| !canUpload\}/);
+    expect(card).toMatch(/const canUpload = ownTick \? policeTicked : consented;/);
+    expect(card).toMatch(/const \[policeTicked, setPoliceTicked\] = useState\(false\);/);
   });
 
   it('the customer ID: an unticked tick, Send waits for it, and "(DPA 2023)" is gone', () => {

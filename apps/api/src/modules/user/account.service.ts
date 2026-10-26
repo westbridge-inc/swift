@@ -543,6 +543,8 @@ export class AccountService {
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
     await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
+    // [O-1] The Swift-bridged calls the person asked for (roles and times; never a number).
+    await prisma.callSession.deleteMany({ where: { callerUserId: userId } });
 
     // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
     //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,

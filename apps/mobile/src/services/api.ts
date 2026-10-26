@@ -971,12 +971,17 @@ export const verificationApi = {
     fileUrl: string;
     consent: true;
     privacyNoticeVersion: string;
-    /** [R17] the tick shown before the upload (recorded in the consent ledger). */
-    consentTick?: 'document_v1';
+    /** [R17] the tick shown before the upload (recorded in the consent ledger); a police clearance's own tick. */
+    consentTick?: 'document_v1' | 'police_clearance_v1';
+    /** [POLICE-CLEARANCE CONSENT] the version of the police-clearance words shown (the API refuses changed words). */
+    consentVersion?: string;
     /** [DOC-CONSENT S4] how that tick was given (an older API ignores it). */
     consentVia?: UploadConsentVia;
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
+  /** [POLICE-CLEARANCE CONSENT] withdraw this checklist's police clearance: erased now, only a note kept. */
+  withdrawPoliceClearance: (role: string, session?: AuthSessionSnapshot) =>
+    api.post('/verification/police-clearance/withdraw', { role }, capturedAuthConfig(session)),
   submitIdentity: (
     // [ROLE-DOCS · owner 21 Oct 2026] the ID alone: a customer never gives a photo (the server drops build 9's selfieUrl)
     // [Owner ruling 24 Oct 2026] the current app sends the customer_id_v2 tick; v1 is build 12's own

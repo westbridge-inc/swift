@@ -253,6 +253,17 @@ const PUBLISHED: Record<
     driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
     vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
   },
+  // [POLICE-CLEARANCE CONSENT · COORD 25 Oct 22:17Z — NON-material] Privacy only: section 6 says what Swift keeps of a
+  // police clearance (whether it was clear and its issue date), that its image is deleted soon after the check (the app
+  // shows the days), and that it can be withdrawn at any time in the app. Same day as 2026-10-25.1, so LAST_UPDATED is
+  // unchanged and the Terms and both agreements keep their hashes. Taking that one sentence back out reproduces the
+  // 2026-10-25.1 Privacy pin exactly.
+  '2026-10-25.2': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: '40512a8d6df0f0952f5189e84b83bfdabec232fc1c782c5979b1406aa2ba45d9',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

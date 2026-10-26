@@ -234,8 +234,9 @@ export function MenuItemRow({
         <PillButton
           label="Delete"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={del.isPending}
           onPress={() => {
-            if (readOnly || !canEdit) return;
+            if (readOnly || !canEdit || del.isPending) return;
             setConfirmDelete(false);
             del.mutate(item.id);
           }}

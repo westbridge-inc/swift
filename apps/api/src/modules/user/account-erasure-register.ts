@@ -38,6 +38,7 @@ export const ERASURE_CLEARED: Readonly<Record<string, string>> = {
   'TripShareToken.createdByUserId': 'ephemeral high-risk rows (NR-3 gap 6): public trip shares',
   'RideQueueEntry.customerId': 'ephemeral high-risk rows (NR-3 gap 6): exact-location queue rows',
   'SupplyWatch.customerId': 'ephemeral high-risk rows (NR-3 gap 6): exact-location watch rows',
+  'CallSession.callerUserId': 'deleted with the account (the NR-3 ephemeral-rows step): the Swift-bridged calls the person asked for (roles and times; Swift stores no number for a call)',
   'FaceTemplate.accountId': 'identity-integrity purge: the biometric template, in every case',
   'IdentityKey.accountId': 'identity-integrity purge (kept only as salted fraud tombstones while IntegritySettings.tombstoneRetentionEnabled is ON; default OFF)',
   'IdentityClusterMember.accountId': 'identity-integrity purge (kept only as fraud tombstones while IntegritySettings.tombstoneRetentionEnabled is ON; default OFF)',

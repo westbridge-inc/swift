@@ -27,6 +27,7 @@ import { serviceCatalogRoutes } from '../modules/services/service-catalog.routes
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
+import { callsRoutes } from '../modules/calls/calls.routes';
 import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,7 @@ async function buildTestApp() {
   await server.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
+  await server.register(callsRoutes, { prefix: '/api/v1/calls' });
   await server.ready();
   return server;
 }
@@ -161,6 +163,8 @@ const MATRIX: PrefixSpec[] = [
   // unauthenticated sweep still applies to every route.
   { prefix: '/api/v1/search/', wrongRoles: [] },
   { prefix: '/api/v1/chat/', wrongRoles: [] },
+  // [O-1] The call bridge: any party to an order (customer, mover, store) may ask Swift to connect a call.
+  { prefix: '/api/v1/calls/', wrongRoles: [] },
   { prefix: '/api/v1/verification/', wrongRoles: [] },
   { prefix: '/api/v1/rides/', wrongRoles: [] },
   // SOS is raiseable by any authenticated actor (passenger/driver/rider), so
@@ -396,11 +400,15 @@ describe('composition root ↔ matrix drift guard, by plugin [SWIFT-092 · T1]',
   // smsInboundRoutes (/api/v1/sms) is the SMS provider calling with a texted reply [R22]:
   // machine-to-machine, HMAC-signed by the provider and refused (403) unsigned, 503 dark
   // until configured; it only ever withdraws marketing consent — proven in marketing-stop.test.ts.
+  // callVoiceRoutes (/api/v1/calls/voice) is the voice provider calling back during a Swift-bridged
+  // call [O-1]: machine-to-machine, signed by the provider over the exact URL and refused (403)
+  // unsigned, 503 until configured; a call back to Swift's number only hears 'call from the app' —
+  // proven in call-bridge.test.ts.
   // testControlRoutes exists only in isolated load builds; production never registers it.
   const EXEMPT_PLUGINS = new Set([
     'agentCashRoutes', 'attributionRoutes', 'discoveryRoutes', 'marketRoutes', 'mmgCheckoutPublicRoutes',
     'cardRailPublicRoutes', 'publicRoutes', 'qrPublicRoutes', 'qrResolverRoutes', 'legalRoutes', 'testControlRoutes',
-    'smsInboundRoutes',
+    'smsInboundRoutes', 'callVoiceRoutes',
   ]);
 
   it('flags a route plugin the matrix never mounts, even under a prefix it already sweeps (red-first)', () => {

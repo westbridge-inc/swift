@@ -94,8 +94,9 @@ describe('the alert-class census: every kind the API sends has a deliberate loud
   it('the urgent job set and the quiet set are pinned too', () => {
     // Demoting a kind to quiet makes it silent and lets Android hold it; that
     // is reviewed here, not discovered on a phone.
+    // [O-1] call_incoming: 'Swift is calling you about your order' — the phone rings within seconds.
     expect(sorted(ALERT_CLASS_KINDS.job_update)).toEqual([
-      'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt', 'prep_ready',
+      'booking_to_confirm', 'call_incoming', 'guardian_driver_confirm', 'liveness_midshift_prompt', 'prep_ready',
     ]);
     expect(sorted(ALERT_CLASS_KINDS.quiet)).toEqual([
       'RATING_REMINDER', 'ad_campaign_completed', 'ad_campaign_live', 'ad_campaign_resumed', 'ad_campaign_scheduled',

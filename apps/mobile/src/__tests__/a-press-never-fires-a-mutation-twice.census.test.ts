@@ -71,10 +71,23 @@ function mutationHooks(sfs: ts.SourceFile[]): Set<string> {
     };
     visit(sf);
   }
+  /** The hooks a returned value comes from: a call (`useMutation(…)`), through parentheses / `as` / `!` and both
+   *  branches of a ternary, or a local bound to one — the phone's vendorops `usePreviewSafeMutation`:
+   *  `const m = useVendorMutation(o); return (pv ? previewMutation() : m) as …`. */
+  const handed = (e: ts.Expression, fn: Fn): string[] => {
+    let x: ts.Expression = e;
+    while (ts.isParenthesizedExpression(x) || ts.isAsExpression(x) || ts.isNonNullExpression(x)) x = x.expression;
+    if (ts.isConditionalExpression(x)) return [...handed(x.whenTrue, fn), ...handed(x.whenFalse, fn)];
+    if (ts.isCallExpression(x)) return calleeName(x) ? [calleeName(x)!] : [];
+    if (!ts.isIdentifier(x) || !fn.body || !ts.isBlock(fn.body)) return [];
+    const name = x.text;
+    return fn.body.statements.flatMap((st) => (ts.isVariableStatement(st) ? st.declarationList.declarations : [])
+      .flatMap((d) => (ts.isIdentifier(d.name) && d.name.text === name && d.initializer && ts.isCallExpression(d.initializer) && calleeName(d.initializer) ? [calleeName(d.initializer)!] : [])));
+  };
   const returned = (fn: Fn): string[] => {
     if (!fn.body) return [];
-    if (!ts.isBlock(fn.body)) return ts.isCallExpression(fn.body) && calleeName(fn.body) ? [calleeName(fn.body)!] : [];
-    return fn.body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression && ts.isCallExpression(st.expression) && calleeName(st.expression) ? [calleeName(st.expression)!] : []));
+    if (!ts.isBlock(fn.body)) return handed(fn.body as ts.Expression, fn);
+    return fn.body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression ? handed(st.expression, fn) : []));
   };
   /** A wrapper that hands back its own `{ …m, mutate, mutateAsync, isPending }` (the cart and checkout hooks). */
   const wraps = (fn: Fn): boolean => {
@@ -356,6 +369,7 @@ const PENDING_ELSEWHERE: Record<string, string> = {};
 /** Reviewed: a second fire is harmless or impossible. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {
   'modules/cart/screens/CartScreen.tsx | setTip.mutate <- <Pressable onPress>': 'Choosing Pickup sets the tip to 0 (a value, not a toggle): a second identical request leaves the same state, and checkout submits zero itself.',
+  'modules/vendor/screens/VendorOps.tsx | orderAction.mutate <- <VendorOrderCard onAction>': 'Held per order: each card gets busy={pendingIds.has(o.id)}, and usePendingOrderIds (hooks/vendorops.ts) reads the pending ORDER_ACTION_KEY mutations (useMutationState, status pending), which this scanner does not follow into another file; VendorOrderCard disables and spins its step buttons on busy. A repeated step is also refused by the server (the order has already moved on).',
 };
 
 /** Calls the scanner cannot trace to a press, checked by hand. Every entry must still match an untraced call. */
@@ -363,6 +377,9 @@ const UNTRACED: Record<string, string> = {
   'modules/cart/screens/CartScreen.tsx | placeOrder.mutate': 'onOrder is also kept in a ref (onOrderLatest) for the pickup-confirm Alert button (the system dialog fires once); its own Place order press is judged, and usePlaceOrder refuses a second order while one is in flight (its inFlight ref).',
   'modules/chat/screens/ConversationScreen.tsx | reportContent.mutate': 'An ActionSheet item (object onPress): kit/action-sheet runs onClose() before the item, so the sheet and its buttons are gone after the first tap.',
   'modules/shop/screens/RestaurantScreen.tsx | reportContent.mutate': 'An ActionSheet item (object onPress): the item closes the sheet first (setReportOpen(false)) and kit/action-sheet runs onClose() before it.',
+  'modules/mover/screens/ActiveJobScreen.tsx | riderAct.mutate': 'Handed to DoorCash as its submit prop with pending={riderAct.isPending}: DoorCash returns early while pending (its confirm) and its Confirm buttons are loading={pending}.',
+  'modules/mover/screens/MoverHomeScreen.tsx | goOnline.mutateAsync': 'Called inside the options object handed to prepareMoverOnline by startOnline, which returns early on busyToggle (preparingOnline, set true first, or goOnline/goOffline pending); the GO control is also disabled={busyToggle}.',
+  'modules/vendor/screens/VendorOrderDetailScreen.tsx | returnReceived.mutate': 'An object action handed to CustodyRecoveryNotice with pending: returnReceived.isPending; the notice renders it as a PillButton loading and disabled on pending.',
 };
 
 const RESULT = census(Object.fromEntries(sources(SRC).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')])));
@@ -461,5 +478,11 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     expect(untraced(`function P(){ const s = useSave(); const keep = useRef(() => s.mutate()); return null; }`)).toEqual(['s.mutate']);
     // A mutation hook's own body is not a press (its callers are judged).
     expect(census(hook).unresolved).toEqual([]);
+    // [STORE-VAT 01:36Z finding] A hook that hands back a LOCAL mutation through a ternary and a cast (the phone's
+    // vendorops usePreviewSafeMutation) is a mutation hook too, and so is every hook that returns it.
+    const preview = { 'ops.ts': `function useSafe(o) { const pv = usePreviewDataset(); const m = useSave(o); return (pv ? previewMutation() : m) as R; }\nexport function useRemoveStaff() { return useSafe({ mutationFn: remove }); }` };
+    const seen = (src: string) => census({ ...hook, ...preview, 'x.tsx': src }).hits.map((h) => h.text);
+    expect(seen(`function P(){ const del = useRemoveStaff(); return <B onPress={() => del.mutate(1)} />; }`)).toEqual(['del.mutate <- <B onPress>']);
+    expect(seen(`function P(){ const del = useRemoveStaff(); return <B disabled={del.isPending} onPress={() => del.mutate(1)} />; }`)).toEqual([]);
   });
 });
