@@ -30,6 +30,11 @@ export type PayAction =
   | CardPayAction;
 
 export { FEE_CHECKOUT_PLATFORMS_KEY };
+/** [MMG reopen] Its own per-platform switch for "Back to MMG's page" (handing
+ *  the SAME open checkout page out again). OFF when the row or a platform is
+ *  missing: it stays off in production until UAT shows what MMG does when an
+ *  already-used checkout page is opened again (MMG-CHECKOUT-API.md section 3). */
+export const FEE_CHECKOUT_REOPEN_PLATFORMS_KEY = 'billing.feeCheckout.reopen.platforms';
 const SWITCH_TTL_MS = 60_000;
 /** Paying rejoins a CHURNED account; PAUSED (billing stopped) and CANCELLED do not pay. */
 const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>([...OPERABLE_STATUSES, 'SUSPENDED', 'CHURNED']);
@@ -51,9 +56,36 @@ export function checkoutAmountGyd(fee: { weeklyFeeGyd: number; amountDueGyd: num
 }
 
 let switchCache: { at: number; switches: PlatformSwitches } | null = null;
-/** Tests reset the one-minute cache of the per-platform switch. */
+let reopenSwitchCache: { at: number; switches: PlatformSwitches } | null = null;
+/** Tests reset the one-minute caches of the per-platform switches (Pay and reopen). */
 export function resetFeeCheckoutSwitchCache(): void {
   switchCache = null;
+  reopenSwitchCache = null;
+}
+
+/** [MMG reopen] The reopen switch row as read. Unlike the pay switch
+ *  (fee-checkout-switch.ts: missing = ON, owner ruling "3 b"), a missing row
+ *  or platform is OFF. Only a real boolean counts: any other value for a
+ *  platform switches it OFF, and a row that is not an object switches every
+ *  platform OFF, each with a warning. */
+function reopenPlatformSwitches(row: { value: unknown } | null): PlatformSwitches {
+  if (!row) return { ios: false, android: false, web: false };
+  const value = row.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    log().warn({ key: FEE_CHECKOUT_REOPEN_PLATFORMS_KEY }, "[MMG checkout] the reopen per-platform switch is not an object of true/false values; reopening an open MMG checkout (Back to MMG's page) is OFF on every platform until it is corrected");
+    return { ios: false, android: false, web: false };
+  }
+  const switches = { ios: false, android: false, web: false };
+  for (const platform of ['ios', 'android', 'web'] as const) {
+    if (!Object.prototype.hasOwnProperty.call(value, platform)) continue;
+    const on = (value as Record<string, unknown>)[platform];
+    if (typeof on === 'boolean') {
+      switches[platform] = on;
+    } else {
+      log().warn({ key: FEE_CHECKOUT_REOPEN_PLATFORMS_KEY, platform }, "[MMG checkout] a reopen per-platform switch value is not true or false; reopening an open MMG checkout (Back to MMG's page) is OFF on that platform until it is corrected");
+    }
+  }
+  return switches;
 }
 
 /** A missing row, or a platform missing from it, is ON (owner ruling "3 b");
@@ -66,6 +98,20 @@ export async function feeCheckoutPlatforms(prisma: Pick<PrismaClient, 'platformC
     switchCache = { at: now, switches: platformSwitches(row) };
   }
   return { ...switchCache.switches };
+}
+
+/** [MMG reopen] May "Back to MMG's page" be offered and honoured on this
+ *  platform? Read at most once a minute; a missing row or platform is OFF, and
+ *  only the JSON boolean `true` turns a platform on. An unknown platform counts
+ *  only when every platform is on. */
+export async function mmgReopenSwitchedOn(prisma: Pick<PrismaClient, 'platformConfig'>, platform: ClientPlatform): Promise<boolean> {
+  const now = Date.now();
+  if (!reopenSwitchCache || now - reopenSwitchCache.at > SWITCH_TTL_MS) {
+    const row = await prisma.platformConfig.findUnique({ where: { key: FEE_CHECKOUT_REOPEN_PLATFORMS_KEY } });
+    reopenSwitchCache = { at: now, switches: reopenPlatformSwitches(row) };
+  }
+  const switches = reopenSwitchCache.switches;
+  return platform === 'unknown' ? switches.ios && switches.android && switches.web : switches[platform];
 }
 
 /**
