@@ -91,6 +91,9 @@ async function fixture(status = 'ACTIVE') {
     extractionRun: { findMany: extracted }, auditLog: { create: audit },
     promoCode: { findMany: async () => [] }, actorRatingStat: { findMany: async () => [] },
     customer: { count: async () => 0 },
+    // [FOOD-PERMIT · owner 24 Oct 2026] This fixture is a registered restaurant: its owner has given the food handlers
+    // tick (the ledger row POST /vendor/onboarding/food-handlers writes), so the disclosure block alone decides here.
+    consentRecord: { findMany: async () => [{ action: 'granted', documentVersion: 'v1', evidence: { vendorId: 'store-fixture' } }] },
   });
   const host = await hostRoutes(customerRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
   const read = async (tenant?: string) => {
