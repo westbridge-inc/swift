@@ -28,6 +28,16 @@ describe('sellerVerifiedNow', () => {
     expect(sellerVerifiedNow(real({ owner: { user: { isSynthetic: true, syntheticRunId: null } } }), NOW)).toBe(false);
     expect(sellerVerifiedNow(real({ owner: { user: { isSynthetic: false, syntheticRunId: 'seed-demo' } } }), NOW)).toBe(false);
   });
+
+  // [CI red on 31126d0e: storefront-disclosure-r3 reads a store row without the bound] A row read without its
+  // document bound is never "verified" (fail closed) and never throws: a store page must not 500 on a missing field.
+  it('a row read without its document bound is never verified, and never throws', () => {
+    const noBound = { ...real(), activationValidUntil: undefined } as unknown as SellerVerifiedFacts;
+    expect(() => sellerVerifiedNow(noBound, NOW)).not.toThrow();
+    expect(sellerVerifiedNow(noBound, NOW)).toBe(false);
+    const notADate = { ...real(), activationValidUntil: '2099-01-01' } as unknown as SellerVerifiedFacts;
+    expect(sellerVerifiedNow(notADate, NOW)).toBe(false);
+  });
 });
 
 describe('the fiction sources carry the markers', () => {

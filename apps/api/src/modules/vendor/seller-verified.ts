@@ -26,7 +26,10 @@ export const SELLER_VERIFIED_SELECT = {
 export function sellerVerifiedNow(store: SellerVerifiedFacts, now: Date = new Date()): boolean {
   const ownerUser = store.owner?.user;
   const synthetic = store.isSynthetic === true || ownerUser?.isSynthetic === true || (ownerUser?.syntheticRunId ?? null) !== null;
+  // A row read without its bound (undefined, or not a Date) is never "verified" and never throws: fail closed, and a
+  // store page must not 500 on a missing field.
+  const bound: unknown = store.activationValidUntil;
   return store.isVerified === true
     && !synthetic
-    && (store.activationValidUntil === null || store.activationValidUntil.getTime() > now.getTime());
+    && (bound === null || (bound instanceof Date && bound.getTime() > now.getTime()));
 }
