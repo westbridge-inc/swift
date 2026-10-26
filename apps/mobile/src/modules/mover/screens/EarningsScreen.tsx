@@ -22,6 +22,7 @@ import {
   requireAuthSessionSnapshot,
 } from '../../../stores/authStore';
 import {
+  cashInHandThisWeek,
   earningLabel,
   earningRows,
   earningsWindowTotal,
@@ -426,6 +427,8 @@ export function EarningsScreen({ navigation }: any) {
   const allTimeDetail = isDriver
     ? countDetail(allTimeJobs, 'trip', 'trips')
     : countDetail(allTimeJobs, 'job', 'jobs');
+  // [Board 13a "CASH COLLECTED"] The server's figure; undefined (older API) leaves the tile out.
+  const cashThisWeek = cashInHandThisWeek(summaryQ.data);
 
   return (
     <Screen>
@@ -476,6 +479,13 @@ export function EarningsScreen({ navigation }: any) {
               total={earningsWindowTotal(summaryQ.data, 'allTime')}
               sub={allTimeDetail}
             />
+            {cashThisWeek != null ? (
+              <StatTile
+                label="CASH COLLECTED"
+                total={cashThisWeek}
+                sub={isDriver ? 'Cash fares this week' : 'Kept this week after paying stores'}
+              />
+            ) : null}
           </View>
 
           {breakdown ? (
