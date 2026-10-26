@@ -80,6 +80,7 @@ import {
 } from '../order/order-status';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -1236,12 +1237,14 @@ export async function riderRoutes(app: FastifyInstance) {
   const ACTIVE_ORDER_INCLUDE = {
     vendor: {
       select: {
-        id: true, name: true, logoUrl: true, phone: true,
+        // [O-1] Not `phone`: that is the store's account/OTP line, and no build read it.
+        id: true, name: true, logoUrl: true,
         latitude: true, longitude: true,
         addressLine1: true, city: true,
       },
     },
-    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
+    // [COORD 17 Oct] The rider calls the customer: first name + phone, never the last name.
+    // [O-1] The phone goes only to an installed store build (withCounterpartPhones on the way out).
     customer: {
       select: {
         id: true,
@@ -1278,6 +1281,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const order = await app.prisma.order.findUnique({
       where: { id: rider.currentOrderId, riderId: rider.id },
       // [F-0011] The response spreads this row wholesale — omit at the source.
+      // [O-1] The parcel recipient's number is gated below (withCounterpartPhones).
       omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
@@ -1290,7 +1294,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return { success: true, data: null };
     }
 
-    return { success: true, data: activeOrderView(order) };
+    return { success: true, data: withCounterpartPhones(request, activeOrderView(order)) };
   });
 
   /** GET /orders/active-legs — [B6] EVERY live leg, not only the pointer's.
@@ -1307,7 +1311,7 @@ export async function riderRoutes(app: FastifyInstance) {
       omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
-    const legs = rows.map((o) => ({ ...activeOrderView(o), isPrimary: o.id === rider.currentOrderId }));
+    const legs = rows.map((o) => ({ ...withCounterpartPhones(request, activeOrderView(o)), isPrimary: o.id === rider.currentOrderId }));
     const first = legs[0];
     const run = legs.length >= 2 && first
       ? {
@@ -2239,6 +2243,8 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    const fee = await payInfo(app.prisma, sub);
     return {
       success: true,
       data: {
@@ -2247,7 +2253,9 @@ export async function riderRoutes(app: FastifyInstance) {
         // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
-        ...(await payInfo(app.prisma, sub)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, sub, fee, now),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).

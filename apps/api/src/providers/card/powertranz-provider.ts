@@ -95,6 +95,10 @@ if (COMPLETION_CLAIM_WAIT_MS < COMPLETION_TIMEOUT_MS + 5_000) throw new Error('C
 export const SPI_TOKEN_LIFETIME_MS = 5 * 60_000;
 /** A page's facts outlive it long enough for any reconciliation (as the simulator's). */
 const RECORD_RETAIN_MS = 30 * 24 * 60 * 60_000;
+/** [REVIEW-G S4-2 on #1524] The sandbox self-check's page record is only proof
+ *  that the page set up: it is abandoned at once and kept one hour, never the
+ *  30-day card record retention. Nothing reads it afterwards. */
+export const SELF_CHECK_RECORD_TTL_MS = 60 * 60_000;
 
 /** ISO 4217 numeric codes (sec. 5.1 CurrencyCode "Must use numeric currency code (ISO 4217)"). */
 export const CURRENCY_NUMERIC: Readonly<Record<string, string>> = {
@@ -948,7 +952,14 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
         returnUrl: opts.returnUrl, expiresAt: new Date(this.now().getTime() + 60_000), amountMinor: 100, currencyCode: 'GYD',
       });
       out.push({ check: 'hosted payment page set up', ok: created.status === 'succeeded' });
-      if (created.status === 'succeeded') await this.abandon(this.key.session(created.providerSessionRef), 'SELF_CHECK');
+      if (created.status === 'succeeded') {
+        const record = this.key.session(created.providerSessionRef);
+        try {
+          await this.abandon(record, 'SELF_CHECK');
+        } finally {
+          await this.redis.pexpire(record, SELF_CHECK_RECORD_TTL_MS).catch(() => 0);
+        }
+      }
     }
     return out;
   }

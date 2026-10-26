@@ -949,6 +949,10 @@ export const servicesApi = {
     api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
+/** [DOC-CONSENT S4] How the person gave the document tick for this upload: ticked on this visit, shown from their own
+ *  grant on record, or the prompt a police clearance asks first. The API records it as the ledger row's evidence. */
+export type UploadConsentVia = 'checkbox' | 'record' | 'prompt';
+
 // Verification (mounted at /api/v1/verification)
 export const verificationApi = {
   status: (role: string, vehicleType?: string) =>
@@ -963,6 +967,8 @@ export const verificationApi = {
     privacyNoticeVersion: string;
     /** [R17] the tick shown before the upload (recorded in the consent ledger). */
     consentTick?: 'document_v1';
+    /** [DOC-CONSENT S4] how that tick was given (an older API ignores it). */
+    consentVia?: UploadConsentVia;
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
@@ -1061,7 +1067,20 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
+    body: {
+      outcome: 'paid' | 'no_show' | 'refused' | 'short_payment';
+      gps: { lat: number; lng: number };
+      photoUrl?: string;
+      ridePin?: string;
+      /** [L02 · row 56] The cash taken at the door, whole GYD (api cash/door-cash.ts decides what it means). */
+      collectedAmount?: number;
+      /** 'short_payment' with partial cash only: true = handed back; false = the rider still holds it (operations follow up). */
+      cashReturned?: boolean;
+      /** 'paid' only: the goods were already handed over for less than due. */
+      handedOverShort?: true;
+      /** The door authority version the screen rendered; a stale one is refused. */
+      handoverVersion?: string;
+    },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
