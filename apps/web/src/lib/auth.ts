@@ -3,6 +3,7 @@
 import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { DEMO_ENDED_LOGIN, DEMO_ENDED_NOTICE, isClosedDemoAnswer, noteDemoEnded } from '@/lib/demo-ended';
+import { CALL_BRIDGE_HEADER, CALL_BRIDGE_VERSION } from '@/lib/call-bridge-header';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [W-01] THIS APP HOLDS NO CREDENTIAL. It used to keep both tokens in
@@ -337,6 +338,9 @@ export async function apiFetch(
         ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
         ...clientHeaders,
         ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
+        // [O-1] This website knows the Swift call bridge: with the bridge on, the API sends it no other
+        // person's personal number ("Call via Swift" instead); with it off, nothing changes (lib/call-bridge-header.ts).
+        [CALL_BRIDGE_HEADER]: CALL_BRIDGE_VERSION,
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
         // [Row 225] The account this page is acting as: the API refuses a write
