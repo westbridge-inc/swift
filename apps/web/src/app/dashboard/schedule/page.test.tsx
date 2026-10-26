@@ -19,6 +19,8 @@ interface Opts {
   role?: Role; vendorType?: string; failStores?: boolean; failBookings?: boolean; failBlocks?: boolean; failDelete?: boolean;
   // [UI-SWEEP, REVIEW-F #2013 S4-1/S4-2/S4-4/S4-5]
   failCreate?: boolean; holdStores?: Promise<void>; bookingsData?: unknown[]; blocksData?: unknown[]; menu?: unknown[] | 'fail';
+  // [size budget] The unblock's own states: hold the DELETE, and answer each one in turn.
+  holdDelete?: Promise<void>; deleteResults?: Array<'fail' | 'ok'>;
 }
 
 const today = appointmentDayKey(new Date());
@@ -37,6 +39,11 @@ function scheduleApi(opts: Opts = {}) {
     if (method !== 'GET') {
       writes.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : null });
       if (opts.failDelete && method === 'DELETE') return { status: 503, body: { success: false, error: { message: 'Service unavailable' } } };
+      if (method === 'DELETE' && (opts.holdDelete || opts.deleteResults)) {
+        const result = opts.deleteResults?.shift() ?? 'ok';
+        const answer = result === 'fail' ? { status: 503, body: { success: false, error: { message: 'Service unavailable' } } } : { body: { success: true, data: {} } };
+        return (opts.holdDelete ?? Promise.resolve()).then(() => answer);
+      }
       if (opts.failCreate && method === 'POST') return { status: 409, body: { success: false, error: { message: 'That time overlaps a booking.' } } };
       return { body: { success: true, data: {} } };
     }
@@ -162,6 +169,32 @@ describe('the Schedule tab copies the app', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Remove block, 13:00–17:00' }));
     expect(await screen.findByText(/Service unavailable/)).toBeTruthy();
     expect(screen.getByText('Blocked · 13:00–17:00')).toBeTruthy();
+  });
+});
+
+// [size budget] The unblock is a plain call now (react-query's mutation code stays out of
+// this tab's first load), so its states are pinned here: nothing else covered them.
+describe('an unblock on its way, refused, then tried again', () => {
+  it('every remove button waits while it is sent; a refusal shows and re-enables them; the next try clears it', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    scheduleApi({ holdDelete: held, deleteResults: ['fail', 'ok'] });
+    renderWithQuery(<SchedulePage />);
+    const remove = await screen.findByRole('button', { name: 'Remove block, 13:00–17:00' }) as HTMLButtonElement;
+    fireEvent.click(remove);
+    await waitFor(() => expect(remove.disabled).toBe(true));
+    fireEvent.click(remove);
+    release();
+    expect(await screen.findByText(/Service unavailable/)).toBeTruthy();
+    await waitFor(() => expect(remove.disabled).toBe(false));
+    expect(writes.filter((w) => w.method === 'DELETE')).toHaveLength(1);
+    const blockReads = reads.filter((r) => r === '/vendor/bookings/exceptions').length;
+    fireEvent.click(remove);
+    await waitFor(() => expect(writes.filter((w) => w.method === 'DELETE')).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText(/Service unavailable/)).toBeNull());
+    // A removal that went through reads the blocked time again.
+    await waitFor(() => expect(reads.filter((r) => r === '/vendor/bookings/exceptions').length).toBeGreaterThan(blockReads));
+    await waitFor(() => expect(remove.disabled).toBe(false));
   });
 });
 

@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = join(__dirname, '..');
 const ROOTS = ['app/dashboard', 'app/portal', 'app/advertiser'];
-const FILES = ['components/console-shell.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
+const FILES = ['components/console-shell.tsx', 'components/schedule-block-time.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
   // The weekly-fee page every partner pays through, and its MMG and card words (lib/card-fee.ts
   // is byte-identical to the phone copy by census; both now say "kept for your next weekly fee").
   'components/weekly-fee.tsx', 'components/weekly-fee-reopen.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/weekly-fee-reopen.ts', 'lib/card-fee.ts',
