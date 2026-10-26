@@ -185,7 +185,7 @@ export async function storeVatReport(db: PrismaClient | Prisma.TransactionClient
     take: MAX_ORDERS + 1,
   });
   if (found.length > MAX_ORDERS) throw rangeError('That period has too many orders for one report. Choose a shorter period.');
-  return buildVatReport(found.map((o) => ({
+  const rows = found.map((o) => ({
     id: o.id,
     orderNumber: o.orderNumber,
     vatRateBps: o.vatRateBps!,
@@ -197,5 +197,8 @@ export async function storeVatReport(db: PrismaClient | Prisma.TransactionClient
     vatSellerName: o.vatSellerName,
     vatSellerNumber: o.vatSellerNumber,
     supplyDay: guyanaDayKey(supplyInstant({ deliveredAt: o.deliveredAt, completedAt: o.statusHistory[0]?.createdAt ?? null, placedAt: o.placedAt })),
-  })), range.from, range.to);
+  }));
+  // [REVIEW-M #2109 S4] The query window is a coarse cut (any COMPLETED row inside it); the order's ONE supply day is the
+  // first completion. Keep exactly the orders whose supply day falls in the period, so an order counts once, on that day.
+  return buildVatReport(rows.filter((r) => r.supplyDay >= range.from && r.supplyDay <= range.to), range.from, range.to);
 }

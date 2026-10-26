@@ -121,6 +121,10 @@ beforeAll(async () => {
   await order('cancelled', vendorId, { status: 'CANCELLED', placedAt: new Date('2026-03-05T13:00:00Z'), vat: { base: 1140, vat: 140, zero: 0, exempt: 0 } });
   await order('novat', vendorId, { status: 'DELIVERED', deliveredAt: new Date('2026-03-06T15:00:00Z'), placedAt: new Date('2026-03-06T13:00:00Z'), vat: null });
   await order('other', otherVendorId, { status: 'DELIVERED', deliveredAt: new Date('2026-03-07T15:00:00Z'), placedAt: new Date('2026-03-07T13:00:00Z'), vat: { base: 1140, vat: 140, zero: 0, exempt: 0 } });
+  // [REVIEW-M #2109 S4] Two COMPLETED log rows (a re-completion): the supply day is the FIRST (27 Feb), so a March report
+  // must not take it in although its second row falls in March.
+  await order('twice', vendorId, { status: 'COMPLETED', completedAt: new Date('2026-02-27T15:00:00Z'), placedAt: new Date('2026-02-27T13:00:00Z'), vat: { base: 1140, vat: 140, zero: 0, exempt: 0 } });
+  await app.prisma.orderStatusLog.create({ data: { orderId: orderIds['twice']!, status: 'COMPLETED' as never, createdAt: new Date('2026-03-03T15:00:00Z'), note: 'Completed again' } });
   await order('april', vendorId, { status: 'DELIVERED', deliveredAt: new Date('2026-04-01T05:00:00Z'), placedAt: new Date('2026-04-01T03:00:00Z'), vat: { base: 1140, vat: 140, zero: 0, exempt: 0 } });
 });
 
@@ -146,6 +150,13 @@ describe('[O-5 PR4] the store’s VAT report', () => {
     expect(data.prepared).toBe('Prepared from your Swift orders. Your accountant files your VAT return; Swift does not file it for you.');
     // The seller as each order froze it (a number changed mid-period would show as a second line).
     expect(data).toMatchObject({ from: '2026-02-28', to: '2026-03-31', sellers: [{ name: 'Report Shop Ltd', vatNumber: VAT_NUMBER, orders: 2 }] });
+  });
+
+  it('an order counts once, on its FIRST completion: a later completion row inside the period does not pull it in', async () => {
+    const res = await get('/api/v1/vendor/vat/report?from=2026-03-01&to=2026-03-31', ownerToken);
+    expect((res.json().data.orders as Array<{ orderNumber: string }>).map((o) => o.orderNumber)).not.toContain(`VR-${RUN}-twice`);
+    const feb = await get('/api/v1/vendor/vat/report?from=2026-02-27&to=2026-02-27', ownerToken);
+    expect((feb.json().data.orders as Array<{ orderNumber: string }>).map((o) => o.orderNumber)).toEqual([`VR-${RUN}-twice`]);
   });
 
   it('a Guyana day, not a UTC day: from 1 March leaves out the order delivered at 22:00 on 28 February', async () => {
