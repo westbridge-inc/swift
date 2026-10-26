@@ -19,8 +19,9 @@ const DOOR = { lat: 6.81, lng: -58.16 };
 afterEach(() => vi.restoreAllMocks());
 
 function fixture() {
+  // [#2108] Loss protection is the default tenant's program (rlp.ts RLP_TENANT): a payout fixture lives there.
   const order: any = {
-    id: 'safeb-order', tenantId: 'safeb-tenant', orderType: 'TAXI',
+    id: 'safeb-order', tenantId: 'swift-default', orderType: 'TAXI',
     driverId: 'safeb-driver', riderId: null, customerId: 'safeb-customer',
     status: 'RIDE_IN_PROGRESS', paymentMethod: 'CASH', paymentStatus: 'PENDING',
     deliveryLat: DOOR.lat, deliveryLng: DOOR.lng, deliveredAt: null,
@@ -29,7 +30,7 @@ function fixture() {
     customer: { id: 'safeb-customer', phone: '+5920000000', countryCode: 'GY' },
   };
   const driver = {
-    id: 'safeb-driver', userId: 'safeb-driver-user', tenantId: 'safeb-tenant', locationSessionId: 'safeb-session',
+    id: 'safeb-driver', userId: 'safeb-driver-user', tenantId: 'swift-default', locationSessionId: 'safeb-session',
     currentLat: 7.5, currentLng: -58.5, lastLocationUpdate: new Date(Date.now() - 3_600_000),
   };
   const state = {

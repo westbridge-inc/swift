@@ -102,7 +102,8 @@ function harness() {
   const orphans = new Map<string, any>();
   // [VERIFY-DOCS V3] The admin who mints a view link; the render route re-reads
   // their document reviewer grant on every load (same tenant as subject A).
-  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', admin: { permissions: ['documents.review'] } };
+  // [ADMIN-ROLE] The staff role counts when the account HOLDS it (users.roles), as every real admin row does.
+  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', roles: ['ADMIN'], admin: { permissions: ['documents.review'] } };
   const db: any = {
     user: {
       findUnique: vi.fn(async ({ where }: any) => (where.id === reviewer.id ? reviewer : people.get(where.id))),
