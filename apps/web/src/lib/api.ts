@@ -110,6 +110,9 @@ export interface StorefrontSeller {
 
 export interface StorefrontDetail extends StorefrontSummary {
   addressLine1: string;
+  /** [P35 · board 4b] A person approved the store's documents and they are still current (server-computed).
+   *  Absent from an older API: the page then says nothing about verification. */
+  isVerified?: boolean;
   /** Absent from an API older than R3. */
   seller?: StorefrontSeller | null;
   operatingHours: Array<{ dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }>;

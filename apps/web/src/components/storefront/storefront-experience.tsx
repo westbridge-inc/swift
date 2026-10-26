@@ -1113,6 +1113,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       {modalItem && itemSheetModule ? (
         <itemSheetModule.ItemSheet
           item={modalItem}
+          // [P35 · board 4b] The server's verdict: a person approved the store's documents and they are still
+          // current (public storefront isVerified, seller-verified.ts). An older API sends nothing: no pill.
+          seller={{ name: store.name, city: store.city, verified: store.isVerified === true }}
           vendorType={catalog.vendorType}
           selectedOptions={selectedOptions}
           onChoose={chooseOption}
