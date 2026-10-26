@@ -299,6 +299,12 @@ export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?$
 export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
+/** [O-1] Order pages show party phones masked. The full number of ONE party is
+ *  read through this audited door: the reason travels in x-swift-reason and the
+ *  server records the read before it answers. */
+export type OrderContactParty = 'customer' | 'store' | 'mover';
+export const revealOrderPartyPhone = (id: string, party: OrderContactParty, reason: string): Promise<{ data: { party: OrderContactParty; phone: string; auditId: string } }> =>
+  apiFetch(`/api/v1/admin/orders/${id}/party-phone?party=${party}`, { reason });
 
 // ─── Detail pages (People phase) ─────────────────────────────────
 export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${id}`);

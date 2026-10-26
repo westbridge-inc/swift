@@ -104,6 +104,7 @@ import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, d
 import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
+import { maskOrderPartyPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2345,7 +2346,8 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // 13 Decimal columns on the order + 7 more on every included OrderItem,
     // all of which the admin client types as `number`. Coerce at the seam.
-    const result = paginatedResponse(coerceMoney(orders), total, { page, limit, skip });
+    // [O-1] The customer's phone goes out masked (search still matches the full number server-side).
+    const result = paginatedResponse(coerceMoney(orders.map(maskOrderPartyPhones)), total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
@@ -2722,7 +2724,25 @@ export async function adminRoutes(app: FastifyInstance) {
     // heading for. Any other order gains no key.
     const itinerary = order.orderType === 'TAXI' ? await readAdminItinerary(app.prisma, order) : null;
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}), ...(itinerary ?? {}) } };
+    // [O-1] Party phones go out MASKED; the full number is the audited reveal below.
+    return { success: true, data: { ...maskOrderPartyPhones(order), sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}), ...(itinerary ?? {}) } };
+  });
+
+  /**
+   * [O-1 · COORD ruling 22 Oct 2026] The audited door to ONE party's full phone
+   * on an order (customer, store, or the mover: rider or driver). A stated
+   * reason (x-swift-reason) and an audit row written before the number is
+   * returned (modules/admin/order-contact.ts).
+   */
+  const orderContactQuery = z.object({ party: z.enum(ORDER_CONTACT_PARTIES) });
+  app.get('/orders/:id/party-phone', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { party } = orderContactQuery.parse(request.query);
+    const result = await revealOrderPartyPhone(
+      { prisma: app.prisma },
+      { orderId: id, party, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   /**
