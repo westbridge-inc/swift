@@ -69,6 +69,12 @@ describe('[T3] cross-tenant attack matrix — owner login', () => {
         expect(result.approvals.asked, JSON.stringify(result.approvals)).toBeGreaterThan(30);
         expect(result.approvals.approved, JSON.stringify(result.approvals.byStatus)).toBe(result.approvals.asked);
         expect(result.approvals.reached, JSON.stringify(result.approvals.byStatus)).toBe(result.approvals.asked);
+        // [REVIEW-M #2126 S4-1] ...and past validation: no re-send was refused for its body (each handler reached its own
+        // checks and its object lookup). A 503 is allowed only as a server switch that refuses before anything: billing
+        // mutations for a non-production tenant (TENANT_BILLING_UNAVAILABLE) and MMG fee returns while off (REVERSAL_OFF).
+        const stopped = Object.entries(result.approvals.byRoute)
+          .filter(([, outcome]) => /VALIDATION_ERROR/.test(outcome) || (/^503\b/.test(outcome) && !/TENANT_BILLING_UNAVAILABLE|REVERSAL_OFF/.test(outcome)));
+        expect(stopped, JSON.stringify(result.approvals.byRoute)).toEqual([]);
       } else {
         expect(result.approvals.asked).toBe(0);
       }

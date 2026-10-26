@@ -281,6 +281,49 @@ export function poison(w: World): { query: string; body: Record<string, unknown>
 }
 
 /**
+ * [REVIEW-M #2126 S4-1] VALID bodies for the two-person money and platform routes whose handler refuses the generic
+ * poison body at validation (it would never reach the object lookup). Each still names the production object where the
+ * schema takes one; the path ids come from materialize. The six admin billing mutations are fail-closed for every tenant
+ * but the production one (TENANT_BILLING_UNAVAILABLE, before any lookup: receipt counters are not tenant-aware), so no
+ * second-tenant fixture can open them; their bodies are valid too, so the day that guard opens they reach the lookup.
+ */
+export function craftedBodies(w: World): Record<string, Record<string, unknown>> {
+  const v = w.victim;
+  const A = '/api/v1/admin';
+  const at = new Date(Date.UTC(2026, 0, 15, 12)).toISOString();
+  const sunsetAt = new Date(Date.now() + 60 * 86_400_000).toISOString();
+  return {
+    [`POST ${A}/orders/:id/close-store-refund`]: { expectedClaimRevision: 0, reason: 'matrix probe' },
+    [`PUT ${A}/orders/:id/refund-settled`]: { reference: 'MATRIX-REF', amount: 100 },
+    [`POST ${A}/billing/mover-fees/:userId/resolve`]: { expectedRevision: 1, canonicalSubscriptionId: v.subscription, sourceSubscriptionIds: [v.subscription], reason: 'matrix probe' },
+    [`POST ${A}/notifications/broadcast`]: { title: 'matrix probe', body: 'matrix probe', category: 'service' },
+    [`POST ${A}/ads/refund-intents/:id/settle`]: { manualPayoutRef: 'MATRIX-REF' },
+    [`PUT ${A}/ads/invoices/:id/mark-paid`]: { reference: 'MATRIX-REF' },
+    [`POST ${A}/billing/usd-migration/mode-b`]: { sunsetAt },
+    [`POST ${A}/billing/confirmations/:id/resolve`]: { sourceId: v.subscription, epoch: 1, clockVersion: 0, decision: 'UNPAID', evidenceReference: 'MATRIX evidence 0001', reason: 'matrix probe' },
+    [`POST ${A}/billing/mmg-checkouts/:id/reverse`]: { amountGyd: 2000, reason: 'matrix probe' },
+    [`POST ${A}/billing/mmg-fee-reversals/:id/resolve`]: { outcome: 'NOT_RETURNED', mmgReference: 'MATRIX-REF', reason: 'matrix probe' },
+    [`POST ${A}/billing/settlement-batches/:id/confirm-deposit`]: { depositedGyd: 2000, depositedAt: at, bankRef: 'MATRIX-REF' },
+    [`POST ${A}/billing/settlement-batches/:id/adjust-deposit`]: { depositedGyd: 2000, depositedAt: at, bankRef: 'MATRIX-REF', reason: 'matrix probe' },
+    [`PUT ${A}/returns/:id/resolve`]: { status: 'APPROVED', note: 'matrix probe' },
+    [`PUT ${A}/returns/:id/refund-settled`]: { reference: 'MATRIX-REF', amount: 100, note: 'matrix probe' },
+    [`PUT ${A}/cash-rules/claims/:id/paid`]: { reference: 'MATRIX-REF', amount: 500 },
+    // fail-closed for tenant B today (TENANT_BILLING_UNAVAILABLE): valid, so they reach the lookup if that ever opens
+    [`POST ${A}/subscriptions/:id/topup`]: { amount: 2000, reference: 'MATRIX-REF' },
+    [`POST ${A}/subscriptions/:id/refund-credit/set-aside`]: { amount: 100 },
+    [`POST ${A}/subscriptions/:id/refund-credit/release`]: { amount: 100, setAsideId: v.subscription },
+    [`POST ${A}/billing/agent-payments`]: { san: '000000000', amount: 2000, paidAt: at, receiptNumber: 'MATRIX-001', verifiedInPortal: true },
+    [`POST ${A}/billing/agent-payments/:id/attach`]: { subscriptionId: v.subscription },
+    [`POST ${A}/billing/settlement-import`]: { csv: 'date,reference,amount\n2026-01-15,MATRIX-REF,2000', source: 'matrix probe' },
+  };
+}
+
+/** Headers a crafted route needs to reach its lookup: the recorded fee payment demands its Idempotency-Key first. */
+export function craftedHeaders(w: World): Record<string, Record<string, string>> {
+  return { 'POST /api/v1/admin/subscriptions/:id/topup': { 'idempotency-key': `matrix-topup-${w.run}` } };
+}
+
+/**
  * Routes the matrix never fires: identity/session routes (covered by the auth suites; logout would end the
  * attacker's own session), provider webhooks, and the attacker's OWN account deletion (it acts on the caller
  * only, and every later request would answer 401: a vacuous pass).
@@ -293,7 +336,17 @@ export function skipped(method: string, url: string): boolean {
 export interface Finding { attacker: string; method: string; url: string; status: number; why: string }
 /** The approval leg's tally: asks (202 with an approval id), asks the colleague APPROVED, re-sends, re-sends the gate
  *  let through to the handler (the approval is spent: APPLIED), and the re-sends' statuses. */
-export interface ApprovalLeg { asked: number; approved: number; resent: number; reached: number; byStatus: Record<string, number> }
+export interface ApprovalLeg { asked: number; approved: number; resent: number; reached: number; byStatus: Record<string, number>; byRoute: Record<string, string> }
+
+/** The error code an answer names ('' for none): what stopped a handler (validation, a refused object, billing). */
+function errorCodeOf(body: string): string {
+  try {
+    const code = (JSON.parse(body) as { error?: { code?: unknown } })?.error?.code;
+    return typeof code === 'string' ? code : '';
+  } catch {
+    return '';
+  }
+}
 
 /** The approval id a 202 APPROVAL_REQUIRED answer names, or null. */
 function approvalIdOf(body: string): string | null {
@@ -321,6 +374,8 @@ export async function sweep(
     throw new Error(`${attacker.label}: the attacker's own session is refused (${me.statusCode} ${me.body.slice(0, 300)})`);
   }
   const { query, body } = poison(w);
+  const crafted = craftedBodies(w);
+  const craftedHead = craftedHeaders(w);
   const findings: Finding[] = [];
   const byStatus: Record<string, number> = {};
   let fired = 0;
@@ -328,7 +383,7 @@ export async function sweep(
   const unanswered: string[] = [];
   const approver = w.approvers[attacker.userId];
   let approverToken: string | null = null;
-  const approvals: ApprovalLeg = { asked: 0, approved: 0, resent: 0, reached: 0, byStatus: {} };
+  const approvals: ApprovalLeg = { asked: 0, approved: 0, resent: 0, reached: 0, byStatus: {}, byRoute: {} };
   const tally = (key: string) => { approvals.byStatus[key] = (approvals.byStatus[key] ?? 0) + 1; };
   let previous = '(start)';
   const seen = new Set<string>();
@@ -342,10 +397,11 @@ export async function sweep(
         url: method === 'GET' || method === 'DELETE' ? `${path}${path.includes('?') ? '&' : '?'}${query}` : path,
         headers: {
           authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'x-vendor-id': w.victim.vendor, 'x-swift-reason': 'matrix probe',
+          ...(craftedHead[`${method} ${url}`] ?? {}),
           ...(approvalId ? { 'x-swift-approval': approvalId } : {}),
         },
       };
-      if (method !== 'GET' && method !== 'DELETE') opts.payload = body;
+      if (method !== 'GET' && method !== 'DELETE') opts.payload = crafted[`${method} ${url}`] ?? body;
       return app.inject(opts);
     };
     let res = await fire(token);
@@ -383,6 +439,7 @@ export async function sweep(
         if (again.statusCode === 401) { token = await mintToken(app, owner, attacker); again = await fire(token, approvalId); }
         approvals.resent += 1;
         tally(String(again.statusCode));
+        approvals.byRoute[`${method} ${url}`] = `${again.statusCode} ${errorCodeOf(again.body)}`.trim();
         // The gate spends an approval only when it lets the request through to the handler.
         const spent = await owner.privilegedApproval.findUnique({ where: { id: approvalId }, select: { status: true } });
         if (spent?.status === 'APPLIED') approvals.reached += 1;
@@ -421,6 +478,11 @@ export async function digestProduction(owner: PrismaClient, w: World): Promise<R
     optionGroups: await owner.optionGroup.findMany({ where: { itemId: v.item }, include: { options: { orderBy: { id: 'asc' } } }, orderBy: { id: 'asc' } }),
     bookings: await owner.booking.findMany({ where: { customerId: v.customer }, orderBy: { id: 'asc' } }),
     subscription: await owner.subscription.findUnique({ where: { id: v.subscription } }),
+    // [REVIEW-M #2126 S4-1] what a money handler would write beside the plan, and what a broadcast would put in a production inbox
+    prepaid: await owner.prepaidBalance.findMany({ where: { subscriptionId: v.subscription }, orderBy: { id: 'asc' } }),
+    payments: await owner.subscriptionPayment.findMany({ where: { subscriptionId: v.subscription }, orderBy: { id: 'asc' } }),
+    billingEvents: await owner.billingEvent.findMany({ where: { subscriptionId: v.subscription }, orderBy: { id: 'asc' } }),
+    inbox: await owner.notification.findMany({ where: { userId: { in: [v.customer, v.owner, v.staffUser, v.riderUser, v.driverUser] } }, orderBy: { id: 'asc' } }),
     claims: await owner.reimbursementClaim.findMany({ where: { customerId: v.customer }, orderBy: { id: 'asc' } }),
   };
   return Object.fromEntries(Object.entries(rows).map(([k, value]) => [k, createHash('sha256').update(JSON.stringify(value, (_key, val) => (typeof val === 'bigint' ? String(val) : val))).digest('hex')]));
