@@ -17,6 +17,8 @@ type Button = { text: string; style?: string; onPress?: () => void };
 const fx = vi.hoisted(() => ({
   alerts: [] as { title: string; message?: string; buttons: Button[] }[],
   mutate: vi.fn(),
+  libraryPermission: vi.fn(async () => ({ granted: false, canAskAgain: true })),
+  library: vi.fn(async () => ({ canceled: true, assets: [] as unknown[] })),
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 vi.mock('react-native', async () => {
@@ -33,8 +35,8 @@ vi.mock('react-native', async () => {
 vi.mock('expo-image-picker', () => ({
   MediaTypeOptions: { Images: 'Images' },
   requestCameraPermissionsAsync: vi.fn(async () => ({ granted: false, canAskAgain: true })),
-  requestMediaLibraryPermissionsAsync: vi.fn(async () => ({ granted: false, canAskAgain: true })),
-  launchCameraAsync: vi.fn(), launchImageLibraryAsync: vi.fn(),
+  requestMediaLibraryPermissionsAsync: () => fx.libraryPermission(),
+  launchCameraAsync: vi.fn(), launchImageLibraryAsync: () => fx.library(),
 }));
 vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn() }) }));
 vi.mock('@expo/vector-icons', () => ({ Feather: () => null, MaterialCommunityIcons: () => null }));
@@ -114,5 +116,34 @@ describe('[DOC-CONSENT] a police clearance asks for the consent again when the t
   it('without a tick the card stays shut, ask or not', async () => {
     await mount({ docType: 'police_clearance', consented: false, askConsentFirst: true });
     expect((host.querySelector('[data-card]') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe('[S4 · REVIEW-G2] the upload says how its consent was given', () => {
+    const fromLibrary = async (n: number) => {
+      fx.libraryPermission.mockResolvedValueOnce({ granted: true, canAskAgain: true });
+      fx.library.mockResolvedValueOnce({ canceled: false, assets: [{ uri: 'file:///doc.jpg', fileName: 'doc.jpg', mimeType: 'image/jpeg' }] });
+      await choose(n, 'Choose from library');
+      await vi.waitFor(() => expect(fx.mutate).toHaveBeenCalledTimes(1));
+      return fx.mutate.mock.calls[0]![0] as { docType: string; consentVia?: string };
+    };
+
+    it('the box shown from the record: "record"', async () => {
+      await mount({ docType: 'drivers_licence', consented: true, consentVia: 'record' });
+      await tap();
+      expect(await fromLibrary(0)).toMatchObject({ docType: 'drivers_licence', consentVia: 'record' });
+    });
+
+    it('the box ticked on this visit: "checkbox"', async () => {
+      await mount({ docType: 'drivers_licence', consented: true, consentVia: 'checkbox' });
+      await tap();
+      expect(await fromLibrary(0)).toMatchObject({ consentVia: 'checkbox' });
+    });
+
+    it('a police clearance after "I consent": "prompt", not the record it came from', async () => {
+      await mount({ docType: 'police_clearance', consented: true, askConsentFirst: true, consentVia: 'record' });
+      await tap();
+      await choose(0, 'I consent');
+      expect(await fromLibrary(1)).toMatchObject({ docType: 'police_clearance', consentVia: 'prompt' });
+    });
   });
 });

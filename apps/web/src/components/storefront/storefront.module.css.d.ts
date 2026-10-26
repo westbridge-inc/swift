@@ -48,6 +48,7 @@ declare const styles: {
   readonly mobileTotal: string;
   readonly modalAlert: string;
   readonly modalDescription: string;
+  readonly modalDescriptionClamped: string;
   readonly modalTitle: string;
   readonly notice: string;
   readonly noticeLink: string;
@@ -81,6 +82,7 @@ declare const styles: {
   readonly railNote: string;
   readonly railPrice: string;
   readonly railTitle: string;
+  readonly readMore: string;
   readonly removeLineButton: string;
   readonly required: string;
   readonly reviewLine: string;
@@ -106,6 +108,7 @@ declare const styles: {
   readonly sheetHeader: string;
   readonly sheetHeading: string;
   readonly sheetPhoto: string;
+  readonly sheetSeller: string;
   readonly soldOut: string;
   readonly storeActions: string;
   readonly storeHead: string;

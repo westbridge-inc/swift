@@ -84,8 +84,13 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  store lists (RESTAURANT_OWN_NAME, SUPERMARKET_OWN_NAME, STORE_OWN_NAME).
  *  2026-10-22.1 [ROLE-DOCS PR 3 · owner 21 Oct]: 2026-10-21.2 plus the solar /
  *  generator / inverter installer's GEI electrical licence
- *  (SERVICE_PROVIDER_TRADE_SOLAR_GENERATOR_INVERTER_INSTALLER). */
-export const PLATFORM_CONFIG_VERSION = '2026-10-22.1';
+ *  (SERVICE_PROVIDER_TRADE_SOLAR_GENERATOR_INVERTER_INSTALLER).
+ *  2026-10-24.1 [FOOD-PERMIT · owner 24 Oct]: 2026-10-22.1 with a registered restaurant's food handler's
+ *  certificate OPTIONAL (RESTAURANT and RESTAURANT_OWN_NAME no longer name it; RESTAURANT_OPTIONAL does): the owner
+ *  ticks for the store's food handlers instead (vendor/food-handlers.ts, asked by code, on no list). The self-declared
+ *  tier (RESTAURANT_UNREGISTERED), chef and caterer keep it required. Until the owner-signed seed lands, a stored
+ *  RESTAURANT list that still names the certificate wins (stricter): the tick is asked either way. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-24.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -186,16 +191,21 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
     // pairs a person's name and address with their tax-account login. A VAT-registered store may type its
     // VAT registration number on its profile instead (vendor.vatRegistrationNumber, for VAT invoices).
-    RESTAURANT: ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant no longer has to upload a food handler's certificate:
+    // its owner ticks that everyone who handles food there holds a current one (vendor/food-handlers.ts — asked of the
+    // store by code, never a list item). The certificate stays one it MAY add: reviewed, and shown on the storefront.
+    RESTAURANT: ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'storefront_photo'],
+    RESTAURANT_OPTIONAL: ['food_handler_cert'],
     SUPERMARKET: ['owner_national_id', 'business_registration', 'storefront_photo'],
     STORE: ['owner_national_id', 'business_registration', 'storefront_photo'],
     // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
-    // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
+    // self-declaration, the storefront photo, and — never waived — the food handler permit for food (the home cook IS
+    // the food handler: [FOOD-PERMIT · owner 24 Oct 2026] this tier keeps it REQUIRED and is never offered the tick).
     // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
     // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's OWN name (Business Names (Registration) Act,
     // Cap. 90:05, s.3: a true surname with only first names or initials needs no registration) gives the signed own-name
     // declaration in place of the business registration; everything else is unchanged (vendor/own-name.ts).
-    RESTAURANT_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    RESTAURANT_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'gra_restaurant_licence', 'storefront_photo'],
     SUPERMARKET_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
     STORE_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
     RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
@@ -250,6 +260,9 @@ export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string
   pest_control: ['national_id', 'police_clearance', 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
   chef: ['national_id', 'police_clearance', 'food_handler_cert'],
   caterer: ['national_id', 'police_clearance', 'food_handler_cert', 'eating_house_registration'],
+  // [ROLE-DOCS · REVIEW-G #2053 S4-4] The GEI electrical licence the electrician's list already names, now a floor too:
+  // a stored edit can no longer strip it (as for the solar installer below).
+  electrician: ['national_id', 'police_clearance', 'gei_electrical_licence'],
   photographer: ['national_id', 'police_clearance'],
   tutor: ['national_id', 'police_clearance'],
   // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI electrical licence, like an electrician

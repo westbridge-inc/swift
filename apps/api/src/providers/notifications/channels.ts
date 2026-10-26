@@ -58,6 +58,14 @@ export interface PushOptions {
    *  response window closed). It is never sent at or after this moment, its
    *  ttl never reaches past it, and it is never retried past it. */
   deadlineMs?: number;
+  /** [DRILL-STORM] A push that REPLACES the last one sent under the same key
+   *  (Expo collapseId: iOS apns-collapse-id replaces the shown notification,
+   *  FCM collapse_key coalesces in transit). Set from the payload's
+   *  collapseKey (alert-class.ts); the operating system does the work, so it
+   *  needs no app change. */
+  collapseId?: string;
+  /** [DRILL-STORM] Android: replaces a notification already shown under the same tag (Expo `tag`). */
+  tag?: string;
 }
 
 /** The options a push gets when a caller passes none: the standard class. */
@@ -288,6 +296,8 @@ function expoMessage(
     ...(options.sound ? { sound: options.sound } : {}),
     ...(options.channelId ? { channelId: options.channelId } : {}),
     ...(options.interruptionLevel ? { interruptionLevel: options.interruptionLevel } : {}),
+    ...(options.collapseId ? { collapseId: options.collapseId } : {}),
+    ...(options.tag ? { tag: options.tag } : {}),
     ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
   };
 }

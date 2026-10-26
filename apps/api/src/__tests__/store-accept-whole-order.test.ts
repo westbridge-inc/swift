@@ -107,14 +107,14 @@ const pushes = (orderId: string) => sys(async () => (await app.prisma.notificati
   .filter((n) => JSON.stringify(n.data ?? {}).includes(orderId)));
 
 /** A real checkout: rice ×1 and beans ×2 from the grocer (or only the rice). */
-async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH' = 'CASH', opts: { onlyRice?: boolean } = {}) {
+async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH' = 'CASH', opts: { onlyRice?: boolean; promoCode?: string; pickup?: boolean } = {}) {
   expect((await call('DELETE', '/api/v1/customer/cart', customer.token)).statusCode).toBe(200);
   const lines: ReadonlyArray<readonly [string, number]> = opts.onlyRice ? [[grocer.rice, 1]] : [[grocer.rice, 1], [grocer.beans, 2]];
   for (const [itemId, quantity] of lines) {
     const added = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: grocer.vendorId, itemId, quantity });
     expect(added.statusCode, added.body).toBe(201);
   }
-  const body = paymentMethod === 'MOBILE_MONEY' ? { paymentMethod, mmgPayTo: 'STORE_NUMBER' } : { paymentMethod };
+  const body = { ...(paymentMethod === 'MOBILE_MONEY' ? { paymentMethod, mmgPayTo: 'STORE_NUMBER' } : { paymentMethod }), ...(opts.promoCode ? { promoCode: opts.promoCode } : {}), ...(opts.pickup ? { fulfillmentSelections: { [grocer.vendorId]: 'PICKUP' } } : {}) };
   const res = await call('POST', '/api/v1/customer/checkout', customer.token, body, { 'idempotency-key': `swo-${nanoid(10)}` });
   expect(res.statusCode, res.body).toBe(200);
   const orderId = (res.json().data as { order: { id: string } }).order.id;
@@ -274,6 +274,35 @@ describe('[O-4] "Out of stock" before accepting asks the customer', () => {
     expect(accepted.statusCode, accepted.body).toBe(200);
     expect(Number(accepted.json().data.totalAmount)).toBe(Number(after.totalAmount));
     expect((await ready(orderId)).statusCode).toBe(200);
+  });
+
+  // [COORD ruling R2 on REVIEW-M #2043 S4-3] A promo that needed a minimum basket STAYS applied when the store's
+  // "Out of stock" takes the basket under that minimum: the customer never pays more because the store could not
+  // supply an item. The whole line comes off the total and the discount is kept.
+  it('a minimum-basket promo stays applied when an out-of-stock item takes the basket under the minimum', async () => {
+    const code = `SWO${nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, '0')}`;
+    await sys(() => app.prisma.promoCode.create({ data: {
+      code, description: '500 off a basket of 4,000 or more', discountType: 'FIXED_AMOUNT', discountValue: 500, minOrderAmount: 4000,
+      applicableTo: [], validFrom: new Date(Date.now() - DAY), validUntil: new Date(Date.now() + DAY), maxUsesPerUser: 5,
+      vendorId: grocer.vendorId, funder: 'VENDOR',
+    } }));
+    // (a promo is not offered on a cash DELIVERY order yet: a pickup order carries it)
+    const orderId = await placeOrder('CASH', { promoCode: code, pickup: true });
+    const before = await orderRow(orderId);
+    expect(Number(before.discount)).toBe(500);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    // without the rice the basket is under the promo's minimum
+    expect(Number(before.subtotalCustomer) - Number(rice.totalCustomer)).toBeLessThan(4000);
+    expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200);
+    const after = await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: { promoRedemption: true } }));
+    expect(Number(after.discount)).toBe(500);
+    expect(after.promoCodeId).toBe(before.promoCodeId);
+    expect(after.promoRedemption).not.toBeNull();
+    expect(Number(after.totalAmount)).toBe(Number(before.totalAmount) - Number(rice.totalCustomer));
+    const accepted = await accept(orderId);
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect(Number(accepted.json().data.totalAmount)).toBe(Number(after.totalAmount));
   });
 
   it('"Cancel order" is the free cancel a waiting order already has; a decline on a removal question is refused', async () => {

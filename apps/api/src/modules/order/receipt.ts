@@ -34,7 +34,18 @@ type ReceiptOrder = {
    *  receipt names the store by its trading name and address only (never a guess). */
   seller?: { legalName: string | null; address: string | null; phone: string | null } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
-  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null }>;
+  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null; vatClass?: string | null }>;
+  /** [STORE-VAT · owner O-5] The VAT frozen at checkout (store-vat/order-vat.ts). vatRateBps null = no VAT on this order,
+   *  and the receipt is exactly what it was before VAT existed. */
+  vatRateBps?: number | null;
+  vatAmount?: unknown;
+  vatStandardGoods?: unknown;
+  vatZeroRatedGoods?: unknown;
+  vatExemptGoods?: unknown;
+  /** The standard-rated goods the VAT was taken from (after the store's OWN discount only). */
+  vatBase?: unknown;
+  vatSellerNumber?: string | null;
+  vatSellerName?: string | null;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
   currencyCode?: string | null;
   /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
@@ -57,6 +68,48 @@ function soldBy(vendor: NonNullable<ReceiptOrder['vendor']>, seller: ReceiptOrde
   const phone = seller?.phone ? ` · ${esc(seller.phone)}` : '';
   return `Sold by ${esc(name)} — ${esc(address)}${phone}`;
 }
+
+/** "14", "12.5": a rate in basis points as the percent people read. */
+function ratePercentLabel(bps: number): string {
+  return (bps / 100).toFixed(2).replace(/\.?0+$/, '');
+}
+
+/**
+ * [STORE-VAT · owner O-5] The VAT a person-approved VAT store charged, inside the prices above (VAT Act s.90).
+ * Swift is not the registered supplier: this receipt is never headed or called a tax invoice (s.28(3)-(4), an offence
+ * otherwise, s.67(4)); it names the store as the one charging the VAT, with the number a person checked on its
+ * certificate, and says the store issues its own tax invoice. Zero-rated and exempt goods get their own totals
+ * (VAT Regulations reg. 10(d)). Swift's fees are never in it.
+ *
+ * [REVIEW-F #2085 S3-1] A SUMMARY UNDER the Total, never rows in the totals column: VAT is inside the prices, and a
+ * row above the Total reads as added on top. [REVIEW-M S3-1 · REVIEW-F S4] It shows the amount the VAT was taken from
+ * (vatBase: the standard-rated goods less the store's OWN discount; a Swift-funded discount does not lower it), so the
+ * two figures reconcile. An order without VAT renders nothing here: its receipt is byte-identical to before VAT existed.
+ */
+function vatSummary(order: ReceiptOrder, money: (n: unknown) => string): string {
+  if (order.vatRateBps == null || !order.vatSellerName || !order.vatSellerNumber) return '';
+  const rate = ratePercentLabel(order.vatRateBps);
+  const zero = Number(order.vatZeroRatedGoods ?? 0);
+  const exempt = Number(order.vatExemptGoods ?? 0);
+  const standard = Number(order.vatStandardGoods ?? 0);
+  const base = order.vatBase == null ? standard : Number(order.vatBase);
+  const name = esc(order.vatSellerName);
+  const rows = [
+    '<tr><td colspan="2"><strong>VAT summary</strong></td></tr>',
+    `<tr><td>${base < standard ? 'Standard-rated goods, after the store’s own discount (incl. VAT)' : 'Standard-rated goods (incl. VAT)'}</td><td class="num">${money(base)}</td></tr>`,
+    zero > 0 ? `<tr><td>Zero-rated goods (no VAT)</td><td class="num">${money(zero)}</td></tr>` : '',
+    exempt > 0 ? `<tr><td>Exempt goods (no VAT)</td><td class="num">${money(exempt)}</td></tr>` : '',
+    `<tr><td>VAT included (${rate}%)</td><td class="num">${money(order.vatAmount ?? 0)}</td></tr>`,
+  ].filter(Boolean).join('\n    ');
+  return `<table>
+    ${rows}
+  </table>
+  <div class="foot">
+    VAT charged by ${name} · VAT reg. no. ${esc(order.vatSellerNumber)}. The prices of the goods include VAT at ${rate}%. The VAT is worked out on the store’s price for its standard-rated goods, less any discount the store itself gave; delivery pay, tips and Swift’s fees carry no VAT. ${name} issues its own tax invoice for these goods.
+  </div>`;
+}
+
+const VAT_CLASS_TAG: Readonly<Record<string, string>> = { ZERO_RATED: ' (zero-rated)', EXEMPT: ' (exempt)' };
 
 export function renderReceiptHtml(order: ReceiptOrder): string {
   // [M-36] The order names its currency; the receipt renders it through the
@@ -100,7 +153,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const rows = order.items
     .map(
       (i) => `<tr>
-        <td>${i.quantity}× ${esc(i.name)}${removed(i) ? ' (removed, not charged)' : ''}</td>
+        <td>${i.quantity}× ${esc(i.name)}${order.vatRateBps != null ? VAT_CLASS_TAG[i.vatClass ?? ''] ?? '' : ''}${removed(i) ? ' (removed, not charged)' : ''}</td>
         <td class="num">${money(removed(i) ? 0 : i.totalCustomer)}</td>
       </tr>`,
     )
@@ -111,6 +164,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const deliveryFee = Number(order.deliveryFee ?? 0);
   const distance = billableDistance(order);
   const waiting = order.fareBreakdown ?? null;
+  const vat = vatSummary(order, money);
 
   return `<!doctype html>
 <html lang="en">
@@ -154,7 +208,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     ${waiting && waiting.waitingCharge > 0 ? `<tr class="totals"><td>Waiting (${waiting.waitingMinutes} min)</td><td class="num">${money(waiting.waitingCharge)}</td></tr>` : ''}
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>
   </table>
-  <div class="foot">
+${vat ? `  ${vat}\n` : ''}  <div class="foot">
     Swift charges no commission and never takes custody of order money. Order payment and any
     delivery-pay handoff happen directly between the parties shown above. Questions? Support
     lives in the Swift app.

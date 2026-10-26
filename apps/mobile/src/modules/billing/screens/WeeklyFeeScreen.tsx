@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
@@ -56,6 +56,22 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     return () => clearInterval(timer);
   }, []);
   const pull = usePullToRefresh(async () => { await refreshRef.current(); if (!contextPending) session.focus(undefined, checkoutRef); });
+  // [FEE-STATUS · owner 25 Oct] "The Refresh status button never worked": it re-read the fee with
+  // nothing to show while it did or after. It now spins while it re-reads, then says when it last
+  // checked. A failed re-read shows the screen's own error (the query's), never "Checked at".
+  // One re-read at a time.
+  const [checked, setChecked] = useState<{ busy: boolean; at: number | null }>({ busy: false, at: null });
+  const checking = React.useRef(false);
+  const refreshStatus = async () => {
+    if (checking.current) return;
+    checking.current = true;
+    setChecked((c) => ({ ...c, busy: true }));
+    if (!contextPending) session.focus(undefined, checkoutRef);
+    let ok = false;
+    try { ok = (await refresh() as { isError?: boolean } | undefined)?.isError !== true; } catch { ok = false; }
+    checking.current = false;
+    setChecked((c) => ({ busy: false, at: ok ? Date.now() : c.at }));
+  };
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
   const mmgPending = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
@@ -63,6 +79,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   // The card choice exists only when the server says CARD is live (or a card payment of ours is in flight).
   const card = liveCard(sub?.payActions);
   const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId)) || !!adoptableCardSession(sub?.latestCardSession);
+  const feeStatus = sub ? feeStatusOf(sub) : null;
   return <Screen>
     <Header title="Weekly fee" />
     {contextError ? <Card>
@@ -73,12 +90,14 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     {loading ? <LoadingBlock /> : error || !sub ? <ErrorState message="We couldn't load your weekly fee. Try again." onRetry={() => { void refresh(); }} /> :
       <ScrollView refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={{ padding: space['2xl'], gap: space.lg }}>
         <Card>
-          <T variant="heading">{dueLine(sub)}</T>
-          <T variant="body" style={{ marginTop: space.md }}>{subscriptionWords(checkout?.subscriptionStatus ?? sub.status)}</T>
+          {/* [FEE-STATUS] The API's words for where the fee stands: never a passed date as a next bill. */}
+          <T variant="heading" testID="weekly-fee-status">{feeStatus?.headline}</T>
+          {feeStatus?.detail ? <T variant="body" style={{ marginTop: space.md }}>{feeStatus.detail}</T> : null}
           {checkout ? <T variant="body" style={{ marginTop: space.md }}>{checkoutWords(checkout, view.returned)}</T> : null}
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
           {view.error ? <T variant="caption" tone="error" style={{ marginTop: space.md }}>{view.error}</T> : null}
-          <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.lg }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
+          <PillButton label="Refresh status" variant="soft" loading={checked.busy} style={{ marginTop: space.lg }} onPress={refreshStatus} />
+          {checked.at ? <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{`Checked at ${new Date(checked.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Guyana' })}`}</T> : null}
           {/* [NO-DEAD-ENDS] A payment held for checking took the Pay button away
               and promised "Support will contact you", with no way to ask. The
               door opens a ticket that already carries the Swift reference. */}

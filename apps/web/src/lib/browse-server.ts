@@ -152,7 +152,8 @@ export async function marketSeed(category: string): Promise<MarketSeed> {
   const rail = await guestRead<unknown>('/api/v1/discovery/categories?vertical=RETAIL', BROWSE_REVALIDATE_SECONDS, ['browse:market'], isObject);
   const categories = rail ? { data: retailCategories(rail.data) as MarketCategory[], at: rail.at } : null;
   const listed = category === '' || (categories !== null && categories.data.some((entry) => entry.slug === category));
-  const qs = new URLSearchParams({ sort: 'popular' });
+  // [P35 · board 4a] Newest first, as the phone's Market (useMarketItems sort 'new'): the shelf is "New arrivals".
+  const qs = new URLSearchParams({ sort: 'new' });
   if (category) qs.set('category', category);
   const items = listed
     ? await guestRead<{ items: MarketItem[]; nextCursor: string | null }>(`/api/v1/market/items?${qs}`, BROWSE_REVALIDATE_SECONDS, ['browse:market'],

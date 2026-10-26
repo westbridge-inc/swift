@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
-import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
+import { UPLOAD_CONSENT_TICKS, UPLOAD_CONSENT_VIAS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { documentConsentOnRecord } from './document-consent-record';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { liveDuplicateHolders } from './duplicate-holders';
@@ -69,6 +69,8 @@ const submitDocumentSchema = z.object({
   // Storage reference from the upload service — never raw document content
   fileUrl: z.string().min(5).max(2048),
   ...consentFields,
+  /** [DOC-CONSENT S4] how the tick was given for this upload (upload-consent.ts); older apps and the website omit it */
+  consentVia: z.enum(UPLOAD_CONSENT_VIAS).optional(),
 });
 
 // [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match. [ROLE-DOCS · owner 21 Oct 2026] No selfie
@@ -148,6 +150,12 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (body.consentTick && body.consentTick !== 'document_v1') {
       throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to a document upload.');
     }
+    // [DOC-CONSENT S4] A tick shown from the record stands on a grant the ledger holds NOW (none, or withdrawn:
+    // refused before anything is stored), so the evidence never names a grant that is not there.
+    if (body.consentTick && body.consentVia === 'record'
+      && !(await documentConsentOnRecord(app.prisma, request.user.userId, body.role)).given) {
+      throw new AppError(409, 'CONSENT_NOT_ON_RECORD', 'Tick the box above to upload this document.');
+    }
     const doc = await verification.submitDocument(
       request.user.userId,
       body.role,
@@ -158,7 +166,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     );
     // [R17] the tick the person gave, after the document is on file (a refused upload records no consent)
     if (body.consentTick) {
-      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: consentSubjectForRole(body.role), surface: consentSurfaceOf(request), ip: request.ip, docType: body.docType });
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: consentSubjectForRole(body.role), surface: consentSurfaceOf(request), ip: request.ip, docType: body.docType, via: body.consentVia });
     }
     reply.code(201);
     return { success: true, data: doc };
