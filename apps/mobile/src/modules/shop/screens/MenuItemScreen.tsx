@@ -11,6 +11,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
 import { HERO_PHOTO_WIDTH, itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { itemVatNote, storefrontVat } from '../../../lib/storeVat';
 import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
 import {
   Photo,
@@ -271,6 +272,8 @@ export function MenuItemScreen() {
             {/* [Wave 3 audit · law 3] Money is INK, never brand — maroon is
                 reserved for the acts (the CTA below), not the numbers. */}
             <Money amount={basePrice} size="l" />
+            {/* [STORE-VAT · VAT Act s.90(2)] A person-approved VAT store's standard-rated price includes VAT and says so. */}
+            {itemVatNote(storefrontVat(vendor.data?.vat), item) ? <T variant="caption" tone="muted">{itemVatNote(storefrontVat(vendor.data?.vat), item)}</T> : null}
             {outOfStock ? (
               <View
                 style={{

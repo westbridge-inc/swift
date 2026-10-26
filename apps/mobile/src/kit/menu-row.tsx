@@ -20,6 +20,7 @@ export function MenuRow({
   name,
   description,
   price,
+  priceNote,
   image,
   qty,
   soldOut = false,
@@ -33,6 +34,8 @@ export function MenuRow({
   name: string;
   description?: string | null;
   price: number;
+  /** [STORE-VAT · owner O-5] A short note under the price ("incl. VAT"), from lib/storeVat. */
+  priceNote?: string | null;
   image?: string | null;
   qty: number;
   soldOut?: boolean;
@@ -81,7 +84,10 @@ export function MenuRow({
             ) : null}
           </View>
           <View style={{ alignItems: 'flex-end', justifyContent: 'space-between', gap: space.sm }}>
-            <Money amount={price} tone={soldOut ? 'muted' : 'brand'} />
+            <View style={{ alignItems: 'flex-end' }}>
+              <Money amount={price} tone={soldOut ? 'muted' : 'brand'} />
+              {priceNote ? <T variant="micro" tone="faint">{priceNote}</T> : null}
+            </View>
             {soldOut ? null : <AddMorph qty={qty} busy={busy} onAdd={onAdd} onInc={onInc} onDec={onDec} />}
           </View>
         </View>

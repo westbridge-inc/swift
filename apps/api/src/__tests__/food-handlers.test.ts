@@ -254,6 +254,24 @@ describe('[FOOD-PERMIT] a registered restaurant never goes live without the tick
     expect(told[0]!.body).toContain(FOOD_HANDLERS_TICK_V1);
   });
 
+  // [REVIEW-G #2062 S4-1] The other arm of 'going live': a store whose flag says verified but which still waits for
+  // approval (PENDING_APPROVAL) would be opened by the projection's PENDING_APPROVAL -> ACTIVE promotion. Without the
+  // tick it is held like a first go-live (told with the go-live words), never promoted.
+  it('a store marked verified but still waiting for approval is held too: never promoted without the tick', async () => {
+    const o = await restaurant();
+    await approveAll(o, 'RESTAURANT', REGISTERED_DOCS);
+    // set back to waiting with its verified flag kept (a console step, or a store from before this shipped)
+    await system(() => app.prisma.vendor.update({ where: { id: o.vendorId }, data: { status: 'PENDING_APPROVAL', isVerified: true } }));
+    await system(() => app.prisma.notification.deleteMany({ where: { userId: o.userId } }));
+    await service.reprojectVendorActivation(o.userId);
+    expect(await store(o)).toEqual({ status: 'PENDING_APPROVAL', isVerified: true });
+    const told = await notices(o);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toMatch(/has everything else it needs/);
+    expect((await tick(o)).statusCode).toBe(201);
+    expect(await store(o)).toEqual({ status: 'ACTIVE', isVerified: true });
+  });
+
   it('a live restaurant that lapsed comes back only with the tick', async () => {
     const o = await restaurant({ status: 'ACTIVE', isVerified: false });
     await approveAll(o, 'RESTAURANT', REGISTERED_DOCS);
@@ -313,6 +331,42 @@ describe('[FOOD-PERMIT] who may tick, and which tick counts', () => {
     expect(status.foodHandlerAttestation.stores).toEqual([{ vendorId: o.vendorId, name: expect.any(String), attested: false }]);
     expect((await service.vendorGoLive(o.vendorId))!.foodHandlers).toEqual({ required: true, attested: false });
   });
+
+  // [REVIEW-G #2062 S4-3] One tick per store at a time: the store row is the lock. A second tap that arrives while the
+  // first tap's transaction is still open waits for it, then finds its row and writes nothing — never a second grant.
+  it('a double tap writes one row: the second tick waits on the store lock, then finds the first', async () => {
+    const words = await restaurant();
+    expect((await tick(words)).statusCode).toBe(201); // the words are published
+    const o = await restaurant();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => { holding = resolve; });
+    // the first tap: its transaction holds the store row and has written its grant, not yet committed
+    const first = system(() => app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${o.vendorId} FOR UPDATE`;
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: o.userId, documentType: TICK_TYPE as ConsentDocumentType, version: 'v1', action: 'granted', surface: 'vendor_web',
+        evidence: { vendorId: o.vendorId },
+      });
+      holding();
+      await released;
+    }, { timeout: 60_000 }));
+    await held;
+    const second = tick(o);
+    let settled = false;
+    void second.then(() => { settled = true; }, () => { settled = true; });
+    // wait until the second tick is queued behind the store lock (or, without the lock, has already answered)
+    const waitingOnStore = async () => (await system(() => app.prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%food-handlers-tick%'`))[0]!.n;
+    for (let i = 0; i < 200 && !settled && (await waitingOnStore()) === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    await first;
+    const res = await second;
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: o.userId, documentType: TICK_TYPE } }))).toBe(1);
+  }, 60_000);
 
   it('a tick row for a home cook’s store never stands in for the certificate', async () => {
     const ticked = await restaurant();

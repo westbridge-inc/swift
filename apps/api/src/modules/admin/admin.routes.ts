@@ -6251,7 +6251,7 @@ export async function adminRoutes(app: FastifyInstance) {
     }, async (tx, facts) => {
       await auditIn(tx, request.user.userId, 'APPROVE_STORE_VAT', 'Vendor', vendorId, facts, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-    });
+    }, process.env, new Date(), (id) => notifications.publishPersisted(id));
     return { success: true, data };
   });
 
@@ -6262,7 +6262,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const data = await rejectStoreVat(tenantPrisma, verification, vendorId, request.user.userId, body.reason, async (tx, facts) => {
       await auditIn(tx, request.user.userId, 'REJECT_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-    });
+    }, process.env, new Date(), (id) => notifications.publishPersisted(id));
     return { success: true, data };
   });
 
@@ -6273,7 +6273,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await revokeStoreVat(tenantPrisma, vendorId, request.user.userId, body.reason, async (tx, facts) => {
       await auditIn(tx, request.user.userId, 'REVOKE_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-    });
+    }, new Date(), (id) => notifications.publishPersisted(id));
     return { success: true, data: await storeVatView(tenantPrisma, vendorId) };
   });
 
