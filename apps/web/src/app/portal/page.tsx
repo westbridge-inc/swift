@@ -47,7 +47,7 @@ function SummaryTiles({ s, role }: { s: EarningsSummary; role: 'rider' | 'driver
         <Stat
           label="Cash collected"
           value={money(cash)}
-          sub={role === 'driver' ? 'Cash fares this week' : 'Kept this week after paying stores'}
+          sub={role === 'driver' ? 'This week: the fares passengers paid you in cash' : 'This week, after paying stores for the goods'}
         />
       )}
     </div>

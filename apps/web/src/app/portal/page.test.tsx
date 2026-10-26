@@ -222,7 +222,7 @@ describe('[board 13a] the office shows CASH COLLECTED like the phone', () => {
     renderWithQuery(<PortalHome />);
     const label = await screen.findByText('Cash collected');
     expect(label.parentElement?.textContent).toContain('$2,300');
-    expect(label.parentElement?.textContent).toContain('Kept this week after paying stores');
+    expect(label.parentElement?.textContent).toContain('This week, after paying stores for the goods');
   });
 
   it("a driver: this week's cash fares", async () => {
@@ -230,7 +230,7 @@ describe('[board 13a] the office shows CASH COLLECTED like the phone', () => {
     renderWithQuery(<PortalHome />);
     const label = await screen.findByText('Cash collected');
     expect(label.parentElement?.textContent).toContain('$0');
-    expect(label.parentElement?.textContent).toContain('Cash fares this week');
+    expect(label.parentElement?.textContent).toContain('This week: the fares passengers paid you in cash');
   });
 
   it('an older API that sends no figure (or junk) shows no tile, never $0', async () => {
