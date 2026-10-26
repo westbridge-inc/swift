@@ -76,10 +76,18 @@ export function requireAdminPhone(raw: string | undefined): string {
 
 // ── [TASK-057] shared provisioning ───────────────────────────────────────────
 
-/** Types that expire: an admin must approve them with an expiresAt (doc-registry.ts). */
+/** Types that expire: an admin must approve them with an expiresAt (doc-registry.ts AUTO_APPROVE_EXPIRY_DAYS;
+ *  the API answers 400 EXPIRY_REQUIRED without one). Every registry type is here, pinned by
+ *  apps/api/src/__tests__/livetest-expiring-docs.unit.test.ts: the hire licences were missing (26 Oct), so
+ *  no roster taxi driver held both and none could go online. */
 const EXPIRING = new Set([
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit', 'road_service_licence',
   'drivers_licence', 'vehicle_registration', 'food_handler_cert', 'gra_restaurant_licence', 'self_declaration_unregistered',
+  // [VERIFY-DOCS · ruling 8] the two licences that replaced the hire-car permit: the person's (3 years) and the car's (1 year)
+  'hire_car_driver_licence', 'hire_car_vehicle_licence',
+  // the other registry types that expire (store certificates checked every January, the service trades' documents)
+  'sanitary_certificate', 'trade_licence', 'pesticide_applicator_certificate', 'pest_control_operator_licence',
+  'eating_house_registration', 'gei_electrical_licence',
 ]);
 const PRIVACY_NOTICE_VERSION = '2026-09-23'; // modules/legal/legal.routes.ts LEGAL_VERSION
 
