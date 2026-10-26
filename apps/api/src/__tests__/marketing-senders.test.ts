@@ -16,6 +16,7 @@ const SEND = /\.(sendSms|sendEmail)\(/;
 const SERVICE_SENDERS: Record<string, string> = {
   'modules/admin/admin-email-change.ts': 'security notice to an admin e-mail address being replaced',
   'modules/admin/solo-approval.ts': 'the owner approval code for a privileged action',
+  'modules/ops/seed-plan.ts': 'the owner sign-in code and notices for a solo production re-seed',
   'modules/auth/auth.service.ts': 'sign-in codes',
   'modules/auth/step-up.ts': 'confirmation codes for sensitive changes',
   'modules/integrity/money-surface.ts': 'money notices about a person\u2019s own payment',

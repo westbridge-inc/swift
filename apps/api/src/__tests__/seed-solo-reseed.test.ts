@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PrismaClient, type UserRole } from '@prisma/client';
+import type { UserRole } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
@@ -17,6 +17,7 @@ import {
 import { desiredPlatformConfig, spineRequestContext } from '../modules/ops/platform-config';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
 import { testPhone } from './helpers/fixture-ids';
+import { testPrismaClient } from './helpers/test-prisma-client';
 
 // This suite pins the deployment identity singleton and the admin roster for the whole file and restores both after.
 grantSuiteCapability('unscoped-mutation');
@@ -51,7 +52,7 @@ vi.mock('../providers/notifications/channels', async (importOriginal) => {
   };
 });
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const URL_ = process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test';
 const KEYDIR = mkdtempSync(join(tmpdir(), 'seed-reseed-approvers-'));
 const makeKey = (name: string) => {
@@ -297,7 +298,7 @@ describe('[SOLO RE-SEED] the wait: refused before it ends, cancellable during it
     u.hostname = u.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
     const other = u.toString();
     expect(other).not.toBe(URL_);
-    const alt = new PrismaClient({ datasourceUrl: other });
+    const alt = testPrismaClient(other);
     try {
       const cancelled = await cancelSoloReseeds(alt, other, { actor: 'owner' });
       expect(cancelled.find((x) => x.plan === s.plan.digest)).toMatchObject({ configVersion: 'reseed-26', changes: 1, approver: 'owner' });
