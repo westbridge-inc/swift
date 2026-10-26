@@ -44,6 +44,7 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'modules/vendor/vendor.routes.ts': { count: 6, why: `3 ${GATED}; 2 ${OWN} (store team); 1 ${INTERNAL} (reserved-name check)` },
   'utils/counterparty.ts': { count: 1, why: 'the opt-in itself (riderCounterpartySelect withPhone)' },
   'modules/admin/admin.routes.ts': { count: 24, why: OPS },
+  'modules/admin/order-contact.ts': { count: 4, why: `${OPS}: masked on the order desk; one party's full number only through the audited reveal (reason + audit row before the value)` },
   'modules/admin/solo-approval.ts': { count: 1, why: INTERNAL },
   'modules/ads/advertiser.service.ts': { count: 1, why: `${OWN} (advertiser team: accepted members only)` },
   'modules/auth/auth.routes.ts': { count: 2, why: OWN },

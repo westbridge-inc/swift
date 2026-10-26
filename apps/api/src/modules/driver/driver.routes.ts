@@ -1,3 +1,4 @@
+import { cashInHandWindows } from '../dispatch/cash-in-hand';
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
@@ -1887,6 +1888,8 @@ export async function driverRoutes(app: FastifyInstance) {
         thisWeek: earningsWindow(weekEarnings),
         thisMonth: earningsWindow(monthEarnings),
         allTime: earningsWindow(allTimeEarnings),
+        // [board 13a] Cash kept from completed CASH jobs, per window (dispatch/cash-in-hand.ts). Additive.
+        cashInHand: await cashInHandWindows(app.prisma, { driverId: driver.id }),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
         todayRides,
         totalRides,

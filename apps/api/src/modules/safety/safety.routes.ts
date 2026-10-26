@@ -13,6 +13,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
+import { pageOps } from '../ops/ops-page';
 import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
 import { consoleRoleOf } from '../auth/console-role';
 
@@ -445,6 +446,12 @@ export async function safetyRoutes(app: FastifyInstance) {
   // is a brake on noise, not the guard against guessing.
   const CHECKIN_LINK_MISS_LIMIT = 50;
   const CHECKIN_LINK_MISS_WINDOW_S = 600;
+  // [COORD ruling R1 · REVIEW-G S4-1 on #1997] The HIGH ceiling: past this many WRONG answers from one address in
+  // the window it is a flood, not people behind a shared NAT. Crossing it pages ops ONCE (a platform page, so a
+  // person checks the edge for the attacker). It counts wrong answers only and never touches a valid one: the
+  // lookup above always runs first, so an "I need help" from the same address still lands. The page names no
+  // address (an IP is personal data) — only that the ceiling tripped.
+  const CHECKIN_LINK_FLOOD_LIMIT = 1000;
   app.post('/public/checkin', { config: { rateLimit: false as const } }, async (request, reply) => {
     const body = z.object({ ref: z.string().min(1).max(64), secret: z.string().min(1).max(64), response: z.enum(['OK', 'NEED_HELP']) }).parse(request.body ?? {});
     const answer = await guardian.answerByLink(body.ref, body.secret, body.response);
@@ -454,6 +461,14 @@ export async function safetyRoutes(app: FastifyInstance) {
       if (n === 1) await app.redis.expire(missKey, CHECKIN_LINK_MISS_WINDOW_S);
       return n;
     }).catch(() => 0);
+    if (misses === CHECKIN_LINK_FLOOD_LIMIT + 1) {
+      await pageOps({ prisma: app.prisma, redis: app.redis, notifications: new NotificationService(app.prisma, app.io) }, {
+        key: 'guardian-link-flood:page', windowSeconds: 1800,
+        title: 'Safety check-in links: a flood of wrong answers',
+        body: `One network address sent more than ${CHECKIN_LINK_FLOOD_LIMIT} wrong answers to the texted safety check-in link in ten minutes. Wrong answers are refused; a valid answer, "I need help" above all, still lands. Check the edge for an attacker.`,
+        data: { kind: 'ops_checkin_link_flood', limit: CHECKIN_LINK_FLOOD_LIMIT, windowSeconds: CHECKIN_LINK_MISS_WINDOW_S },
+      }).catch((err: unknown) => request.log.warn({ err }, 'guardian link flood page failed'));
+    }
     if (misses > CHECKIN_LINK_MISS_LIMIT) {
       reply.code(429);
       return { success: false, error: { code: 'TOO_MANY_ATTEMPTS', message: 'Too many attempts from this connection. If you are in danger, call 911.' } };

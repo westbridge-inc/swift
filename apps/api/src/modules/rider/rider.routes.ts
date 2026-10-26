@@ -1,3 +1,4 @@
+import { cashInHandWindows } from '../dispatch/cash-in-hand';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
@@ -1942,6 +1943,8 @@ export async function riderRoutes(app: FastifyInstance) {
         thisWeek: earningsWindow(week),
         thisMonth: earningsWindow(month),
         allTime: earningsWindow(allTime),
+        // [board 13a] Cash kept from completed CASH jobs, per window (dispatch/cash-in-hand.ts). Additive.
+        cashInHand: await cashInHandWindows(app.prisma, { riderId: rider.id }),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
       },
     };

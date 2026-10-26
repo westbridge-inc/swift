@@ -320,6 +320,42 @@ describe('[F2] a held weekly-fee rise is told 14 days ahead and applies only fro
     expect(await rate(moved.subId)).toBe(5500);
   });
 
+  // [COORD ruling R4 on REVIEW-M #2021 S4-1] A waiver given AFTER the partner was told is not a reason to drop the
+  // told rise: nothing is charged for the waived week, the told fee applies from the date it was told for (14 days'
+  // notice), and nothing is ever charged back for the waived week. (A waiver in place BEFORE the notice drops it:
+  // nothing is told for a waived fee.)
+  it('a waiver after the notice: the waived week costs nothing, the told fee still applies from its date, never backdated', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    const rider = await makeRider({ weeklyRate: 6000, due, prepaid: 6000 });
+    await hold(rider.subId, 6000, 8000, t);
+    await billing.sweepFeeRises(t);
+    const firstNewFee = new Date(due.getTime() + 2 * WEEK);
+    expect(await heldOf(rider.subId)).toMatchObject({ appliesFrom: firstNewFee.toISOString() });
+    expect(await bill(rider.subId, new Date(due.getTime() + 60_000))).toBe('succeeded');
+    expect(Number((await capturedFor(rider.subId, due))!.amount)).toBe(6000);
+    // An admin waives the next week, after the partner was told of the rise.
+    await app.prisma.subscription.update({ where: { id: rider.subId }, data: { feeWaived: true, feeWaivedBy: 'test-admin', feeWaivedReason: 'test waiver' } });
+    await billing.sweepFeeRises(new Date(due.getTime() + DAY));
+    const lastOld = new Date(due.getTime() + WEEK);
+    expect(await bill(rider.subId, new Date(lastOld.getTime() + 60_000))).toBe('succeeded');
+    // The waived week: nothing charged.
+    expect(Number((await capturedFor(rider.subId, lastOld))!.amount)).toBe(0);
+    // The told rise was not dropped: it moved in with that week, for the date it was told for.
+    expect(await rate(rider.subId)).toBe(8000);
+    expect(await heldOf(rider.subId)).toBeNull();
+    expect(await audits(rider.subId, 'BILLING_FEE_RISE_DROPPED')).toHaveLength(0);
+    expect((await audits(rider.subId, 'BILLING_FEE_RISE_APPLIED')).map((a) => a.changes)).toEqual([expect.objectContaining({ from: 6000, to: 8000, firstFeeAtNewRate: firstNewFee.toISOString() })]);
+    expect((await notices(rider.userId)).map((n) => n.title)).toEqual(['Your weekly fee is changing']);
+    // The waiver covered that one week; the told fee is charged from its date.
+    await topUp(rider.subId, 8000);
+    expect(await bill(rider.subId, new Date(firstNewFee.getTime() + 60_000))).toBe('succeeded');
+    expect(Number((await capturedFor(rider.subId, firstNewFee))!.amount)).toBe(8000);
+    // Never backdated: the waived week still has its one record, for nothing.
+    const waivedWeek = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: rider.subId, periodStart: lastOld } });
+    expect(waivedWeek.map((p) => [p.status, Number(p.amount)])).toEqual([['CAPTURED', 0]]);
+  });
+
   it('nothing is held for a negotiated or waived fee, nor for a change that is not a rise', async () => {
     const due = new Date(Date.now() + 3 * DAY);
     const custom = await makeRider({ weeklyRate: 6000, due });
