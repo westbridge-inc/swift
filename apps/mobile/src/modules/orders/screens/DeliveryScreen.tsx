@@ -20,6 +20,7 @@ import { readOrderFresh, useOrder, useDecideSubstitution, useClaimMmgPayment } f
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { orderVatLine } from '../../../lib/storeVat';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
@@ -1477,6 +1478,12 @@ export function DeliveryScreen() {
             {Number(o.discount ?? 0) > 0 ? <InfoRow label="Discount" value={`−${money(o.discount)}`} /> : null}
             <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
             <InfoRow label="Total" value={money(o.totalAmount ?? o.total)} strong />
+            {/* [STORE-VAT · owner O-5] The VAT a person-approved VAT store's goods included, frozen on the order (inside the total). */}
+            {orderVatLine(o) ? (
+              <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                {orderVatLine(o)}
+              </T>
+            ) : null}
           </View>
           {o.paymentMethod === 'CASH' ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.surface.sunken }}>

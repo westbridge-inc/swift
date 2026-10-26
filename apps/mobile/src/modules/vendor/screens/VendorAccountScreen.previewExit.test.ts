@@ -270,6 +270,7 @@ vi.mock('../../../components/RefundRuleCard', () => ({ RefundRuleCard: 'RefundRu
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
 vi.mock('../../../components/StorePhotosCard', () => ({ StorePhotosCard: 'StorePhotosCard' }));
 vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));
+vi.mock('../StoreVatSection', () => ({ StoreVatSection: () => null })); // [STORE-VAT] a child section, stubbed like its siblings
 vi.mock('../../../hooks/useStepUp', () => ({
   useStepUp: () => ({ withStepUp: (fn: unknown) => fn, sheet: null, active: false }),
 }));
