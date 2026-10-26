@@ -3,6 +3,7 @@
 import OrderDetailSkeleton from './loading';
 
 import { OpenSwiftApp } from '@/components/open-swift-app';
+import { CallPartyButton } from '@/components/call-party-button';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 // [UI-SWEEP U14] Cancellation codes read through the one shared plain-words map.
@@ -16,7 +17,6 @@ import {
   ExternalLink,
   MapPin,
   PackageCheck,
-  Phone,
   Star,
   Truck,
 } from 'lucide-react';
@@ -734,11 +734,14 @@ export default function OrderDetailPage() {
               <div className={styles.riderDetails}>
                 {vehicle ? <p><Truck size={18} aria-hidden="true" /> {vehicle}</p> : null}
                 {order.rider.licensePlate ? <p className={styles.plate}>Plate {order.rider.licensePlate}</p> : null}
-                {order.rider.phone ? (
-                  <a href={`tel:${order.rider.phone}`} className={styles.secondaryButton}>
-                    <Phone size={18} aria-hidden="true" /> {isTaxi ? 'Call driver' : 'Call rider'}
-                  </a>
-                ) : null}
+                {/* [O-1] Bridge off: today's tel: link. Bridge on: "Call via Swift" (no number on this page). */}
+                <CallPartyButton
+                  orderId={order.id}
+                  target={isTaxi ? 'driver' : 'rider'}
+                  phone={order.rider.phone}
+                  label={isTaxi ? 'Call driver' : 'Call rider'}
+                  className={styles.secondaryButton}
+                />
               </div>
             </section>
           ) : null}

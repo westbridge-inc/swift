@@ -34,7 +34,7 @@ import { safetyApi, type RideClass, type RideRequestBody, type TierEstimate } fr
 import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
-import { openExternal } from '../../../lib/openExternal';
+import { CallParty } from '../../../components/CallParty';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
@@ -1077,15 +1077,19 @@ function AssignedRideCard({
             </View>
           ) : <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>New on Swift</T>}
         </View>
-        {driver.user?.phone ? (
-          <PillButton
-            label="Call"
-            variant="soft"
-            size="md"
-            icon="phone"
-            onPress={() => void openExternal(`tel:${driver.user.phone}`, "Couldn't start the call — dial your driver directly.")}
-          />
-        ) : null}
+        {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+        <CallParty orderId={ride?.id} target="driver" phone={driver.user?.phone} dialFailText="Couldn't start the call — dial your driver directly.">
+          {(call) => (
+            <PillButton
+              label={call.label}
+              variant="soft"
+              size="md"
+              icon="phone"
+              disabled={call.busy}
+              onPress={call.onPress}
+            />
+          )}
+        </CallParty>
       </View>
 
       {showStartCode ? (
