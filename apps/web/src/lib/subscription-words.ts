@@ -9,6 +9,8 @@
  * name the state without pulling the whole weekly-fee module (checkout
  * session, receipts) into the Orders page's first load (scripts/perf-budget).
  */
+import { feeStatusOf, type FeeStatusRow } from './fee-status';
+
 const SUBSCRIPTION_WORDS: Record<string, string> = {
   TRIAL: 'Free trial',
   ACTIVE: 'Active',
@@ -24,7 +26,7 @@ export const subscriptionWords = (status: string): string => SUBSCRIPTION_WORDS[
 /**
  * [FEE-STATUS · owner 25 Oct 2026] The Billing tile's pill: where the fee stands, from the API's
  * feeStatus (the web ships with its API). The same words as the phone's lib/feeStatusPill
- * (subscription-words.test pins them); an answer without feeStatus names the state in words.
+ * (subscription-words.test pins them); an answer without feeStatus is worded by lib/fee-status feeStatusOf.
  */
 const FEE_STATUS_PILL: Record<string, { label: string; tone: 'success' | 'warning' | 'error' | 'brand' | 'neutral' }> = {
   TRIAL: { label: 'Free trial', tone: 'brand' }, PAID: { label: 'Paid', tone: 'success' }, UPCOMING: { label: 'Active', tone: 'success' }, COVERED: { label: 'Paid', tone: 'success' },
@@ -34,17 +36,16 @@ const FEE_STATUS_PILL: Record<string, { label: string; tone: 'success' | 'warnin
 };
 export const feeStatusPillWords = (state: string) => FEE_STATUS_PILL[state] ?? FEE_STATUS_PILL['UNKNOWN']!;
 
-type Sub = { status?: unknown; feeStatus?: { state?: unknown; headline?: unknown } | null } | null | undefined;
-/** The pill for a subscription: the API's feeStatus state, else the state's words. */
+type Sub = FeeStatusRow | null | undefined;
+/** The pill for a subscription: the API's feeStatus, or the same rules on the row (lib/fee-status feeStatusOf,
+ *  REVIEW-F S4-1): never "Active" beside a week that is due. */
 export function billingPill(sub: Sub): { label: string; tone: 'success' | 'warning' | 'error' | 'brand' | 'neutral' } {
-  const state = sub?.feeStatus?.state;
-  return typeof state === 'string' ? feeStatusPillWords(state) : { label: subscriptionWords(String(sub?.status ?? '')), tone: 'neutral' };
+  return sub ? feeStatusPillWords(feeStatusOf(sub).state) : feeStatusPillWords('UNKNOWN');
 }
-/** The Billing tile's line: the API's feeStatus headline, else the state's words (never a date it cannot vouch for).
+/** The Billing tile's line: the API's feeStatus headline, or the same rules on the row (never a date it cannot vouch for).
  *  It replaced vendor-hub billingSummary ("Next bill <date>", the phone VendorOps copy); it lives here so the
  *  board's shared helpers (vendor-hub, in every dashboard page's first load) stay as small as they were. */
 export function billingHeadline(sub: Sub): string {
   if (!sub) return 'Subscription not active';
-  const headline = sub.feeStatus?.headline;
-  return typeof headline === 'string' && headline ? headline : subscriptionWords(String(sub.status ?? ''));
+  return feeStatusOf(sub).headline;
 }
