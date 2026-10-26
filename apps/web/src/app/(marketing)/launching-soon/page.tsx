@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
+import { AppStoreLinks } from '@/components/app-store-links';
 import { site, SITE_ORIGIN } from '@/site.config';
 import { launchCity } from '@/lib/web-ordering';
 
@@ -64,6 +65,8 @@ export default function LaunchingSoonPage() {
           Food, groceries, shops, parcels and rides from local businesses, where the people serving you keep 100% of
           what they earn. Ordering opens on this site soon; nothing can be ordered here yet.
         </p>
+        {/* [G11] The store links, only once the apps are live in both stores. */}
+        <AppStoreLinks className="mt-6" />
         <LinkList label={`About ${site.tradeName}`} links={ABOUT_SWIFT} />
         <LinkList label="Company and policies" links={COMPANY_AND_POLICIES} />
         <p className="mt-10 text-sm text-[var(--swift-muted)]">

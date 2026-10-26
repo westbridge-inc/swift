@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
 import { BrowserOrderingNote } from '@/components/browser-ordering-note';
+import { AppStoreSentence } from '@/components/app-store-links';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 import { CANCEL_ORDER_ANSWER } from '@/lib/cancel-policy-copy';
 
@@ -77,7 +78,7 @@ const FAQ: QA[] = [
       <>
         <BrowserOrderingNote open="Store ordering and order tracking work in your phone's browser." /> Taxi rides
         require the Swift mobile app
-        during the pilot, including the safety PIN and SOS. Store download links will appear here when available.
+        during the pilot, including the safety PIN and SOS. <AppStoreSentence />
       </>
     ),
   },

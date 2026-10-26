@@ -1,7 +1,8 @@
 import Link from 'next/link';
 import { SwiftLogo } from './swift-logo';
 import { BrowserOrderingNote } from './browser-ordering-note';
-import { site, launch, showAppStoreBadges } from '@/site.config';
+import { AppStoreLinks } from './app-store-links';
+import { site, launch } from '@/site.config';
 export { SiteNav } from './site-nav';
 
 /** Shared marketing chrome: nav + footer, Swift red on a light canvas. */
@@ -47,14 +48,13 @@ export function SiteFooter() {
             One app for food, groceries, shops, couriers, rides and trades — where the people doing
             the work keep 100% of what they earn.
           </p>
-          {/* No store badges until an app actually exists in a store. A dead
-              badge is a review flag and a small lie; showAppStoreBadges is the
-              only switch, and it is driven by the launch config. */}
-          {showAppStoreBadges ? null : (
-            <p className="mt-4 text-xs text-[var(--swift-muted)]">
-              <BrowserOrderingNote /> Taxi rides require the Swift mobile app.
-            </p>
-          )}
+          <p className="mt-4 text-xs text-[var(--swift-muted)]">
+            <BrowserOrderingNote /> Taxi rides require the Swift mobile app.
+          </p>
+          {/* [G11] No store link until the apps are live in both stores: a dead
+              link is a review flag and a small lie. The web server's
+              SWIFT_APP_STORES switch is the only way on (lib/launch-switch.ts). */}
+          <AppStoreLinks className="mt-3" />
         </div>
 
         <nav aria-label="Company" className="text-sm">

@@ -15,7 +15,6 @@ import { CustomerSessionProvider, type CustomerSession } from './components/cust
 vi.mock('@/site.config', () => ({
   site: { legalEntityName: 'Westbridge', supportEmail: 'support@example.test' },
   launch: { webOrdering: 'live', markets: ['Georgetown, Guyana'], verticals: {} },
-  showAppStoreBadges: false,
   SITE_ORIGIN: 'https://swift.example',
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));

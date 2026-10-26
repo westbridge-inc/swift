@@ -5,7 +5,7 @@ import PricingPage from './page';
 
 // The real config refuses to load while company details are placeholders; the
 // page only needs a support address from it.
-vi.mock('@/site.config', () => ({ site: { supportEmail: 'support@example.test' }, showAppStoreBadges: false }));
+vi.mock('@/site.config', () => ({ site: { supportEmail: 'support@example.test' } }));
 
 // ---------------------------------------------------------------------------
 // The public price list must quote each partner the rate they will be billed.

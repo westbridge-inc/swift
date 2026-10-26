@@ -89,10 +89,6 @@ export { SITE_ORIGIN };
 export { launch };
 export type { LaunchState } from './site.launch';
 
-/** True only when a real, installable app exists in that store. Gates the
- *  store badges — see AC-10. There is deliberately no way to force a badge on. */
-export const showAppStoreBadges = launch.iosApp === 'live' || launch.androidApp === 'live';
-
 // ── The deploy gate ────────────────────────────────────────────────────────
 //  [SITE-1.1 Part 3] "the build FAILS if any {{...}} token remains."
 //
