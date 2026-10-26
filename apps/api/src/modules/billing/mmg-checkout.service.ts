@@ -34,7 +34,7 @@ import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { FEE_SELLER, type FeeSeller } from './fee-seller';
-import { checkExpiredNoReplyHolds } from './mmg-expired-hold-check';
+import { AUTO_CLOSE_LATE_PAYMENT_LIKELY, AUTO_CLOSE_POSSIBLE_MATCH, checkExpiredNoReplyHolds, watchAutoClosedCheckouts } from './mmg-expired-hold-check';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
@@ -547,6 +547,9 @@ const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
   PAYMENT_TIME_UNREADABLE: ' MMG’s transaction history gives a time for this payment that cannot be read. Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_AFTER_REPLY: ' MMG’s transaction history dates this payment after Swift had already received the MMG reply naming it: either MMG_CHECKOUT_CREATION_ZONE does not match how MMG writes times, or the payment is not this checkout’s. Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_OUTSIDE_WINDOW: ' MMG’s transaction history dates this payment outside the time the checkout was open. Check the payment against the MMG statement before confirming it.',
+  // [REVIEW-M #2098 S3-1 (b)] A record after an automatic NOT PAID close.
+  [AUTO_CLOSE_LATE_PAYMENT_LIKELY]: ' LATE PAYMENT LIKELY. Swift closed this checkout as not paid when MMG’s transaction history showed no payment for it and no reply ever came, but MMG’s history now shows a paid record naming exactly this checkout, for exactly its amount (MMG may have kept its page open past Swift’s deadline). Nothing was credited. Check it against the MMG statement: credit it if it is this partner’s payment for this fee, or return it.',
+  [AUTO_CLOSE_POSSIBLE_MATCH]: ' Possible match, check MMG. Swift closed this checkout as not paid when MMG’s transaction history showed no payment for it and no reply ever came, but MMG’s history now shows a record in which this checkout’s reference appears (not a paid record of exactly this checkout and amount). Nothing was credited. Check it against the MMG statement before doing anything.',
   // Held before 7 Oct, when MMG's lookup creationDate was read as the payment time; kept for those rows.
   CREATION_AFTER_REPLY: ' MMG says this payment was made after Swift had already received the MMG reply naming it, so the creationDate stamps from MMG may not match the configured MMG_CHECKOUT_CREATION_ZONE. Check that setting against a real payment before trusting any automatic confirmation.',
 };
@@ -902,6 +905,20 @@ export class MmgCheckoutService {
         await checkExpiredNoReplyHolds(this.prisma, { lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject }, clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the expired-checkout check failed; it is retried on the next poll');
+      }
+      // [REVIEW-M #2098 S3-1 (b)] For a week after such a close, a record MMG
+      // shows naming the checkout puts it in front of a person (never credited).
+      try {
+        await watchAutoClosedCheckouts(this.prisma, {
+          lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject, paidStatuses: MMG_HISTORY_SUCCESS,
+          holdForReview: async (checkoutId, reason, at) => {
+            const intent = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: checkoutId } });
+            if (intent) await this.hold(intent, reason, at);
+          },
+          pageAdmins: (input) => notifyAdmins(this.prisma, this.notifications, input),
+        }, clock());
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] the watch after automatic closes failed; it is retried on the next poll');
       }
       try {
         await this.reconcileUnappliedPages(clock());

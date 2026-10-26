@@ -42,6 +42,8 @@ type ReceiptOrder = {
   vatStandardGoods?: unknown;
   vatZeroRatedGoods?: unknown;
   vatExemptGoods?: unknown;
+  /** The standard-rated goods the VAT was taken from (after the store's OWN discount only). */
+  vatBase?: unknown;
   vatSellerNumber?: string | null;
   vatSellerName?: string | null;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
@@ -78,24 +80,33 @@ function ratePercentLabel(bps: number): string {
  * otherwise, s.67(4)); it names the store as the one charging the VAT, with the number a person checked on its
  * certificate, and says the store issues its own tax invoice. Zero-rated and exempt goods get their own totals
  * (VAT Regulations reg. 10(d)). Swift's fees are never in it.
+ *
+ * [REVIEW-F #2085 S3-1] A SUMMARY UNDER the Total, never rows in the totals column: VAT is inside the prices, and a
+ * row above the Total reads as added on top. [REVIEW-M S3-1 · REVIEW-F S4] It shows the amount the VAT was taken from
+ * (vatBase: the standard-rated goods less the store's OWN discount; a Swift-funded discount does not lower it), so the
+ * two figures reconcile. An order without VAT renders nothing here: its receipt is byte-identical to before VAT existed.
  */
-function vatBlock(order: ReceiptOrder, money: (n: unknown) => string): { rows: string; foot: string } {
-  if (order.vatRateBps == null || !order.vatSellerName || !order.vatSellerNumber) return { rows: '', foot: '' };
+function vatSummary(order: ReceiptOrder, money: (n: unknown) => string): string {
+  if (order.vatRateBps == null || !order.vatSellerName || !order.vatSellerNumber) return '';
   const rate = ratePercentLabel(order.vatRateBps);
   const zero = Number(order.vatZeroRatedGoods ?? 0);
   const exempt = Number(order.vatExemptGoods ?? 0);
+  const standard = Number(order.vatStandardGoods ?? 0);
+  const base = order.vatBase == null ? standard : Number(order.vatBase);
   const name = esc(order.vatSellerName);
   const rows = [
-    `<tr class="totals"><td>Standard-rated goods (incl. VAT)</td><td class="num">${money(order.vatStandardGoods ?? 0)}</td></tr>`,
-    zero > 0 ? `<tr class="totals"><td>Zero-rated goods (no VAT)</td><td class="num">${money(zero)}</td></tr>` : '',
-    exempt > 0 ? `<tr class="totals"><td>Exempt goods (no VAT)</td><td class="num">${money(exempt)}</td></tr>` : '',
-    `<tr class="totals"><td>VAT included (${rate}%)</td><td class="num">${money(order.vatAmount ?? 0)}</td></tr>`,
+    '<tr><td colspan="2"><strong>VAT summary</strong></td></tr>',
+    `<tr><td>${base < standard ? 'Standard-rated goods, after the store’s own discount (incl. VAT)' : 'Standard-rated goods (incl. VAT)'}</td><td class="num">${money(base)}</td></tr>`,
+    zero > 0 ? `<tr><td>Zero-rated goods (no VAT)</td><td class="num">${money(zero)}</td></tr>` : '',
+    exempt > 0 ? `<tr><td>Exempt goods (no VAT)</td><td class="num">${money(exempt)}</td></tr>` : '',
+    `<tr><td>VAT included (${rate}%)</td><td class="num">${money(order.vatAmount ?? 0)}</td></tr>`,
   ].filter(Boolean).join('\n    ');
-  const foot = `<div class="foot">
-    VAT charged by ${name} · VAT reg. no. ${esc(order.vatSellerNumber)}. The prices of the goods include VAT at ${rate}%,
-    after any discount on them; VAT applies to the store’s goods only. ${name} issues its own tax invoice for these goods.
+  return `<table>
+    ${rows}
+  </table>
+  <div class="foot">
+    VAT charged by ${name} · VAT reg. no. ${esc(order.vatSellerNumber)}. The prices of the goods include VAT at ${rate}%. The VAT is worked out on the store’s price for its standard-rated goods, less any discount the store itself gave; delivery pay, tips and Swift’s fees carry no VAT. ${name} issues its own tax invoice for these goods.
   </div>`;
-  return { rows, foot };
 }
 
 const VAT_CLASS_TAG: Readonly<Record<string, string>> = { ZERO_RATED: ' (zero-rated)', EXEMPT: ' (exempt)' };
@@ -153,7 +164,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const deliveryFee = Number(order.deliveryFee ?? 0);
   const distance = billableDistance(order);
   const waiting = order.fareBreakdown ?? null;
-  const vat = vatBlock(order, money);
+  const vat = vatSummary(order, money);
 
   return `<!doctype html>
 <html lang="en">
@@ -190,19 +201,19 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <table>
     ${rows}
     <tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>
-${vat.rows ? `    ${vat.rows}\n` : ''}    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
+    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
     ${distance ? `<tr class="totals"><td>Distance (${esc(distance.sourceLabel)})</td><td class="num">${esc(distance.label)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
     ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}
     ${waiting && waiting.waitingCharge > 0 ? `<tr class="totals"><td>Waiting (${waiting.waitingMinutes} min)</td><td class="num">${money(waiting.waitingCharge)}</td></tr>` : ''}
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>
   </table>
-  <div class="foot">
+${vat ? `  ${vat}\n` : ''}  <div class="foot">
     Swift charges no commission and never takes custody of order money. Order payment and any
     delivery-pay handoff happen directly between the parties shown above. Questions? Support
     lives in the Swift app.
   </div>
-${vat.foot ? `  ${vat.foot}\n` : ''}</div>
+</div>
 </body>
 </html>`;
 }

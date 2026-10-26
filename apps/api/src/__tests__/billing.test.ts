@@ -514,6 +514,32 @@ describe('Waivers, reminders, tier recalculation', () => {
     expect(stillOne).toBe(1);
   });
 
+  it('[FEE-STATUS] the due-tomorrow reminder names the due day as Guyana reads it and the fee in GY$', async () => {
+    // A fee due at 02:00 UTC falls due at 22:00 the evening BEFORE in Guyana (UTC-4). The reminder
+    // printed the UTC calendar date ("is due on 2026-10-14" for a fee due on the 13th in Guyana): a
+    // day late, a misleading fee claim. And "$12,000 GYD" is not how any other fee notice writes money.
+    const now = new Date();
+    // The next 00:00-03:59 UTC hour that is 1-23 h away: always the day before in Guyana, always inside the reminder window.
+    const due = [0, 1].flatMap((d) => [0, 1, 2, 3].map((h) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + d, h))))
+      .find((t) => t.getTime() > now.getTime() + HOUR && t.getTime() <= now.getTime() + 23 * HOUR)!;
+    const { subId, userId } = await makeMoverWithCardSub({ token: 'tok_good_reminder_day', due });
+    await billing.sendUpcomingReminders(now);
+    const notices = await app.prisma.billingFeeNotice.findMany({ where: { subscriptionId: subId } });
+    const inbox = await app.prisma.notification.findMany({ where: { userId } });
+    const bodies = [...notices.map((n) => String((n.payload as { body?: unknown }).body ?? '')), ...inbox.map((n) => n.body)]
+      .filter((body) => body.startsWith('Your weekly fee of'));
+    expect(bodies.length).toBeGreaterThanOrEqual(1);
+    const guyana = new Date(due.getTime() - 4 * HOUR);
+    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = `${WEEKDAYS[guyana.getUTCDay()]} ${guyana.getUTCDate()} ${MONTHS[guyana.getUTCMonth()]}`;
+    for (const body of bodies) {
+      expect(body).toMatch(new RegExp(`^Your weekly fee of GY\\$12,000 is due on ${day}\\.`));
+      expect(body).not.toContain(due.toISOString().slice(0, 10));
+      expect(body).not.toMatch(/\$12,000 GYD/);
+    }
+  });
+
   it('prices a vendor for the large tier from catalogue size — never from sales; the rise is held for the 14-day notice', async () => {
     const fixture = await makeVendorWithSub({
       rate: 15000,

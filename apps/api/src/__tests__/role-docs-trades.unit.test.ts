@@ -86,6 +86,7 @@ describe('[ROLE-DOCS · PR 3] each trade asks exactly what the law requires', ()
   });
 
   it('the platform config version moves with the new solar list', () => {
-    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-22.1');
+    // [FOOD-PERMIT] 2026-10-24.1 carries the solar list on, with a registered restaurant's certificate optional
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-24.1');
   });
 });
