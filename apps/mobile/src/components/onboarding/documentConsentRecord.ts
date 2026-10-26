@@ -60,3 +60,33 @@ export function policeClearanceWordsFrom(status: unknown): PoliceClearanceWords 
   if (tick !== POLICE_CLEARANCE_TICK || !filled(version, 40) || !filled(text, 2000) || !filled(withdrawConfirm, 500)) return null;
   return { tick: POLICE_CLEARANCE_TICK, version, text, withdrawConfirm };
 }
+
+/** The API's answer to a withdrawal (POST /verification/police-clearance/withdraw). */
+export type PoliceWithdrawAnswer = { withdrawn: number; keptForLegalHold: number; deletionPending: number };
+
+const count = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+
+/**
+ * [REVIEW-F #2111 S3-1] What the phone says after the person withdraws their police clearance, from the API's own
+ * answer: deleted; kept because the law requires it (a legal hold keeps the bytes, never their use); not yet
+ * confirmed deleted by storage; or nothing was on file. An answer it cannot read claims no deletion — only what a
+ * withdrawal always does (the clearance stops counting).
+ */
+export function policeWithdrawOutcome(answer: unknown): { title: string; message: string } {
+  const title = 'Police clearance withdrawn';
+  const a = (answer && typeof answer === 'object' ? answer : {}) as { [K in keyof PoliceWithdrawAnswer]?: unknown };
+  if (!count(a.withdrawn) || !count(a.keptForLegalHold) || !count(a.deletionPending)) {
+    return { title, message: 'It is no longer used for your account.' };
+  }
+  if (a.withdrawn === 0) return { title: 'Nothing to withdraw', message: 'No police clearance is on file to withdraw.' };
+  if (a.keptForLegalHold > 0) {
+    return { title, message: 'Swift must keep it for a legal reason, so it is not deleted. It is no longer used for your account.' };
+  }
+  if (a.deletionPending > 0) {
+    return {
+      title,
+      message: 'It is no longer used for your account. Swift has not confirmed the file is deleted yet; ask Swift support if you want it checked.',
+    };
+  }
+  return { title, message: 'It is deleted. Swift keeps only a note that it was withdrawn.' };
+}

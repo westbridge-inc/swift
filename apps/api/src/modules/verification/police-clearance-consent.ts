@@ -66,10 +66,17 @@ function wordsFor(kind: PoliceClearanceKind, days: number): string {
     : `Needed because I will visit customers' homes. I choose to upload my police clearance. ${record} ${image} I can withdraw it at any time; Swift then deletes it, keeps only a note that it was withdrawn, and pauses my home visits until a new one is approved. ${law}`;
 }
 
+/**
+ * [REVIEW-F #2111 S3-1] What the app says before a withdrawal, true to the withdraw route: the clearance stops
+ * counting at once (revoked or out of review, eligibility recomputed) and is erased with only a note kept — but a
+ * legal hold keeps its bytes (the route answers keptForLegalHold), so the words say that plainly. App words, not
+ * the consent ticked: they are not part of a version.
+ */
 function withdrawConfirmFor(kind: PoliceClearanceKind): string {
+  const what = 'Swift stops using your police clearance now and deletes it, keeping only a note that it was withdrawn. If the law requires Swift to keep it, it is kept but no longer used for your account.';
   return kind === 'taxi'
-    ? 'Swift deletes your police clearance now and keeps only a note that it was withdrawn. Your account is no longer recorded as police-cleared.'
-    : 'Swift deletes your police clearance now and keeps only a note that it was withdrawn. Your home visits pause until a new one is approved.';
+    ? `${what} Your account is no longer recorded as police-cleared.`
+    : `${what} Your home visits pause until a new one is approved.`;
 }
 
 export type PoliceClearanceConsent = {

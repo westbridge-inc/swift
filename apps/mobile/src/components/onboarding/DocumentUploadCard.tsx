@@ -15,7 +15,7 @@ import type { AuthSessionSnapshot } from '../../lib/authSession';
 import { pendingDocumentLabel } from './documentChecklistPresentation';
 import { docLabel } from './docLabels';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
-import { SENSITIVE_CONSENT_ASK, type PoliceClearanceWords } from './documentConsentRecord';
+import { SENSITIVE_CONSENT_ASK, policeWithdrawOutcome, type PoliceClearanceWords } from './documentConsentRecord';
 import type { UploadConsentVia } from '../../services/api';
 
 const label = docLabel;
@@ -205,7 +205,14 @@ function explainPermissionDenied(
     if (!policeConsent) return;
     Alert.alert('Withdraw your police clearance?', policeConsent.withdrawConfirm, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Withdraw', style: 'destructive', onPress: () => withdraw.mutate() },
+      // [REVIEW-F #2111 S3-1] Then say what happened, from the API's answer (deleted, or kept for a legal reason).
+      {
+        text: 'Withdraw',
+        style: 'destructive',
+        onPress: () => withdraw.mutate(undefined, {
+          onSuccess: (answer) => { const outcome = policeWithdrawOutcome(answer); Alert.alert(outcome.title, outcome.message); },
+        }),
+      },
     ]);
   };
   const confirmReplace = () =>

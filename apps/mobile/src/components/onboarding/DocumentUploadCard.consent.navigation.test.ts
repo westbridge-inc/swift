@@ -164,7 +164,7 @@ describe('[DOC-CONSENT] a police clearance asks for the consent again when the t
     const WORDS = {
       tick: 'police_clearance_v1' as const, version: 'taxi-v1-30d',
       text: 'Optional. I choose to upload my police clearance. (the words from the API)',
-      withdrawConfirm: 'Swift deletes your police clearance now and keeps only a note that it was withdrawn.',
+      withdrawConfirm: 'Swift stops using your police clearance now and deletes it, keeping only a note that it was withdrawn. If the law requires Swift to keep it, it is kept but no longer used for your account.',
     };
     const ownTick = () => host.querySelector('[data-card="police-clearance-consent-tick"]') as HTMLElement | null;
     const fromLibrary = async (n: number) => {
@@ -217,6 +217,23 @@ describe('[DOC-CONSENT] a police clearance asks for the consent again when the t
       await act(async () => link.click());
       await choose(1, 'Withdraw');
       expect(fx.withdraw).toHaveBeenCalledTimes(1);
+    });
+
+    it('[REVIEW-F #2111 S3-1] after the tap the phone says what happened, from the API\'s answer', async () => {
+      await mount({ docType: 'police_clearance', status: 'APPROVED', consented: true, policeConsent: WORDS });
+      const link = host.querySelector('[data-link="Withdraw my police clearance"]') as HTMLElement;
+      await act(async () => link.click());
+      await choose(0, 'Withdraw');
+      expect(fx.withdraw).toHaveBeenCalledTimes(1);
+      const opts = fx.withdraw.mock.calls[0]![1] as { onSuccess?: (_answer: unknown) => void } | undefined;
+      expect(typeof opts?.onSuccess, 'the withdrawal reports its result').toBe('function');
+      await act(async () => opts!.onSuccess!({ withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 }));
+      expect(fx.alerts[1]).toMatchObject({
+        title: 'Police clearance withdrawn',
+        message: 'Swift must keep it for a legal reason, so it is not deleted. It is no longer used for your account.',
+      });
+      await act(async () => opts!.onSuccess!({ withdrawn: 1, keptForLegalHold: 0, deletionPending: 0 }));
+      expect(fx.alerts[2]).toMatchObject({ title: 'Police clearance withdrawn', message: 'It is deleted. Swift keeps only a note that it was withdrawn.' });
     });
 
     it('nothing on file, or an older API without the words: no withdraw link; older API keeps the list tick', async () => {

@@ -361,9 +361,10 @@ describe('multi-step authenticated mutation ownership', () => {
   });
 
   it('[POLICE-CLEARANCE CONSENT] withdrawing asks the API for this checklist, as the signed-in account, and refreshes the checklist', async () => {
-    mocks.withdrawPoliceClearance.mockResolvedValue({ data: { data: { withdrawn: 1, kept: 0 } } });
-    const mutation = useWithdrawPoliceClearance('MOVER') as unknown as CapturedMutation<void, { withdrawn: number; kept: number }>;
-    await expect(mutation.mutationFn(undefined)).resolves.toEqual({ withdrawn: 1, kept: 0 });
+    // [REVIEW-F #2111 S3-1] The API's answer as it is: what a legal hold kept and what storage has not confirmed yet.
+    mocks.withdrawPoliceClearance.mockResolvedValue({ data: { data: { withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 } } });
+    const mutation = useWithdrawPoliceClearance('MOVER') as unknown as CapturedMutation<void, { withdrawn: number; keptForLegalHold: number; deletionPending: number }>;
+    await expect(mutation.mutationFn(undefined)).resolves.toEqual({ withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 });
     expect(mocks.withdrawPoliceClearance).toHaveBeenCalledWith('MOVER', accountA);
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['verification', 'MOVER'] });
   });

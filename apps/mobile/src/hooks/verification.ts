@@ -264,7 +264,8 @@ export function useWithdrawPoliceClearance(role: string) {
   return useMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
-      const result = await unwrap<{ withdrawn: number; kept: number }>(verificationApi.withdrawPoliceClearance(role, owner));
+      // [REVIEW-F #2111 S3-1] The API's answer as it is: the card says what happened from it.
+      const result = await unwrap<{ withdrawn: number; keptForLegalHold: number; deletionPending: number }>(verificationApi.withdrawPoliceClearance(role, owner));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['verification', role] });
       return result;
