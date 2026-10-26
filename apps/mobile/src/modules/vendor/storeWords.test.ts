@@ -142,11 +142,13 @@ describe('[UI-SWEEP U72] the screens use the words, not the code', () => {
   it('the Billing and QR tiles use the words', () => {
     const ops = src('screens/VendorOps.tsx');
     expect(ops).toMatch(/<TonePill label=\{qrStatusWords\(qrQ\.data\.status\)\}/);
-    expect(ops).toMatch(/<TonePill label=\{subscriptionPillWords\(sub\.status\)\}/);
+    // [FEE-STATUS] The Billing pill names where the fee stands (feeStatusPill words), never "Active" on a week that is due.
+    expect(ops).toMatch(/const billingPill = sub \? feeStatusPill\(feeStatusOf\(sub\)\.state\) : null;/);
+    expect(ops).toMatch(/<TonePill label=\{billingPill\.label\}/);
     expect(ops).not.toMatch(/String\((qrQ\.data|sub)\.status[^)]*\)\.replace\(/);
     // The tiles' spoken labels read like the web console's ("QR: Active", "Subscription: Free trial").
     expect(ops).toMatch(/badgeLabel=\{qrQ\.data\?\.status \? `QR: \$\{qrStatusWords\(qrQ\.data\.status\)\}`/);
-    expect(ops).toMatch(/`Subscription: \$\{subscriptionPillWords\(sub\.status\)\}`/);
+    expect(ops).toMatch(/`Subscription: \$\{billingPill\.label\}`/);
   });
 
   it('the store order screen uses the payment line and the history words', () => {

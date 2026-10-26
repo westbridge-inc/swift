@@ -22,7 +22,7 @@ import {
   TonePill,
 } from '../../../kit';
 import { BrandSwitch } from '../../../kit/controls';
-import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../shared';
+import { DAY_LABELS, GUTTER, InlineInput, prettyVendorType } from '../shared';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { MmgNumberCard } from '../../../components/MmgNumberCard';
@@ -58,6 +58,8 @@ import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
+import { feeStatusOf } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
 import { useAuthStore } from '../../../stores/authStore';
@@ -444,22 +446,14 @@ function VendorDocumentsSection({ vendorType, storeName }: { vendorType: string;
 
 function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string; setBilling: any }) {
   const navigation = useNavigation<any>();
-  const pill = !sub
-    ? { label: 'Inactive', tone: 'brand' as const }
-    : sub.isTrialActive
-      ? { label: 'Free trial', tone: 'brand' as const }
-      : sub.isInGracePeriod
-        ? { label: 'Grace period', tone: 'warning' as const }
-        : sub.status === 'ACTIVE'
-          ? { label: 'Active', tone: 'success' as const }
-          : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
-  const subLine = !sub
+  // [FEE-STATUS · owner 25 Oct] Where the fee stands, in the API's words (feeStatusOf): this row read
+  // "next bill 13 Oct" + "Active" on 25 October. Never the code, never a passed date as a next bill.
+  const feeStatus = sub ? feeStatusOf(sub) : null;
+  const pill = feeStatus ? feeStatusPill(feeStatus.state) : { label: 'Inactive', tone: 'brand' as const };
+  const rate = `${money(sub?.weeklyFeeGyd ?? sub?.customRate ?? sub?.weeklyRate)}/week`;
+  const subLine = !feeStatus
     ? 'Not active yet'
-    : sub.isTrialActive && sub.trialEndDate
-      ? `Trial ends ${fmtDate(sub.trialEndDate)} · then ${money(sub.weeklyRate)}/week`
-      : sub.isInGracePeriod && sub.gracePeriodEnd
-        ? `Weekly fee due by ${fmtDate(sub.gracePeriodEnd)}`
-        : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`;
+    : feeStatus.state === 'TRIAL' ? `${feeStatus.headline} · then ${rate}` : `${rate} · ${feeStatus.headline}`;
   return (
     <>
       <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>

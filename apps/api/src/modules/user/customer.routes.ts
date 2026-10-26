@@ -91,6 +91,7 @@ import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { counterpartPhone } from '../calls/counterpart-phone';
 import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
@@ -2989,7 +2990,8 @@ export async function customerRoutes(app: FastifyInstance) {
           // [S1 response-shaping] the mover's personal number is a handover
           // convenience, not a permanent gift: null once the order is closed,
           // exactly like the live coordinates two lines below.
-          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
+          // [O-1] Only an installed store build is sent it (it dials it); a bridge-aware client calls through Swift.
+          phone: liveLocationVisible(order.status) ? counterpartPhone(request, order.rider.user?.phone) : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
