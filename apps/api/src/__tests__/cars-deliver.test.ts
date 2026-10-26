@@ -17,6 +17,7 @@ import { reserveRiderLeg } from '../modules/dispatch/concurrency-policy';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { grantStepUp } from './helpers/step-up';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [CARS-DELIVER · owner 8 Oct 2026 + 25 Oct 22:33Z] "Cars can deliver": a verified taxi driver's car can
@@ -32,7 +33,8 @@ import { grantStepUp } from './helpers/step-up';
 //     unchanged), switches to deliveries, goes online, is offered a store order and claims it on the
 //     delivery profile; going back to taxi retires the delivery supply; delivery GO re-syncs the car from
 //     the taxi profile; a claim needs the taxi document verdict on the same car; a vehicle change carries
-//     the delivery profile to the new car and retires the old car's papers.
+//     the delivery profile to the new car and retires the old car's papers; the car's cash deliveries count in
+//     the delivery profile's CASH COLLECTED (#2117) after paying the store, and never in the taxi figure.
 //
 // Fixtures: Kato, far from every other suite, so only this file's movers are ever candidates.
 // ---------------------------------------------------------------------------
@@ -438,5 +440,24 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
     expect(bike.statusCode, bike.body).toBe(200);
     expect(bike.json().data).toMatchObject({ kind: 'RIDER', vehicleType: 'MOTORCYCLE' });
     expect(await riderOf(driver.userId)).toMatchObject({ id: riderId, vehicleType: 'MOTORCYCLE', riderType: 'BOTH', isOnline: false });
+  });
+
+  it('[CHAINS 02:00Z · #2117] the car’s cash deliveries count in the delivery profile’s CASH COLLECTED after paying the store, never in the taxi figure', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await makeTaxiDriver();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const riderId = await seedCarProfile(driver);
+    // A handed-over cash store delivery on the delivery profile: 2,500 collected at the door, 2,000 paid to the store.
+    const order = await makeReadyOrder(customer.userId);
+    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { riderId, acceptedAt: new Date(), paymentStatus: 'CAPTURED' } }));
+    await sys(() => walkOrderStatus(app.prisma, order.id, 'DELIVERED', { deliveredAt: new Date() }));
+    expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))).driverId).toBeNull();
+
+    const deliveries = await call('GET', '/api/v1/rider/earnings/summary', driver.token);
+    expect(deliveries.statusCode, deliveries.body).toBe(200);
+    expect(deliveries.json().data.cashInHand).toMatchObject({ today: 500, allTime: 500 });
+    const taxi = await call('GET', '/api/v1/driver/earnings/summary', driver.token);
+    expect(taxi.statusCode, taxi.body).toBe(200);
+    expect(taxi.json().data.cashInHand).toMatchObject({ today: 0, allTime: 0 });
   });
 });

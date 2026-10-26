@@ -80,7 +80,7 @@ export function carMirror(driver: MirrorSource) {
   };
 }
 
-function mirrorDiffers(rider: MirrorSource, next: ReturnType<typeof carMirror>): boolean {
+function mirrorDiffers(rider: Prisma.RiderGetPayload<{ select: typeof MIRROR_SOURCE }>, next: ReturnType<typeof carMirror>): boolean {
   return rider.vehicleType !== next.vehicleType
     || (rider.vehicleMake ?? null) !== (next.vehicleMake ?? null)
     || (rider.vehicleModel ?? null) !== (next.vehicleModel ?? null)
