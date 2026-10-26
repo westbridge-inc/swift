@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { publishLegalDocumentOnce, recordConsent, currentConsentDetailed, type ConsentSurface } from '../legal/consent.service';
 import { consentSubjectForRole } from './upload-consent';
+import { POLICE_CLEARANCE_DOC_TYPE } from './doc-registry';
 import {
   configuredDays, DEFAULT_PERSONAL_IMAGE_DAYS, DEFAULT_REJECTED_DOCUMENT_DAYS, PERSONAL_IMAGE_DAYS_KEY, REJECTED_DOCUMENT_DAYS_KEY,
 } from './retention-rules';
@@ -103,7 +104,7 @@ export async function recordPoliceClearanceConsent(
     action: 'granted',
     surface: input.surface,
     ip: input.ip ?? null,
-    evidence: { control: 'police_clearance_checkbox', path: 'verification', docType: 'police_clearance' },
+    evidence: { control: 'police_clearance_checkbox', path: 'verification', docType: POLICE_CLEARANCE_DOC_TYPE },
   }));
 }
 
