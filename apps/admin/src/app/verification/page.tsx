@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
@@ -14,6 +15,9 @@ import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
 import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 import { label } from '@/lib/labels';
+
+/** [STORE-VAT] The server's code-level document type for a store's GRA VAT certificate. */
+const VAT_CERTIFICATE_DOC_TYPE = 'vat_registration_certificate';
 
 const EXPIRING_DOC_TYPES = [
   'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -227,8 +231,11 @@ export default function VerificationPage() {
     onSettled: () => { inFlight.current = false; },
   });
   const busy = mutation.isPending;
+  // [STORE-VAT · owner O-5] A store's GRA VAT certificate is decided in Store VAT, where the reviewer types the VAT number,
+  // the registered name and the date it shows; the server refuses it at this door (DECIDE_IN_STORE_VAT).
+  const vatCertificate = selected?.docType === VAT_CERTIFICATE_DOC_TYPE;
   const openDecision = (action: 'approve' | 'reject') => {
-    if (!selected || selected.status !== 'PENDING' || busy || (action === 'approve' && approveBlocked)) return;
+    if (!selected || selected.status !== 'PENDING' || busy || vatCertificate || (action === 'approve' && approveBlocked)) return;
     setReason(''); setReasonCode(''); setMutationError(null); setDecision(action);
   };
   useEffect(() => {
@@ -346,7 +353,8 @@ export default function VerificationPage() {
             </section>
           </div>
         </div>
-        {selected.status === 'PENDING' && <footer ref={actions} className="rc-actions"><p>{viewed ? 'Evidence opened. Record your decision.' : 'Open the evidence to unlock approval.'}<small>Desktop: A approve · R reject · J/K navigate</small></p><button disabled={busy} onClick={() => openDecision('reject')}>Reject</button><button className="rc-primary" disabled={busy || !!approveBlocked} onClick={() => openDecision('approve')}>Approve</button></footer>}
+        {selected.status === 'PENDING' && vatCertificate && <footer className="rc-actions"><p>A VAT certificate is decided in Store VAT, where you type the VAT number, the registered name and the date it shows.</p><Link href="/store-vat" className="rc-primary">Open Store VAT</Link></footer>}
+        {selected.status === 'PENDING' && !vatCertificate && <footer ref={actions} className="rc-actions"><p>{viewed ? 'Evidence opened. Record your decision.' : 'Open the evidence to unlock approval.'}<small>Desktop: A approve · R reject · J/K navigate</small></p><button disabled={busy} onClick={() => openDecision('reject')}>Reject</button><button className="rc-primary" disabled={busy || !!approveBlocked} onClick={() => openDecision('approve')}>Approve</button></footer>}
       </section>}
     </div>
     {decision && selected && applicant && <Modal title={decision === 'approve' ? 'Approve document' : 'Reject document'} busy={busy} onClose={() => setDecision(null)}>

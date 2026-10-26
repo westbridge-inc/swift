@@ -16,6 +16,11 @@ import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, UPLOAD_CONSENT_VIAS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { documentConsentOnRecord } from './document-consent-record';
+import {
+  POLICE_CLEARANCE_TICK, POLICE_CLEARANCE_WITHDRAWN_NOTE, policeClearanceChecklistOf, policeClearanceConsentFor, policeClearanceKind,
+  recordPoliceClearanceConsent, recordPoliceClearanceWithdrawal,
+} from './police-clearance-consent';
+import { POLICE_CLEARANCE_DOC_TYPE } from './doc-registry';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { liveDuplicateHolders } from './duplicate-holders';
 
@@ -69,6 +74,10 @@ const submitDocumentSchema = z.object({
   // Storage reference from the upload service — never raw document content
   fileUrl: z.string().min(5).max(2048),
   ...consentFields,
+  /** [R17 + POLICE-CLEARANCE CONSENT] the tick shown: the document tick, or a police clearance's own (older apps: document_v1) */
+  consentTick: z.enum([...UPLOAD_CONSENT_TICKS, POLICE_CLEARANCE_TICK]).optional(),
+  /** [POLICE-CLEARANCE CONSENT] the version of the police-clearance words the person was shown (GET /status) */
+  consentVersion: z.string().min(1).max(40).optional(),
   /** [DOC-CONSENT S4] how the tick was given for this upload (upload-consent.ts); older apps and the website omit it */
   consentVia: z.enum(UPLOAD_CONSENT_VIAS).optional(),
 });
@@ -87,16 +96,37 @@ export async function verificationRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const auth = { preHandler: [app.authenticate] };
 
+  /**
+   * [POLICE-CLEARANCE CONSENT] The person's withdrawal of these police clearances — from the withdraw button or the
+   * DSAR erase door: each is withdrawn first (revoked or out of review, record stripped, eligibility recomputed; a
+   * legal hold keeps the bytes, never the use), and the ledger records it under the subject each was stored for.
+   * The caller erases them next.
+   */
+  async function withdrawPoliceClearances(
+    userId: string, docs: ReadonlyArray<{ id: string; role: string }>, request: Parameters<typeof consentSurfaceOf>[0] & { ip: string }, path: string,
+  ): Promise<void> {
+    if (docs.length === 0) return;
+    await verification.markPoliceClearanceWithdrawn(userId, docs.map((d) => d.id));
+    const byChecklist = new Map<string, number>();
+    for (const d of docs) byChecklist.set(policeClearanceChecklistOf(d.role), (byChecklist.get(policeClearanceChecklistOf(d.role)) ?? 0) + 1);
+    for (const [role, withdrawn] of byChecklist) {
+      const current = await policeClearanceConsentFor(app.prisma, role);
+      if (current) await recordPoliceClearanceWithdrawal(app.prisma, { userId, role, current, surface: consentSurfaceOf(request), ip: request.ip, withdrawn, path });
+    }
+  }
+
   /** GET /status?role= — checklist, submitted docs, what's missing. [DOC-CONSENT] `documentConsent` (additive; older
    *  apps ignore it): whether this person's document-upload tick is on record, so the checklist shows their own
    *  recorded choice instead of an empty box on every visit (document-consent-record.ts). */
   app.get('/status', auth, async (request) => {
     const { role, vehicleType } = statusQuerySchema.parse(request.query);
-    const [status, documentConsent] = await Promise.all([
+    const [status, documentConsent, policeClearanceConsent] = await Promise.all([
       verification.getStatus(request.user.userId, role, vehicleType),
       documentConsentOnRecord(app.prisma, request.user.userId, role),
+      // [POLICE-CLEARANCE CONSENT] the police clearance's own words for this checklist, true as of now (additive)
+      policeClearanceConsentFor(app.prisma, role),
     ]);
-    return { success: true, data: { ...status, documentConsent } };
+    return { success: true, data: { ...status, documentConsent, policeClearanceConsent } };
   });
 
   /** POST /appeal — "Think this is a mistake?" (trial-integrity Part 4).
@@ -131,8 +161,46 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /dsar/documents/erase — destroy what can be destroyed now; refuse the rest with the ground stated. */
   app.post('/dsar/documents/erase', auth, async (request) => {
     const { documentIds } = z.object({ documentIds: z.array(z.string().min(1)).min(1).max(50).optional() }).parse(request.body ?? {});
+    // [POLICE-CLEARANCE CONSENT · REVIEW-G2 S4] Erasing a police clearance withdraws it: same withdrawal, same ledger row.
+    const police = await app.prisma.verificationDocument.findMany({
+      where: {
+        userId: request.user.userId, docType: POLICE_CLEARANCE_DOC_TYPE, purgedAt: null,
+        OR: [{ reviewNote: null }, { reviewNote: { not: POLICE_CLEARANCE_WITHDRAWN_NOTE } }], ...(documentIds ? { id: { in: documentIds } } : {}),
+      },
+      select: { id: true, role: true },
+    });
+    await withdrawPoliceClearances(request.user.userId, police, request, 'verification/dsar/documents/erase');
     const { eraseDocumentsFor } = await import('./dsar');
     return { success: true, data: await eraseDocumentsFor(app.prisma, verification, request.user.userId, documentIds) };
+  });
+
+  /**
+   * [POLICE-CLEARANCE CONSENT] POST /police-clearance/withdraw { role } — the person withdraws their police clearance
+   * at any time, even while active: it is erased now (shred, receipt; a legal hold still keeps it), only a note is
+   * kept, eligibility follows (police-cleared off; home visits pause until a new one is approved), and the ledger
+   * records the withdrawal. Nothing to withdraw: nothing happens.
+   */
+  app.post('/police-clearance/withdraw', auth, async (request) => {
+    const { role } = z.object({ role: checklistRoleSchema }).parse(request.body ?? {});
+    const current = await policeClearanceConsentFor(app.prisma, role);
+    if (!policeClearanceKind(role) || !current) {
+      throw new AppError(400, 'NO_POLICE_CLEARANCE', 'This checklist has no police clearance to withdraw.');
+    }
+    const userId = request.user.userId;
+    const docs = await app.prisma.verificationDocument.findMany({
+      where: { userId, docType: POLICE_CLEARANCE_DOC_TYPE, purgedAt: null, OR: [{ reviewNote: null }, { reviewNote: { not: POLICE_CLEARANCE_WITHDRAWN_NOTE } }] },
+      select: { id: true, role: true },
+    });
+    if (docs.length === 0) return { success: true, data: { withdrawn: 0, keptForLegalHold: 0, deletionPending: 0 } };
+    // Withdrawn first (revoked or out of review, record stripped, eligibility recomputed, ledger row), then erased.
+    // [REVIEW-G2 S3-1] A clearance under a legal hold is withdrawn too: the hold keeps its bytes, never its use.
+    await withdrawPoliceClearances(userId, docs, request, 'verification/police-clearance/withdraw');
+    const { eraseDocumentsFor } = await import('./dsar');
+    const outcomes = await eraseDocumentsFor(app.prisma, verification, userId, docs.map((d) => d.id));
+    // [REVIEW-M S4] What a hold keeps and what storage has not confirmed deleted yet are told apart.
+    const keptForLegalHold = outcomes.filter((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD').length;
+    const erased = outcomes.filter((o) => o.outcome === 'DESTROYED' || o.outcome === 'ALREADY_DESTROYED').length;
+    return { success: true, data: { withdrawn: docs.length, keptForLegalHold, deletionPending: outcomes.length - erased - keptForLegalHold } };
   });
 
   /** POST /dsar/documents/rectify — re-open a review case; the correction is a reviewer action (DOC-INV-34). */
@@ -147,7 +215,17 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);
-    if (body.consentTick && body.consentTick !== 'document_v1') {
+    // [POLICE-CLEARANCE CONSENT] A police clearance's own tick belongs to a police clearance only, and to the words
+    // shown now: the version names the days the words promise, so stale words are refused before anything is stored.
+    const policeWords = body.consentTick === POLICE_CLEARANCE_TICK ? await policeClearanceConsentFor(app.prisma, body.role) : null;
+    if (body.consentTick === POLICE_CLEARANCE_TICK) {
+      if (body.docType !== POLICE_CLEARANCE_DOC_TYPE || !policeWords) {
+        throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent belongs to a police clearance upload.');
+      }
+      if (body.consentVersion !== policeWords.version) {
+        throw new AppError(409, 'CONSENT_WORDS_CHANGED', 'The words for this upload have changed. Read them again and tick the box.');
+      }
+    } else if (body.consentTick && body.consentTick !== 'document_v1') {
       throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to a document upload.');
     }
     // [DOC-CONSENT S4] A tick shown from the record stands on a grant the ledger holds NOW (none, or withdrawn:
@@ -165,7 +243,9 @@ export async function verificationRoutes(app: FastifyInstance) {
       request.user.role,
     );
     // [R17] the tick the person gave, after the document is on file (a refused upload records no consent)
-    if (body.consentTick) {
+    if (policeWords) {
+      await recordPoliceClearanceConsent(app.prisma, { userId: request.user.userId, role: body.role, words: policeWords, surface: consentSurfaceOf(request), ip: request.ip });
+    } else if (body.consentTick && body.consentTick !== POLICE_CLEARANCE_TICK) {
       await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: consentSubjectForRole(body.role), surface: consentSurfaceOf(request), ip: request.ip, docType: body.docType, via: body.consentVia });
     }
     reply.code(201);

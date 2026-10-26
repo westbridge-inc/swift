@@ -6,6 +6,7 @@ import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
 import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
+import { assertCallRelayConfig } from '../modules/calls/call-relay-switch';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
 import { identitySalt } from '../modules/integrity/normalize';
@@ -191,6 +192,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // driver needs its whole configuration — keys parsed, the request proven to
   // fit the key. Production also refuses the sandbox and a UAT page.
   assertMmgCheckoutConfig(env);
+  // [O-1] The Swift call bridge, in EVERY mode: CALL_RELAY=1 needs Swift's caller ID, the
+  // public webhook address and the Twilio account, key and webhook token, or nothing starts.
+  assertCallRelayConfig(env);
   // Validate the documented retention setting in every mode. Production
   // salts are checked below after the existing configuration guards.
   scanRawRetentionDays(env);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cashInHandThisWeek,
   earningRows,
   earningsWindowTotal,
   hasEarningRowsPayload,
@@ -30,6 +31,18 @@ describe('earner server-value guards', () => {
     expect(earningsWindowTotal({ thisWeek: { total: 48_600, count: 31 } }, 'thisWeek', 'week')).toBe(48_600);
     expect(earningsWindowTotal({ week: 56_700 }, 'thisWeek', 'week')).toBe(56_700);
     expect(earningsWindowTotal({ week: 56_700 }, 'allTime')).toBeUndefined();
+  });
+});
+
+describe('[board 13a] cash collected this week', () => {
+  it("reads the server's cashInHand.thisWeek, keeps a real zero, and never invents one", () => {
+    expect(cashInHandThisWeek({ cashInHand: { today: 500, thisWeek: 2300, thisMonth: 2300, allTime: 2800 } })).toBe(2300);
+    expect(cashInHandThisWeek({ cashInHand: { today: 0, thisWeek: 0, thisMonth: 0, allTime: 0 } })).toBe(0);
+    // An older API sends no cashInHand: no figure, so the tile is left out.
+    expect(cashInHandThisWeek({ thisWeek: { total: 48_600, count: 31 } })).toBeUndefined();
+    for (const junk of [undefined, null, 'x', { cashInHand: null }, { cashInHand: 12 }, { cashInHand: { thisWeek: 'n/a' } }, { cashInHand: {} }]) {
+      expect(cashInHandThisWeek(junk)).toBeUndefined();
+    }
   });
 });
 

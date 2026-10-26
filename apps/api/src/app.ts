@@ -378,6 +378,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // until TWILIO_WEBHOOK_AUTH_TOKEN and TWILIO_INBOUND_SMS_URL are set.
   const { smsInboundRoutes } = await import('./modules/notification/sms-inbound.routes');
   await app.register(smsInboundRoutes, { prefix: '/api/v1/sms' });
+  // [O-1] The Swift call bridge: the parties' door (signed-in; refuses with
+  // CALL_RELAY_OFF while the switch is off) and the voice provider's webhooks
+  // (signature-checked over the exact URL before the body is used; 503 until
+  // configured; never forward a call back to anyone).
+  const { callsRoutes, callVoiceRoutes } = await import('./modules/calls/calls.routes');
+  await app.register(callsRoutes, { prefix: '/api/v1/calls' });
+  await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps

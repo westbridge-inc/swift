@@ -197,6 +197,24 @@ describe('a new tab follows the server\'s latest card session', () => {
     expect(calls.mock.calls.some(([url, init]) => String(url).endsWith('/card-sessions') && (init as RequestInit | undefined)?.method === 'POST')).toBe(false);
     view.unmount();
   });
+  it('[MMG reopen] a card payment still being checked hides Back to MMG too, even with a server reopen grant', async () => {
+    await import('./weekly-fee-reopen'); // the on-demand Back card is ready, so a wrong Back would show at once
+    const open = { ref: 'own-open', status: 'OPEN', expiresAt: '2099-10-08T23:30:00Z', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'PAST_DUE' };
+    const sub = { success: true, data: { status: 'PAST_DUE', amountDueGyd: 1200, payActions: [MMG, cardLive()], latestMmgCheckout: open, recentCheckouts: [open], latestCardSession: session('UNKNOWN'), reopenableMmgCheckout: { ref: open.ref, expiresAt: open.expiresAt } } };
+    mockApi((r) => {
+      const path = r.url.pathname;
+      if (path.endsWith('/subscription')) return { body: sub };
+      if (path.endsWith('/mmg-checkout/own-open')) return { body: { success: true, data: open } };
+      if (path.includes('/card-sessions/')) return { body: { success: true, data: session('UNKNOWN') } };
+      return { status: 404, body: { success: false, error: { code: 'NOT_FOUND' } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    expect(await screen.findByText("Checking with the bank. Don't pay again.")).toBeTruthy();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    expect(screen.queryByRole('button', { name: "Back to MMG's page" })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Pay GY$1,200 with MMG' })).toBeNull();
+    view.unmount();
+  });
   it('a finished latest session brings nothing back: the page offers the ways to pay', async () => {
     const sub = { success: true, data: { status: 'PAST_DUE', amountDueGyd: 1200, payActions: [MMG, cardLive()], latestMmgCheckout: null, recentCheckouts: [], latestCardSession: session('FAILED') } };
     api(sub);

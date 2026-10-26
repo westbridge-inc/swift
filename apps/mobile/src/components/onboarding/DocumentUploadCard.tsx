@@ -1,11 +1,11 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Linking, Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Badge, Card, LinkText, T } from '../../kit';
-import { useUploadDocument } from '../../hooks/verification';
+import { Badge, BrandCheckbox, Card, LinkText, T } from '../../kit';
+import { useUploadDocument, useWithdrawPoliceClearance } from '../../hooks/verification';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -15,7 +15,7 @@ import type { AuthSessionSnapshot } from '../../lib/authSession';
 import { pendingDocumentLabel } from './documentChecklistPresentation';
 import { docLabel } from './docLabels';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
-import { SENSITIVE_CONSENT_ASK } from './documentConsentRecord';
+import { SENSITIVE_CONSENT_ASK, type PoliceClearanceWords } from './documentConsentRecord';
 import type { UploadConsentVia } from '../../services/api';
 
 const label = docLabel;
@@ -49,6 +49,7 @@ export function DocumentUploadCard({
   consented = false,
   askConsentFirst = false,
   consentVia = 'checkbox',
+  policeConsent = null,
 }: {
   role: string;
   docType: string;
@@ -72,8 +73,20 @@ export function DocumentUploadCard({
   /** [DOC-CONSENT S4] How the checklist's tick was given (ticked on this visit, or shown from the record); the
    *  police-clearance prompt overrides it with 'prompt'. Sent with the upload so the ledger says it truly. */
   consentVia?: UploadConsentVia;
+  /** [POLICE-CLEARANCE CONSENT] A police clearance's OWN consent, in the API's words: its own box (unticked, asked
+   *  for each upload) opens the card instead of the list's tick, and a clearance on file can be withdrawn. Null (an
+   *  older API, or any other document): the list's tick and the ask above, as before. */
+  policeConsent?: PoliceClearanceWords | null;
 }) {
   const upload = useUploadDocument(role);
+  const withdraw = useWithdrawPoliceClearance(role);
+  // [POLICE-CLEARANCE CONSENT] The card's own box: never ticked for anyone, emptied after each upload.
+  const [policeTicked, setPoliceTicked] = useState(false);
+  const ownTick = policeConsent !== null;
+  // A tick belongs to the words it was given to: new words (the API changed them) start empty.
+  const wordsVersion = policeConsent?.version ?? null;
+  useEffect(() => { setPoliceTicked(false); }, [wordsVersion]);
+  const canUpload = ownTick ? policeTicked : consented;
   const navigation = useNavigation<any>();
   const expired = status === 'EXPIRED';
   const pending = status === 'PENDING';
@@ -94,7 +107,8 @@ export function DocumentUploadCard({
       file: { uri: a.uri, name: a.fileName ?? `${docType}.jpg`, type: a.mimeType ?? 'image/jpeg' },
       authSession,
       consentVia: consentSource.current,
-    });
+      ...(policeConsent ? { consent: { tick: policeConsent.tick, version: policeConsent.version } } : {}),
+    }, { onSuccess: () => setPoliceTicked(false) });
 
 
 /** G9: a denied permission must never be a silent dead end. On iOS the OS
@@ -178,12 +192,22 @@ function explainPermissionDenied(
   // [DOC-CONSENT] The start of every upload (a first one, a re-upload, a replacement). A sensitive document whose
   // tick stands only on the record asks first, in the exact words the ledger anchors the upload to; only
   // "I consent" goes on to the photo. Every other upload starts at the photo, as before.
-  const pick = askConsentFirst
+  // [POLICE-CLEARANCE CONSENT] Its own box is the explicit consent for this upload: no second ask.
+  const pick = ownTick
+    ? () => choosePhoto('checkbox')
+    : askConsentFirst
     ? () => Alert.alert(label(docType), `${SENSITIVE_CONSENT_ASK}\n\n${DOCUMENT_CONSENT_TEXT}`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'I consent', onPress: () => choosePhoto('prompt') },
     ])
     : () => choosePhoto(consentVia);
+  const confirmWithdraw = () => {
+    if (!policeConsent) return;
+    Alert.alert('Withdraw your police clearance?', policeConsent.withdrawConfirm, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Withdraw', style: 'destructive', onPress: () => withdraw.mutate() },
+    ]);
+  };
   const confirmReplace = () =>
     Alert.alert('Replace this document?', 'Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.', [
       { text: 'Cancel', style: 'cancel' },
@@ -195,8 +219,8 @@ function explainPermissionDenied(
     ? ((upload.error as any)?.response?.data?.error?.message ?? 'Upload failed — tap to try again')
     : null;
 
-  const caption = !consented && !approved && !pending && !uploadErr
-    ? 'Tick the box above to upload'
+  const caption = !canUpload && !approved && !pending && !uploadErr
+    ? (ownTick ? 'Tick the box below to upload' : 'Tick the box above to upload')
     : uploadErr
     ? uploadErr
     : approved
@@ -222,7 +246,7 @@ function explainPermissionDenied(
                   : 'Get started';
 
   return (
-    <Pressable disabled={approved || upload.isPending || !consented} onPress={pending ? confirmReplace : pick}>
+    <Pressable disabled={approved || upload.isPending || !canUpload} onPress={pending ? confirmReplace : pick}>
       <Card
         style={[
           { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
@@ -274,6 +298,31 @@ function explainPermissionDenied(
           <Feather name="chevron-right" size={20} color={color.text.muted} />
         )}
       </Card>
+      {/* [POLICE-CLEARANCE CONSENT] The clearance's own box, in the API's words, for each upload. */}
+      {policeConsent && !approved ? (
+        <Pressable
+          onPress={() => setPoliceTicked((t) => !t)}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: policeTicked }}
+          accessibilityLabel={policeConsent.text}
+          testID="police-clearance-consent-tick"
+          style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md, marginTop: -4, marginBottom: space.sm, paddingHorizontal: 4 }}
+        >
+          <BrandCheckbox checked={policeTicked} onToggle={() => setPoliceTicked((t) => !t)} label={policeConsent.text} />
+          <T variant="micro" tone="muted" style={{ flex: 1 }}>{policeConsent.text}</T>
+        </Pressable>
+      ) : null}
+      {/* [POLICE-CLEARANCE CONSENT] Withdraw at any time: the API's own words first. */}
+      {policeConsent && status ? (
+        <View style={{ alignSelf: 'flex-end', marginBottom: space.sm, paddingRight: 4 }}>
+          <LinkText label="Withdraw my police clearance" tone="muted" onPress={confirmWithdraw} />
+          {withdraw.isError ? (
+            <T variant="micro" tone="error">
+              {(withdraw.error as any)?.response?.data?.error?.message ?? 'Couldn’t withdraw it. Try again.'}
+            </T>
+          ) : null}
+        </View>
+      ) : null}
       {/* [E11] The contest door. Tap-to-re-upload fixes a BAD PHOTO; it cannot
           fix a decision — an insurance policy read as PRIVATE re-uploads to
           the same verdict, and 61 real applications sat stalled exactly there

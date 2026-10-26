@@ -214,12 +214,14 @@ export function useSubmitIdentity() {
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ docType, file, authSession, consentVia }: {
+    mutationFn: async ({ docType, file, authSession, consentVia, consent }: {
       docType: string;
       file: { uri: string; name: string; type: string };
       authSession?: AuthSessionSnapshot;
       /** [DOC-CONSENT S4] how the checklist's tick was given for this upload (the ledger records it). */
       consentVia?: UploadConsentVia;
+      /** [POLICE-CLEARANCE CONSENT] a police clearance's own tick and the version of the words shown. */
+      consent?: { tick: 'police_clearance_v1'; version: string };
     }) => {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
@@ -235,11 +237,34 @@ export function useUploadDocument(role: string) {
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
-          // [R17] the checklist's tick (build 12) is recorded in the consent ledger
-          consentTick: 'document_v1',
+          // [R17] the checklist's tick (build 12) is recorded in the consent ledger; a police clearance sends its own
+          ...(consent ? { consentTick: consent.tick, consentVersion: consent.version } : { consentTick: 'document_v1' }),
           ...(consentVia ? { consentVia } : {}),
         }, current),
       );
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['verification', role] });
+      return result;
+    },
+    // [DOC-CONSENT S4 · REVIEW-F] A consent the API refused — no longer on record (withdrawn meanwhile), or words that
+    // changed — re-reads the checklist, so the box shows the truth instead of a tick that no longer stands.
+    onError: (error) => {
+      const code = (error as { response?: { data?: { error?: { code?: string } } } } | null)?.response?.data?.error?.code;
+      if (code === 'CONSENT_NOT_ON_RECORD' || code === 'CONSENT_WORDS_CHANGED') void qc.invalidateQueries({ queryKey: ['verification', role] });
+    },
+  });
+}
+
+/**
+ * [POLICE-CLEARANCE CONSENT] Withdraw this checklist's police clearance (POST /verification/police-clearance/withdraw):
+ * the API erases it now, keeps only a note, and records the withdrawal; the checklist refreshes.
+ */
+export function useWithdrawPoliceClearance(role: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const owner = requireAuthSessionSnapshot();
+      const result = await unwrap<{ withdrawn: number; kept: number }>(verificationApi.withdrawPoliceClearance(role, owner));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['verification', role] });
       return result;

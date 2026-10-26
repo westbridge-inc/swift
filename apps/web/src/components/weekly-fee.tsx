@@ -1,12 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
 import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [MMG reopen] Loaded only when the server grants a reopen (switch off by default): not in the first load,
+// and neither is its rule or its words (lib/weekly-fee-reopen).
+const WeeklyFeeReopen = lazyRetry(() => import('./weekly-fee-reopen'));
 
 export function WeeklyFee({ family }: { family: FeeFamily }) {
   const storeId = useStoreId();
@@ -35,6 +40,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
     start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    reopen: (ref, key) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}/reopen`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
     refresh: () => { void client.invalidateQueries({ queryKey }); },
@@ -52,7 +58,9 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const sub = q.data;
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const mmgPending = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const mmgPending = view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  // [MMG reopen] Only a server grant loads the Back card, which decides (reopenableMmg) whether it shows.
+  const canReopen = !!sub.reopenableMmgCheckout && !view.blocked && !cardPending;
   const blocked = mmgPending || cardPending;
   // The card choice exists only when the server says CARD is live.
   const card = liveCard(sub.payActions);
@@ -75,6 +83,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     </div>
     {action && !blocked && card && <h2 className="text-lg font-bold">Choose how to pay</h2>}
     <div className={`grid gap-4 ${action && !blocked && card ? 'md:grid-cols-2' : ''}`}>
+      {canReopen && <Suspense fallback={null}><WeeklyFeeReopen sub={sub} checkout={checkout} busy={view.busy} onBack={(ref) => void session.reopen(ref)} onExpired={q.refetch} /></Suspense>}
       {action && !blocked && <section aria-labelledby="mmg-pay-title" className="flex flex-col gap-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
         <div className="flex items-start gap-3">
           <span aria-hidden="true" className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--swift-red-50)] text-xs font-extrabold text-[var(--swift-red-600)]">MMG</span>

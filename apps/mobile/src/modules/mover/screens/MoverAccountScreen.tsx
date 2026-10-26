@@ -96,6 +96,8 @@ export function MoverAccountScreen({ navigation }: any) {
           : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
 
   const pickVehiclePhoto = async () => {
+    // One photo at a time: a tap while one is uploading opens nothing.
+    if (uploadVehiclePhoto.isPending) return;
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -200,7 +202,7 @@ export function MoverAccountScreen({ navigation }: any) {
             {uploadVehiclePhoto.isError ? (
               <View style={{ marginTop: space.sm }}>
                 <T variant="caption" tone="error">Upload failed — your selected photo is kept for retry.</T>
-                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" onPress={() => uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
+                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" disabled={uploadVehiclePhoto.isPending} onPress={() => !uploadVehiclePhoto.isPending && uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
               </View>
             ) : null}
           </Card>

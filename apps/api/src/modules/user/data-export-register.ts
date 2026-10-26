@@ -298,6 +298,12 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'name', 'phoneE164', 'relationship', 'priority', 'verifiedAt', 'createdAt', 'updatedAt'],
   },
   {
+    // [O-1] The Swift-bridged calls the person asked for on their orders: which party (a role, never a
+    // person), when, and how far it got. Swift stores no phone number for a call; the provider's own id is bookkeeping.
+    category: 'swiftCalls', model: 'CallSession', by: ['callerUserId'], key: 'id', omit: { provider: 'SYSTEM', providerCallId: 'SYSTEM' },
+    fields: ['id', 'orderId', 'callerUserId', 'callerRole', 'calleeRole', 'status', 'callerConfirmedAt', 'connectedAt', 'endedAt', 'durationSeconds', 'createdAt', 'updatedAt'],
+  },
+  {
     category: 'tripShares', model: 'TripShareToken', by: ['createdByUserId'], key: 'id',
     fields: ['id', 'orderId', 'createdByUserId', 'rotatedAt', 'sharedToPhone', 'expiresAt', 'revokedAt', 'viewCount', 'lastViewedAt', 'createdAt'],
   },

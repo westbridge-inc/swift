@@ -45,7 +45,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
   ring_offer: ['dispatch_offer'],
 
   // A job already in hand needs the person now.
-  job_update: ['prep_ready', 'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt'],
+  // [O-1] 'Swift is calling you about your order': the phone rings within seconds, so it travels now and loud.
+  job_update: ['prep_ready', 'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt', 'call_incoming'],
 
   // Nothing is lost if these land an hour late and silently.
   quiet: [
@@ -130,6 +131,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
     'ops_places_failing',
+    // [COORD R1 · #1997 S4-1] a flood of wrong answers to the texted safety check-in link (the high ceiling tripped)
+    'ops_checkin_link_flood',
     'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
