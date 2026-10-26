@@ -288,6 +288,10 @@ describe('[O-1] starting a call', () => {
     await hook('leg1', res.json().data.callId, {});
     const dial = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
     expect(dial.body).toContain(`>${RECIPIENT}</Number>`);
+    // [REVIEW-F S4-1] The recipient did not place the order: they hear about a delivery for them, never "your order".
+    const screen = await hook('screen', res.json().data.callId, {});
+    expect(screen.body).toContain('<Say>Swift call about a delivery for you. Press 1 to connect.</Say>');
+    expect(screen.body).not.toContain('your order');
     await hook('dial-done', res.json().data.callId, { DialCallStatus: 'busy' });
   });
 
@@ -391,7 +395,8 @@ describe('[O-1] the call itself: Press 1 on both legs', () => {
     expect((await session(callId))).toMatchObject({ status: 'CALLER_CONFIRMED' });
     const riderNotice = await callNotices(riderP.id);
     expect(riderNotice.at(-1)!.data).toMatchObject({ kind: 'call_incoming', callOrderId: o.id, from: 'customer', leg: 2, audience: 'earner' });
-    expect(riderNotice.at(-1)!.body).toMatch(/Swift is calling you about your order .+: your customer\. Answer, then press 1 to connect\./);
+    // [REVIEW-F S4-2 · owner copy 22 Oct] "Your customer is calling you through Swift", not a clipped ": your customer."
+    expect(riderNotice.at(-1)!.body).toMatch(/^Your customer is calling you through Swift about your order .+\. Answer, then press 1 to connect\.$/);
     for (const p of allPhones()) expect(JSON.stringify(riderNotice.at(-1)).includes(p)).toBe(false);
 
     const screen = await hook('screen', callId, {});

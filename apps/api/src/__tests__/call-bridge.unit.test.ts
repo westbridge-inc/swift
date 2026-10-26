@@ -74,6 +74,8 @@ describe('[O-1] the documents Twilio runs', () => {
 
   it('the owner\'s words are what people hear', () => {
     expect(CALL_WORDS.calleePrompt).toBe('Swift call about your order. Press 1 to connect.');
+    // [REVIEW-F S4-1] the parcel recipient did not place the order
+    expect(CALL_WORDS.recipientPrompt).toBe('Swift call about a delivery for you. Press 1 to connect.');
     expect(CALL_WORDS.callerPrompt).toMatch(/Press 1 to continue\.$/);
   });
 });
