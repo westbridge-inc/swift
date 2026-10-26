@@ -110,18 +110,18 @@ function ModifiersSection({ item }: { item: any }) {
   const removeOption = (groupId: string, optionId: string) => {
     if (readOnly) return;
     const owner = requireAuthSessionSnapshot();
-    holdRow(optionId, () => delOption.mutateAsync({ id: optionId, authSession: owner }, {
-      onSuccess: () => {
-        try {
-          requireAuthSessionForPrincipal(owner);
-          setGroups((gs) =>
-            gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
-          );
-        } catch {
-          // The editor belongs to an older account and is being unmounted.
-        }
-      },
-    }).catch(() => undefined)); // a failed delete is told by the app's mutation error notice; the row is released for another try
+    // [REVIEW-F #2123 S3-1] The option comes off on ITS OWN call's promise: with two options' x in flight, per-call
+    // callbacks (mutate/mutateAsync options) reach only the latest call. A sample preview never gets here (readOnly).
+    holdRow(optionId, () => delOption.mutateAsync({ id: optionId, authSession: owner }).then(() => {
+      try {
+        requireAuthSessionForPrincipal(owner);
+        setGroups((gs) =>
+          gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
+        );
+      } catch {
+        // The editor belongs to an older account and is being unmounted.
+      }
+    }, () => undefined)); // a failed delete is told by the app's mutation error notice; the row is released for another try
   };
 
   return (
