@@ -502,7 +502,7 @@ export class PartnerService {
 
       // VEHICLE DOCUMENTS FOLLOW VEHICLES: keep only documents bound to a plate this
       // account still carries after the change.
-      const keptPlates = [newPlate, target === 'DRIVER' ? (carTwin ? newPlate : rider?.licensePlate) : driver?.licensePlate]
+      const keptPlates = [newPlate, target === 'DRIVER' ? rider?.licensePlate : driver?.licensePlate]
         .map((plate) => normalizeRegistrationMark(plate ?? ''))
         .filter((plate) => plate.length > 0);
       const keptSubjects = new Set<string>();

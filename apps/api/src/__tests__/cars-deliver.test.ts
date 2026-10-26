@@ -371,6 +371,23 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
     expect((await riderOf(driver.userId))!.currentOrderId).toBeNull();
   });
 
+  it('a claim needs the taxi profile to name the same car: an online delivery profile left on an old plate is refused under lock', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await makeTaxiDriver();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const riderId = await seedCarProfile(driver);
+    await sys(() => app.prisma.user.update({ where: { id: driver.userId }, data: { activeRole: 'RIDER', lastMoverRole: 'RIDER' } }));
+    await sys(() => app.prisma.rider.update({ where: { id: riderId }, data: {
+      isOnline: true, isAvailable: true, locationSessionId: driver.sessionId, currentLat: SPOT.lat, currentLng: SPOT.lng, lastLocationUpdate: new Date(),
+    } }));
+    await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { licensePlate: `HK ${NUM}7${String(seq).padStart(2, '0')}` } }));
+    const order = await makeReadyOrder(customer.userId);
+    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { riderId } }));
+    await expect(sys(() => app.prisma.$transaction((tx) => reserveRiderLeg(tx, riderId, order.id, 1))))
+      .rejects.toMatchObject({ code: 'VERIFICATION_REQUIRED' });
+    expect((await riderOf(driver.userId))!.currentOrderId).toBeNull();
+  });
+
   it('a vehicle change carries the delivery profile to the new car, offline, and the old car’s papers retire with it', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const driver = await makeTaxiDriver({ verified: false });

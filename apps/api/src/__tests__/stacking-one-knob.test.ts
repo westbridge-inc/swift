@@ -1,4 +1,4 @@
-import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
+import { currentTaxiSplitDocuments, verifiedTaxiCarProfile } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -472,11 +472,14 @@ describe('STK-3 · at capacity 3 the physical rules still refuse an unsafe third
   it('R4 cash vs float: a third CASH leg that takes the summed cash past the float cap is refused, naming R4', async () => {
     // [Owner ruling 15 Oct 2026] TRANSFORMED: this case's mover is a car, which takes goods only while the
     // CAR_DELIVERIES switch is on; it is on for this case so the case still measures R4 alone.
+    // [CARS-DELIVER] TRANSFORMED again: a car delivers only as its owner's verified taxi car, so the car gets
+    // its taxi profile and current taxi papers — the case still measures R4 alone.
     vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     await setCapacity(3);
     const k = await makeKitchen(SITE.cashGate);
     // Three 2,500 cash drops = 7,500 to carry; this rider's float cap is 7,000.
     const m = await makeMover(SITE.cashGate, { vehicleType: 'CAR', floatLimit: 7_000 });
+    await sys(() => verifiedTaxiCarProfile(app.prisma, m.riderId));
     await holdTwoLegs(m, k);
 
     const third = await makeOrder(k);

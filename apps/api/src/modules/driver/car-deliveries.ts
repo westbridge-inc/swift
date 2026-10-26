@@ -197,8 +197,9 @@ export async function syncCarDeliveryProfile(tx: Tx, userId: string): Promise<vo
 
 /**
  * Vehicle change (PartnerService.changeVehicleWithAuthority, which holds the User, Rider and Driver locks):
- * the delivery profile follows the taxi profile's NEW car — so the old car's papers retire with the old car
- * ("vehicle documents follow vehicles") instead of being kept alive by a delivery profile still naming it.
+ * the delivery profile follows the taxi profile's NEW car, offline, so it never names a car the account no
+ * longer drives (customers are shown the car that comes; the old car's papers retire through the change's own
+ * fresh-review rule).
  */
 export async function followTaxiCar(tx: Tx, riderId: string, driverId: string, extra: Prisma.RiderUpdateInput): Promise<void> {
   const driver = await tx.driver.findUniqueOrThrow({ where: { id: driverId }, select: MIRROR_SOURCE });
