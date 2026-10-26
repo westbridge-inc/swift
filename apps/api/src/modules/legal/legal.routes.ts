@@ -73,7 +73,7 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // (Privacy "With your explicit consent" line; Mover Agreement documents paragraph). Non-material: Swift asks for less
 // (reaccept.ts NON_MATERIAL_CHANGES). Same day as 2026-10-22, so the stamp carries a same-day suffix.
 // [2026-10-25 · owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] A customer needs no ID for a taxi ride or an
-// Order of any size (rides.service / order.service no longer ask). Terms section 2, Privacy sections 2 and 3 and Child
+// Order of any size (rides.service / order.service no longer ask). Terms section 3, Privacy sections 1 and 3 and Child
 // Safety section 4 stop saying taxi rides and larger Orders require an ID; they say when the app still asks for one
 // (after repeated failed deliveries or payments, or for a high-value promotion). Retention of a customer's own ID is
 // unchanged (Privacy section 6). Non-material: Swift asks for less (reaccept.ts NON_MATERIAL_CHANGES says why).

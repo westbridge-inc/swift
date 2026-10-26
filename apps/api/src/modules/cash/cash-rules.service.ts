@@ -713,7 +713,9 @@ export class CashRulesService {
   ): Promise<StagedClaim> {
     // [DOC-1 §31.3/§31.4 · P31-1] The policy covers what the rider FRONTED — the food
     // cost on a delivery, never the delivery fee — and the cap per claim is the ID gate,
-    // measured on that same figure: above it the ID is on file instead.
+    // measured on that same figure: above it the claim is outside the automatic guarantee and
+    // support follows up. [Owner ruling 24 Oct 2026] Such an order no longer needs the customer's
+    // ID on file (owner accepted: rider float caps bound the exposure).
     const amount = coveredAmountFor(order);
     const moverUserId = (await this.moverUser(mover)).userId;
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(order.customer.countryCode);
