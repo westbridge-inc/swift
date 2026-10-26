@@ -158,6 +158,10 @@ INSERT INTO restore_replay_changes SELECT 'carts', count(*) FROM c;
 WITH c AS (DELETE FROM cart_merge_receipts t USING restore_closed_ids x WHERE t."userId" = x.id
   AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'cart_merge_receipts' AND k.id = t.id::text) RETURNING 1)
 INSERT INTO restore_replay_changes SELECT 'cart merge receipts', count(*) FROM c;
+-- [O-1] The Swift-bridged calls a closed account asked for (no number in them; deleted with the account).
+WITH c AS (DELETE FROM call_sessions t USING restore_closed_ids x WHERE t."callerUserId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'call_sessions' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'swift calls', count(*) FROM c;
 
 -- 6. Rating text by or about a closed account (scores stay, the words go).
 WITH c AS (

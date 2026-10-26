@@ -45,7 +45,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
   ring_offer: ['dispatch_offer'],
 
   // A job already in hand needs the person now.
-  job_update: ['prep_ready', 'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt'],
+  // [O-1] 'Swift is calling you about your order': the phone rings within seconds, so it travels now and loud.
+  job_update: ['prep_ready', 'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt', 'call_incoming'],
 
   // Nothing is lost if these land an hour late and silently.
   quiet: [
