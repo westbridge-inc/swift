@@ -71,10 +71,23 @@ function mutationHooks(sfs: ts.SourceFile[]): Set<string> {
     };
     visit(sf);
   }
+  /** The hooks a returned value comes from: a call (`useMutation(…)`), through parentheses / `as` / `!` and both
+   *  branches of a ternary, or a local bound to one — the phone's vendorops `usePreviewSafeMutation`:
+   *  `const m = useVendorMutation(o); return (pv ? previewMutation() : m) as …`. */
+  const handed = (e: ts.Expression, fn: Fn): string[] => {
+    let x: ts.Expression = e;
+    while (ts.isParenthesizedExpression(x) || ts.isAsExpression(x) || ts.isNonNullExpression(x)) x = x.expression;
+    if (ts.isConditionalExpression(x)) return [...handed(x.whenTrue, fn), ...handed(x.whenFalse, fn)];
+    if (ts.isCallExpression(x)) return calleeName(x) ? [calleeName(x)!] : [];
+    if (!ts.isIdentifier(x) || !fn.body || !ts.isBlock(fn.body)) return [];
+    const name = x.text;
+    return fn.body.statements.flatMap((st) => (ts.isVariableStatement(st) ? st.declarationList.declarations : [])
+      .flatMap((d) => (ts.isIdentifier(d.name) && d.name.text === name && d.initializer && ts.isCallExpression(d.initializer) && calleeName(d.initializer) ? [calleeName(d.initializer)!] : [])));
+  };
   const returned = (fn: Fn): string[] => {
     if (!fn.body) return [];
-    if (!ts.isBlock(fn.body)) return ts.isCallExpression(fn.body) && calleeName(fn.body) ? [calleeName(fn.body)!] : [];
-    return fn.body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression && ts.isCallExpression(st.expression) && calleeName(st.expression) ? [calleeName(st.expression)!] : []));
+    if (!ts.isBlock(fn.body)) return handed(fn.body as ts.Expression, fn);
+    return fn.body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression ? handed(st.expression, fn) : []));
   };
   /** A wrapper that hands back its own `{ …m, mutate, mutateAsync, isPending }` (the cart and checkout hooks). */
   const wraps = (fn: Fn): boolean => {
@@ -461,5 +474,11 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     expect(untraced(`function P(){ const s = useSave(); const keep = useRef(() => s.mutate()); return null; }`)).toEqual(['s.mutate']);
     // A mutation hook's own body is not a press (its callers are judged).
     expect(census(hook).unresolved).toEqual([]);
+    // [STORE-VAT 01:36Z finding] A hook that hands back a LOCAL mutation through a ternary and a cast (the phone's
+    // vendorops usePreviewSafeMutation) is a mutation hook too, and so is every hook that returns it.
+    const preview = { 'ops.ts': `function useSafe(o) { const pv = usePreviewDataset(); const m = useSave(o); return (pv ? previewMutation() : m) as R; }\nexport function useRemoveStaff() { return useSafe({ mutationFn: remove }); }` };
+    const seen = (src: string) => census({ ...hook, ...preview, 'x.tsx': src }).hits.map((h) => h.text);
+    expect(seen(`function P(){ const del = useRemoveStaff(); return <B onPress={() => del.mutate(1)} />; }`)).toEqual(['del.mutate <- <B onPress>']);
+    expect(seen(`function P(){ const del = useRemoveStaff(); return <B disabled={del.isPending} onPress={() => del.mutate(1)} />; }`)).toEqual([]);
   });
 });
