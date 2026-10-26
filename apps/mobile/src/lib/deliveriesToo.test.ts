@@ -21,7 +21,7 @@ describe('deliveriesTooView: the account card follows the server answer only', (
   it('can be set up: offered to the taxi driver only, naming the car', () => {
     expect(deliveriesTooView({ available: true, enabled: false, vehicle: { label: 'Wagon Car' } }, 'DRIVER')).toMatchObject({
       show: true, state: 'offer', action: 'Add deliveries',
-      body: 'Use your wagon car for store deliveries as well as taxi rides. Your weekly fee stays the same, and you keep 100%.',
+      body: 'Use your wagon car for store deliveries as well as taxi rides. Adding deliveries does not change your weekly fee, and you keep 100%.',
     });
     expect(deliveriesTooView({ available: true, enabled: false }, 'DRIVER')).toMatchObject({ state: 'offer', body: expect.stringContaining('Use your car for') });
     expect(deliveriesTooView({ available: true, enabled: false }, 'RIDER')).toEqual({ show: false });

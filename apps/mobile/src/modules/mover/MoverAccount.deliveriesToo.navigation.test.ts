@@ -185,7 +185,7 @@ describe('[CARS-DELIVER] "Deliveries too" on the mover account follows the serve
     fx.status = { available: true, enabled: false, reason: null, vehicle: { type: 'WAGON_CAR', label: 'Wagon Car' } };
     await renderAccount();
     expect(host.textContent).toContain('Take deliveries too');
-    expect(host.textContent).toContain('Use your wagon car for store deliveries as well as taxi rides. Your weekly fee stays the same, and you keep 100%.');
+    expect(host.textContent).toContain('Use your wagon car for store deliveries as well as taxi rides. Adding deliveries does not change your weekly fee, and you keep 100%.');
     await press('Add deliveries');
     expect(fx.addCarDeliveries).toHaveBeenCalledTimes(1);
   });

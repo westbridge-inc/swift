@@ -51,7 +51,7 @@ export function deliveriesTooView(answer: unknown, kind: WorkKind | null): Deliv
   if (available && kind === 'DRIVER') {
     return {
       show: true, state: 'offer', title: 'Take deliveries too',
-      body: `Use your ${vehicle} for store deliveries as well as taxi rides. Your weekly fee stays the same, and you keep 100%.`,
+      body: `Use your ${vehicle} for store deliveries as well as taxi rides. Adding deliveries does not change your weekly fee, and you keep 100%.`,
       action: 'Add deliveries',
     };
   }
