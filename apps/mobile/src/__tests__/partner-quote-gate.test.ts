@@ -51,7 +51,7 @@ describe('[H7] a preview with no quote says so — never $0, never covered', () 
     const screen = src('src/modules/billing/screens/WeeklyFeeScreen.tsx');
     // [FEE-STATUS] The header is feeStatusOf (it replaced dueLine); unknown is still said, never $0 or covered.
     expect(screen).toContain('feeStatusOf(sub)');
-    expect(src('src/lib/weeklyFee.ts')).toContain("if (!Number.isFinite(amountDue)) return word('UNKNOWN', 'Amount due unavailable.');");
+    expect(src('src/lib/fee-status.ts')).toContain("if (!Number.isFinite(amountDue)) return word('UNKNOWN', 'Amount due unavailable.');");
   });
 
   it.each(['src/hooks/vendorops.ts', 'src/hooks/mover.ts'])('%s carries the price list\'s loading and error state into the preview subscription', (file) => {
