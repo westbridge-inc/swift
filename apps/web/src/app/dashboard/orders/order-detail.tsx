@@ -10,12 +10,13 @@ import { cancellationReasonWords } from '@swift/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
+import { CallPartyButton } from '@/components/call-party-button';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, telHref, vendorStatusLabel, whenLabel,
+  confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, vendorStatusLabel, whenLabel,
 } from '@/lib/vendor-order-view';
 import {
   acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder,
@@ -363,8 +364,6 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const payBlockedReason = !paused && isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED' ? mmgPayBlockedReason(o.paymentStatus) : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
-  const customerTel = telHref(o.customer?.phone);
-  const riderTel = telHref(o.rider?.user?.phone);
   const recovery = recoveryView(o.custodyRecovery);
   const timeline = [...(o.statusHistory ?? [])].reverse();
   const prepLine = prepTimeLine(o);
@@ -489,11 +488,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
             <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Customer</p>
             <p className="break-words text-sm font-semibold">{customer}</p>
           </div>
-          {customerTel && (
-            <a href={customerTel} aria-label={`Call ${customer}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
-              Call
-            </a>
-          )}
+          {/* [O-1] Bridge off: today's tel: link. Bridge on: "Call via Swift" (no number on this page). */}
+          <CallPartyButton orderId={o.id} target="customer" phone={o.customer?.phone} label="Call" icon={false} ariaLabel={`Call ${customer}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]" noteClassName="w-full text-xs text-[var(--swift-muted)]" />
         </div>
         {[...customerLines(o), ...(o.fulfillment === 'PICKUP' && o.deliveryInstructions ? [o.deliveryInstructions] : [])].map((line, i) => (
           <p key={i} className="mt-1.5 break-words text-sm text-[var(--swift-muted)]">{line}</p>
@@ -506,11 +502,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
             <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Rider</p>
             <p className="break-words text-sm font-semibold">{riderName || 'Swift rider'}</p>
           </div>
-          {riderTel && (
-            <a href={riderTel} aria-label={`Call ${riderName || 'the rider'}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
-              Call
-            </a>
-          )}
+          <CallPartyButton orderId={o.id} target="rider" phone={o.rider?.user?.phone} label="Call" icon={false} ariaLabel={`Call ${riderName || 'the rider'}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]" noteClassName="w-full text-xs text-[var(--swift-muted)]" />
           {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider"; then that it went. */}
           {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
           {actions.some((a) => a.kind === 'handed-to-rider') && <div className="w-full"><RiderHandoverLine rider={o.rider} /></div>}

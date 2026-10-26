@@ -57,12 +57,21 @@ describe('[T3] cross-tenant attack matrix — owner login', () => {
       findings.push(...result.findings);
       // A local evidence hook only (CI leaves it unset): one line per attacker with its status spread.
       const report = process.env['T3_MATRIX_REPORT'];
-      if (report) appendFileSync(report, `owner ${attacker.label}: fired ${result.fired} ${JSON.stringify(result.byStatus)}\n${result.unanswered.map((u) => `  ${u}\n`).join('')}`);
+      if (report) appendFileSync(report, `owner ${attacker.label}: fired ${result.fired} ${JSON.stringify(result.byStatus)} approvals ${JSON.stringify(result.approvals)}\n${result.unanswered.map((u) => `  ${u}\n`).join('')}`);
       expect(result.fired).toBeGreaterThan(400);
       // Vacuity guard: the sweep re-signs in once on a 401, so a 401 left in the spread means the attacker's
       // account itself stopped working mid-sweep and every later route was never really fired.
       expect(result.byStatus['401'] ?? 0, `first 401: ${result.firstRefused}`).toBe(0);
       expect(result.findings, `${attacker.label}: ${JSON.stringify(result.byStatus)} first 401: ${result.firstRefused}`).toEqual([]);
+      // [REVIEW-M #2069 S3-1] The approval leg really ran: each two-person ask of the tenant-B admin was APPROVED by its
+      // colleague and re-sent, and the gate let every re-send through to its handler (the approval is spent: APPLIED).
+      if (attacker.role === 'ADMIN') {
+        expect(result.approvals.asked, JSON.stringify(result.approvals)).toBeGreaterThan(30);
+        expect(result.approvals.approved, JSON.stringify(result.approvals.byStatus)).toBe(result.approvals.asked);
+        expect(result.approvals.reached, JSON.stringify(result.approvals.byStatus)).toBe(result.approvals.asked);
+      } else {
+        expect(result.approvals.asked).toBe(0);
+      }
     }, 600_000);
   }
 

@@ -667,3 +667,20 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[1]![1]?.body)).reasonCode).toBe('WRONG_PLATE_CLASS');
   });
 });
+
+// [STORE-VAT · owner O-5] A store's GRA VAT certificate is decided in Store VAT (the reviewer types the number, the
+// registered name and the date it shows); the server refuses it at this door, so the Review Center offers no decision.
+describe('[STORE-VAT] a VAT certificate in the Review Center', () => {
+  it('offers no Approve or Reject (not even by key), only the way to Store VAT', async () => {
+    const vatDocument = { ...baseDocument, docType: 'vat_registration_certificate', role: 'VENDOR_OWNER' };
+    mockApi(verificationHandler(() => { throw new Error('no decision may be sent from here'); }, [vatDocument]));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open Store VAT' }).getAttribute('href')).toBe('/store-vat');
+    await user.keyboard('a');
+    await user.keyboard('r');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});

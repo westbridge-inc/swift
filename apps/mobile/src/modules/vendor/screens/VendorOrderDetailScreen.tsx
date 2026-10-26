@@ -19,7 +19,9 @@ import { storeSwapWaitText } from '../../orders/substitutionCopy';
 import { toast } from '../../../kit/toast';
 import { parsePartyCaseView, partyCaseWorthShowing, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
 import { money } from '../../../lib/money';
-import { openExternal } from '../../../lib/openExternal';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
+import type { CallTarget } from '../../../lib/callBridge';
 import {
   FulfillmentTag,
   GUTTER,
@@ -77,12 +79,17 @@ function ContactCard({
   name,
   phone,
   lines,
+  orderId,
+  target,
 }: {
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   title: string;
   name: string;
   phone?: string;
   lines?: (string | null | undefined)[];
+  /** [O-1] The order and the party, so "Call via Swift" can connect the call while the bridge is on. */
+  orderId?: string;
+  target: CallTarget;
 }) {
   return (
     <Card style={{ marginBottom: space.md }}>
@@ -98,9 +105,10 @@ function ContactCard({
             {name}
           </T>
         </View>
-        {phone ? (
-          <PillButton label="Call" variant="soft" size="sm" onPress={() => void openExternal(`tel:${phone}`, "Couldn't start the call — dial the customer directly.")} />
-        ) : null}
+        {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this screen). */}
+        <CallParty orderId={orderId} target={target} phone={phone} dialFailText={`Couldn't start the call — dial the ${title.toLowerCase()} directly.`}>
+          {(call) => <PillButton label={call.label} variant="soft" size="sm" disabled={call.busy} onPress={call.onPress} />}
+        </CallParty>
       </View>
       {(lines ?? []).filter(Boolean).map((l, i) => (
         <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: i === 0 ? space.md : 4 }}>
@@ -548,6 +556,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
           title="Customer"
           name={customerName}
           phone={order.customer?.phone}
+          orderId={order.id}
+          target="customer"
           lines={
             isAppt
               ? [formatSlot(order.appointmentSlot), apptMobile ? `You travel to: ${order.deliveryAddress}` : 'At your store']
@@ -558,7 +568,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
         />
 
         {/* Rider — only once dispatch has assigned one */}
-        {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} /> : null}
+        {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} orderId={order.id} target="rider" /> : null}
+        {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+        <SwiftCallNumberTip />
         {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider". */}
         {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside the "Handed to rider" button: never before the order is
             ready, never on an order paused for an MMG payment review. */}

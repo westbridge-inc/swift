@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, type VendorActivationChecklist } from '@/lib/api';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
 import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
 import type { ProhibitedClass } from '@/lib/api';
@@ -118,6 +118,14 @@ function whyHidden(p: ProhibitedRow): string {
   return p.state === 'WAITING' ? `Waiting for a check: ${where} (${what})` : `Approved: ${where} (${what})`;
 }
 interface Sibling { id: string; name: string; status: string }
+
+/** [STORE-VAT] Where a store's VAT stands, in words (the server's StoreVatStatus). */
+const VAT_STATUS_WORDS: Readonly<Record<string, string>> = {
+  PENDING: 'Waiting for a person to check its GRA certificate',
+  APPROVED: 'Approved by a person (its certificate was checked)',
+  REJECTED: 'Not approved',
+  REVOKED: 'Withdrawn',
+};
 
 export default function VendorDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -234,6 +242,18 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     context,
     submit: ({ reason }) => suspendVendor(id, reason),
     success: () => `${v.name} is suspended and has stopped taking orders. The owner was sent your reason.`,
+  }));
+
+  // [STORE-VAT · owner O-5] Withdraw a store's approved VAT (e.g. the GRA cancelled its registration). New orders stop
+  // carrying VAT at once; orders already placed keep the VAT they froze.
+  const withdrawVat = async () => show(await dialog.run({
+    title: `Withdraw VAT for ${v.name}?`,
+    body: <p>Its new orders stop carrying VAT at once, and its prices stop saying &ldquo;incl. VAT&rdquo;. Orders already placed keep their VAT. Your reason shows on the store&apos;s VAT settings.</p>,
+    confirmLabel: 'Withdraw VAT',
+    reason: { hint: 'The store sees this on its VAT settings, and it is kept on the permanent record.' },
+    context,
+    submit: ({ reason }) => revokeStoreVat(id, reason),
+    success: () => `${v.name}'s VAT is withdrawn. New orders carry no VAT.`,
   }));
 
   const toggleFeatured = async () => {
@@ -390,6 +410,26 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
               <Row label="Joined">{when(v.createdAt)}</Row>
             </dl>
           </section>
+
+          {v.vatStatus && v.vatStatus !== 'NONE' ? (
+            <section aria-labelledby="vat" className="mc-card">
+              <h2 id="vat" className="mc-label">VAT</h2>
+              <dl className="mc-rows">
+                <Row label="Status">{VAT_STATUS_WORDS[v.vatStatus as string] ?? 'Not recognised by this page'}</Row>
+                <Row label="Number the store gave">{v.vatRegistrationNumber}</Row>
+                {v.vatStatus === 'APPROVED' ? (
+                  <>
+                    <Row label="Approved VAT reg. no.">{v.vatApprovedNumber}</Row>
+                    <Row label="Registered name">{v.vatApprovedName}</Row>
+                    <Row label="Takes effect">{v.vatEffectiveFrom ? String(v.vatEffectiveFrom).slice(0, 10) : null}</Row>
+                  </>
+                ) : null}
+                {v.vatStatus === 'REJECTED' || v.vatStatus === 'REVOKED' ? <Row label="Reason given">{v.vatReviewNote}</Row> : null}
+              </dl>
+              {v.vatStatus === 'PENDING' ? <Link href="/store-vat" className="text-sm underline">Decide it in Store VAT</Link> : null}
+              {v.vatStatus === 'APPROVED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={() => void withdrawVat()}>Withdraw VAT</button> : null}
+            </section>
+          ) : null}
 
           {(v.prohibitedItems ?? []).length > 0 ? (
             <section aria-labelledby="prohibited" className="mc-card">

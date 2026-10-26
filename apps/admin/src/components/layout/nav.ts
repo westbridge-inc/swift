@@ -45,6 +45,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: 'Queues',
     items: [
       { label: 'Documents', href: '/verification', icon: FileCheck2, blurb: 'Review each document and decide it', keywords: 'verification review center kyc id licence' },
+      // [STORE-VAT · owner O-5] A store's VAT shows only after a person checked its GRA VAT certificate here.
+      { label: 'Store VAT', href: '/store-vat', icon: Receipt, blurb: 'Stores waiting for a person to check their GRA VAT certificate', keywords: 'vat gra tax certificate registration' },
       // [ADM-005] A pending row means a colleague asked for something and it has not happened yet.
       { label: 'Approvals', href: '/approvals', icon: Stamp, blurb: 'Money and platform actions waiting for a second admin', keywords: 'second signature two person' },
       { label: 'Moderation', href: '/moderation', icon: Flag, blurb: 'Reports about reviews, messages, people and stores', keywords: 'reports abuse' },

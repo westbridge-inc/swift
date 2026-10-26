@@ -182,7 +182,12 @@ export interface CatalogItem {
   /** [GUARDRAILS §8] Set when Swift does not allow the item, or is holding it for a
    *  quick check (a banned word in the partner's own text). Absent on older servers. */
   catalogueCheck?: CatalogueCheck | null;
+  /** [STORE-VAT · owner O-5] The store's VAT class for the item (STANDARD unless the store chose otherwise). */
+  vatClass?: VatClass;
 }
+
+/** [STORE-VAT · owner O-5] Only STANDARD goods carry VAT, and only for a store whose VAT a person approved. */
+export type VatClass = 'STANDARD' | 'ZERO_RATED' | 'EXEMPT';
 
 /** [GUARDRAILS §8] What the server tells a partner about an item it hides. `message` is the words to show. */
 export type CatalogueCheck =

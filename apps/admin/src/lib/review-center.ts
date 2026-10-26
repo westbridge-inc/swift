@@ -36,6 +36,8 @@ const LABELS: Record<string, string> = {
   national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport', identity_l2: 'Customer ID',
   drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA restaurant licence',
   business_registration: 'Business registration', police_clearance: 'Police clearance',
+  // [STORE-VAT · owner O-5] Decided in Store VAT, never here (the server refuses it at this door).
+  vat_registration_certificate: 'VAT registration certificate',
   fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
   hire_car_permit: 'Hire car permit', road_service_licence: 'Road service licence',
   hire_car_driver_licence: "Hire Car Driver's Licence", hire_car_vehicle_licence: "Car's hire licence (yearly)",
