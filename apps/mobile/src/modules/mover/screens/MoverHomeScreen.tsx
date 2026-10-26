@@ -7,6 +7,7 @@ import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
+import { useRowHold } from '../../../lib/useRowHold';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
@@ -439,6 +440,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const accept = useAcceptJob(k);
   const acceptOffer = useAcceptOffer(k);
   const decline = useDeclineOffer(k);
+  const holdRow = useRowHold();
   const selectMoverKind = useSelectMoverKind();
   const earnings = useEarningsToday(kind);
   const daily = useDailyEarnings<any>(kind); // DASH-03: server-aggregated 7-day trend
@@ -1041,16 +1043,17 @@ export function MoverHomeScreen({ navigation }: any) {
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={k}
           accepting={acceptOffer.isPending}
-          onAccept={() => acceptOffer.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
+          onAccept={() => !acceptOffer.isPending && acceptOffer.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {
             // [WR-010] Dismiss immediately (never trap a mover on a card they
             // refused) but be honest if dispatch never heard the decline.
-            decline.mutate(
+            // [BUG-GUARDS C2] Held per offer: a second tap on THIS card sends nothing, while the next offer's
+            // Decline is never held by an earlier decline still in flight.
+            holdRow(offer.offerAttemptId ?? offer.orderId, () => decline.mutateAsync(
               { orderId: offer.orderId, offerAttemptId: offer.offerAttemptId },
-              { onError: () => toast.show("Couldn't tell dispatch — the offer will time out on its own.") },
-            );
+            ).catch(() => toast.show("Couldn't tell dispatch — the offer will time out on its own.")));
             dismiss();
           }}
         />
