@@ -7,7 +7,7 @@ import { hopDocState } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, OWN_NAME_DOC_TYPE, OWN_NAME_TIER, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, FOOD_HANDLER_ATTESTATION_TYPE, isNeverAcceptedDocType, OWN_NAME_DOC_TYPE, OWN_NAME_TIER, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
@@ -31,6 +31,7 @@ import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
+import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
@@ -54,8 +55,11 @@ import {
   reconcileProviderVerifications,
   refreshProviderVerification,
 } from '../services/services.service';
-import { insertNoticeFor, publicPhoneAsked } from '../../lib/owner-wall-notices';
+import { insertNoticeFor, noticeHeld, publicPhoneAsked } from '../../lib/owner-wall-notices';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
+import { randomUUID } from 'node:crypto';
+import { VAT_CERTIFICATE_DOC_TYPE, storeVatEnabled } from '../store-vat/store-vat';
+import { revokeStoreVatForCertificate } from '../store-vat/store-vat-decisions';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
@@ -95,6 +99,10 @@ export interface VendorGoLive {
   /** [owner #51] The store has a published number customers can call (vendor/go-live.ts). A store's FIRST
    *  go-live needs one; the projection holds a waiting store without it. Never the number itself. */
   publishedPhone: boolean;
+  /** [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant (required) and whether its owner has ticked that everyone
+   *  who handles food there holds a current food handler's certificate (vendor/food-handlers.ts). Making it live
+   *  needs the tick; `ready` includes it. */
+  foodHandlers: { required: boolean; attested: boolean };
 }
 
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
@@ -427,11 +435,15 @@ export type DecisionWithin = (tx: Prisma.TransactionClient, decided: Verificatio
 export const APPROVAL_TAIL = 'APPROVAL_TAIL';
 
 /** The words of the decision notices — one place, for the in-transaction and the direct sends. */
+/** [STORE-VAT] The words a notice uses for a document type ("VAT", not "vat", for the store's VAT certificate). */
+function docTypeWords(docType: string): string {
+  return docType === VAT_CERTIFICATE_DOC_TYPE ? 'VAT registration certificate' : docType.replace(/_/g, ' ');
+}
 export function approvedNotice(docType: string): { title: string; body: string } {
-  return { title: 'Document approved', body: `Your ${docType.replace(/_/g, ' ')} has been approved.` };
+  return { title: 'Document approved', body: `Your ${docTypeWords(docType)} has been approved.` };
 }
 export function rejectedNotice(docType: string, reason?: string): { title: string; body: string } {
-  return { title: 'Document rejected', body: `Your ${docType.replace(/_/g, ' ')} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.` };
+  return { title: 'Document rejected', body: `Your ${docTypeWords(docType)} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.` };
 }
 
 function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
@@ -712,13 +724,20 @@ export class VerificationService {
     fileUrl: string,
     privacyNoticeVersion: string,
     authenticatedRole?: string,
-    /** [ROLE-DOCS · security review] Set ONLY by the signed own-name route (vendor.routes POST /onboarding/own-name). */
-    internal: { ownNameSigned?: true } = {},
+    /** [ROLE-DOCS · security review] `ownNameSigned`: set ONLY by the signed own-name route (vendor.routes POST /onboarding/own-name).
+     *  [STORE-VAT] `storeVatCertificate`: set ONLY by the store-VAT certificate route (vendor.routes POST /vat/certificate); the
+     *  generic document route can never file one. */
+    internal: { ownNameSigned?: true; storeVatCertificate?: true } = {},
   ) {
     // [ROLE-DOCS · owner 21 Oct 2026 · security review] An own-name declaration is the signed words the owner ticked,
     // filed by its own route — never an uploaded file. Refused before anything is read or recorded.
     if (docType === OWN_NAME_DOC_TYPE && internal.ownNameSigned !== true) {
       throw new AppError(400, 'OWN_NAME_SIGNED_ONLY', 'The own-name declaration is signed in the app, under Documents. It cannot be uploaded.');
+    }
+    // [FOOD-PERMIT · owner 24 Oct 2026] The food handlers step is a tick, never a file. A phone build that cannot show the
+    // tick draws the step as an upload card: what it sends is refused, with the words saying where to tick.
+    if (docType === FOOD_HANDLER_ATTESTATION_TYPE) {
+      throw new AppError(400, 'FOOD_HANDLERS_TICK_ONLY', `This step is a tick, not a file: “${FOOD_HANDLERS_TICK_V1}” ${FOOD_HANDLERS_WHERE}`);
     }
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -736,6 +755,14 @@ export class VerificationService {
     // before anything is recorded or sent anywhere.
     if (isNeverAcceptedDocType(docType)) {
       throw new AppError(400, 'DOC_TYPE_NOT_ACCEPTED', 'Swift does not accept medical documents. Remove it and upload the document your checklist asks for.');
+    }
+    // [STORE-VAT · owner O-5] A store's GRA VAT certificate: outside every checklist (no config change), filed only
+    // through the store's own VAT route, only for a store role, only while STORE_VAT is on. It is never sent to a
+    // document processor and never decided by a machine: it waits for a PERSON (store-vat-decisions.ts), and it
+    // never counts toward a store's activation (no checklist names it).
+    const vatCertificate = docType === VAT_CERTIFICATE_DOC_TYPE;
+    if (vatCertificate && (internal.storeVatCertificate !== true || roleKey === 'MOVER' || !storeVatEnabled())) {
+      throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
     }
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
@@ -759,7 +786,7 @@ export class VerificationService {
         : await this.checklistFor(userId, user.countryCode, roleKey);
       checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
     }
-    if (!checklist.includes(docType)) {
+    if (!vatCertificate && !checklist.includes(docType)) {
       // [DOC-1 §18.3] A document type a category gate names in this country is
       // submittable by a vendor even when no checklist lists it — a shop that wants
       // to sell alcohol uploads its liquor licence. Never a type that still needs
@@ -788,7 +815,8 @@ export class VerificationService {
       const vehicleIds = vehicle ? [...new Set([vehicle.subjectId, await rootSubjectId(this.prisma, vehicle.subjectId)])] : [];
       sameVehicle = { OR: [{ subjectId: null }, ...(vehicleIds.length > 0 ? [{ subjectId: { in: vehicleIds } }] : [])] };
     }
-    const alreadyApproved = await this.prisma.verificationDocument.findFirst({
+    // [STORE-VAT] A new VAT certificate is always a new claim (a changed number, a renewal): never "already verified".
+    const alreadyApproved = vatCertificate ? null : await this.prisma.verificationDocument.findFirst({
       where: {
         userId,
         docType,
@@ -818,8 +846,11 @@ export class VerificationService {
     assertKeyServiceForAccess('intake');
     // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
-    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
-    if (identityFaceMatchLeg(docType)) {
+    // [STORE-VAT] The VAT certificate leaves for no engine: it is queued for a person, as the manual engine queues.
+    if (!vatCertificate) assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
+    if (vatCertificate) {
+      result = { status: 'pending_manual' as const, referenceToken: `manual_${randomUUID()}` };
+    } else if (identityFaceMatchLeg(docType)) {
       const selfieUrl = await resolveSignupSelfie(this.prisma, userId);
       // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
       result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl }));
@@ -1675,6 +1706,8 @@ export class VerificationService {
         status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: `REVOKED: ${reason}`,
       });
       if (!won) throw new AppError(409, 'NOT_COMMITTED', 'Only a committed (approved) document can be revoked');
+      // [STORE-VAT] A withdrawn VAT certificate withdraws the VAT of the store resting on it, in this transaction.
+      if (doc.docType === VAT_CERTIFICATE_DOC_TYPE) await revokeStoreVatForCertificate(tx, docId, adminId, reason);
       if (doc.docType === IDENTITY_DOC_TYPE) {
         // [Owner ruling 8 Oct 2026 — CUSTOMER ID] A withdrawal is a person's decision and must outlive
         // the row: the customer can erase a withdrawn ID (it becomes PURGED), and the next upload must
@@ -1981,6 +2014,18 @@ export class VerificationService {
       gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
       optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
     }
+    // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant goes live on its owner's food handlers tick. The step
+    // joins the gate (and so `checklist` and `missing`) while any of the owner's registered restaurants has not ticked:
+    // an older app shows it as a step to do, and the newer apps draw it as the tick from `foodHandlerAttestation` (the
+    // words, their version and each store). Never a document, never in a stored list.
+    let foodHandlerAttestation: ReturnType<typeof foodHandlerAttestationView> | undefined;
+    if (roleKey === 'RESTAURANT') {
+      const stores = await foodHandlerStoresOf(this.prisma, userId);
+      if (stores.length > 0) {
+        foodHandlerAttestation = foodHandlerAttestationView(stores);
+        if (stores.some((s) => !s.attested)) gate = [...gate, FOOD_HANDLER_ATTESTATION_TYPE];
+      }
+    }
     // [VERIFY-DOCS · ruling 6 Oct ~21:25] A service business that offers home visits is SHOWN the
     // police clearance in its checklist — build 9 uploads only what `checklist` names — but the
     // store's gate is unchanged: only its home-visit bookings wait for the clearance.
@@ -2067,6 +2112,7 @@ export class VerificationService {
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
       ...(nameBasis ? { nameBasis } : {}),
+      ...(foodHandlerAttestation ? { foodHandlerAttestation } : {}),
     };
   }
 
@@ -2247,7 +2293,7 @@ export class VerificationService {
   async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
     const vendor = await db.vendor.findUnique({
       where: { id: vendorId },
-      select: { vendorType: true, publicPhone: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
+      select: { vendorType: true, tier: true, publicPhone: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
     });
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
@@ -2260,13 +2306,17 @@ export class VerificationService {
     const block = engaged
       ? await compileActivationDisclosure(db, vendorId, { accountId: ownerUserId, tenantId: vendor.owner.user.tenantId })
       : null;
+    // [FOOD-PERMIT] the projection's own rule: a registered restaurant is made live only with its owner's tick
+    const foodHandlersRequired = foodHandlerTickApplies(vendor);
+    const foodHandlers = { required: foodHandlersRequired, attested: foodHandlersRequired && await storeAttested(db, ownerUserId, vendorId) };
     return {
       ownerUserId,
       role,
       checklist,
       disclosure: { engaged, complete: block ? block.complete : null, missing: block ? block.missing : [] },
-      ready: checklist.complete && (!block || block.complete),
+      ready: checklist.complete && (!block || block.complete) && (!foodHandlers.required || foodHandlers.attested),
       publishedPhone: goLiveMissing(vendor).length === 0,
+      foodHandlers,
     };
   }
 
@@ -2342,7 +2392,7 @@ export class VerificationService {
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
-          select: { id: true, name: true, vendorType: true, isVerified: true, status: true, publicPhone: true },
+          select: { id: true, name: true, vendorType: true, tier: true, isVerified: true, status: true, publicPhone: true },
         },
       },
     });
@@ -2372,6 +2422,15 @@ export class VerificationService {
       if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
         await this.askForPublishedPhone(db, userId, vendor);
         continue;
+      }
+      // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant is never MADE live without its owner's food handlers
+      // tick: not on its first go-live, not coming back after its documents lapsed. It waits, and the owner is told
+      // once. A restaurant already live is never taken down for it (old phone builds cannot show the tick): it stays
+      // live and is told once to tick.
+      if (verified && foodHandlerTickApplies(vendor) && !(await storeAttested(db, userId, vendor.id))) {
+        const goingLive = !vendor.isVerified || vendor.status === 'PENDING_APPROVAL';
+        await this.askForFoodHandlerTick(db, userId, vendor, goingLive);
+        if (goingLive) continue;
       }
       if (verified) {
         // [PR1270-S2-03] This projection is the one authority that makes a
@@ -2432,6 +2491,34 @@ export class VerificationService {
       body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
+    });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [FOOD-PERMIT · owner 24 Oct 2026] The one notice that asks a restaurant's owner for the food handlers tick: once
+   *  per store, per words' version and per reason (waiting to go live / already live), however often the projection
+   *  runs. Delivered after the projection commits. */
+  private async askForFoodHandlerTick(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+    goingLive: boolean,
+  ): Promise<void> {
+    const dedupeKey = `${FOOD_HANDLERS_NOTICE_KIND}:${FOOD_HANDLERS_VERSION}:${vendor.id}:${goingLive ? 'go-live' : 'live'}`;
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const held = ownerRlsBindEnabled()
+      ? await noticeHeld(db, userId, dedupeKey)
+      : (await db.notification.findFirst({ where: { userId, dedupeKey }, select: { id: true } })) !== null;
+    if (held) return;
+    const words = foodHandlersNotice(vendor.name, goingLive);
+    const notice = await insertNoticeFor(db, {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: words.title,
+      body: words.body,
+      dedupeKey,
+      // The literal keeps the kind visible to the cross-app notification census.
+      data: { kind: 'vendor_needs_food_handler_tick', vendorId: vendor.id },
     });
     this.projectionNotices.get(db)?.push(notice.id);
   }

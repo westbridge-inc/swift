@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import PortalHome from './page';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
+import { feeDate } from '@/lib/weekly-fee';
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -63,10 +64,14 @@ const owedRow = (over: Record<string, unknown> = {}) => ({
 
 describe('earner office home: the weekly fee (U18 / U46)', () => {
   it('shows the rate charged, and the status in words', async () => {
-    riderHome({ subscription: { status: 'PAST_DUE', weeklyRate: '2000.00', customRate: '1500.00', nextBillingDate: '2026-10-26T16:00:00.000Z' } });
+    // [FEE-STATUS] As the API sends it (the amount due rides with the row), with the due date passed: the line
+    // says since when it is due; it read "next bill <date>" whatever that date was.
+    const passed = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    riderHome({ subscription: { status: 'PAST_DUE', weeklyRate: '2000.00', customRate: '1500.00', amountDueGyd: 1500, nextBillingDate: passed } });
     renderWithQuery(<PortalHome />);
-    expect(await screen.findByText('Weekly fee overdue')).toBeTruthy();
-    expect(screen.getByText(/\$1,500\/week · next bill 26 Oct 2026/)).toBeTruthy();
+    expect(await screen.findByText('Payment due')).toBeTruthy();
+    expect(screen.getByText(new RegExp(`\\$1,500/week · Payment due since ${feeDate(passed)}`))).toBeTruthy();
+    expect(screen.queryByText(/next bill/i)).toBeNull();
     expect(screen.queryByText(/\$2,000|PAST_DUE/)).toBeNull();
   });
 });

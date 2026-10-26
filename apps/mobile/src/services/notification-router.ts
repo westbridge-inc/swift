@@ -74,6 +74,12 @@ function documentsFor(audience: string, openApp?: OpenApp): Destination {
  *  `openApp` is consulted only for a payload with no server-tagged audience. */
 export function destinationFor(data: Record<string, unknown> | null | undefined, openApp?: OpenApp): Destination | null {
   if (!data) return null;
+  // [DRILL-STORM · S-19] An OPS PAGE — any payload carrying the ops alert it belongs to (an SOS page, a
+  // platform page, a re-page, the drill, a failed drill) — opens that page on the responder's Ops alerts
+  // screen, where it is acknowledged. Until now these taps opened nothing (or a customer's order screen),
+  // so a page could only be stopped from a computer. Only ops pages carry an opsAlertId.
+  const opsAlertId = data['opsAlertId'];
+  if (typeof opsAlertId === 'string' && opsAlertId) return { screen: 'OpsAlerts', params: { opsAlertId } };
   if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
@@ -267,6 +273,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // [owner #51] A store whose documents are done waits only for the number
   // customers can call: the vendor root (the waiting store's own screen) asks for it.
   if (kind === 'vendor_needs_public_phone') return { screen: 'Main' };
+  // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant ticks that everyone who handles its food holds a current
+  // food handler's certificate: the tick is in the store's Documents, on Account.
+  if (kind === 'vendor_needs_food_handler_tick') return { screen: 'VendorRoot', params: { screen: 'Account' } };
   // [PUSH-ROUTING] STORE SURFACES, on VendorRoot after the router selects the
   // store (go() validates the account and the store first). Stock ran low, or a
   // category the store asked for was added, mapped or declined: the catalogue

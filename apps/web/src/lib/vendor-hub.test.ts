@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { billingSummary, DAY_LABELS, hoursSummary, orderActions, storeStatusEyebrow, windowTotals } from './vendor-hub';
+import { DAY_LABELS, hoursSummary, orderActions, storeStatusEyebrow, windowTotals } from './vendor-hub';
+import { billingHeadline } from './subscription-words';
 
 // Owner ruling (11 Oct 2026): the website's business board copies the phone
 // app — same cards, same words, same server data. The app's helpers live in
@@ -26,7 +27,11 @@ const line = (src: string, start: string) => {
 };
 
 const FROM_SHARED = ['safeVendorRole', 'orderActions', 'statusActions', 'timeAgo', 'clock', 'fmtWhen', 'fmtDate', 'numericFact', 'guyanaDate', 'guyanaDayKey', 'hasTrailingGuyanaDays', 'normalizeRevenueDays', 'reconciledRevenueDays', 'windowTotals'];
-const FROM_OPS = ['formatBusinessTime', 'normalizeHours', 'hoursSummary', 'storeStatusEyebrow', 'financialDeltaLabel', 'subscriptionTone', 'billingSummary'];
+// [FEE-STATUS · owner 25 Oct 2026] billingSummary and the tile's tone left this list on purpose: the phone's
+// tile works the API's feeStatus words out itself for an older API (lib/weeklyFee feeStatusOf), while the web
+// ships with its API and shows feeStatus as sent (subscription-words billingHeadline, which replaced the web's
+// billingSummary copy). Both are pinned below.
+const FROM_OPS = ['formatBusinessTime', 'normalizeHours', 'hoursSummary', 'storeStatusEyebrow', 'financialDeltaLabel'];
 
 describe('the web board helpers are the app\'s, word for word', () => {
   it.each(FROM_SHARED)('%s matches apps/mobile/src/modules/vendor/shared.tsx', (name) => {
@@ -59,7 +64,11 @@ describe('the web board helpers are the app\'s, word for word', () => {
     expect(hoursSummary(DAY_LABELS.map((_, dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })))).toBe('Daily · 8:00 AM–10:00 PM');
     expect(hoursSummary([])).toBeNull();
     expect(storeStatusEyebrow({ isCurrentlyOpen: false }, false).label).toBe('CLOSED');
-    expect(billingSummary(null)).toBe('Subscription not active');
+    expect(billingHeadline(null)).toBe('Subscription not active');
+    // [FEE-STATUS] The tile read "Next bill 13 Oct" on 25 October: it now says what the API says, and
+    // without the API's words names the state, never a date it cannot vouch for.
+    expect(billingHeadline({ status: 'ACTIVE', feeStatus: { state: 'DUE', headline: 'Payment due since 13 Oct 2026' } })).toBe('Payment due since 13 Oct 2026');
+    expect(billingHeadline({ status: 'ACTIVE' })).toBe('Active');
     expect(windowTotals([], 7).prev).toBeNull();
   });
 });

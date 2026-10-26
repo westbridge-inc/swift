@@ -6,10 +6,13 @@ import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { OwnNameCard } from './OwnNameCard';
+import { FoodHandlersCard } from './FoodHandlersCard';
+import { FOOD_HANDLERS_DOC } from './foodHandlers';
 import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 import { SENSITIVE_DOC_TYPES, documentConsentGivenLine, documentConsentOnRecord } from './documentConsentRecord';
+import type { UploadConsentVia } from '../../services/api';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
@@ -53,6 +56,9 @@ export function DocumentChecklist({
   const recordLine = choice === null && record.given ? documentConsentGivenLine(record.givenAt) : null;
   // [DPA s.9(1)(a) · research D1] A police clearance is not opened by the record alone: its card asks again.
   const askConsentFirst = (docType: string) => choice !== true && SENSITIVE_DOC_TYPES.has(docType);
+  // [DOC-CONSENT S4] Each upload tells the ledger how the tick was given: ticked on this visit, or shown from the record
+  // (a card that asks again records its prompt instead).
+  const consentVia: UploadConsentVia = choice === true ? 'checkbox' : 'record';
   if (isLoading) {
     return (
       <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
@@ -179,6 +185,8 @@ export function DocumentChecklist({
         </View>
       </View>
       {checklist.map((docType) => {
+        // [FOOD-PERMIT · owner 24 Oct 2026] the food handlers step is a tick (the server's words), never an upload
+        if (docType === FOOD_HANDLERS_DOC) return <FoodHandlersCard key={docType} role={role} status={status} />;
         const doc = latestDoc(docType);
         // [ROLE-DOCS · owner 21 Oct 2026] the own-name declaration is signed in the app, never uploaded
         if (docType === OWN_NAME_DOC) {
@@ -198,6 +206,7 @@ export function DocumentChecklist({
           <DocumentUploadCard
             consented={consented}
             askConsentFirst={askConsentFirst(docType)}
+            consentVia={consentVia}
             key={docType}
             role={role}
             docType={docType}
@@ -228,6 +237,7 @@ export function DocumentChecklist({
               <DocumentUploadCard
                 consented={consented}
                 askConsentFirst={askConsentFirst(docType)}
+                consentVia={consentVia}
                 key={docType}
                 role={role}
                 docType={docType}
