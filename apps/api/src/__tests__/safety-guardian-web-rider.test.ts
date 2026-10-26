@@ -350,4 +350,31 @@ describe('[WEB-TAXI] the answer link is never throttled for a valid answer', () 
     expect((await session(ride.id)).status).toBe('MONITORING');
     await app.redis.del(`guardian-link-miss:${SHARED_IP}`);
   });
+
+  // [COORD ruling R1 on REVIEW-G S4-1 #1997] A HIGH ceiling on WRONG answers per address: a flood, not a person.
+  // Crossing it pages ops once (a platform page: someone checks the edge); it never touches a valid answer — the
+  // lookup always runs first, so an "I need help" from the same address still lands.
+  it('a flood of wrong answers past the high ceiling pages ops once, and an "I need help" from that address still lands', async () => {
+    const FLOOD_IP = '10.99.0.2';
+    const TITLE = 'Safety check-in links: a flood of wrong answers';
+    const fromFlood = (body: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/safety/public/checkin', payload: body, remoteAddress: FLOOD_IP });
+    await app.prisma.opsAlert.updateMany({ where: { title: TITLE, closedAt: null }, data: { closedAt: new Date(), closeReason: 'test-reset' } });
+    await app.redis.del('guardian-link-flood:page');
+    const t0 = Date.now() - 1_800_000;
+    const { passenger, sessionId, l2At } = await anomalousRide(t0);
+    await healthy().sweep(new Date(l2At));
+    const link = linkOf((await textsTo(passenger.userId)).at(-1)!.body)!;
+    // The address has already sent 1,000 wrong answers in this window (counted the same way as the 50-miss brake).
+    await app.redis.set(`guardian-link-miss:${FLOOD_IP}`, '1000', 'EX', 600);
+    for (let i = 0; i < 3; i += 1) expect((await fromFlood({ ref: link.ref, secret: nanoid(22), response: 'OK' })).statusCode).toBe(429);
+    const pages = await app.prisma.opsAlert.findMany({ where: { title: TITLE, closedAt: null } });
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ kind: 'PLATFORM' });
+    expect(JSON.stringify(pages[0])).not.toContain(FLOOD_IP);
+    const help = await fromFlood({ ...link, response: 'NEED_HELP' });
+    expect(help.statusCode, help.body).toBe(200);
+    expect(await app.prisma.sosAlert.count({ where: { clientIdempotencyKey: `guardian-help:${sessionId}` } })).toBe(1);
+    await app.prisma.opsAlert.updateMany({ where: { title: TITLE, closedAt: null }, data: { closedAt: new Date(), closeReason: 'test-cleanup' } });
+    await app.redis.del(`guardian-link-miss:${FLOOD_IP}`, 'guardian-link-flood:page');
+  }, 120_000);
 });
