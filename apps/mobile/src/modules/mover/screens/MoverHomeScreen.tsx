@@ -12,6 +12,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
 import { boardPaused, recentBoard } from '../../../lib/moverBoard';
+import { workModeLink } from '../../../lib/deliveriesToo';
 import { demandTapFor } from '../demandTap';
 import {
   useMoverKind,
@@ -428,6 +429,7 @@ export function MoverHomeScreen({ navigation }: any) {
     loading,
     error: moverProfileError,
     ambiguous,
+    dual,
     refetch: refetchMoverProfiles,
   } = useMoverKind();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
@@ -510,6 +512,8 @@ export function MoverHomeScreen({ navigation }: any) {
 
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
+  // [CARS-DELIVER] An account with a taxi AND a delivery profile switches work mode from here (offline, no job).
+  const modeLink = workModeLink({ dual: dual === true, kind, online, hasActiveJob: !!activeJob });
   // While the board rests, its last answer is not shown (no stale pins on the map).
   // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
   const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
@@ -793,6 +797,31 @@ export function MoverHomeScreen({ navigation }: any) {
               onPress={() => void startOnline()}
               style={{ marginTop: space.md }}
             />
+          ) : null}
+
+          {/* [CARS-DELIVER] Taxi rides or deliveries, one at a time: the switch for an account with both. */}
+          {modeLink.show ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={modeLink.label}
+              disabled={selectMoverKind.isPending}
+              onPress={() => selectMoverKind.mutate(modeLink.target)}
+              hitSlop={6}
+            >
+              {({ pressed }) => (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, opacity: pressed || selectMoverKind.isPending ? 0.7 : 1 }}>
+                  <Feather name="repeat" size={14} color={dk.accent} />
+                  <T variant="label" weight="bold" style={{ color: dk.accent }}>
+                    {selectMoverKind.isPending ? 'Switching…' : modeLink.label}
+                  </T>
+                </View>
+              )}
+            </Pressable>
+          ) : null}
+          {modeLink.show && selectMoverKind.isError ? (
+            <T variant="caption" style={{ color: dk.accent, marginTop: space.xs }}>
+              We couldn’t switch work modes. Finish any active job, check your connection and try again.
+            </T>
           ) : null}
 
           {/* Why the switch snapped back — the gate's own words, right where you flipped it. */}
