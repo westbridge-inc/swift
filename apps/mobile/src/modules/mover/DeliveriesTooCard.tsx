@@ -36,6 +36,12 @@ export function DeliveriesTooCard({ kind, hasTaxiProfile, style }: { kind: WorkK
     },
     onError: (e: unknown) => toast.error('Deliveries not added', serverMessage(e, 'Check your connection and try again.')),
   });
+  // [PR4] "Taxi rides and deliveries" on or off (PUT /driver/deliveries/mode); the server answers with the card's status.
+  const setBoth = useMutation({
+    mutationFn: (on: boolean) => driverApi.setCarDeliveriesMode(on),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['mover', 'carDeliveries'] }); },
+    onError: (e: unknown) => toast.error('Not changed', serverMessage(e, 'Check your connection and try again.')),
+  });
   const selectKind = useSelectMoverKind();
   if (preview || !hasTaxiProfile) return null;
   const view = deliveriesTooView(status.data, kind);
@@ -67,6 +73,19 @@ export function DeliveriesTooCard({ kind, hasTaxiProfile, style }: { kind: WorkK
             <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
               {serverMessage(selectKind.error, 'We couldn’t switch work modes. Finish any active job, check your connection and try again.')}
             </T>
+          ) : null}
+          {view.both ? (
+            <>
+              <T variant="caption" tone="muted" style={{ marginTop: space.md }}>{view.both.line}</T>
+              <PillButton
+                label={setBoth.isPending ? 'Saving…' : view.both.label}
+                variant={view.both.on ? 'outline' : 'primary'}
+                loading={setBoth.isPending}
+                disabled={setBoth.isPending}
+                style={{ marginTop: space.sm }}
+                onPress={() => setBoth.mutate(!view.both!.on)}
+              />
+            </>
           ) : null}
         </>
       ) : null}

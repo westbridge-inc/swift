@@ -12,7 +12,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
 import { boardPaused, recentBoard } from '../../../lib/moverBoard';
-import { workModeLink } from '../../../lib/deliveriesToo';
+import { offerKindOf, workModeLink } from '../../../lib/deliveriesToo';
 import { demandTapFor } from '../demandTap';
 import {
   useMoverKind,
@@ -442,6 +442,9 @@ export function MoverHomeScreen({ navigation }: any) {
   const accept = useAcceptJob(k);
   const acceptOffer = useAcceptOffer(k);
   const decline = useDeclineOffer(k);
+  // [CARS-DELIVER PR4] On "taxi rides and deliveries" a delivery card can come in taxi mode: it is answered as one.
+  const acceptDelivery = useAcceptOffer('RIDER');
+  const declineDelivery = useDeclineOffer('RIDER');
   const holdRow = useRowHold();
   const selectMoverKind = useSelectMoverKind();
   const earnings = useEarningsToday(kind);
@@ -454,7 +457,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const online = !!profile?.isOnline;
   // [PERF partner #4] A taxi driver's board rests during a ride (one ride at a time).
   const available = useAvailableJobs(kind, online, !!active.data);
-  const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
+  const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online, dual === true && kind === 'DRIVER');
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
   const here = liveLocation
@@ -514,6 +517,10 @@ export function MoverHomeScreen({ navigation }: any) {
   const activeJob = active.data;
   // [CARS-DELIVER] An account with a taxi AND a delivery profile switches work mode from here (offline, no job).
   const modeLink = workModeLink({ dual: dual === true, kind, online, hasActiveJob: !!activeJob });
+  // [CARS-DELIVER PR4] The card, its Accept and its Decline follow the offer's own kind (an older server: this app's).
+  const offerKind = offerKindOf(offer, k);
+  const answerAccept = offerKind === k ? acceptOffer : acceptDelivery;
+  const answerDecline = offerKind === k ? decline : declineDelivery;
   // While the board rests, its last answer is not shown (no stale pins on the map).
   // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
   const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
@@ -1070,9 +1077,9 @@ export function MoverHomeScreen({ navigation }: any) {
           <DispatchOfferCard
           offer={offer}
           job={jobs.find((j) => j.id === offer.orderId)}
-          kind={k}
-          accepting={acceptOffer.isPending}
-          onAccept={() => !acceptOffer.isPending && acceptOffer.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
+          kind={offerKind}
+          accepting={answerAccept.isPending}
+          onAccept={() => !answerAccept.isPending && answerAccept.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {
@@ -1080,7 +1087,7 @@ export function MoverHomeScreen({ navigation }: any) {
             // refused) but be honest if dispatch never heard the decline.
             // [BUG-GUARDS C2] Held per offer: a second tap on THIS card sends nothing, while the next offer's
             // Decline is never held by an earlier decline still in flight.
-            holdRow(offer.offerAttemptId ?? offer.orderId, () => decline.mutateAsync(
+            holdRow(offer.offerAttemptId ?? offer.orderId, () => answerDecline.mutateAsync(
               { orderId: offer.orderId, offerAttemptId: offer.offerAttemptId },
             ).catch(() => toast.show("Couldn't tell dispatch — the offer will time out on its own.")));
             dismiss();

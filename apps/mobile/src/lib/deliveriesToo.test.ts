@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliveriesTooView, switchTarget, workModeLink } from './deliveriesToo';
+import { deliveriesTooView, offerKindOf, switchTarget, workModeLink } from './deliveriesToo';
 
 // [CARS-DELIVER · owner 8 + 25 Oct 2026] "Deliveries too" behind the server's CAR_DELIVERIES switch. The card says
 // nothing unless the server says it can be set up now or is set up; the home link switches work mode only for an
@@ -54,5 +54,42 @@ describe('workModeLink: the home switch', () => {
     expect(home).toContain("const modeLink = workModeLink({ dual: dual === true, kind, online, hasActiveJob: !!activeJob });");
     expect(home).toContain('{modeLink.show ? (');
     expect(home).toContain('onPress={() => selectMoverKind.mutate(modeLink.target)}');
+  });
+});
+
+// [CARS-DELIVER PR4 · COORD 26 Oct] "Taxi rides and deliveries": the taxi driver's toggle, and every offer card
+// answered as the kind of job it is.
+describe('PR4: taxi rides and deliveries', () => {
+  it('the toggle shows in taxi mode only while the switch is on (available), worded for each state', () => {
+    const off = deliveriesTooView({ available: true, enabled: true, takesDeliveries: false }, 'DRIVER');
+    expect(off).toMatchObject({ state: 'ready', both: { on: false, label: 'Taxi rides and deliveries' } });
+    expect((off as { both: { line: string } }).both.line).toContain('still one job at a time');
+    const on = deliveriesTooView({ available: true, enabled: true, takesDeliveries: true }, 'DRIVER');
+    expect(on).toMatchObject({ state: 'ready', both: { on: true, label: 'Taxi rides only' } });
+    expect((on as { both: { line: string } }).both.line).toContain('After a delivery you go back to taxi rides and deliveries.');
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: true }, 'RIDER')).toMatchObject({ both: null });
+    expect(deliveriesTooView({ available: false, enabled: true, reason: 'SWITCH_OFF', takesDeliveries: true }, 'DRIVER')).toMatchObject({ state: 'paused' });
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: 'true' }, 'DRIVER')).toMatchObject({ both: { on: false } });
+  });
+
+  it('offerKindOf: the server names the job; without it, the app kind as before', () => {
+    expect(offerKindOf({ orderType: 'TAXI' }, 'RIDER')).toBe('DRIVER');
+    expect(offerKindOf({ orderType: 'FOOD_DELIVERY' }, 'DRIVER')).toBe('RIDER');
+    expect(offerKindOf({ orderType: 'COURIER' }, 'DRIVER')).toBe('RIDER');
+    expect(offerKindOf({}, 'DRIVER')).toBe('DRIVER');
+    expect(offerKindOf(null, 'RIDER')).toBe('RIDER');
+    expect(offerKindOf({ orderType: '' }, 'DRIVER')).toBe('DRIVER');
+  });
+
+  it('the home answers each card as its own kind, and the offer hook recovers and marks cards by kind', () => {
+    const home = readFileSync(join(process.cwd(), 'src/modules/mover/screens/MoverHomeScreen.tsx'), 'utf8');
+    expect(home).toContain("const offerKind = offerKindOf(offer, k);");
+    expect(home).toContain('const answerAccept = offerKind === k ? acceptOffer : acceptDelivery;');
+    expect(home).toContain('const answerDecline = offerKind === k ? decline : declineDelivery;');
+    expect(home).toContain('kind={offerKind}');
+    expect(home).toContain("useDispatchOffers(kind, online, dual === true && kind === 'DRIVER')");
+    const hook = readFileSync(join(process.cwd(), 'src/hooks/dispatchOffers.ts'), 'utf8');
+    expect(hook).toContain("if (!data?.offer?.orderId && alsoDeliveries && kind === 'DRIVER') {");
+    expect(hook).toContain("const api = offerKindOf(offer, kind) === 'DRIVER' ? driverApi : riderApi;");
   });
 });
