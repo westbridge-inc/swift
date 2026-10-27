@@ -47,7 +47,7 @@ describe('[ADMIN-AUDIT S2-1] Today lists every queue that waits for a person', (
     expect(doors()).toEqual([
       ['1 SOS or ops page waiting to be acknowledged', '/ops-alerts'],
       ['1 safety ticket open', '/support?status=OPEN'],
-      ['13 documents waiting for review', '/verification'],
+      ['13 documents waiting for review (both lanes; VAT certificates are under Store VAT)', '/verification'],
       ['1 request waiting for a second admin', '/approvals'],
     ]);
     expect(screen.queryByText(/All clear/)).toBeNull();
@@ -66,7 +66,7 @@ describe('[ADMIN-AUDIT S2-1] Today lists every queue that waits for a person', (
   it('the overview\'s own alerts stay, after SOS and safety', async () => {
     page({ body: { success: true, data: counts({ supportSafety: 1, documents: 2 }) } }, { ...quiet, alerts: { pendingVendors: 3, pastDueSubs: 0, unassignedOrders: 2 } });
     await waitFor(() => expect(doors()).toHaveLength(4));
-    expect(doors().map(([text]) => text)).toEqual(['1 safety ticket open', '2 orders unassigned for > 10 minutes', '2 documents waiting for review', '3 vendors pending approval']);
+    expect(doors().map(([text]) => text)).toEqual(['1 safety ticket open', '2 orders unassigned for > 10 minutes', '2 documents waiting for review (both lanes; VAT certificates are under Store VAT)', '3 vendors pending approval']);
   });
 
   it('a queue the server could not count is said to be unknown, never zero, and is not "All clear"', async () => {

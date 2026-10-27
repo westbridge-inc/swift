@@ -77,6 +77,19 @@ export default function SupportPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['support'] }),
   });
 
+  // [ADMIN-AUDIT S3-6] Each act says where the ticket went, with a door to that tab: the ticket used to just
+  // leave the list. And only the ticket being taken waits (one pending take used to hold every row's button).
+  const [done, setDone] = useState<{ words: string; tab: (typeof FILTERS)[number] } | null>(null);
+  const [taking, setTaking] = useState<ReadonlySet<string>>(new Set());
+  const takeTicket = (t: { id: string; subject: string; status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) => {
+    setDone(null);
+    setTaking((ids) => new Set(ids).add(t.id));
+    take.mutate({ id: t.id, expectedStatus: t.status }, {
+      onSuccess: () => setDone({ words: `You took “${t.subject}”. It is now under ${label('SupportStatus', 'IN_PROGRESS')}.`, tab: 'IN_PROGRESS' }),
+      onSettled: () => setTaking((ids) => { const next = new Set(ids); next.delete(t.id); return next; }),
+    });
+  };
+
   /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
   const [completing, setCompleting] = useState<{ id: string; reason: string } | null>(null);
   const closeAccount = useMutation({
@@ -110,6 +123,15 @@ export default function SupportPage() {
           ))}
         </div>
       </div>
+      {done && (
+        <div role="status" className="mc-note mc-note-good mb-3 flex flex-wrap items-center gap-3">
+          <span className="flex-1 text-sm">{done.words}</span>
+          {done.tab !== filter && (
+            <button type="button" className="mc-btn" onClick={() => { setFilter(done.tab); setDone(null); }}>Show {label('SupportStatus', done.tab)}</button>
+          )}
+          <button type="button" className="mc-btn" aria-label="Dismiss" onClick={() => setDone(null)}>×</button>
+        </div>
+      )}
       <div className="mc-list">
         {isLoading ? (
           <div className="mc-loading" aria-busy="true">Loading tickets…</div>
@@ -232,11 +254,11 @@ export default function SupportPage() {
                         {t.status === 'OPEN' && (
                           <button
                             type="button"
-                            onClick={() => take.mutate({ id: t.id, expectedStatus: t.status })}
-                            disabled={take.isPending}
+                            onClick={() => takeTicket(t)}
+                            disabled={taking.has(t.id)}
                             className="mc-btn"
                           >
-                            {take.isPending && take.variables?.id === t.id ? 'Taking…' : 'Take it'}
+                            {taking.has(t.id) ? 'Taking…' : 'Take it'}
                           </button>
                         )}
                         <button
@@ -284,15 +306,21 @@ export default function SupportPage() {
                         ) : null}
                         <div className="mc-actions">
                           <button
-                            onClick={() =>
+                            onClick={() => {
+                              const note = closing?.note?.trim() || undefined;
+                              const how = RESOLUTIONS.find((r) => r.value === closing?.resolution)?.label;
+                              setDone(null);
                               resolve.mutate({
                                 id: t.id,
                                 status: 'RESOLVED',
-                                note: closing?.note?.trim() || undefined,
+                                note,
                                 resolution: (closing?.resolution || undefined) as SupportResolution | undefined,
                                 expectedStatus: t.status,
-                              })
-                            }
+                              }, {
+                                // [ADMIN-AUDIT S3-6] the note is what the reporter reads (WR-022): say it went to them
+                                onSuccess: () => setDone({ words: `Closed “${t.subject}”${how ? `: ${how}` : ''}.${note ? ' Your note was sent to them.' : ''}`, tab: 'RESOLVED' }),
+                              });
+                            }}
                             disabled={resolve.isPending || cannotClose}
                             className="mc-btn mc-btn-primary"
                           >

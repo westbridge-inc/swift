@@ -12,8 +12,7 @@ import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX,
   canApply, awaitsRequester, snapshotEntries, soloWaitCopy, SOLO_EXPLAIN, needsStepUp,
-  type ApprovalRow,
-} from '@/lib/approvals';
+  type ApprovalRow, personWords } from '@/lib/approvals';
 
 const FILTERS = ['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED'] as const;
 
@@ -153,7 +152,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
       <blockquote className="border-l-2 border-[var(--mc-accent)] pl-3 mb-3">
         <p className="text-sm">{row.reason}</p>
         <p className="text-xs mc-muted mt-1">
-          asked by {row.requestedBy}
+          asked by {personWords(row.requestedByName, row.requestedBy)}
           {row.isOwnRequest ? ' (you)' : ''} · {new Date(row.createdAt).toLocaleString()}
         </p>
       </blockquote>
@@ -193,7 +192,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
 
       {row.decidedAt && (
         <p className="text-xs mc-muted mb-2">
-          {row.status.toLowerCase()} by {row.approvedBy} · {new Date(row.decidedAt).toLocaleString()}
+          {row.status.toLowerCase()} by {personWords(row.approvedByName, row.approvedBy)} · {new Date(row.decidedAt).toLocaleString()}
           {row.decisionNote ? ` — “${row.decisionNote}”` : ''}
         </p>
       )}

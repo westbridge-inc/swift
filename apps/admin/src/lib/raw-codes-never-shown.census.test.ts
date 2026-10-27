@@ -331,6 +331,7 @@ const KNOWN: Record<string, string> = {
   "lib/approvals.ts | segment .replace(/[-_]/g, ' ')": 'describeAction(): the approval queue names the admin ROUTE being approved from its path segments ("Change: Billing → Agent Payments → Refund Flag", pinned in approvals.test.ts), not a status code.',
   "lib/labels.ts | value.toLowerCase().replaceAll('_', ' ')": 'The floor of label(): it runs only for a value ENUM_LABELS has not been taught yet; labels.test.ts keeps it unreachable for every enum listed there.',
   "components/mc/ActivationChecklist.tsx | docType.replaceAll('_', ' ')": 'Fallback after docLabel() for a document type it does not know: document names are nouns (road_service_licence -> "Road service licence"), not a status code.',
+  'app/audit/page.tsx | e.reason': '[ADMIN-AUDIT S3-5] The reason the person TYPED when acting (the audit row\'s changes.reason, free text), shown in quotes: words, not a code.',
 };
 
 const ALL = sources(SRC).flatMap((p) => scan(relative(SRC, p), readFileSync(p, 'utf8')));
