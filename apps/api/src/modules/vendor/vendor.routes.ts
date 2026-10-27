@@ -3159,10 +3159,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 4. MENU — Categories
   // =========================================================================
 
-  /** GET /categories — List all categories for the vendor */
+  /** GET /categories — List all categories for the vendor (the phone's menu read).
+   *  [TAP-AUDIT 27 Oct] Each item as GET /items and the item editor's answers carry it: its bulk as the WORD (G2: the
+   *  integer never crosses the wire) and why customers cannot see it (GUARDRAILS §8). The phone's editor opened from
+   *  this read showed every item as "Normal" and saved that back, so editing a 20 kg bag's price made it bicycle-
+   *  sized for dispatch; and the menu never showed "Waiting for a quick check". Additive for every app (no client
+   *  reads bulkUnits). */
   app.get('/categories', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
-    return { success: true, data: await menu.listCategories(vendorId) };
+    const categories = await menu.listCategories(vendorId);
+    const checks = await catalogueChecksFor(app.prisma, categories.flatMap((c) => c.items.map((i) => i.id)));
+    const data = categories.map((category) => ({
+      ...category,
+      items: category.items.map((item) => ({ ...withBulkWord(item), catalogueCheck: partnerView(checks.get(item.id)) })),
+    }));
+    return { success: true, data };
   });
 
   /** POST /categories — Create a category */
