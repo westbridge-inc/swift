@@ -251,7 +251,7 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
   | `UNKNOWN` | "Open the Swift app to see your weekly fee." |
 
   The page carries no amount, name, card or id: anyone who holds the link would see it.
-- **Every state shows two links:**
+- **Every state shows two ways back, as Swift's buttons** (links styled as the app's pill buttons):
   - "Back to the Swift app" → `swift://pay/card/return`, with no parameters;
   - "Continue on the web" → the web's neutral weekly-fee route, `<APP_PUBLIC_URL>/weekly-fee` (the same route as the MMG return page), which picks the dashboard or the portal from the signed-in session.
 - **It waits at most 20 seconds for the provider's answer.** Past that it shows `PENDING`; the answer is still recorded when it comes, and the sweep asks again if it never does.
@@ -264,6 +264,8 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
 - On the provider's test system it carries the test label (`testMode: true`, `testModeLabel`), as the CARD entry and the session do.
 - The card is typed and the bank's 3-D Secure check runs inside the iframe. When the check is done, the return page above appears inside the same frame with the same two links ("Back to the Swift app" closes the in-app sheet).
 - Once the page is finished or expired it shows "This card page has ended" and no form. It sends its own strict content policy, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and is never logged.
+
+**How these pages look** (`card-page-look.ts`, owner 27 Oct 2026: "make it look like the rest of Swift"). The card page, its ended and missing states, the return page and the simulator wear the Swift app's look, read from `packages/ui`: the app's paper and ink, Indian Red, the kit's pill buttons ("Back to the Swift app" primary; "Continue on the web" and "Cancel and go back to the Swift app" soft), its tone chips (the return states use the app's tones: Done success, Checking waiting, didn't go through error, otherwise neutral; the unknown state is headed "Weekly fee", as the MMG return page is) and the Swift mark. They are light only, like the app and the web. Every style is in the page's one inline stylesheet and the mark and icons are inline shapes: nothing is loaded from anywhere, and no page policy changed for the look. The bank's frame is untouched: the card is typed only in it.
 - Nothing about opening it changes for the app: open `hostedUrl` in the in-app sheet (phone) or the same tab (web), then poll the session.
 
 **The simulator** (staging only; production refuses it) serves its page at `hostedUrl`:
