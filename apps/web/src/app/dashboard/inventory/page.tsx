@@ -50,6 +50,11 @@ function RowThumb({ url }: { url: string }) {
   const tools = menuTools.usePart(true);
   return tools ? <tools.Thumb url={url} fallback={<Pictogram name="food" size={26} />} /> : <Pictogram name="food" size={26} />;
 }
+/** [REVIEW-F #2142 S4-1] As the app: an outside photo address is named for what it is (drawn by the tools chunk). */
+function RowPhotoNote({ url }: { url: string }) {
+  const tools = menuTools.usePart(true);
+  return tools ? <tools.PhotoNote url={url} /> : null;
+}
 /** [STORE-VAT] The owner's VAT class select and its note, drawn by the tools chunk (only VAT-registered stores). */
 function RowVat(props: { item: CatalogItem; vatRate: number; vatEffective: boolean; pending: boolean; onVatClass: (_id: string, _vatClass: VatClass) => void }) {
   const tools = menuTools.usePart(true);
@@ -104,6 +109,7 @@ const ItemRow = memo(function ItemRow({ item: i, pending, pricePending, manager,
       </span>
       <div className={`min-w-0 flex-1 ${i.isAvailable ? '' : 'opacity-60'}`}><h2 className="sw-label">{i.name}</h2><p className="sw-caption">{i.category?.name ?? 'Uncategorised'}</p>
         {i.catalogueCheck && <CatalogueCheckNote check={i.catalogueCheck} />}
+        {i.imageUrl && <RowPhotoNote url={i.imageUrl} />}
         {editingPrice ? <RowTool tool="price" item={i} onSave={(price) => onPrice(i, price)} onDone={() => onEditPrice(null)} /> : <button onClick={() => onEditPrice(i.id)} disabled={pricePending} className={`min-h-8 font-semibold hover:underline ${pricePending ? 'opacity-60' : ''}`}>{money(i.basePrice)}</button>}
       </div>
       <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => onToggle(i.id, !i.isAvailable)} disabled={pending}

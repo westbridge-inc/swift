@@ -1,6 +1,9 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import InventoryPage from './page';
+import { OUTSIDE_PHOTO_NOTE } from './menu-tools';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
 
 // ---------------------------------------------------------------------------
@@ -219,6 +222,16 @@ describe('[TAP-AUDIT] the web adds and edits items like the app', () => {
     expect(screen.getByRole('article', { name: 'Rice 20 kg' }).querySelector('img')).toBeNull();
   });
 
+  it('[REVIEW-F #2142 S4-1] that row says why, in the app\'s words; a photo Swift keeps, or none, says nothing', async () => {
+    items = items.map((i) => (i.id === 'rice' ? { ...i, imageUrl: 'https://elsewhere.example/rice.jpg' } : i));
+    renderWithQuery(<InventoryPage />);
+    const rice = await screen.findByRole('article', { name: 'Rice 20 kg' });
+    expect(await within(rice).findByText(OUTSIDE_PHOTO_NOTE)).toBeTruthy();
+    expect(within(screen.getByRole('article', { name: 'Roti' })).queryByText(OUTSIDE_PHOTO_NOTE)).toBeNull();
+    const app = readFileSync(join(process.cwd(), '..', 'mobile', 'src', 'modules', 'vendor', 'screens', 'VendorMenuScreen.tsx'), 'utf8');
+    expect(app, 'the same words as the app').toContain(`OUTSIDE_PHOTO_NOTE = ${JSON.stringify(OUTSIDE_PHOTO_NOTE)}`);
+  });
+
   it('an item\'s own photo is on its row (a small copy from the store-photo route)', async () => {
     renderWithQuery(<InventoryPage />);
     const roti = await screen.findByRole('article', { name: 'Roti' });
@@ -346,12 +359,14 @@ describe('[REVIEW-F #2142 S4-4] the editor draws only a photo Swift keeps, or th
     let editor = await dialog();
     expect(editor.querySelector('img')).toBeNull();
     expect(within(editor).getByText('Add a photo')).toBeTruthy();
+    expect(within(editor).getByText(OUTSIDE_PHOTO_NOTE), '[REVIEW-F #2142 S4-1] and says why').toBeTruthy();
     await click(within(editor).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await click(within(screen.getByRole('article', { name: 'Roti' })).getByRole('button', { name: 'Edit item' }));
     editor = await dialog();
     expect(editor.querySelector('img')?.getAttribute('src')).toContain('/media/items/store-1/abcdefghijklmnop.jpg');
     expect(within(editor).getByText('Change photo')).toBeTruthy();
+    expect(within(editor).queryByText(OUTSIDE_PHOTO_NOTE)).toBeNull();
   });
 });
 
