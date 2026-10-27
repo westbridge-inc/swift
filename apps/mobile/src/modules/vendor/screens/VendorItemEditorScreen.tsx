@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useVendorMutation } from '../../../hooks/useVendorMutation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { usePreventRemove } from '@react-navigation/native';
 import { useQueryClient } from '@tanstack/react-query';
 import { Pressable, ScrollView, View } from 'react-native';
@@ -37,7 +37,11 @@ import {
   useDeleteOptionGroup,
   useAddOption,
   useDeleteOption,
+  MENU_WRITE_KEY,
+  answerIntoMenu,
+  menuScope,
 } from '../../../hooks/vendorops';
+import { menuWithItemFields } from '../../../lib/menuAnswers';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -51,15 +55,60 @@ import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
 
+/** [TAP-AUDIT] An option group (with its choices) written on a NEW item, before its first save: kept on the phone and
+ *  sent with the item in the one create request (POST /vendor/items takes `optionGroups`), so a store adds an item
+ *  with its sizes in one visit instead of saving, finding the item again and adding each choice one request at a time. */
+export type DraftOptionGroup = {
+  key: string;
+  name: string;
+  isRequired: boolean;
+  maxSelect: number;
+  options: { key: string; name: string; additionalPrice: number }[];
+};
+
+/** The create request's `optionGroups`, exactly what the store typed (the server checks every name, as it does for
+ *  a group added later). */
+export function draftOptionGroupsPayload(groups: DraftOptionGroup[]) {
+  return groups.map((g) => ({
+    name: g.name,
+    isRequired: g.isRequired,
+    minSelect: g.isRequired ? 1 : 0,
+    maxSelect: g.maxSelect,
+    options: g.options.map((o) => ({ name: o.name, additionalPrice: o.additionalPrice })),
+  }));
+}
+
+let draftKeys = 0;
+const nextDraftKey = () => `draft-${++draftKeys}`;
+
+/** [REVIEW-F #2141 S4-2] The item or its section was deleted on another phone: the server's "Category with id … not
+ *  found" names an internal id, so the store reads this instead. */
+export const ITEM_GONE_WORDS = 'This section or item was removed on another phone. Go back and open the menu again.';
+
+/** [TAP-AUDIT] Why the server would not save the item, in its own words (a banned word, documents not yet checked).
+ *  A refusal with no words for a person (the form's shape, a duplicate, a server fault) keeps the editor's own
+ *  sentence; a missing item or section says so in plain words. */
+export function saveRefusal(error: unknown): string | null {
+  const body = (error as { response?: { data?: { error?: { code?: unknown; message?: unknown } } } } | null)?.response?.data?.error;
+  if (body?.code === 'NOT_FOUND') return ITEM_GONE_WORDS;
+  if (!body || body.code === 'VALIDATION_ERROR' || body.code === 'DUPLICATE' || body.code === 'INTERNAL_ERROR') return null;
+  if (typeof body.message !== 'string' || !body.message.trim()) return null;
+  return body.message;
+}
+
 /**
  * Modifiers editor (master plan §4.2): size / add-ons / toppings on an item.
  * The OptionGroup CRUD already exists server-side — this is its operator UI.
  * Mutations resolve to the created row, so the list updates from the response
- * instead of waiting on the menu query.
+ * instead of waiting on the menu query. On a NEW item (no id yet) the groups and
+ * choices are a draft the editor sends with the item ([TAP-AUDIT], `staged`).
  */
-function ModifiersSection({ item }: { item: any }) {
+function ModifiersSection({ item, staged }: { item: any; staged?: { groups: DraftOptionGroup[]; set: Dispatch<SetStateAction<DraftOptionGroup[]>> } }) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
-  const [groups, setGroups] = useState<any[]>(item.optionGroups ?? []);
+  const [savedGroups, setGroups] = useState<any[]>(item?.optionGroups ?? []);
+  const groups: any[] = staged
+    ? staged.groups.map((g) => ({ id: g.key, name: g.name, isRequired: g.isRequired, maxSelect: g.maxSelect, options: g.options.map((o) => ({ id: o.key, name: o.name, additionalPrice: o.additionalPrice })) }))
+    : savedGroups;
   const addGroup = useAddOptionGroup();
   const delGroup = useDeleteOptionGroup();
   const addOption = useAddOption();
@@ -76,6 +125,13 @@ function ModifiersSection({ item }: { item: any }) {
     if (readOnly) return;
     const name = groupName.trim();
     if (!name || addGroup.isPending) return;
+    if (staged) {
+      staged.set((gs) => [...gs, { key: nextDraftKey(), name, isRequired: groupRequired, maxSelect: groupMulti ? 10 : 1, options: [] }]);
+      setGroupName('');
+      setGroupRequired(false);
+      setGroupMulti(false);
+      return;
+    }
     const owner = requireAuthSessionSnapshot();
     const g = await addGroup.mutateAsync({
       itemId: item.id,
@@ -94,6 +150,12 @@ function ModifiersSection({ item }: { item: any }) {
     const d = draft(groupId);
     const name = d.name.trim();
     if (!name || addOption.isPending) return;
+    if (staged) {
+      const additionalPrice = Number(d.price) || 0;
+      staged.set((gs) => gs.map((g) => (g.key === groupId ? { ...g, options: [...g.options, { key: nextDraftKey(), name, additionalPrice }] } : g)));
+      setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
+      return;
+    }
     const owner = requireAuthSessionSnapshot();
     const opt = await addOption.mutateAsync({
       groupId,
@@ -109,6 +171,10 @@ function ModifiersSection({ item }: { item: any }) {
   const holdRow = useRowHold();
   const removeOption = (groupId: string, optionId: string) => {
     if (readOnly) return;
+    if (staged) {
+      staged.set((gs) => gs.map((g) => (g.key === groupId ? { ...g, options: g.options.filter((o) => o.key !== optionId) } : g)));
+      return;
+    }
     const owner = requireAuthSessionSnapshot();
     // [REVIEW-F #2123 S3-1] The option comes off on ITS OWN call's promise: with two options' x in flight, per-call
     // callbacks (mutate/mutateAsync options) reach only the latest call. A sample preview never gets here (readOnly).
@@ -130,6 +196,11 @@ function ModifiersSection({ item }: { item: any }) {
       <T variant="label" tone="muted" style={{ marginTop: 4 }}>
         Sizes, toppings, extras — customers pick these when ordering.
       </T>
+      {staged && groups.length > 0 ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+          Saved with the item when you tap Add item.
+        </T>
+      ) : null}
       {readOnly ? (
         <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
           Read-only in the sample preview.
@@ -147,7 +218,13 @@ function ModifiersSection({ item }: { item: any }) {
                 {g.isRequired ? 'Required' : 'Optional'} · {g.maxSelect > 1 ? `up to ${g.maxSelect}` : 'pick one'}
               </T>
             </View>
-            <Pressable disabled={readOnly} onPress={() => setRemoveGroupId(g.id)} hitSlop={8}>
+            <Pressable
+              disabled={readOnly}
+              onPress={() => (staged ? staged.set((gs) => gs.filter((d) => d.key !== g.id)) : setRemoveGroupId(g.id))}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${g.name}`}
+            >
               <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
                 <Feather name="trash-2" size={18} color={color.text.muted} />
               </View>
@@ -268,12 +345,20 @@ function StockAdjustRow({ item }: { item: any }) {
   // failure cannot move stock twice; changing the entry is a new adjustment.
   const [commandKey, setCommandKey] = useState(() => Crypto.randomUUID());
   const adjust = useVendorMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }, commandKey),
-    onSuccess: () => {
+    onMutate: menuScope,
+    onSuccess: (res: any, _vars: void, scope) => {
       setCommandKey(Crypto.randomUUID());
       setOpen(false);
       setDelta('');
-      qc.invalidateQueries({ queryKey: ['vendor', 'menu'] });
+      // [TAP-AUDIT] The count the ledger now holds goes into the menu at once; the menu is read again once, later.
+      const answer = res?.data?.data;
+      const fields = {
+        ...(typeof answer?.stockQuantity === 'number' ? { stockQuantity: answer.stockQuantity } : {}),
+        ...(typeof answer?.isAvailable === 'boolean' ? { isAvailable: answer.isAvailable } : {}),
+      };
+      answerIntoMenu(qc, scope, (menu) => menuWithItemFields(menu, item.id, fields));
     },
   });
   const n = Number(delta);
@@ -365,9 +450,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   // "Discard your changes?"; Discard lets that same navigation through. A
   // change is a difference from how the editor opened (a toggle put back is
   // not one); a saved item, or a read-only preview, leaves without an ask.
+  // [TAP-AUDIT] A new item's option groups and choices, sent with it in the one create request.
+  const [draftGroups, setDraftGroups] = useState<DraftOptionGroup[]>([]);
   const formNow = JSON.stringify([
     name, price, description, categoryId, available, popular, sku, unit, bulk, stock, lowStock,
     duration, [...days].sort((a, b) => a - b), startTime, endTime, mode, radiusKm,
+    draftGroups.map((g) => [g.name, g.isRequired, g.maxSelect, g.options.map((o) => [o.name, o.additionalPrice])]),
   ]);
   const [formAtOpen] = useState(formNow);
   const [leaving, setLeaving] = useState(false);
@@ -454,6 +542,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               // '' clears tracking (null) so a vendor can stop tracking stock.
               stockQuantity: stock.trim() === '' ? null : Number.isFinite(stockNum as number) ? stockNum : undefined,
               lowStockThreshold: lowStock.trim() === '' ? null : Number(lowStock) >= 0 ? Number(lowStock) : undefined,
+              // [TAP-AUDIT] A new item's groups and choices travel with it (one request, not one per choice).
+              ...(!existing && draftGroups.length > 0 ? { optionGroups: draftOptionGroupsPayload(draftGroups) } : {}),
             }),
       },
     });
@@ -663,9 +753,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
         {existing && !isService ? (
           <ModifiersSection item={existing} />
         ) : !isService ? (
-          <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
-            Save the item first to add options &amp; add-ons (sizes, toppings, extras).
-          </T>
+          <ModifiersSection item={null} staged={{ groups: draftGroups, set: setDraftGroups }} />
         ) : null}
 
         <T variant="label" weight="semibold" tone="muted" style={{ marginTop: space.lg, marginBottom: space.sm }}>
@@ -684,7 +772,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
         {save.isError ? (
           <T variant="label" tone="error" style={{ marginBottom: space.md }}>
-            Couldn&apos;t save. Check the details and try again.
+            {saveRefusal(save.error) ?? "Couldn't save. Check the details and try again."}
           </T>
         ) : null}
         {/* [#947's grammar] A disabled button says WHY — the first unmet

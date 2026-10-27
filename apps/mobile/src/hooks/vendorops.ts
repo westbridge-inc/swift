@@ -4,7 +4,7 @@ import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Vibration } from 'react-native';
-import { useMutationState, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
+import { useMutationState, useQuery, useQueryClient, type QueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
 import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
@@ -27,6 +27,10 @@ import {
 import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { withStoreFields, withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
+import {
+  MENU_REREAD_SETTLE_MS, menuWithItem, menuWithItemFields, menuWithOption, menuWithOptionGroup, menuWithSection,
+  menuWithoutItem, menuWithoutOption, menuWithoutOptionGroup, menuWithoutSection,
+} from '../lib/menuAnswers';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
@@ -729,6 +733,48 @@ export function usePickingActions() {
 
 // ─── Menu ────────────────────────────────────────────────────────────────────
 
+const MENU_KEY = ['vendor', 'menu'] as const;
+/** [TAP-AUDIT] Every menu change carries this key, so the one re-read waits while any change is still on its way. */
+export const MENU_WRITE_KEY = ['vendor', 'menu', 'write'] as const;
+export type MenuScope = { storeId: string | null; generation: number };
+/** The store a menu change is sent for (onMutate): its answer is written only while that store is still the one shown. */
+export function menuScope(): MenuScope {
+  const s = useStoreSwitcher.getState();
+  return { storeId: s.selectedStoreId, generation: s.storeGeneration };
+}
+function sameMenuScope(scope: MenuScope | undefined): boolean {
+  const s = useStoreSwitcher.getState();
+  return !!scope && s.selectedStoreId === scope.storeId && s.storeGeneration === scope.generation;
+}
+const menuRereads = new WeakMap<QueryClient, ReturnType<typeof setTimeout>>();
+/** [TAP-AUDIT] ONE re-read of the menu after a burst of changes (lib/menuAnswers): it waits until the changes stop
+ *  and none is still on its way (a re-read then would show that change's old value for a moment). */
+export function rereadMenuSoon(qc: QueryClient, delay = MENU_REREAD_SETTLE_MS): void {
+  const waiting = menuRereads.get(qc);
+  if (waiting) clearTimeout(waiting);
+  menuRereads.set(qc, setTimeout(() => {
+    menuRereads.delete(qc);
+    if (qc.isMutating({ mutationKey: MENU_WRITE_KEY }) > 0) {
+      rereadMenuSoon(qc, delay);
+      return;
+    }
+    void qc.invalidateQueries({ queryKey: MENU_KEY });
+  }, delay));
+}
+/** [TAP-AUDIT] The server's answer written into the menu on screen (for the store it was sent for), then the one
+ *  re-read. Returns nothing: the button is free at the answer, not after a whole-menu download. */
+export function answerIntoMenu(qc: QueryClient, scope: MenuScope | undefined, apply: (menu: unknown) => unknown): void {
+  if (!sameMenuScope(scope)) return;
+  if (qc.getQueryData(MENU_KEY) !== undefined) {
+    // [REVIEW-G #2141 S3-1] A menu read already on its way left BEFORE this change: landing, it would put the old menu
+    // back on screen (a switched-off item on again, a deleted one back) until the next re-read. It is cancelled (the
+    // menu stays as the screen held it) and the answer is written; the one re-read below reads the menu again.
+    void qc.cancelQueries({ queryKey: MENU_KEY, exact: true });
+    qc.setQueryData(MENU_KEY, (menu: unknown) => (menu === undefined ? menu : apply(menu)));
+  }
+  rereadMenuSoon(qc);
+}
+
 /** Categories with their nested items (the menu, grouped by section). */
 export function useVendorMenu(enabled = true) {
   const pv = usePreviewDataset();
@@ -739,16 +785,20 @@ export function useVendorMenu(enabled = true) {
 export function useCreateCategory() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (data: { name: string }) => unwrap(vendorApi.createCategory(data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _data, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
 export function useUpdateCategory() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ id, data }: { id: string; data: { name?: string } }) => unwrap(vendorApi.updateCategory(id, data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _vars, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
@@ -756,15 +806,19 @@ export function useUpdateCategory() {
 export function useDeleteCategory() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (id: string) => unwrap(vendorApi.deleteCategory(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, id, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutSection(menu, id)),
   });
 }
 
-/** Create (no id) or update (id present) an item. */
+/** Create (no id) or update (id present) an item. A new item may carry its option groups and their choices
+ *  (`data.optionGroups`): the server saves them with the item, in the same request. */
 export function useSaveItem() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ id, data, authSession, storeId }: {
       id?: string;
       data: any;
@@ -774,94 +828,117 @@ export function useSaveItem() {
       id
         ? unwrap(vendorApi.updateItem(id, data, authSession, storeId))
         : unwrap(vendorApi.createItem(data, authSession, storeId)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _vars, scope) => answerIntoMenu(qc, scope, (menu) => menuWithItem(menu, answer)),
   });
 }
 
 export function useDeleteItem() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (id: string) => unwrap(vendorApi.deleteItem(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, id, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutItem(menu, id)),
   });
 }
 
 export function useSetItemAvailability() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ id, isAvailable }: { id: string; isAvailable: boolean }) =>
-      unwrap(vendorApi.setItemAvailability(id, isAvailable)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+      unwrap<{ isAvailable?: unknown }>(vendorApi.setItemAvailability(id, isAvailable)),
+    onMutate: menuScope,
+    onSuccess: (answer, { id }, scope) => answerIntoMenu(qc, scope, (menu) => (
+      typeof answer?.isAvailable === 'boolean' ? menuWithItemFields(menu, id, { isAvailable: answer.isAvailable }) : menu
+    )),
   });
 }
 
 // ─── Modifiers (option groups + options) ─────────────────────────────────────
-// Each mutation resolves to the updated group (with options) so the editor can
-// refresh its local list without waiting for the menu query.
+// Each mutation resolves to the saved group (with options) or option, so the editor updates its own list from the
+// answer, and the menu takes the same answer (no whole-menu download per choice).
 
 export function useAddOptionGroup() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ itemId, data, authSession }: {
       itemId: string;
       data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number };
       authSession?: AuthSessionSnapshot;
     }) => unwrap<any>(vendorApi.addOptionGroup(itemId, data, authSession)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, { itemId }, scope) => answerIntoMenu(qc, scope, (menu) => menuWithOptionGroup(menu, itemId, answer)),
   });
 }
 
 export function useDeleteOptionGroup() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (input: string | { id: string; authSession?: AuthSessionSnapshot }) => {
       const id = typeof input === 'string' ? input : input.id;
       const authSession = typeof input === 'string' ? undefined : input.authSession;
       return unwrap(vendorApi.deleteOptionGroup(id, authSession));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, input, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutOptionGroup(menu, typeof input === 'string' ? input : input.id)),
   });
 }
 
 export function useAddOption() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ groupId, data, authSession }: {
       groupId: string;
       data: { name: string; additionalPrice?: number };
       authSession?: AuthSessionSnapshot;
     }) => unwrap<any>(vendorApi.addOption(groupId, data, authSession)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, { groupId }, scope) => answerIntoMenu(qc, scope, (menu) => menuWithOption(menu, groupId, answer)),
   });
 }
 
 export function useDeleteOption() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (input: string | { id: string; authSession?: AuthSessionSnapshot }) => {
       const id = typeof input === 'string' ? input : input.id;
       const authSession = typeof input === 'string' ? undefined : input.authSession;
       return unwrap(vendorApi.deleteOption(id, authSession));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, input, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutOption(menu, typeof input === 'string' ? input : input.id)),
   });
 }
 
-/** Upload (or replace) an item's photo — multipart to the StorageProvider. */
+/** Upload (or replace) an item's photo — multipart to the StorageProvider. [TAP-AUDIT] Sized on the phone first, as
+ *  section and store photos are (lib/uploadImage: 1280 px, a few hundred KB instead of a 2-4 MB camera original, so
+ *  seconds instead of most of a minute on a mobile line); the server still checks, scans and redraws it. If the
+ *  phone cannot size it (an older app binary, a decoder failure), the original is sent, never dropped. */
 export function useUploadItemImage() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ id, file, authSession, storeId }: {
+    mutationKey: MENU_WRITE_KEY,
+    mutationFn: async ({ id, file, authSession, storeId }: {
       id: string;
       file: { uri: string; name: string; type: string };
       authSession?: AuthSessionSnapshot;
       storeId?: string | null;
     }) => {
+      const prepared = await prepareUploadImage(file);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
-      return unwrap(vendorApi.uploadItemImage(id, form, authSession, storeId));
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap<{ imageUrl?: unknown }>(vendorApi.uploadItemImage(id, form, authSession, storeId));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, { id }, scope) => answerIntoMenu(qc, scope, (menu) => (
+      answer && 'imageUrl' in answer ? menuWithItemFields(menu, id, { imageUrl: answer.imageUrl }) : menu
+    )),
   });
 }
 
@@ -870,13 +947,15 @@ export function useUploadItemImage() {
 export function useUploadCategoryPhoto() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: async ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
       const prepared = await prepareUploadImage(file);
       const form = new FormData();
       form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
       return unwrap(vendorApi.uploadCategoryPhoto(id, form));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _vars, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
@@ -884,8 +963,10 @@ export function useUploadCategoryPhoto() {
 export function useRemoveCategoryPhoto() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (id: string) => unwrap(vendorApi.removeCategoryPhoto(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _id, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
