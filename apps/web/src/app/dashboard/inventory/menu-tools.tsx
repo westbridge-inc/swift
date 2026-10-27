@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useMutation, useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { Modal } from '@/components/modal';
 import { storeKey } from '@/lib/store-scope';
@@ -64,12 +64,13 @@ function reread(qc: QueryClient, keys: Keys) {
 
 // ── Parts of a row drawn from this chunk (the page's first load does not carry them) ─────────────────────────
 
-/** The item's photo: a 96 px copy through the store-photo route. */
-export function Thumb({ url }: { url: string }) {
+/** The item's photo: a 96 px copy through the store-photo route. [REVIEW-G #2142 S4-3] Only a photo Swift keeps, as
+ *  the editor and the app draw it: an outside address saved before photos were uploaded draws nothing. */
+export function Thumb({ url, fallback = null }: { url: string; fallback?: ReactNode }) {
   const shot = storePhoto(url);
-  const src = shot ? (shot.loader ? shot.loader({ src: shot.src, width: 96 }) : shot.src) : null;
+  const src = shot?.loader ? shot.loader({ src: shot.src, width: 96 }) : null;
   // eslint-disable-next-line @next/next/no-img-element -- a 96 px copy from the store-photo route; next/image is not in the page's first load
-  return src ? <img src={src} alt="" loading="lazy" className="h-full w-full object-cover" /> : null;
+  return src ? <img src={src} alt="" loading="lazy" className="h-full w-full object-cover" /> : <>{fallback}</>;
 }
 
 /** [STORE-VAT · owner O-5] The owner of a VAT-registered store gives each item its VAT class. */
@@ -303,6 +304,8 @@ export function ItemEditor({
   const kept = storePhoto(item?.imageUrl ?? null);
   const keptPhoto = kept?.loader ? kept : null;
   const hasPhoto = !!photoPreview || !!keptPhoto;
+  // The file just chosen is a local blob: nothing for the image optimiser to resize (the store's photo goes through it).
+  const previewIsLocal = !!photoPreview && photoPreview.startsWith('blob:');
   const pickPhoto = (file: File | undefined) => {
     if (!file) return;
     if (photoPreview) URL.revokeObjectURL(photoPreview);
@@ -317,7 +320,7 @@ export function ItemEditor({
       <div className="mt-4 flex items-center gap-4">
         <div className="grid h-24 w-24 flex-none place-items-center overflow-hidden rounded-xl bg-[var(--swift-sunken)]">
           {photoPreview
-            ? <Image src={photoPreview} alt={`${name || 'Item'} photo`} width={96} height={96} unoptimized className="h-full w-full object-cover" />
+            ? <Image src={photoPreview} alt={`${name || 'Item'} photo`} width={96} height={96} unoptimized={previewIsLocal} className="h-full w-full object-cover" />
             : keptPhoto
               ? <Image {...keptPhoto} alt={`${name || 'Item'} photo`} width={96} height={96} className="h-full w-full object-cover" />
               : <span className="text-xs text-[var(--swift-muted)]">No photo</span>}

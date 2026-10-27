@@ -48,7 +48,7 @@ function RowPhoto({ url }: { url: string | null | undefined }) {
 }
 function RowThumb({ url }: { url: string }) {
   const tools = menuTools.usePart(true);
-  return tools ? <tools.Thumb url={url} /> : <Pictogram name="food" size={26} />;
+  return tools ? <tools.Thumb url={url} fallback={<Pictogram name="food" size={26} />} /> : <Pictogram name="food" size={26} />;
 }
 /** [STORE-VAT] The owner's VAT class select and its note, drawn by the tools chunk (only VAT-registered stores). */
 function RowVat(props: { item: CatalogItem; vatRate: number; vatEffective: boolean; pending: boolean; onVatClass: (_id: string, _vatClass: VatClass) => void }) {

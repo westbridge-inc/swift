@@ -211,6 +211,14 @@ describe('[TAP-AUDIT] the web adds and edits items like the app', () => {
     expect(body(writes[0]!)).not.toHaveProperty('optionGroups');
   });
 
+  it('[REVIEW-G #2142 S4-3] an outside address on a row draws nothing (only a photo Swift keeps)', async () => {
+    items = items.map((i) => (i.id === 'rice' ? { ...i, imageUrl: 'https://elsewhere.example/rice.jpg' } : i));
+    renderWithQuery(<InventoryPage />);
+    const roti = await screen.findByRole('article', { name: 'Roti' });
+    await waitFor(() => expect(roti.querySelector('img')).toBeTruthy());
+    expect(screen.getByRole('article', { name: 'Rice 20 kg' }).querySelector('img')).toBeNull();
+  });
+
   it('an item\'s own photo is on its row (a small copy from the store-photo route)', async () => {
     renderWithQuery(<InventoryPage />);
     const roti = await screen.findByRole('article', { name: 'Roti' });
