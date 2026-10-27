@@ -73,6 +73,15 @@ export function Thumb({ url, fallback = null }: { url: string; fallback?: ReactN
   return src ? <img src={src} alt="" loading="lazy" className="h-full w-full object-cover" /> : <>{fallback}</>;
 }
 
+/** [REVIEW-F #2142 S4-1] The app's words (VendorMenuScreen OUTSIDE_PHOTO_NOTE) for a photo address saved before photos
+ *  were uploaded: Swift does not draw it for customers, so the owner is told what to do. */
+export const OUTSIDE_PHOTO_NOTE = "Its old photo link isn't shown to customers. Upload the photo again.";
+
+/** The note under a row or in the editor, only for an outside address (a photo Swift keeps, or none, says nothing). */
+export function PhotoNote({ url }: { url: string | null | undefined }) {
+  return url && !storePhoto(url)?.loader ? <p className="sw-caption font-semibold text-amber-700">{OUTSIDE_PHOTO_NOTE}</p> : null;
+}
+
 /** [STORE-VAT · owner O-5] The owner of a VAT-registered store gives each item its VAT class. */
 export function VatSelect({ item, vatRate, vatEffective, pending, onVatClass }: { item: CatalogItem; vatRate: number; vatEffective: boolean; pending: boolean; onVatClass: (_id: string, _vatClass: VatClass) => void }) {
   return (
@@ -332,6 +341,7 @@ export function ItemEditor({
           </label>
           {photo ? <button type="button" className="ml-3 text-sm font-semibold text-[var(--swift-muted)]" onClick={() => { setPhoto(null); setPhotoPreview(null); }}>Remove selected photo</button> : null}
           <p className="sw-caption mt-1">Bright and straight-on — customers choose with their eyes</p>
+          {photoPreview ? null : <PhotoNote url={item?.imageUrl} />}
         </div>
       </div>
 
