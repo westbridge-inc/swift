@@ -185,6 +185,19 @@ describe('[TAP-AUDIT] the website\'s + and −', () => {
     expect(taps.shown('rice', 2)).toBe(2);
   }, 2000);
 
+  it('[REVIEW-F #2146 S4] a read that shows the tapped total already reached drops the item there: Checkout is free at that read', async () => {
+    taps.tap('rice', 'Rice', 1, cartOf(line('l-rice', 'rice', 1)));
+    taps.tap('rice', 'Rice', 1, cartOf(line('l-rice', 'rice', 1)));
+    sends[0]!.ok({ message: 'ok' }); // an answer that is not a cart: the second + waits for a read
+    await flush();
+    expect(reads).toHaveLength(1);
+    await read(0, cartOf(line('l-rice', 'rice', 3))); // another tab already took it to 3
+    expect(sends, 'nothing to send').toHaveLength(1);
+    expect(taps.pending(), 'Checkout is free at this read, not the next one').toBe(false);
+    expect(taps.shown('rice', 3)).toBe(3);
+    expect(reads).toHaveLength(1);
+  });
+
   it('never below 0; a plain line never above 99 (the server\'s cap)', () => {
     taps.tap('rice', 'Rice', -1, cartOf());
     expect(sends).toHaveLength(0);
