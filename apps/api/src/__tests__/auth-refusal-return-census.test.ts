@@ -106,7 +106,7 @@ for (const { file, src } of parsed) {
     }
     if (ts.isIfStatement(n) && /^\w+\.sent$/.test(n.expression.getText(src).replace(/\s+/g, ''))) {
       const fn = enclosingFn(n);
-      const then = ts.isBlock(n.thenStatement) && n.thenStatement.statements.length === 1 ? n.thenStatement.statements[0] : n.thenStatement;
+      const then = ts.isBlock(n.thenStatement) && n.thenStatement.statements.length === 1 ? n.thenStatement.statements[0]! : n.thenStatement;
       if (fn && isAsync(fn) && ts.isReturnStatement(then) && !then.expression) bareSentReturns.push({ where: where(n), text: n.getText(src) });
     }
     ts.forEachChild(n, visit);
