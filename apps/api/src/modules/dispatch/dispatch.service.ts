@@ -1235,7 +1235,8 @@ export class DispatchService {
             AND u."status" = 'ACTIVE'
             AND u."activeRole" IN ('MOVER', 'DRIVER')
             -- [SECURITY · PR4 HIGH] delivery GO's gates: a profile photo, and neither profile identity-locked or
-            -- safety-suspended (the selfie-check freshness is the offer gate's, canTakeDeliveryFromTaxi).
+            -- safety-suspended. The rest (selfie-check freshness, push, identity authority, the fee, the device
+            -- session, the papers) are the offer gate's, canTakeDeliveryFromTaxi, before any card is sent.
             AND u."selfieCapturedAt" IS NOT NULL
             AND r."livenessLockedAt" IS NULL AND r."safetySuspendedAt" IS NULL
             AND d."livenessLockedAt" IS NULL AND d."safetySuspendedAt" IS NULL

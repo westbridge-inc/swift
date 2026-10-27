@@ -6,7 +6,7 @@ import { assertNotSafetySuspended } from '../safety/incident.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { requireIdentityAuthority } from '../integrity/identity-review';
 import { moverFeeOperability, moverFeePayer } from '../subscription/mover-fee-authority';
-import { isCarDeliveryProfile, syncCarDeliveryProfile } from './car-deliveries';
+import { carDeliveryLivePreview, isCarDeliveryProfile, syncCarDeliveryProfile } from './car-deliveries';
 
 // ---------------------------------------------------------------------------
 // [CARS-DELIVER PR4] "Taxi + deliveries" supply: the offer gate and the claim's promotion, used only by the
@@ -18,8 +18,11 @@ import { isCarDeliveryProfile, syncCarDeliveryProfile } from './car-deliveries';
 // fresh selfie check where required (shiftLiveness) and no safety suspension — on the delivery profile AND on the
 // taxi it rides on — a live push registration where required, the weekly fee (the payer's one fee, as delivery GO
 // reads it) and, for an account with no fee row at all, identity authority. The documents are the claim's own
-// (reserveRiderLeg: the delivery verdict and the taxi verdict on the same car, deadlines at the write). The offer
-// gate refuses the same states, so a blocked profile is never even offered work.
+// (reserveRiderLeg: the delivery verdict and the taxi verdict on the same car, deadlines at the write).
+//
+// [Second pass, 27 Oct] The offer gate runs the SAME gate function (deliveryGoGates), plus the device session and
+// delivery GO's own preview of the papers for a car, so a blocked profile is never even offered a card. The
+// candidate SQL drops every state a column can show (identity lock, suspension, photo, account status and role).
 //
 // Identity authority is read here WITHOUT delivery GO's global identity lock: the claim already holds User and
 // Order, and taking that advisory lock after them would invert the order every identity writer takes. In practice
@@ -42,6 +45,35 @@ function safetyClear(row: GateRow): boolean {
   }
 }
 
+/**
+ * Delivery GO's gates for a delivery profile riding on its taxi: ONE function for the offer gate and the claim's
+ * promotion, so the two cannot drift apart. A vehicle Swift takes; no identity lock, a fresh selfie check where
+ * required and no safety suspension, on the delivery profile AND on the taxi; a profile photo; a live push
+ * registration where required; identity authority for an account with no fee row at all; the weekly fee (the
+ * payer's one fee, read as delivery GO reads it).
+ */
+async function deliveryGoGates(
+  db: Db, userId: string, riderId: string, rider: GateRow & { vehicleType: VehicleType }, taxi: GateRow,
+): Promise<boolean> {
+  if (!isVehicleOffered(rider.vehicleType) || !safetyClear(rider) || !safetyClear(taxi)) return false;
+  const account = await db.user.findUniqueOrThrow({ where: { id: userId }, select: { selfieCapturedAt: true } });
+  if (!account.selfieCapturedAt) return false;
+  try {
+    await assertMoverPushReady(db as Tx, userId);
+  } catch {
+    return false;
+  }
+  const feeRows = await db.subscription.count({ where: { OR: [{ riderId }, { driver: { userId } }] } });
+  if (feeRows === 0) {
+    try {
+      await requireIdentityAuthority(db, userId);
+    } catch {
+      return false;
+    }
+  }
+  return (await moverFeeOperability(db, await moverFeePayer(db, userId), { missingRow: 'GRANDFATHER' })).operable;
+}
+
 /** A delivery profile's live legs, counted from the orders table (the one truth). */
 async function liveLegs(db: Db, riderId: string): Promise<number> {
   return db.order.count({ where: { riderId, status: { notIn: [...TERMINAL_ORDER_STATUSES] } } });
@@ -50,8 +82,9 @@ async function liveLegs(db: Db, riderId: string): Promise<number> {
 /**
  * canReceiveOffer's answer for a delivery profile that is NOT online itself: may it still receive a delivery offer
  * because its taxi is online, free and on "taxi + deliveries"? Only while the switch is on, never with a live
- * delivery leg (one job at a time), and only while neither profile is identity-locked, suspended or due a selfie
- * check, with a profile photo on the account and (where required) a live push registration.
+ * delivery leg (one job at a time), on the taxi's live device session, through delivery GO's gates (deliveryGoGates,
+ * the promotion's own) and delivery GO's preview of the papers for a car (the taxi verdict on the car the taxi
+ * profile names; the claim re-derives both verdicts under its locks).
  */
 export async function canTakeDeliveryFromTaxi(db: Db, riderId: string): Promise<boolean> {
   if (!carDeliveriesEnabled()) return false;
@@ -59,21 +92,22 @@ export async function canTakeDeliveryFromTaxi(db: Db, riderId: string): Promise<
     where: { id: riderId },
     select: { userId: true, vehicleType: true, isOnline: true, lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
   });
-  if (!rider || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType) || !isVehicleOffered(rider.vehicleType) || !safetyClear(rider)) return false;
+  if (!rider || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return false;
   const taxi = await db.driver.findFirst({
     where: {
       userId: rider.userId, takesDeliveries: true, isOnline: true, isAvailable: true, currentRideId: null,
-      locationSessionId: { not: null }, user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] }, selfieCapturedAt: { not: null } },
+      locationSessionId: { not: null }, user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
     },
-    select: { lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
+    select: { locationSessionId: true, lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
   });
-  if (!taxi || !safetyClear(taxi) || (await liveLegs(db, riderId)) > 0) return false;
+  if (!taxi?.locationSessionId || (await liveLegs(db, riderId)) > 0) return false;
+  const liveSession = await db.session.count({ where: { id: taxi.locationSessionId, userId: rider.userId, expiresAt: { gt: new Date() } } });
+  if (liveSession !== 1 || !(await deliveryGoGates(db, rider.userId, riderId, rider, taxi))) return false;
   try {
-    await assertMoverPushReady(db as Tx, rider.userId);
+    return await carDeliveryLivePreview(db, rider.userId);
   } catch {
     return false;
   }
-  return true;
 }
 
 /**
@@ -103,24 +137,8 @@ export async function promoteDeliveryFromTaxi(tx: Tx, userId: string, riderId: s
   if (!taxi || !taxi.takesDeliveries || !taxi.isOnline || !taxi.isAvailable || taxi.currentRideId
     || !taxi.locationSessionId || taxi.currentLat == null || taxi.currentLng == null) return null;
 
-  // Delivery GO's gates, on the locked rows.
-  if (!isVehicleOffered(rider.vehicleType) || !safetyClear(rider) || !safetyClear(taxi)) return null;
-  const account = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { selfieCapturedAt: true } });
-  if (!account.selfieCapturedAt) return null;
-  try {
-    await assertMoverPushReady(tx, userId);
-  } catch {
-    return null;
-  }
-  const feeRows = await tx.subscription.count({ where: { OR: [{ riderId }, { driver: { userId } }] } });
-  if (feeRows === 0) {
-    try {
-      await requireIdentityAuthority(tx, userId);
-    } catch {
-      return null;
-    }
-  }
-  if (!(await moverFeeOperability(tx, await moverFeePayer(tx, userId), { missingRow: 'GRANDFATHER' })).operable) return null;
+  // Delivery GO's gates, on the locked rows (the offer gate's own).
+  if (!(await deliveryGoGates(tx, userId, riderId, rider, taxi))) return null;
 
   const sessions = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id" FROM "sessions" WHERE "id" = ${taxi.locationSessionId} AND "userId" = ${userId} AND "expiresAt" > NOW() FOR SHARE`;
