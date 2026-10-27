@@ -458,6 +458,47 @@ export function refreshAfterJobStep(qc: QueryClient): Promise<void> {
   void qc.invalidateQueries({ queryKey: ['mover'], predicate: (query) => query.queryKey[1] !== 'active' });
   return qc.invalidateQueries({ queryKey: ['mover', 'active'] });
 }
+
+/**
+ * [TAP-AUDIT 27 Oct · owner: "every single button tap"] The job's next status, from the step's OWN answer (the
+ * server has already moved the job: a rider step answers `{ orderId, status }`, a driver step the updated ride),
+ * written into the active job at once — the single job and a stacked rider's legs. The job screen draws the next
+ * step from that status, so the button is free at the answer instead of after a second round trip (the re-read of
+ * the active job, ~0.6 s more on a mobile link, on every one of the ~6 steps of a delivery). A poll already on its
+ * way (it left with the old status) is cancelled by the re-read that follows (refreshAfterJobStep's refetch cancels
+ * one in flight), and a cancelled read falls back to this written state. False when the answer names no status or
+ * the job is not on screen: the caller then waits for the re-read, as before.
+ */
+export function writeJobStatus(qc: QueryClient, jobId: string | undefined, answer: unknown): boolean {
+  const a = answer as { status?: unknown; ridePinVerified?: unknown } | null | undefined;
+  if (!jobId || typeof a?.status !== 'string' || !a.status) return false;
+  const fields = { status: a.status, ...(typeof a.ridePinVerified === 'boolean' ? { ridePinVerified: a.ridePinVerified } : {}) };
+  let wrote = false;
+  qc.setQueriesData({ queryKey: ['mover', 'active'] }, (data: unknown) => {
+    const one = data as { id?: unknown; legs?: unknown } | null | undefined;
+    if (one && one.id === jobId) { wrote = true; return { ...one, ...fields }; }
+    if (one && Array.isArray(one.legs) && one.legs.some((l: { id?: unknown } | null) => l?.id === jobId)) {
+      wrote = true;
+      return { ...one, legs: one.legs.map((l: { id?: unknown } | null) => (l?.id === jobId ? { ...l, ...fields } : l)) };
+    }
+    return data;
+  });
+  return wrote;
+}
+
+/** [TAP-AUDIT] The steps whose answer moves the job along without ending it: their button is free at the answer. The
+ *  steps that end or hand back a job (delivered, the door's handover, a fare outcome, a handback) still wait for the
+ *  re-read: the screen's completion flow follows the job leaving the active read. */
+const STEPS_SHOWN_AT_THE_ANSWER: ReadonlySet<string> = new Set([
+  'en-route-pickup', 'arrived-pickup', 'picked-up', 'en-route-delivery', 'arrived', 'en-route', 'verify-pin', 'start',
+]);
+function afterStep(qc: QueryClient, jobId: string | undefined, action: string, answer: unknown): Promise<void> | undefined {
+  if (STEPS_SHOWN_AT_THE_ANSWER.has(action) && writeJobStatus(qc, jobId, answer)) {
+    void refreshAfterJobStep(qc); // everything else (and the job's other fields) still refreshes, in the background
+    return undefined;
+  }
+  return refreshAfterJobStep(qc);
+}
 export function useAcceptJob(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
@@ -573,7 +614,7 @@ export function useDriverAction() {
         void qc.invalidateQueries({ queryKey: ['mover'] });
         return;
       }
-      return refreshAfterJobStep(qc);
+      return afterStep(qc, input.id, input.action, _data);
     },
   });
   return pv ? PV.previewMutation() : m;
@@ -638,7 +679,7 @@ export function useRiderAction() {
         }
       }
     },
-    onSuccess: () => refreshAfterJobStep(qc),
+    onSuccess: (data, input) => afterStep(qc, input.id, input.action, data),
   });
   return pv ? PV.previewMutation() : m;
 }
