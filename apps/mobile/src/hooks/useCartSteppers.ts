@@ -39,7 +39,14 @@ const notify = () => { version += 1; listeners.forEach((listener) => listener())
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const snapshot = () => version;
 
-const keyOf = (key: string, line: CartLine | null | undefined) => (line ? `line:${line.id}` : aliases.get(`item:${key}`) ?? `item:${key}`);
+function keyOf(key: string, line: CartLine | null | undefined) {
+  if (!line) return aliases.get(`item:${key}`) ?? `item:${key}`;
+  const byLine = `line:${line.id}`;
+  // [REVIEW-F #2148 S4-1] A read can show the line an add made before the add's own answer arrives: that line is the
+  // add's stepper (never a second one for the same line).
+  const adding = !entries.has(byLine) && line.itemId && isPlainLine(line) ? entries.get(`item:${line.itemId}`) : undefined;
+  return adding ? adding.key : byLine;
+}
 const plainLineOf = (items: CartLine[], itemId: string) => {
   const lines = items.filter((line) => line.itemId === itemId);
   return lines.find(isPlainLine) ?? (lines.length === 1 ? lines[0] : undefined);
@@ -110,7 +117,9 @@ function onRead(items: CartLine[], readAt: number) {
         : plainLineOf(items, entry.addAs?.itemId ?? entry.key.slice(5)) ?? null;
       entry.line = line;
       if (line) rekey(entry, `line:${line.id}`);
-      if (nextSend(entry.target, line)) { void drive(entry); continue; }
+      // [REVIEW-M #2148 S4-1] Only what can be sent: a line gone (another device) with no add details is done.
+      const next = nextSend(entry.target, line);
+      if (next && (next.kind === 'set' || entry.addAs)) { void drive(entry); continue; }
     }
     drop(entry);
     changed = true;

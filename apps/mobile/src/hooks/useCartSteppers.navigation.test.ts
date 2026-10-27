@@ -177,6 +177,45 @@ describe('[TAP-AUDIT] the cart\'s + and −', () => {
   });
 });
 
+describe('[REVIEW-F #2148 S4-2 · REVIEW-M #2148] a line that cannot get where it was tapped ends at the next read', () => {
+  it('+ then − while the + is out, and the answer already holds the −: nothing more is sent, and the next + goes', async () => {
+    await plus('rice');
+    await tap('rice', 1);
+    await answer(0, [{ id: 'line-rice', itemId: 'rice', quantity: 1 }]);
+    expect(fx.calls).toHaveLength(1);
+    await plus('rice');
+    expect(sent()[1], 'a tap after it is never swallowed').toEqual(['set', { id: 'line-rice', quantity: 2 }]);
+  });
+
+  it('[REVIEW-M #2148 P1] two − while out, the answer has only a chosen line of that item: reads after it send nothing', async () => {
+    showCart = true;
+    server = [{ id: 'line-rice', itemId: 'rice', quantity: 2 }];
+    await read();
+    await act(async () => { cartPage.set('line:line-rice', server[0], 1); });
+    await act(async () => { cartPage.set('line:line-rice', server[0], 0); });
+    expect(fx.calls).toHaveLength(1);
+    const chosen = { id: 'line-rice-l', itemId: 'rice', quantity: 1, selectedOptions: { size: ['L'] } } as unknown as Line;
+    await answer(0, [chosen]);
+    for (let i = 0; i < 5; i += 1) await read([chosen]);
+    expect(fx.calls).toHaveLength(1);
+    expect(fx.refetch).not.toHaveBeenCalled();
+    expect(page('cart')).toMatch(/settled$/);
+  });
+
+  it('[REVIEW-M #2148 S4-1] a refused cart tap, a tap meanwhile, and a read where the line is gone (another device): settled', async () => {
+    showCart = true; showStore = false;
+    await read();
+    await act(async () => { cartPage.set('line:line-rice', server[0], 2); });
+    await refuse(0);
+    await act(async () => { cartPage.set('line:line-rice', server[0], 3); });
+    expect(cartPage.settled).toBe(false);
+    await read([]);
+    expect(cartPage.settled, 'Place order is free again').toBe(true);
+    expect(cartPage.qty('line:line-rice', null)).toBe(0);
+    expect(fx.calls).toHaveLength(1);
+  });
+});
+
 describe('[REVIEW-F #2145 S4-2] one stepper per line for the store page and the cart', () => {
   beforeEach(async () => { showCart = true; await draw(); });
 
@@ -202,6 +241,18 @@ describe('[REVIEW-F #2145 S4-2] one stepper per line for the store page and the 
     await read([...server, { id: 'line-oil', itemId: 'oil', quantity: 1 }]); // read while the set is out
     expect(page('cart')).toBe('line-rice=1 line-oil=2 pending');
     expect(page('store')).toBe('rice=1 oil=2');
+  });
+
+  it('[REVIEW-F #2148 S4-1] a read that shows the new line before the add has answered: still the same stepper (never a second one)', async () => {
+    await plus('oil');
+    await plus('oil');
+    await read([...server, { id: 'line-oil', itemId: 'oil', quantity: 1 }]); // the add is in, its answer is not
+    expect(page('store')).toBe('rice=1 oil=2');
+    expect(page('cart')).toBe('line-rice=1 line-oil=2 pending');
+    await plus('oil');
+    expect(fx.calls, 'no second request for the line while its add is out').toHaveLength(1);
+    await answer(0, [...server]);
+    expect(sent()[1]).toEqual(['set', { id: 'line-oil', quantity: 3 }]);
   });
 
   it('the cart\'s Place order waits for a tap still out from the store page', async () => {
