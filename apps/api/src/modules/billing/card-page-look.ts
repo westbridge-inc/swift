@@ -121,7 +121,8 @@ export function testBanner(label: string): string {
 /** The lock beside the words that say the card is typed only in the bank's form. */
 export const LOCK_ICON = icon('lock', 16);
 
-/** A way back, as a kit pill button. A link (never a form): these pages run no script and post nothing. */
-export function buttonLink(href: string, label: string, kind: 'primary' | 'soft'): string {
-  return `<a class="btn btn-${kind}" href="${escapeHtml(href)}" target="_top">${escapeHtml(label)}</a>`;
+/** A way back, as a kit pill button. A link (never a form): these pages run no script and post nothing.
+ *  (`variant`, as the kit's PillButton names it — never `kind`: the phone's notification census reads every kind literal in the API.) */
+export function buttonLink(href: string, label: string, variant: 'primary' | 'soft'): string {
+  return `<a class="btn btn-${variant}" href="${escapeHtml(href)}" target="_top">${escapeHtml(label)}</a>`;
 }

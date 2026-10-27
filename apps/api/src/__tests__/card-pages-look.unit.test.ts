@@ -152,13 +152,15 @@ describe('[CARD-PAGE] Swift\'s card pages look like the Swift app', () => {
     }
   });
 
-  it('"Back to the Swift app", "Continue on the web" and "Cancel" are Swift pill buttons with big tap targets, not bare links', async () => {
+  it('"Back to the Swift app", "Continue on the web" and the frame page\'s way out are Swift pill buttons with big tap targets, not bare links', async () => {
     const back = `<a class="btn btn-primary" href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a>`;
     const web = `<a class="btn btn-soft" href="${cardWebFeeUrl()}" target="_top">Continue on the web</a>`;
-    const cancel = `<a class="btn btn-soft" href="${CARD_APP_RETURN_LINK}" target="_top">Cancel and go back to the Swift app</a>`;
+    // [REVIEW-F #2140 S4-1] The frame page's way out sits under the bank's frame, which may already show "Done":
+    // it says what it does in both cases ("Go back to the Swift app"), never "Cancel", which could read as undoing a payment.
+    const leave = `<a class="btn btn-soft" href="${CARD_APP_RETURN_LINK}" target="_top">Go back to the Swift app</a>`;
     for (const { name, html } of await servedPages()) {
       if (name.startsWith('return')) { expect(html, name).toContain(back); expect(html, name).toContain(web); }
-      if (name === 'pay: live' || name === 'pay: live, test system') expect(html, name).toContain(cancel);
+      if (name === 'pay: live' || name === 'pay: live, test system') { expect(html, name).toContain(leave); expect(own(html), name).not.toMatch(/cancel/i); }
       if (name.startsWith('pay: ended') || name === 'pay: no such page') expect(html, name).toContain(back);
       // No link is left bare: every link on every page is one of the buttons.
       expect(own(html).match(/<a\b[^>]*>/g)?.every((a) => a.startsWith('<a class="btn btn-')) ?? true, name).toBe(true);

@@ -545,7 +545,8 @@ function hostedCardPageHtml(facts: PowerTranzHostedPage): string {
     // their own cookies, popups for a bank that opens one; the frame can move
     // this page only when the partner taps (the return page's links).
     + `<div class="frame"><iframe class="card" title="Your bank's secure card form" sandbox="${CARD_FRAME_SANDBOX}" srcdoc="${escapeHtml(facts.redirectData)}" allow="payment"></iframe></div>`
-    + `<div class="actions">${buttonLink(CARD_APP_RETURN_LINK, 'Cancel and go back to the Swift app', 'soft')}</div>`);
+    // [REVIEW-F #2140 S4-1] Under the frame, which may already say "Done": never "Cancel" (it could read as undoing a payment).
+    + `<div class="actions">${buttonLink(CARD_APP_RETURN_LINK, 'Go back to the Swift app', 'soft')}</div>`);
 }
 
 /** The card provider's own origins (its API is pinned to ptranz.com, guide sec. 2.3). */
