@@ -276,7 +276,8 @@ const pageState = (html: string) => {
   if (html.includes('<h1>Done</h1>')) return 'SUCCEEDED';
   if (html.includes('<h1>Checking with the bank</h1>')) return 'PENDING';
   if (html.includes("<h1>This didn&#39;t go through</h1>")) return 'FAILED';
-  if (html.includes('<h1>Swift</h1>')) return 'UNKNOWN';
+  // [CARD-PAGE] The unknown state is headed "Weekly fee", as the MMG return page is (it was a bare "Swift").
+  if (html.includes('<h1>Weekly fee</h1>')) return 'UNKNOWN';
   return `UNRECOGNISED: ${html.slice(0, 200)}`;
 };
 

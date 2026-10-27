@@ -20,6 +20,7 @@ import { BillingService } from './billing.service';
 import { CARD_ON_FILE_CONSENT_VERSION, CARD_RESOLVE_ACTIONS, CARD_SANDBOX_TEST_LABEL, CardRailService, INSTRUMENT_DTO_SELECT, cardTestLabel, type CardSessionDto, type PaymentInstrumentDto } from './card-rail.service';
 import { CARD_OFF, cardPayAction, cardSessionsAllowed, type CardPayAction } from './card-pay-action';
 import { clientPlatform, type PayAction } from './fee-pay-actions';
+import { LOCK_ICON, SWIFT_PAGE_HEADER, buttonLink, cardPageHtml, escapeHtml, testBanner, toneChip, type CardPageTone } from './card-page-look';
 
 // ---------------------------------------------------------------------------
 // [PT-2] The card rail v2 ROUTES (CARD-CHECKOUT-API.md). They call PT-1's
@@ -404,24 +405,17 @@ function pageForStatus(status: CardSessionStatus): CardReturnPage {
   }
 }
 
-const RETURN_WORDS: Record<CardReturnPage, { title: string; body: string }> = {
-  SUCCEEDED: { title: 'Done', body: 'Go back to the Swift app to see it.' },
-  PENDING: { title: 'Checking with the bank', body: "We're checking with the bank. Don't pay again. You can close this page." },
-  FAILED: { title: "This didn't go through", body: 'You can try again in the Swift app.' },
-  UNKNOWN: { title: 'Swift', body: 'Open the Swift app to see your weekly fee.' },
+// [CARD-PAGE] Each state wears the app's tone for it (cardSessionTone). The
+// unknown state is headed "Weekly fee", as the MMG return page is.
+const RETURN_WORDS: Record<CardReturnPage, { title: string; body: string; tone: CardPageTone }> = {
+  SUCCEEDED: { title: 'Done', body: 'Go back to the Swift app to see it.', tone: 'success' },
+  PENDING: { title: 'Checking with the bank', body: "We're checking with the bank. Don't pay again. You can close this page.", tone: 'waiting' },
+  FAILED: { title: "This didn't go through", body: 'You can try again in the Swift app.', tone: 'error' },
+  UNKNOWN: { title: 'Weekly fee', body: 'Open the Swift app to see your weekly fee.', tone: 'neutral' },
 };
 
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-
-function page(title: string, inner: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`
-    + `<meta name="robots" content="noindex"><title>${escapeHtml(title)}</title>`
-    + `<style>body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px;background:#fff;color:#111;max-width:480px}`
-    + `h1{font-size:22px}p{font-size:16px;line-height:1.5}.test{background:#fff3cd;border:2px solid #b8860b;padding:12px;font-weight:700}`
-    + `.brand{font-weight:800;font-size:18px;letter-spacing:.02em}iframe.card{display:block;width:100%;min-height:560px;border:1px solid #ddd;border-radius:12px}`
-    + `button{display:block;width:100%;margin:12px 0;padding:14px;font-size:16px;border-radius:10px;border:1px solid #111;background:#f6f6f6}`
-    + `a{color:#111;font-weight:600}</style></head><body>${inner}</body></html>`;
-}
+/** [CARD-PAGE] Every card page wears Swift's look (card-page-look.ts); its policy is set by the route, unchanged. */
+const page = cardPageHtml;
 
 /** [Review S3] "Continue on the web": the web's one neutral weekly-fee route,
  *  which picks the dashboard or the portal from the signed-in session (as the
@@ -437,11 +431,13 @@ export function cardWebFeeUrl(env: Record<string, string | undefined> = process.
   return `${origin}/weekly-fee`;
 }
 
+/** A return state shows inside Swift's card page (the bank's frame comes back here), so it
+ *  carries no header of its own: the kit's state pattern and the two ways back, as buttons. */
 export function returnPageHtml(state: CardReturnPage): string {
   const words = RETURN_WORDS[state];
-  return page(words.title, `<h1>${escapeHtml(words.title)}</h1><p>${escapeHtml(words.body)}</p>`
-    + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`
-    + `<p><a href="${escapeHtml(cardWebFeeUrl())}" target="_top">Continue on the web</a></p>`);
+  return page(words.title, `<section class="state">${toneChip(words.tone, 32)}<h1>${escapeHtml(words.title)}</h1><p>${escapeHtml(words.body)}</p></section>`
+    + `<div class="actions">${buttonLink(CARD_APP_RETURN_LINK, 'Back to the Swift app', 'primary')}`
+    + `${buttonLink(cardWebFeeUrl(), 'Continue on the web', 'soft')}</div>`);
 }
 
 /** Never cached, never indexed, never sent onward as a referrer. */
@@ -536,20 +532,21 @@ export const CARD_FRAME_SANDBOX = 'allow-scripts allow-forms allow-same-origin a
 
 function hostedCardPageHtml(facts: PowerTranzHostedPage): string {
   const price = formatAmount(fromMinor(facts.amountMinor, facts.currencyCode));
-  const test = facts.sandbox ? `<p class="test">${escapeHtml(CARD_SANDBOX_TEST_LABEL)}</p>` : '';
-  const head = `${test}<p class="brand">Swift</p><h1>${escapeHtml(`Pay ${price} by card`)}</h1>`;
+  const test = facts.sandbox ? testBanner(CARD_SANDBOX_TEST_LABEL) : '';
+  const head = `${SWIFT_PAGE_HEADER}${test}<h1>${escapeHtml(`Pay ${price} by card`)}</h1>`;
   if (facts.expired || facts.finished) {
-    return page('Swift card payment', `${head}<p>This card page has ended. Open the Swift app to see your weekly fee, or start again there.</p>`
-      + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`);
+    return page('Swift card payment', `${head}<div class="panel">${toneChip('neutral')}<p>This card page has ended. Open the Swift app to see your weekly fee, or start again there.</p></div>`
+      + `<div class="actions">${buttonLink(CARD_APP_RETURN_LINK, 'Back to the Swift app', 'primary')}</div>`);
   }
   return page('Swift card payment', `${head}`
-    + `<p>Type your card on your bank's secure form below. Swift never sees your card number or security code.</p>`
+    + `<p class="lede">${LOCK_ICON}<span>Type your card on your bank's secure form below. Swift never sees your card number or security code.</span></p>`
     // [Review S3] Sandboxed: scripts and forms run (the self-posting form, the
     // bank's 3-D Secure pages), same-origin is kept so the bank's pages keep
     // their own cookies, popups for a bank that opens one; the frame can move
     // this page only when the partner taps (the return page's links).
-    + `<iframe class="card" title="Your bank's secure card form" sandbox="${CARD_FRAME_SANDBOX}" srcdoc="${escapeHtml(facts.redirectData)}" allow="payment"></iframe>`
-    + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Cancel and go back to the Swift app</a></p>`);
+    + `<div class="frame"><iframe class="card" title="Your bank's secure card form" sandbox="${CARD_FRAME_SANDBOX}" srcdoc="${escapeHtml(facts.redirectData)}" allow="payment"></iframe></div>`
+    // [REVIEW-F #2140 S4-1] Under the frame, which may already say "Done": never "Cancel" (it could read as undoing a payment).
+    + `<div class="actions">${buttonLink(CARD_APP_RETURN_LINK, 'Go back to the Swift app', 'soft')}</div>`);
 }
 
 /** The card provider's own origins (its API is pinned to ptranz.com, guide sec. 2.3). */
@@ -630,7 +627,7 @@ function simulatorPageHtml(ref: string, facts: NonNullable<Awaited<ReturnType<Si
   const what = facts.purpose === 'ENROLL'
     ? 'Add a card'
     : `Pay ${formatAmount(fromMinor(facts.amountMinor ?? 0, facts.currencyCode ?? ''), { code: true })}`;
-  const head = `<p class="test">${escapeHtml(SIMULATOR_PAGE.testModeLabel)}</p><h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(what)}</p>`;
+  const head = `${SWIFT_PAGE_HEADER}${testBanner(SIMULATOR_PAGE.testModeLabel)}<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(what)}</p>`;
   if (facts.expired) return page(SIMULATOR_PAGE.title, `${head}<p>This test page has expired. Start again in the Swift app.</p>`);
   // Buttons only: a <button name value> submits its scenario without any input field [C10].
   const buttons = SIMULATOR_PAGE.buttons.map((b) =>
@@ -691,15 +688,15 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
     config: { rateLimit: { ...CARD_SIMULATOR_RATE, ...perSource, ...rateLimited } },
   };
   const simulatorMissing = (reply: FastifyReply, status = 404, words = 'There is no such test page.') =>
-    framing(privatePage(reply), cardTextPageCsp('simulator')).status(status).send(page(SIMULATOR_PAGE.title, `<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(words)}</p>`));
+    framing(privatePage(reply), cardTextPageCsp('simulator')).status(status).send(page(SIMULATOR_PAGE.title, `${SWIFT_PAGE_HEADER}<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(words)}</p>`));
 
   /** [PT-4] Swift's page around the bank's card form. Never logged, never cached; its own strict policy. */
   app.get<{ Params: { ref: string } }>('/pay/:ref', simulatorOptions, async (request, reply) => {
     const provider = powerTranzOf(rt());
     const facts = provider && PAY_REF_SHAPE.test(request.params.ref) ? await provider.hostedPageFor(request.params.ref) : null;
     if (!facts) {
-      return framing(privatePage(reply), hostedCardPageCsp()).status(404).send(page('Swift card payment', '<p class="brand">Swift</p><h1>There is no such card page</h1>'
-        + `<p>Open the Swift app to see your weekly fee.</p><p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`));
+      return framing(privatePage(reply), hostedCardPageCsp()).status(404).send(page('Swift card payment', `${SWIFT_PAGE_HEADER}<h1>There is no such card page</h1>`
+        + `<p>Open the Swift app to see your weekly fee.</p><div class="actions">${buttonLink(CARD_APP_RETURN_LINK, 'Back to the Swift app', 'primary')}</div>`));
     }
     return framing(privatePage(reply), hostedCardPageCsp()).send(hostedCardPageHtml(facts));
   });
