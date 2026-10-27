@@ -23,6 +23,7 @@ import {
 } from '../../../stores/authStore';
 import {
   cashInHandThisWeek,
+  otherProfileWeek,
   earningLabel,
   earningRows,
   earningsWindowTotal,
@@ -376,6 +377,10 @@ export function EarningsScreen({ navigation }: any) {
   const { kind } = mover;
   const summaryQ = useEarningsSummary<unknown>(kind);
   const historyQ = useEarnings<unknown>(kind);
+  // [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with both profiles also sees the other profile's week, read from
+  // that profile's own summary (asked for only for such an account).
+  const otherKind: 'DRIVER' | 'RIDER' | null = mover.dual === true && kind ? (kind === 'DRIVER' ? 'RIDER' : 'DRIVER') : null;
+  const otherSummaryQ = useEarningsSummary<unknown>(otherKind);
   // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
   const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
   const stats = useMoverStats(kind);
@@ -429,6 +434,7 @@ export function EarningsScreen({ navigation }: any) {
     : countDetail(allTimeJobs, 'job', 'jobs');
   // [Board 13a "CASH COLLECTED"] The server's figure; undefined (older API) leaves the tile out.
   const cashThisWeek = cashInHandThisWeek(summaryQ.data);
+  const other = otherKind ? otherProfileWeek(otherKind, otherSummaryQ.data) : undefined;
 
   return (
     <Screen>
@@ -490,6 +496,14 @@ export function EarningsScreen({ navigation }: any) {
                 ? 'Cash collected this week: the fares passengers paid you in cash.'
                 : 'Cash collected this week, after paying stores for the goods.'}
             </T>
+          ) : null}
+          {other ? (
+            <Card style={{ marginTop: space.md }}>
+              <T variant="micro" tone="muted">{other.title}</T>
+              <T variant="numM" style={{ marginTop: space.xs }}>{money(other.total)}</T>
+              {other.cash ? <T variant="caption" tone="muted">{other.cash}</T> : null}
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{other.note}</T>
+            </Card>
           ) : null}
 
           {breakdown ? (

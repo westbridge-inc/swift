@@ -45,12 +45,13 @@ export function deliveriesTooView(answer: unknown, kind: WorkKind | null): Deliv
   }
   if (enabled) {
     const next = switchTarget(kind);
-    // [PR4] In taxi mode, while the switch is on (available), the driver may take both at once.
+    // [PR4] In taxi mode, while the switch is on (available), the driver may take both at once. [REVIEW-F #2139 S4-3]
+    // Only from a server that knows the mode (takesDeliveries is a boolean): a #2128-only server has no mode route.
     const bothOn = a.takesDeliveries === true;
-    const both: BothToggle | null = kind === 'DRIVER' && available
+    const both: BothToggle | null = kind === 'DRIVER' && available && serverKnowsTaxiAndDeliveries(a)
       ? bothOn
-        ? { on: true, label: 'Taxi rides only', line: 'Taxi rides and deliveries is on: store orders also come while you drive and are free. After a delivery you go back to taxi rides and deliveries.' }
-        : { on: false, label: 'Taxi rides and deliveries', line: 'Turn on taxi rides and deliveries to also get store orders while you drive — still one job at a time.' }
+        ? { on: true, label: 'Back to taxi rides only', line: 'Taxi rides and deliveries is on: when you are online with no ride, store delivery offers come too. After a delivery you go back to taxi rides and deliveries.' }
+        : { on: false, label: 'Turn on taxi rides and deliveries', line: 'Turn on taxi rides and deliveries to also get store delivery offers when you are online with no ride — still one job at a time.' }
       : null;
     return {
       show: true, state: 'ready', title: 'Deliveries too',
@@ -66,6 +67,18 @@ export function deliveriesTooView(answer: unknown, kind: WorkKind | null): Deliv
     };
   }
   return { show: false };
+}
+
+/**
+ * [PR4 · REVIEW-F #2139 S2-2 · COORD 27 Oct] What this app declares at taxi GO: it can show a delivery card in taxi
+ * mode (its pay, the cash box, "Accept delivery") and answer it on the delivery routes. The server offers a delivery
+ * from taxi work only to a taxi GO that declared it; an older app, which would show a delivery as a ride, never does.
+ */
+export const DELIVERY_CARDS_CAPABILITY = 'CAR_DELIVERY_CARDS_V1';
+
+/** A server that knows "taxi + deliveries": its GET /driver/deliveries answer carries takesDeliveries (true or false). */
+export function serverKnowsTaxiAndDeliveries(answer: unknown): boolean {
+  return !!answer && typeof answer === 'object' && typeof (answer as { takesDeliveries?: unknown }).takesDeliveries === 'boolean';
 }
 
 /**

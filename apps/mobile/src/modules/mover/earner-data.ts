@@ -69,6 +69,30 @@ export function cashInHandThisWeek(summary: unknown): number | undefined {
   return cash ? serverNumber(cash['thisWeek']) : undefined;
 }
 
+/** [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] For an account with a taxi AND a delivery profile, the OTHER profile's week,
+ *  from that profile's own server summary (never added to this screen's figures, which stay one profile's). One on
+ *  "taxi rides and deliveries" goes back to taxi work after every delivery, so without this its delivery money would
+ *  sit out of sight. Undefined when the other summary is missing or junk (never a guessed 0). */
+export function otherProfileWeek(
+  otherKind: 'DRIVER' | 'RIDER',
+  summary: unknown,
+): { title: string; total: number; cash: string | null; note: string } | undefined {
+  const total = earningsWindowTotal(summary, 'thisWeek', 'week');
+  if (total == null) return undefined;
+  const cash = cashInHandThisWeek(summary);
+  const deliveries = otherKind === 'RIDER';
+  return {
+    title: deliveries ? 'YOUR DELIVERIES THIS WEEK' : 'YOUR TAXI RIDES THIS WEEK',
+    total,
+    cash: cash == null
+      ? null
+      : deliveries
+        ? `Cash collected ${money(cash)}, after paying stores for the goods.`
+        : `Cash collected ${money(cash)}: the fares passengers paid you in cash.`,
+    note: deliveries ? 'The figures above are your taxi rides only.' : 'The figures above are your deliveries only.',
+  };
+}
+
 export function earningRows(payload: unknown): WireRecord[] {
   if (Array.isArray(payload)) return serverRecords(payload);
   const source = serverRecord(payload);

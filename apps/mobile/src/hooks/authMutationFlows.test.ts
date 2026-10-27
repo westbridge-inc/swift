@@ -567,16 +567,16 @@ describe('[CARS-DELIVER PR4] a taxi go-online declares delivery cards only to a 
     mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'DRIVER' } } });
     mocks.driverGoOnline.mockResolvedValue({ data: { data: { online: true } } });
   }
-  const goOnline = () => (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+  const useTaxiGoOnline = () => (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
 
   it('the server answers takesDeliveries: the go-online declares CAR_DELIVERY_CARDS_V1 (with stops too when offered)', async () => {
     mocks.carDeliveries.mockResolvedValue({ data: { data: { available: false, enabled: false, reason: 'SWITCH_OFF', takesDeliveries: false } } });
     arrangeOnline();
-    await goOnline();
+    await useTaxiGoOnline();
     expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['CAR_DELIVERY_CARDS_V1']);
 
     mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 2 } } });
-    await goOnline();
+    await useTaxiGoOnline();
     expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1', 'CAR_DELIVERY_CARDS_V1']);
   });
 
@@ -587,7 +587,7 @@ describe('[CARS-DELIVER PR4] a taxi go-online declares delivery cards only to a 
   ])('%s: exactly today’s go-online call, no capability', async (_label, arrange) => {
     arrange();
     arrangeOnline();
-    await goOnline();
+    await useTaxiGoOnline();
     expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
     expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
   });

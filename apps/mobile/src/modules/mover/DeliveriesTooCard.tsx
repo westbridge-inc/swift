@@ -37,9 +37,18 @@ export function DeliveriesTooCard({ kind, hasTaxiProfile, style }: { kind: WorkK
     onError: (e: unknown) => toast.error('Deliveries not added', serverMessage(e, 'Check your connection and try again.')),
   });
   // [PR4] "Taxi rides and deliveries" on or off (PUT /driver/deliveries/mode); the server answers with the card's status.
+  // [REVIEW-F #2139 S4-4] The card shows that answer at once (no flash of the old label); only an answer that is not a
+  // status falls back to reading the card again.
   const setBoth = useMutation({
     mutationFn: (on: boolean) => driverApi.setCarDeliveriesMode(on),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['mover', 'carDeliveries'] }); },
+    onSuccess: (res: unknown) => {
+      const next = (res as { data?: { data?: unknown } } | undefined)?.data?.data;
+      if (next && typeof next === 'object' && typeof (next as { enabled?: unknown }).enabled === 'boolean') {
+        qc.setQueryData(['mover', 'carDeliveries'], next);
+      } else {
+        void qc.invalidateQueries({ queryKey: ['mover', 'carDeliveries'] });
+      }
+    },
     onError: (e: unknown) => toast.error('Not changed', serverMessage(e, 'Check your connection and try again.')),
   });
   const selectKind = useSelectMoverKind();
