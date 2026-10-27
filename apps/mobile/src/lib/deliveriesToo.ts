@@ -11,13 +11,16 @@
  */
 export type WorkKind = 'DRIVER' | 'RIDER';
 
+/** [PR4] "Taxi rides and deliveries": the taxi driver's switch between taxi rides only and both at once. */
+export type BothToggle = { on: boolean; label: string; line: string };
+
 export type DeliveriesTooView =
   | { show: false }
   | { show: true; state: 'offer'; title: string; body: string; action: string }
-  | { show: true; state: 'ready'; title: string; body: string; action: string; target: WorkKind }
+  | { show: true; state: 'ready'; title: string; body: string; action: string; target: WorkKind; both: BothToggle | null }
   | { show: true; state: 'paused'; title: string; body: string };
 
-type Answer = { available?: unknown; enabled?: unknown; reason?: unknown; vehicle?: { label?: unknown } | null } | null | undefined;
+type Answer = { available?: unknown; enabled?: unknown; reason?: unknown; takesDeliveries?: unknown; vehicle?: { label?: unknown } | null } | null | undefined;
 
 /** The work mode a switch from `kind` goes to, and the words on its button. */
 export function switchTarget(kind: WorkKind): { target: WorkKind; label: string } {
@@ -42,10 +45,18 @@ export function deliveriesTooView(answer: unknown, kind: WorkKind | null): Deliv
   }
   if (enabled) {
     const next = switchTarget(kind);
+    // [PR4] In taxi mode, while the switch is on (available), the driver may take both at once. [REVIEW-F #2139 S4-3]
+    // Only from a server that knows the mode (takesDeliveries is a boolean): a #2128-only server has no mode route.
+    const bothOn = a.takesDeliveries === true;
+    const both: BothToggle | null = kind === 'DRIVER' && available && serverKnowsTaxiAndDeliveries(a)
+      ? bothOn
+        ? { on: true, label: 'Back to taxi rides only', line: 'Taxi rides and deliveries is on: when you are online with no ride, store delivery offers come too. After a delivery you go back to taxi rides and deliveries.' }
+        : { on: false, label: 'Turn on taxi rides and deliveries', line: 'Turn on taxi rides and deliveries to also get store delivery offers when you are online with no ride — still one job at a time.' }
+      : null;
     return {
       show: true, state: 'ready', title: 'Deliveries too',
       body: `Your ${vehicle} can take store deliveries as well as taxi rides — one at a time. Switch here or on your home screen when you go offline.`,
-      action: next.label, target: next.target,
+      action: next.label, target: next.target, both,
     };
   }
   if (available && kind === 'DRIVER') {
@@ -59,6 +70,30 @@ export function deliveriesTooView(answer: unknown, kind: WorkKind | null): Deliv
 }
 
 /**
+ * [PR4 · REVIEW-F #2139 S2-2 · COORD 27 Oct] What this app declares at taxi GO: it can show a delivery card in taxi
+ * mode (its pay, the cash box, "Accept delivery") and answer it on the delivery routes. The server offers a delivery
+ * from taxi work only to a taxi GO that declared it; an older app, which would show a delivery as a ride, never does.
+ */
+export const DELIVERY_CARDS_CAPABILITY = 'CAR_DELIVERY_CARDS_V1';
+
+/**
+ * [REVIEW-F #2139 delta S3-1, S4-5] The server's car delivery profile (isCarDeliveryProfile): a delivery profile on a
+ * passenger vehicle, which only "Deliveries too" creates. Only an account holding one sees or asks anything new, so
+ * an existing motorbike + taxi account keeps today's screens and requests while CAR_DELIVERIES is off.
+ */
+const PASSENGER_VEHICLES: ReadonlySet<string> = new Set(['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']);
+
+export function isCarDeliveryProfile(profile: unknown): boolean {
+  const type = profile && typeof profile === 'object' ? (profile as { vehicleType?: unknown }).vehicleType : undefined;
+  return typeof type === 'string' && PASSENGER_VEHICLES.has(type);
+}
+
+/** A server that knows "taxi + deliveries": its GET /driver/deliveries answer carries takesDeliveries (true or false). */
+export function serverKnowsTaxiAndDeliveries(answer: unknown): boolean {
+  return !!answer && typeof answer === 'object' && typeof (answer as { takesDeliveries?: unknown }).takesDeliveries === 'boolean';
+}
+
+/**
  * The home screen's work-mode link: only for an account that holds both a taxi and a delivery profile, and
  * only while it is offline with no job (going offline first keeps the switch from dropping a live shift).
  */
@@ -67,4 +102,15 @@ export function workModeLink(opts: { dual: boolean; kind: WorkKind | null; onlin
   | { show: true; target: WorkKind; label: string } {
   if (!opts.dual || !opts.kind || opts.online || opts.hasActiveJob) return { show: false };
   return { show: true, ...switchTarget(opts.kind) };
+}
+
+/**
+ * [PR4] Which kind of job an offer card is, from the offer itself (the server names it: orderType). A phone on
+ * "taxi rides and deliveries" gets both kinds while in taxi mode; a card without the field (an older server) is
+ * the app's current kind, as before.
+ */
+export function offerKindOf(offer: { orderType?: unknown } | null | undefined, fallback: WorkKind): WorkKind {
+  const type = offer?.orderType;
+  if (typeof type !== 'string' || !type) return fallback;
+  return type === 'TAXI' ? 'DRIVER' : 'RIDER';
 }

@@ -4,6 +4,7 @@ import { riderApi, driverApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useMoverPreview } from '../stores/moverPreview';
 import type { MoverKind } from '../lib/moverLocation';
+import { offerKindOf } from '../lib/deliveriesToo';
 
 // ---------------------------------------------------------------------------
 // The mover's live offer cards: the dispatch:offer socket stream, the queue
@@ -25,6 +26,8 @@ function usePreview() {
 export interface DispatchOffer {
   orderId: string;
   offerAttemptId?: string;
+  /** [CARS-DELIVER PR4] The job kind the server names (TAXI, or a delivery type); absent from older servers. */
+  orderType?: string;
   orderNumber?: string;
   vendorName?: string;
   expiresInSeconds?: number;
@@ -88,7 +91,9 @@ const RETIRED_CARDS_REMEMBERED = 64;
  * refresh the available list. Polling (useAvailableJobs) stays as a fallback,
  * so a missed socket event still resolves within the poll interval.
  */
-export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
+/** [CARS-DELIVER PR4] `alsoDeliveries`: an account on "taxi rides and deliveries" in taxi mode also recovers a
+ *  delivery card after a reconnect; every card's render proof goes to its own kind (offerKindOf). */
+export function useDispatchOffers(kind: MoverKind | null, online: boolean, alsoDeliveries = false) {
   const pv = usePreview();
   const qc = useQueryClient();
   // Stacking: offers QUEUE (FIFO, deduped by orderId) instead of overwriting —
@@ -172,7 +177,10 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     let gone = false;
     const recover = async () => {
       try {
-        const data = await unwrap<{ offer: RecoveredDispatchOffer | null }>(api.currentOffer());
+        let data = await unwrap<{ offer: RecoveredDispatchOffer | null }>(api.currentOffer());
+        if (!data?.offer?.orderId && alsoDeliveries && kind === 'DRIVER') {
+          data = await unwrap<{ offer: RecoveredDispatchOffer | null }>(riderApi.currentOffer());
+        }
         if (!gone && data?.offer?.orderId) {
           const recoveredOffer: DispatchOffer = {
             ...data.offer,
@@ -192,7 +200,7 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
       s.off('connect', recover);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, online, qc, pv]);
+  }, [kind, online, qc, pv, alsoDeliveries]);
 
   // [danger #21 · AX299 F2] Render proof when the card is ON SCREEN — the head
   // of the queue while online — never on arrival. A timeout without this stamp
@@ -206,7 +214,7 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     if (seenCard.current === key) return;
     if (offer.deadlineAt !== undefined && offer.deadlineAt <= Date.now()) return;
     seenCard.current = key;
-    const api = kind === 'DRIVER' ? driverApi : riderApi;
+    const api = offerKindOf(offer, kind) === 'DRIVER' ? driverApi : riderApi;
     void api.offerSeen(offer.orderId, offer.offerAttemptId).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offer?.orderId, offer?.offerAttemptId, kind, online, pv]);

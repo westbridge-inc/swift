@@ -22,6 +22,7 @@ const fx = vi.hoisted(() => ({
   statusError: null as unknown,
   carDeliveries: vi.fn(),
   addCarDeliveries: vi.fn(),
+  setCarDeliveriesMode: vi.fn(),
   selectKind: vi.fn(),
 }));
 vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
@@ -113,7 +114,7 @@ vi.mock('../../stores/authStore', () => {
 });
 vi.mock('../../services/api', () => ({
   API_URL: 'https://example.test', riderApi: {},
-  driverApi: { carDeliveries: fx.carDeliveries, addCarDeliveries: fx.addCarDeliveries },
+  driverApi: { carDeliveries: fx.carDeliveries, addCarDeliveries: fx.addCarDeliveries, setCarDeliveriesMode: fx.setCarDeliveriesMode },
 }));
 vi.mock('../../hooks/mover', () => ({ useSelectMoverKind: () => ({ mutate: fx.selectKind, isPending: false, isError: false, error: null }) }));
 vi.mock('../chat/screens/ConversationScreen', () => ({ ConversationScreen: () => null }));
@@ -143,6 +144,7 @@ beforeEach(() => {
   });
   fx.addCarDeliveries.mockReset().mockResolvedValue({ data: { success: true, data: { available: true, enabled: true, reason: null } } });
   fx.selectKind.mockReset();
+  fx.setCarDeliveriesMode.mockReset().mockResolvedValue({ data: { success: true, data: {} } });
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
@@ -223,5 +225,55 @@ describe('[CARS-DELIVER] "Deliveries too" on the mover account follows the serve
     expect(host.textContent).toContain('Earnings');
     expect(fx.carDeliveries).not.toHaveBeenCalled();
     expect(host.textContent).not.toContain('deliveries too');
+  });
+
+  it('[PR4] in taxi mode with the switch on: turn taxi rides and deliveries on, then back to taxi rides only', async () => {
+    fx.status = { available: true, enabled: true, reason: null, takesDeliveries: false, vehicle: { type: 'CAR', label: 'Car' } };
+    fx.dual = true;
+    await renderAccount();
+    expect(host.textContent).toContain('Turn on taxi rides and deliveries to also get store delivery offers when you are online with no ride — still one job at a time.');
+    await press('Turn on taxi rides and deliveries');
+    expect(fx.setCarDeliveriesMode).toHaveBeenLastCalledWith(true);
+
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    fx.status = { available: true, enabled: true, reason: null, takesDeliveries: true, vehicle: { type: 'CAR', label: 'Car' } };
+    await renderAccount();
+    expect(host.textContent).toContain('when you are online with no ride, store delivery offers come too. After a delivery you go back to taxi rides and deliveries.');
+    await press('Back to taxi rides only');
+    expect(fx.setCarDeliveriesMode).toHaveBeenLastCalledWith(false);
+  });
+
+  // [REVIEW-F #2139 S4-4] The mode route answers with the card's status: the card shows it at once, with no flash of
+  // the old label and no second read (the server's GET here still answers the old state, and is not asked again).
+  it('[PR4] the card shows the mode route’s answer at once', async () => {
+    fx.status = { available: true, enabled: true, reason: null, takesDeliveries: false, vehicle: { type: 'CAR', label: 'Car' } };
+    fx.dual = true;
+    fx.setCarDeliveriesMode.mockResolvedValue({ data: { success: true, data: { ...(fx.status as object), takesDeliveries: true } } });
+    await renderAccount();
+    expect(fx.carDeliveries).toHaveBeenCalledTimes(1);
+    await press('Turn on taxi rides and deliveries');
+    expect(buttons()).toContain('Back to taxi rides only');
+    expect(buttons()).not.toContain('Turn on taxi rides and deliveries');
+    expect(fx.carDeliveries).toHaveBeenCalledTimes(1);
+  });
+
+  // [REVIEW-F #2139 S4-3] A server with Deliveries too but without the mode (#2128 only) sends no takesDeliveries and
+  // has no mode route: no toggle that could only fail.
+  it('[PR4] a server without the mode: the card, but no taxi-and-deliveries toggle', async () => {
+    fx.status = { available: true, enabled: true, reason: null, vehicle: { type: 'CAR', label: 'Car' } };
+    fx.dual = true;
+    await renderAccount();
+    expect(host.textContent).toContain('Deliveries too');
+    expect(buttons().filter((b) => /taxi rides and deliveries|taxi rides only/i.test(b))).toEqual([]);
+    expect(host.textContent).not.toMatch(/taxi rides and deliveries/i);
+  });
+
+  it('[PR4] the switch off after set-up: no taxi-and-deliveries toggle', async () => {
+    fx.status = { available: false, enabled: true, reason: 'SWITCH_OFF', takesDeliveries: true, vehicle: { type: 'CAR', label: 'Car' } };
+    fx.dual = true;
+    await renderAccount();
+    expect(buttons()).not.toContain('Back to taxi rides only');
+    expect(buttons()).not.toContain('Turn on taxi rides and deliveries');
   });
 });

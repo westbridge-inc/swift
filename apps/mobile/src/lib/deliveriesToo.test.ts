@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliveriesTooView, switchTarget, workModeLink } from './deliveriesToo';
+import { DELIVERY_CARDS_CAPABILITY, deliveriesTooView, isCarDeliveryProfile, offerKindOf, serverKnowsTaxiAndDeliveries, switchTarget, workModeLink } from './deliveriesToo';
 
 // [CARS-DELIVER · owner 8 + 25 Oct 2026] "Deliveries too" behind the server's CAR_DELIVERIES switch. The card says
 // nothing unless the server says it can be set up now or is set up; the home link switches work mode only for an
@@ -54,5 +54,81 @@ describe('workModeLink: the home switch', () => {
     expect(home).toContain("const modeLink = workModeLink({ dual: dual === true, kind, online, hasActiveJob: !!activeJob });");
     expect(home).toContain('{modeLink.show ? (');
     expect(home).toContain('onPress={() => selectMoverKind.mutate(modeLink.target)}');
+  });
+});
+
+// [CARS-DELIVER PR4 · COORD 26 Oct] "Taxi rides and deliveries": the taxi driver's toggle, and every offer card
+// answered as the kind of job it is.
+describe('PR4: taxi rides and deliveries', () => {
+  it('the toggle shows in taxi mode only while the switch is on (available), worded for each state', () => {
+    const off = deliveriesTooView({ available: true, enabled: true, takesDeliveries: false }, 'DRIVER');
+    expect(off).toMatchObject({ state: 'ready', both: { on: false, label: 'Turn on taxi rides and deliveries' } });
+    expect((off as { both: { line: string } }).both.line).toBe(
+      'Turn on taxi rides and deliveries to also get store delivery offers when you are online with no ride — still one job at a time.');
+    const on = deliveriesTooView({ available: true, enabled: true, takesDeliveries: true }, 'DRIVER');
+    expect(on).toMatchObject({ state: 'ready', both: { on: true, label: 'Back to taxi rides only' } });
+    expect((on as { both: { line: string } }).both.line).toBe(
+      'Taxi rides and deliveries is on: when you are online with no ride, store delivery offers come too. After a delivery you go back to taxi rides and deliveries.');
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: true }, 'RIDER')).toMatchObject({ both: null });
+    expect(deliveriesTooView({ available: false, enabled: true, reason: 'SWITCH_OFF', takesDeliveries: true }, 'DRIVER')).toMatchObject({ state: 'paused' });
+  });
+
+  // [REVIEW-F #2139 S4-3] The toggle follows the server exactly: the server refuses "on" while the car cannot deliver
+  // (available false, e.g. VEHICLE_NOT_OFFERED), and a server without "taxi + deliveries" (#2128 only) sends no
+  // takesDeliveries field and has no mode route, so a toggle there could only fail.
+  it('no toggle unless the server says it can be set now (available) and knows the mode (takesDeliveries is a boolean)', () => {
+    expect(deliveriesTooView({ available: false, enabled: true, reason: 'VEHICLE', takesDeliveries: false }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+    expect(deliveriesTooView({ available: true, enabled: true, reason: null }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: 'true' }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: null }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+  });
+
+  // [REVIEW-F #2139 S2-2 · COORD 27 Oct] This app declares it can show a delivery card at taxi GO, only to a server
+  // that knows "taxi + deliveries" (its deliveries answer carries takesDeliveries, whatever its value).
+  it('the delivery-card capability: its name, and which servers hear it', () => {
+    expect(DELIVERY_CARDS_CAPABILITY).toBe('CAR_DELIVERY_CARDS_V1');
+    expect(serverKnowsTaxiAndDeliveries({ available: false, enabled: false, reason: 'SWITCH_OFF', takesDeliveries: false })).toBe(true);
+    expect(serverKnowsTaxiAndDeliveries({ available: true, enabled: true, takesDeliveries: true })).toBe(true);
+    for (const older of [null, undefined, {}, { available: true, enabled: true, reason: null }, { takesDeliveries: 'true' }, 'x', 12]) {
+      expect(serverKnowsTaxiAndDeliveries(older)).toBe(false);
+    }
+  });
+
+  it('offerKindOf: the server names the job; without it, the app kind as before', () => {
+    expect(offerKindOf({ orderType: 'TAXI' }, 'RIDER')).toBe('DRIVER');
+    expect(offerKindOf({ orderType: 'FOOD_DELIVERY' }, 'DRIVER')).toBe('RIDER');
+    expect(offerKindOf({ orderType: 'COURIER' }, 'DRIVER')).toBe('RIDER');
+    expect(offerKindOf({}, 'DRIVER')).toBe('DRIVER');
+    expect(offerKindOf(null, 'RIDER')).toBe('RIDER');
+    expect(offerKindOf({ orderType: '' }, 'DRIVER')).toBe('DRIVER');
+  });
+
+  it('the home answers each card as its own kind, and the offer hook recovers and marks cards by kind', () => {
+    const home = readFileSync(join(process.cwd(), 'src/modules/mover/screens/MoverHomeScreen.tsx'), 'utf8');
+    expect(home).toContain("const offerKind = offerKindOf(offer, k);");
+    expect(home).toContain('const answerAccept = offerKind === k ? acceptOffer : acceptDelivery;');
+    expect(home).toContain('const answerDecline = offerKind === k ? decline : declineDelivery;');
+    expect(home).toContain('kind={offerKind}');
+    expect(home).toContain("useDispatchOffers(kind, online, dual === true && kind === 'DRIVER')");
+    const hook = readFileSync(join(process.cwd(), 'src/hooks/dispatchOffers.ts'), 'utf8');
+    expect(hook).toContain("if (!data?.offer?.orderId && alsoDeliveries && kind === 'DRIVER') {");
+    expect(hook).toContain("const api = offerKindOf(offer, kind) === 'DRIVER' ? driverApi : riderApi;");
+  });
+});
+
+// [REVIEW-F #2139 delta S3-1, S4-5 · COORD 16:12Z] Only an account with a CAR delivery profile (the server's
+// isCarDeliveryProfile: a delivery profile on a passenger vehicle, which only "Deliveries too" creates) sees anything
+// new: an existing motorbike + taxi account sees today's screens and makes today's requests.
+describe('PR4: the car delivery profile', () => {
+  it('is a delivery profile on a passenger vehicle, as the server reads it', () => {
+    for (const type of ['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']) expect(isCarDeliveryProfile({ vehicleType: type })).toBe(true);
+    for (const type of ['MOTORCYCLE', 'BICYCLE', 'VAN', 'PICKUP', 'CANTER', 'car', '']) expect(isCarDeliveryProfile({ vehicleType: type })).toBe(false);
+    for (const junk of [null, undefined, {}, 'CAR', { vehicleType: 1 }]) expect(isCarDeliveryProfile(junk)).toBe(false);
+  });
+
+  it('useMoverKind says whether the account holds a taxi profile and a car delivery profile', () => {
+    const hook = readFileSync(join(process.cwd(), 'src/hooks/mover.ts'), 'utf8');
+    expect(hook).toContain('carDeliveryProfile: !!driver.data && isCarDeliveryProfile(rider.data),');
+    expect(hook).toMatch(/dual: false,\s*carDeliveryProfile: false,/);
   });
 });

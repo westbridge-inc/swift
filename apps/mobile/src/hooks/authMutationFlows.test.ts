@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   switchRole: vi.fn(),
   driverGoOnline: vi.fn(),
   rideCapabilities: vi.fn(),
+  carDeliveries: vi.fn(),
+  riderProfile: null as unknown,
   driverUploadVehicle: vi.fn(),
   riderHandover: vi.fn(),
   lastKnownPosition: vi.fn(),
@@ -58,7 +60,7 @@ function samePrincipal(left: AuthSessionSnapshot | null, right: AuthSessionSnaps
 vi.mock('@tanstack/react-query', () => ({
   useMutation: (options: unknown) => options,
   useQuery: (options: unknown) => options,
-  useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
+  useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries, getQueryData: (key: unknown) => (JSON.stringify(key) === '["mover","riderProfile"]' ? mocks.riderProfile : undefined) }),
 }));
 
 vi.mock('../stores/authStore', () => {
@@ -94,6 +96,7 @@ vi.mock('../services/api', () => ({
   driverApi: {
     goOnline: mocks.driverGoOnline,
     uploadVehiclePhoto: mocks.driverUploadVehicle,
+    carDeliveries: mocks.carDeliveries,
   },
   riderApi: { handover: mocks.riderHandover },
   rideApi: { capabilities: mocks.rideCapabilities },
@@ -185,6 +188,10 @@ beforeEach(() => {
   mocks.current = { ...accountA };
   // An older server: no capability read (404) — go-online is exactly today's.
   mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } });
+  // ...nor "taxi + deliveries" (404): no delivery-card capability either.
+  mocks.carDeliveries.mockRejectedValue({ response: { status: 404 } });
+  // ...and no delivery profile on this account.
+  mocks.riderProfile = null;
   mocks.user = {
     id: accountA.userId,
     firstName: 'Account',
@@ -551,6 +558,77 @@ describe('[TAXI multi-stop] go-online declares stops only to a server that offer
     await (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
     expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
     expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+});
+
+// [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2 · COORD 27 Oct] This app can show a delivery card in taxi mode, so a taxi GO
+// declares CAR_DELIVERY_CARDS_V1 to a server that knows "taxi + deliveries" (its GET /driver/deliveries answers
+// takesDeliveries); the server offers a delivery from taxi work only to a GO that declared it. Any other answer:
+// exactly today's go-online call.
+describe('[CARS-DELIVER PR4] a taxi go-online declares delivery cards only to a server that knows taxi + deliveries', () => {
+  function arrangeOnline() {
+    mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'DRIVER' } } });
+    mocks.driverGoOnline.mockResolvedValue({ data: { data: { online: true } } });
+    // [delta S4-5] The read is made only for an account with a taxi AND a car delivery profile.
+    mocks.riderProfile = { id: 'rider-1', vehicleType: 'CAR' };
+  }
+  const useTaxiGoOnline = () => (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+
+  it('the server answers takesDeliveries: the go-online declares CAR_DELIVERY_CARDS_V1 (with stops too when offered)', async () => {
+    mocks.carDeliveries.mockResolvedValue({ data: { data: { available: false, enabled: false, reason: 'SWITCH_OFF', takesDeliveries: false } } });
+    arrangeOnline();
+    await useTaxiGoOnline();
+    expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['CAR_DELIVERY_CARDS_V1']);
+
+    mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 2 } } });
+    await useTaxiGoOnline();
+    expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1', 'CAR_DELIVERY_CARDS_V1']);
+  });
+
+  it.each([
+    ['an older server without the read (404)', () => mocks.carDeliveries.mockRejectedValue({ response: { status: 404 } })],
+    ['a server with Deliveries too but not the mode (no takesDeliveries)', () => mocks.carDeliveries.mockResolvedValue({ data: { data: { available: true, enabled: true, reason: null } } })],
+    ['the read fails', () => mocks.carDeliveries.mockRejectedValue(new Error('offline'))],
+  ])('%s: exactly today’s go-online call, no capability', async (_label, arrange) => {
+    arrange();
+    arrangeOnline();
+    await useTaxiGoOnline();
+    expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
+    expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+
+  // [REVIEW-F #2139 delta S4-5] Never a second round trip in a row: the deliveries read runs alongside the stops read.
+  it('the deliveries read runs alongside the stops read, not after it', async () => {
+    arrangeOnline();
+    let releaseStops!: (value: unknown) => void;
+    mocks.rideCapabilities.mockReturnValue(new Promise((resolve) => { releaseStops = resolve; }));
+    mocks.carDeliveries.mockResolvedValue({ data: { data: { available: true, enabled: true, reason: null, takesDeliveries: true } } });
+    const run = useTaxiGoOnline();
+    await vi.waitFor(() => expect(mocks.carDeliveries).toHaveBeenCalledTimes(1), { timeout: 500 });
+    expect(mocks.driverGoOnline).not.toHaveBeenCalled();
+    releaseStops({ data: { data: { maxStops: 2 } } });
+    await run;
+    expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1', 'CAR_DELIVERY_CARDS_V1']);
+  });
+
+  // [REVIEW-F #2139 delta S4-5 · S3-1] An account without a car delivery profile (taxi only, or motorbike + taxi)
+  // makes exactly today's requests: the deliveries read is never made.
+  it.each([
+    ['taxi only (no delivery profile)', null],
+    ['a motorbike delivery profile beside the taxi', { id: 'rider-2', vehicleType: 'MOTORCYCLE' }],
+  ])('%s: the deliveries read is never made; exactly today’s go-online call', async (_label, riderProfile) => {
+    arrangeOnline();
+    mocks.riderProfile = riderProfile;
+    mocks.carDeliveries.mockResolvedValue({ data: { data: { available: true, enabled: true, reason: null, takesDeliveries: true } } });
+    await useTaxiGoOnline();
+    expect(mocks.carDeliveries).not.toHaveBeenCalled();
+    expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+
+  it('a delivery GO never asks', async () => {
+    mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'RIDER' } } });
+    await (useGoOnline('RIDER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 }).catch(() => undefined);
+    expect(mocks.carDeliveries).not.toHaveBeenCalled();
   });
 });
 
