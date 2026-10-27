@@ -23,11 +23,20 @@ function server(rows: unknown[], write: (_r: ApiRequest) => ApiReply) {
   });
 }
 
+// [ADMIN-AUDIT S4-1] The status tabs now use the same words as the row's decision buttons ("Refund owed",
+// "Rejected"): a row action is the button OUTSIDE the "Show returns" tab group.
+const inRow = (buttons: HTMLElement[]) => buttons.filter((b) => !b.closest('[aria-label="Show returns"]'));
+const rowButton = async (name: string) => {
+  // The tabs render before the rows arrive: wait for the row's own button.
+  await waitFor(() => expect(inRow(screen.getAllByRole('button', { name }))).not.toHaveLength(0));
+  return inRow(screen.getAllByRole('button', { name }))[0]!;
+};
+
 describe('[U06] a return decision is shown, and a queued one cannot be asked twice', () => {
   it('"Refund owed" asks in the panel; once queued every decision on that return is locked', async () => {
     const fetchMock = server([requested], queued);
     const { user } = renderWithQuery(<ReturnsPage />);
-    await user.click(await screen.findByRole('button', { name: 'Refund owed' }));
+    await user.click(await rowButton('Refund owed'));
     const panel = await screen.findByRole('dialog');
     expect(panel.textContent).toContain('This does not move money');
     await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), REASON);
@@ -42,9 +51,9 @@ describe('[U06] a return decision is shown, and a queued one cannot be asked twi
     expect((await screen.findAllByText(/second admin.s approval/)).length).toBeGreaterThan(0);
     expect(screen.queryByRole('alert')).toBeNull();
     for (const name of ['Approved', 'Refund owed', 'Rejected']) {
-      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled, name).toBe(true);
+      expect((inRow(screen.getAllByRole('button', { name }))[0] as HTMLButtonElement).disabled, name).toBe(true);
     }
-    await user.click(screen.getByRole('button', { name: 'Rejected' }));
+    await user.click(inRow(screen.getAllByRole('button', { name: 'Rejected' }))[0]!);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
   });
@@ -52,7 +61,7 @@ describe('[U06] a return decision is shown, and a queued one cannot be asked twi
   it('a refusal is shown in the server\'s words, never swallowed', async () => {
     server([requested], () => ({ status: 409, body: { success: false, error: { code: 'ALREADY_RESOLVED', message: 'This return was already decided.' } } }));
     const { user } = renderWithQuery(<ReturnsPage />);
-    await user.click(await screen.findByRole('button', { name: 'Rejected' }));
+    await user.click(await rowButton('Rejected'));
     const panel = await screen.findByRole('dialog');
     await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(panel).getByRole('button', { name: 'Reject' }));

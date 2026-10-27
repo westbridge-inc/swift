@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { NAV_GROUPS, navItemFor } from './nav';
+import { navGroupsFor, navItemFor } from './nav';
 import { label } from '@/lib/labels';
 
 /** Initials for the signed-in role chip; the session carries roles, not a name. */
@@ -25,7 +25,7 @@ export function Sidebar({ onNavigate, role }: { onNavigate?: () => void; role?: 
         <span className="mc-numbers">Swift</span> Mission Control
       </div>
       <nav aria-label="Mission Control" className="mc-sidebar-nav">
-        {NAV_GROUPS.map((group) => (
+        {navGroupsFor(role).map((group) => (
           <div key={group.title} className="mc-sidebar-group">
             <p className="mc-sidebar-title" id={`nav-${group.title}`}>{group.title}</p>
             <ul aria-labelledby={`nav-${group.title}`}>

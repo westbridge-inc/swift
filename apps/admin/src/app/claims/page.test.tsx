@@ -65,7 +65,7 @@ function claimsHandler(
 }
 
 async function showApprovedClaims(user: ReturnType<typeof renderWithQuery>['user']) {
-  await user.click(await screen.findByRole('button', { name: 'approved' }));
+  await user.click(within(await screen.findByRole('group', { name: 'Show claims' })).getByRole('button', { name: 'Approved' }));
   return screen.findAllByRole('button', { name: 'Mark paid' });
 }
 
@@ -270,7 +270,7 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
     const reserve = await screen.findByTestId('rlp-reserve');
     await waitFor(() => expect(reserve.textContent).toContain('12,000'));
     expect(reserve.textContent).toContain('BELOW FLOOR');
-    await user.click(await screen.findByRole('button', { name: 'approved' }));
+    await user.click(within(await screen.findByRole('group', { name: 'Show claims' })).getByRole('button', { name: 'Approved' }));
     const bundle = await screen.findByTestId('evidence-claim-bundle');
     expect(bundle.textContent).toContain('door photo — missing');
     expect(bundle.textContent).toContain('rider at door ✓');

@@ -7,6 +7,7 @@ import { fetchReturns, resolveReturn, settleReturnRefund } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { label } from '@/lib/labels';
 
 const FILTERS = ['REQUESTED', 'APPROVED', 'REFUND_DUE', 'REJECTED', 'REFUNDED'] as const;
 
@@ -58,7 +59,7 @@ export default function ReturnsPage() {
   return (
     <div className="mc-page">
       <div className="flex items-center justify-between mb-1">
-        <div className="flex gap-1">
+        <div className="flex gap-1" role="group" aria-label="Show returns">
           {FILTERS.map((f) => (
             <button
               key={f}
@@ -67,7 +68,7 @@ export default function ReturnsPage() {
               aria-pressed={filter === f}
               className="mc-tab"
             >
-              {f.toLowerCase()}
+              {label('ReturnStatus', f)}
             </button>
           ))}
         </div>
@@ -85,7 +86,7 @@ export default function ReturnsPage() {
           <QueryFailed error={error} what="the returns" onRetry={() => void refetch()} retrying={isFetching} />
         ) : rows.length === 0 ? (
           <div className="mc-empty">
-            No {filter.toLowerCase()} returns.
+            No returns under “{label('ReturnStatus', filter)}”.
           </div>
         ) : (
           rows.map((r: any) => (

@@ -9,7 +9,7 @@ import { label } from '@/lib/labels';
 import { outcomeOf } from '@/lib/outcome';
 import { maskedPhone } from '@/lib/review-center';
 import { Modal } from '@/components/Modal';
-import { NAV_ITEMS } from './nav';
+import { navItemsFor } from './nav';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · shell] ⌘K — search everything the server can search today.
@@ -43,7 +43,7 @@ interface Option {
 
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
 
-export function CommandPalette({ onClose }: { onClose: () => void }) {
+export function CommandPalette({ onClose, role }: { onClose: () => void; role?: string | null }) {
   const router = useRouter();
   const uid = useId();
   const [q, setQ] = useState('');
@@ -61,7 +61,8 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   const options = useMemo<Option[]>(() => {
     const needle = q.trim().toLowerCase();
-    const pages = NAV_ITEMS
+    // [ADMIN-AUDIT S3-2] only the pages this role is offered in the sidebar
+    const pages = navItemsFor(role)
       .filter((n) => !needle || `${n.label} ${n.keywords ?? ''} ${n.blurb}`.toLowerCase().includes(needle))
       .slice(0, needle ? 6 : 8)
       .map((n): Option => ({ key: `page:${n.href}`, group: 'Go to', href: n.href, icon: n.icon, title: n.label, detail: n.blurb }));
@@ -80,7 +81,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       title: v.name, detail: [label('VendorType', v.vendorType), v.city, label('VendorStatus', v.status)].filter(Boolean).join(' · '),
     }));
     return [...pages, ...orders, ...people, ...businesses];
-  }, [q, term, searchable, search.data]);
+  }, [q, term, searchable, search.data, role]);
 
   useEffect(() => { setActive(0); }, [q]);
 
@@ -164,7 +165,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 }
 
 /** The header's search button, and ⌘K / Ctrl+K from anywhere. */
-export function SearchLauncher() {
+export function SearchLauncher({ role }: { role?: string | null } = {}) {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -183,7 +184,7 @@ export function SearchLauncher() {
         <span className="mc-truncate">Search everything</span>
         <kbd aria-hidden="true">⌘K</kbd>
       </button>
-      {open ? <CommandPalette onClose={() => setOpen(false)} /> : null}
+      {open ? <CommandPalette onClose={() => setOpen(false)} role={role} /> : null}
     </>
   );
 }
