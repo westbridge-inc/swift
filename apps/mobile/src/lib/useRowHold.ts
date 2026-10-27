@@ -21,7 +21,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
  * wait for every request (the cart's quote) reads `busy` too.
  * The census (a-press-never-fires-a-mutation-twice) counts `holdRow(key, () => …)` as held.
  */
-export type RowHold = ((key: string, run: () => Promise<unknown>) => boolean) & { readonly busy: boolean };
+export type RowHold = ((key: string, run: () => Promise<unknown>) => boolean) & { readonly busy: boolean; /** [TAP-AUDIT] Is THIS row's request still out? */ holds(key: string): boolean };
 
 export function useRowHold(): RowHold {
   const held = useRef(new Set<string>());
@@ -43,5 +43,5 @@ export function useRowHold(): RowHold {
     });
     return true;
   }, []);
-  return useMemo(() => Object.assign((key: string, run: () => Promise<unknown>) => hold(key, run), { busy: sending > 0 }), [hold, sending]);
+  return useMemo(() => Object.assign((key: string, run: () => Promise<unknown>) => hold(key, run), { busy: sending > 0, holds: (key: string) => held.current.has(key) }), [hold, sending]);
 }

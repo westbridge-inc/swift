@@ -19,8 +19,8 @@ import {
   useRemoveCartItem,
   useRemoveCartPromo,
   useSetCartTip,
-  useUpdateCartItem,
 } from '../../../hooks/customer';
+import { useCartSteppers } from '../../../hooks/useCartSteppers';
 import { useRowHold } from '../../../lib/useRowHold';
 import { maybePrimeNotifications } from '../../../services/notification-priming';
 import { useAuthStore } from '../../../stores/authStore';
@@ -148,7 +148,6 @@ export function CartScreen() {
   const { isAuthenticated, promptLogin } = useAuthStore();
   const { latitude, longitude } = useLocationStore();
 
-  const updateItem = useUpdateCartItem();
   const removeItem = useRemoveCartItem();
   // [BUG-GUARDS C2] One remove per line at a time; another line's trash still goes while it sends.
   const removeLine = useRowHold();
@@ -250,6 +249,8 @@ export function CartScreen() {
     [fulfillment, express, quoteBasis, selectedTip, appliedPromo],
   );
   const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, pricing);
+  // [TAP-AUDIT] A line's + and − answer at the tap and add up; only that line has a request out (hooks/useCartSteppers).
+  const steppers = useCartSteppers(cart.dataUpdatedAt);
   const c = cart.data; // null = empty cart
   // [E01-B] The retry's own quote, requested only once the customer asked to
   // switch (no riders): every store collects, no express, no tip, promo kept.
@@ -343,7 +344,7 @@ export function CartScreen() {
   // while a promo apply/remove is in flight, so the code in the body is the
   // code the quote on screen was priced with.
   // removeLine.busy: with two lines removing, removeItem.isPending follows only the latest call.
-  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removeLine.busy && !removePromo.isPending && !applyPromo.isPending;
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && steppers.settled && !removeItem.isPending && !removeLine.busy && !removePromo.isPending && !applyPromo.isPending;
 
   const items: any[] = c?.items ?? [];
 
@@ -875,11 +876,11 @@ export function CartScreen() {
                         {/* A quantity stepper is one of the four things allowed
                             to wear maroon. */}
                         <AddMorph
-                          qty={it.quantity}
-                          busy={updateItem.isPending}
-                          onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                          onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                          onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                          qty={steppers.qty(`line:${it.id}`, it)}
+                          busy={false}
+                          onAdd={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
+                          onInc={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
+                          onDec={() => steppers.qty(`line:${it.id}`, it) > 1 && steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) - 1)}
                         />
                         {/* Removing a line is an ordinary action, not an error —
                             it stops being red. hitSlop holds the 44pt target. */}

@@ -12,6 +12,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto } from '../../../lib/images';
 import { toast } from '../../../kit/toast';
+import { useRowHold } from '../../../lib/useRowHold';
 import {
   AddMorph,
   Chip,
@@ -209,27 +210,27 @@ export function MarketScreen() {
 
   const activeChip = chips.find((c) => c.slug === category);
 
-  const mutateCart = addToCart.mutate;
+  // [TAP-AUDIT] Only the card tapped waits for its add (one shared "adding" used to hold every card's + until the
+  // answer); a second tap on THAT card while it adds sends nothing; another card's add goes at once. Each answer is
+  // the card's own (its promise), so two adds in flight each say "added" or why not.
+  const addAsync = addToCart.mutateAsync;
+  const holdCard = useRowHold();
   const onAdd = useCallback((item: MarketItem) => {
     if (!isAuthenticated) { promptLogin(); return; }
     // The haptic tick is AddMorph's (one per press).
-    mutateCart(
-      { vendorId: item.vendorId, itemId: item.id, quantity: 1 },
-      {
-        onSuccess: () => toast.success(`${item.name} added`),
-        // The cart refuses a second vendor mid-order; that refusal is the
-        // server's to explain, so its words are shown rather than replaced.
-        onError: (e: any) =>
-          toast.error(e?.response?.data?.error?.message ?? 'Couldn’t add that — try again.'),
-      },
-    );
-  }, [isAuthenticated, promptLogin, mutateCart]);
+    holdCard(item.id, () => addAsync({ vendorId: item.vendorId, itemId: item.id, quantity: 1 }).then(
+      () => { toast.success(`${item.name} added`); },
+      // The cart refuses a second vendor mid-order; that refusal is the
+      // server's to explain, so its words are shown rather than replaced.
+      (e: any) => { toast.error(e?.response?.data?.error?.message ?? 'Couldn’t add that — try again.'); },
+    ));
+  }, [isAuthenticated, promptLogin, addAsync, holdCard]);
   const onOpen = useCallback((item: MarketItem) => {
     navigation.navigate('MenuItem', { itemId: item.id, vendorId: item.vendorId });
   }, [navigation]);
   const renderItem = useCallback(({ item }: { item: MarketItem }) => (
-    <MarketCard item={item} onOpen={onOpen} onAdd={onAdd} adding={addToCart.isPending} />
-  ), [onOpen, onAdd, addToCart.isPending]);
+    <MarketCard item={item} onOpen={onOpen} onAdd={onAdd} adding={holdCard.holds(item.id)} />
+  ), [onOpen, onAdd, holdCard]);
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>

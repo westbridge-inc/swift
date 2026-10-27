@@ -386,16 +386,26 @@ export function useFavorites<T = any>() {
   return useQuery<T>({ queryKey: ['customer', 'favorites'], queryFn: () => unwrap<T>(customerApi.getFavorites()) });
 }
 
+/** [TAP-AUDIT 27 Oct] The store page's heart fills (or empties) at the tap: the store's own read takes the new state at
+ *  once and goes back if the server refuses. The store page is NOT downloaded again for a heart (it carries the whole
+ *  menu); the lists that show hearts (favourites, Home, store lists) are re-read as before. */
+const withFavorite = (vendor: unknown, isFavorite: boolean) => (vendor && typeof vendor === 'object' ? { ...(vendor as object), isFavorite } : vendor);
 export function useToggleFavorite() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ vendorId, isFavorite }: { vendorId: string; isFavorite: boolean }) =>
       unwrap(isFavorite ? customerApi.removeFavorite(vendorId) : customerApi.addFavorite(vendorId)),
+    onMutate: async ({ vendorId, isFavorite }) => {
+      await qc.cancelQueries({ queryKey: customerKeys.vendor(vendorId), exact: true });
+      qc.setQueryData(customerKeys.vendor(vendorId), (v: unknown) => withFavorite(v, !isFavorite));
+    },
+    onError: (_e, { vendorId, isFavorite }) => {
+      qc.setQueryData(customerKeys.vendor(vendorId), (v: unknown) => withFavorite(v, isFavorite));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['customer', 'favorites'] });
       qc.invalidateQueries({ queryKey: ['customer', 'home'] });
       qc.invalidateQueries({ queryKey: ['customer', 'vendors'] });
-      qc.invalidateQueries({ queryKey: ['customer', 'vendor'] });
     },
   });
 }
