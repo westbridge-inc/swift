@@ -376,6 +376,8 @@ describe('[item 20] support tickets: the census', () => {
       'modules/support/support.service.ts findMany': 2, // listForUser (own) + listForAdmin (the queue: capability when on)
       // The admin queue (SupportService.queue: tenantPrisma off, the capability on): count, the resolve read (off/on), update.
       'modules/support/support.service.ts count': 1,
+      // [ADMIN-AUDIT S2-1] Today's counts (waitingForAdmin: by tab and SAFETY apart), through the same queue().
+      'modules/support/support.service.ts groupBy': 1,
       'modules/support/support.service.ts findUnique': 1,
       'modules/support/support.service.ts findFirst': 1,
       'modules/support/support.service.ts update': 1,
