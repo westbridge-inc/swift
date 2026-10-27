@@ -49,30 +49,44 @@ export const addOption = (groupId: string, body: { name: string; additionalPrice
   apiFetch(`${V}/option-groups/${groupId}/options`, { method: 'POST', body: JSON.stringify(body) }).then(data<OptionRow>);
 export const deleteOption = (id: string) => apiFetch(`${V}/options/${id}`, { method: 'DELETE' }).then(data<{ deleted: boolean }>);
 
-/** Why the server refused, in its own words (a banned word, documents not yet checked). A form-shape refusal has no
- *  words for a person, so the caller keeps its own sentence. */
+/** [REVIEW-F #2142 S4-2, as the phone's #2141] The item or its section was deleted on another device: the server's
+ *  "Category with id … not found" names an internal id, so the store reads this instead. */
+export const ITEM_GONE_WORDS = 'This section or item was removed on another phone. Go back and open the menu again.';
+
+/** Why the server refused, in its own words (a banned word, documents not yet checked). A refusal with no words for a
+ *  person (the form's shape, a duplicate, a server fault) gives null, so the caller keeps its own sentence; a missing
+ *  item or section says so in plain words. */
 export function refusalWords(error: unknown): string | null {
-  if (!(error instanceof ApiRequestError) || error.code === 'VALIDATION_ERROR' || !error.message.trim()) return null;
+  if (!(error instanceof ApiRequestError)) return null;
+  if (error.code === 'NOT_FOUND') return ITEM_GONE_WORDS;
+  if (error.code === 'VALIDATION_ERROR' || error.code === 'DUPLICATE' || error.code === 'INTERNAL_ERROR' || !error.message.trim()) return null;
   return error.message;
 }
 
 /** A photo sized in the browser before it is sent, like the phone app does (long edge 1280 px, JPEG): a few hundred
- *  KB instead of a multi-MB camera original. Anything that cannot be sized (no canvas, a format the browser cannot
- *  draw) is sent as chosen — never dropped. The server still checks, scans and redraws every photo. */
+ *  KB instead of a multi-MB camera original. It is drawn upright (the camera's orientation applied, since the re-encode
+ *  drops the EXIF that carried it) on white (JPEG has no transparency: a transparent PNG would otherwise turn black —
+ *  REVIEW-F #2142 S3-1). Anything that cannot be sized (no canvas, a format the browser cannot draw, no 2D context) is
+ *  sent as chosen — never dropped, never a blank image. The server still checks, scans and redraws every photo. */
 export async function sizedPhoto(file: File, edge = 1280): Promise<{ blob: Blob; name: string }> {
+  const original = { blob: file as Blob, name: file.name };
   try {
-    if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') return { blob: file, name: file.name };
-    const bitmap = await createImageBitmap(file);
+    if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') return original;
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
     const scale = Math.min(1, edge / Math.max(bitmap.width, bitmap.height));
-    if (scale === 1 && file.size < 600_000) { bitmap.close?.(); return { blob: file, name: file.name }; }
+    if (scale === 1 && file.size < 600_000) { bitmap.close?.(); return original; }
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(bitmap.width * scale);
     canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) { bitmap.close?.(); return original; }
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     bitmap.close?.();
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
-    return blob ? { blob, name: file.name.replace(/\.[^.]+$/, '') + '.jpg' } : { blob: file, name: file.name };
+    return blob && blob.size > 0 ? { blob, name: file.name.replace(/\.[^.]+$/, '') + '.jpg' } : original;
   } catch {
-    return { blob: file, name: file.name };
+    return original;
   }
 }

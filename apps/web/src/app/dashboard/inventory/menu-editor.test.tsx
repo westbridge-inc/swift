@@ -22,6 +22,9 @@ let refuse: Record<string, { status: number; body: unknown }>;
 let hold: { release?: () => void } | null;
 /** After the first load: every re-read of the list hangs, so only the server's answers can change the screen. */
 let holdReads: boolean;
+/** [REVIEW-F #2142] Writes that hang (a slow line): to prove a second press sends nothing while the first is out. */
+let holdSectionPost = false;
+let holdItemPost = false;
 
 const body = (r: ApiRequest) => (typeof r.init?.body === 'string' ? JSON.parse(r.init.body) : r.init?.body);
 
@@ -40,6 +43,8 @@ beforeEach(() => {
   refuse = {};
   hold = null;
   holdReads = false;
+  holdSectionPost = false;
+  holdItemPost = false;
   mockApi(async (r) => {
     const { url, method } = r;
     const path = url.pathname;
@@ -51,6 +56,7 @@ beforeEach(() => {
     if (path === '/api/v1/vendor/categories' && method === 'GET') return { body: { data: sections } };
     if (path === '/api/v1/vendor/stores') return { body: { data: { stores: [{ id: 'store-1', name: 'Mart', vendorType, isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true }], selectedId: 'store-1', myRole: role } } };
     if (path === '/api/v1/vendor/profile') return { body: { data: { myRole: role, vendors: [] } } };
+    if (path === '/api/v1/vendor/items' && method === 'POST' && holdItemPost) return new Promise<never>(() => {});
     if (path === '/api/v1/vendor/items' && method === 'POST') {
       const b = body(r);
       const saved = { id: 'new-1', ...b, basePrice: String(b.basePrice), category: sections.find((c) => c.id === b.categoryId), bulk: b.bulk ?? 'normal',
@@ -74,6 +80,7 @@ beforeEach(() => {
     const opts = path.match(/^\/api\/v1\/vendor\/option-groups\/([^/]+)\/options$/);
     if (opts) return { body: { data: { id: 'o-new', optionGroupId: opts[1], ...body(r) } } };
     if (/^\/api\/v1\/vendor\/options\/[^/]+$/.test(path)) return { body: { data: { deleted: true } } };
+    if (path === '/api/v1/vendor/categories' && method === 'POST' && holdSectionPost) return new Promise<never>(() => {});
     if (path === '/api/v1/vendor/categories' && method === 'POST') {
       const saved = { id: 'sides', name: body(r).name, sortOrder: 2 };
       sections = [...sections, saved];
@@ -285,5 +292,69 @@ describe('[TAP-AUDIT] a new price shows at the tap', () => {
     await act(async () => { fireEvent.keyDown(within(roti).getByRole('spinbutton'), { key: 'Enter' }); });
     expect(await screen.findByText(/This item is being checked by Swift\./)).toBeTruthy();
     await waitFor(() => expect(within(screen.getByRole('article', { name: 'Roti' })).getByRole('button', { name: '$500' })).toBeTruthy());
+  });
+});
+
+describe('[REVIEW-F #2142] a second press while the first is on its way sends nothing more', () => {
+  // S3-2: REVIEW-F's probe, lifted as is (Enter, then a key-repeat 30 ms later).
+  it('Enter twice in the section name: ONE new section', async () => {
+    holdSectionPost = true;
+    renderWithQuery(<InventoryPage />);
+    await screen.findByRole('article', { name: 'Roti' });
+    await click(within(screen.getByLabelText('Sections')).getByRole('button', { name: '+ Add section' }));
+    const box = await dialog();
+    await type(box, 'Section name', 'Sides');
+    await act(async () => { fireEvent.keyDown(field(box, 'Section name'), { key: 'Enter' }); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); }); // a key-repeat later: React has drawn the pending state
+    await act(async () => { fireEvent.keyDown(field(box, 'Section name'), { key: 'Enter' }); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(writes.filter((w) => w.method === 'POST' && w.url.pathname === '/api/v1/vendor/categories')).toHaveLength(1);
+  });
+
+  // S4-1: Save is held while it saves.
+  it('Add item pressed twice: ONE create request', async () => {
+    holdItemPost = true;
+    renderWithQuery(<InventoryPage />);
+    await screen.findByRole('article', { name: 'Roti' });
+    await click(await screen.findByRole('button', { name: '+ Add item' }));
+    const editor = await dialog();
+    await type(editor, 'Item name', 'Chow mein');
+    await type(editor, 'Price (GYD)', '700');
+    await click(within(editor).getByRole('button', { name: 'Add item' }));
+    const saving = await within(editor).findByRole('button', { name: 'Saving…' });
+    expect(saving.hasAttribute('disabled')).toBe(true);
+    await click(saving);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(writes.filter((w) => w.method === 'POST' && w.url.pathname === '/api/v1/vendor/items')).toHaveLength(1);
+  });
+});
+
+describe('[REVIEW-F #2142 S4-4] the editor draws only a photo Swift keeps, or the file just chosen', () => {
+  it('an outside address saved before photos were uploaded is not drawn ("Add a photo"); Swift\'s own photo is', async () => {
+    items = items.map((i) => (i.id === 'rice' ? { ...i, imageUrl: 'https://elsewhere.example/rice.jpg' } : i));
+    renderWithQuery(<InventoryPage />);
+    const rice = await screen.findByRole('article', { name: 'Rice 20 kg' });
+    await click(await within(rice).findByRole('button', { name: 'Edit item' }));
+    let editor = await dialog();
+    expect(editor.querySelector('img')).toBeNull();
+    expect(within(editor).getByText('Add a photo')).toBeTruthy();
+    await click(within(editor).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await click(within(screen.getByRole('article', { name: 'Roti' })).getByRole('button', { name: 'Edit item' }));
+    editor = await dialog();
+    expect(editor.querySelector('img')?.getAttribute('src')).toContain('/media/items/store-1/abcdefghijklmnop.jpg');
+    expect(within(editor).getByText('Change photo')).toBeTruthy();
+  });
+});
+
+describe('[REVIEW-F #2142 S4-2] a removed item or section is said in plain words', () => {
+  it('deleting an item already deleted on the phone: plain words, never the internal id', async () => {
+    refuse['DELETE /api/v1/vendor/items/rice'] = { status: 404, body: { success: false, error: { code: 'NOT_FOUND', message: 'Item with id cm0abc123 not found' } } };
+    renderWithQuery(<InventoryPage />);
+    const rice = await screen.findByRole('article', { name: 'Rice 20 kg' });
+    await click(await within(rice).findByRole('button', { name: 'Delete' }));
+    const ask = await dialog();
+    await click(within(ask).getByRole('button', { name: 'Delete' }));
+    expect((await within(ask).findByRole('alert')).textContent).toBe('This section or item was removed on another phone. Go back and open the menu again.');
   });
 });

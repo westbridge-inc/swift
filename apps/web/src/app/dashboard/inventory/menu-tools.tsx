@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { Modal } from '@/components/modal';
 import { storeKey } from '@/lib/store-scope';
-import { mediaUrl, photo } from '@/lib/media';
+import Image from 'next/image';
+import { photo as storePhoto } from '@/lib/media';
 import { GRA_VAT_URL } from '@/lib/gra-vat-url';
 import type { CatalogItem, VatClass } from '@/lib/vendor-api';
 import {
@@ -65,7 +66,7 @@ function reread(qc: QueryClient, keys: Keys) {
 
 /** The item's photo: a 96 px copy through the store-photo route. */
 export function Thumb({ url }: { url: string }) {
-  const shot = photo(url);
+  const shot = storePhoto(url);
   const src = shot ? (shot.loader ? shot.loader({ src: shot.src, width: 96 }) : shot.src) : null;
   // eslint-disable-next-line @next/next/no-img-element -- a 96 px copy from the store-photo route; next/image is not in the page's first load
   return src ? <img src={src} alt="" loading="lazy" className="h-full w-full object-cover" /> : null;
@@ -297,7 +298,11 @@ export function ItemEditor({
     },
   });
 
-  const shownPhoto = photoPreview ?? mediaUrl(item?.imageUrl ?? null);
+  // [REVIEW-F #2142 S4-4] Only a preview made here from the chosen file, or a photo Swift keeps (the store-photo route,
+  // as the row and the app draw it); an outside address saved before photos were uploaded is not drawn.
+  const kept = storePhoto(item?.imageUrl ?? null);
+  const keptPhoto = kept?.loader ? kept : null;
+  const hasPhoto = !!photoPreview || !!keptPhoto;
   const pickPhoto = (file: File | undefined) => {
     if (!file) return;
     if (photoPreview) URL.revokeObjectURL(photoPreview);
@@ -311,12 +316,15 @@ export function ItemEditor({
 
       <div className="mt-4 flex items-center gap-4">
         <div className="grid h-24 w-24 flex-none place-items-center overflow-hidden rounded-xl bg-[var(--swift-sunken)]">
-          {/* eslint-disable-next-line @next/next/no-img-element -- a local preview (blob:) or the store's own photo, drawn as chosen */}
-          {shownPhoto ? <img src={shownPhoto} alt={`${name || 'Item'} photo`} className="h-full w-full object-cover" /> : <span className="text-xs text-[var(--swift-muted)]">No photo</span>}
+          {photoPreview
+            ? <Image src={photoPreview} alt={`${name || 'Item'} photo`} width={96} height={96} unoptimized className="h-full w-full object-cover" />
+            : keptPhoto
+              ? <Image {...keptPhoto} alt={`${name || 'Item'} photo`} width={96} height={96} className="h-full w-full object-cover" />
+              : <span className="text-xs text-[var(--swift-muted)]">No photo</span>}
         </div>
         <div className="min-w-0">
           <label className="sw-btn-outline inline-flex min-h-11 cursor-pointer items-center rounded-lg px-4 text-sm font-semibold">
-            {shownPhoto ? 'Change photo' : 'Add a photo'}
+            {hasPhoto ? 'Change photo' : 'Add a photo'}
             <input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" aria-label="Item photo" onChange={(e) => pickPhoto(e.target.files?.[0])} />
           </label>
           {photo ? <button type="button" className="ml-3 text-sm font-semibold text-[var(--swift-muted)]" onClick={() => { setPhoto(null); setPhotoPreview(null); }}>Remove selected photo</button> : null}
@@ -631,7 +639,7 @@ export function SectionDialog({ storeId, vendorType, section, itemCount, mode, o
     <Modal labelledBy="section-name-title" onClose={onClose} className="bg-[var(--swift-card)] px-6 pb-6 pt-5">
       <h2 id="section-name-title" className="sw-title">{mode === 'add' ? 'New section' : `Rename “${section?.name ?? ''}”`}</h2>
       <input className="sw-input mt-4" aria-label="Section name" placeholder={mode === 'add' ? SECTION_HINT[vendorType ?? 'RESTAURANT'] ?? SECTION_HINT['RESTAURANT'] : 'Category name'}
-        value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && name.trim()) write.mutate(); }} data-modal-initial-focus />
+        value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && name.trim() && !write.isPending) write.mutate(); }} data-modal-initial-focus />
       {failure ? <p role="alert" className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{failure}</p> : null}
       <div className="mt-4 flex gap-3">
         <button type="button" className="sw-btn sw-btn-md flex-1" disabled={!name.trim() || write.isPending} onClick={() => write.mutate()}>
