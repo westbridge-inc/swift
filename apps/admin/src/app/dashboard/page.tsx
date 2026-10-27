@@ -5,7 +5,7 @@ import { RevenueBreakdown } from '@/components/dashboard/RevenueBreakdown';
 import { LiveOrderFeed } from '@/components/dashboard/LiveOrderFeed';
 import { AlertsPanel } from '@/components/dashboard/AlertsPanel';
 import { useQuery } from '@tanstack/react-query';
-import { fetchDashboard } from '@/lib/api';
+import { fetchDashboard, fetchWaiting } from '@/lib/api';
 import { DataUnavailable, METRIC_UNAVAILABLE } from '@/components/dashboard/DataUnavailable';
 
 export default function DashboardPage() {
@@ -14,6 +14,10 @@ export default function DashboardPage() {
     queryFn: fetchDashboard,
     refetchInterval: 30_000,
   });
+
+  // [ADMIN-AUDIT S2-1] Every queue that waits for a person, counted by the server: its own read, so a slow
+  // count never holds the figures above, and a failed one is never read as a quiet platform.
+  const waiting = useQuery({ queryKey: ['dashboard-waiting'], queryFn: fetchWaiting, refetchInterval: 30_000 });
 
   const stats = data?.data;
   // [A-06] A failed read is not a quiet platform. Every card below said "—"
@@ -99,7 +103,14 @@ export default function DashboardPage() {
         <LiveOrderFeed />
       </div>
 
-      <AlertsPanel alerts={stats?.alerts} unavailable={blind} lastSuccessAt={dataUpdatedAt || undefined} />
+      <AlertsPanel
+        alerts={stats?.alerts}
+        unavailable={blind}
+        lastSuccessAt={dataUpdatedAt || undefined}
+        waiting={waiting.data?.data}
+        waitingUnavailable={waiting.isError && !waiting.data}
+        waitingLoading={waiting.isLoading}
+      />
     </div>
   );
 }

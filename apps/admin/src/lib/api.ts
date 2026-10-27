@@ -283,6 +283,16 @@ export interface Promo {
 
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
+/** [ADMIN-AUDIT S2-1] Every queue that waits for a person, counted by the server (GET /admin/dashboard/waiting).
+ *  `count: null` = it could not be read just now (not zero); `notCounted` = queues this account's grant does not open. */
+export type WaitingKey =
+  | 'opsAlerts' | 'supportSafety' | 'documents' | 'approvals' | 'paymentConfirmations' | 'support' | 'catalogue'
+  | 'storeVat' | 'custody' | 'claimsToDecide' | 'claimsToPay' | 'returnsToDecide' | 'refundsOwed' | 'moderation';
+export interface WaitingCounts {
+  queues: { key: WaitingKey; count: number | null }[];
+  notCounted: WaitingKey[];
+}
+export const fetchWaiting = (): Promise<Envelope<WaitingCounts>> => apiFetch('/api/v1/admin/dashboard/waiting');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
 /** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
 export interface ListEnvelope<T> {

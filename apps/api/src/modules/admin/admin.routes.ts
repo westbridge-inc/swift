@@ -4,7 +4,7 @@ import { documentScanState, uploadScanRefusal, retryHeldEvidenceScan } from '../
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
-import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
+import { CUSTODY_CASE_DIRECTABLE, CUSTODY_CASE_OPEN_STATES } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
@@ -13,7 +13,8 @@ import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
-import { bindTenantTransaction } from '../../plugins/prisma';
+import { bindTenantTransaction, runWithoutTenant } from '../../plugins/prisma';
+import { countWaiting, type WaitingKey } from './dashboard-waiting';
 import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -1185,6 +1186,51 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  // [ADMIN-AUDIT S2-1] TODAY: EVERY QUEUE THAT WAITS FOR A PERSON, counted by the server with the same read as
+  // the queue's own page (dashboard-waiting.ts says why). A queue is counted only when this request's live grant
+  // (read by the capability hook) would open that page's read; a failed count is null, never zero.
+  app.get('/dashboard/waiting', { preHandler: [adminGuard] }, async (request: any) => {
+    const tenantId = requireTenantId();
+    const now = new Date();
+    let supportCounts: Promise<{ safety: number; other: number }> | null = null;
+    const supportWaiting = () => (supportCounts ??= support.waitingForAdmin());
+    const counters: Record<WaitingKey, () => Promise<number>> = {
+      // GET /safety/ops-alerts' own read [S-19 · M009]: a platform responder (SUPER_ADMIN) is paged for every
+      // tenant's alert and the platform's, a tenant ADMIN for their tenant's alone.
+      opsAlerts: () => (request.user.role === 'SUPER_ADMIN'
+        ? runWithoutTenant(() => app.prisma.opsAlert.count({ where: { acknowledgedAt: null, closedAt: null } }))
+        : app.prisma.opsAlert.count({ where: { tenantId, acknowledgedAt: null, closedAt: null } })),
+      supportSafety: async () => (await supportWaiting()).safety,
+      support: async () => (await supportWaiting()).other,
+      documents: () => tenantPrisma.verificationDocument.count({ where: { status: 'PENDING' } }),
+      approvals: () => tenantPrisma.privilegedApproval.count({ where: approvalsViewWhere('PENDING', now) }),
+      paymentConfirmations: async () => {
+        const { confirmationReviewQueue } = await import('../billing/confirmation-finance');
+        return (await confirmationReviewQueue(app.prisma, tenantId, now)).length;
+      },
+      catalogue: async () => {
+        const { waiting, heldStores } = await catalogueWaiting(tenantId);
+        return waiting.length + heldStores.length;
+      },
+      storeVat: () => tenantPrisma.vendor.count({ where: { vatStatus: 'PENDING' } }),
+      custody: () => app.prisma.custodyRecoveryCase.count({ where: { state: { in: CUSTODY_CASE_OPEN_STATES } } }),
+      claimsToDecide: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'PENDING_REVIEW' } }),
+      claimsToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: { in: ['APPROVED', 'AUTO_APPROVED'] } } }),
+      returnsToDecide: () => tenantPrisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
+      refundsOwed: () => tenantPrisma.returnRequest.count({ where: { status: 'REFUND_DUE' } }),
+      moderation: async () => {
+        const [reports, ratings] = await Promise.all([
+          tenantPrisma.contentReport.count({ where: { status: 'PENDING' } }),
+          ratingsModerationQueue({ record: false }),
+        ]);
+        return reports + ratings.held.length + ratings.reports.length;
+      },
+    };
+    const data = await countWaiting({ role: request.user.role, permissions: request.adminPermissions ?? null }, counters,
+      (key, error) => app.log.warn({ key, err: error }, '[ADMIN-AUDIT S2-1] a Today count could not be read; shown as unknown, not zero'));
+    return { success: true, data };
+  });
+
   // ─── Users ─────────────────────────────────────────────────────────────
 
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
@@ -1538,10 +1584,16 @@ export async function adminRoutes(app: FastifyInstance) {
   // or an earlier removal). Both actions are C3: reason owed, audit row written.
   // =========================================================================
 
+  // [ADMIN-AUDIT S2-1] What the catalogue check waits on, read once: for its page and for Today's count.
+  const catalogueWaiting = async (tenantId: string) => ({
+    // An item held only because its STORE waits is checked through its store (below), not one by one.
+    waiting: [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store'),
+    heldStores: [...(await storesHeldInTenant(app.prisma, tenantId))],
+  });
+
   app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
     const tenantId = requireTenantId();
-    // An item held only because its STORE waits is checked through its store (below), not one by one.
-    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store');
+    const { waiting, heldStores } = await catalogueWaiting(tenantId);
     // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
     const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
     const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
@@ -1558,7 +1610,6 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     // [owner 14 Oct, store names] Stores whose own words are held: approve shows the store (and lets its items be
     // judged by their own words again) for exactly the words on screen.
-    const heldStores = [...(await storesHeldInTenant(app.prisma, tenantId))];
     const storeRows = await app.prisma.vendor.findMany({
       where: { id: { in: heldStores.slice(0, CATALOGUE_REVIEW_PAGE).map(([id]) => id) } },
       select: { id: true, status: true, ...STORE_WORDS_SELECT },
@@ -7513,8 +7564,9 @@ export async function adminRoutes(app: FastifyInstance) {
   // exclusions, never operational status.
   // =========================================================================
 
-  /** GET /ratings/moderation — held reviews + pending reports, one queue. */
-  app.get('/ratings/moderation', { preHandler: [adminGuard] }, async () => {
+  /** GET /ratings/moderation — held reviews + pending reports, one queue. [ADMIN-AUDIT S2-1] Read once: for its
+   *  page and for Today's count. */
+  const ratingsModerationQueue = async ({ record = true }: { record?: boolean } = {}) => {
     const held = await tenantPrisma.rating.findMany({
       where: { flagged: true, flagReason: 'PROFANITY_HOLD', state: 'ACTIVE' },
       orderBy: { createdAt: 'asc' },
@@ -7538,16 +7590,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // quarantined for the platform, counted, and the queue names how many.
     const reports = pending.filter((r) => byId.has(r.ratingId));
     const quarantined = pending.length - reports.length;
-    if (quarantined > 0) ratingReportTenancyCounter.labels('quarantined_in_queue').inc(quarantined);
-    return {
-      success: true,
-      data: {
-        held,
-        reports: reports.map((r) => ({ ...r, rating: byId.get(r.ratingId) ?? null })),
-        quarantined,
-      },
-    };
-  });
+    // Today's count reads the same queue every 30 s: it does not count the quarantine again.
+    if (quarantined > 0 && record) ratingReportTenancyCounter.labels('quarantined_in_queue').inc(quarantined);
+    return { held, reports: reports.map((r) => ({ ...r, rating: byId.get(r.ratingId) ?? null })), quarantined };
+  };
+  app.get('/ratings/moderation', { preHandler: [adminGuard] }, async () => ({ success: true, data: await ratingsModerationQueue() }));
 
   /** POST /ratings/:id/moderate — publish (clear hold) | remove | exclude. */
   app.post<{ Params: { id: string } }>('/ratings/:id/moderate', { preHandler: [adminGuard] }, async (request) => {

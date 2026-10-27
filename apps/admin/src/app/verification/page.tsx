@@ -227,7 +227,10 @@ export default function VerificationPage() {
       answers.current.set(variables.doc.id, typeof outcome === 'string' ? outcome : '');
       // [ADMIN-AUDIT S2-2] Stay with this applicant while they have documents waiting (a rider sends
       // three, a taxi driver seven): their next waiting document opens, in the order the list shows.
-      const stillWaiting = documents.filter((d) => d.status === 'PENDING' && !answers.current.has(d.id));
+      // A VAT certificate is decided in Store VAT, never here: it is not a next document to stop on.
+      // A role or document-type filter is a sweep of that kind across applicants: only matching documents are next.
+      const stillWaiting = documents.filter((d) => d.status === 'PENDING' && !answers.current.has(d.id) && d.docType !== VAT_CERTIFICATE_DOC_TYPE
+        && (!role || d.role === role) && (!type || d.docType === type));
       const from = documents.findIndex((d) => d.id === variables.doc.id);
       const nextDocument = stillWaiting.find((d) => documents.indexOf(d) > from) ?? stillWaiting[0] ?? null;
       setDecision(null);
