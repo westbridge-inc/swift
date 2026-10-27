@@ -126,20 +126,39 @@ const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString(
  *  licence — synthetic and unique to the document, so no two journey accounts are ever joined — or a
  *  police clearance's issue date. */
 const NUMBER_TYPED = new Set(['national_id', 'owner_national_id', 'passport', 'identity_l2', 'drivers_licence']);
-export function reviewerTypedBody(docType: string, docId: string): Record<string, string> {
+/** [R15] Certificates checked again every January: the reviewer types the year printed on them
+ *  (doc-registry CERTIFICATE_YEAR_DOC_TYPES). */
+const YEAR_TYPED = new Set([
+  'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
+  'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
+]);
+/** The year in Guyana (UTC-4, no daylight saving): the API refuses a certificate year that has not started there. */
+const guyanaYear = () => new Date(Date.now() - 4 * 3_600_000).getUTCFullYear();
+export function reviewerTypedBody(docType: string, docId: string): Record<string, string | number | boolean> {
   if (NUMBER_TYPED.has(docType)) return { documentNumber: `SYN${docId.replace(/[^a-zA-Z0-9]/g, '').slice(-16)}` };
   if (docType === 'police_clearance') return { issuedOn: new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10) };
+  if (YEAR_TYPED.has(docType)) return { certificateYear: guyanaYear() };
+  // [R16] A business registration says what it is: the synthetic stores are companies (a certificate of
+  // incorporation never expires, so no January re-check falls inside a journey). The year is typed too.
+  if (docType === 'business_registration') return { registrationKind: 'COMPANY', certificateYear: guyanaYear() };
+  // [ROLE-DOCS] An own-name declaration is approved only on the reviewer's check of the name against the ID.
+  if (docType === 'own_name_declaration') return { ownNameConfirmed: true };
   return {};
 }
 
-/** Approve one pending document as the admin (with an expiry, and hire insurance for a taxi). */
-export async function approveDoc(admin: Session, docId: string, docType: string, vehicleType?: string): Promise<Res> {
+/** The approve request's body: what the reviewer types, an expiry, and hire insurance for a taxi. */
+export function approvalBody(docId: string, docType: string, vehicleType?: string): Record<string, unknown> {
   const body: Record<string, unknown> = { ...reviewerTypedBody(docType, docId) };
   if (EXPIRING.has(docType)) body.expiresAt = inDays(300);
   if (docType === 'vehicle_insurance' && vehicleType && ['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15'].includes(vehicleType)) {
     body.insurance = { insurerName: 'Synthetic Assurance', policyNumber: `SYN-${docId.slice(-8)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true };
   }
-  return asAdmin(admin.token, `approve synthetic ${docType} submitted by the journey roster`, 'PUT', `/admin/verification/${docId}/approve`, body);
+  return body;
+}
+
+/** Approve one pending document as the admin. */
+export async function approveDoc(admin: Session, docId: string, docType: string, vehicleType?: string): Promise<Res> {
+  return asAdmin(admin.token, `approve synthetic ${docType} submitted by the journey roster`, 'PUT', `/admin/verification/${docId}/approve`, approvalBody(docId, docType, vehicleType));
 }
 
 /**
