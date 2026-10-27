@@ -16,6 +16,7 @@ vi.mock('next/navigation', () => ({ usePathname: () => nav.pathname, useRouter: 
 import ReturnsPage from './returns/page';
 import ClaimsPage from './claims/page';
 import SubscriptionsPage from './subscriptions/page';
+import SupportPage from './support/page';
 
 const empty = () => mockApi(() => ({ body: { success: true, data: [], meta: { page: 1, limit: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false } } }));
 const tabs = () => screen.getAllByRole('button').filter((b) => b.hasAttribute('aria-pressed')).map((b) => b.textContent);
@@ -34,6 +35,13 @@ describe('[ADMIN-AUDIT S4-1] status tabs in plain words', () => {
     expect(await screen.findByText('No claims under “Waiting for review”.')).toBeTruthy();
     expect(tabs()).toEqual(expect.arrayContaining(['Waiting for review', 'Approved automatically', 'Approved', 'Paid', 'Rejected']));
     expect(document.body.textContent).not.toMatch(/pending review|auto approved/);
+  });
+  it('Support (REVIEW-F #2154 S4-3): the tabs say what the rows say', async () => {
+    mockApi(() => ({ body: { success: true, data: { tickets: [], total: 0, page: 1, limit: 20 } } }));
+    renderWithQuery(<SupportPage />);
+    expect(await screen.findByText('No tickets under “Open”.')).toBeTruthy();
+    expect(tabs()).toEqual(['Open', 'Being handled', 'Resolved']);
+    expect(document.body.textContent).not.toMatch(/In progress|open tickets/);
   });
   it('Subscribers', async () => {
     empty();

@@ -320,7 +320,6 @@ const AFTER_1942: Record<string, string> = {
   "app/subscriptions/page.tsx | String(e.kind ?? '').replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   'app/subscriptions/page.tsx | h.kind': 'BUG-GUARDS C5 admin, after #1942',
   "app/support/page.tsx | f.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
-  "app/support/page.tsx | filter.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/support/page.tsx | String(t.category).replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/support/page.tsx | String(t.resolution).replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   'components/dashboard/LiveOrderFeed.tsx | order.status': 'BUG-GUARDS C5 admin, after #1942',
