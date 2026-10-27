@@ -16,8 +16,10 @@ import {
 } from '../modules/ops/approver-signatures';
 import { desiredPlatformConfig, spineRequestContext } from '../modules/ops/platform-config';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { SmtpEmailProvider } from '../providers/notifications/smtp-email';
 import { testPhone } from './helpers/fixture-ids';
 import { testPrismaClient } from './helpers/test-prisma-client';
+import { isTestRunnerSetting, PRODUCTION_CHANNELS, seedContainerNames, UNSET_IN_THE_SEED } from './helpers/seed-channel-settings';
 
 // This suite pins the deployment identity singleton and the admin roster for the whole file and restores both after.
 grantSuiteCapability('unscoped-mutation');
@@ -582,5 +584,126 @@ describe('[SOLO RE-SEED] the real seed entry point', () => {
     const r = run({ SEED_SOLO_CANCEL: 'yes' });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('SEED_SOLO_CANCEL must be exactly 1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SEED-FIX 27 Oct] In the seed container, in production. The owner's first
+// real start on production was refused (SOLO_EMAIL_UNAVAILABLE, nothing
+// changed): the container had no PUSH_PROVIDER, getChannels() builds every
+// channel, and a dev push provider refuses production. Every case above runs
+// the dev adapters in test posture, so none could see it. Here the channels are
+// the production ones (Twilio, Expo, SMTP: placeholder settings, the network
+// stubbed) and the process sees ONLY the notification settings
+// docker-compose.seed.yml passes, valued as deploy/.env holds them for the api
+// (seed-channel-settings.ts takes the names from the code, not a list).
+// ---------------------------------------------------------------------------
+interface Wire { texts: Array<{ to: string; body: string }>; emails: Array<{ to: string; subject: string }>; reads: Set<string> }
+
+/**
+ * Run `fn` as the seed container runs it, in production posture: the process
+ * holds ONLY the names the container holds (seedContainerNames: the compose
+ * environment after the secret-file loader, minus `omit`), the notification
+ * ones valued as deploy/.env holds them for the api, and every name read is
+ * recorded (wire.reads) so a case can prove it needed nothing the container
+ * lacks. Only the test runner's own settings pass through besides.
+ */
+async function inSeedContainer<T>(fn: (wire: Wire) => Promise<T>, omit: readonly string[] = []): Promise<T> {
+  const held = seedContainerNames();
+  const saved = process.env;
+  const wire: Wire = { texts: [], emails: [], reads: new Set() };
+  const env: Record<string, string> = {};
+  for (const name of held) {
+    if (omit.includes(name)) continue;
+    const value = name === 'DATABASE_URL' ? saved['DATABASE_URL'] : PRODUCTION_CHANNELS[name];
+    if (value !== undefined) env[name] = value;
+  }
+  for (const [name, value] of Object.entries(saved)) if (isTestRunnerSetting(name) && value !== undefined) env[name] = value;
+  const record = (key: string | symbol) => { if (typeof key === 'string') wire.reads.add(key); };
+  // Only Twilio is reached: each text is answered the way Twilio answers one.
+  vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: { body?: unknown }) => {
+    if (!String(url).startsWith('https://api.twilio.com/')) throw new Error(`the seed reached the network outside Twilio: ${String(url)}`);
+    const form = new URLSearchParams(String(init?.body ?? ''));
+    wire.texts.push({ to: form.get('To') ?? '', body: form.get('Body') ?? '' });
+    return new Response(JSON.stringify({ sid: `SM${String(wire.texts.length).padStart(32, '0')}` }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+  }));
+  // The mailbox is built from the settings for real; only the SMTP dialogue is not run.
+  const smtp = vi.spyOn(SmtpEmailProvider.prototype, 'sendEmail').mockImplementation(async (to: string, subject: string) => {
+    wire.emails.push({ to, subject });
+    return { ref: `<seed-${wire.emails.length}@example.invalid>` };
+  });
+  process.env = new Proxy(env, {
+    get: (target, key) => { record(key); return typeof key === 'string' ? target[key] : undefined; },
+    has: (target, key) => { record(key); return key in target; },
+    ownKeys: (target) => { wire.reads.add('*'); return Reflect.ownKeys(target); },
+  }) as typeof process.env;
+  try {
+    return await fn(wire);
+  } finally {
+    process.env = saved;
+    smtp.mockRestore();
+    vi.unstubAllGlobals();
+  }
+}
+
+/**
+ * The names a case read that the seed container does not hold: the test
+ * runner's own settings aside, and the reviewed few whose unset value is the
+ * right one in the seed (UNSET_IN_THE_SEED, each with its reason).
+ */
+const readsTheContainerLacks = (wire: Wire): string[] => {
+  const held = seedContainerNames();
+  return [...wire.reads].filter((name) => !held.has(name) && !isTestRunnerSetting(name) && !(name in UNSET_IN_THE_SEED)).sort();
+};
+
+describe('[SEED-FIX] in the seed container, in production: what docker-compose.seed.yml passes carries a solo re-seed', () => {
+  it('the start (A7f): the wait starts, the owner is emailed through the mailbox and texted through Twilio', async () => {
+    const c = await reseedCase(31);
+    const line = sign('owner', c.request);
+    const { started, wire } = await inSeedContainer(async (w) => ({
+      started: await startSoloReseed(prisma, URL_, c.desired, c.plan, { approvals: [line], approverKeys: OWNER_ONLY, request: c.ctx, actor: 'owner' }),
+      wire: w,
+    }));
+    expect(started.eligibleAt.getTime()).toBeGreaterThan(Date.now() + SOLO_COOLING_OFF_MS - 60_000);
+    expect(await eventsFor(line)).toEqual(['REQUESTED']);
+    expect(wire.emails).toEqual([{ to: EMAIL, subject: 'Swift: a production settings re-seed is waiting for your solo approval' }]);
+    expect(wire.texts.map((t) => t.to)).toEqual([PHONE]);
+    expect(wire.texts[0]!.body).toContain('SEED_SOLO_CANCEL=1');
+    // Nothing went to the dev adapters: these were the production channels.
+    expect(devChannelLog).toHaveLength(0);
+    expect(await keyValue()).toBeNull();
+    // Nothing the start read is missing from the container (the census: seed-channel-settings.ts).
+    expect([...wire.reads]).toEqual(expect.arrayContaining(['NODE_ENV', 'PUSH_PROVIDER', 'EMAIL_PROVIDER', 'SMTP_PASS', 'NOTIFICATION_PROVIDER', 'TWILIO_API_KEY_SECRET']));
+    expect(readsTheContainerLacks(wire), 'settings the start read that the seed container does not hold').toEqual([]);
+  });
+
+  it('the apply after the wait (A7g): the sign-in code goes by Twilio and is typed back, the plan applies, the owner is emailed and texted', async () => {
+    const c = await startedCase(32);
+    resetDevChannelLog();
+    const { res, wire } = await inSeedContainer(async (w) => ({
+      res: await applyWith(c, c.line, { readSignInCode: async () => CODE.exec(w.texts.at(-1)?.body ?? '')?.[1] ?? '' }),
+      wire: w,
+    }));
+    expect(res.applied).toBe(1);
+    expect(await keyValue()).toBe(32);
+    expect(await eventsFor(c.line)).toEqual(['REQUESTED', 'APPLIED']);
+    expect(wire.texts.map((t) => [t.to, CODE.test(t.body) ? 'code' : 'applied'])).toEqual([[PHONE, 'code'], [PHONE, 'applied']]);
+    expect(wire.emails).toEqual([{ to: EMAIL, subject: 'Swift: production settings re-seed applied (solo approval)' }]);
+    expect(devChannelLog).toHaveLength(0);
+    expect([...wire.reads]).toEqual(expect.arrayContaining(['NODE_ENV', 'PUSH_PROVIDER', 'EMAIL_PROVIDER', 'SMTP_PASS', 'NOTIFICATION_PROVIDER', 'TWILIO_API_KEY_SECRET']));
+    expect(readsTheContainerLacks(wire), 'settings the apply read that the seed container does not hold').toEqual([]);
+  });
+
+  it('the production push guard still stands: a seed container without PUSH_PROVIDER is refused and starts nothing', async () => {
+    const c = await reseedCase(33);
+    const line = sign('owner', c.request);
+    const { err, wire } = await inSeedContainer(async (w) => ({
+      err: await startSoloReseed(prisma, URL_, c.desired, c.plan, { approvals: [line], approverKeys: OWNER_ONLY, request: c.ctx }).catch((e: unknown) => e),
+      wire: w,
+    }), ['PUSH_PROVIDER']);
+    expect((err as { code?: string }).code).toBe('SOLO_EMAIL_UNAVAILABLE');
+    expect(await eventsFor(line)).toEqual([]);
+    expect(wire.emails).toEqual([]);
+    expect(wire.texts).toEqual([]);
   });
 });
