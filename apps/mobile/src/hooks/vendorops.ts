@@ -32,6 +32,7 @@ import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
 import { pendingOrderIds } from '../modules/vendor/boardTaps';
 import { answeredSinceAsked } from '../modules/vendor/storeOrderRules';
+import { errorMessage } from '../lib/apiError';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -652,6 +653,12 @@ export function useConfirmVendorCashSettlement() {
   });
 }
 
+/** [REVIEW-F #2143 S3-2] What a refused pick tick says: the server's own reason, or a plain sentence. */
+export const TICK_REFUSED_TITLE = 'That tick didn’t save';
+export function tickRefusalWords(error: unknown): string {
+  return errorMessage(error, 'Check your connection and tap it again.');
+}
+
 /** [TAP-AUDIT] Every pick tick carries this key: the screen reads which lines are waiting (usePendingPickLines). */
 export const PICK_KEY = ['vendor', 'orders', 'pick'] as const;
 /** An order with one line's `picked` as given (an order without that line, or not an order, comes back as it is). */
@@ -694,7 +701,13 @@ export function usePickingActions() {
       await qc.cancelQueries({ queryKey: ['vendor', 'orders', 'detail', orderId], exact: true });
       writePick(orderId, lineId, picked);
     },
-    onError: (_e, { orderId, lineId, picked }) => writePick(orderId, lineId, !picked),
+    // [REVIEW-F #2143 S3-2] A refused tick goes back WITH words, as on the web: the server's reason, or a plain
+    // sentence. Said here, once (the app-wide notice stays quiet for this tap). The toast is loaded when needed.
+    meta: { silent: true },
+    onError: (error, { orderId, lineId, picked }) => {
+      writePick(orderId, lineId, !picked);
+      void import('../kit/toast').then(({ toast }) => toast.error(TICK_REFUSED_TITLE, tickRefusalWords(error)));
+    },
     onSuccess: (line, { orderId, lineId }) => { if (typeof line?.picked === 'boolean') writePick(orderId, lineId, line.picked); },
     onSettled: (_d, _e, { orderId }) => {
       // Only the last tick re-reads (a re-read while another tick is out would show that box as it was).

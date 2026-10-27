@@ -16,6 +16,8 @@ let writes: Array<{ method: string; path: string; body: unknown }>;
 let reads: string[];
 let picks: Array<{ path: string; release: (_reply: { status?: number; body: unknown }) => void }>;
 let order: Record<string, unknown>;
+/** After the window is open: every re-read hangs, so only the server's answers can change the screen. */
+let holdReads = false;
 
 const lines = () => [
   wireOrderLine({ id: 'line-1', itemId: 'item-1', name: 'Rice', picked: false }),
@@ -32,6 +34,7 @@ function api() {
       return { body: { success: true, data: {} } };
     }
     reads.push(path);
+    if (holdReads) return new Promise(() => {});
     if (path === '/vendor/orders') return { body: { success: true, data: [order], meta: { total: 1 } } };
     if (path.startsWith('/vendor/orders/')) return { body: { success: true, data: order } };
     if (path === '/vendor/items') return { body: { success: true, data: [] } };
@@ -47,6 +50,7 @@ async function openWindow(view: ReturnType<typeof renderWithQuery>) {
 const box = (dialog: HTMLElement, name: string) => within(dialog).getByRole('checkbox', { name: `Picked: 2× ${name}` }) as HTMLInputElement;
 
 beforeEach(async () => {
+  holdReads = false;
   writes = [];
   reads = [];
   picks = [];
@@ -61,12 +65,26 @@ describe('[TAP-AUDIT] a pick tick on the web', () => {
     const view = renderWithQuery(<OrdersPage />);
     const dialog = await openWindow(view);
     await act(async () => { fireEvent.click(box(dialog, 'Rice')); });
-    expect(box(dialog, 'Rice').checked, 'the box ticks before the server answers').toBe(true);
+    // [REVIEW-F #2143 S3-1] The tick lands a scheduler tick after the click (the write first cancels a read on its
+    // way); the server's answer is still held here, so this is the box before the answer.
+    await waitFor(() => expect(box(dialog, 'Rice').checked, 'the box ticks before the server answers').toBe(true));
+    expect(picks).toHaveLength(1);
     expect(box(dialog, 'Rice').disabled, 'that line waits').toBe(true);
     expect(box(dialog, 'Oil').disabled, 'the other line does not').toBe(false);
     await act(async () => { fireEvent.click(box(dialog, 'Oil')); });
-    expect(box(dialog, 'Oil').checked).toBe(true);
+    await waitFor(() => expect(box(dialog, 'Oil').checked).toBe(true));
     expect(writes.map((w) => w.path)).toEqual(['/vendor/orders/o-1/items/line-1/picked', '/vendor/orders/o-1/items/line-2/picked']);
+  });
+
+  it('[REVIEW-M #2143 S4-2] the server\'s answer wins over the tap (another device unticked it)', async () => {
+    api();
+    const view = renderWithQuery(<OrdersPage />);
+    const dialog = await openWindow(view);
+    holdReads = true; // only the answer itself can untick the box
+    await act(async () => { fireEvent.click(box(dialog, 'Rice')); });
+    await waitFor(() => expect(box(dialog, 'Rice').checked).toBe(true));
+    await act(async () => { picks[0]!.release({ body: { success: true, data: { id: 'line-1', picked: false } } }); });
+    await waitFor(() => expect(box(dialog, 'Rice').checked).toBe(false));
   });
 
   it('a refused tick goes back and says why', async () => {

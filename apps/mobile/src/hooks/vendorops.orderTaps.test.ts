@@ -15,6 +15,7 @@ const fx = vi.hoisted(() => ({
   invalidated: [] as unknown[],
   store: { selectedStoreId: 'store-a' as string | null, storeGeneration: 1 },
   api: {} as Record<string, ReturnType<typeof vi.fn>>,
+  toastError: vi.fn(),
 }));
 
 vi.mock('react', async (importOriginal) => {
@@ -40,6 +41,7 @@ vi.mock('../lib/vendorPreviewData', () => ({
 }));
 vi.mock('../services/socket', () => ({ connectSocket: vi.fn(), getSocket: () => ({ connected: false, on: vi.fn(), off: vi.fn(), emit: vi.fn() }) }));
 vi.mock('../stores/storeSwitcher', () => ({ useStoreSwitcher: Object.assign(() => ({}), { getState: () => fx.store }) }));
+vi.mock('../kit/toast', () => ({ toast: { error: fx.toastError, show: vi.fn(), success: vi.fn() } }));
 vi.mock('../stores/vendorPreview', () => ({ useVendorPreview: (selector: (s: { previewType: null }) => unknown) => selector({ previewType: null }) }));
 
 import { PICK_KEY, usePickingActions, useSetRequirePickupCode, useSetSelfDelivery, useToggleOrders } from './vendorops';
@@ -93,6 +95,28 @@ describe('[TAP-AUDIT] a pick tick shows at the tap', () => {
     const hook = usePicker();
     await hook.onMutate?.({ orderId: 'o1', lineId: 'l1', picked: true });
     hook.onError?.(new Error('refused'), { orderId: 'o1', lineId: 'l1', picked: true }, undefined);
+    expect(line(DETAIL, 'l1').picked).toBe(false);
+    expect(line(BOARD, 'l1').picked).toBe(false);
+  });
+
+  it('[REVIEW-F #2143 S3-2] ... and says why: the server\'s words, or plain words, once (the app-wide notice is quiet)', async () => {
+    fx.toastError.mockClear();
+    const hook = usePicker() as Hook & { meta?: Record<string, unknown> };
+    expect(hook.meta?.['silent'], 'one message, not two').toBe(true);
+    hook.onError?.({ response: { data: { error: { code: 'ORDER_MOVED_ON', message: 'This order has moved on.' } } } }, { orderId: 'o1', lineId: 'l1', picked: true }, undefined);
+    await vi.waitFor(() => expect(fx.toastError).toHaveBeenLastCalledWith('That tick didn’t save', 'This order has moved on.'));
+    hook.onError?.({}, { orderId: 'o1', lineId: 'l1', picked: true }, undefined);
+    await vi.waitFor(() => expect(fx.toastError).toHaveBeenLastCalledWith('That tick didn’t save', 'Check your connection and tap it again.'));
+    hook.onError?.({ message: 'Network Error' }, { orderId: 'o1', lineId: 'l1', picked: true }, undefined);
+    await vi.waitFor(() => expect(fx.toastError.mock.calls.at(-1)?.[1]).toMatch(/offline/i));
+  });
+
+  it('[REVIEW-M #2143 S4-2] the server\'s answer wins over the tap (another device unticked it)', async () => {
+    const hook = usePicker();
+    const vars = { orderId: 'o1', lineId: 'l1', picked: true };
+    await hook.onMutate?.(vars);
+    expect(line(DETAIL, 'l1').picked).toBe(true);
+    hook.onSuccess?.({ id: 'l1', picked: false }, vars, undefined);
     expect(line(DETAIL, 'l1').picked).toBe(false);
     expect(line(BOARD, 'l1').picked).toBe(false);
   });
