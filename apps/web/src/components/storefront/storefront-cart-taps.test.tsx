@@ -45,7 +45,8 @@ type Out = { args: unknown[]; ok: (_answer: unknown) => void; fail: (_error: unk
 let sets: Out[];
 let adds: Out[];
 let server: customer.Cart;
-let intersect: ((_entries: Array<{ target: Element; isIntersecting: boolean }>) => void) | undefined;
+type Report = (_entries: Array<{ target: Element; isIntersecting: boolean }>) => void;
+let intersect: Report | undefined;
 const held = (list: Out[]) => (...args: unknown[]) => new Promise<never>((ok, fail) => { list.push({ args, ok: ok as (_a: unknown) => void, fail }); });
 
 beforeEach(() => {
@@ -55,8 +56,8 @@ beforeEach(() => {
   server = cartWith(1);
   intersect = undefined;
   vi.stubGlobal('IntersectionObserver', class {
-    private readonly report: typeof intersect;
-    constructor(callback: typeof intersect) { this.report = callback; }
+    private readonly report: Report;
+    constructor(callback: Report) { this.report = callback; }
     observe = (target: Element) => { if (target.id === 'checkout') intersect = this.report; };
     disconnect = () => {};
   });
@@ -87,12 +88,24 @@ const answer = async (out: Out, rotiQuantity: number) => {
 describe('[TAP-AUDIT] a tap before the tap code has arrived', () => {
   it('is kept, not dropped: sent (added up) once the code is here', async () => {
     await open();
+    act(() => intersect!([{ target: panel(), isIntersecting: false }]));
     fireEvent.click(plus());
     fireEvent.click(plus());
     expect(sets).toHaveLength(0);
+    // [REVIEW-M #2146 S3-1] Before the code is here the taps already count: the number moves, Checkout waits and the
+    // dock's Checkout tapped meanwhile goes only once they have landed (never to a cart without them).
+    expect(count()).toBe('3');
+    expect((within(panel()).getByRole('button', { name: /^Checkout · / }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('link', { name: /^Checkout · \d+ item/ }));
+    expect(nav.push).not.toHaveBeenCalled();
     await act(async () => { code.arrive(); await loadCartTaps(); });
     await waitFor(() => expect(sets.map((s) => s.args)).toEqual([['line-roti', 2]]));
     expect(count()).toBe('3');
+    expect(nav.push).not.toHaveBeenCalled();
+    await answer(sets[0]!, 2);
+    expect(sets.map((s) => s.args)[1]).toEqual(['line-roti', 3]);
+    await answer(sets[1]!, 3);
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/checkout'));
   });
 });
 

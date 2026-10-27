@@ -1,4 +1,4 @@
-import type { Cart } from './customer';
+import { addToCart, getCart, removeCartLine, updateCartLine, type Cart } from './customer';
 import { isPlainLine } from './menu-options';
 
 // [TAP-AUDIT 27 Oct · owner: "every single button tap"] The store page's + and − on the website.
@@ -64,8 +64,11 @@ type Entry = {
 };
 
 export type CartTapsIO = {
-  send: (_itemId: string, _request: TapSend) => Promise<unknown>;
-  read: () => Promise<Cart>;
+  /** The store whose + adds an item. */
+  vendorId: string;
+  /** Stand-ins for the cart's own requests (tests); the page leaves them out (this chunk sends them, not the page). */
+  send?: (_itemId: string, _request: TapSend) => Promise<unknown>;
+  read?: () => Promise<Cart>;
   /** A fresh read of the cart: show it. */
   show: (_cart: Cart) => void;
   changed: () => void;
@@ -82,18 +85,29 @@ export function cartTaps(io: () => CartTapsIO) {
   let retry: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
 
+  const send = (itemId: string, request: TapSend) => io().send?.(itemId, request) ?? (request.kind === 'add'
+    ? addToCart({ vendorId: io().vendorId, itemId, quantity: request.quantity })
+    : request.kind === 'set' ? updateCartLine(request.lineId, request.quantity) : removeCartLine(request.lineId));
+
   const drive = async (id: string) => {
     const entry = items.get(id);
     if (!entry || entry.out || !entry.held || entry.target === null) return;
     entry.out = true;
+    let wrote = false;
     try {
       while (entry.held && entry.sent !== entry.target) {
         const request = tapSend(entry.target, entry.held);
-        if (!request) break;
+        if (!request) {
+          // [REVIEW-F #2146 S3-1] Nothing can take the item there (it is already there, or only a chosen line is left
+          // for a −): it is done — never read again and again for it. The read already asked for shows the server's.
+          entry.sent = entry.target;
+          break;
+        }
+        wrote = true;
         const sent = entry.target;
         const from = entry.held.total;
         entry.sent = sent;
-        const fresh = answeredCart(await io().send(id, request));
+        const fresh = answeredCart(await send(id, request));
         entry.answered = ++answers;
         entry.held = fresh === undefined ? null : itemHold(fresh, id);
         if (sent > from) io().added(entry.name);
@@ -106,8 +120,10 @@ export function cartTaps(io: () => CartTapsIO) {
       io().failed(error);
     } finally {
       entry.out = false;
+      // Never told the server anything: the page's cart is the server's, nothing to wait for.
+      if (!wrote && !entry.answered && entry.target !== null) items.delete(id);
       io().changed();
-      void settle();
+      if (wrote) void settle();
     }
   };
 
@@ -120,13 +136,17 @@ export function cartTaps(io: () => CartTapsIO) {
     clearTimeout(retry);
     const from = answers;
     try {
-      const cart = await io().read();
+      const cart = await (io().read ?? getCart)();
       if (stopped) return;
       io().show(cart);
       for (const [id, entry] of items) {
         if (entry.out || entry.answered > from) continue;
         // Taps made while the server's number was not known go now, from this read.
-        if (entry.target !== null && entry.sent !== entry.target) { entry.held = itemHold(cart, id); void drive(id); } else items.delete(id);
+        if (entry.target !== null && entry.sent !== entry.target) {
+          entry.held = itemHold(cart, id);
+          if (tapSend(entry.target, entry.held)) { void drive(id); continue; }
+        }
+        items.delete(id);
       }
     } catch (error) {
       // Nothing is built from a cart this page could not read: say so and read again shortly.

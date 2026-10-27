@@ -22,6 +22,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   sends = []; reads = []; shown = []; failures = []; added = [];
   const io: CartTapsIO = {
+    vendorId: 'store-1',
     send: (itemId, request) => new Promise((ok, fail) => { sends.push({ itemId, request, ok, fail }); }),
     read: () => new Promise((ok, fail) => { reads.push({ ok, fail }); }),
     show: (cart) => { shown.push(cart); },
@@ -160,6 +161,30 @@ describe('[TAP-AUDIT] the website\'s + and −', () => {
     expect(taps.busy('curry')).toBe(false);
   });
 
+  it('[REVIEW-F #2146 S4-1] a tap that lands where the server already is sends nothing (no empty request)', async () => {
+    taps.tap('rice', 'Rice', 1, cartOf(line('l-rice', 'rice', 1)));
+    taps.tap('rice', 'Rice', -1, cartOf(line('l-rice', 'rice', 1)));
+    await answer(0, cartOf(line('l-rice', 'rice', 1))); // another tap or device left it at 1: where the customer is now
+    expect(sends).toHaveLength(1);
+    expect(reads).toHaveLength(1);
+    await read(0, cartOf(line('l-rice', 'rice', 1)));
+    expect(taps.pending()).toBe(false);
+  });
+
+  it('[REVIEW-F #2146 S3-1] a − nothing can take (another device left only a chosen line): done after one read, never a read storm', async () => {
+    const chosenOnly = cartOf(line('l-rice-large', 'rice', 2, { selectedOptionNames: ['Large'] } as Partial<Line>));
+    taps.tap('rice', 'Rice', -1, cartOf(line('l-rice', 'rice', 2)));
+    taps.tap('rice', 'Rice', -1, cartOf(line('l-rice', 'rice', 2)));
+    await answer(0, chosenOnly);
+    expect(sends).toHaveLength(1);
+    expect(reads).toHaveLength(1);
+    await read(0, chosenOnly);
+    await flush();
+    expect(reads).toHaveLength(1);
+    expect(taps.pending(), 'Checkout is free again').toBe(false);
+    expect(taps.shown('rice', 2)).toBe(2);
+  }, 2000);
+
   it('never below 0; a plain line never above 99 (the server\'s cap)', () => {
     taps.tap('rice', 'Rice', -1, cartOf());
     expect(sends).toHaveLength(0);
@@ -167,6 +192,29 @@ describe('[TAP-AUDIT] the website\'s + and −', () => {
     taps.tap('rice', 'Rice', 1, cartOf(line('l-rice', 'rice', 99)));
     expect(sends).toHaveLength(0);
   });
+});
+
+describe('[REVIEW-F #2146 S3-1] probe: an unreachable target, with a cart that answers every read at once', () => {
+  it('two − taps, then another device leaves only a chosen line: the cart is read a bounded number of times', async () => {
+    const chosenOnly = cartOf(line('l-rice-large', 'rice', 2, { selectedOptionNames: ['Large'] } as Partial<Line>));
+    let readCount = 0;
+    let firstSend: ((_a: unknown) => void) | null = null;
+    const io: CartTapsIO = {
+      vendorId: 'store-1',
+      send: () => new Promise((ok) => { firstSend ??= ok; }),
+      read: async () => { readCount += 1; return chosenOnly; },
+      show: () => {}, changed: () => {}, failed: () => {}, added: () => {},
+    };
+    const probe = cartTaps(() => io);
+    probe.live(true);
+    const now = cartOf(line('l-rice', 'rice', 2));
+    probe.tap('rice', 'Rice', -1, now);
+    probe.tap('rice', 'Rice', -1, now);
+    firstSend!({ cart: chosenOnly, message: 'ok' });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(readCount).toBeLessThanOrEqual(3);
+    expect(probe.pending()).toBe(false);
+  }, 2000);
 });
 
 describe('[TAP-AUDIT] the request for a tapped total', () => {
@@ -178,6 +226,9 @@ describe('[TAP-AUDIT] the request for a tapped total', () => {
     expect(chosen.line).toBeNull();
     expect(tapSend(3, chosen)).toEqual({ kind: 'add', quantity: 1 });
     expect(tapSend(1, chosen)).toBeNull();
+    // [REVIEW-F #2146 S4-1] Already there: nothing to send.
+    expect(tapSend(2, plain)).toBeNull();
+    expect(tapSend(2, chosen)).toBeNull();
   });
 
   it('reads the cart out of a write\'s answer, with or without the envelope', () => {

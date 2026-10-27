@@ -20,7 +20,6 @@ import {
   getPublicVendor,
   readCheckoutAttempt,
   removeCartLine,
-  updateCartLine,
   type Cart,
   type MenuItem,
   type OptionGroup,
@@ -371,9 +370,20 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // waits, taps add up, and the cart is read once nothing is out. Its code arrives after the page (fetched as soon as
   // the visitor is signed in); a tap before it waits for it, never dropped.
   const tapEngine = useRef<CartTaps | null>(null);
-  const withTaps = useCallback((run: (_engine: CartTaps) => unknown) => {
+  // [REVIEW-M #2146 S3-1] Changes made before the code has arrived ([item, step]; 0 for a change that is not a + or −):
+  // counted as out (Checkout waits, the dock defers), and a + or − already moves its number. Each is handed to the
+  // engine when it arrives (or said, if the code cannot be fetched).
+  const early = useRef<Array<[string, number]>>([]);
+  const withTaps = useCallback((run: (_engine: CartTaps) => unknown, id = '', step = 0) => {
     if (tapEngine.current) { run(tapEngine.current); return; }
-    void loadCartTaps().then((m) => run(tapEngine.current ??= m.cartTaps(() => tapIO.current!)), () => tapIO.current?.failed(new Error('Swift couldn’t update your order. Check your connection and try again.')));
+    const mark: [string, number] = [id, step];
+    const queue = early.current;
+    queue.push(mark);
+    redrawTaps((n) => n + 1);
+    void loadCartTaps().then((m) => run(tapEngine.current ??= m.cartTaps(() => tapIO.current!)), () => tapIO.current?.failed(null)).finally(() => {
+      queue.splice(queue.indexOf(mark), 1);
+      redrawTaps((n) => n + 1);
+    });
   }, []);
 
   useEffect(() => {
@@ -572,10 +582,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   };
 
   tapIO.current = {
-    send: (itemId, request) => (request.kind === 'add'
-      ? addToCart({ vendorId: catalog.id, itemId, quantity: request.quantity })
-      : request.kind === 'set' ? updateCartLine(request.lineId, request.quantity) : removeCartLine(request.lineId)),
-    read: () => getCart(),
+    vendorId: catalog.id,
     show: (next) => { cartNow.current = next; setCart(next); refreshShellCart(); },
     changed: () => redrawTaps((n) => n + 1),
     failed: (mutationError) => {
@@ -587,7 +594,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     added: (name) => showNotice(`${name} added to your order.`, true),
   };
   const taps = tapEngine.current;
-  const tapsPending = !!taps?.pending();
+  const cartBusyNow = () => early.current.length > 0 || !!tapEngine.current?.pending();
+  const tapsPending = cartBusyNow();
   const tapBusy = (itemId: string) => !!taps?.busy(itemId);
   // Fetched as soon as the visitor is signed in (a failed fetch is tried again by the first tap, which says why).
   useEffect(() => {
@@ -610,7 +618,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   /** A + or − on a row (signed in): the number moves now; the engine tells the server. */
   const tapItem = (item: DisplayItem, step: 1 | -1) => {
     setError(null);
-    withTaps((engine) => engine.tap(item.id, item.name, step, cartNow.current));
+    withTaps((engine) => engine.tap(item.id, item.name, step, cartNow.current), item.id, step);
   };
 
   /** A change that is not a tap (an add with choices, a ×): only that item waits for it. */
@@ -918,7 +926,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                 <div className={styles.rows}>
                   {(category.items as DisplayItem[]).map((item) => {
                     // [TAP-AUDIT] The tapped number while the item's taps are on their way; the server's otherwise.
-                    const quantity = taps ? taps.shown(item.id, quantities.get(item.id) ?? 0) : quantities.get(item.id) ?? 0;
+                    const quantity = taps ? taps.shown(item.id, quantities.get(item.id) ?? 0) : Math.max(0, early.current.reduce((n, [id, by]) => (id === item.id ? n + by : n), quantities.get(item.id) ?? 0));
                     const fulfillmentVerified = item.fulfillment === 'DELIVERY' || item.fulfillment === 'PICKUP' || item.fulfillment === 'APPOINTMENT';
                     // [W-13] A price Swift cannot read is not an orderable item. It used
                     // to become GY$0 and stay addable, so a broken row shipped as free.
@@ -1149,7 +1157,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
           ref={orderDock}
           href="/checkout"
           className={styles.mobileDock}
-          onClick={(event) => { if (tapEngine.current?.pending()) { event.preventDefault(); checkoutAfterTaps.current = true; } }}
+          onClick={(event) => { if (cartBusyNow()) { event.preventDefault(); checkoutAfterTaps.current = true; } }}
         >
           <span>Checkout · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
           <span className={styles.mobileTotal}>{basketLabel}</span>
