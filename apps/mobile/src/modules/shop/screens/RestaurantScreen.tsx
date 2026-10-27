@@ -264,7 +264,7 @@ function RestaurantStore() {
   // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
   const cartClearance = useCartBarClearance({ vendorId });
   // [TAP-AUDIT] + and − answer at the tap and add up; only that item has a request out (hooks/useCartSteppers).
-  const steppers = useCartSteppers(cart.dataUpdatedAt);
+  const steppers = useCartSteppers(cart);
 
   const v = vendor.data;
   // [STORE-VAT · owner O-5] Only a store whose VAT a person approved sends `vat`; every other store (and an older server) shows none.
