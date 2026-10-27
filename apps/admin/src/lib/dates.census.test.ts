@@ -56,8 +56,18 @@ describe('[ADMIN-AUDIT S3-4] the date words', () => {
 });
 
 const SRC = join(process.cwd(), 'src');
-/** A hit kept on purpose, with its reason (none today: a calendar day goes through gyCalendarDay). */
-const ALLOWED: Record<string, string> = {};
+/** A hit kept on purpose, with its reason. A cut-off ISO string is keyed by what it cuts, so a new one is a new hit. */
+const ALLOWED: Record<string, string> = {
+  'app/verification/page.tsx | slice(0, 10) of new Date(now).toISOString()': 'the max= of a date input (a form value the browser needs as YYYY-MM-DD), never printed',
+  'app/promos/page.tsx | slice(0, 10) of new Date().toISOString()': 'the default value of a date input (YYYY-MM-DD), never printed',
+  'app/promos/page.tsx | slice(0, 10) of new Date(Date.now() + 30 * 864e5).toISOString()': 'the default value of a date input (YYYY-MM-DD), never printed',
+  'lib/approvals.ts | slice(0, 10) of row.entityId': 'shortens a record id for a title, not a date',
+};
+/** [REVIEW-F #2155 S3-1] Options that make toLocaleString write a date or a time, whatever its receiver is called
+ *  (`at.toLocaleString(undefined, { dateStyle: 'medium' })` wrote the solo wait in the browser's locale and zone).
+ *  A number's toLocaleString (money, counts) carries none of these. */
+const DATE_OPTION_KEYS = new Set(['dateStyle', 'timeStyle', 'weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'timeZone', 'timeZoneName', 'hour12', 'hourCycle']);
+const literal = (e: ts.Expression | undefined, v: number) => !!e && ts.isNumericLiteral(e) && Number(e.text) === v;
 
 function files(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -68,7 +78,7 @@ function files(dir: string): string[] {
 }
 
 describe('[ADMIN-AUDIT S3-4] the date census', () => {
-  it('no page writes a date itself (toLocaleDateString / toLocaleTimeString / new Date(…).toLocaleString / Intl.DateTimeFormat)', () => {
+  it('no page writes a date itself (toLocaleDateString / toLocaleTimeString / toLocaleString of a date / Intl.DateTimeFormat / a cut-off ISO string)', () => {
     const hits: string[] = [];
     const used = new Set<string>();
     for (const path of files(SRC)) {
@@ -84,6 +94,15 @@ describe('[ADMIN-AUDIT S3-4] the date census', () => {
             let recv: ts.Expression = n.expression.expression;
             while (ts.isParenthesizedExpression(recv)) recv = recv.expression;
             if (ts.isNewExpression(recv) && recv.expression.getText(sf) === 'Date') kind = 'new Date().toLocaleString';
+            const options = n.arguments[1];
+            if (options && ts.isObjectLiteralExpression(options) && options.properties.some((p) => p.name && ts.isIdentifier(p.name) && DATE_OPTION_KEYS.has(p.name.text))) {
+              kind = 'toLocaleString with date options';
+            }
+          }
+          // [REVIEW-F #2155 S3-1] "2026-10-28" cut from an ISO string is the UTC day (wrong in Guyana 20:00-23:59) and
+          // not in words (store-vat wrote "Certificate sent 2026-10-28" for a certificate sent on the evening of 27 Oct).
+          if ((name === 'slice' || name === 'substring' || name === 'substr') && literal(n.arguments[0], 0) && literal(n.arguments[1], 10)) {
+            kind = `slice(0, 10) of ${n.expression.expression.getText(sf)}`;
           }
         }
         if (ts.isPropertyAccessExpression(n) && n.getText(sf) === 'Intl.DateTimeFormat') kind = 'Intl.DateTimeFormat';

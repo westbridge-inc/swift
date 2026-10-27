@@ -422,7 +422,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                   <>
                     <Row label="Approved VAT reg. no.">{v.vatApprovedNumber}</Row>
                     <Row label="Registered name">{v.vatApprovedName}</Row>
-                    <Row label="Takes effect">{v.vatEffectiveFrom ? String(v.vatEffectiveFrom).slice(0, 10) : null}</Row>
+                    <Row label="Takes effect">{v.vatEffectiveFrom ? gyDate(v.vatEffectiveFrom) : null}</Row>
                   </>
                 ) : null}
                 {v.vatStatus === 'REJECTED' || v.vatStatus === 'REVOKED' ? <Row label="Reason given">{v.vatReviewNote}</Row> : null}

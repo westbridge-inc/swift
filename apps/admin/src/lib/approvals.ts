@@ -11,6 +11,8 @@
 // action it knows will fail is teaching the operator to click through errors.
 // ---------------------------------------------------------------------------
 
+import { gyDateTime } from './dates';
+
 export interface ApprovalRow {
   id: string;
   /** "<METHOD> <route template>" — the classified action, never a raw URL. */
@@ -53,10 +55,10 @@ export type SoloState =
   | { state: 'available'; coolOffHours: number }
   | { state: 'unavailable'; why: string; message: string };
 
-/** "Solo approval: available after 14 Oct, 07:30" — the wait, in plain words. */
+/** "Solo approval: available after 14 Oct 2026, 07:30" — the wait, in plain words, in Guyana time (lib/dates). */
 export function soloWaitCopy(availableAt: string, now = new Date()): string {
   const at = new Date(availableAt);
-  const when = at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const when = gyDateTime(at);
   return at.getTime() > now.getTime() ? `Solo approval: available after ${when}` : `Solo approval: available now (since ${when})`;
 }
 
