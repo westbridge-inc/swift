@@ -7,6 +7,7 @@ import { fetchReturns, resolveReturn, settleReturnRefund } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { gyDateTime } from '@/lib/dates';
 import { label } from '@/lib/labels';
 import { useStatusFromUrl } from '@/lib/status-from-url';
 
@@ -97,7 +98,7 @@ export default function ReturnsPage() {
               <div className="flex flex-wrap items-center gap-3">
                 <StatusPill value={r.status} />
                 <span className="text-sm">{r.reason ?? 'No reason given'}</span>
-                <span className="text-xs mc-muted ml-auto">{new Date(r.createdAt).toLocaleString()}</span>
+                <span className="text-xs mc-muted ml-auto">{gyDateTime(r.createdAt)}</span>
               </div>
               <div className="flex flex-wrap items-center gap-4 mt-3 text-sm mc-muted">
                 <Link href={`/orders/${r.orderId}`} className="text-[var(--mc-accent)] font-semibold">

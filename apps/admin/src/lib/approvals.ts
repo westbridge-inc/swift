@@ -110,6 +110,24 @@ export function urgencyOf(row: ApprovalRow, now = new Date()): Urgency {
   return m <= 30 ? 'soon' : 'ok';
 }
 
+// [ADMIN-AUDIT S3-7] The card's words: the class, the status and the time left, never the codes alone.
+export const CLASS_WORD: Record<string, string> = { C4: 'Money', C5: 'Platform' };
+export const APPROVAL_STATUS_WORDS: Record<ApprovalRow['status'], string> = {
+  PENDING: 'Waiting for a second admin', APPROVED: 'Approved, not executed yet', REJECTED: 'Rejected',
+  APPLIED: 'Executed', EXPIRED: 'Expired', CANCELLED: 'Cancelled',
+};
+/** The decided line: "Approved by …" (an executed request was approved first), "Rejected by …". */
+export const DECIDED_WORDS: Partial<Record<ApprovalRow['status'], string>> = {
+  APPROVED: 'Approved', APPLIED: 'Approved', REJECTED: 'Rejected', CANCELLED: 'Cancelled', EXPIRED: 'Expired',
+};
+/** "23 h 53 min left", "45 min left", "expired". */
+export function timeLeftWords(minutes: number): string {
+  if (!(minutes > 0)) return 'expired';
+  const h = Math.floor(minutes / 60);
+  const m = Math.floor(minutes % 60);
+  return h > 0 ? `${h} h ${m} min left` : `${m} min left`;
+}
+
 export const CLASS_MEANING: Record<string, string> = {
   C4: 'Money — moves, forgives, or claims settlement of value',
   C5: 'Platform — pricing, config, algorithms, or broadcasts',

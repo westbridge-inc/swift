@@ -10,10 +10,11 @@ import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
-  entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX,
+  entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX, CLASS_WORD, APPROVAL_STATUS_WORDS, DECIDED_WORDS, timeLeftWords,
   canApply, awaitsRequester, snapshotEntries, soloWaitCopy, SOLO_EXPLAIN, needsStepUp,
   type ApprovalRow,
 } from '@/lib/approvals';
+import { gyDateTime } from '@/lib/dates';
 
 const FILTERS = ['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED'] as const;
 
@@ -134,14 +135,14 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
       }`}
     >
       <div className="flex flex-wrap items-center gap-2 mb-2">
-        <span className="rounded-md bg-[var(--mc-accent)] px-2 py-0.5 text-xs font-bold text-white">{row.cls}</span>
+        <span className="rounded-md bg-[var(--mc-accent)] px-2 py-0.5 text-xs font-bold text-white">{CLASS_WORD[row.cls] ?? 'Other'}</span>
         <span className="text-sm font-semibold">{describeAction(row.action)}</span>
         <span className="rounded-md border border-[var(--mc-line)] px-1.5 py-0.5 text-xs mc-muted">
-          {row.status}
+          {APPROVAL_STATUS_WORDS[row.status] ?? 'Unknown status'}
         </span>
         {row.status === 'PENDING' && (
           <span className={`ml-auto text-xs ${urgency === 'expired' ? 'mc-text-bad' : urgency === 'soon' ? 'mc-text-warn' : 'mc-muted'}`}>
-            {left > 0 ? `${left} min left` : 'expired'}
+            {timeLeftWords(left)}
           </span>
         )}
       </div>
@@ -154,12 +155,12 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
         <p className="text-sm">{row.reason}</p>
         <p className="text-xs mc-muted mt-1">
           asked by {row.requestedBy}
-          {row.isOwnRequest ? ' (you)' : ''} · {new Date(row.createdAt).toLocaleString()}
+          {row.isOwnRequest ? ' (you)' : ''} · {gyDateTime(row.createdAt)}
         </p>
       </blockquote>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs mc-muted mb-3">
-        <div><span className="block text-xs uppercase tracking-wide">Capability</span><code>{row.capability}</code></div>
+        <div><span className="block text-xs uppercase tracking-wide">Permission used</span><span>Code: <code>{row.capability}</code></span></div>
         {entityLabel(row) && (
           <div><span className="block text-xs uppercase tracking-wide">Record</span><code>{entityLabel(row)}</code></div>
         )}
@@ -193,7 +194,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
 
       {row.decidedAt && (
         <p className="text-xs mc-muted mb-2">
-          {row.status.toLowerCase()} by {row.approvedBy} · {new Date(row.decidedAt).toLocaleString()}
+          {DECIDED_WORDS[row.status] ?? 'Decided'} by {row.approvedBy} · {gyDateTime(row.decidedAt)}
           {row.decisionNote ? ` — “${row.decisionNote}”` : ''}
         </p>
       )}

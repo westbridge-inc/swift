@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { API_URL, getDocSignedUrl } from '@/lib/api';
 import { Modal } from '@/components/Modal';
+import { gyDate } from '@/lib/dates';
 
 /** The API's own sentence for a missing document-reviewer grant (document-reviewer.ts), for the render path. */
 const DOCUMENT_REVIEWER_SENTENCE = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
@@ -96,7 +97,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   const comparison = selfie && <figure className="rc-selfie">
     {/* eslint-disable-next-line @next/next/no-img-element -- evidence is rendered directly, never optimized or cached */}
     <img src={selfie.url} alt="Applicant signup selfie" referrerPolicy="no-referrer" />
-    <figcaption>Signup selfie, taken {new Date(selfie.capturedAt).toLocaleDateString()}. Compare the two faces yourself — Swift does not compare faces automatically.</figcaption>
+    <figcaption>Signup selfie, taken {gyDate(selfie.capturedAt)}. Compare the two faces yourself — Swift does not compare faces automatically.</figcaption>
   </figure>;
   const evidence = <div ref={evidenceViewport} className="rc-evidence-viewport">
     {pdf ? <>

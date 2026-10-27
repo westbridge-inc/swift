@@ -1,5 +1,6 @@
 import { fetchVerificationQueue } from './api';
 import { isRejectionReasonCode, rejectionLabel } from './rejection-reasons';
+import { gyDate } from '@/lib/dates';
 
 export const REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -227,7 +228,7 @@ export function resubmissionLabel(doc: Pick<ReviewDocument, 'previousDecision'>)
   if (!prev) return null;
   return prev.kind === 'RESUBMITTED_AFTER_REJECTION' ? 'Re-submitted after rejection' : 'Renewal';
 }
-const shortDay = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' }) : null);
+const shortDay = (iso: string | null) => (iso ? gyDate(iso) : null);
 /** [MC-AD1] What the earlier decision was, in one sentence (the reviewer's note is quoted separately). */
 export function previousDecisionLine(prev: PreviousDecision): string {
   const when = shortDay(prev.decidedAt);

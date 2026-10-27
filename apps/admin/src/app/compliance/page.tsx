@@ -6,6 +6,7 @@ import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveCom
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { humanise } from '@/lib/labels';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 /**
  * The liability shield. Three panels:
@@ -63,7 +64,7 @@ export default function CompliancePage() {
   const violations: any[] = d?.openViolations ?? [];
   const queue: any[] = d?.reviewQueue ?? [];
 
-  const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const when = (iso: string) => gyDateTime(iso);
 
   return (
     <div className="mc-page">
@@ -158,7 +159,7 @@ export default function CompliancePage() {
                     {c.user?.firstName} {c.user?.lastName}
                   </span>
                   <span className="mc-muted mc-numbers text-xs">{c.user?.phone}</span>
-                  <span className="mc-badge mc-tone-warn">Due {new Date(c.dueAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
+                  <span className="mc-badge mc-tone-warn">Due {gyDate(c.dueAt)}</span>
                 </div>
                 <p className="mc-muted mt-1.5 text-xs">
                   Re-open their documents in Documents and confirm they are genuine and current — then decide here.
