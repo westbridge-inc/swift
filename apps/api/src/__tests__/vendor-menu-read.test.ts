@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [TAP-AUDIT 27 Oct] The phone's menu read (GET /vendor/categories) carries each item as the editor and the list need
@@ -18,7 +19,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const RUN = nanoid(6);
+// Checked names (store, section, item) carry digits only (helpers/fixture-ids: random letters can spell a banned word).
+const RUN = wordFreeTag(6);
 let app: FastifyInstance;
 let token: string;
 const userIds: string[] = [];
@@ -57,7 +59,7 @@ beforeAll(async () => {
   const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
   await app.prisma.vendor.create({
     data: {
-      ownerId: owner.id, name: `Menu Read Mart ${RUN}`, slug: `menu-read-mart-${RUN.toLowerCase()}`, vendorType: 'SUPERMARKET',
+      ownerId: owner.id, name: `Menu Read Mart ${RUN}`, slug: `menu-read-mart-${RUN}`, vendorType: 'SUPERMARKET',
       phone: `+5927${String(Date.now()).slice(-6)}`, addressLine1: '1 Menu Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },
@@ -76,8 +78,11 @@ describe('[TAP-AUDIT] the phone\'s menu read carries the bulk word and the catal
     const categoryId = section.json().data.id as string;
     const rice = await inject('POST', '/api/v1/vendor/items', { categoryId, name: `Rice 20 kg ${RUN}`, basePrice: 6000, bulk: 'very_bulky' });
     expect(rice.statusCode, rice.body).toBe(200);
-    const held = await inject('POST', '/api/v1/vendor/items', { categoryId, name: `Beer batter fish ${RUN}`, basePrice: 300 });
+    // An item a person took off the menu (the catalogue check is what is under test here, not the word check: no
+    // banned word in any fixture name).
+    const held = await inject('POST', '/api/v1/vendor/items', { categoryId, name: `Pepper sauce ${RUN}`, basePrice: 300 });
     expect(held.statusCode, held.body).toBe(200);
+    await app.prisma.item.update({ where: { id: held.json().data.id }, data: { prohibitedAt: new Date(), prohibitedClass: 'COUNTERFEIT', prohibitedReason: 'Removed by a person in this test' } });
 
     const read = await inject('GET', '/api/v1/vendor/categories');
     expect(read.statusCode, read.body).toBe(200);
@@ -88,7 +93,7 @@ describe('[TAP-AUDIT] the phone\'s menu read carries the bulk word and the catal
     expect(riceRow).not.toHaveProperty('bulkUnits');
     expect(riceRow['catalogueCheck']).toBeNull();
     expect(heldRow['bulk']).toBe('normal');
-    expect(heldRow['catalogueCheck']).toMatchObject({ status: 'WAITING_FOR_CHECK', message: 'Waiting for a quick check' });
+    expect(heldRow['catalogueCheck']).toMatchObject({ status: 'NOT_ALLOWED', prohibitedClass: 'COUNTERFEIT', reason: 'Removed by a person in this test' });
   });
 
   it('what the phone editor saves back after an unrelated edit keeps the item very bulky', async () => {
