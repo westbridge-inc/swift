@@ -4,6 +4,7 @@ import { documentDeadlineSql, lockMoverDocuments } from '../verification/mover-d
 import { lockMoverSources, moverFeeOperability, moverFeePayer } from '../subscription/mover-fee-authority';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
+import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
@@ -18,8 +19,8 @@ import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 //
 // The taxi profile goes back online only through the taxi GO's own gates, re-read under the locks: an active
 // account, a vehicle Swift takes, no safety suspension or identity lock (and a fresh selfie check where required),
-// the taxi documents (H plate, hire licences, hire-class insurance; deadline enforced at the write) and the
-// weekly fee. If any of them fails, the delivery profile still goes offline and the account lands on taxi work
+// the taxi documents (H plate, hire licences, hire-class insurance; deadline enforced at the write), the
+// weekly fee and a live push registration where required. If any of them fails, the delivery profile still goes offline and the account lands on taxi work
 // OFFLINE (the taxi GO then says why). Nothing here depends on the CAR_DELIVERIES switch: taxi work never did.
 // ---------------------------------------------------------------------------
 
@@ -76,6 +77,12 @@ export async function returnToTaxiAndDeliveries(
       return true;
     })();
     if (!passes || !(await moverFeeOperability(tx, payer, { missingRow: 'BLOCK' })).operable) return 'RETURNED_OFFLINE';
+    // [REVIEW-G #2138 S2-1 · REVIEW-M S4-2] Taxi GO's push-ready gate, under the same User lock taxi GO takes it under.
+    try {
+      await assertMoverPushReady(tx, userId);
+    } catch {
+      return 'RETURNED_OFFLINE';
+    }
     const documents = await lockMoverDocuments(tx, userId, 'DRIVER');
     if (!documents.allowed) return 'RETURNED_OFFLINE';
     const online = await tx.$executeRaw`

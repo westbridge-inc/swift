@@ -1227,6 +1227,8 @@ export class DispatchService {
           JOIN "users" u ON u."id" = r."userId"
           WHERE r."isOnline" = false
             AND d."takesDeliveries" = true
+            -- [REVIEW-F #2139 S2-2] only a taxi GO whose app can show a delivery card (an older one shows it as a ride)
+            AND d."deliveryCardsCapable" = true
             AND d."isOnline" = true
             AND d."isAvailable" = true
             ${capacityPredicateSql('DRIVER')}
@@ -1669,6 +1671,10 @@ export class DispatchService {
             // [ALG-06 ①] Swift's own money on top of the fee, or absent.
             rescueIncentiveGyd: rescueGyd > 0 ? rescueGyd : null,
             paymentMethod: order.paymentMethod,
+            // [CARS-DELIVER PR4 · REVIEW-F #2139 S2-1] The card's pay, from the order's stored columns (as the
+            // recovered card carries them): a delivery card in taxi mode has no delivery board row to read it from.
+            deliveryFee: Number(order.deliveryFee),
+            tipAmount: Number(order.tipAmount),
             customerTrust: trust ?? null,
             itemCount: order.items.length,
             estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
@@ -2644,8 +2650,10 @@ export class DispatchService {
     // to the same free driver in one window both claim and double-book the driver
     // (the founder's one-ride-per-driver invariant). [SWIFT taxi-exclusivity]
     let promotedFromTaxi: { userId: string; driverId: string } | null = null;
+    let claimantUserId: string | null = null;
     const { order, assignmentSequence } = await this.prisma.$transaction(async (tx) => {
       promotedFromTaxi = null;
+      claimantUserId = null;
       // Canonical lock order is User → Order → selected mover profile. Admin
       // suspension/ban and role switching take the same User lock first, so an
       // accept and a revocation have one legal database order rather than a
@@ -2667,6 +2675,7 @@ export class DispatchService {
             FOR UPDATE OF u
           `;
       const moverAuthority = authority[0];
+      claimantUserId = moverAuthority?.userId ?? null;
       const allowedRole = pool === 'DRIVER'
         ? moverAuthority?.activeRole === 'MOVER' || moverAuthority?.activeRole === 'DRIVER'
         : moverAuthority?.activeRole === 'MOVER' || moverAuthority?.activeRole === 'RIDER';
@@ -2914,6 +2923,16 @@ export class DispatchService {
       await closeOnlineSession(this.redis, promoted.driverId).catch(() => {});
       await startOnlineSession(this.redis, moverId).catch(() => {});
       try { disconnectUserSockets(this.io, promoted.userId); } catch { /* reconnects; never a claim failure */ }
+    }
+    // [REVIEW-M #2138 S4-4] A taxi on "taxi + deliveries" may hold a delivery card on its delivery profile when it
+    // takes a ride: release that card now (the store order re-dispatches) rather than letting it run to its timeout.
+    const rideTakenBy = claimantUserId as string | null;
+    if (pool === 'DRIVER' && rideTakenBy && carDeliveriesEnabled()) {
+      const twin = await this.prisma.rider.findUnique({ where: { userId: rideTakenBy }, select: { id: true } }).catch(() => null);
+      if (twin) {
+        await this.releaseHeldOffer(twin.id)
+          .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'held delivery offer release after a ride claim failed'));
+      }
     }
     await this.recordOfferOutcome(moverId, true, pool)
       .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch acceptance-rate update failed after claim commit'));

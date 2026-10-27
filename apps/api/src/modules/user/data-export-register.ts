@@ -319,7 +319,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'driverProfile', model: 'Driver', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'takesDeliveries', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'takesDeliveries', 'deliveryCardsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceProviderProfile', model: 'ServiceProvider', by: ['userId'], key: 'id',

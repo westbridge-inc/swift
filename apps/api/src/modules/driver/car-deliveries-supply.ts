@@ -95,7 +95,7 @@ export async function canTakeDeliveryFromTaxi(db: Db, riderId: string): Promise<
   if (!rider || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return false;
   const taxi = await db.driver.findFirst({
     where: {
-      userId: rider.userId, takesDeliveries: true, isOnline: true, isAvailable: true, currentRideId: null,
+      userId: rider.userId, takesDeliveries: true, deliveryCardsCapable: true, isOnline: true, isAvailable: true, currentRideId: null,
       locationSessionId: { not: null }, user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
     },
     select: { locationSessionId: true, lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
@@ -127,14 +127,14 @@ export async function promoteDeliveryFromTaxi(tx: Tx, userId: string, riderId: s
   const rider = riders[0];
   if (!rider || rider.userId !== userId || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return null;
   const drivers = await tx.$queryRaw<Array<GateRow & {
-    id: string; takesDeliveries: boolean; isOnline: boolean; isAvailable: boolean; currentRideId: string | null;
+    id: string; takesDeliveries: boolean; deliveryCardsCapable: boolean; isOnline: boolean; isAvailable: boolean; currentRideId: string | null;
     locationSessionId: string | null; currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null;
   }>>`
-    SELECT "id", "takesDeliveries", "isOnline", "isAvailable", "currentRideId", "locationSessionId",
+    SELECT "id", "takesDeliveries", "deliveryCardsCapable", "isOnline", "isAvailable", "currentRideId", "locationSessionId",
            "currentLat", "currentLng", "lastLocationUpdate", "lastLivenessPassAt", "livenessLockedAt", "safetySuspendedAt"
     FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
   const taxi = drivers[0];
-  if (!taxi || !taxi.takesDeliveries || !taxi.isOnline || !taxi.isAvailable || taxi.currentRideId
+  if (!taxi || !taxi.takesDeliveries || !taxi.deliveryCardsCapable || !taxi.isOnline || !taxi.isAvailable || taxi.currentRideId
     || !taxi.locationSessionId || taxi.currentLat == null || taxi.currentLng == null) return null;
 
   // Delivery GO's gates, on the locked rows (the offer gate's own).

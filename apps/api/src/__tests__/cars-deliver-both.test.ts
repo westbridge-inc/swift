@@ -14,6 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { makeDispatchService, type DispatchService } from '../modules/dispatch/dispatch.service';
 import { returnToTaxiAndDeliveries } from '../modules/driver/car-deliveries-return';
+import { canTakeDeliveryFromTaxi } from '../modules/driver/car-deliveries-supply';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 
@@ -508,6 +509,8 @@ describe('[CARS-DELIVER PR4 · review] only an app that can show a delivery card
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeReadyOrder(customer.userId);
     expect(await candidates()).not.toContain(driver.riderId);
+    // The offer gate refuses it on its own too (a taxi GO from an older app can land between the search and the card).
+    expect(await sys(() => canTakeDeliveryFromTaxi(app.prisma, driver.riderId))).toBe(false);
     expect((await dispatch.dispatchOrder(order.id)).offered).toBeUndefined();
     await expect(dispatch.claimOrder(order.id, driver.riderId, 'RIDER')).rejects.toMatchObject({ code: 'MOVER_INACTIVE' });
     expect((await orderRow(order.id)).riderId).toBeNull();
@@ -518,6 +521,7 @@ describe('[CARS-DELIVER PR4 · review] only an app that can show a delivery card
     const updated = await call('POST', '/api/v1/driver/go-online', driver.token, { ...here, capabilities: [CARDS] });
     expect(updated.statusCode, updated.body).toBe(200);
     expect(await candidates()).toContain(driver.riderId);
+    expect(await sys(() => canTakeDeliveryFromTaxi(app.prisma, driver.riderId))).toBe(true);
     expect((await dispatch.dispatchOrder(order.id)).offered).toBe(driver.riderId);
 
     const older = await call('POST', '/api/v1/driver/go-online', driver.token, here);

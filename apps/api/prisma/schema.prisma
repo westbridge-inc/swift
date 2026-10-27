@@ -1388,6 +1388,10 @@ model Driver {
   /// its car's delivery profile (the account's Rider row) is also offered store deliveries. Only while the
   /// CAR_DELIVERIES switch is on (modules/driver/car-deliveries.ts); false = taxi rides only, every row today.
   takesDeliveries          Boolean          @default(false)
+  /// [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2] The app on this taxi GO can show a delivery card (it declared
+  /// CAR_DELIVERY_CARDS_V1). Set on EVERY taxi GO from what the app declares, as taxiStopsCapable is: an older
+  /// app going online again clears it. "Taxi + deliveries" offers a delivery only to a taxi with this set.
+  deliveryCardsCapable     Boolean          @default(false)
   /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
   /// consumer handles null. bodyType from the make/model fleet mapping
   /// (UNKNOWN surfaces one-tap classification in admin — never guessed

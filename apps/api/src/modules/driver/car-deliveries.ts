@@ -252,6 +252,25 @@ export async function lockCarDeliveryAuthority(tx: Tx, userId: string): Promise<
 export const DELIVERIES_NOT_SET_UP = 'DELIVERIES_NOT_SET_UP';
 
 /**
+ * [REVIEW-F #2139 S2-2 · REVIEW-G #2138 S2-2 · REVIEW-M #2138 S2-1] What a taxi app declares at GO when it can show a
+ * delivery card (its pay, the cash box, "Accept delivery") and answer it through the delivery routes. An older taxi
+ * app would show a store delivery as a ride, so a delivery is offered from taxi work only to a taxi GO whose app
+ * declared this (drivers.deliveryCardsCapable, set on EVERY taxi GO as TAXI_STOPS_V1 is: an older app going online
+ * again clears it).
+ */
+export const DELIVERY_CARDS_CAPABILITY = 'CAR_DELIVERY_CARDS_V1';
+
+export function declaresDeliveryCards(capabilities: readonly string[] | null | undefined): boolean {
+  return Array.isArray(capabilities) && capabilities.includes(DELIVERY_CARDS_CAPABILITY);
+}
+
+/** [REVIEW-G #2138 S2-2 (b)] The taxi accept route never takes a delivery: it is all an older taxi app has, and that
+ *  app shows a delivery as a ride. Refused before anything is read or consumed; the delivery routes take it. */
+export function notARideOffer(): AppError {
+  return new AppError(409, 'NOT_A_RIDE_OFFER', 'This offer is a store delivery, not a ride. Update Swift to see and answer delivery offers.');
+}
+
+/**
  * PUT /driver/deliveries/mode — turn "taxi + deliveries" on or off. On needs the switch (the route refuses first
  * while it is off), an active account and a delivery profile on this taxi car; off is always allowed. Under the
  * User, then Rider, then Driver locks. It changes no supply: an online taxi stays exactly as it is.
