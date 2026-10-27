@@ -91,6 +91,7 @@ vi.mock('../../../kit', async () => {
 });
 
 import { RestaurantScreen } from './RestaurantScreen';
+import { forgetCartSteppers } from '../../../hooks/useCartSteppers';
 
 const store = { id: 'a', name: 'Store a', vendorType: 'RESTAURANT', isCurrentlyOpen: true, operatingHours: [], activePromos: [],
   categories: [{ id: 'a-mains', name: 'Mains', items: [{ id: 'curry', name: 'Curry chicken', basePrice: 1000 }, { id: 'pepperpot', name: 'Pepperpot', basePrice: 1200 }] }] };
@@ -102,6 +103,7 @@ const click = async (el: Element) => act(async () => { el.dispatchEvent(new wind
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  forgetCartSteppers(); // one stepper per line for the whole app: none carried over from another test
   fx.vendors = { a: store };
   fx.lines = [{ id: 'line-curry', itemId: 'curry', quantity: 1 }];
   fx.writes = [];

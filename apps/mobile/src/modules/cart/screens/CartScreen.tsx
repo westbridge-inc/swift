@@ -250,7 +250,7 @@ export function CartScreen() {
   );
   const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, pricing);
   // [TAP-AUDIT] A line's + and − answer at the tap and add up; only that line has a request out (hooks/useCartSteppers).
-  const steppers = useCartSteppers(cart.dataUpdatedAt);
+  const steppers = useCartSteppers(cart);
   const c = cart.data; // null = empty cart
   // [E01-B] The retry's own quote, requested only once the customer asked to
   // switch (no riders): every store collects, no express, no tip, promo kept.
