@@ -119,6 +119,19 @@ export class SupportService {
     return { tickets, total, page, limit };
   }
 
+  /** [ADMIN-AUDIT S2-1] Today's count of this queue: tickets not resolved yet, by the tab that lists them (Open,
+   *  In progress) and SAFETY apart. The same reads, scope and wall as listForAdmin. */
+  async waitingForAdmin(): Promise<{ safetyOpen: number; safetyInProgress: number; open: number; inProgress: number }> {
+    const unresolved: Prisma.SupportTicketWhereInput = { status: { in: ['OPEN', 'IN_PROGRESS'] } };
+    const rows = await this.queue((db, scope) => db.supportTicket.groupBy({
+      by: ['status', 'category'], where: { AND: [unresolved, ...(scope ? [scope] : [])] }, _count: { _all: true },
+    }));
+    const n = (status: SupportStatus, safety: boolean) => rows
+      .filter((r) => r.status === status && (r.category === 'SAFETY') === safety)
+      .reduce((sum, r) => sum + r._count._all, 0);
+    return { safetyOpen: n('OPEN', true), safetyInProgress: n('IN_PROGRESS', true), open: n('OPEN', false), inProgress: n('IN_PROGRESS', false) };
+  }
+
   /** CONTRACT [WR-022]: `adminNote` is CUSTOMER-FACING — it is stored on the
    *  ticket AND sent verbatim as the notification body. There is no internal-
    *  note field on this rail; consoles must label the input accordingly.

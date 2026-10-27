@@ -7,6 +7,7 @@ import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
 import { humanise, label } from '@/lib/labels';
+import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['OPEN', 'IN_PROGRESS', 'RESOLVED'] as const;
 
@@ -40,6 +41,8 @@ const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'nume
 export default function SupportPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('OPEN');
+  // [ADMIN-AUDIT S2-1] Today's rows open the tab that lists them (?status=…).
+  useStatusFromUrl(FILTERS, setFilter);
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ['support', filter],
     queryFn: () => fetchSupportTickets(filter),

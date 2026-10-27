@@ -8,6 +8,7 @@ import { StatusPill, gyd } from '@/components/detail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { label } from '@/lib/labels';
+import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
@@ -19,6 +20,8 @@ const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTE
 export default function ClaimsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('PENDING_REVIEW');
+  // [ADMIN-AUDIT S2-1] Today's rows open the tab that lists them (?status=…).
+  useStatusFromUrl(FILTERS, setFilter);
   const claimsQ = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
   const metricsQ = useQuery({ queryKey: ['cash-metrics'], queryFn: fetchCashMetrics });
   const invalidate = () => {

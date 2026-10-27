@@ -4,7 +4,7 @@ import { documentScanState, uploadScanRefusal, retryHeldEvidenceScan } from '../
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
-import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
+import { CUSTODY_CASE_DIRECTABLE, CUSTODY_CASE_OPEN_STATES } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
@@ -13,7 +13,9 @@ import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
-import { bindTenantTransaction } from '../../plugins/prisma';
+import { bindTenantTransaction, runWithoutTenant } from '../../plugins/prisma';
+import { countWaiting, type WaitingKey } from './dashboard-waiting';
+import { VAT_CERTIFICATE_DOC_TYPE } from '../store-vat/store-vat';
 import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -72,7 +74,7 @@ import {
 } from './solo-approval';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
-import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
@@ -697,6 +699,14 @@ export async function adminRoutes(app: FastifyInstance) {
     return role;
   };
 
+  // [AUTH-FIX S2-3] Every guard goes on only with an identity authenticate()
+  // actually verified: its session id and its user. authenticate() throws its
+  // refusals, so this never fires today; it keeps a guard from carrying on
+  // with an identity that was refused.
+  const requireAuthenticatedIdentity = (request: any): void => {
+    if (!request.authSessionId || !request.user?.userId) throw new UnauthorizedError('Invalid or expired token');
+  };
+
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
     // The production server opens this store globally. Admin routes also do it
@@ -704,7 +714,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // and then lose the tenant binding across the auth await boundary.
     beginRequestTenantContext();
     await app.authenticate(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     if (!bindConsoleRole(request)) {
       throw new ForbiddenError('Admin access required');
     }
@@ -717,7 +727,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // as through the plugin hook so the route-level law remains self-contained.
   const founderGuard = async (request: any, reply: any) => {
     await app.authenticate(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     // [ADMIN-ROLE] Judged on the admin role the account HOLDS (bound for the
     // request); an account holding none is judged on nothing, never its mode.
     if (!bindConsoleRole(request)) request.user.role = '';
@@ -729,7 +739,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // founder-only: SUPER_ADMIN is otherwise deliberately tenant-local.
   const platformControlGuard = async (request: any, reply: any) => {
     await founderGuard(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     if (requireTenantId() !== 'swift-default') {
       throw new ForbiddenError('Platform controls require the default tenant');
     }
@@ -743,7 +753,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // anything is read or written.
   const canonicalTenantGuard = async (request: any, reply: any) => {
     await adminGuard(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     if (requireTenantId() !== 'swift-default') {
       throw new ForbiddenError('Platform controls require the default tenant');
     }
@@ -846,7 +856,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // unexpired, unused, by someone else, and over THIS request: the fingerprint
   // covers the method, route, params and body, so an approved settlement
   // cannot be re-aimed at a different beneficiary or amount afterwards.
-  app.addHook('preValidation', async (request: any, reply: any) => {
+  app.addHook('preValidation', async (request: any) => {
     const routeUrl = routeTemplateOf(request, app.prefix);
     const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
     if (!authority || !requiresApproval(authority.cls)) return;
@@ -881,14 +891,11 @@ export async function adminRoutes(app: FastifyInstance) {
       // PENDING approval IS the record of the ask, and an audit row here would
       // read as a completed action to anyone reviewing the trail later.
       request.approvalPending = true;
-      return reply.code(202).send({
-        success: false,
-        error: {
-          code: 'APPROVAL_REQUIRED',
-          message: 'A second admin must approve this before it happens. It is in the approvals queue.',
-          details: { approvalId: outcome.approvalId },
-        },
-      });
+      // [AUTH-FIX S2-3] Thrown, not sent: a hook that sends and returns lets
+      // the handler run if the caller hangs up before the response ends. The
+      // error handler writes the same 202 and body.
+      throw new AppError(202, 'APPROVAL_REQUIRED', 'A second admin must approve this before it happens. It is in the approvals queue.',
+        { approvalId: outcome.approvalId });
     }
     if (outcome.outcome === 'already-open') {
       // [U06] A second press, or a second admin, asking for an act that is
@@ -1183,6 +1190,55 @@ export async function adminRoutes(app: FastifyInstance) {
         alerts: { pendingVendors, pastDueSubs, unassignedOrders },
       },
     };
+  });
+
+  // [ADMIN-AUDIT S2-1] TODAY: EVERY QUEUE THAT WAITS FOR A PERSON, counted by the server with the same read as
+  // the queue's own page (dashboard-waiting.ts says why). A queue is counted only when this request's live grant
+  // (read by the capability hook) would open that page's read; a failed count is null, never zero.
+  app.get('/dashboard/waiting', { preHandler: [adminGuard] }, async (request: any) => {
+    const tenantId = requireTenantId();
+    const now = new Date();
+    let supportCounts: ReturnType<typeof support.waitingForAdmin> | null = null;
+    const supportWaiting = () => (supportCounts ??= support.waitingForAdmin());
+    const counters: Record<WaitingKey, () => Promise<number>> = {
+      // GET /safety/ops-alerts' own read [S-19 · M009]: a platform responder (SUPER_ADMIN) is paged for every
+      // tenant's alert and the platform's, a tenant ADMIN for their tenant's alone.
+      opsAlerts: () => (request.user.role === 'SUPER_ADMIN'
+        ? runWithoutTenant(() => app.prisma.opsAlert.count({ where: { acknowledgedAt: null, closedAt: null } }))
+        : app.prisma.opsAlert.count({ where: { tenantId, acknowledgedAt: null, closedAt: null } })),
+      supportSafety: async () => (await supportWaiting()).safetyOpen,
+      supportSafetyInProgress: async () => (await supportWaiting()).safetyInProgress,
+      support: async () => (await supportWaiting()).open,
+      supportInProgress: async () => (await supportWaiting()).inProgress,
+      // [REVIEW-F #2152 S4-6] A VAT certificate is decided in Store VAT (counted there), never in the Review Center.
+      documents: () => tenantPrisma.verificationDocument.count({ where: { status: 'PENDING', docType: { not: VAT_CERTIFICATE_DOC_TYPE } } }),
+      approvals: () => tenantPrisma.privilegedApproval.count({ where: approvalsViewWhere('PENDING', now) }),
+      paymentConfirmations: async () => {
+        const { confirmationReviewQueue } = await import('../billing/confirmation-finance');
+        return (await confirmationReviewQueue(app.prisma, tenantId, now)).length;
+      },
+      catalogue: async () => {
+        const { waiting, heldStores } = await catalogueWaiting(tenantId);
+        return waiting.length + heldStores.length;
+      },
+      storeVat: () => tenantPrisma.vendor.count({ where: { vatStatus: 'PENDING' } }),
+      custody: () => app.prisma.custodyRecoveryCase.count({ where: { state: { in: CUSTODY_CASE_OPEN_STATES } } }),
+      claimsToDecide: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'PENDING_REVIEW' } }),
+      claimsToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'APPROVED' } }),
+      claimsAutoToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'AUTO_APPROVED' } }),
+      returnsToDecide: () => tenantPrisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
+      refundsOwed: () => tenantPrisma.returnRequest.count({ where: { status: 'REFUND_DUE' } }),
+      moderation: async () => {
+        const [reports, ratings] = await Promise.all([
+          tenantPrisma.contentReport.count({ where: { status: 'PENDING' } }),
+          ratingsModerationQueue({ record: false }),
+        ]);
+        return reports + ratings.held.length + ratings.reports.length;
+      },
+    };
+    const data = await countWaiting({ role: request.user.role, permissions: request.adminPermissions ?? null }, counters,
+      (key, error) => app.log.warn({ key, err: error }, '[ADMIN-AUDIT S2-1] a Today count could not be read; shown as unknown, not zero'));
+    return { success: true, data };
   });
 
   // ─── Users ─────────────────────────────────────────────────────────────
@@ -1538,10 +1594,16 @@ export async function adminRoutes(app: FastifyInstance) {
   // or an earlier removal). Both actions are C3: reason owed, audit row written.
   // =========================================================================
 
+  // [ADMIN-AUDIT S2-1] What the catalogue check waits on, read once: for its page and for Today's count.
+  const catalogueWaiting = async (tenantId: string) => ({
+    // An item held only because its STORE waits is checked through its store (below), not one by one.
+    waiting: [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store'),
+    heldStores: [...(await storesHeldInTenant(app.prisma, tenantId))],
+  });
+
   app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
     const tenantId = requireTenantId();
-    // An item held only because its STORE waits is checked through its store (below), not one by one.
-    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store');
+    const { waiting, heldStores } = await catalogueWaiting(tenantId);
     // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
     const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
     const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
@@ -1558,7 +1620,6 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     // [owner 14 Oct, store names] Stores whose own words are held: approve shows the store (and lets its items be
     // judged by their own words again) for exactly the words on screen.
-    const heldStores = [...(await storesHeldInTenant(app.prisma, tenantId))];
     const storeRows = await app.prisma.vendor.findMany({
       where: { id: { in: heldStores.slice(0, CATALOGUE_REVIEW_PAGE).map(([id]) => id) } },
       select: { id: true, status: true, ...STORE_WORDS_SELECT },
@@ -7513,8 +7574,9 @@ export async function adminRoutes(app: FastifyInstance) {
   // exclusions, never operational status.
   // =========================================================================
 
-  /** GET /ratings/moderation — held reviews + pending reports, one queue. */
-  app.get('/ratings/moderation', { preHandler: [adminGuard] }, async () => {
+  /** GET /ratings/moderation — held reviews + pending reports, one queue. [ADMIN-AUDIT S2-1] Read once: for its
+   *  page and for Today's count. */
+  const ratingsModerationQueue = async ({ record = true }: { record?: boolean } = {}) => {
     const held = await tenantPrisma.rating.findMany({
       where: { flagged: true, flagReason: 'PROFANITY_HOLD', state: 'ACTIVE' },
       orderBy: { createdAt: 'asc' },
@@ -7538,16 +7600,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // quarantined for the platform, counted, and the queue names how many.
     const reports = pending.filter((r) => byId.has(r.ratingId));
     const quarantined = pending.length - reports.length;
-    if (quarantined > 0) ratingReportTenancyCounter.labels('quarantined_in_queue').inc(quarantined);
-    return {
-      success: true,
-      data: {
-        held,
-        reports: reports.map((r) => ({ ...r, rating: byId.get(r.ratingId) ?? null })),
-        quarantined,
-      },
-    };
-  });
+    // Today's count reads the same queue every 30 s: it does not count the quarantine again.
+    if (quarantined > 0 && record) ratingReportTenancyCounter.labels('quarantined_in_queue').inc(quarantined);
+    return { held, reports: reports.map((r) => ({ ...r, rating: byId.get(r.ratingId) ?? null })), quarantined };
+  };
+  app.get('/ratings/moderation', { preHandler: [adminGuard] }, async () => ({ success: true, data: await ratingsModerationQueue() }));
 
   /** POST /ratings/:id/moderate — publish (clear hold) | remove | exclude. */
   app.post<{ Params: { id: string } }>('/ratings/:id/moderate', { preHandler: [adminGuard] }, async (request) => {

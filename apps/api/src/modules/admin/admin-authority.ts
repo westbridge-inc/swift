@@ -248,6 +248,9 @@ const E = {
 export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAuthority>> = {
   // ── Dashboard and search ────────────────────────────────────────────────
   'GET /dashboard/overview': c('C0', 'dashboard.read'),
+  // [ADMIN-AUDIT S2-1] Today's count of every queue that waits for a person. Counts only, and each one only
+  // when this same grant would open that queue's own read (dashboard-waiting.ts).
+  'GET /dashboard/waiting': c('C0', 'dashboard.read'),
   'GET /legal/processors': c('C0', 'legal.processors.read'),
   'PUT /verification/doc-types/:code/external-processing': c('C4', 'verification.doctype.external', E.docType),
   'GET /search': c('C1', 'search.read'),

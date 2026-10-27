@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { desiredPlatformConfig, seedPlatformSpine } from './seed-platform';
 import { spineRequestContext } from '../src/modules/ops/platform-config';
 import {
-  cancelSoloReseeds, planApprovalRequest, promoteBootstrapAdmin, promotionApprovalRequest, SOLO_RESEED_CODE_TTL_MS, startSoloReseed, type ApplyResult, type SeedPlan,
+  cancelSoloReseeds, planApprovalRequest, promoteBootstrapAdmin, promotionApprovalRequest, SOLO_RESEED_CODE_TTL_MS, startSoloReseed, unsetEmptyChannelSettings, type ApplyResult, type SeedPlan,
 } from '../src/modules/ops/seed-plan';
 import { parseSignedApprovals, SOLO_COOLING_OFF_MS } from '../src/modules/ops/approver-signatures';
 
@@ -92,14 +92,6 @@ function soloCancelMode(raw: string | undefined): boolean {
   throw new Error('SEED_SOLO_CANCEL must be exactly 1 (cancel every waiting solo re-seed) or unset; refusing to guess');
 }
 
-/** [SOLO RE-SEED] Compose hands an unset notice setting over as an empty
- *  string, and the providers read empty as a value (SMTP_TLS=''), so here an
- *  empty notice setting is unset (docker-compose.seed.yml). */
-const NOTICE_SETTINGS = ['NOTIFICATION_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID', 'EMAIL_PROVIDER', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_TLS', 'SMTP_USER', 'EMAIL_FROM'] as const;
-function unsetEmptyNoticeSettings(env: Record<string, string | undefined>): void {
-  for (const name of NOTICE_SETTINGS) if (env[name] === '') delete env[name];
-}
-
 /** [SOLO RE-SEED] The one-person re-seed request, and what happens next. */
 function printSoloReseedRequest(request: string): void {
   const expires = /^expires: (.+)$/m.exec(request)?.[1] ?? '';
@@ -141,7 +133,8 @@ async function main(): Promise<void> {
   const adminEmail = process.env['SEED_ADMIN_EMAIL']?.trim() || null;
   const solo = soloMode(process.env['SEED_SOLO']);
   const cancel = soloCancelMode(process.env['SEED_SOLO_CANCEL']);
-  unsetEmptyNoticeSettings(process.env);
+  // [SOLO RE-SEED] Compose hands an unset notification setting over as an empty string: unset it (seed-plan.ts).
+  unsetEmptyChannelSettings(process.env);
   try {
     // [SOLO RE-SEED] The brake: needs no approval, no code and no plan.
     if (cancel) {

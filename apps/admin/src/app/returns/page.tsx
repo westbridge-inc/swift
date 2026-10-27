@@ -8,12 +8,15 @@ import { StatusPill } from '@/components/detail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { label } from '@/lib/labels';
+import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['REQUESTED', 'APPROVED', 'REFUND_DUE', 'REJECTED', 'REFUNDED'] as const;
 
 export default function ReturnsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('REQUESTED');
+  // [ADMIN-AUDIT S2-1] Today's rows open the tab that lists them (?status=…).
+  useStatusFromUrl(FILTERS, setFilter);
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['returns', filter], queryFn: () => fetchReturns(filter) });
   // [U06] Deciding and settling a return are C4 (money): the first answer is a
   // second admin's approval. Both used to show nothing — a queued ask looked
