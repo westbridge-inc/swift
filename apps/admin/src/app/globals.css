@@ -308,7 +308,9 @@ body {
 .mc-truncate:focus-visible, :focus-visible > .mc-truncate, :focus-visible .mc-truncate { white-space: normal; overflow: visible; overflow-wrap: anywhere; -webkit-line-clamp: unset; display: block; }
 
 /* <DataTable>: fixed layout, ellipsis cells, a card per row at phone width. */
-.mc-table-wrap { background: var(--mc-card); border: 1px solid var(--mc-line); border-radius: var(--mc-radius); overflow: hidden; min-width: 0; }
+/* [ADMIN-AUDIT S3-3] A table wider than its card scrolls sideways inside it (Markets lost three fee columns:
+   this rule's overflow: hidden beat Tailwind's overflow-x-auto). The rounded corners still clip. */
+.mc-table-wrap { background: var(--mc-card); border: 1px solid var(--mc-line); border-radius: var(--mc-radius); overflow-x: auto; overflow-y: hidden; min-width: 0; }
 .mc-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .8125rem; }
 .mc-table caption { text-align: left; padding: .75rem 1rem 0; }
 .mc-table th { text-align: left; padding: .6rem 1rem; border-bottom: 1px solid var(--mc-line); }

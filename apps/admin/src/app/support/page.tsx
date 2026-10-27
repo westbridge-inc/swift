@@ -6,7 +6,7 @@ import { maskedPhone } from '@/lib/review-center';
 import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
-import { humanise } from '@/lib/labels';
+import { humanise, label } from '@/lib/labels';
 import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['OPEN', 'IN_PROGRESS', 'RESOLVED'] as const;
@@ -105,7 +105,7 @@ export default function SupportPage() {
               aria-pressed={filter === f}
               className="mc-tab"
             >
-              {humanise(f)}
+              {label('SupportStatus', f)}
             </button>
           ))}
         </div>
@@ -131,7 +131,7 @@ export default function SupportPage() {
           </div>
         ) : tickets.length === 0 ? (
           <div className="mc-empty">
-            No {filter.replaceAll('_', ' ').toLowerCase()} tickets.
+            No tickets under “{label('SupportStatus', filter)}”.
           </div>
         ) : (
           tickets.map((t: any) => {

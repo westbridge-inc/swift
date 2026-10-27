@@ -171,7 +171,7 @@ export default function SubscriptionsPage() {
   return (
     <div className="mc-page">
       <div className="flex items-center justify-between mb-1">
-        <div className="flex gap-1">
+        <div className="flex gap-1" role="group" aria-label="Show subscribers">
           {FILTERS.map((f) => (
             <button
               key={f}
@@ -180,7 +180,7 @@ export default function SubscriptionsPage() {
               aria-pressed={filter === f}
               className="mc-tab"
             >
-              {f === 'ALL' ? 'All' : f.replaceAll('_', ' ').toLowerCase()}
+              {f === 'ALL' ? 'All' : label('SubscriptionStatus', f)}
             </button>
           ))}
         </div>

@@ -7,6 +7,7 @@ import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fet
 import { StatusPill, gyd } from '@/components/detail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { label } from '@/lib/labels';
 import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
@@ -150,7 +151,7 @@ export default function ClaimsPage() {
         ) : null}
       </div>
 
-      <div className="flex gap-1 mb-4">
+      <div className="flex gap-1 mb-4" role="group" aria-label="Show claims">
         {FILTERS.map((f) => (
           <button
             key={f}
@@ -159,7 +160,7 @@ export default function ClaimsPage() {
             aria-pressed={filter === f}
             className="mc-tab"
           >
-            {f.replaceAll('_', ' ').toLowerCase()}
+            {label('ClaimStatus', f)}
           </button>
         ))}
       </div>
@@ -171,7 +172,7 @@ export default function ClaimsPage() {
           <QueryFailed error={claimsQ.error} what="the claims" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
         ) : rows.length === 0 ? (
           <div className="mc-empty">
-            No {filter.replaceAll('_', ' ').toLowerCase()} claims.
+            No claims under “{label('ClaimStatus', filter)}”.
           </div>
         ) : (
           rows.map((c: any) => (

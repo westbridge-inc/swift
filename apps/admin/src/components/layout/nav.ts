@@ -27,6 +27,9 @@ export interface NavItem {
   blurb: string;
   /** Extra words the ⌘K "Go to" search matches. */
   keywords?: string;
+  /** [ADMIN-AUDIT S3-2] The page's own read is a founder control (the API's platformControlGuard: SUPER_ADMIN of
+   *  the default tenant). It is not listed for any other admin, who would only be refused there. */
+  founderOnly?: true;
 }
 
 export interface NavGroup {
@@ -75,7 +78,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'MMG payments', href: '/mmg-payments', icon: Receipt, blurb: 'Find a weekly-fee payment by any reference', keywords: 'checkout mobile money' },
       { label: 'Payment confirmations', href: '/payment-confirmations', icon: ShieldCheck, blurb: 'Weekly-fee payments waiting for a PAID or NOT PAID decision', keywords: 'mmg confirmation hold weekly fee review' },
       { label: 'Received agent cash', href: '/cash', icon: Banknote, blurb: 'Attach or refund cash already received', keywords: 'agent san collections' },
-      { label: 'Promos', href: '/promos', icon: Tag, blurb: 'Discount codes', keywords: 'discounts codes' },
+      { label: 'Promos', href: '/promos', icon: Tag, blurb: 'Discount codes', keywords: 'discounts codes', founderOnly: true },
     ],
   },
   {
@@ -86,7 +89,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Ops alerts', href: '/ops-alerts', icon: BellRing, blurb: 'SOS and operations pages waiting for a person to acknowledge them', keywords: 'sos page acknowledge drill on-call escalation paging' },
       { label: 'Support', href: '/support', icon: Headphones, blurb: 'Help tickets from customers and partners', keywords: 'tickets help' },
       { label: 'Compliance', href: '/compliance', icon: Scale, blurb: 'Movers taken offline for lapsed documents or cover', keywords: 'liability insurance' },
-      { label: 'Background jobs', href: '/jobs', icon: ListRestart, blurb: 'Jobs that failed and can be retried', keywords: 'queues dlq workers' },
+      { label: 'Background jobs', href: '/jobs', icon: ListRestart, blurb: 'Jobs that failed and can be retried', keywords: 'queues dlq workers', founderOnly: true },
       { label: 'Broadcast', href: '/broadcast', icon: Megaphone, blurb: 'Send one message to everyone', keywords: 'announcement notification' },
     ],
   },
@@ -95,16 +98,26 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: 'Audit log', href: '/audit', icon: FileText, blurb: 'Who did what, and why', keywords: 'history trail' },
       { label: 'Markets', href: '/markets', icon: Globe, blurb: 'Countries Swift runs in', keywords: 'countries' },
-      { label: 'Zones', href: '/zones', icon: Map, blurb: 'Delivery zones and fares', keywords: 'fares areas' },
-      { label: 'Config', href: '/config', icon: Settings, blurb: 'Platform settings', keywords: 'settings' },
+      { label: 'Zones', href: '/zones', icon: Map, blurb: 'Delivery zones and fares', keywords: 'fares areas', founderOnly: true },
+      { label: 'Config', href: '/config', icon: Settings, blurb: 'Platform settings', keywords: 'settings', founderOnly: true },
       { label: 'Discovery', href: '/discovery', icon: Compass, blurb: 'Categories customers browse by', keywords: 'categories tags' },
-      { label: 'Integrity', href: '/integrity', icon: Fingerprint, blurb: 'The detection algorithms\' decision log, for review', keywords: 'fraud identity trial algorithm detection' },
+      { label: 'Integrity', href: '/integrity', icon: Fingerprint, blurb: 'The detection algorithms\' decision log, for review', keywords: 'fraud identity trial algorithm detection', founderOnly: true },
       { label: 'Ads review', href: '/ads', icon: AdsIcon, blurb: 'Advertisers and creatives (ads are off at launch)', keywords: 'advertising' },
     ],
   },
 ];
 
 export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
+
+/** [ADMIN-AUDIT S3-2] What this role is shown: a founder page only to a SUPER_ADMIN (and nothing founder-only while
+ *  the role is still being checked). The server refuses the rest either way; this only stops offering them. */
+export function navGroupsFor(role: string | null | undefined): NavGroup[] {
+  return NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((item) => !item.founderOnly || role === 'SUPER_ADMIN') }))
+    .filter((g) => g.items.length > 0);
+}
+export function navItemsFor(role: string | null | undefined): NavItem[] {
+  return navGroupsFor(role).flatMap((g) => g.items);
+}
 
 /** The section a path belongs to (the longest matching href). */
 export function navItemFor(pathname: string): NavItem | null {
