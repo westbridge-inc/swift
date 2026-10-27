@@ -115,10 +115,18 @@ export default function VerificationPage() {
       (!age || (a.oldest > 0 && now - a.oldest >= Number(age) * 3_600_000)) &&
       a.documents.some((d) => (!role || d.role === role) && (!type || d.docType === type));
   });
+  // [ADMIN-AUDIT S2-2] The server's answer to each decision made on this page, by document id. Until the
+  // re-reads land, the queue still lists a decided document as waiting: its chip shows the answer instead,
+  // and it is never offered as the next document again (a second-review answer stays PENDING on the server).
+  const answers = useRef(new Map<string, string>());
   const documents = applicant ? [...new Map([
     ...applicant.documents, ...(history.data ?? []).filter((d) => applicantId(d) === applicant.id),
     ...(queue.data ?? []).filter((d) => applicantId(d) === applicant.id),
-  ].map((d) => [d.id, d])).values()] : [];
+  ].map((d) => [d.id, d])).values()].map((d) => {
+    const answer = answers.current.get(d.id);
+    const answered: ReviewDocument['status'] | null = answer === 'APPROVED' ? 'APPROVED' : answer === 'REJECTED' ? 'REJECTED' : null;
+    return d.status === 'PENDING' && answered ? { ...d, status: answered } : d;
+  }) : [];
   useEffect(() => {
     const list = documentList.current;
     if (!list) return;
@@ -216,11 +224,17 @@ export default function VerificationPage() {
         : outcome === 'REJECTED' ? `Rejected ${docLabel(variables.doc.docType)} for ${applicant?.name}.`
         : 'Decision received. Refreshing the server record; no final status was returned.');
       const nextApplicant = filtered[currentIndex + 1] ?? null;
+      answers.current.set(variables.doc.id, typeof outcome === 'string' ? outcome : '');
+      // [ADMIN-AUDIT S2-2] Stay with this applicant while they have documents waiting (a rider sends
+      // three, a taxi driver seven): their next waiting document opens, in the order the list shows.
+      const stillWaiting = documents.filter((d) => d.status === 'PENDING' && !answers.current.has(d.id));
+      const from = documents.findIndex((d) => d.id === variables.doc.id);
+      const nextDocument = stillWaiting.find((d) => documents.indexOf(d) > from) ?? stillWaiting[0] ?? null;
       setDecision(null);
       // No optimistic decision or removal: the decision shows only from the server's answer (above).
-      // [PERF row 562 · COORD 00:41Z] The next applicant opens AT that answer; the reads that follow
-      // run on their own. They used to hold the whole workspace for four more round trips.
-      openApplicant(nextApplicant);
+      // [PERF row 562 · COORD 00:41Z] The next document or applicant opens AT that answer; the reads
+      // that follow run on their own. They used to hold the whole workspace for four more round trips.
+      if (nextDocument) selectDocument(nextDocument); else openApplicant(nextApplicant);
       void Promise.all([
         client.invalidateQueries({ queryKey: ['verification'] }),
         client.invalidateQueries({ queryKey: ['verification-history'] }),
