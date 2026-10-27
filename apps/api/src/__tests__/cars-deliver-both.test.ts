@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole, VehicleType } from '@prisma/client';
@@ -13,6 +13,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { makeDispatchService, type DispatchService } from '../modules/dispatch/dispatch.service';
+import { returnToTaxiAndDeliveries } from '../modules/driver/car-deliveries-return';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 
@@ -219,6 +220,7 @@ afterAll(async () => {
     await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.deviceToken.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   });
@@ -237,11 +239,15 @@ afterAll(async () => {
 const mode = (token: string, takesDeliveries: boolean) => call('PUT', '/api/v1/driver/deliveries/mode', token, { takesDeliveries });
 const heartbeat = (token: string, at = here) => call('PUT', '/api/v1/rider/location', token, at);
 
-/** A verified taxi driver with Deliveries too, online as a taxi (real GO), optionally on "taxi + deliveries". */
-async function taxiWithDeliveries(opts: { both?: boolean } = {}) {
+/** [REVIEW-F #2139 S2-2 · REVIEW-G S2-2 · REVIEW-M S2-1] What a taxi app that can show a delivery card declares at GO. */
+const CARDS = 'CAR_DELIVERY_CARDS_V1';
+
+/** A verified taxi driver with Deliveries too, online as a taxi (real GO from an app that declares it can show a
+ *  delivery card, unless `oldApp`), optionally on "taxi + deliveries". */
+async function taxiWithDeliveries(opts: { both?: boolean; oldApp?: boolean } = {}) {
   const driver = await makeTaxiDriver();
   const riderId = await seedCarProfile(driver);
-  const go = await call('POST', '/api/v1/driver/go-online', driver.token, here);
+  const go = await call('POST', '/api/v1/driver/go-online', driver.token, opts.oldApp ? here : { ...here, capabilities: [CARDS] });
   expect(go.statusCode, go.body).toBe(200);
   if (opts.both !== false) await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { takesDeliveries: true } }));
   return { ...driver, riderId };
@@ -482,5 +488,176 @@ describe('[CARS-DELIVER PR4 · security] taxi + deliveries runs the delivery GO 
     expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, locationSessionId: null, returnsToTaxi: false });
     expect(await driverOf(driver.userId)).toMatchObject({ isOnline: true, locationSessionId: driver.sessionId });
     expect(await userOf(driver.userId)).toMatchObject({ activeRole: 'DRIVER' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [27 Oct review batch] REVIEW-F #2139 S2-1/S2-2, REVIEW-G #2138 S2-1/S2-2/S3-1/S4-1, REVIEW-M #2138 S2-1/S4-1/S4-2/S4-4.
+// An older taxi app (embedded JS after a reinstall, a second phone, a failed update) cannot show a delivery card: it
+// would show a store delivery as a ride and its "Accept ride" would take the delivery. So a delivery is offered from
+// taxi work only to a taxi GO whose app declared it can show one (CAR_DELIVERY_CARDS_V1, set on every taxi GO as
+// TAXI_STOPS_V1 is), and the taxi accept route never takes a delivery. The live card carries its pay.
+// ---------------------------------------------------------------------------
+describe('[CARS-DELIVER PR4 · review] only an app that can show a delivery card is offered one; the taxi route never takes a delivery', () => {
+  const candidates = async () => (await dispatch.findCandidates(`probe-${nanoid(6)}`, SPOT, 5, 'RIDER', 0, null, null, null, null)).map((c) => c.riderId);
+  const orderRow = (id: string) => sys(() => app.prisma.order.findUniqueOrThrow({ where: { id } }));
+
+  it('a taxi GO from an app that does not declare it: never a candidate, never offered, its claim promotes nothing; declared: offered; an older app going online again clears it', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries({ oldApp: true });
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    expect(await candidates()).not.toContain(driver.riderId);
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBeUndefined();
+    await expect(dispatch.claimOrder(order.id, driver.riderId, 'RIDER')).rejects.toMatchObject({ code: 'MOVER_INACTIVE' });
+    expect((await orderRow(order.id)).riderId).toBeNull();
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, returnsToTaxi: false });
+    expect(await driverOf(driver.userId)).toMatchObject({ isOnline: true });
+    expect(await userOf(driver.userId)).toMatchObject({ activeRole: 'DRIVER' });
+
+    const updated = await call('POST', '/api/v1/driver/go-online', driver.token, { ...here, capabilities: [CARDS] });
+    expect(updated.statusCode, updated.body).toBe(200);
+    expect(await candidates()).toContain(driver.riderId);
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(driver.riderId);
+
+    const older = await call('POST', '/api/v1/driver/go-online', driver.token, here);
+    expect(older.statusCode, older.body).toBe(200);
+    expect(await candidates()).not.toContain(driver.riderId);
+  });
+
+  it('the taxi accept route (all an older taxi app has) refuses a delivery offer: nothing consumed, nothing moves; the delivery route takes it', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(driver.riderId);
+    const held = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(held).toContain(driver.riderId);
+
+    const asRide = await call('POST', '/api/v1/driver/offers/accept', driver.token, { orderId: order.id });
+    expect(asRide.statusCode, asRide.body).toBe(409);
+    expect(asRide.json().error.code).toBe('NOT_A_RIDE_OFFER');
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(held);
+    expect((await orderRow(order.id)).riderId).toBeNull();
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, returnsToTaxi: false });
+    expect(await driverOf(driver.userId)).toMatchObject({ isOnline: true });
+    expect(await userOf(driver.userId)).toMatchObject({ activeRole: 'DRIVER' });
+
+    const asDelivery = await call('POST', '/api/v1/rider/offers/accept', driver.token, { orderId: order.id });
+    expect(asDelivery.statusCode, asDelivery.body).toBe(200);
+    expect((await orderRow(order.id)).riderId).toBe(driver.riderId);
+  });
+
+  it('the live delivery card carries its pay (deliveryFee and tipAmount from the order, as the recovered card does) and still no address', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { tipAmount: 300, totalAmount: 2800 } }));
+    const emitted: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
+    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
+      emit: (event: string, payload: Record<string, unknown>) => { emitted.push({ room, event, payload }); return true; },
+    })) as never);
+    try {
+      expect((await dispatch.dispatchOrder(order.id)).offered).toBe(driver.riderId);
+    } finally {
+      spy.mockRestore();
+    }
+    const card = emitted.find((e) => e.event === 'dispatch:offer' && e.room === `user:${driver.userId}`)?.payload;
+    expect(card).toMatchObject({ orderId: order.id, orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', deliveryFee: 500, tipAmount: 300 });
+    expect(card).not.toHaveProperty('deliveryAddress');
+    const recovered = await dispatch.currentOfferFor(driver.riderId);
+    expect({ deliveryFee: recovered?.deliveryFee, tipAmount: recovered?.tipAmount }).toEqual({ deliveryFee: 500, tipAmount: 300 });
+  });
+
+  it('when the taxi takes a ride, its held delivery offer is released at once (the store order never waits out the card)', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(driver.riderId);
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toContain(driver.riderId);
+    const ride = await sys(() => app.prisma.order.create({
+      data: {
+        orderNumber: `CARB-T-${nanoid(10)}`, orderType: 'TAXI', customerId: customer.userId, status: 'PENDING',
+        pickupAddress: 'Kurupukari crossing', pickupLat: SPOT.lat, pickupLng: SPOT.lng,
+        deliveryAddress: 'Kurupukari landing', deliveryLat: SPOT.lat + 0.01, deliveryLng: SPOT.lng + 0.01,
+        taxiPickupAddress: 'Kurupukari crossing', taxiDropoffAddress: 'Kurupukari landing',
+        taxiPassengerCount: 1, rideClass: 'ECONOMY', taxiFareTotal: 1500,
+        subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500,
+        paymentMethod: 'CASH', ridePin: '482915',
+      },
+    }));
+    orderIds.push(ride.id);
+    await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER');
+    expect((await orderRow(ride.id)).driverId).toBe(driver.driverId);
+    expect((await app.redis.get(`dispatch:offer:${order.id}`)) ?? '').not.toContain(driver.riderId);
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, returnsToTaxi: false });
+  });
+});
+
+describe('[CARS-DELIVER PR4 · review] the return to taxi work runs every taxi GO gate (REVIEW-G S2-1/S3-1/S4-1, REVIEW-M S4-1/S4-2)', () => {
+  /** A delivery taken from taxi work and handed back: the next delivery heartbeat is the return. */
+  async function deliveryDone() {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(driver.riderId);
+    await dispatch.acceptOffer(order.id, driver.userId);
+    const handback = await call('POST', `/api/v1/rider/orders/${order.id}/handback`, driver.token, { reason: 'Car trouble before pickup' });
+    expect(handback.statusCode, handback.body).toBe(200);
+    return driver;
+  }
+  async function landsOffline(d: { userId: string }) {
+    expect(await driverOf(d.userId)).toMatchObject({ isOnline: false });
+    expect(await riderOf(d.userId)).toMatchObject({ isOnline: false, locationSessionId: null, returnsToTaxi: false });
+    expect(await userOf(d.userId)).toMatchObject({ activeRole: 'DRIVER' });
+  }
+
+  const gates: Array<[string, (d: { userId: string; driverId: string }) => Promise<unknown>]> = [
+    ['push required and no live registration (taxi GO answers PUSH_REQUIRED)', async () => { process.env['MOVER_PUSH_REQUIRED'] = 'true'; }],
+    ['the taxi profile identity-locked during the delivery', (d) => sys(() => app.prisma.driver.update({ where: { userId: d.userId }, data: { livenessLockedAt: new Date() } }))],
+    ['the taxi profile’s selfie check gone stale while checks are required', async (d) => {
+      process.env['LIVENESS_REQUIRED'] = '1';
+      await sys(() => app.prisma.driver.update({ where: { userId: d.userId }, data: { lastLivenessPassAt: new Date(Date.now() - 30 * DAY) } }));
+    }],
+    ['the taxi profile safety-suspended during the delivery', (d) => sys(() => app.prisma.driver.update({ where: { userId: d.userId }, data: { safetySuspendedAt: new Date() } }))],
+    ['the weekly fee no longer in good standing', (d) => sys(() => app.prisma.subscription.updateMany({ where: { driverId: d.driverId }, data: { status: 'CANCELLED' } }))],
+    ['no profile photo', (d) => sys(() => app.prisma.user.update({ where: { id: d.userId }, data: { selfieCapturedAt: null } }))],
+  ];
+  for (const [label, block] of gates) {
+    it(`${label}: delivery supply ends and the taxi stays offline (taxi GO will say why)`, async () => {
+      const d = await deliveryDone();
+      await block(d);
+      const back = await heartbeat(d.token);
+      expect(back.statusCode, back.body).toBe(200);
+      expect(back.json().data).toEqual({ accepted: false, reason: 'RETURNED_TO_TAXI' });
+      await landsOffline(d);
+    });
+  }
+
+  it('a device session that ended during the delivery: the return lands offline (called directly — an ended session never authenticates a heartbeat)', async () => {
+    const d = await deliveryDone();
+    await sys(() => app.prisma.session.update({ where: { id: d.sessionId }, data: { expiresAt: new Date(Date.now() - 60_000) } }));
+    expect(await sys(() => returnToTaxiAndDeliveries(app.prisma, d.userId, d.sessionId, here))).toBe('RETURNED_OFFLINE');
+    await landsOffline(d);
+  });
+
+  it('a heartbeat from another device of the same account changes nothing; the device that owns the delivery profile returns it', async () => {
+    const d = await deliveryDone();
+    const token = app.jwt.sign({ userId: d.userId, role: 'RIDER', jti: nanoid(8) });
+    await sys(() => app.prisma.session.create({
+      data: { userId: d.userId, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `cars-other-${nanoid(4)}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+    }));
+    const stray = await heartbeat(token);
+    expect(stray.json().data ?? null).not.toEqual({ accepted: false, reason: 'RETURNED_TO_TAXI' });
+    expect(await riderOf(d.userId)).toMatchObject({ isOnline: true, locationSessionId: d.sessionId, returnsToTaxi: true });
+    expect(await driverOf(d.userId)).toMatchObject({ isOnline: false });
+    expect(await userOf(d.userId)).toMatchObject({ activeRole: 'RIDER' });
+
+    const back = await heartbeat(d.token);
+    expect(back.json().data).toEqual({ accepted: false, reason: 'RETURNED_TO_TAXI' });
+    expect(await driverOf(d.userId)).toMatchObject({ isOnline: true, locationSessionId: d.sessionId });
   });
 });
