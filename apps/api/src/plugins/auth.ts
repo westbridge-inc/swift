@@ -13,6 +13,7 @@ import {
 } from '../modules/auth/session-assurance';
 import { adoptCookieCredential, bearerOrCookieToken } from '../modules/auth/browser-session';
 import { refuseUnexpectedPrincipal } from '../modules/auth/expected-principal';
+import { AppError } from '../utils/errors';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -122,7 +123,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   const logoutInTenant = (session: { id: string; user: { id: string; tenantId: string } }) =>
     runWithTenant(session.user.tenantId, () => authService.logout(session.id, session.user.id));
 
-  app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.decorate('authenticate', async (request: FastifyRequest, _reply: FastifyReply) => {
     let reviewTenant = false;
     try {
       const credentialSource = adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
@@ -171,6 +172,11 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       request.tenantKind = session.user.tenant.kind;
       reviewTenant = session.user.tenant.kind === 'REVIEW';
     } catch (err) {
+      // [AUTH-FIX S2-3] A refused request carries NO identity onward: jwtVerify
+      // may already have set request.user from a token that verified (a
+      // signed-out session, a suspended account), so it is cleared here.
+      (request as { user?: unknown }).user = undefined;
+      request.tenantId = null;
       request.authSessionId = null;
       request.authCredentialSource = null;
       request.tenantKind = null;
@@ -189,16 +195,17 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       //     they are told their session is invalid at the worst possible moment.
       // A verdict we actually reached is 401. Anything else is 503 and is
       // LOUD, because it is an outage, not a login problem.
+      // [AUTH-FIX S2-3] The refusal is THROWN, never sent and returned. A
+      // hook that sends and returns lets Fastify run the next hook and the
+      // handler whenever the response has not ended yet: an async onSend
+      // still writing, or a caller that hung up mid-response. A thrown error
+      // stops the request in every case; the error handler writes the same
+      // status and body.
       if (isCredentialVerdict(err)) {
-        reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
-        return;
+        throw new AppError(401, 'UNAUTHORIZED', 'Invalid or expired token');
       }
       request.log.error({ err, url: request.url }, '[F-250] could not verify the session — reporting 503, NOT 401');
-      reply.status(503).send({
-        success: false,
-        error: { code: 'AUTH_UNAVAILABLE', message: 'We could not verify your session right now. Please try again in a moment — you have not been signed out.' },
-      });
-      return;
+      throw new AppError(503, 'AUTH_UNAVAILABLE', 'We could not verify your session right now. Please try again in a moment — you have not been signed out.');
     }
     // [STA-1 DL-9] Outside the try: a dead review session is a 410 through the
     // normal error path — never a 401, never a 503.
