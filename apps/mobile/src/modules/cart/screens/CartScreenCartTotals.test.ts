@@ -53,7 +53,9 @@ describe('the quote is priced for exactly what the order button submits (E01)', 
 
   it('money is committed only against a settled quote: priced for the current choices and not mid-refresh', () => {
     // [BUG-GUARDS C2 · #1952 S3-2] Lines remove one per row, so two can be in flight: removeItem.isPending follows only the latest, removeLine.busy every one.
-    expect(src).toMatch(/const quoteSettled = !cart\.isFetching && !cart\.isPlaceholderData && !updateItem\.isPending && !removeItem\.isPending && !removeLine\.busy && !removePromo\.isPending && !applyPromo\.isPending;/);
+    // [TAP-AUDIT] A line's + / − is held by the steppers (hooks/useCartSteppers) until the server holds what was tapped
+    // AND the cart has been read again: `steppers.settled` replaces the one shared update's isPending.
+    expect(src).toMatch(/const quoteSettled = !cart\.isFetching && !cart\.isPlaceholderData && steppers\.settled && !removeItem\.isPending && !removeLine\.busy && !removePromo\.isPending && !applyPromo\.isPending;/);
     expect(src).toMatch(/disabled=\{!quoteSettled \|\| !c\.meetsMinimum/);
     expect(src).toMatch(/disabled=\{recovery\.recovering \|\| alreadyPlaced \|\| stillPlacing \|\| !quoteSettled \|\| \(confirmPickup && pickupQuote\.isFetching\)\}/);
   });

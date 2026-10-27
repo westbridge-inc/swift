@@ -5,7 +5,8 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
-import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
+import { useCart, useReportContent, useToggleFavorite, useVendor } from '../../../hooks/customer';
+import { useCartSteppers } from '../../../hooks/useCartSteppers';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { requestAuthContinuation } from '../../../navigation/authContinuation';
@@ -107,7 +108,7 @@ const TILE_W = (SCREEN_W - GUTTER * 2 - space.md * 2) / 3;
  *  on-card add. In-cart shows a mini stepper — shopping without detail hops. */
 function ProductTile({
   item,
-  line,
+  qty,
   onAdd,
   onSetQty,
   onOpen,
@@ -115,7 +116,8 @@ function ProductTile({
   vat = null,
 }: {
   item: any;
-  line: any;
+  /** [TAP-AUDIT] What the customer has tapped to (hooks/useCartSteppers), else the cart's quantity. */
+  qty: number;
   onAdd: () => void;
   onSetQty: (qty: number) => void;
   onOpen: () => void;
@@ -125,7 +127,6 @@ function ProductTile({
 }) {
   const hasOptions = (item.optionGroups?.length ?? 0) > 0;
   const out = item.stockQuantity === 0;
-  const qty = line?.quantity ?? 0;
   return (
     <View style={{ width: TILE_W }}>
       <Pressable onPress={onOpen}>
@@ -262,8 +263,8 @@ function RestaurantStore() {
   const cart = useCart<any>();
   // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
   const cartClearance = useCartBarClearance({ vendorId });
-  const addToCart = useAddToCart();
-  const updateCartItem = useUpdateCartItem();
+  // [TAP-AUDIT] + and − answer at the tap and add up; only that item has a request out (hooks/useCartSteppers).
+  const steppers = useCartSteppers(cart.dataUpdatedAt);
 
   const v = vendor.data;
   // [STORE-VAT · owner O-5] Only a store whose VAT a person approved sends `vat`; every other store (and an older server) shows none.
@@ -668,14 +669,11 @@ function RestaurantStore() {
                     key={item.id}
                     item={item}
                     vat={storeVat}
-                    line={lineFor(item.id)}
-                    busy={addToCart.isPending || updateCartItem.isPending}
+                    qty={steppers.qty(item.id, lineFor(item.id))}
+                    busy={false}
                     onOpen={() => openItem(item)}
-                    onAdd={() => guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))}
-                    onSetQty={(qty) => {
-                      const line = lineFor(item.id);
-                      if (line) updateCartItem.mutate({ id: line.id, quantity: qty });
-                    }}
+                    onAdd={() => guardAuth(() => steppers.set(item.id, lineFor(item.id), steppers.qty(item.id, lineFor(item.id)) + 1, { vendorId, itemId: item.id }))}
+                    onSetQty={(qty) => guardAuth(() => steppers.set(item.id, lineFor(item.id), qty, { vendorId, itemId: item.id }))}
                   />
                 ))}
               </View>
@@ -769,7 +767,8 @@ function RestaurantStore() {
                     {cat.items.map((item: any, idx: number) => {
                       const hasOptions = (item.optionGroups?.length ?? 0) > 0;
                       const line = lineFor(item.id);
-                      const qty = hasOptions ? 0 : (line?.quantity ?? 0);
+                      const shown = hasOptions ? 0 : steppers.qty(item.id, line);
+                      const tapTo = (next: number) => guardAuth(() => steppers.set(item.id, line, next, { vendorId, itemId: item.id }));
                       return (
                         <MenuRow
                           key={item.id}
@@ -779,21 +778,13 @@ function RestaurantStore() {
                           priceNote={itemVatNote(storeVat, item)}
                           image={itemPhoto(item)}
                           soldOut={item.stockQuantity === 0}
-                          qty={qty}
-                          busy={addToCart.isPending || updateCartItem.isPending}
+                          qty={shown}
+                          busy={false}
                           last={idx === cat.items.length - 1}
                           onOpen={() => openItem(item)}
-                          onAdd={() =>
-                            hasOptions
-                              ? openItem(item)
-                              : guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))
-                          }
-                          onInc={() => {
-                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) + 1 });
-                          }}
-                          onDec={() => {
-                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) - 1 });
-                          }}
+                          onAdd={() => (hasOptions ? openItem(item) : tapTo(shown + 1))}
+                          onInc={() => tapTo(shown + 1)}
+                          onDec={() => tapTo(shown - 1)}
                         />
                       );
                     })}
