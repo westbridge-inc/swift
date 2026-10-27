@@ -69,6 +69,18 @@ export function cashInHandThisWeek(summary: unknown): number | undefined {
   return cash ? serverNumber(cash['thisWeek']) : undefined;
 }
 
+/** [CARS-DELIVER PR4 · REVIEW-F #2139 delta S3-1] Whose other week the earnings screen shows: only for an account
+ *  with a taxi profile AND a CAR delivery profile ("Deliveries too"), the kind the screen is not showing. Null for
+ *  every other account (a motorbike + taxi account sees today's screen while CAR_DELIVERIES is off). */
+export function otherProfileKind(opts: {
+  kind: 'DRIVER' | 'RIDER' | null | undefined;
+  dual: boolean | undefined;
+  carDeliveryProfile: boolean | undefined;
+}): 'DRIVER' | 'RIDER' | null {
+  if (opts.dual !== true || opts.carDeliveryProfile !== true || !opts.kind) return null;
+  return opts.kind === 'DRIVER' ? 'RIDER' : 'DRIVER';
+}
+
 /** [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] For an account with a taxi AND a delivery profile, the OTHER profile's week,
  *  from that profile's own server summary (never added to this screen's figures, which stay one profile's). One on
  *  "taxi rides and deliveries" goes back to taxi work after every delivery, so without this its delivery money would

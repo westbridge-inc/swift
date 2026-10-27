@@ -76,6 +76,18 @@ export function deliveriesTooView(answer: unknown, kind: WorkKind | null): Deliv
  */
 export const DELIVERY_CARDS_CAPABILITY = 'CAR_DELIVERY_CARDS_V1';
 
+/**
+ * [REVIEW-F #2139 delta S3-1, S4-5] The server's car delivery profile (isCarDeliveryProfile): a delivery profile on a
+ * passenger vehicle, which only "Deliveries too" creates. Only an account holding one sees or asks anything new, so
+ * an existing motorbike + taxi account keeps today's screens and requests while CAR_DELIVERIES is off.
+ */
+const PASSENGER_VEHICLES: ReadonlySet<string> = new Set(['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']);
+
+export function isCarDeliveryProfile(profile: unknown): boolean {
+  const type = profile && typeof profile === 'object' ? (profile as { vehicleType?: unknown }).vehicleType : undefined;
+  return typeof type === 'string' && PASSENGER_VEHICLES.has(type);
+}
+
 /** A server that knows "taxi + deliveries": its GET /driver/deliveries answer carries takesDeliveries (true or false). */
 export function serverKnowsTaxiAndDeliveries(answer: unknown): boolean {
   return !!answer && typeof answer === 'object' && typeof (answer as { takesDeliveries?: unknown }).takesDeliveries === 'boolean';

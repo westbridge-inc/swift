@@ -8,7 +8,7 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tansta
 import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
 import { currentDevicePosition } from '../services/devicePosition';
 import { TAXI_STOPS_CAPABILITY, maxStopsFrom, rideStops } from '../lib/taxiItinerary';
-import { DELIVERY_CARDS_CAPABILITY, serverKnowsTaxiAndDeliveries } from '../lib/deliveriesToo';
+import { DELIVERY_CARDS_CAPABILITY, isCarDeliveryProfile, serverKnowsTaxiAndDeliveries } from '../lib/deliveriesToo';
 import { skippedStopsKey } from '../lib/routeLine';
 import { track } from '../lib/analytics';
 import {
@@ -164,6 +164,7 @@ export function useMoverKind() {
       error: null,
       ambiguous: false,
       dual: false,
+      carDeliveryProfile: false,
       refetch: async () => {},
     };
   }
@@ -186,6 +187,8 @@ export function useMoverKind() {
     error,
     // [CARS-DELIVER] The account holds both a taxi and a delivery profile (it can switch work modes).
     dual: !!driver.data && !!rider.data,
+    // [CARS-DELIVER PR4 · REVIEW-F #2139 delta S3-1] A taxi profile AND a car delivery profile ("Deliveries too").
+    carDeliveryProfile: !!driver.data && isCarDeliveryProfile(rider.data),
     refetch: async () => {
       await Promise.all([driver.refetch(), rider.refetch()]);
     },
@@ -403,13 +406,14 @@ export function useGoOnline(kind: MoverKind) {
       // server that has advertised rides with stops; any other answer (an older
       // server's 404, 0, an error) sends exactly today's go-online body.
       // [CARS-DELIVER PR4] Likewise delivery cards, only to a server that knows "taxi + deliveries": this app shows a
-      // delivery card in taxi mode, so the server may offer it deliveries from taxi work.
-      const declared = kind === 'DRIVER'
-        ? [
-          ...(await serverOffersTaxiStops(current) ? [TAXI_STOPS_CAPABILITY] : []),
-          ...(await serverKnowsDeliveryCards() ? [DELIVERY_CARDS_CAPABILITY] : []),
-        ]
-        : [];
+      // delivery card in taxi mode, so the server may offer it deliveries from taxi work. [REVIEW-F #2139 delta S4-5]
+      // Asked only by an account that holds a car delivery profile, and alongside the stops read (never a second
+      // round trip in a row); every other account makes exactly today's requests.
+      const carDeliveries = kind === 'DRIVER' && isCarDeliveryProfile(qc.getQueryData(['mover', 'riderProfile']));
+      const [stops, cards] = kind === 'DRIVER'
+        ? await Promise.all([serverOffersTaxiStops(current), carDeliveries ? serverKnowsDeliveryCards() : false])
+        : [false, false];
+      const declared = [...(stops ? [TAXI_STOPS_CAPABILITY] : []), ...(cards ? [DELIVERY_CARDS_CAPABILITY] : [])];
       const capabilities = declared.length > 0 ? declared : null;
       if (capabilities) current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(capabilities

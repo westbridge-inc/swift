@@ -23,6 +23,7 @@ import {
 } from '../../../stores/authStore';
 import {
   cashInHandThisWeek,
+  otherProfileKind,
   otherProfileWeek,
   earningLabel,
   earningRows,
@@ -377,12 +378,12 @@ export function EarningsScreen({ navigation }: any) {
   const { kind } = mover;
   const summaryQ = useEarningsSummary<unknown>(kind);
   const historyQ = useEarnings<unknown>(kind);
-  // [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with both profiles also sees the other profile's week, read from
-  // that profile's own summary (asked for only for such an account).
-  const otherKind: 'DRIVER' | 'RIDER' | null = mover.dual === true && kind ? (kind === 'DRIVER' ? 'RIDER' : 'DRIVER') : null;
+  // [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with a taxi AND a car delivery profile also sees the other
+  // profile's week, read from that profile's own summary (asked for only for such an account). [REVIEW-F delta S3-1]
+  const otherKind = otherProfileKind({ kind, dual: mover.dual, carDeliveryProfile: mover.carDeliveryProfile });
   const otherSummaryQ = useEarningsSummary<unknown>(otherKind);
   // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
-  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
+  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch(), ...(otherKind ? [otherSummaryQ.refetch()] : [])]));
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
