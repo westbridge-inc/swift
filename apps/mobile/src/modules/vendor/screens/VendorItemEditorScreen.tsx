@@ -81,11 +81,18 @@ export function draftOptionGroupsPayload(groups: DraftOptionGroup[]) {
 let draftKeys = 0;
 const nextDraftKey = () => `draft-${++draftKeys}`;
 
+/** [REVIEW-F #2141 S4-2] The item or its section was deleted on another phone: the server's "Category with id … not
+ *  found" names an internal id, so the store reads this instead. */
+export const ITEM_GONE_WORDS = 'This section or item was removed on another phone. Go back and open the menu again.';
+
 /** [TAP-AUDIT] Why the server would not save the item, in its own words (a banned word, documents not yet checked).
- *  A form-shape refusal has no words for a person: the editor's own sentence is kept. */
+ *  A refusal with no words for a person (the form's shape, a duplicate, a server fault) keeps the editor's own
+ *  sentence; a missing item or section says so in plain words. */
 export function saveRefusal(error: unknown): string | null {
   const body = (error as { response?: { data?: { error?: { code?: unknown; message?: unknown } } } } | null)?.response?.data?.error;
-  if (!body || body.code === 'VALIDATION_ERROR' || typeof body.message !== 'string' || !body.message.trim()) return null;
+  if (body?.code === 'NOT_FOUND') return ITEM_GONE_WORDS;
+  if (!body || body.code === 'VALIDATION_ERROR' || body.code === 'DUPLICATE' || body.code === 'INTERNAL_ERROR') return null;
+  if (typeof body.message !== 'string' || !body.message.trim()) return null;
   return body.message;
 }
 

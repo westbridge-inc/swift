@@ -686,7 +686,13 @@ export function rereadMenuSoon(qc: QueryClient, delay = MENU_REREAD_SETTLE_MS): 
  *  re-read. Returns nothing: the button is free at the answer, not after a whole-menu download. */
 export function answerIntoMenu(qc: QueryClient, scope: MenuScope | undefined, apply: (menu: unknown) => unknown): void {
   if (!sameMenuScope(scope)) return;
-  qc.setQueryData(MENU_KEY, (menu: unknown) => (menu === undefined ? menu : apply(menu)));
+  if (qc.getQueryData(MENU_KEY) !== undefined) {
+    // [REVIEW-G #2141 S3-1] A menu read already on its way left BEFORE this change: landing, it would put the old menu
+    // back on screen (a switched-off item on again, a deleted one back) until the next re-read. It is cancelled (the
+    // menu stays as the screen held it) and the answer is written; the one re-read below reads the menu again.
+    void qc.cancelQueries({ queryKey: MENU_KEY, exact: true });
+    qc.setQueryData(MENU_KEY, (menu: unknown) => (menu === undefined ? menu : apply(menu)));
+  }
   rereadMenuSoon(qc);
 }
 

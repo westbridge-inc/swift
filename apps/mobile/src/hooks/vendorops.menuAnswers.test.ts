@@ -150,6 +150,23 @@ describe('[TAP-AUDIT] a menu change: the server\'s answer at once, one re-read a
     expect(menuRereads()).toBe(1);
   });
 
+  it('[REVIEW-G #2141 S3-1] a menu read already on its way when the answer lands does not put the old menu back', async () => {
+    let land!: (menu: unknown) => void;
+    // A re-read (a focus refetch, the last burst's re-read) left BEFORE this change: it carries the old menu.
+    const stale = fx.qc.fetchQuery({ queryKey: MENU, queryFn: () => new Promise((resolve) => { land = resolve; }), staleTime: 0 }).catch(() => undefined);
+    await tap(useSetItemAvailability() as unknown as Hook, { id: 'roti', isAvailable: false });
+    expect(items('mains').find((i: any) => i.id === 'roti').isAvailable).toBe(false);
+    land(menu()); // the old menu: roti still on
+    await stale;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(items('mains').find((i: any) => i.id === 'roti').isAvailable, 'the switched-off item stays off').toBe(false);
+    const second = fx.qc.fetchQuery({ queryKey: MENU, queryFn: () => new Promise((resolve) => { land = resolve; }), staleTime: 0 }).catch(() => undefined);
+    await tap(useDeleteItem() as unknown as Hook, 'curry');
+    land(menu());
+    await second;
+    expect(items('mains').map((i: any) => i.id), 'the deleted item does not come back').toEqual(['roti']);
+  });
+
   it('every menu change carries the menu-change key (the re-read can see it)', () => {
     for (const hook of [useSetItemAvailability, useSaveItem, useDeleteItem, useCreateCategory, useUpdateCategory, useDeleteCategory,
       useAddOptionGroup, useDeleteOptionGroup, useAddOption, useDeleteOption, useUploadItemImage]) {

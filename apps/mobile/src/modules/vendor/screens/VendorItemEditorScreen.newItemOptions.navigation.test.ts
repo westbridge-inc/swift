@@ -275,6 +275,19 @@ describe('[TAP-AUDIT] a refused save says why, in the server\'s words', () => {
     expect(shown('Validation failed')).toBe(false);
   });
 
+  it('[REVIEW-F #2141 S4-2] the item or its section deleted on another phone: plain words, never an internal id', async () => {
+    fx.saveError = { response: { data: { error: { code: 'NOT_FOUND', message: 'Category with id cm0abc123 not found' } } } };
+    await openNewItem();
+    expect(shown('This section or item was removed on another phone. Go back and open the menu again.')).toBe(true);
+    expect(shown('Category with id cm0abc123 not found')).toBe(false);
+  });
+
+  it.each(['DUPLICATE', 'INTERNAL_ERROR'])('a %s refusal keeps the editor\'s own words', async (code) => {
+    fx.saveError = { response: { data: { error: { code, message: 'Unique constraint failed on the fields: (`sku`)' } } } };
+    await openNewItem();
+    expect(shown("Couldn't save. Check the details and try again.")).toBe(true);
+  });
+
   it('no answer at all (offline) keeps the editor\'s own words', async () => {
     fx.saveError = new Error('Network Error');
     await openNewItem();
