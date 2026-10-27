@@ -30,13 +30,10 @@ const registerSchema = z.object({
 export async function adsRoutes(app: FastifyInstance) {
   // Encapsulated by the ads plugin: every existing and future ads endpoint,
   // including serving/events, refuses before parsing, authentication or effects.
-  app.addHook('onRequest', async (_request, reply) => {
-    if (!adsEnabled()) {
-      return reply.code(403).send({
-        success: false,
-        error: { code: 'ADS_DISABLED', message: 'Advertising is currently unavailable.' },
-      });
-    }
+  app.addHook('onRequest', async () => {
+    // [AUTH-FIX S2-3] Thrown, not sent: the error handler writes the same 403
+    // and body, and nothing after this hook can run.
+    if (!adsEnabled()) throw new AppError(403, 'ADS_DISABLED', 'Advertising is currently unavailable.');
   });
   const auth = { preHandler: [app.authenticate] };
   const advertisers = new AdvertiserService(app.prisma, app.io);

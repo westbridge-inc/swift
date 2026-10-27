@@ -72,7 +72,7 @@ import {
 } from './solo-approval';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
-import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
@@ -697,6 +697,14 @@ export async function adminRoutes(app: FastifyInstance) {
     return role;
   };
 
+  // [AUTH-FIX S2-3] Every guard goes on only with an identity authenticate()
+  // actually verified: its session id and its user. authenticate() throws its
+  // refusals, so this never fires today; it keeps a guard from carrying on
+  // with an identity that was refused.
+  const requireAuthenticatedIdentity = (request: any): void => {
+    if (!request.authSessionId || !request.user?.userId) throw new UnauthorizedError('Invalid or expired token');
+  };
+
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
     // The production server opens this store globally. Admin routes also do it
@@ -704,7 +712,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // and then lose the tenant binding across the auth await boundary.
     beginRequestTenantContext();
     await app.authenticate(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     if (!bindConsoleRole(request)) {
       throw new ForbiddenError('Admin access required');
     }
@@ -717,7 +725,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // as through the plugin hook so the route-level law remains self-contained.
   const founderGuard = async (request: any, reply: any) => {
     await app.authenticate(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     // [ADMIN-ROLE] Judged on the admin role the account HOLDS (bound for the
     // request); an account holding none is judged on nothing, never its mode.
     if (!bindConsoleRole(request)) request.user.role = '';
@@ -729,7 +737,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // founder-only: SUPER_ADMIN is otherwise deliberately tenant-local.
   const platformControlGuard = async (request: any, reply: any) => {
     await founderGuard(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     if (requireTenantId() !== 'swift-default') {
       throw new ForbiddenError('Platform controls require the default tenant');
     }
@@ -743,7 +751,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // anything is read or written.
   const canonicalTenantGuard = async (request: any, reply: any) => {
     await adminGuard(request, reply);
-    if (reply.sent) return;
+    requireAuthenticatedIdentity(request);
     if (requireTenantId() !== 'swift-default') {
       throw new ForbiddenError('Platform controls require the default tenant');
     }
@@ -846,7 +854,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // unexpired, unused, by someone else, and over THIS request: the fingerprint
   // covers the method, route, params and body, so an approved settlement
   // cannot be re-aimed at a different beneficiary or amount afterwards.
-  app.addHook('preValidation', async (request: any, reply: any) => {
+  app.addHook('preValidation', async (request: any) => {
     const routeUrl = routeTemplateOf(request, app.prefix);
     const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
     if (!authority || !requiresApproval(authority.cls)) return;
@@ -881,14 +889,11 @@ export async function adminRoutes(app: FastifyInstance) {
       // PENDING approval IS the record of the ask, and an audit row here would
       // read as a completed action to anyone reviewing the trail later.
       request.approvalPending = true;
-      return reply.code(202).send({
-        success: false,
-        error: {
-          code: 'APPROVAL_REQUIRED',
-          message: 'A second admin must approve this before it happens. It is in the approvals queue.',
-          details: { approvalId: outcome.approvalId },
-        },
-      });
+      // [AUTH-FIX S2-3] Thrown, not sent: a hook that sends and returns lets
+      // the handler run if the caller hangs up before the response ends. The
+      // error handler writes the same 202 and body.
+      throw new AppError(202, 'APPROVAL_REQUIRED', 'A second admin must approve this before it happens. It is in the approvals queue.',
+        { approvalId: outcome.approvalId });
     }
     if (outcome.outcome === 'already-open') {
       // [U06] A second press, or a second admin, asking for an act that is

@@ -813,7 +813,8 @@ export async function customerRoutes(app: FastifyInstance) {
       if (!getTenantId()) enterPublicBrowse();
       return;
     }
-    await app.authenticate(request, reply);
+    // [AUTH-FIX S2-3] A refusal THROWS out of authenticate: nothing after this hook runs.
+    return app.authenticate(request, reply);
   });
 
   // ========================================================================
