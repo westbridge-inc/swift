@@ -229,12 +229,15 @@ describe('[CARD-PAGE] what the restyle must never change', () => {
     }
   });
 
-  it('no page loads anything from anywhere: no script, stylesheet, font, image, media or frame of Swift\'s own, and no address but the two ways back', async () => {
+  it('no page loads or runs anything of Swift\'s own: no script or inline handler, stylesheet, font, image, media or frame, and no address but the two ways back', async () => {
     for (const { name, html } of await servedPages()) {
       const mine = own(html);
       expect(mine, name).not.toMatch(/<script|<link|<img|<object|<embed|<video|<audio|<source|<base|<frame\b|<portal|@import|@font-face|url\(|\ssrc=|\sxlink:href=|<use\b|<image\b/i);
       // A style attribute is not needed: every style is in the page's one inline <style>.
       expect(mine, name).not.toMatch(/\sstyle=/i);
+      // [REVIEW-G #2140 S4-1] No inline event handler and no javascript: address in Swift's own markup. The card
+      // page's policy must allow inline script (the bank's srcdoc frame inherits it), so on it either WOULD run.
+      expect(mine, name).not.toMatch(/\son[a-z]+\s*=|javascript:/i);
       expect(mine.match(/<style>/g), name).toEqual(['<style>']);
       // The only addresses anywhere are the two ways back (and the simulator's own buttons' post).
       const hrefs = [...mine.matchAll(/\shref="([^"]*)"/g)].map((m) => m[1]);
