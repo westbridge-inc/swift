@@ -402,9 +402,18 @@ describe('[CARS-DELIVER PR4] switch ON: taxi + deliveries', () => {
 // where required (on the delivery profile AND the taxi it rides on), push ready where required, a profile photo,
 // a vehicle Swift takes. A profile failing any of them is never offered a delivery from taxi work, and a claim
 // promotes nothing (MOVER_INACTIVE, nothing written).
+// [SECURITY · PR4 HIGH, second pass 27 Oct] ...and the rest of delivery GO: an active account, a live device session,
+// identity authority for an account with no fee row, the weekly fee and the papers. The offer gate refuses every
+// state the promotion refuses (one shared gate), so a blocked profile is never even offered a card.
 describe('[CARS-DELIVER PR4 · security] taxi + deliveries runs the delivery GO gates before anything goes online', () => {
+  const clusterIds: string[] = [];
+  afterAll(async () => {
+    await sys(() => app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: userIds } } }));
+    await sys(() => app.prisma.identityCluster.deleteMany({ where: { id: { in: clusterIds } } }));
+  });
+
   // [label, block, filtered by the candidate SQL itself (else by the offer gate before any card is sent)]
-  const blocked: Array<[string, (d: { userId: string; riderId: string }) => Promise<unknown>, boolean?]> = [
+  const blocked: Array<[string, (d: { userId: string; riderId: string; driverId: string; sessionId: string }) => Promise<unknown>, boolean?]> = [
     ['an identity-locked delivery profile', (d) => sys(() => app.prisma.rider.update({ where: { id: d.riderId }, data: { livenessLockedAt: new Date() } })), true],
     ['a safety-suspended delivery profile', (d) => sys(() => app.prisma.rider.update({ where: { id: d.riderId }, data: { safetySuspendedAt: new Date() } })), true],
     ['an identity-locked taxi', (d) => sys(() => app.prisma.driver.update({ where: { userId: d.userId }, data: { livenessLockedAt: new Date() } })), true],
@@ -416,6 +425,15 @@ describe('[CARS-DELIVER PR4 · security] taxi + deliveries runs the delivery GO 
     }],
     ['no live push registration while push is required', async () => { process.env['MOVER_PUSH_REQUIRED'] = 'true'; }],
     ['no profile photo', (d) => sys(() => app.prisma.user.update({ where: { id: d.userId }, data: { selfieCapturedAt: null } })), true],
+    ['a suspended account', (d) => sys(() => app.prisma.user.update({ where: { id: d.userId }, data: { status: 'SUSPENDED' } })), true],
+    ['a device session that has ended', (d) => sys(() => app.prisma.session.update({ where: { id: d.sessionId }, data: { expiresAt: new Date(Date.now() - 60_000) } }))],
+    // Delivery GO asks for identity authority only when the account has no fee row at all (the grandfathered path).
+    ['an identity record that needs review, on an account with no fee row', async (d) => {
+      await sys(() => app.prisma.subscription.deleteMany({ where: { driverId: d.driverId } }));
+      const cluster = await sys(() => app.prisma.identityCluster.create({ data: { authorityReviewRequired: true } }));
+      clusterIds.push(cluster.id);
+      await sys(() => app.prisma.identityClusterMember.create({ data: { accountId: d.userId, clusterId: cluster.id, linkedVia: [] } }));
+    }],
   ];
   for (const [label, block, sqlFiltered] of blocked) {
     it(`${label}: never offered, never promoted`, async () => {
@@ -436,14 +454,33 @@ describe('[CARS-DELIVER PR4 · security] taxi + deliveries runs the delivery GO 
     });
   }
 
-  it('a weekly fee that stopped being in good standing after taxi GO: the claim promotes nothing', async () => {
+  it('a weekly fee that stopped being in good standing after taxi GO: never offered, and the claim promotes nothing', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const driver = await taxiWithDeliveries();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeReadyOrder(customer.userId);
     await sys(() => app.prisma.subscription.updateMany({ where: { driverId: driver.driverId }, data: { status: 'CANCELLED' } }));
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBeUndefined();
     await expect(dispatch.claimOrder(order.id, driver.riderId, 'RIDER')).rejects.toMatchObject({ code: 'MOVER_INACTIVE' });
     expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, returnsToTaxi: false });
     expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))).riderId).toBeNull();
+    expect(await driverOf(driver.userId)).toMatchObject({ isOnline: true });
+    expect(await userOf(driver.userId)).toMatchObject({ activeRole: 'DRIVER' });
+  });
+
+  // The papers are the claim's own (reserveRiderLeg: the delivery verdict and the taxi verdict on the same car, under
+  // the claim's locks, deadlines at the write); the offer gate previews them as delivery GO does for a car.
+  it('taxi papers no longer current (hire insurance no longer hire-class): never offered; the claim is refused and the promotion rolls back', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    await sys(() => app.prisma.verificationDocument.updateMany({ where: { userId: driver.userId, docType: 'vehicle_insurance' }, data: { coverageClass: 'PRIVATE' } }));
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBeUndefined();
+    await expect(dispatch.claimOrder(order.id, driver.riderId, 'RIDER')).rejects.toMatchObject({ code: 'INSURANCE_HIRE_CLASS_REQUIRED' });
+    expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))).riderId).toBeNull();
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, locationSessionId: null, returnsToTaxi: false });
+    expect(await driverOf(driver.userId)).toMatchObject({ isOnline: true, locationSessionId: driver.sessionId });
+    expect(await userOf(driver.userId)).toMatchObject({ activeRole: 'DRIVER' });
   });
 });
