@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   switchRole: vi.fn(),
   driverGoOnline: vi.fn(),
   rideCapabilities: vi.fn(),
+  carDeliveries: vi.fn(),
   driverUploadVehicle: vi.fn(),
   riderHandover: vi.fn(),
   lastKnownPosition: vi.fn(),
@@ -94,6 +95,7 @@ vi.mock('../services/api', () => ({
   driverApi: {
     goOnline: mocks.driverGoOnline,
     uploadVehiclePhoto: mocks.driverUploadVehicle,
+    carDeliveries: mocks.carDeliveries,
   },
   riderApi: { handover: mocks.riderHandover },
   rideApi: { capabilities: mocks.rideCapabilities },
@@ -185,6 +187,8 @@ beforeEach(() => {
   mocks.current = { ...accountA };
   // An older server: no capability read (404) — go-online is exactly today's.
   mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } });
+  // ...nor "taxi + deliveries" (404): no delivery-card capability either.
+  mocks.carDeliveries.mockRejectedValue({ response: { status: 404 } });
   mocks.user = {
     id: accountA.userId,
     firstName: 'Account',
@@ -551,6 +555,47 @@ describe('[TAXI multi-stop] go-online declares stops only to a server that offer
     await (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
     expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
     expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+});
+
+// [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2 · COORD 27 Oct] This app can show a delivery card in taxi mode, so a taxi GO
+// declares CAR_DELIVERY_CARDS_V1 to a server that knows "taxi + deliveries" (its GET /driver/deliveries answers
+// takesDeliveries); the server offers a delivery from taxi work only to a GO that declared it. Any other answer:
+// exactly today's go-online call.
+describe('[CARS-DELIVER PR4] a taxi go-online declares delivery cards only to a server that knows taxi + deliveries', () => {
+  function arrangeOnline() {
+    mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'DRIVER' } } });
+    mocks.driverGoOnline.mockResolvedValue({ data: { data: { online: true } } });
+  }
+  const goOnline = () => (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+
+  it('the server answers takesDeliveries: the go-online declares CAR_DELIVERY_CARDS_V1 (with stops too when offered)', async () => {
+    mocks.carDeliveries.mockResolvedValue({ data: { data: { available: false, enabled: false, reason: 'SWITCH_OFF', takesDeliveries: false } } });
+    arrangeOnline();
+    await goOnline();
+    expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['CAR_DELIVERY_CARDS_V1']);
+
+    mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 2 } } });
+    await goOnline();
+    expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1', 'CAR_DELIVERY_CARDS_V1']);
+  });
+
+  it.each([
+    ['an older server without the read (404)', () => mocks.carDeliveries.mockRejectedValue({ response: { status: 404 } })],
+    ['a server with Deliveries too but not the mode (no takesDeliveries)', () => mocks.carDeliveries.mockResolvedValue({ data: { data: { available: true, enabled: true, reason: null } } })],
+    ['the read fails', () => mocks.carDeliveries.mockRejectedValue(new Error('offline'))],
+  ])('%s: exactly today’s go-online call, no capability', async (_label, arrange) => {
+    arrange();
+    arrangeOnline();
+    await goOnline();
+    expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
+    expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+
+  it('a delivery GO never asks', async () => {
+    mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'RIDER' } } });
+    await (useGoOnline('RIDER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 }).catch(() => undefined);
+    expect(mocks.carDeliveries).not.toHaveBeenCalled();
   });
 });
 

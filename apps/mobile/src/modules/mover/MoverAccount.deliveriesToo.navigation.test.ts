@@ -231,24 +231,49 @@ describe('[CARS-DELIVER] "Deliveries too" on the mover account follows the serve
     fx.status = { available: true, enabled: true, reason: null, takesDeliveries: false, vehicle: { type: 'CAR', label: 'Car' } };
     fx.dual = true;
     await renderAccount();
-    expect(host.textContent).toContain('Turn on taxi rides and deliveries to also get store orders while you drive — still one job at a time.');
-    await press('Taxi rides and deliveries');
+    expect(host.textContent).toContain('Turn on taxi rides and deliveries to also get store delivery offers when you are online with no ride — still one job at a time.');
+    await press('Turn on taxi rides and deliveries');
     expect(fx.setCarDeliveriesMode).toHaveBeenLastCalledWith(true);
 
     await act(async () => root.unmount());
     root = createRoot(host);
     fx.status = { available: true, enabled: true, reason: null, takesDeliveries: true, vehicle: { type: 'CAR', label: 'Car' } };
     await renderAccount();
-    expect(host.textContent).toContain('After a delivery you go back to taxi rides and deliveries.');
-    await press('Taxi rides only');
+    expect(host.textContent).toContain('when you are online with no ride, store delivery offers come too. After a delivery you go back to taxi rides and deliveries.');
+    await press('Back to taxi rides only');
     expect(fx.setCarDeliveriesMode).toHaveBeenLastCalledWith(false);
+  });
+
+  // [REVIEW-F #2139 S4-4] The mode route answers with the card's status: the card shows it at once, with no flash of
+  // the old label and no second read (the server's GET here still answers the old state, and is not asked again).
+  it('[PR4] the card shows the mode route’s answer at once', async () => {
+    fx.status = { available: true, enabled: true, reason: null, takesDeliveries: false, vehicle: { type: 'CAR', label: 'Car' } };
+    fx.dual = true;
+    fx.setCarDeliveriesMode.mockResolvedValue({ data: { success: true, data: { ...(fx.status as object), takesDeliveries: true } } });
+    await renderAccount();
+    expect(fx.carDeliveries).toHaveBeenCalledTimes(1);
+    await press('Turn on taxi rides and deliveries');
+    expect(buttons()).toContain('Back to taxi rides only');
+    expect(buttons()).not.toContain('Turn on taxi rides and deliveries');
+    expect(fx.carDeliveries).toHaveBeenCalledTimes(1);
+  });
+
+  // [REVIEW-F #2139 S4-3] A server with Deliveries too but without the mode (#2128 only) sends no takesDeliveries and
+  // has no mode route: no toggle that could only fail.
+  it('[PR4] a server without the mode: the card, but no taxi-and-deliveries toggle', async () => {
+    fx.status = { available: true, enabled: true, reason: null, vehicle: { type: 'CAR', label: 'Car' } };
+    fx.dual = true;
+    await renderAccount();
+    expect(host.textContent).toContain('Deliveries too');
+    expect(buttons().filter((b) => /taxi rides and deliveries|taxi rides only/i.test(b))).toEqual([]);
+    expect(host.textContent).not.toMatch(/taxi rides and deliveries/i);
   });
 
   it('[PR4] the switch off after set-up: no taxi-and-deliveries toggle', async () => {
     fx.status = { available: false, enabled: true, reason: 'SWITCH_OFF', takesDeliveries: true, vehicle: { type: 'CAR', label: 'Car' } };
     fx.dual = true;
     await renderAccount();
-    expect(buttons()).not.toContain('Taxi rides only');
-    expect(buttons()).not.toContain('Taxi rides and deliveries');
+    expect(buttons()).not.toContain('Back to taxi rides only');
+    expect(buttons()).not.toContain('Turn on taxi rides and deliveries');
   });
 });

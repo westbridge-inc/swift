@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliveriesTooView, offerKindOf, switchTarget, workModeLink } from './deliveriesToo';
+import { DELIVERY_CARDS_CAPABILITY, deliveriesTooView, offerKindOf, serverKnowsTaxiAndDeliveries, switchTarget, workModeLink } from './deliveriesToo';
 
 // [CARS-DELIVER · owner 8 + 25 Oct 2026] "Deliveries too" behind the server's CAR_DELIVERIES switch. The card says
 // nothing unless the server says it can be set up now or is set up; the home link switches work mode only for an
@@ -62,14 +62,36 @@ describe('workModeLink: the home switch', () => {
 describe('PR4: taxi rides and deliveries', () => {
   it('the toggle shows in taxi mode only while the switch is on (available), worded for each state', () => {
     const off = deliveriesTooView({ available: true, enabled: true, takesDeliveries: false }, 'DRIVER');
-    expect(off).toMatchObject({ state: 'ready', both: { on: false, label: 'Taxi rides and deliveries' } });
-    expect((off as { both: { line: string } }).both.line).toContain('still one job at a time');
+    expect(off).toMatchObject({ state: 'ready', both: { on: false, label: 'Turn on taxi rides and deliveries' } });
+    expect((off as { both: { line: string } }).both.line).toBe(
+      'Turn on taxi rides and deliveries to also get store delivery offers when you are online with no ride — still one job at a time.');
     const on = deliveriesTooView({ available: true, enabled: true, takesDeliveries: true }, 'DRIVER');
-    expect(on).toMatchObject({ state: 'ready', both: { on: true, label: 'Taxi rides only' } });
-    expect((on as { both: { line: string } }).both.line).toContain('After a delivery you go back to taxi rides and deliveries.');
+    expect(on).toMatchObject({ state: 'ready', both: { on: true, label: 'Back to taxi rides only' } });
+    expect((on as { both: { line: string } }).both.line).toBe(
+      'Taxi rides and deliveries is on: when you are online with no ride, store delivery offers come too. After a delivery you go back to taxi rides and deliveries.');
     expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: true }, 'RIDER')).toMatchObject({ both: null });
     expect(deliveriesTooView({ available: false, enabled: true, reason: 'SWITCH_OFF', takesDeliveries: true }, 'DRIVER')).toMatchObject({ state: 'paused' });
-    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: 'true' }, 'DRIVER')).toMatchObject({ both: { on: false } });
+  });
+
+  // [REVIEW-F #2139 S4-3] The toggle follows the server exactly: the server refuses "on" while the car cannot deliver
+  // (available false, e.g. VEHICLE_NOT_OFFERED), and a server without "taxi + deliveries" (#2128 only) sends no
+  // takesDeliveries field and has no mode route, so a toggle there could only fail.
+  it('no toggle unless the server says it can be set now (available) and knows the mode (takesDeliveries is a boolean)', () => {
+    expect(deliveriesTooView({ available: false, enabled: true, reason: 'VEHICLE', takesDeliveries: false }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+    expect(deliveriesTooView({ available: true, enabled: true, reason: null }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: 'true' }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+    expect(deliveriesTooView({ available: true, enabled: true, takesDeliveries: null }, 'DRIVER')).toMatchObject({ state: 'ready', both: null });
+  });
+
+  // [REVIEW-F #2139 S2-2 · COORD 27 Oct] This app declares it can show a delivery card at taxi GO, only to a server
+  // that knows "taxi + deliveries" (its deliveries answer carries takesDeliveries, whatever its value).
+  it('the delivery-card capability: its name, and which servers hear it', () => {
+    expect(DELIVERY_CARDS_CAPABILITY).toBe('CAR_DELIVERY_CARDS_V1');
+    expect(serverKnowsTaxiAndDeliveries({ available: false, enabled: false, reason: 'SWITCH_OFF', takesDeliveries: false })).toBe(true);
+    expect(serverKnowsTaxiAndDeliveries({ available: true, enabled: true, takesDeliveries: true })).toBe(true);
+    for (const older of [null, undefined, {}, { available: true, enabled: true, reason: null }, { takesDeliveries: 'true' }, 'x', 12]) {
+      expect(serverKnowsTaxiAndDeliveries(older)).toBe(false);
+    }
   });
 
   it('offerKindOf: the server names the job; without it, the app kind as before', () => {

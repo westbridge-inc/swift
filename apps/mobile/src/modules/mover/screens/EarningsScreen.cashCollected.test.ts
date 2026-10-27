@@ -28,3 +28,18 @@ describe('[board 13a] CASH COLLECTED tile', () => {
     expect(row.slice(0, row.indexOf('label="CASH COLLECTED"'))).not.toContain('</View>');
   });
 });
+
+// [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with a taxi AND a delivery profile also sees the other profile's
+// week (otherProfileWeek, earner-data.test.ts), read from that profile's own summary only for such an account.
+describe('[CARS-DELIVER PR4] the other profile’s week on the earnings screen', () => {
+  it('asks for the other summary only for an account with both, and shows it in its own card', () => {
+    expect(screen).toContain("const otherKind: 'DRIVER' | 'RIDER' | null = mover.dual === true && kind ? (kind === 'DRIVER' ? 'RIDER' : 'DRIVER') : null;");
+    expect(screen).toContain('const otherSummaryQ = useEarningsSummary<unknown>(otherKind);');
+    expect(screen).toContain('const other = otherKind ? otherProfileWeek(otherKind, otherSummaryQ.data) : undefined;');
+    const card = screen.slice(screen.indexOf('{other ? ('));
+    expect(card).toMatch(/^\{other \? \(\s*<Card[^>]*>\s*<T variant="micro" tone="muted">\{other\.title\}<\/T>/);
+    expect(card).toContain('{money(other.total)}');
+    expect(card).toContain('{other.cash ? ');
+    expect(card).toContain('{other.note}');
+  });
+});
