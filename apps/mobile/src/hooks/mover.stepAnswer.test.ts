@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // Driven through the REAL hooks' options against a REAL query client (the harness of mover.jobStepWait.test.ts).
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ qc: null as unknown as import('@tanstack/react-query').QueryClient }));
+const fx = vi.hoisted(() => ({ qc: null as unknown as import('@tanstack/react-query').QueryClient, driverApi: {} as Record<string, unknown> }));
 
 vi.mock('@tanstack/react-query', async (importOriginal) => {
   const real = await importOriginal<typeof import('@tanstack/react-query')>();
@@ -22,7 +22,7 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   };
 });
 vi.mock('../services/api', () => ({
-  authApi: {}, customerApi: {}, driverApi: {}, riderApi: {}, rideApi: {},
+  authApi: {}, customerApi: {}, driverApi: fx.driverApi, riderApi: {}, rideApi: {},
 }));
 vi.mock('../stores/moverPreview', () => ({
   useMoverPreview: (selector: (state: { preview: boolean; kind: string }) => unknown) => selector({ preview: false, kind: 'DRIVER' }),
@@ -140,6 +140,38 @@ describe('[TAP-AUDIT] a job step: the answered status at once, the button free a
       reads.stop();
     });
   }
+
+  // [REVIEW-F #2144 S3-1] The PIN check comes ONLY from the server's answer: a step that is not the PIN leaves the
+  // ride's "Verify rider PIN" step showing, and a wrong PIN writes nothing at all.
+  it.each([
+    ['arrived, the answer naming no PIN check', { id: 'ride-1', status: 'DRIVER_ARRIVED' }],
+    ['arrived, the answer saying the PIN is not checked', { id: 'ride-1', status: 'DRIVER_ARRIVED', ridePinVerified: false }],
+  ])('%s: the PIN step still shows', async (_label, answer) => {
+    const reads = await mount('DRIVER', { id: 'ride-1', status: 'DRIVER_EN_ROUTE', ridePinVerified: false });
+    (useDriverAction() as unknown as Step).onSuccess!(answer, { id: 'ride-1', action: 'arrived' });
+    expect(fx.qc.getQueryData(ACTIVE('DRIVER'))).toMatchObject({ status: 'DRIVER_ARRIVED', ridePinVerified: false });
+    reads.stop();
+  });
+
+  it('a wrong PIN (the server refuses) writes nothing: the ride stays as it was', async () => {
+    const reads = await mount('DRIVER', { id: 'ride-1', status: 'DRIVER_ARRIVED', ridePinVerified: false });
+    fx.driverApi['verifyPin'] = vi.fn(async () => { throw Object.assign(new Error('Request failed'), { response: { status: 400, data: { error: { code: 'INVALID_PIN', message: 'That PIN is not right.' } } } }); });
+    const mutation = fx.qc.getMutationCache().build(fx.qc, useDriverAction() as never);
+    await expect(mutation.execute({ id: 'ride-1', action: 'verify-pin', pin: '0000' } as never)).rejects.toBeTruthy();
+    expect(fx.qc.getQueryData(ACTIVE('DRIVER'))).toEqual({ id: 'ride-1', status: 'DRIVER_ARRIVED', ridePinVerified: false });
+    reads.stop();
+  });
+
+  // [REVIEW-F #2144 S4-1] Only a real status is ever written.
+  it.each([[42], [true], [{ code: 'PICKED_UP' }]])('a status that is not words (%j) is never written; the step waits for the re-read', async (status) => {
+    const reads = await mount('RIDER', { id: 'order-1', status: 'RIDER_ARRIVED_PICKUP' });
+    expect(writeJobStatus(fx.qc, 'order-1', { status })).toBe(false);
+    const returned = (useRiderAction() as unknown as Step).onSuccess!({ orderId: 'order-1', status }, { id: 'order-1', action: 'picked-up' });
+    expect(returned).toBeInstanceOf(Promise);
+    expect(statusOf('RIDER')).toBe('RIDER_ARRIVED_PICKUP');
+    await returned;
+    reads.stop();
+  });
 
   it('writeJobStatus: nothing to write without a job id or a status', () => {
     expect(writeJobStatus(fx.qc, undefined, { status: 'PICKED_UP' })).toBe(false);
