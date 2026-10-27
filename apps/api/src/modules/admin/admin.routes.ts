@@ -15,6 +15,7 @@ import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction, runWithoutTenant } from '../../plugins/prisma';
 import { countWaiting, type WaitingKey } from './dashboard-waiting';
+import { VAT_CERTIFICATE_DOC_TYPE } from '../store-vat/store-vat';
 import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -1192,7 +1193,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/dashboard/waiting', { preHandler: [adminGuard] }, async (request: any) => {
     const tenantId = requireTenantId();
     const now = new Date();
-    let supportCounts: Promise<{ safety: number; other: number }> | null = null;
+    let supportCounts: ReturnType<typeof support.waitingForAdmin> | null = null;
     const supportWaiting = () => (supportCounts ??= support.waitingForAdmin());
     const counters: Record<WaitingKey, () => Promise<number>> = {
       // GET /safety/ops-alerts' own read [S-19 · M009]: a platform responder (SUPER_ADMIN) is paged for every
@@ -1200,9 +1201,12 @@ export async function adminRoutes(app: FastifyInstance) {
       opsAlerts: () => (request.user.role === 'SUPER_ADMIN'
         ? runWithoutTenant(() => app.prisma.opsAlert.count({ where: { acknowledgedAt: null, closedAt: null } }))
         : app.prisma.opsAlert.count({ where: { tenantId, acknowledgedAt: null, closedAt: null } })),
-      supportSafety: async () => (await supportWaiting()).safety,
-      support: async () => (await supportWaiting()).other,
-      documents: () => tenantPrisma.verificationDocument.count({ where: { status: 'PENDING' } }),
+      supportSafety: async () => (await supportWaiting()).safetyOpen,
+      supportSafetyInProgress: async () => (await supportWaiting()).safetyInProgress,
+      support: async () => (await supportWaiting()).open,
+      supportInProgress: async () => (await supportWaiting()).inProgress,
+      // [REVIEW-F #2152 S4-6] A VAT certificate is decided in Store VAT (counted there), never in the Review Center.
+      documents: () => tenantPrisma.verificationDocument.count({ where: { status: 'PENDING', docType: { not: VAT_CERTIFICATE_DOC_TYPE } } }),
       approvals: () => tenantPrisma.privilegedApproval.count({ where: approvalsViewWhere('PENDING', now) }),
       paymentConfirmations: async () => {
         const { confirmationReviewQueue } = await import('../billing/confirmation-finance');
@@ -1215,7 +1219,8 @@ export async function adminRoutes(app: FastifyInstance) {
       storeVat: () => tenantPrisma.vendor.count({ where: { vatStatus: 'PENDING' } }),
       custody: () => app.prisma.custodyRecoveryCase.count({ where: { state: { in: CUSTODY_CASE_OPEN_STATES } } }),
       claimsToDecide: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'PENDING_REVIEW' } }),
-      claimsToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: { in: ['APPROVED', 'AUTO_APPROVED'] } } }),
+      claimsToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'APPROVED' } }),
+      claimsAutoToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'AUTO_APPROVED' } }),
       returnsToDecide: () => tenantPrisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
       refundsOwed: () => tenantPrisma.returnRequest.count({ where: { status: 'REFUND_DUE' } }),
       moderation: async () => {

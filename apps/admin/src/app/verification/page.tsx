@@ -148,7 +148,12 @@ export default function VerificationPage() {
   };
   const openApplicant = (next: Applicant | null) => {
     setApplicant(next);
-    if (next) selectDocument(next.documents[0]!); else setSelected(null);
+    // [ADMIN-AUDIT S2-2 · REVIEW-F #2152 S4-3] Under a role or type filter the applicant opens on their first
+    // MATCHING document, and never on a VAT certificate when another can be decided here (Store VAT decides it).
+    const matches = (d: ReviewDocument) => (!role || d.role === role) && (!type || d.docType === type);
+    const first = next && (next.documents.find((d) => matches(d) && d.docType !== VAT_CERTIFICATE_DOC_TYPE)
+      ?? next.documents.find(matches) ?? next.documents[0]);
+    if (first) selectDocument(first); else setSelected(null);
   };
   // [MC-PR1] /verification?applicant=<userId>: "Open in Review Center" on a
   // refusal (a store whose documents are not all approved) lands on THAT

@@ -27,8 +27,9 @@ const healthy = {
   alerts: { pendingVendors: 0, pastDueSubs: 0, unassignedOrders: 0 },
 };
 
-const WAITING_KEYS = ['opsAlerts', 'supportSafety', 'documents', 'approvals', 'paymentConfirmations', 'support', 'catalogue', 'storeVat',
-  'custody', 'claimsToDecide', 'claimsToPay', 'returnsToDecide', 'refundsOwed', 'moderation'];
+const WAITING_KEYS = ['opsAlerts', 'supportSafety', 'supportSafetyInProgress', 'documents', 'approvals', 'paymentConfirmations', 'support',
+  'supportInProgress', 'catalogue', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'claimsAutoToPay', 'returnsToDecide',
+  'refundsOwed', 'moderation'];
 
 function handler(mode: 'ok' | 'fail') {
   return (request: ApiRequest) => {
@@ -55,7 +56,8 @@ describe('[A-06] a failed dashboard read is never a quiet platform', () => {
     mockApi(handler('fail'));
     renderWithQuery(<DashboardPage />);
 
-    expect(await screen.findByText(/NOT an all-clear/i)).toBeTruthy();
+    // [REVIEW-F #2152 S3-1] Both reads failed here, so both say so (the alerts and the queue counts).
+    expect((await screen.findAllByText(/NOT an all-clear/i)).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/All clear — no active alerts/i)).toBeNull();
   });
 

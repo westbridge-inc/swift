@@ -23,6 +23,7 @@ const doc = (id: string, userId: string, firstName: string, type: string) => ({
 });
 const aliceId = doc('a1', 'u1', 'Alice', 'national_id');
 const aliceVat = { ...doc('a3', 'u1', 'Alice', 'vat_registration_certificate'), role: 'VENDOR_OWNER' };
+const bobVat = { ...doc('b0', 'u2', 'Bob', 'vat_registration_certificate'), role: 'VENDOR_OWNER' };
 const bob = doc('b', 'u2', 'Bob', 'national_id');
 
 /** Each decision is held until `answer()`; every read after the first decision is held until `reads()`. */
@@ -36,17 +37,17 @@ function fixture(outcomes: Record<string, 'APPROVED' | 'PENDING' | 'REJECTED'>) 
       const id = r.url.pathname.split('/').slice(-2)[0]!;
       await new Promise<void>((resolve) => { release = resolve; });
       gate.decided.push(id);
-      const base = [aliceId, aliceVat, bob].find((d) => d.id === id)!;
+      const base = [aliceId, aliceVat, bobVat, bob].find((d) => d.id === id)!;
       return { body: { data: { ...base, status: outcomes[id] ?? 'APPROVED' } } };
     }
     // The re-reads a decision asks for (queue, other statuses, counts, history) are held; opening the
     // next document's evidence is not a re-read and is answered.
     const evidence = r.url.pathname.endsWith('/document-url') || r.url.pathname.includes('/verification/render/');
     if (gate.decided.length && !evidence) { gate.heldReads += 1; await readsBack; }
-    if (r.url.pathname.endsWith('/queue/counts')) return { body: { data: { byLane: { PENDING: { operator: 3, customer: 0 } } } } };
+    if (r.url.pathname.endsWith('/queue/counts')) return { body: { data: { byLane: { PENDING: { operator: 4, customer: 0 } } } } };
     if (r.url.pathname.endsWith('/queue')) {
       if (r.url.searchParams.get('status') !== 'PENDING') return { body: { data: [], meta: { hasNext: false } } };
-      const waiting = [aliceId, aliceVat, bob].filter((d) => !gate.decided.includes(d.id));
+      const waiting = [aliceId, aliceVat, bobVat, bob].filter((d) => !gate.decided.includes(d.id));
       return { body: { data: waiting, meta: { hasNext: false, total: waiting.length } } };
     }
     if (r.url.pathname.includes('/users/')) return { body: { data: {} } };
@@ -88,6 +89,8 @@ describe('[ADMIN-AUDIT S2-2 · REVIEW-F #2149 S4-2] a VAT certificate is decided
     await waitFor(() => expect(requestsByMethod(f.fetch, 'PUT')).toHaveLength(1));
     f.answer();
     expect(await screen.findByRole('heading', { level: 2, name: 'Bob Applicant' })).toBeTruthy();
+    // [REVIEW-F #2152 S4-3] Bob's first document is a VAT certificate too: he opens on the one decided here.
+    expect(documentHeading()).toBe('National ID');
     expect(screen.getByRole('status').textContent).toContain('Approved National ID for Alice Applicant');
     expect(screen.queryByText(/decided in Store VAT/)).toBeNull();
     f.reads();

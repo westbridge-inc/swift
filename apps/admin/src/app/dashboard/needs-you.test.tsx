@@ -20,8 +20,9 @@ const quiet = {
   revenue: { weeklySubscriptionRevenue: 0, weeklySubscriptionWaived: 0 }, subscriptionBreakdown: [],
   alerts: { pendingVendors: 0, pastDueSubs: 0, unassignedOrders: 0 },
 };
-const KEYS = ['opsAlerts', 'supportSafety', 'documents', 'approvals', 'paymentConfirmations', 'support', 'catalogue', 'storeVat',
-  'custody', 'claimsToDecide', 'claimsToPay', 'returnsToDecide', 'refundsOwed', 'moderation'] as const;
+const KEYS = ['opsAlerts', 'supportSafety', 'supportSafetyInProgress', 'documents', 'approvals', 'paymentConfirmations', 'support',
+  'supportInProgress', 'catalogue', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'claimsAutoToPay', 'returnsToDecide',
+  'refundsOwed', 'moderation'] as const;
 const counts = (over: Partial<Record<(typeof KEYS)[number], number | null>> = {}, notCounted: string[] = []) => ({
   queues: KEYS.filter((k) => !notCounted.includes(k)).map((key) => ({ key, count: key in over ? over[key]! : 0 })),
   notCounted,
@@ -45,7 +46,7 @@ describe('[ADMIN-AUDIT S2-1] Today lists every queue that waits for a person', (
     await waitFor(() => expect(doors()).toHaveLength(4));
     expect(doors()).toEqual([
       ['1 SOS or ops page waiting to be acknowledged', '/ops-alerts'],
-      ['1 safety ticket open', '/support'],
+      ['1 safety ticket open', '/support?status=OPEN'],
       ['13 documents waiting for review', '/verification'],
       ['1 request waiting for a second admin', '/approvals'],
     ]);
@@ -55,8 +56,10 @@ describe('[ADMIN-AUDIT S2-1] Today lists every queue that waits for a person', (
   it('every queue has its own door, with the page it opens', async () => {
     page({ body: { success: true, data: counts(Object.fromEntries(KEYS.map((k) => [k, 2]))) } });
     await waitFor(() => expect(doors()).toHaveLength(KEYS.length));
-    expect(doors().map(([, href]) => href)).toEqual(['/ops-alerts', '/support', '/verification', '/approvals', '/payment-confirmations',
-      '/support', '/catalogue-check', '/store-vat', '/custody', '/claims', '/claims', '/returns', '/returns', '/moderation']);
+    // Each door opens the tab that lists its row [REVIEW-F #2152 S4-4].
+    expect(doors().map(([, href]) => href)).toEqual(['/ops-alerts', '/support?status=OPEN', '/support?status=IN_PROGRESS', '/verification',
+      '/approvals', '/payment-confirmations', '/support?status=OPEN', '/support?status=IN_PROGRESS', '/catalogue-check', '/store-vat',
+      '/custody', '/claims', '/claims?status=APPROVED', '/claims?status=AUTO_APPROVED', '/returns', '/returns?status=REFUND_DUE', '/moderation']);
     expect(doors()[0]![0]).toBe('2 SOS or ops pages waiting to be acknowledged');
   });
 

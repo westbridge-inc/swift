@@ -8,26 +8,30 @@ import type { WaitingCounts, WaitingKey } from '@/lib/api';
 type Alerts = { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
 
 type Level = 'warning' | 'error';
-type Item = { level: Level | 'unknown'; message: string; href: string };
+type Item = { level: Level | 'unknown'; message: string; href: string; door: boolean };
 
 const plural = (n: number, s: string) => `${n} ${s}${n === 1 ? '' : 's'}`;
 
 // [ADMIN-AUDIT S2-1] Every queue the server counts, in the words of its own page. SOS / ops pages and
-// safety tickets first. `many` also names the queue when its count could not be read.
-const QUEUES: Record<WaitingKey, { one: string; many: string; href: string; level: Level }> = {
+// safety tickets first. `many` also names the queue when its count could not be read. Each row opens the
+// tab that lists it (REVIEW-F #2152 S4-4). `noDoor`: said when this account may only know the count.
+const QUEUES: Record<WaitingKey, { one: string; many: string; href: string; level: Level; noDoor?: string }> = {
   opsAlerts: { one: 'SOS or ops page waiting to be acknowledged', many: 'SOS or ops pages waiting to be acknowledged', href: '/ops-alerts', level: 'error' },
-  supportSafety: { one: 'safety ticket open', many: 'safety tickets open', href: '/support', level: 'error' },
-  documents: { one: 'document waiting for review', many: 'documents waiting for review', href: '/verification', level: 'warning' },
+  supportSafety: { one: 'safety ticket open', many: 'safety tickets open', href: '/support?status=OPEN', level: 'error' },
+  supportSafetyInProgress: { one: 'safety ticket being handled, not resolved yet', many: 'safety tickets being handled, not resolved yet', href: '/support?status=IN_PROGRESS', level: 'error' },
+  documents: { one: 'document waiting for review', many: 'documents waiting for review', href: '/verification', level: 'warning', noDoor: 'A document reviewer decides these.' },
   approvals: { one: 'request waiting for a second admin', many: 'requests waiting for a second admin', href: '/approvals', level: 'warning' },
   paymentConfirmations: { one: 'weekly-fee payment waiting for PAID or NOT PAID', many: 'weekly-fee payments waiting for PAID or NOT PAID', href: '/payment-confirmations', level: 'warning' },
-  support: { one: 'support ticket open', many: 'support tickets open', href: '/support', level: 'warning' },
+  support: { one: 'support ticket open', many: 'support tickets open', href: '/support?status=OPEN', level: 'warning' },
+  supportInProgress: { one: 'support ticket being handled, not resolved yet', many: 'support tickets being handled, not resolved yet', href: '/support?status=IN_PROGRESS', level: 'warning' },
   catalogue: { one: 'item or store held by a banned word', many: 'items or stores held by a banned word', href: '/catalogue-check', level: 'warning' },
   storeVat: { one: 'store VAT certificate to check', many: 'store VAT certificates to check', href: '/store-vat', level: 'warning' },
   custody: { one: 'custody case open', many: 'custody cases open', href: '/custody', level: 'warning' },
   claimsToDecide: { one: 'claim to decide', many: 'claims to decide', href: '/claims', level: 'warning' },
-  claimsToPay: { one: 'approved claim to pay', many: 'approved claims to pay', href: '/claims', level: 'warning' },
+  claimsToPay: { one: 'approved claim to pay', many: 'approved claims to pay', href: '/claims?status=APPROVED', level: 'warning' },
+  claimsAutoToPay: { one: 'claim approved automatically, to pay', many: 'claims approved automatically, to pay', href: '/claims?status=AUTO_APPROVED', level: 'warning' },
   returnsToDecide: { one: 'return to decide', many: 'returns to decide', href: '/returns', level: 'warning' },
-  refundsOwed: { one: 'refund owed', many: 'refunds owed', href: '/returns', level: 'warning' },
+  refundsOwed: { one: 'refund owed', many: 'refunds owed', href: '/returns?status=REFUND_DUE', level: 'warning' },
   moderation: { one: 'report or held review to moderate', many: 'reports or held reviews to moderate', href: '/moderation', level: 'warning' },
 };
 
@@ -67,19 +71,21 @@ export function AlertsPanel({
     const q = counts?.queues.find((row) => row.key === key);
     if (!q) return;
     const words = QUEUES[key];
-    if (q.count === null) items.push({ level: 'unknown', message: `Could not count ${words.many}. This is not zero.`, href: words.href });
-    else if (q.count > 0) items.push({ level: words.level, message: `${q.count} ${q.count === 1 ? words.one : words.many}`, href: words.href });
+    const door = q.door !== false;
+    const after = door || !words.noDoor ? '' : ` ${words.noDoor}`;
+    if (q.count === null) items.push({ level: 'unknown', message: `Could not count ${words.many}. This is not zero.${after}`, href: words.href, door });
+    else if (q.count > 0) items.push({ level: words.level, message: `${q.count} ${q.count === 1 ? words.one : words.many}${after ? `.${after}` : ''}`, href: words.href, door });
   };
-  queue('opsAlerts');
-  queue('supportSafety');
+  const FIRST: WaitingKey[] = ['opsAlerts', 'supportSafety', 'supportSafetyInProgress'];
+  FIRST.forEach(queue);
   if (alerts && alerts.unassignedOrders > 0)
-    items.push({ level: 'error', message: `${plural(alerts.unassignedOrders, 'order')} unassigned for > 10 minutes`, href: '/orders' });
-  for (const key of Object.keys(QUEUES) as WaitingKey[]) if (key !== 'opsAlerts' && key !== 'supportSafety') queue(key);
+    items.push({ level: 'error', message: `${plural(alerts.unassignedOrders, 'order')} unassigned for > 10 minutes`, href: '/orders', door: true });
+  for (const key of Object.keys(QUEUES) as WaitingKey[]) if (!FIRST.includes(key)) queue(key);
   if (alerts) {
     if (alerts.pastDueSubs > 0)
-      items.push({ level: 'warning', message: `${plural(alerts.pastDueSubs, 'subscription')} past due`, href: '/finance' });
+      items.push({ level: 'warning', message: `${plural(alerts.pastDueSubs, 'subscription')} past due`, href: '/finance', door: true });
     if (alerts.pendingVendors > 0)
-      items.push({ level: 'warning', message: `${plural(alerts.pendingVendors, 'vendor')} pending approval`, href: '/vendors' });
+      items.push({ level: 'warning', message: `${plural(alerts.pendingVendors, 'vendor')} pending approval`, href: '/vendors', door: true });
   }
   const notCounted = counts?.notCounted.length ?? 0;
   const clear = !unavailable && !queuesUnknown && !waitingLoading && items.length === 0;
@@ -88,7 +94,28 @@ export function AlertsPanel({
     <div className="mc-card">
       <h3 className="mc-section-title">Needs you</h3>
       <div className="space-y-2">
-        {unavailable ? (
+        {/* [REVIEW-F #2152 S3-1] The two reads never hide each other: the queues the server counted (SOS pages
+            first) stay on screen when the overview read fails, and its own alerts are then said to be unknown. */}
+        {items.map((alert, i) => {
+          const icon = alert.level === 'error' ? (
+            <AlertCircle size={16} className="mc-text-bad shrink-0" />
+          ) : alert.level === 'unknown' ? (
+            <HelpCircle size={16} className="mc-text-warn shrink-0" />
+          ) : (
+            <AlertTriangle size={16} className="mc-text-warn shrink-0" />
+          );
+          const row = 'flex min-h-[44px] items-center gap-3 rounded-[var(--mc-radius-sm)] border border-[var(--mc-line)] p-3';
+          // [REVIEW-F #2152 S4-5] A count this account may know but whose page it may not open is not a door.
+          if (!alert.door) return <div key={i} className={row}>{icon}<span className="flex-1 font-semibold">{alert.message}</span></div>;
+          return (
+            <Link key={i} href={alert.href} className={`group ${row} hover:border-[var(--mc-accent)]`}>
+              {icon}
+              <span className="flex-1 font-semibold">{alert.message}</span>
+              <ChevronRight size={15} className="mc-muted group-hover:text-[var(--mc-accent)]" />
+            </Link>
+          );
+        })}
+        {unavailable && (
           // [A-06] The panel that most needed this: an operator reading
           // "All clear" during an outage believes safety and money are quiet.
           <DataUnavailable
@@ -96,49 +123,29 @@ export function AlertsPanel({
             notAnAllClear="This is NOT an all-clear — there may be alerts you cannot see."
             lastSuccessAt={lastSuccessAt}
           />
-        ) : (
-          <>
-            {items.map((alert, i) => (
-              <Link
-                key={i}
-                href={alert.href}
-                className="group flex min-h-[44px] items-center gap-3 rounded-[var(--mc-radius-sm)] border border-[var(--mc-line)] p-3 hover:border-[var(--mc-accent)]"
-              >
-                {alert.level === 'error' ? (
-                  <AlertCircle size={16} className="mc-text-bad shrink-0" />
-                ) : alert.level === 'unknown' ? (
-                  <HelpCircle size={16} className="mc-text-warn shrink-0" />
-                ) : (
-                  <AlertTriangle size={16} className="mc-text-warn shrink-0" />
-                )}
-                <span className="flex-1 font-semibold">{alert.message}</span>
-                <ChevronRight size={15} className="mc-muted group-hover:text-[var(--mc-accent)]" />
-              </Link>
-            ))}
-            {queuesUnknown && (
-              // [ADMIN-AUDIT S2-1] The queue counts did not arrive: SOS pages, documents and the rest are unknown.
-              <DataUnavailable
-                what="The queue counts"
-                notAnAllClear="This is NOT an all-clear — SOS pages, documents and other queues could not be counted."
-              />
-            )}
-            {waitingLoading && !queuesUnknown && <p className="mc-muted text-sm">Counting every queue…</p>}
-            {clear && (
-              <div className="mc-note mc-note-good flex items-center gap-3">
-                <CheckCircle2 size={16} className="shrink-0" />
-                <span className="text-sm">
-                  {notCounted === 0
-                    ? 'All clear — no active alerts.'
-                    : 'All clear in the queues you can open.'}
-                </span>
-              </div>
-            )}
-            {notCounted > 0 && !queuesUnknown && (
-              <p className="mc-muted text-sm">
-                {plural(notCounted, 'other queue')} need{notCounted === 1 ? 's' : ''} a permission your account does not have, so {notCounted === 1 ? 'it is' : 'they are'} not counted here.
-              </p>
-            )}
-          </>
+        )}
+        {queuesUnknown && (
+          // [ADMIN-AUDIT S2-1] The queue counts did not arrive: SOS pages, documents and the rest are unknown.
+          <DataUnavailable
+            what="The queue counts"
+            notAnAllClear="This is NOT an all-clear — SOS pages, documents and other queues could not be counted."
+          />
+        )}
+        {waitingLoading && !queuesUnknown && <p className="mc-muted text-sm">Counting every queue…</p>}
+        {clear && (
+          <div className="mc-note mc-note-good flex items-center gap-3">
+            <CheckCircle2 size={16} className="shrink-0" />
+            <span className="text-sm">
+              {notCounted === 0
+                ? 'All clear — no active alerts.'
+                : 'All clear in the queues you can open.'}
+            </span>
+          </div>
+        )}
+        {notCounted > 0 && !queuesUnknown && (
+          <p className="mc-muted text-sm">
+            {plural(notCounted, 'other queue')} need{notCounted === 1 ? 's' : ''} a permission your account does not have, so {notCounted === 1 ? 'it is' : 'they are'} not counted here.
+          </p>
         )}
       </div>
     </div>

@@ -31,6 +31,10 @@ const userIds: string[] = [];
 const ticketIds: string[] = [];
 const reportIds: string[] = [];
 const alertIds: string[] = [];
+const docIds: string[] = [];
+const claimIds: string[] = [];
+const orderIds: string[] = [];
+const riderIds: string[] = [];
 
 async function makeUser(role: 'ADMIN' | 'SUPER_ADMIN' | 'CUSTOMER', permissions: string[] | null, tenantId = 'swift-default') {
   const user = await runWithoutTenant(() => app.prisma.user.create({
@@ -53,8 +57,8 @@ const call = (token: string, url: string) => app.inject({ method: 'GET', url, he
 async function waiting(token: string) {
   const res = await call(token, '/api/v1/admin/dashboard/waiting');
   expect(res.statusCode, res.body).toBe(200);
-  const data = res.json().data as { queues: { key: WaitingKey; count: number | null }[]; notCounted: WaitingKey[] };
-  return { ...data, count: (key: WaitingKey) => data.queues.find((q) => q.key === key)?.count };
+  const data = res.json().data as { queues: { key: WaitingKey; count: number | null; door: boolean }[]; notCounted: WaitingKey[] };
+  return { ...data, count: (key: WaitingKey) => data.queues.find((q) => q.key === key)?.count, door: (key: WaitingKey) => data.queues.find((q) => q.key === key)?.door };
 }
 
 async function ticket(userId: string, category: 'SAFETY' | 'ORDER_ISSUE', status: 'OPEN' | 'IN_PROGRESS' = 'OPEN') {
@@ -64,6 +68,10 @@ async function ticket(userId: string, category: 'SAFETY' | 'ORDER_ISSUE', status
 async function opsAlert(tenantId: string | null) {
   const row = await runWithoutTenant(() => app.prisma.opsAlert.create({ data: { tenantId, kind: 'DRILL', title: `Waiting ${RUN}`, body: 'Fixture page.', ackDeadlineAt: new Date(Date.now() + 600_000) } }));
   alertIds.push(row.id);
+}
+async function vatCertificate(userId: string) {
+  const row = await runWithoutTenant(() => app.prisma.verificationDocument.create({ data: { userId, role: 'VENDOR_OWNER', docType: 'vat_registration_certificate', fileUrl: `local://waiting-${RUN}/${nanoid(6)}.pdf` } }));
+  docIds.push(row.id);
 }
 async function report(reporterId: string) {
   const row = await runWithoutTenant(() => app.prisma.contentReport.create({ data: { reporterId, targetType: 'USER', targetId: `waiting-${nanoid(8)}`, reason: 'SPAM' } }));
@@ -96,6 +104,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.opsAlert.deleteMany({ where: { id: { in: alertIds } } }).catch(() => {});
+    await app.prisma.verificationDocument.deleteMany({ where: { id: { in: docIds } } }).catch(() => {});
+    await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } }).catch(() => {});
+    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => {});
+    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } }).catch(() => {});
     await app.prisma.contentReport.deleteMany({ where: { id: { in: reportIds } } }).catch(() => {});
     await app.prisma.supportTicket.deleteMany({ where: { id: { in: ticketIds } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -115,15 +127,19 @@ describe('[ADMIN-AUDIT S2-1] Today counts every queue that waits for a person', 
     await report(customer.id);
     const w = await waiting(superAdmin.token);
     expect(w.queues.map((q) => q.key)).toEqual(WAITING_QUEUES.map((q) => q.key));
-    expect(w.queues.slice(0, 2).map((q) => q.key)).toEqual(['opsAlerts', 'supportSafety']);
+    expect(w.queues.slice(0, 3).map((q) => q.key)).toEqual(['opsAlerts', 'supportSafety', 'supportSafetyInProgress']);
+    for (const q of w.queues) expect(q.door, q.key).toBe(true);
     expect(w.notCounted).toEqual([]);
     for (const q of w.queues) expect(q.count, q.key).not.toBeNull();
 
     const json = async (url: string) => { const r = await call(superAdmin.token, url); expect(r.statusCode, url).toBe(200); return r.json(); };
     expect(w.count('opsAlerts')).toBe((await json('/api/v1/safety/ops-alerts')).data.length);
-    const open = (await json('/api/v1/admin/support?status=OPEN')).data.total + (await json('/api/v1/admin/support?status=IN_PROGRESS')).data.total;
-    expect(w.count('supportSafety')! + w.count('support')!).toBe(open);
-    expect(w.count('documents')).toBe((await json('/api/v1/admin/verification/queue/counts')).data.byStatus.PENDING ?? 0);
+    // Each support row is the tab that lists its tickets: Open, In progress.
+    expect(w.count('supportSafety')! + w.count('support')!).toBe((await json('/api/v1/admin/support?status=OPEN')).data.total);
+    expect(w.count('supportSafetyInProgress')! + w.count('supportInProgress')!).toBe((await json('/api/v1/admin/support?status=IN_PROGRESS')).data.total);
+    // Documents: what waits in the Review Center, less the VAT certificates Store VAT decides (counted there).
+    const vatWaiting = await runWithoutTenant(() => app.prisma.verificationDocument.count({ where: { status: 'PENDING', docType: 'vat_registration_certificate', user: { tenantId: 'swift-default' } } }));
+    expect(w.count('documents')).toBe(((await json('/api/v1/admin/verification/queue/counts')).data.byStatus.PENDING ?? 0) - vatWaiting);
     expect(w.count('approvals')).toBe((await json('/api/v1/admin/approvals?status=PENDING')).pagination.total);
     expect(w.count('paymentConfirmations')).toBe((await json('/api/v1/admin/billing/confirmations')).data.length);
     const catalogue = (await json('/api/v1/admin/catalogue-review')).data;
@@ -131,24 +147,55 @@ describe('[ADMIN-AUDIT S2-1] Today counts every queue that waits for a person', 
     expect(w.count('storeVat')).toBe((await json('/api/v1/admin/store-vat/pending')).data.length);
     expect(w.count('custody')).toBe((await json('/api/v1/admin/custody-cases?open=true')).data.length);
     expect(w.count('claimsToDecide')).toBe((await json('/api/v1/admin/cash-rules/claims?status=PENDING_REVIEW')).meta.total);
-    expect(w.count('claimsToPay')).toBe((await json('/api/v1/admin/cash-rules/claims?status=APPROVED')).meta.total
-      + (await json('/api/v1/admin/cash-rules/claims?status=AUTO_APPROVED')).meta.total);
+    expect(w.count('claimsToPay')).toBe((await json('/api/v1/admin/cash-rules/claims?status=APPROVED')).meta.total);
+    expect(w.count('claimsAutoToPay')).toBe((await json('/api/v1/admin/cash-rules/claims?status=AUTO_APPROVED')).meta.total);
     expect(w.count('returnsToDecide')).toBe((await json('/api/v1/admin/returns?status=REQUESTED')).meta.total);
     expect(w.count('refundsOwed')).toBe((await json('/api/v1/admin/returns?status=REFUND_DUE')).meta.total);
     const ratings = (await json('/api/v1/admin/ratings/moderation')).data;
     expect(w.count('moderation')).toBe((await json('/api/v1/admin/moderation/reports')).pendingTotal + ratings.held.length + ratings.reports.length);
   });
 
-  it('a SAFETY ticket is counted on its own line; any other open ticket on the support line', async () => {
+  it('a SAFETY ticket is counted on its own line, by the tab that lists it (Open, In progress); any other on the support lines', async () => {
+    const keys = ['supportSafety', 'supportSafetyInProgress', 'support', 'supportInProgress'] as const;
+    const cases: [ 'SAFETY' | 'ORDER_ISSUE', 'OPEN' | 'IN_PROGRESS', (typeof keys)[number]][] = [
+      ['SAFETY', 'OPEN', 'supportSafety'], ['SAFETY', 'IN_PROGRESS', 'supportSafetyInProgress'],
+      ['ORDER_ISSUE', 'OPEN', 'support'], ['ORDER_ISSUE', 'IN_PROGRESS', 'supportInProgress'],
+    ];
+    for (const [category, status, key] of cases) {
+      const before = await waiting(superAdmin.token);
+      await ticket(customer.id, category, status);
+      const after = await waiting(superAdmin.token);
+      for (const k of keys) expect(after.count(k), `${category} ${status} -> ${k}`).toBe(before.count(k)! + (k === key ? 1 : 0));
+    }
+  });
+
+  it('an approved claim and an automatically approved one are each counted on the line whose tab lists it', async () => {
+    const orders = await runWithoutTenant(() => Promise.all([0, 1].map(() => app.prisma.order.create({ data: {
+      orderNumber: `WT-${nanoid(10).toUpperCase()}`, customerId: customer.id, orderType: 'COURIER', status: 'DELIVERED',
+      deliveryAddress: '1 Test St', deliveryLat: 6.8055, deliveryLng: -58.1553,
+      subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+    }, select: { id: true, customerId: true } }))));
+    orderIds.push(...orders.map((o) => o.id));
+    const mover = await makeUser('CUSTOMER', null);
+    const rider = await runWithoutTenant(() => app.prisma.rider.create({ data: { userId: mover.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } }));
+    riderIds.push(rider.id);
     const before = await waiting(superAdmin.token);
-    await ticket(customer.id, 'SAFETY');
-    const afterSafety = await waiting(superAdmin.token);
-    expect(afterSafety.count('supportSafety')).toBe(before.count('supportSafety')! + 1);
-    expect(afterSafety.count('support')).toBe(before.count('support')!);
-    await ticket(customer.id, 'ORDER_ISSUE');
-    const afterOther = await waiting(superAdmin.token);
-    expect(afterOther.count('support')).toBe(before.count('support')! + 1);
-    expect(afterOther.count('supportSafety')).toBe(afterSafety.count('supportSafety'));
+    for (const [order, status] of [[orders[0]!, 'APPROVED'], [orders[1]!, 'AUTO_APPROVED']] as const) {
+      const row = await runWithoutTenant(() => app.prisma.reimbursementClaim.create({ data: {
+        orderId: order.id, customerId: order.customerId, riderId: rider.id, amount: 1500, reason: 'no_show', gpsLat: 6.8055, gpsLng: -58.1553, status,
+      } }));
+      claimIds.push(row.id);
+    }
+    const after = await waiting(superAdmin.token);
+    expect(after.count('claimsToPay')).toBe(before.count('claimsToPay')! + 1);
+    expect(after.count('claimsAutoToPay')).toBe(before.count('claimsAutoToPay')! + 1);
+  });
+
+  it('a waiting VAT certificate is counted once, under Store VAT\'s own count — never as a Review Center document', async () => {
+    const before = await waiting(superAdmin.token);
+    await vatCertificate(customer.id);
+    const after = await waiting(superAdmin.token);
+    expect(after.count('documents')).toBe(before.count('documents'));
   });
 
   it('ops pages: a tenant ADMIN counts their tenant\'s, the platform responder every tenant\'s and the platform\'s — as GET /safety/ops-alerts lists them', async () => {
@@ -177,8 +224,12 @@ describe('[ADMIN-AUDIT S2-1] Today counts every queue that waits for a person', 
   it('a narrowed operator is counted only the queues their grant opens; the rest are named, never zero — and agree with the routes', async () => {
     const op = await makeUser('ADMIN', [...SUPPORT_OPERATOR_CAPABILITIES]);
     const w = await waiting(op.token);
-    expect(w.queues.map((q) => q.key)).toEqual(['opsAlerts', 'supportSafety', 'documents', 'support', 'catalogue', 'moderation']);
-    expect(w.notCounted).toEqual(['approvals', 'paymentConfirmations', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'returnsToDecide', 'refundsOwed']);
+    expect(w.queues.map((q) => q.key)).toEqual(['opsAlerts', 'supportSafety', 'supportSafetyInProgress', 'documents', 'support', 'supportInProgress', 'catalogue', 'moderation']);
+    expect(w.notCounted).toEqual(['approvals', 'paymentConfirmations', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'claimsAutoToPay', 'returnsToDecide', 'refundsOwed']);
+    // It may count documents (DOC-1 §8.4) but not open the Review Center's queue: that row is not a door.
+    expect(w.door('documents')).toBe(false);
+    expect((await call(op.token, '/api/v1/admin/verification/queue')).statusCode).toBe(403);
+    for (const key of ['opsAlerts', 'supportSafety', 'support', 'catalogue', 'moderation'] as const) expect(w.door(key), key).toBe(true);
     // The rule is the capability hook's own: every named read answers 403 to this token, every counted one does not.
     for (const q of WAITING_QUEUES) {
       for (const route of q.reads) {

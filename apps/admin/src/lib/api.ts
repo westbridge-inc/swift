@@ -286,10 +286,12 @@ export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
 /** [ADMIN-AUDIT S2-1] Every queue that waits for a person, counted by the server (GET /admin/dashboard/waiting).
  *  `count: null` = it could not be read just now (not zero); `notCounted` = queues this account's grant does not open. */
 export type WaitingKey =
-  | 'opsAlerts' | 'supportSafety' | 'documents' | 'approvals' | 'paymentConfirmations' | 'support' | 'catalogue'
-  | 'storeVat' | 'custody' | 'claimsToDecide' | 'claimsToPay' | 'returnsToDecide' | 'refundsOwed' | 'moderation';
+  | 'opsAlerts' | 'supportSafety' | 'supportSafetyInProgress' | 'documents' | 'approvals' | 'paymentConfirmations' | 'support'
+  | 'supportInProgress' | 'catalogue' | 'storeVat' | 'custody' | 'claimsToDecide' | 'claimsToPay' | 'claimsAutoToPay'
+  | 'returnsToDecide' | 'refundsOwed' | 'moderation';
 export interface WaitingCounts {
-  queues: { key: WaitingKey; count: number | null }[];
+  /** `door: false` = this account may know the count but not open the queue's page. */
+  queues: { key: WaitingKey; count: number | null; door?: boolean }[];
   notCounted: WaitingKey[];
 }
 export const fetchWaiting = (): Promise<Envelope<WaitingCounts>> => apiFetch('/api/v1/admin/dashboard/waiting');

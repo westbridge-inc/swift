@@ -16,31 +16,38 @@ import { capabilityMode, decideCapability, type AdminCapabilityMode } from './ad
 // not be read is null (never zero).
 // ---------------------------------------------------------------------------
 
-/** In the order Today lists them: SOS / ops pages and safety first. `reads` are the queue page's own
- *  admin reads (route-authority keys); every one must be open to the caller for the queue to be counted. */
+/** In the order Today lists them: SOS / ops pages and safety first. `reads` are the admin reads the count stands
+ *  on (route-authority keys); every one must be open to the caller for the queue to be counted. `door` (default:
+ *  `reads`) is the page's own list read: when the caller may count a queue but not open it, the row is not a door.
+ *  Support and claims are split by the tab that lists them, so each row opens the tab its tickets or claims are on. */
 export const WAITING_QUEUES = [
   // Ops alerts are the safety module's read, decided by the admin role the account holds (S-19 · M009).
   { key: 'opsAlerts', reads: [] },
   { key: 'supportSafety', reads: ['GET /support'] },
-  { key: 'documents', reads: ['GET /verification/queue/counts'] },
+  { key: 'supportSafetyInProgress', reads: ['GET /support'] },
+  // [DOC-1 §8.4] A SUPPORT operator may know how many documents wait (counts) but not open the queue.
+  { key: 'documents', reads: ['GET /verification/queue/counts'], door: ['GET /verification/queue'] },
   { key: 'approvals', reads: ['GET /approvals'] },
   { key: 'paymentConfirmations', reads: ['GET /billing/confirmations'] },
   { key: 'support', reads: ['GET /support'] },
+  { key: 'supportInProgress', reads: ['GET /support'] },
   { key: 'catalogue', reads: ['GET /catalogue-review'] },
   { key: 'storeVat', reads: ['GET /store-vat/pending'] },
   { key: 'custody', reads: ['GET /custody-cases'] },
   { key: 'claimsToDecide', reads: ['GET /cash-rules/claims'] },
   { key: 'claimsToPay', reads: ['GET /cash-rules/claims'] },
+  { key: 'claimsAutoToPay', reads: ['GET /cash-rules/claims'] },
   { key: 'returnsToDecide', reads: ['GET /returns'] },
   { key: 'refundsOwed', reads: ['GET /returns'] },
   { key: 'moderation', reads: ['GET /moderation/reports', 'GET /ratings/moderation'] },
-] as const satisfies readonly { key: string; reads: readonly string[] }[];
+] as const satisfies readonly { key: string; reads: readonly string[]; door?: readonly string[] }[];
 
 export type WaitingKey = (typeof WAITING_QUEUES)[number]['key'];
 
 export interface WaitingCounts {
-  /** Every counted queue, in Today's order. `count: null` = it could not be read just now (not zero). */
-  queues: { key: WaitingKey; count: number | null }[];
+  /** Every counted queue, in Today's order. `count: null` = it could not be read just now (not zero). `door`: this
+   *  account may open the queue's page (false: it may only know the count). */
+  queues: { key: WaitingKey; count: number | null; door: boolean }[];
   /** Queues this account's grant does not open: not counted, and never shown as zero. */
   notCounted: WaitingKey[];
 }
@@ -65,12 +72,13 @@ export async function countWaiting(
 ): Promise<WaitingCounts> {
   const open = WAITING_QUEUES.filter((q) => q.reads.every((route) => servesRead(actor, route, mode)));
   const settled = await Promise.allSettled(open.map((q) => counters[q.key]()));
+  const door = (q: (typeof WAITING_QUEUES)[number]) => ('door' in q ? q.door : q.reads).every((route) => servesRead(actor, route, mode));
   return {
     queues: open.map((q, i) => {
       const r = settled[i]!;
-      if (r.status === 'fulfilled' && Number.isSafeInteger(r.value) && r.value >= 0) return { key: q.key, count: r.value };
+      if (r.status === 'fulfilled' && Number.isSafeInteger(r.value) && r.value >= 0) return { key: q.key, count: r.value, door: door(q) };
       onError(q.key, r.status === 'rejected' ? r.reason : new Error(`not a count: ${String(r.value)}`));
-      return { key: q.key, count: null };
+      return { key: q.key, count: null, door: door(q) };
     }),
     notCounted: WAITING_QUEUES.filter((q) => !open.includes(q)).map((q) => q.key),
   };

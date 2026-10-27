@@ -119,18 +119,17 @@ export class SupportService {
     return { tickets, total, page, limit };
   }
 
-  /** [ADMIN-AUDIT S2-1] Today's count of this queue: tickets not resolved yet (open or being handled), SAFETY
-   *  ones apart. The same reads, scope and wall as listForAdmin. */
-  async waitingForAdmin(): Promise<{ safety: number; other: number }> {
+  /** [ADMIN-AUDIT S2-1] Today's count of this queue: tickets not resolved yet, by the tab that lists them (Open,
+   *  In progress) and SAFETY apart. The same reads, scope and wall as listForAdmin. */
+  async waitingForAdmin(): Promise<{ safetyOpen: number; safetyInProgress: number; open: number; inProgress: number }> {
     const unresolved: Prisma.SupportTicketWhereInput = { status: { in: ['OPEN', 'IN_PROGRESS'] } };
-    const [safety, other] = await this.queue((db, scope) => {
-      const where = (category: Prisma.SupportTicketWhereInput) => ({ AND: [unresolved, category, ...(scope ? [scope] : [])] });
-      return Promise.all([
-        db.supportTicket.count({ where: where({ category: 'SAFETY' }) }),
-        db.supportTicket.count({ where: where({ category: { not: 'SAFETY' } }) }),
-      ]);
-    });
-    return { safety, other };
+    const rows = await this.queue((db, scope) => db.supportTicket.groupBy({
+      by: ['status', 'category'], where: { AND: [unresolved, ...(scope ? [scope] : [])] }, _count: { _all: true },
+    }));
+    const n = (status: SupportStatus, safety: boolean) => rows
+      .filter((r) => r.status === status && (r.category === 'SAFETY') === safety)
+      .reduce((sum, r) => sum + r._count._all, 0);
+    return { safetyOpen: n('OPEN', true), safetyInProgress: n('IN_PROGRESS', true), open: n('OPEN', false), inProgress: n('IN_PROGRESS', false) };
   }
 
   /** CONTRACT [WR-022]: `adminNote` is CUSTOMER-FACING — it is stored on the
