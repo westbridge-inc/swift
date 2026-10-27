@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   driverGoOnline: vi.fn(),
   rideCapabilities: vi.fn(),
   carDeliveries: vi.fn(),
+  riderProfile: null as unknown,
   driverUploadVehicle: vi.fn(),
   riderHandover: vi.fn(),
   lastKnownPosition: vi.fn(),
@@ -59,7 +60,7 @@ function samePrincipal(left: AuthSessionSnapshot | null, right: AuthSessionSnaps
 vi.mock('@tanstack/react-query', () => ({
   useMutation: (options: unknown) => options,
   useQuery: (options: unknown) => options,
-  useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
+  useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries, getQueryData: (key: unknown) => (JSON.stringify(key) === '["mover","riderProfile"]' ? mocks.riderProfile : undefined) }),
 }));
 
 vi.mock('../stores/authStore', () => {
@@ -189,6 +190,8 @@ beforeEach(() => {
   mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } });
   // ...nor "taxi + deliveries" (404): no delivery-card capability either.
   mocks.carDeliveries.mockRejectedValue({ response: { status: 404 } });
+  // ...and no delivery profile on this account.
+  mocks.riderProfile = null;
   mocks.user = {
     id: accountA.userId,
     firstName: 'Account',
@@ -566,6 +569,8 @@ describe('[CARS-DELIVER PR4] a taxi go-online declares delivery cards only to a 
   function arrangeOnline() {
     mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'DRIVER' } } });
     mocks.driverGoOnline.mockResolvedValue({ data: { data: { online: true } } });
+    // [delta S4-5] The read is made only for an account with a taxi AND a car delivery profile.
+    mocks.riderProfile = { id: 'rider-1', vehicleType: 'CAR' };
   }
   const useTaxiGoOnline = () => (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
 
@@ -589,6 +594,34 @@ describe('[CARS-DELIVER PR4] a taxi go-online declares delivery cards only to a 
     arrangeOnline();
     await useTaxiGoOnline();
     expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
+    expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+
+  // [REVIEW-F #2139 delta S4-5] Never a second round trip in a row: the deliveries read runs alongside the stops read.
+  it('the deliveries read runs alongside the stops read, not after it', async () => {
+    arrangeOnline();
+    let releaseStops!: (value: unknown) => void;
+    mocks.rideCapabilities.mockReturnValue(new Promise((resolve) => { releaseStops = resolve; }));
+    mocks.carDeliveries.mockResolvedValue({ data: { data: { available: true, enabled: true, reason: null, takesDeliveries: true } } });
+    const run = useTaxiGoOnline();
+    await vi.waitFor(() => expect(mocks.carDeliveries).toHaveBeenCalledTimes(1), { timeout: 500 });
+    expect(mocks.driverGoOnline).not.toHaveBeenCalled();
+    releaseStops({ data: { data: { maxStops: 2 } } });
+    await run;
+    expect(mocks.driverGoOnline).toHaveBeenLastCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1', 'CAR_DELIVERY_CARDS_V1']);
+  });
+
+  // [REVIEW-F #2139 delta S4-5 · S3-1] An account without a car delivery profile (taxi only, or motorbike + taxi)
+  // makes exactly today's requests: the deliveries read is never made.
+  it.each([
+    ['taxi only (no delivery profile)', null],
+    ['a motorbike delivery profile beside the taxi', { id: 'rider-2', vehicleType: 'MOTORCYCLE' }],
+  ])('%s: the deliveries read is never made; exactly today’s go-online call', async (_label, riderProfile) => {
+    arrangeOnline();
+    mocks.riderProfile = riderProfile;
+    mocks.carDeliveries.mockResolvedValue({ data: { data: { available: true, enabled: true, reason: null, takesDeliveries: true } } });
+    await useTaxiGoOnline();
+    expect(mocks.carDeliveries).not.toHaveBeenCalled();
     expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
   });
 

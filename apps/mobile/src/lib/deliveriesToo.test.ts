@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DELIVERY_CARDS_CAPABILITY, deliveriesTooView, offerKindOf, serverKnowsTaxiAndDeliveries, switchTarget, workModeLink } from './deliveriesToo';
+import { DELIVERY_CARDS_CAPABILITY, deliveriesTooView, isCarDeliveryProfile, offerKindOf, serverKnowsTaxiAndDeliveries, switchTarget, workModeLink } from './deliveriesToo';
 
 // [CARS-DELIVER · owner 8 + 25 Oct 2026] "Deliveries too" behind the server's CAR_DELIVERIES switch. The card says
 // nothing unless the server says it can be set up now or is set up; the home link switches work mode only for an
@@ -113,5 +113,22 @@ describe('PR4: taxi rides and deliveries', () => {
     const hook = readFileSync(join(process.cwd(), 'src/hooks/dispatchOffers.ts'), 'utf8');
     expect(hook).toContain("if (!data?.offer?.orderId && alsoDeliveries && kind === 'DRIVER') {");
     expect(hook).toContain("const api = offerKindOf(offer, kind) === 'DRIVER' ? driverApi : riderApi;");
+  });
+});
+
+// [REVIEW-F #2139 delta S3-1, S4-5 · COORD 16:12Z] Only an account with a CAR delivery profile (the server's
+// isCarDeliveryProfile: a delivery profile on a passenger vehicle, which only "Deliveries too" creates) sees anything
+// new: an existing motorbike + taxi account sees today's screens and makes today's requests.
+describe('PR4: the car delivery profile', () => {
+  it('is a delivery profile on a passenger vehicle, as the server reads it', () => {
+    for (const type of ['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']) expect(isCarDeliveryProfile({ vehicleType: type })).toBe(true);
+    for (const type of ['MOTORCYCLE', 'BICYCLE', 'VAN', 'PICKUP', 'CANTER', 'car', '']) expect(isCarDeliveryProfile({ vehicleType: type })).toBe(false);
+    for (const junk of [null, undefined, {}, 'CAR', { vehicleType: 1 }]) expect(isCarDeliveryProfile(junk)).toBe(false);
+  });
+
+  it('useMoverKind says whether the account holds a taxi profile and a car delivery profile', () => {
+    const hook = readFileSync(join(process.cwd(), 'src/hooks/mover.ts'), 'utf8');
+    expect(hook).toContain('carDeliveryProfile: !!driver.data && isCarDeliveryProfile(rider.data),');
+    expect(hook).toMatch(/dual: false,\s*carDeliveryProfile: false,/);
   });
 });

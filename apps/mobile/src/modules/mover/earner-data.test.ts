@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { money } from '../../lib/money';
 import {
   cashInHandThisWeek,
+  otherProfileKind,
   otherProfileWeek,
   earningRows,
   earningsWindowTotal,
@@ -132,5 +133,19 @@ describe('[CARS-DELIVER PR4] the other profile’s week, for an account with bot
   it('no cash figure from an older server: the week alone; no week at all, or junk: nothing (never a guessed 0)', () => {
     expect(otherProfileWeek('RIDER', { thisWeek: { total: 0, count: 0 } })).toMatchObject({ total: 0, cash: null });
     for (const junk of [undefined, null, 'x', {}, { thisWeek: 'n/a' }]) expect(otherProfileWeek('RIDER', junk)).toBeUndefined();
+  });
+});
+
+// [REVIEW-F #2139 delta S3-1 · COORD 16:12Z] With CAR_DELIVERIES off the screens equal today's: only an account with a
+// taxi profile AND a CAR delivery profile gets the other profile's week; a motorbike + taxi account does not.
+describe('[CARS-DELIVER PR4] whose other week is shown', () => {
+  it('only for an account with a car delivery profile, and it is the kind the screen is not showing', () => {
+    expect(otherProfileKind({ kind: 'DRIVER', dual: true, carDeliveryProfile: true })).toBe('RIDER');
+    expect(otherProfileKind({ kind: 'RIDER', dual: true, carDeliveryProfile: true })).toBe('DRIVER');
+    expect(otherProfileKind({ kind: 'DRIVER', dual: true, carDeliveryProfile: false })).toBeNull();
+    expect(otherProfileKind({ kind: 'RIDER', dual: true, carDeliveryProfile: false })).toBeNull();
+    expect(otherProfileKind({ kind: 'DRIVER', dual: false, carDeliveryProfile: true })).toBeNull();
+    expect(otherProfileKind({ kind: null, dual: true, carDeliveryProfile: true })).toBeNull();
+    expect(otherProfileKind({ kind: 'DRIVER', dual: undefined, carDeliveryProfile: undefined })).toBeNull();
   });
 });

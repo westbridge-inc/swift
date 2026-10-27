@@ -33,7 +33,7 @@ describe('[board 13a] CASH COLLECTED tile', () => {
 // week (otherProfileWeek, earner-data.test.ts), read from that profile's own summary only for such an account.
 describe('[CARS-DELIVER PR4] the other profile’s week on the earnings screen', () => {
   it('asks for the other summary only for an account with both, and shows it in its own card', () => {
-    expect(screen).toContain("const otherKind: 'DRIVER' | 'RIDER' | null = mover.dual === true && kind ? (kind === 'DRIVER' ? 'RIDER' : 'DRIVER') : null;");
+    expect(screen).toContain('const otherKind = otherProfileKind({ kind, dual: mover.dual, carDeliveryProfile: mover.carDeliveryProfile });');
     expect(screen).toContain('const otherSummaryQ = useEarningsSummary<unknown>(otherKind);');
     expect(screen).toContain('const other = otherKind ? otherProfileWeek(otherKind, otherSummaryQ.data) : undefined;');
     const card = screen.slice(screen.indexOf('{other ? ('));
@@ -41,5 +41,16 @@ describe('[CARS-DELIVER PR4] the other profile’s week on the earnings screen',
     expect(card).toContain('{money(other.total)}');
     expect(card).toContain('{other.cash ? ');
     expect(card).toContain('{other.note}');
+  });
+});
+
+// [REVIEW-F #2139 delta S4-6] Pulling to refresh refreshes the other profile's week too.
+describe('[CARS-DELIVER PR4] pull to refresh', () => {
+  it('refetches the other summary along with this one and the history', () => {
+    const pull = screen.slice(screen.indexOf('const pull = usePullToRefresh('), screen.indexOf('\n', screen.indexOf('const pull = usePullToRefresh(')));
+    expect(pull).toContain('summaryQ.refetch()');
+    expect(pull).toContain('historyQ.refetch()');
+    expect(pull).toContain('otherSummaryQ.refetch()');
+    expect(screen.indexOf('const otherSummaryQ = ')).toBeLessThan(screen.indexOf('const pull = usePullToRefresh('));
   });
 });
