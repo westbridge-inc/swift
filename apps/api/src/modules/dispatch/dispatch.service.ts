@@ -16,7 +16,9 @@ import { classesAtOrAbove } from '../rides/fare.service';
 import { readOfferItinerary } from '../rides/taxi-stops-read';
 import { taxiStopsAppUpdateRequired } from '../rides/taxi-stop-rules';
 import { offerCardAddresses, type CoarseStop } from './board-privacy';
-import { closeOnlineSession } from '../rider/online-hours';
+import { closeOnlineSession, startOnlineSession } from '../rider/online-hours';
+import { canTakeDeliveryFromTaxi, promoteDeliveryFromTaxi } from '../driver/car-deliveries-supply';
+import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
 import { journalAuthorityWhere, poolForOrder, type DispatchPool } from './dispatch-generation-keys';
@@ -28,7 +30,7 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
-import { goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { hireVehicleTypes, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { log } from '../../utils/logger';
@@ -522,7 +524,8 @@ export class DispatchService {
             user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
           },
         });
-    if (count !== 1) return false;
+    // [CARS-DELIVER PR4] A taxi car's delivery profile riding on its online, free taxi ("taxi + deliveries").
+    if (count !== 1) return pool === 'RIDER' && await canTakeDeliveryFromTaxi(this.prisma, moverId);
     if (pool === 'RIDER') {
       // The capacity half of the re-check, from the orders table — the same
       // truth the candidate SQL counted, so the two gates cannot disagree.
@@ -1211,6 +1214,56 @@ export class DispatchService {
           LIMIT ${cap}
         `;
 
+    // [CARS-DELIVER PR4 · "taxi + deliveries"] While the switch is on, a taxi car's delivery profile is ALSO a
+    // goods candidate while its taxi is online, free and fresh, located where the taxi is. Same goods filters
+    // (vehicle, service, float, tenant, self) on the delivery profile; no live delivery leg (one job at a time).
+    // The taxi rows are only read; the claim promotes the profile (promoteDeliveryFromTaxi).
+    if (pool === 'RIDER' && carDeliveriesEnabled()) {
+      const fromTaxi = await this.prisma.$queryRaw<GeoCandidateRow[]>`
+          SELECT r."id", r."userId", d."currentLat", d."currentLng",
+                 r."averageRating", r."acceptanceRate", r."currentOrderId"
+          FROM "riders" r
+          JOIN "drivers" d ON d."userId" = r."userId"
+          JOIN "users" u ON u."id" = r."userId"
+          WHERE r."isOnline" = false
+            AND d."takesDeliveries" = true
+            -- [REVIEW-F #2139 S2-2] only a taxi GO whose app can show a delivery card (an older one shows it as a ride)
+            AND d."deliveryCardsCapable" = true
+            AND d."isOnline" = true
+            AND d."isAvailable" = true
+            ${capacityPredicateSql('DRIVER')}
+            AND d."locationSessionId" IS NOT NULL
+            AND d."lastLocationUpdate" >= ${locationFreshSince}
+            AND u."status" = 'ACTIVE'
+            AND u."activeRole" IN ('MOVER', 'DRIVER')
+            -- [SECURITY · PR4 HIGH] delivery GO's gates: a profile photo, and neither profile identity-locked or
+            -- safety-suspended. The rest (selfie-check freshness, push, identity authority, the fee, the device
+            -- session, the papers) are the offer gate's, canTakeDeliveryFromTaxi, before any card is sent.
+            AND u."selfieCapturedAt" IS NOT NULL
+            AND r."livenessLockedAt" IS NULL AND r."safetySuspendedAt" IS NULL
+            AND d."livenessLockedAt" IS NULL AND d."safetySuspendedAt" IS NULL
+            ${tenantFilter}
+            ${selfFilter}
+            ${vehicleFilter}
+            ${riderTypeFilter}
+            AND (r."floatLimit" - r."committedFloat") >= ${floatRequired}
+            ${capacityPredicateSql('RIDER', 1)}
+            AND d."currentLat" IS NOT NULL
+            AND d."currentLng" IS NOT NULL
+            AND ST_DWithin(
+              geography(ST_MakePoint(d."currentLng", d."currentLat")),
+              geography(ST_MakePoint(${pickup.lng}, ${pickup.lat})),
+              ${radiusKm * 1000}
+            )
+          ORDER BY ST_Distance(
+            geography(ST_MakePoint(d."currentLng", d."currentLat")),
+            geography(ST_MakePoint(${pickup.lng}, ${pickup.lat}))
+          ) ASC
+          LIMIT ${cap}
+        `;
+      rows.push(...fromTaxi.filter((t) => !rows.some((r) => r.id === t.id)));
+    }
+
     let eligible = rows.filter((r) => !declined.includes(r.id));
     if (eligible.length === 0) return [];
 
@@ -1607,6 +1660,8 @@ export class DispatchService {
             // those actions bind to exactly this generation (optional — older
             // clients omit it).
             offerAttemptId: attemptId,
+            // [CARS-DELIVER PR4] What kind of job the card is: a phone on "taxi + deliveries" gets both kinds.
+            orderType: order.orderType,
             orderNumber: order.orderNumber,
             vendorName: order.vendor?.name,
             // Express = bigger fee for the mover; badge it so they know why.
@@ -1616,6 +1671,10 @@ export class DispatchService {
             // [ALG-06 ①] Swift's own money on top of the fee, or absent.
             rescueIncentiveGyd: rescueGyd > 0 ? rescueGyd : null,
             paymentMethod: order.paymentMethod,
+            // [CARS-DELIVER PR4 · REVIEW-F #2139 S2-1] The card's pay, from the order's stored columns (as the
+            // recovered card carries them): a delivery card in taxi mode has no delivery board row to read it from.
+            deliveryFee: Number(order.deliveryFee),
+            tipAmount: Number(order.tipAmount),
             customerTrust: trust ?? null,
             itemCount: order.items.length,
             estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
@@ -1778,6 +1837,8 @@ export class DispatchService {
     orderId: string;
     /** [F-014-04] The live generation's identity — echoed on accept/decline/seen. */
     offerAttemptId: string | null;
+    /** [CARS-DELIVER PR4] TAXI, or a delivery/parcel type. */
+    orderType: string;
     orderNumber: string;
     vendorName: string | null;
     isExpress: boolean;
@@ -1889,6 +1950,8 @@ export class DispatchService {
     return {
       orderId,
       offerAttemptId: attemptId ?? null,
+      // [CARS-DELIVER PR4] The same job kind the live card carries.
+      orderType: order.orderType,
       orderNumber: order.orderNumber,
       vendorName: order.vendor?.name ?? null,
       isExpress: order.isExpress,
@@ -2586,7 +2649,11 @@ export class DispatchService {
     // and this order stays open for the next candidate. Without it, two orders offered
     // to the same free driver in one window both claim and double-book the driver
     // (the founder's one-ride-per-driver invariant). [SWIFT taxi-exclusivity]
+    let promotedFromTaxi: { userId: string; driverId: string } | null = null;
+    let claimantUserId: string | null = null;
     const { order, assignmentSequence } = await this.prisma.$transaction(async (tx) => {
+      promotedFromTaxi = null;
+      claimantUserId = null;
       // Canonical lock order is User → Order → selected mover profile. Admin
       // suspension/ban and role switching take the same User lock first, so an
       // accept and a revocation have one legal database order rather than a
@@ -2608,10 +2675,15 @@ export class DispatchService {
             FOR UPDATE OF u
           `;
       const moverAuthority = authority[0];
+      claimantUserId = moverAuthority?.userId ?? null;
       const allowedRole = pool === 'DRIVER'
         ? moverAuthority?.activeRole === 'MOVER' || moverAuthority?.activeRole === 'DRIVER'
         : moverAuthority?.activeRole === 'MOVER' || moverAuthority?.activeRole === 'RIDER';
-      if (!moverAuthority || moverAuthority.status !== 'ACTIVE' || !allowedRole) {
+      // [CARS-DELIVER PR4] A delivery claimed from taxi work ("taxi + deliveries") may promote the car's delivery
+      // profile below, after the Order lock; decided there, refused there exactly as here if it does not apply.
+      const mayPromoteFromTaxi = pool === 'RIDER' && carDeliveriesEnabled() && moverAuthority?.status === 'ACTIVE'
+        && (moverAuthority.activeRole === 'DRIVER' || moverAuthority.activeRole === 'MOVER');
+      if (!moverAuthority || moverAuthority.status !== 'ACTIVE' || (!allowedRole && !mayPromoteFromTaxi)) {
         throw new AppError(409, 'MOVER_INACTIVE', 'This mover is no longer available to accept work');
       }
 
@@ -2660,6 +2732,13 @@ export class DispatchService {
       // The CAS below would refuse it too, but as ALREADY_TAKEN, which told a
       // driver another driver had the ride when the customer had cancelled it.
       if (lockedOrder.status === 'CANCELLED') throw this.orderCancelled(lockedOrder);
+      // [CARS-DELIVER PR4] User -> Order -> Rider -> Driver: the delivery profile goes online in place of the taxi.
+      // (null for every ordinary rider: an online profile, or not a taxi car's.)
+      if (mayPromoteFromTaxi) {
+        const promotion = await promoteDeliveryFromTaxi(tx, moverAuthority.userId, moverId);
+        if (promotion) promotedFromTaxi = { userId: moverAuthority.userId, driverId: promotion.driverId };
+        else if (!allowedRole) throw new AppError(409, 'MOVER_INACTIVE', 'This mover is no longer available to accept work');
+      }
       if (pool === 'RIDER' && lockedOrder.fulfillmentMode === 'VENDOR_DELIVERY') {
         throw new AppError(409, 'VENDOR_DELIVERY_SELECTED', 'The store is delivering this order');
       }
@@ -2835,6 +2914,26 @@ export class DispatchService {
     // Everything below is publication/telemetry/cache cleanup after the
     // authoritative DB commit. None may convert a winner into an HTTP failure
     // that acceptOffer interprets as permission to re-dispatch the same job.
+    // [CARS-DELIVER PR4] Taxi supply retired by the promotion: its held ride offer goes, its online hours close,
+    // the delivery profile's open, and live sockets reconnect under the new work app (as a role switch does).
+    const promoted = promotedFromTaxi as { userId: string; driverId: string } | null;
+    if (promoted) {
+      await this.releaseHeldOffer(promoted.driverId)
+        .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'taxi offer cleanup after promotion failed'));
+      await closeOnlineSession(this.redis, promoted.driverId).catch(() => {});
+      await startOnlineSession(this.redis, moverId).catch(() => {});
+      try { disconnectUserSockets(this.io, promoted.userId); } catch { /* reconnects; never a claim failure */ }
+    }
+    // [REVIEW-M #2138 S4-4] A taxi on "taxi + deliveries" may hold a delivery card on its delivery profile when it
+    // takes a ride: release that card now (the store order re-dispatches) rather than letting it run to its timeout.
+    const rideTakenBy = claimantUserId as string | null;
+    if (pool === 'DRIVER' && rideTakenBy && carDeliveriesEnabled()) {
+      const twin = await this.prisma.rider.findUnique({ where: { userId: rideTakenBy }, select: { id: true } }).catch(() => null);
+      if (twin) {
+        await this.releaseHeldOffer(twin.id)
+          .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'held delivery offer release after a ride claim failed'));
+      }
+    }
     await this.recordOfferOutcome(moverId, true, pool)
       .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch acceptance-rate update failed after claim commit'));
 

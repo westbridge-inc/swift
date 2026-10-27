@@ -12,7 +12,8 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { carDeliveriesEnabled, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
-import { carDeliveriesStatus, enableCarDeliveries } from './car-deliveries';
+import { carDeliveriesStatus, declaresDeliveryCards, enableCarDeliveries, notARideOffer, setTaxiAndDeliveries } from './car-deliveries';
+import { poolForOrder } from '../dispatch/dispatch-generation-keys';
 import { passengersOnlyRefusal } from '../dispatch/concurrency-policy';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -359,6 +360,16 @@ export async function driverRoutes(app: FastifyInstance) {
     return { success: true, data: await enableCarDeliveries(app.prisma, request.user.userId) };
   });
 
+  /** [CARS-DELIVER PR4] PUT /deliveries/mode { takesDeliveries } — "taxi + deliveries": store delivery offers also
+   *  come while this taxi is online and free (car-deliveries.ts). Turning it ON is refused while CAR_DELIVERIES is
+   *  off, before anything is read or written; turning it off is always allowed. */
+  app.put('/deliveries/mode', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { takesDeliveries } = z.object({ takesDeliveries: z.boolean() }).parse(request.body ?? {});
+    if (takesDeliveries && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    return { success: true, data: await setTaxiAndDeliveries(app.prisma, request.user.userId, takesDeliveries) };
+  });
+
   /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on
    *  acceptance (master plan §5). Stored in the public vehicles/ tree —
    *  distinct from the private vehicle_exterior_photo KYC document. */
@@ -451,7 +462,11 @@ export async function driverRoutes(app: FastifyInstance) {
     const location = driverGoOnlineSchema.parse(request.body ?? {});
     // [TAXI multi-stop 4/8] Set on EVERY go-online from what this app declares:
     // an older app going online after a newer one clears it again.
-    const taxiStopsCapable = declaresTaxiStops(driverCapabilitiesSchema.parse(request.body ?? {}).capabilities);
+    const declared = driverCapabilitiesSchema.parse(request.body ?? {}).capabilities;
+    const taxiStopsCapable = declaresTaxiStops(declared);
+    // [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2] Likewise whether this app can show a delivery card: only then is it
+    // offered deliveries from taxi work ("taxi + deliveries"). Set on every GO, so an older app clears it again.
+    const deliveryCardsCapable = declaresDeliveryCards(declared);
 
     // Serialize GO against role switching and compare the profile generation
     // captured before the slower verification gates. If an accept/offline/
@@ -507,6 +522,7 @@ export async function driverRoutes(app: FastifyInstance) {
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
           "taxiStopsCapable" = ${taxiStopsCapable},
+          "deliveryCardsCapable" = ${deliveryCardsCapable},
           "updatedAt" = clock_timestamp()
         WHERE id = ${driver.id} AND ${documentDeadlineSql(liveGate)}
         RETURNING "isOnline", "isAvailable"`;
@@ -1111,6 +1127,10 @@ export async function driverRoutes(app: FastifyInstance) {
       fare: zMoneyWhole.optional(),
       offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
+    // [CARS-DELIVER PR4 · REVIEW-G #2138 S2-2 (b)] acceptOffer takes the pool from the ORDER, so this route would claim
+    // a store delivery for an older taxi app that showed it as a ride. Refused before anything is consumed.
+    const kind = await app.prisma.order.findUnique({ where: { id: orderId }, select: { orderType: true } });
+    if (kind && poolForOrder(kind) !== 'DRIVER') throw notARideOffer();
     const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });

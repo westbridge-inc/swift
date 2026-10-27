@@ -14,6 +14,7 @@ import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { carDeliveriesEnabled, carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { carDeliveryLivePreview, isCarDeliveryProfile, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
+import { returnToTaxiAndDeliveries } from '../driver/car-deliveries-return';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
@@ -70,6 +71,7 @@ import {
   assertMoverRoleAuthority,
   assertActiveMoverAccount,
   lockAndRetireDriverSupply,
+  completeUserRoleAuthorityTransition,
   lockUserRoleAuthority,
   staleMoverAuthorityError,
 } from '../mover-authority';
@@ -775,6 +777,8 @@ export async function riderRoutes(app: FastifyInstance) {
         UPDATE riders SET "isOnline" = true, "isAvailable" = ${available},
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          -- [CARS-DELIVER PR4] Deliveries the mover chose themselves never send them back to taxi work.
+          "returnsToTaxi" = false,
           "updatedAt" = clock_timestamp()
         WHERE id = ${rider.id} AND ${documentDeadlineSql(liveDocuments)}
           AND ${carDocuments ? documentDeadlineSql(carDocuments) : Prisma.sql`TRUE`}
@@ -859,6 +863,26 @@ export async function riderRoutes(app: FastifyInstance) {
 
     if (!rider.isOnline && !rider.currentOrderId) {
       return { success: true, data: { accepted: false, reason: 'OFFLINE' } };
+    }
+
+    // [CARS-DELIVER PR4 · COORD 26 Oct] A delivery taken from "taxi + deliveries" is done: the first heartbeat
+    // after its last leg returns the account to taxi work (car-deliveries-return.ts). The phone is told, so it
+    // refetches and its location stream follows the taxi profile.
+    if (rider.returnsToTaxi && rider.isOnline && !rider.currentOrderId) {
+      const back = await returnToTaxiAndDeliveries(app.prisma, request.user.userId, locationSessionId, { latitude, longitude });
+      if (back) {
+        await completeUserRoleAuthorityTransition(app, {
+          userId: request.user.userId, riderId: rider.id, driverId: null, activeRole: 'DRIVER', lastMoverRole: 'DRIVER',
+        }).catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'return to taxi cleanup failed'));
+        if (back === 'RETURNED') {
+          const driverRow = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+          if (driverRow) {
+            await app.redis.set(`driver:location_db_ts:${driverRow.id}`, Date.now().toString())
+              .catch((error) => request.log.warn({ err: error, driverId: driverRow.id }, 'return to taxi Redis bookkeeping failed'));
+          }
+        }
+        return { success: true, data: { accepted: false, reason: 'RETURNED_TO_TAXI' } };
+      }
     }
 
     // Migration compatibility is first-writer-wins for a legacy null owner;

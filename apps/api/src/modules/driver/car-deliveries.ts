@@ -26,6 +26,13 @@ import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 // Mover Agreement §7: "anyone delivering must hold insurance that permits use for hire or reward").
 // Store orders only (riderType DELIVERY): parcels stay with riders, as the owner's ruling names
 // "food/shop deliveries".
+//
+// [PR4 · "or get both", COORD ruling 26 Oct] "Taxi + deliveries" (drivers.takesDeliveries): while the taxi profile
+// is online and free, the delivery profile is ALSO a delivery candidate, located where the taxi is (the delivery
+// candidate search, dispatch.service). Accepting a delivery PROMOTES it inside the claim's own transaction (taxi
+// supply retired, the delivery profile online on the same device session, work app -> deliveries, marked
+// returnsToTaxi); when its deliveries end the account RETURNS to taxi work with deliveries on
+// (car-deliveries-return.ts). Still one job at a time; the taxi pool, taxi GO and taxi claims are untouched.
 // ---------------------------------------------------------------------------
 
 type Tx = Prisma.TransactionClient;
@@ -47,6 +54,8 @@ export interface CarDeliveriesStatus {
   reason: CarDeliveriesReason | null;
   /** The car the deliveries would run on, as the mover's vehicle picker names it. */
   vehicle: { type: VehicleType; label: string } | null;
+  /** [PR4] "Taxi + deliveries" is on: store delivery offers also come while the taxi is online and free. */
+  takesDeliveries: boolean;
 }
 
 /** A Rider row on a passenger vehicle is a taxi car's delivery profile (onboarding never makes one otherwise). */
@@ -107,7 +116,7 @@ function carDeliveryNeedsTaxi(): AppError {
 /** GET /driver/deliveries — what the driver's account screen shows. Reads only. */
 export async function carDeliveriesStatus(db: Db, userId: string): Promise<CarDeliveriesStatus> {
   const [driver, rider] = await Promise.all([
-    db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    db.driver.findUnique({ where: { userId }, select: { vehicleType: true, takesDeliveries: true } }),
     db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
   ]);
   if (!driver) throw new NotFoundError('Driver');
@@ -118,7 +127,7 @@ export async function carDeliveriesStatus(db: Db, userId: string): Promise<CarDe
     : rider && !enabled
       ? 'OTHER_DELIVERY_VEHICLE'
       : !carCanDeliver(driver.vehicleType) ? 'VEHICLE' : null;
-  return { available: reason === null, enabled, reason, vehicle };
+  return { available: reason === null, enabled, reason, vehicle, takesDeliveries: enabled && driver.takesDeliveries };
 }
 
 /**
@@ -233,4 +242,59 @@ export async function lockCarDeliveryAuthority(tx: Tx, userId: string): Promise<
     return { allowed: false, reason: 'docs', validUntil: null };
   }
   return verdict;
+}
+
+// ---------------------------------------------------------------------------
+// [PR4] "Taxi + deliveries"
+// ---------------------------------------------------------------------------
+
+/** The code "Taxi + deliveries" is refused in before "Deliveries too" is set up. */
+export const DELIVERIES_NOT_SET_UP = 'DELIVERIES_NOT_SET_UP';
+
+/**
+ * [REVIEW-F #2139 S2-2 · REVIEW-G #2138 S2-2 · REVIEW-M #2138 S2-1] What a taxi app declares at GO when it can show a
+ * delivery card (its pay, the cash box, "Accept delivery") and answer it through the delivery routes. An older taxi
+ * app would show a store delivery as a ride, so a delivery is offered from taxi work only to a taxi GO whose app
+ * declared this (drivers.deliveryCardsCapable, set on EVERY taxi GO as TAXI_STOPS_V1 is: an older app going online
+ * again clears it).
+ */
+export const DELIVERY_CARDS_CAPABILITY = 'CAR_DELIVERY_CARDS_V1';
+
+export function declaresDeliveryCards(capabilities: readonly string[] | null | undefined): boolean {
+  return Array.isArray(capabilities) && capabilities.includes(DELIVERY_CARDS_CAPABILITY);
+}
+
+/** [REVIEW-G #2138 S2-2 (b)] The taxi accept route never takes a delivery: it is all an older taxi app has, and that
+ *  app shows a delivery as a ride. Refused before anything is read or consumed; the delivery routes take it. */
+export function notARideOffer(): AppError {
+  return new AppError(409, 'NOT_A_RIDE_OFFER', 'This offer is a store delivery, not a ride. Update Swift to see and answer delivery offers.');
+}
+
+/**
+ * PUT /driver/deliveries/mode — turn "taxi + deliveries" on or off. On needs the switch (the route refuses first
+ * while it is off), an active account and a delivery profile on this taxi car; off is always allowed. Under the
+ * User, then Rider, then Driver locks. It changes no supply: an online taxi stays exactly as it is.
+ */
+export async function setTaxiAndDeliveries(prisma: PrismaClient, userId: string, on: boolean): Promise<CarDeliveriesStatus> {
+  await prisma.$transaction(async (tx) => {
+    const users = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT "status"::text AS "status" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
+    if (!users[0]) throw new NotFoundError('User');
+    await tx.$queryRaw`SELECT "id" FROM "riders" WHERE "userId" = ${userId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT "id" FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
+    const [driver, rider] = await Promise.all([
+      tx.driver.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
+      tx.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    if (!driver) throw new NotFoundError('Driver');
+    if (on) {
+      if (users[0].status !== 'ACTIVE') throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'Your account must be active before you can take work.');
+      if (!rider || !isCarDeliveryProfile(rider.vehicleType)) {
+        throw new AppError(409, DELIVERIES_NOT_SET_UP, 'Add deliveries first, then turn on taxi rides and deliveries together.');
+      }
+      if (!carCanDeliver(driver.vehicleType)) throw new AppError(403, 'VEHICLE_NOT_OFFERED', 'This vehicle cannot take deliveries on Swift.');
+    }
+    await tx.driver.update({ where: { id: driver.id }, data: { takesDeliveries: on } });
+  });
+  return carDeliveriesStatus(prisma, userId);
 }
