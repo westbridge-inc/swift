@@ -89,6 +89,8 @@ COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/ven
 COPY apps/mobile/src/modules/vendor/storeOrderRules.ts apps/mobile/src/modules/vendor/storeOrderRules.ts
 COPY apps/mobile/src/modules/vendor/storeHandover.ts apps/mobile/src/modules/vendor/storeHandover.ts
 COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
+# [TAP-AUDIT] The Products page's item editor uses the app's own words for the store's pick tick (imports nothing).
+COPY apps/mobile/src/lib/storePick.ts apps/mobile/src/lib/storePick.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 
