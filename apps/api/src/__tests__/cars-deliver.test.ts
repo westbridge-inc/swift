@@ -373,6 +373,32 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
     expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, isAvailable: false, locationSessionId: null });
   });
 
+  // [REVIEW-G #2138 NOTE · follow-up] Identity locks are per profile: a lock (or a safety suspension) on the TAXI profile
+  // also stops delivery GO on the same car, so switching to the car's deliveries never gets around it.
+  it('delivery GO on the car is refused while the taxi profile is identity-locked or safety-suspended — nothing goes online', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await makeTaxiDriver();
+    expect((await call('POST', '/api/v1/driver/deliveries', driver.token)).statusCode).toBe(200);
+    expect((await call('POST', '/api/v1/customer/switch-role', driver.token, { role: 'RIDER' })).statusCode).toBe(200);
+
+    await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { livenessLockedAt: new Date() } }));
+    const locked = await call('POST', '/api/v1/rider/go-online', driver.token, here);
+    expect(locked.statusCode, locked.body).toBe(423);
+    expect(locked.json().error.code).toBe('LIVENESS_LOCKED');
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, locationSessionId: null });
+
+    await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { livenessLockedAt: null, safetySuspendedAt: new Date() } }));
+    const suspended = await call('POST', '/api/v1/rider/go-online', driver.token, here);
+    expect(suspended.statusCode, suspended.body).toBe(423);
+    expect(suspended.json().error.code).toBe('SAFETY_SUSPENDED');
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, locationSessionId: null });
+
+    // Control: with the taxi profile clear, the same GO goes online.
+    await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { safetySuspendedAt: null } }));
+    const go = await call('POST', '/api/v1/rider/go-online', driver.token, here);
+    expect(go.statusCode, go.body).toBe(200);
+  });
+
   it('delivery GO re-syncs the car from the taxi profile (a plate or colour changed there is never left behind)', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const driver = await makeTaxiDriver();

@@ -759,6 +759,18 @@ export async function riderRoutes(app: FastifyInstance) {
       assertMoverDocuments(liveDocuments);
       const carDocuments = carDelivery ? await lockCarDeliveryAuthority(tx, request.user.userId) : null;
       if (carDocuments) assertMoverDocuments(carDocuments);
+      // [REVIEW-G #2138 NOTE] Identity locks are per profile (liveness.service): delivery GO on the taxi's car also
+      // refuses while the TAXI profile is identity-locked or safety-suspended (its row is locked just above), so
+      // switching to the same car's deliveries never gets around a lock. Selfie-check freshness stays this
+      // profile's own (assertShiftLiveness above): a check passed on one profile never refreshes the other.
+      if (carDelivery) {
+        const taxi = await tx.driver.findUnique({
+          where: { userId: request.user.userId },
+          select: { lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
+        });
+        if (taxi?.livenessLockedAt) assertShiftLiveness(taxi);
+        if (taxi) assertNotSafetySuspended(taxi);
+      }
       const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
       const available = (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma));
       const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
