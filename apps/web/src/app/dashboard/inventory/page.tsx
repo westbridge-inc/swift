@@ -73,6 +73,15 @@ function RowTool({ tool, item, onSave = () => undefined, onDone }: { tool: 'pric
   return tool === 'price' ? <tools.PriceEdit item={item} onSave={onSave} onDone={onDone} /> : <tools.StockAdjust item={item} onDone={onDone} />;
 }
 
+/** [IN-STORE-SALE] A tracked row's count, "Adjust stock" and the app's "Sold in store −1", drawn from the tools chunk
+ *  (the count alone until it arrives). */
+function RowStock({ item, onAdjust }: { item: CatalogItem; onAdjust: () => void }) {
+  const tools = menuTools.usePart(true);
+  const storeId = useStoreId();
+  return tools ? <tools.SaleStock item={item} storeId={storeId} onAdjust={onAdjust} />
+    : <button onClick={onAdjust} className="sw-link-btn min-h-8">{item.stockQuantity} in stock · Adjust stock</button>;
+}
+
 /**
  * [SPEED 22 Oct] One item's row. Memoised: an in-stock tap, a background re-read or a key
  * typed in Search draws again only a row whose own facts changed (the read keeps unchanged
@@ -120,7 +129,7 @@ const ItemRow = memo(function ItemRow({ item: i, pending, pricePending, manager,
     <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px] text-[var(--swift-muted)]">
       {!i.isAvailable && <span>Sold out</span>}
       {low && <span className="font-semibold text-amber-700">Low stock</span>}
-      {i.stockQuantity == null ? <span>Stock untracked</span> : <button onClick={() => onAdjust(adjusting ? null : i.id)} className="sw-link-btn min-h-8">{i.stockQuantity} in stock · Adjust stock</button>}
+      {i.stockQuantity == null ? <span>Stock untracked</span> : <RowStock item={i} onAdjust={() => onAdjust(adjusting ? null : i.id)} />}
       {i.sku && <span>SKU: {i.sku}</span>}
       {vatRate != null && <RowVat item={i} vatRate={vatRate} vatEffective={vatEffective} pending={vatPending} onVatClass={onVatClass} />}
     </div>

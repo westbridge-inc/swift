@@ -1309,6 +1309,13 @@ export const vendorApi = {
    *  returns the committed movement instead of moving stock again. */
   adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }, commandKey?: string) =>
     api.post(`/vendor/items/${itemId}/adjust`, body, commandKey ? { headers: { 'Idempotency-Key': commandKey } } : undefined),
+  /** [IN-STORE-SALE] One sold in person ("Sold in store −1"). `tapKey` names that ONE tap: a resend is answered with
+   *  its receipt, never taken twice. */
+  inStoreSale: (itemId: string, tapKey: string) =>
+    api.post(`/vendor/items/${itemId}/in-store-sale`, {}, { headers: { 'Idempotency-Key': tapKey } }),
+  /** [IN-STORE-SALE] Undo of that tap: the server puts the one back (a new ledger row), once per sale. */
+  undoInStoreSale: (itemId: string, saleKey: string) =>
+    api.post(`/vendor/items/${itemId}/in-store-sale/undo`, { saleKey }),
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),

@@ -91,6 +91,8 @@ COPY apps/mobile/src/modules/vendor/storeHandover.ts apps/mobile/src/modules/ven
 COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
 # [TAP-AUDIT] The Products page's item editor uses the app's own words for the store's pick tick (imports nothing).
 COPY apps/mobile/src/lib/storePick.ts apps/mobile/src/lib/storePick.ts
+# [IN-STORE-SALE] ... and the app's "Sold in store" line of taps and its words (imports nothing).
+COPY apps/mobile/src/lib/inStoreSale.ts apps/mobile/src/lib/inStoreSale.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

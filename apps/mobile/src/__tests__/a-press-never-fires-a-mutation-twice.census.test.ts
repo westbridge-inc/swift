@@ -381,6 +381,7 @@ const UNTRACED: Record<string, string> = {
   'modules/mover/screens/MoverHomeScreen.tsx | goOnline.mutateAsync': 'Called inside the options object handed to prepareMoverOnline by startOnline, which returns early on busyToggle (preparingOnline, set true first, or goOnline/goOffline pending); the GO control is also disabled={busyToggle}.',
   'hooks/useCartSteppers.ts | add.mutateAsync': '[TAP-AUDIT] The cart steppers send from one queue per cart line (drive): a line has at most one request out, and a tap made meanwhile only moves its target, so no tap sends the same write twice.',
   'hooks/useCartSteppers.ts | update.mutateAsync': '[TAP-AUDIT] The cart steppers send from one queue per cart line (drive): a line has at most one request out, and a tap made meanwhile only moves its target, so no tap sends the same write twice.',
+  'hooks/vendorops.ts | sale.mutateAsync': '[IN-STORE-SALE] The "Sold in store" taps send from one line per item (lib/inStoreSale drive): an item has at most one request out, each tap is its own sale with its own key, and a resend of the same tap (Try again) carries the same key, which the server answers with its receipt, so no tap is taken twice.',
   'modules/vendor/screens/VendorOrderDetailScreen.tsx | returnReceived.mutate': 'An object action handed to CustodyRecoveryNotice with pending: returnReceived.isPending; the notice renders it as a PillButton loading and disabled on pending.',
 };
 

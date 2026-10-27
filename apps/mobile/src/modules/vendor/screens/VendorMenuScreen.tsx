@@ -30,7 +30,10 @@ import {
   useSetItemAvailability,
   useUploadCategoryPhoto,
   useRemoveCategoryPhoto,
+  useSoldInStoreSender,
 } from '../../../hooks/vendorops';
+import { soldInStore, useSoldInStoreRow } from '../../../hooks/useSoldInStore';
+import { SOLD_IN_STORE } from '../../../lib/inStoreSale';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
@@ -62,23 +65,26 @@ export function MenuItemRow({
   const [markedAvailable, setMarkedAvailable] = useState(serverAvailable);
   useEffect(() => setMarkedAvailable(serverAvailable), [serverAvailable]);
   const tracksStock = item.stockQuantity != null;
-  const outOfStock = tracksStock && item.stockQuantity <= 0;
+  // [IN-STORE-SALE] The count moves at a "Sold in store" tap and settles on the server's answer.
+  useSoldInStoreRow(item.id);
+  const stockNow: number = tracksStock ? soldInStore.shown(item.id, item.stockQuantity) : 0;
+  const outOfStock = tracksStock && stockNow <= 0;
   const soldOut = !markedAvailable;
   const lowStock =
     markedAvailable &&
     !outOfStock &&
     tracksStock &&
     item.lowStockThreshold != null &&
-    item.stockQuantity <= item.lowStockThreshold;
+    stockNow <= item.lowStockThreshold;
   const availabilityDisabled = readOnly || setAvail.isPending;
   const [confirmDelete, setConfirmDelete] = useState(false);
   const ordered = numericFact(item.totalOrdered);
   const stockDetail = outOfStock
     ? '0 left'
     : lowStock
-      ? `${item.stockQuantity} left · alert at ${item.lowStockThreshold}`
+      ? `${stockNow} left · alert at ${item.lowStockThreshold}`
       : tracksStock
-        ? `${item.stockQuantity} in stock`
+        ? `${stockNow} in stock`
         : null;
   const itemDetail = [ordered == null ? null : `${ordered} orders placed`, stockDetail].filter(Boolean).join(' · ');
   // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] Only a photo Swift keeps is shown, here as to customers;
@@ -132,7 +138,7 @@ export function MenuItemRow({
           <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
             {soldOut ? <TonePill label="SOLD OUT" tone="warning" /> : null}
             {outOfStock ? <TonePill label="0 LEFT" tone="warning" /> : null}
-            {lowStock ? <TonePill label={`${item.stockQuantity} LEFT`} tone="warning" /> : null}
+            {lowStock ? <TonePill label={`${stockNow} LEFT`} tone="warning" /> : null}
             {itemDetail ? (
               <T variant="caption" tone="muted" style={{ flexShrink: 1 }}>
                 {itemDetail}
@@ -202,6 +208,9 @@ export function MenuItemRow({
         </T>
       ) : null}
 
+      {/* [IN-STORE-SALE] Only an item whose stock is counted: one tap takes one sold in person off the Swift stock. */}
+      {tracksStock && !readOnly ? <SoldInStoreControls itemId={item.id} shown={stockNow} /> : null}
+
       {canEdit ? (
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           <PillButton
@@ -244,6 +253,52 @@ export function MenuItemRow({
         <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmDelete(false)} />
       </PopupCard>
     </Card>
+  );
+}
+
+/**
+ * [IN-STORE-SALE] "Sold in store −1" on a tracked item's row (lib/inStoreSale): a store with no till system takes one
+ * it sold in person off its Swift stock in one tap, so an app order never sells the one that is gone. Any member of
+ * the store may (the server's rule for stock changes). The count moves at the tap; taps add up; only this item waits.
+ * "Sold 1 in store · Undo" shows for a few seconds; a refusal or a tap that did not reach Swift says so here.
+ */
+export function SoldInStoreControls({ itemId, shown }: { itemId: string; shown: number }) {
+  const taps = useSoldInStoreSender();
+  const sale = useSoldInStoreRow(itemId);
+  return (
+    <View style={{ marginTop: space.md, gap: space.sm }}>
+      <PillButton
+        label={SOLD_IN_STORE.button}
+        variant="soft"
+        size="md"
+        style={{ alignSelf: 'stretch' }}
+        disabled={shown <= 0}
+        onPress={() => taps.tap(itemId)}
+      />
+      {sale.sold > 0 ? (
+        <Pressable onPress={() => taps.undo(itemId)} hitSlop={8} accessibilityRole="button" accessibilityLabel={`${SOLD_IN_STORE.sold(sale.sold)}. ${SOLD_IN_STORE.undo}`}>
+          <T variant="caption" tone="muted">
+            {SOLD_IN_STORE.sold(sale.sold)} ·{' '}
+            <T variant="caption" weight="semibold" tone="brand">
+              {SOLD_IN_STORE.undo}
+            </T>
+          </T>
+        </Pressable>
+      ) : null}
+      {sale.stalled ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+          <T variant="caption" tone="error" style={{ flex: 1 }}>
+            {SOLD_IN_STORE.notSent(sale.unsent)}
+          </T>
+          <PillButton label={SOLD_IN_STORE.tryAgain} variant="outline" size="sm" onPress={() => taps.retry(itemId)} />
+        </View>
+      ) : null}
+      {sale.notice ? (
+        <T variant="caption" tone="error">
+          {sale.notice}
+        </T>
+      ) : null}
+    </View>
   );
 }
 

@@ -2891,6 +2891,9 @@ enum StockAdjustmentReason {
   MANUAL
   RECONCILE
   RETURN
+  /// [IN-STORE-SALE] One sold at the counter, tapped on the store's menu list (delta -1); its Undo is a new
+  /// +1 row with the same reason, never an edit. The stock adjust route does not accept it.
+  IN_STORE_SALE
 }
 
 /// THE STOCK LEDGER [MKT-2 Movement 1] — the truth behind `Item.stockQuantity`.
@@ -2960,6 +2963,9 @@ enum StockMovementReason {
   /// One per tracked item at migration time, so the ledger explains the counter
   /// it inherited instead of pretending history started today.
   OPENING_BALANCE
+  /// [IN-STORE-SALE] Sold in person at the store (a store with no till system taps "Sold in store"): -1. Its
+  /// Undo is a compensating +1 row with the same reason, so the reason's deltas sum to the net sold in store.
+  IN_STORE_SALE
 }
 
 model OrderItemOption {

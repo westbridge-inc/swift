@@ -17,6 +17,9 @@ import { vatClassWords } from './vat-class-words';
 import { adjustStock } from '@/lib/stock-adjust';
 // The app's own words for the store's pick tick (a plain file, imported as is).
 import { STORE_PICK } from '../../../../../mobile/src/lib/storePick';
+import { SOLD_IN_STORE } from '../../../../../mobile/src/lib/inStoreSale';
+// [IN-STORE-SALE] A tracked row's "Sold in store −1" (drawn from this chunk, like the row's other tools).
+export { SaleStock } from './sold-in-store';
 
 // [TAP-AUDIT 27 Oct · owner rule 11 Oct: the website copies the app] The Products page's item editor and section
 // tools, copied from the phone (VendorItemEditorScreen, VendorMenuScreen's section header and delete asks): the same
@@ -411,7 +414,8 @@ export function ItemEditor({
             ) : null}
             <input className="sw-input" aria-label="SKU / barcode (optional)" placeholder="SKU / barcode (optional)" value={sku} onChange={(e) => setSku(e.target.value)} />
             <input className="sw-input" aria-label="Low-stock alert at (e.g. 5)" placeholder="Low-stock alert at (e.g. 5)" inputMode="numeric" value={lowStock} onChange={(e) => setLowStock(e.target.value)} />
-            {stock.trim() !== '' ? <p className="sw-caption">Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.</p> : null}
+            {stock.trim() !== '' ? <p className="sw-caption">Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.</p>
+              : <p className="sw-caption">{SOLD_IN_STORE.untracked}</p>}
           </div>
           <OptionsSection storeId={storeId} item={item} drafts={draftGroups} setDrafts={setDraftGroups} />
         </>

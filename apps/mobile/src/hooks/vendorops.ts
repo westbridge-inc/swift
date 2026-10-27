@@ -21,6 +21,7 @@ import type { AuthSessionSnapshot } from '../lib/authSession';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
+  newCommandKey,
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../stores/authStore';
@@ -37,6 +38,8 @@ import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
 import { pendingOrderIds } from '../modules/vendor/boardTaps';
 import { answeredSinceAsked } from '../modules/vendor/storeOrderRules';
 import { errorMessage } from '../lib/apiError';
+import type { SaleAnswer, SaleOp } from '../lib/inStoreSale';
+import { phoneSaleFailure, soldInStore } from './useSoldInStore';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -855,6 +858,45 @@ export function useSetItemAvailability() {
     )),
   });
 }
+
+// [IN-STORE-SALE] The sender for the app's "Sold in store −1" taps (hooks/useSoldInStore, lib/inStoreSale): each tap
+// is one request with its own key; the server's count is written into the menu on screen (for the store it was tapped
+// in) and the menu is read again once, later. Its failures show on the row in words (never the app-wide toast).
+const MENU_READ_KEY = ['vendor', 'menu'] as const;
+const saleFields = (answer: SaleAnswer) => ({
+  ...(typeof answer?.stockQuantity === 'number' ? { stockQuantity: answer.stockQuantity } : {}),
+  ...(typeof answer?.isAvailable === 'boolean' ? { isAvailable: answer.isAvailable } : {}),
+});
+export function useSoldInStoreSender(): { tap: (_itemId: string) => void; undo: (_itemId: string) => void; retry: (_itemId: string) => void } {
+  const qc = useQueryClient();
+  const session = useAuthStore((s) => s.sessionGeneration);
+  const sale = useVendorMutation({
+    mutationKey: MENU_WRITE_KEY,
+    meta: { silent: true },
+    mutationFn: ({ itemId, op }: { itemId: string; op: SaleOp }) => unwrap<SaleAnswer>(
+      op.kind === 'sale' ? vendorApi.inStoreSale(itemId, op.key) : vendorApi.undoInStoreSale(itemId, op.saleKey),
+    ),
+  });
+  // Another person signed in (or out): nothing of the last one's taps carries over.
+  if (saleGeneration !== session) { soldInStore.reset(); saleGeneration = session; }
+  soldInStore.setSender({
+    newKey: () => newCommandKey(),
+    send: (itemId, op) => sale.mutateAsync({ itemId, op }),
+    answered: (itemId, answer, scope) => answerIntoMenu(qc, scope as MenuScope, (menu) => menuWithItemFields(menu, itemId, saleFields(answer))),
+    reread: () => rereadMenuSoon(qc),
+    classify: phoneSaleFailure,
+  });
+  return {
+    tap: (itemId) => {
+      // A menu read already on its way left before this tap: landing, it would show the count from before it.
+      void qc.cancelQueries({ queryKey: MENU_READ_KEY, exact: true });
+      soldInStore.tap(itemId, menuScope());
+    },
+    undo: (itemId) => soldInStore.undo(itemId, menuScope()),
+    retry: (itemId) => soldInStore.retry(itemId),
+  };
+}
+let saleGeneration: number | null = null;
 
 // ─── Modifiers (option groups + options) ─────────────────────────────────────
 // Each mutation resolves to the saved group (with options) or option, so the editor updates its own list from the
