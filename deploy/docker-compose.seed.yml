@@ -77,6 +77,18 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS_FILE: ${SMTP_PASS_FILE:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
+      SMTP_TIMEOUT_MS: ${SMTP_TIMEOUT_MS:-}
+      # [SEED-FIX 27 Oct] getChannels() builds EVERY channel, push included,
+      # even for a caller that only emails and texts, and production refuses a
+      # missing push provider (PUSH_PROVIDER unset is dev, which swallows every
+      # push). Without these lines the owner's solo re-seed was refused at its
+      # start (SOLO_EMAIL_UNAVAILABLE) though it sends no push. The seed gets
+      # the api's own values from deploy/.env (PUSH_PROVIDER=expo there).
+      # seed-container-channels.test.ts reads every setting the channels read
+      # in production and fails until each one is on this list.
+      PUSH_PROVIDER: ${PUSH_PROVIDER:-}
+      EXPO_PUSH_URL: ${EXPO_PUSH_URL:-}
+      EXPO_PUSH_RECEIPT_DELAY_MS: ${EXPO_PUSH_RECEIPT_DELAY_MS:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     networks: [private]

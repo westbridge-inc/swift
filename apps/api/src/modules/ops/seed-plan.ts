@@ -524,6 +524,30 @@ export function soloNoticeChannelsReady(env: Record<string, string | undefined> 
   return null;
 }
 
+/**
+ * [SOLO RE-SEED · SEED-FIX 27 Oct] The notification settings the seed
+ * container is given (deploy/docker-compose.seed.yml), from deploy/.env just
+ * as the api gets them. getChannels() builds every channel (push too), so the
+ * seed needs every setting it reads in production, not only the email and
+ * text ones. Compose hands an unset one over as an empty string, and the
+ * providers read empty as a value (PUSH_PROVIDER='' is an unknown provider,
+ * SMTP_TLS='' an unknown mode), so the seed unsets an empty one first
+ * (seed-production.ts). The two secrets are not listed: they arrive as *_FILE,
+ * and the secret-file loader already treats an empty one as unset.
+ * seed-container-channels.test.ts records what the channels read in
+ * production and holds this list and the compose file to it.
+ */
+export const SEED_CHANNEL_SETTINGS = [
+  'NOTIFICATION_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID',
+  'PUSH_PROVIDER', 'EXPO_PUSH_URL', 'EXPO_PUSH_RECEIPT_DELAY_MS',
+  'EMAIL_PROVIDER', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_TLS', 'SMTP_USER', 'EMAIL_FROM', 'SMTP_TIMEOUT_MS',
+] as const;
+
+/** An empty notification setting is an unset one in the seed (see SEED_CHANNEL_SETTINGS). */
+export function unsetEmptyChannelSettings(env: Record<string, string | undefined>): void {
+  for (const name of SEED_CHANNEL_SETTINGS) if (env[name] === '') delete env[name];
+}
+
 function assertNoticeChannels(): void {
   const missing = soloNoticeChannelsReady();
   if (missing === 'email') throw new SeedRefused('SOLO_EMAIL_UNAVAILABLE', "a solo re-seed emails the owner when it starts and when it runs, and this seed's email is not set up; nothing ran");
