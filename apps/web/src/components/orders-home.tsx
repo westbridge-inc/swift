@@ -454,18 +454,19 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
 export function PickupCodeCard({ store, readFailed = false, onRetryRead = () => {} }: { store: HubStore; readFailed?: boolean; onRetryRead?: () => void }) {
   const storeId = useStoreId();
   const client = useQueryClient();
-  const required = !!store.requirePickupCode;
+  // [TAP-AUDIT] The switch moves at the tap (as the app's does): it shows the tapped state while the request is out and
+  // stays locked until the store is re-read, so a quick second tap cannot send the stale opposite.
   const mut = useMutation({
-    mutationFn: () => updateProfile({ requirePickupCode: !required }),
-    // Locked until the store is re-read, so a quick second tap cannot send the stale opposite.
+    mutationFn: (on: boolean) => updateProfile({ requirePickupCode: on }),
     onSettled: () => Promise.all([
       client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') }),
       client.invalidateQueries({ queryKey: storeKey(storeId, 'orders') }),
     ]),
   });
+  const required = mut.isPending && typeof mut.variables === 'boolean' ? mut.variables : !!store.requirePickupCode;
   return (
     <section aria-label="Pickup code" className="sw-card p-5">
-      <button type="button" role="switch" aria-label={HANDOVER_WORDS.settingTitle} aria-checked={required} disabled={readFailed || mut.isPending} onClick={() => mut.mutate()}
+      <button type="button" role="switch" aria-label={HANDOVER_WORDS.settingTitle} aria-checked={required} disabled={readFailed || mut.isPending} onClick={() => mut.mutate(!required)}
         className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">
         <span className="min-w-0 flex-1">
           <span className="block font-semibold">{HANDOVER_WORDS.settingTitle}</span>

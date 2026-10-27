@@ -67,6 +67,7 @@ vi.mock('../../../hooks/vendorops', () => {
     useVendorOrder: (id?: string) => ({ data: id ? fx.orders[id] : undefined, isLoading: false, isError: false, refetch: vi.fn() }),
     useOrderAction: () => fx.act, useRetryDispatch: idle, useSetOrderFulfillmentMode: idle, useReturnReceived: idle,
     usePickingActions: () => ({ setPicked: idle(), substitute: idle(), refundLine: idle() }),
+    usePendingPickLines: () => new Set(), // [TAP-AUDIT] no pick tick on its way
     useVendorMenu: () => ({ data: [] }),
   };
 });

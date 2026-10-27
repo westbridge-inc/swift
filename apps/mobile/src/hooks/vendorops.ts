@@ -26,7 +26,7 @@ import {
 } from '../stores/authStore';
 import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
-import { withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
+import { withStoreFields, withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
@@ -502,9 +502,38 @@ export function useToggleOpen() {
     onError: () => { void reread(); },
   });
 }
+/** [TAP-AUDIT] Pause / resume new orders answers at the tap, as Store open does (PERF row 562): the screen shows the
+ *  tapped state while the request is out (shownStoreOpen), the server's own answer (both flags) goes into the store at
+ *  once, and the re-read runs on its own. A refusal re-reads, so the button shows what the server holds. */
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  const reread = () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+  return usePreviewSafeMutation({
+    mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)),
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: StoreSwitchAnswer, _accepting: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreSwitchAnswer(before, storeId, answer);
+      if (after !== before) qc.setQueryData(['vendor', 'profile'], after);
+      void reread();
+    },
+    onError: () => { void reread(); },
+  });
+}
+/** [TAP-AUDIT] A store setting switch answers at the tap: the tapped state shows while the request is out, the saved
+ *  store's own value goes into the profile at once, and the re-reads run on their own (they used to hold the switch
+ *  until a second round trip). */
+function settingSwitchAnswers(qc: ReturnType<typeof useQueryClient>, field: 'requirePickupCode' | 'selfDeliveryEnabled', reread: () => void) {
+  return {
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: unknown, _on: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreFields(before, storeId, answer, [field]);
+      if (after !== before) qc.setQueryData(['vendor', 'profile'], after);
+      reread();
+    },
+    onError: () => { reread(); },
+  };
 }
 /** [STORE-DASH · O-2] The store's "Ask for the pickup code" setting (owner/manager; rides the store profile). */
 export function useSetRequirePickupCode() {
@@ -512,10 +541,10 @@ export function useSetRequirePickupCode() {
   return usePreviewSafeMutation({
     mutationFn: (requirePickupCode: boolean) => unwrap(vendorApi.updateProfile({ requirePickupCode })),
     // The orders carry pickupCodeRequired: re-read them too, so the cards switch with the setting.
-    onSuccess: () => Promise.all([
-      qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
-      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
-    ]),
+    ...settingSwitchAnswers(qc, 'requirePickupCode', () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    }),
   });
 }
 
@@ -525,7 +554,7 @@ export function useSetSelfDelivery() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
     mutationFn: (selfDeliveryEnabled: boolean) => unwrap(vendorApi.updateProfile({ selfDeliveryEnabled })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    ...settingSwitchAnswers(qc, 'selfDeliveryEnabled', () => { void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }); }),
   });
 }
 
@@ -623,6 +652,23 @@ export function useConfirmVendorCashSettlement() {
   });
 }
 
+/** [TAP-AUDIT] Every pick tick carries this key: the screen reads which lines are waiting (usePendingPickLines). */
+export const PICK_KEY = ['vendor', 'orders', 'pick'] as const;
+/** An order with one line's `picked` as given (an order without that line, or not an order, comes back as it is). */
+export function withLinePicked(order: unknown, lineId: string, picked: boolean): unknown {
+  const items = (order as { items?: unknown } | null | undefined)?.items;
+  if (!Array.isArray(items) || !items.some((l) => (l as { id?: unknown } | null)?.id === lineId)) return order;
+  return { ...(order as object), items: items.map((l) => ((l as { id?: unknown } | null)?.id === lineId ? { ...(l as object), picked } : l)) };
+}
+/** The lines of this order whose tick is still on its way to the server (each waits alone). */
+export function usePendingPickLines(orderId: string | undefined): ReadonlySet<string> {
+  const lines = useMutationState({
+    filters: { mutationKey: PICK_KEY, status: 'pending' },
+    select: (m) => m.state.variables as { orderId?: string; lineId?: string } | undefined,
+  });
+  return new Set(lines.filter((v) => v?.orderId === orderId).map((v) => v!.lineId!));
+}
+
 /** Grocery picking (§5.3): tick lines, swap out-of-stock, refund a line. */
 export function usePickingActions() {
   const qc = useQueryClient();
@@ -630,10 +676,30 @@ export function usePickingActions() {
     qc.invalidateQueries({ queryKey: ['vendor', 'order', orderId] });
     qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
   };
+  // [TAP-AUDIT] A pick tick shows at the tap (on the order and its board card), the server's answer is written, and
+  // the order alone is read again once after the last tick. It used to wait for the write AND a re-read of every
+  // vendor order query (board, every open order, history) before the box ticked: ~1.3 s a line on a mobile link.
+  const writePick = (orderId: string, lineId: string, picked: boolean) => {
+    qc.setQueryData(['vendor', 'orders', 'detail', orderId], (order: unknown) => withLinePicked(order, lineId, picked));
+    qc.setQueryData(['vendor', 'orders'], (orders: unknown) => (Array.isArray(orders)
+      ? orders.map((o: any) => (o?.id === orderId ? withLinePicked(o, lineId, picked) : o))
+      : orders));
+  };
   const setPicked = usePreviewSafeMutation({
+    mutationKey: PICK_KEY,
     mutationFn: ({ orderId, lineId, picked }: { orderId: string; lineId: string; picked: boolean }) =>
-      unwrap(vendorApi.setLinePicked(orderId, lineId, picked)),
-    onSuccess: (_d, v) => invalidate(v.orderId),
+      unwrap<{ picked?: unknown }>(vendorApi.setLinePicked(orderId, lineId, picked)),
+    onMutate: async ({ orderId, lineId, picked }) => {
+      // A read already on its way would land with the box as it was.
+      await qc.cancelQueries({ queryKey: ['vendor', 'orders', 'detail', orderId], exact: true });
+      writePick(orderId, lineId, picked);
+    },
+    onError: (_e, { orderId, lineId, picked }) => writePick(orderId, lineId, !picked),
+    onSuccess: (line, { orderId, lineId }) => { if (typeof line?.picked === 'boolean') writePick(orderId, lineId, line.picked); },
+    onSettled: (_d, _e, { orderId }) => {
+      // Only the last tick re-reads (a re-read while another tick is out would show that box as it was).
+      if (qc.isMutating({ mutationKey: PICK_KEY }) <= 1) void qc.invalidateQueries({ queryKey: ['vendor', 'orders', 'detail', orderId], exact: true });
+    },
   });
   const substitute = usePreviewSafeMutation({
     mutationFn: ({ orderId, lineId, substituteItemId }: { orderId: string; lineId: string; substituteItemId: string }) =>

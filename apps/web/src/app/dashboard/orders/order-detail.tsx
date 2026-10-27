@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { cancellationReasonWords } from '@swift/types';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
 import { CallPartyButton } from '@/components/call-party-button';
@@ -81,6 +81,10 @@ function actionsFor(o: VendorOrder) {
   return mmgDisputePaused(o) ? out.filter((a) => a.kind === 'reject') : out;
 }
 
+/** [TAP-AUDIT] The pick ticks of one order share this key: the order's step buttons wait while one is still out (a
+ *  "Ready" sent before a tick lands would be refused for an unpicked line). */
+const pickMutationKey = (storeId: string | null, orderId: string) => ['order-pick', storeId, orderId];
+
 function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
@@ -92,10 +96,34 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const [subFor, setSubFor] = useState<string | null>(null);
 
   const MMG_LINE_LOCK = 'MMG order — settle item changes with the customer directly.';
+  // [TAP-AUDIT] A pick tick shows at the tap and only that line waits for its answer (one tick used to freeze every
+  // box on the order until the write AND a re-read of the order and the whole board had come back). A refusal puts the
+  // box back and says why; the order alone is read again once, after the last tick.
+  const detailKey = storeKey(storeId, 'order', order.id);
+  const pickKey = pickMutationKey(storeId, order.id);
+  const writePick = (lineId: string, picked: boolean) => queryClient.setQueryData<VendorOrder>(detailKey, (o) => (o
+    ? { ...o, items: o.items.map((l) => (l.id === lineId ? { ...l, picked } : l)) }
+    : o));
   const pickedMut = useMutation({
+    mutationKey: pickKey,
     mutationFn: (v: { lineId: string; picked: boolean }) => setPicked(order.id, v.lineId, v.picked),
-    onSettled: refresh,
+    onMutate: async (v) => {
+      await queryClient.cancelQueries({ queryKey: detailKey, exact: true });
+      writePick(v.lineId, v.picked);
+    },
+    onError: (_e, v) => writePick(v.lineId, !v.picked),
+    onSuccess: (answer, v) => {
+      const saved = (answer as { data?: { picked?: unknown } } | undefined)?.data?.picked;
+      if (typeof saved === 'boolean') writePick(v.lineId, saved);
+    },
+    onSettled: () => {
+      if (queryClient.isMutating({ mutationKey: pickKey }) <= 1) void queryClient.invalidateQueries({ queryKey: detailKey, exact: true });
+    },
   });
+  const picksOut = new Set(useMutationState({
+    filters: { mutationKey: pickKey, status: 'pending' },
+    select: (m) => (m.state.variables as { lineId: string } | undefined)?.lineId,
+  }));
   const subMut = useMutation({
     mutationFn: (v: { lineId: string; substituteItemId: string }) => proposeSubstitution(order.id, v.lineId, v.substituteItemId),
     onSettled: () => { setSubFor(null); refresh(); },
@@ -137,7 +165,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
         : removed > 0
           ? `Picked ✓ — ${fulfilled} of ${order.items.length} lines, ${removed} removed`
           : 'All picked ✓';
-  const busy = onBusy || pickedMut.isPending || subMut.isPending || refundMut.isPending;
+  const busy = onBusy || subMut.isPending || refundMut.isPending;
   // [W-27] An MMG order's totals cannot change in-app — the server refuses with
   // MMG_ADJUSTMENT_UNAVAILABLE, because the money went straight to the store
   // and Swift never held it. Saying so beats letting the store click into a 409.
@@ -154,7 +182,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
               <input
                 type="checkbox"
                 checked={!!it.picked}
-                disabled={busy || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
+                disabled={busy || picksOut.has(it.id) || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
                 onChange={(e) => pickedMut.mutate({ lineId: it.id, picked: e.target.checked })}
                 aria-label={`Picked: ${it.quantity}× ${it.name}`}
                 className="h-4 w-4 accent-[var(--swift-red)]"
@@ -256,6 +284,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'orders') });
   };
+  // [TAP-AUDIT] The step buttons wait while a pick tick of this order is still on its way.
+  const picksOut = useIsMutating({ mutationKey: pickMutationKey(storeId, id) }) > 0;
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
@@ -679,7 +709,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
                       ? setConfirmReject(true)
                       : act.mutate(a.kind)}
                 aria-busy={act.isPending && act.variables === a.kind}
-                disabled={act.isPending || reject.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
+                disabled={act.isPending || reject.isPending || picksOut || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
                 className={`min-h-12 flex-1 rounded-xl px-5 py-3 text-base font-bold disabled:opacity-50 ${
                   a.tone === 'danger'
                     ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'

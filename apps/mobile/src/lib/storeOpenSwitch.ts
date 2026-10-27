@@ -40,3 +40,15 @@ export function withStoreSwitchAnswer<T>(profile: T, storeId: string | null | un
       : v)),
   } as T;
 }
+
+/** [TAP-AUDIT] The profile read with some of one store's own fields as the server answered them (the "Deliver my own
+ *  orders" and "Ask for the pickup code" switches answer with the saved store). Only boolean answers are written;
+ *  anything it cannot place comes back unchanged and the re-read settles it. */
+export function withStoreFields<T>(profile: T, storeId: string | null | undefined, answer: unknown, fields: readonly string[]): T {
+  if (!storeId || !answer || typeof answer !== 'object') return profile;
+  const picked = Object.fromEntries(fields.filter((f) => typeof (answer as Record<string, unknown>)[f] === 'boolean').map((f) => [f, (answer as Record<string, unknown>)[f]]));
+  if (!Object.keys(picked).length) return profile;
+  const vendors = (profile as { vendors?: unknown } | null | undefined)?.vendors;
+  if (!Array.isArray(vendors) || !vendors.some((v) => (v as { id?: unknown } | null)?.id === storeId)) return profile;
+  return { ...(profile as object), vendors: vendors.map((v) => ((v as { id?: unknown } | null)?.id === storeId ? { ...(v as object), ...picked } : v)) } as T;
+}
