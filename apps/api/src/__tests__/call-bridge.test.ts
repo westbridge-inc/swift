@@ -292,7 +292,21 @@ describe('[O-1] starting a call', () => {
     const screen = await hook('screen', res.json().data.callId, {});
     expect(screen.body).toContain('<Say>Swift call about a delivery for you. Press 1 to connect.</Say>');
     expect(screen.body).not.toContain('your order');
-    await hook('dial-done', res.json().data.callId, { DialCallStatus: 'busy' });
+    // [REVIEW-F #2133 S4-1] The recipient has no chat; the rider can message the SENDER.
+    const done = await hook('dial-done', res.json().data.callId, { DialCallStatus: 'busy' });
+    expect(done.body).toContain("<Say>We couldn't reach the recipient. Try again, or message the sender in chat.</Say>");
+    expect(done.body).not.toContain('message them in chat');
+  });
+
+  it('the recipient\'s number is gone by the time the rider presses 1: nobody is dialled, and the rider is pointed to the sender', async () => {
+    const parcel = await order({ orderType: 'COURIER', customerId: sender.id, riderId: courierRiderId, status: 'PICKED_UP', courierRecipientPhone: RECIPIENT, acceptedAt: new Date() });
+    const res = await bridge(courierP.token, parcel.id, 'recipient');
+    expect(res.statusCode, res.body).toBe(200);
+    await system(() => app.prisma.order.update({ where: { id: parcel.id }, data: { courierRecipientPhone: null } }));
+    const out = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
+    expect(out.body).not.toContain('<Dial');
+    expect(out.body).toContain('message the sender in chat');
+    expect((await session(res.json().data.callId)).status).toBe('NOT_CONNECTED');
   });
 
   it('a taxi: the passenger calls the driver', async () => {

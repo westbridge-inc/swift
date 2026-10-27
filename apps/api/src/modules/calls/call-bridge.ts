@@ -59,6 +59,8 @@ export const CALL_WORDS = {
   noKey: 'No key was pressed. Goodbye.',
   connecting: 'Connecting you now.',
   notReached: "We couldn't reach them. Try again, or message them in chat.",
+  // [REVIEW-F #2133 S4-1] The parcel recipient has no Swift account or chat; the rider can message the sender.
+  recipientNotReached: "We couldn't reach the recipient. Try again, or message the sender in chat.",
 } as const;
 
 /** A call that has been live this long is over, whatever the provider last said:
@@ -303,6 +305,8 @@ export async function handleVoiceStep(
   if (!session) return step === 'status' ? { step: null } : hangup();
   const ended = session.endedAt !== null;
   const notConnected = { status: CALL_STATUS.NOT_CONNECTED, endedAt: now, durationSeconds: 0 };
+  /** What the caller hears when the other side was not reached (the recipient has no chat: the sender's). */
+  const notReachedWords = session.calleeRole === 'recipient' ? CALL_WORDS.recipientNotReached : CALL_WORDS.notReached;
 
   switch (step) {
     case 'leg1': {
@@ -320,7 +324,7 @@ export async function handleVoiceStep(
       const to = order && !isTerminalOrderStatus(order.status) ? numberFor(order, session.calleeRole as CallTarget) : null;
       if (!order || !to) {
         await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null }, data: notConnected });
-        return hangup(CALL_WORDS.notReached);
+        return hangup(notReachedWords);
       }
       const moved = await deps.prisma.callSession.updateMany({
         where: { id: session.id, status: CALL_STATUS.DIALING_CALLER, endedAt: null },
@@ -364,7 +368,7 @@ export async function handleVoiceStep(
         return hangup();
       }
       await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null }, data: notConnected });
-      return hangup(CALL_WORDS.notReached);
+      return hangup(notReachedWords);
     }
     case 'status': {
       if (!ended && event.callStatus && TERMINAL_CALL_STATUSES.has(event.callStatus)) {
