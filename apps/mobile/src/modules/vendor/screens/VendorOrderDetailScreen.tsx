@@ -13,7 +13,7 @@ import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { orderPaymentLine } from '../storeWords';
 import { storeTimelineLabel } from '../../../lib/orderStatus';
-import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
+import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, usePendingPickLines, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
 import { storeSwapWaitText } from '../../orders/substitutionCopy';
 import { toast } from '../../../kit/toast';
@@ -150,6 +150,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const [pickupCode, setPickupCode] = useState('');
   const [subFor, setSubFor] = useState<string | null>(null);
   const picking = usePickingActions();
+  // [TAP-AUDIT] Each line's tick waits alone: a second tap on a box whose tick is still on its way sends nothing.
+  const pickPending = usePendingPickLines(orderId);
   const menu = useVendorMenu();
 
   // [MOB-050] A missing orderId is not a slow network. It used to render the
@@ -207,7 +209,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   // [MOB-050] The one state where a counter hand-over is due.
   const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
-  const busy = orderAction.isPending;
+  // [TAP-AUDIT] The step buttons also wait while a pick tick is still on its way (a Ready sent before it lands would be
+  // refused for an unpicked line).
+  const busy = orderAction.isPending || pickPending.size > 0;
   // The log is stored newest-first; the timeline reads placed → latest.
   const timeline: any[] = [...(order.statusHistory ?? [])].reverse();
   const customerName = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
@@ -376,7 +380,11 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
                   {pickable && !closed ? (
                     <Pressable
-                      onPress={() => !pending && picking.setPicked.mutate({ orderId: order.id, lineId: it.id, picked: !it.picked })}
+                      onPress={() => !pending && !pickPending.has(it.id) && picking.setPicked.mutate({ orderId: order.id, lineId: it.id, picked: !it.picked })}
+                      disabled={pickPending.has(it.id)}
+                      accessibilityRole="checkbox"
+                      accessibilityLabel={`Picked: ${it.quantity}× ${it.name}`}
+                      accessibilityState={{ checked: !!it.picked, busy: pickPending.has(it.id) }}
                       hitSlop={8}
                       style={{ marginRight: space.sm, marginTop: 1 }}
                     >

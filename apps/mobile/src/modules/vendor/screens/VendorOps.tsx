@@ -922,8 +922,11 @@ export function VendorOps({ store, navigation }: any) {
   // [PERF row 562] The switch (and everything that reads it here) shows the
   // state just tapped while its request is out — lib/storeOpenSwitch.
   const open = shownStoreOpen(!!store.isCurrentlyOpen, toggleOpen.isPending, toggleOpen.variables);
-  const accepting = !!store.acceptingOrders;
-  const selfDelivery = !!store.selfDeliveryEnabled;
+  // [TAP-AUDIT] Pause/Resume and the store's setting switches show the tapped state while the request is out (as
+  // Store open does), then the server's answer.
+  const accepting = shownStoreOpen(!!store.acceptingOrders, toggleOrders.isPending, toggleOrders.variables);
+  const selfDelivery = shownStoreOpen(!!store.selfDeliveryEnabled, setSelfDelivery.isPending, setSelfDelivery.variables);
+  const requirePickupCode = shownStoreOpen(!!store.requirePickupCode, setRequirePickupCode.isPending, setRequirePickupCode.variables);
   // [STORE-DASH] Only the order that was tapped waits for the server's answer
   // (boardTaps): a slow answer for one order never freezes the others.
   const pendingIds = usePendingOrderIds();
@@ -1248,7 +1251,7 @@ export function VendorOps({ store, navigation }: any) {
               variant="soft"
               size="md"
               style={{ marginTop: space.md }}
-              loading={toggleOrders.isPending}
+              disabled={toggleOrders.isPending}
               onPress={() => toggleOrders.mutate(!accepting)}
             />
           ) : null}
@@ -1303,20 +1306,20 @@ export function VendorOps({ store, navigation }: any) {
             <Pressable
               testID="vendor-require-pickup-code"
               disabled={setRequirePickupCode.isPending}
-              onPress={() => setRequirePickupCode.mutate(!store.requirePickupCode)}
+              onPress={() => setRequirePickupCode.mutate(!requirePickupCode)}
               accessibilityRole="switch"
               accessibilityLabel={HANDOVER_WORDS.settingTitle}
-              accessibilityState={{ checked: !!store.requirePickupCode, disabled: setRequirePickupCode.isPending, busy: setRequirePickupCode.isPending }}
+              accessibilityState={{ checked: requirePickupCode, disabled: setRequirePickupCode.isPending, busy: setRequirePickupCode.isPending }}
             >
               {({ pressed }) => (
                 <View style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', opacity: pressed ? 0.82 : 1 }}>
                   <View style={{ flex: 1, paddingRight: space.md }}>
                     <T variant="body" weight="bold">{HANDOVER_WORDS.settingTitle}</T>
                     <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                      {store.requirePickupCode ? HANDOVER_WORDS.settingOn : HANDOVER_WORDS.settingOff}
+                      {requirePickupCode ? HANDOVER_WORDS.settingOn : HANDOVER_WORDS.settingOff}
                     </T>
                   </View>
-                  <AvailabilitySwitch value={!!store.requirePickupCode} disabled={setRequirePickupCode.isPending} accessible={false} pointerEvents="none" />
+                  <AvailabilitySwitch value={requirePickupCode} disabled={setRequirePickupCode.isPending} accessible={false} pointerEvents="none" />
                 </View>
               )}
             </Pressable>
