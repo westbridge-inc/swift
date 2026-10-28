@@ -2356,6 +2356,20 @@ export class DispatchService {
       await this.retireForVendorDelivery(orderId, rail.fulfillmentModeVersion);
       throw new AppError(409, 'VENDOR_DELIVERY_SELECTED', 'The store is delivering this order');
     }
+    // Consume the offer atomically before claiming. A late accept can no longer
+    // pass GET and then claim after timeout/offline has offered the job to the
+    // next mover. If the DB claim loses, advance the cascade below.
+    // [F-014-04] With a client-echoed attempt id this binds to the exact card
+    // generation; wildcard is still mover-safe (own offer only).
+    // [F19] Consumed FIRST, before anything reads the delivery generation: an
+    // accept naming a card this mover does not hold (a stale or a made-up id)
+    // is explained from the order row and never restarts the search. Only a
+    // consumed card is the server's own (an exact match on the live value), so
+    // the generation read from it below is server-held, not the client's.
+    const consumed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
+    if (!consumed) {
+      return this.explainLostOffer(orderId, mover.id, pool);
+    }
     const offeredVersion = pool === 'RIDER'
       ? riderDeliveryAuthorityVersionFromAttempt(resolvedAttemptId)
       : undefined;
@@ -2364,19 +2378,9 @@ export class DispatchService {
       && rail != null
       && offeredVersion !== rail.fulfillmentModeVersion
     ) {
-      await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
+      // This mover's own card is gone with the old generation: search the current one.
       await this.dispatchOrder(orderId).catch(() => {});
       throw new AppError(409, 'OFFER_EXPIRED', 'Delivery ownership changed; refresh for the current offer');
-    }
-
-    // Consume the offer atomically before claiming. A late accept can no longer
-    // pass GET and then claim after timeout/offline has offered the job to the
-    // next mover. If the DB claim loses, advance the cascade below.
-    // [F-014-04] With a client-echoed attempt id this binds to the exact card
-    // generation; wildcard is still mover-safe (own offer only).
-    const consumed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
-    if (!consumed) {
-      return this.explainLostOffer(orderId, mover.id, pool);
     }
 
     try {

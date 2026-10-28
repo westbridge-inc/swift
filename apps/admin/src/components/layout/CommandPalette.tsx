@@ -100,6 +100,8 @@ export function CommandPalette({ onClose, role }: { onClose: () => void; role?: 
   const listId = `${uid}-results`;
   const optionId = (i: number) => `${uid}-option-${i}`;
   const failed = searchable && search.isError;
+  // [SEC-PII] The server's own words when searching people by phone number or email needs contact access.
+  const searchHint = searchable && term === q.trim() ? search.data?.data?.searchHint : undefined;
   const waiting = searchable && (search.isFetching || term !== q.trim()) && !search.data;
   const groups = [...new Set(options.map((o) => o.group))];
 
@@ -123,7 +125,7 @@ export function CommandPalette({ onClose, role }: { onClose: () => void; role?: 
         <kbd>esc</kbd>
       </div>
       <p id={`${uid}-hint`} className="mc-palette-hint">
-        {q.trim().length === 1 ? 'Type one more letter to search orders, people and businesses.' : 'Orders by number · people by name or phone · businesses by name'}
+        {q.trim().length === 1 ? 'Type one more letter to search orders, people and businesses.' : 'Orders by number · people by name, or by phone with contact access · businesses by name'}
       </p>
       {failed ? (
         <p role="alert" className="mc-palette-status mc-palette-error">
@@ -131,6 +133,7 @@ export function CommandPalette({ onClose, role }: { onClose: () => void; role?: 
           <button type="button" className="mc-btn mc-btn-quiet" onClick={() => void search.refetch()}>Retry</button>
         </p>
       ) : null}
+      {searchHint ? <p role="status" className="mc-palette-status">{searchHint}</p> : null}
       <div id={listId} role="listbox" aria-label="Results" className="mc-palette-results">
         {groups.map((group) => (
           <div key={group} role="group" aria-label={group}>

@@ -10,6 +10,7 @@ import {
   serializeChatMessage, serializeChatMessages,
 } from './chat-authority';
 import { NotificationService } from '../notification/notification.service';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { assertUsersMayContact } from '../moderation/user-block.service';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -37,6 +38,23 @@ async function recentSenderDigits(app: FastifyInstance, roomId: string, senderId
     select: { message: true },
   });
   return rows.reverse().map((r: { message: string }) => digitRun(r.message)).join('');
+}
+
+/** [F18] Tell the PIN's holder (the order's customer) that the PIN changed. No PIN in the
+ *  notice: it opens their own order or ride screen, which shows the new one. */
+async function notifyRidePinReissued(app: FastifyInstance, notifications: NotificationService, orderId: string): Promise<void> {
+  const order = await app.prisma.order.findUnique({ where: { id: orderId }, select: { customerId: true, orderType: true, orderNumber: true, status: true } });
+  if (!order) return;
+  const ride = order.orderType === 'TAXI';
+  await notifications.send({
+    userId: order.customerId,
+    type: 'ORDER_UPDATE',
+    title: ride ? 'Your ride PIN has changed' : 'Your delivery PIN has changed',
+    body: ride
+      ? 'Your PIN was shared in chat, so Swift made a new one. Open your ride to see it, and give it to your driver only in person.'
+      : `Your PIN for order ${order.orderNumber} was shared in chat, so Swift made a new one. Open your order to see it, and give it to your rider only at the door.`,
+    data: ride ? taxiNotificationData(orderId, { status: order.status }) : { orderId, orderNumber: order.orderNumber, status: order.status },
+  });
 }
 
 const createRoomSchema = z.object({
@@ -285,7 +303,13 @@ export async function chatRoutes(app: FastifyInstance) {
     // [R048-004] A server-issued id cannot name the code by construction (a random name under the
     // room's folder); the check stays as the invariant it is.
     // [R048-004] A live ride PIN typed into chat is in someone's hands now: re-issue it.
-    if (guarded.redacted && access.orderId) await rotateLeakedRidePin(app.prisma, access.orderId, message, access.secrets);
+    // [F18] Judged on the same joined transcript the redaction read (priorDigits): a PIN typed
+    // in pieces is rotated too. The holder is told through the one notification path; the
+    // new PIN is read on their own order screen, never put on a lock screen.
+    if (guarded.redacted && access.orderId && await rotateLeakedRidePin(app.prisma, access.orderId, message, access.secrets, priorDigits)) {
+      await notifyRidePinReissued(app, notifications, access.orderId)
+        .catch((err: unknown) => request.log.warn({ err, orderId: access.orderId }, 'chat: re-issued PIN notice failed after commit'));
+    }
 
     // ONE serializer for every egress: the socket payload, the push body and the response are the same view.
     const view = await serializeChatMessage(msg, access, 'socket');

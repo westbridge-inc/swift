@@ -574,7 +574,9 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     expect(told[0]!.data).toMatchObject({ ref: checkout.ref, status: 'CONFIRMED', vendorId: s.vendorId, subscriptionId: s.subId });
 
     // MMG's server and a page refresh repeat it: nothing moves again.
-    expect(await service.observeReply({ source: 'NOTIFY', outcome: 'notify', params: { payload: token } })).toBe('CONFIRMED');
+    expect(await service.observeReply({ source: 'NOTIFY', outcome: 'notify', params: { token } })).toBe('CONFIRMED');
+    // [SEC-DOS F8] A reply is read from its token field only, on Notify too: the same reply under another name opens nothing.
+    expect(await service.observeReply({ source: 'NOTIFY', outcome: 'notify', params: { payload: token } })).toBe('UNKNOWN');
     expect(await service.observeReply({ source: 'RETURN', outcome: 'success', params: { token } })).toBe('CONFIRMED');
     expect(await topups(s.subId)).toHaveLength(1);
     expect(await toldOf(s.userId)).toHaveLength(1);
@@ -1959,7 +1961,7 @@ describe('concurrency — racing verifiers credit once', () => {
     const token = replyFor(row.merchantTransactionId, tx('TWINTX1'));
     const answers = await Promise.all([
       service.observeReply({ source: 'RETURN', outcome: 'success', params: { token } }),
-      service.observeReply({ source: 'NOTIFY', outcome: 'notify', params: { payload: token } }),
+      service.observeReply({ source: 'NOTIFY', outcome: 'notify', params: { token } }),
     ]);
     expect(answers).toEqual(['CONFIRMED', 'CONFIRMED']);
     expect(await topups(s.subId)).toHaveLength(1);

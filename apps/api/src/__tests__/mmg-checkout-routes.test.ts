@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { nanoid } from 'nanoid';
 import type { Prisma, PrismaClient, SubscriptionStatus, UserRole } from '@prisma/client';
@@ -14,6 +15,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { rateLimitKey } from '../utils/rate-limit-key';
+import { asFastifyTrustProxy } from '../config/trust-proxy';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
@@ -275,8 +277,8 @@ const toldOf = (userId: string, status: string) => app.prisma.notification.findM
 const alertsOf = (alert: string) => app.prisma.notification.findMany({ where: { userId: superAdminId, data: { path: ['alert'], equals: alert } }, orderBy: { createdAt: 'asc' } });
 const observationsOf = (intentId: string) => app.prisma.mmgCheckoutObservation.findMany({ where: { intentId }, orderBy: { createdAt: 'asc' } });
 
-async function buildApp(): Promise<FastifyInstance> {
-  const server = Fastify({ logger: false });
+async function buildApp(options: { trustProxy?: ReturnType<typeof asFastifyTrustProxy> } = {}): Promise<FastifyInstance> {
+  const server = Fastify({ logger: false, ...options });
   registerErrorHandler(server);
   registerEmptyJsonBodyParser(server);
   await server.register(rateLimit, { max: 1000, timeWindow: '1 minute', keyGenerator: rateLimitKey((token) => server.jwt.verify(token)) });
@@ -1428,5 +1430,142 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
       expect(res.json().data).toMatchObject({ reopenableMmgCheckout: null, latestMmgCheckout: { ref: first.ref, status: 'OPEN' }, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, expect.anything()] });
       expect(spy.mock.calls.some(([, options]) => (options as { isolationLevel?: string } | undefined)?.isolationLevel === 'RepeatableRead')).toBe(true);
     } finally { spy.mockRestore(); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SEC-DOS F8] Opening a reply is a private-key operation on the API's one
+// event loop, and both public doors take it from anyone. A reply is opened
+// ONCE per request (the route hands the opened reply to the service, which
+// never opens it again), and only from the reply's own field: `token` (the
+// MMG demo's `?token=`, the address-path `token=` the web page forwards as
+// params.token, the 4 Oct notify form), on both doors: MMG's docs do not
+// describe Notify, so it reads the same field and nothing else (COORD, 28 Oct).
+// The private-key work itself is bounded (mmg-reply-gate.ts): one at a time,
+// the loop gets its turn between them, and the wait is bounded per source.
+// Nothing here changes what credits: still only MMG's lookup.
+// ---------------------------------------------------------------------------
+
+describe('[SEC-DOS F8] a reply is opened once, from its token field, and the private-key work is bounded', () => {
+  beforeEach(() => enable(true));
+
+  /** The sandbox, counting every attempt to open a reply with the private key. */
+  function countingProvider(costMs = 0) {
+    const calls = { n: 0 };
+    const provider = new Proxy(sandbox, {
+      get(target, prop) {
+        if (prop === 'decryptCheckoutResult') {
+          return (token: string) => {
+            calls.n += 1;
+            const until = Date.now() + costMs;
+            while (Date.now() < until) { /* a slow private-key operation: the loop is blocked */ }
+            return target.decryptCheckoutResult(token);
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as MmgCheckoutProvider;
+    checkoutProvider = () => provider;
+    return calls;
+  }
+  /** One RSA block under this file's 4096-bit key, as padded base64url: it passes every cheap check and costs a private-key operation. */
+  const garbage = () => randomBytes(512).toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
+  const garbageFields = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`field${i}`, garbage()]));
+
+  it('the return door never opens a value outside the token field', async () => {
+    const calls = countingProvider();
+    const res = await ret('success', garbageFields(16));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect(calls.n).toBe(0);
+  });
+
+  it('the return door opens its token field once, whatever else the body carries', async () => {
+    const calls = countingProvider();
+    const res = await ret('success', { ...garbageFields(15), token: garbage() });
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect(calls.n).toBe(1);
+  });
+
+  it('a genuine reply among other values is opened once and still confirms only through MMG\'s lookup', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = tx('ONCE0');
+    approved(row, txn, 1500, echoOf(row));
+    const calls = countingProvider();
+    const res = await ret('success', { ...garbageFields(15), token: officialReply(row, '0', txn) });
+    expect(res.json().data.state).toBe('CONFIRMED');
+    expect(calls.n).toBe(1);
+    expect(lookedUp).toContain(txn);
+    expect(await creditsOf(p.subId)).toBe(1);
+    expect((await observationsOf(ref)).filter((o) => o.source === 'RETURN')).toHaveLength(1);
+  });
+
+  it('the notify door opens its token field once, and never a value outside it', async () => {
+    let calls = countingProvider();
+    expect((await notify({ ...garbageFields(15), token: garbage() })).json()).toEqual({ success: true });
+    expect(calls.n).toBe(1);
+    calls = countingProvider();
+    expect((await notify(garbageFields(16))).json()).toEqual({ success: true });
+    expect(calls.n).toBe(0);
+  });
+
+  it('a junk flood from many sources through the one forwarding web server never starves the event loop, and a genuine return still completes', async () => {
+    // As production runs it: the web page forwards each partner's own address
+    // from the private network, and the API resolves request.ip through TRUST_PROXY.
+    const forwarded = await buildApp({ trustProxy: asFastifyTrustProxy('loopback, 172.16.0.0/12') });
+    try {
+      const p = await makeStore({ balance: 600 });
+      const { ref, row } = await started(p);
+      const txn = tx('FLOOD0');
+      approved(row, txn, 1500, echoOf(row));
+      const genuine = officialReply(row, '0', txn);
+      // Every private-key open costs 10 ms of the loop here, as a slow server would pay for it.
+      const calls = countingProvider(10);
+      const WEB = '172.20.0.5';
+      const viaWeb = (client: string, params: Record<string, unknown>) => forwarded.inject({
+        method: 'POST', url: RETURN_URL, remoteAddress: WEB,
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': client }, payload: { outcome: 'success', params },
+      });
+      const loop = monitorEventLoopDelay({ resolution: 5 });
+      loop.enable();
+      const flood = Array.from({ length: 10 }, (_, c) => `203.0.113.${c + 1}`)
+        .flatMap((client) => Array.from({ length: 8 }, () => viaWeb(client, { ...garbageFields(15), token: garbage() })));
+      const real = viaWeb('198.51.100.7', { token: genuine });
+      const [answers, mine] = await Promise.all([Promise.all(flood), real]);
+      loop.disable();
+      expect(mine.statusCode, mine.body).toBe(200);
+      expect(mine.json().data.state).toBe('CONFIRMED');
+      expect(await creditsOf(p.subId)).toBe(1);
+      expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
+      // Junk is answered UNKNOWN, or refused as retryable once its sources' share of the wait is full.
+      let refused = 0;
+      for (const a of answers) {
+        if (a.statusCode === 200) expect(a.json().data.state).toBe('UNKNOWN');
+        else {
+          refused += 1;
+          expect(a.statusCode).toBe(503);
+          expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN', details: { retryAfterSeconds: expect.any(Number) } } });
+          expect(Number(a.headers['retry-after'])).toBeGreaterThan(0);
+        }
+      }
+      expect(refused).toBeGreaterThan(0);
+      // At most one open per request, and the loop was never blocked for much more than one of them.
+      expect(calls.n).toBeLessThanOrEqual(flood.length + 1);
+      expect(loop.max / 1e6).toBeLessThan(120);
+    } finally {
+      await forwarded.close();
+    }
+  });
+
+  it('a busy notify is answered as retryable, never dropped as a 200', async () => {
+    countingProvider(30);
+    const flood = Array.from({ length: 30 }, () => app.inject({ method: 'POST', url: NOTIFY_URL, remoteAddress: '10.90.0.1', headers: { 'content-type': 'application/json' }, payload: { token: garbage() } }));
+    const answers = await Promise.all(flood);
+    const busy = answers.filter((a) => a.statusCode === 503);
+    expect(busy.length).toBeGreaterThan(0);
+    for (const a of busy) expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN' } });
+    for (const a of answers.filter((x) => x.statusCode !== 503)) expect(a.json()).toEqual({ success: true });
   });
 });

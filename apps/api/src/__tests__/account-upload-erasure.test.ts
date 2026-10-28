@@ -145,7 +145,7 @@ describe('(a) an upload no document claims goes with the account', () => {
     const doc = await upload(userId);
     const loose = await upload(userId);
     await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId, role: 'CUSTOMER', docType: 'national_id', fileUrl: doc.key } }));
-    const { hold } = await placeDocLegalHold(app.prisma, { subjectUserId: userId, placedBy: userId, ownerId: userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
+    const { hold } = await placeDocLegalHold(app.prisma, { subjectUserId: userId, placedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, ownerId: userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
     // Reported as kept for the hold (never silently skipped), and no deletion receipt while held.
     expect(await service().deleteAccount(userId)).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD', heldDocuments: 1, heldUploads: 1 });
     expect(await system(() => app.prisma.deletionReceipt.count({ where: { subjectId: userId } }))).toBe(0);
@@ -155,7 +155,7 @@ describe('(a) an upload no document claims goes with the account', () => {
       expect(e.wrappedDek).not.toBeNull();
       expect(e.sha256).toBe(u.sha256);
     }
-    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: userId, reason: 'Synthetic case closed' });
+    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, reason: 'Synthetic case closed' });
     // Nothing re-runs the erasure on release itself: the account tombstone's daily sweep (the retention job) does.
     expect(await system(() => app.prisma.deletionReceipt.count({ where: { subjectId: userId } }))).toBe(0);
     await retryAccountErasures({ prisma: app.prisma, log: app.log, io: io as never });
@@ -222,7 +222,7 @@ describe('(a) the shift liveness selfies go with the account', () => {
 });
 
 describe('a legal hold freezes every erasure write on the person, checked under the subject lock', () => {
-  const holdInput = (userId: string) => ({ subjectUserId: userId, placedBy: userId, ownerId: userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
+  const holdInput = (userId: string) => ({ subjectUserId: userId, placedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, ownerId: userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
   const claim = (userId: string, key: string) => runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId, role: 'CUSTOMER', docType: 'national_id', fileUrl: key } }));
 
   it('a hold being placed holds the subject lock: the upload pass waits for it, sees it, and keeps the upload whole', async () => {
@@ -261,7 +261,7 @@ describe('a legal hold freezes every erasure write on the person, checked under 
     expect(await service().deleteAccount(userId)).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD', heldUploads: 1 });
     expect((await storage.getObject(photo)).length).toBeGreaterThan(0);
     expect(await system(() => app.prisma.livenessCheck.count({ where: { userId } }))).toBe(2);
-    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: userId, reason: 'Synthetic case closed' });
+    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, reason: 'Synthetic case closed' });
     expect(await retry(userId)).toMatchObject({ deleted: true });
     await gone(photo);
     expect(await system(() => app.prisma.livenessCheck.count({ where: { userId } }))).toBe(0);
@@ -277,7 +277,7 @@ describe('a legal hold freezes every erasure write on the person, checked under 
     const { hold } = await placeDocLegalHold(app.prisma, holdInput(userId));
     expect(await service().deleteAccount(userId)).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
     expect((await envelope(old.key)).sha256).toBe(old.sha256);
-    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: userId, reason: 'Synthetic case closed' });
+    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, reason: 'Synthetic case closed' });
     await retry(userId);
     expect((await envelope(old.key)).sha256).toBe('erased');
   });
@@ -307,7 +307,7 @@ describe('(c) after erasure the same document links nobody', () => {
     const held = await person(true);
     const theirs = await upload(held, bytes);
     await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId: held, role: 'VENDOR_OWNER', docType: 'owner_national_id', fileUrl: theirs.key } }));
-    await placeDocLegalHold(app.prisma, { subjectUserId: held, placedBy: held, ownerId: held, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
+    await placeDocLegalHold(app.prisma, { subjectUserId: held, placedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, ownerId: held, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
     expect(await service().deleteAccount(held)).toMatchObject({ status: 'PENDING_LEGAL_HOLD' });
     expect((await envelope(theirs.key)).sha256).toBe(theirs.sha256);
 

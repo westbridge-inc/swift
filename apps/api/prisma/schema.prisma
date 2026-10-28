@@ -8235,8 +8235,8 @@ model SubjectLink {
   /// [High #9 · DS109] NULL = a PENDING assignment (created when an account submitted a
   /// VEHICLE-kind document whose plate matched an existing vehicle subject it does not
   /// own). Pending links never propagate the subject's vehicle evidence; an admin-approved
-  /// assignment stamps this. The subject's registering account gets its link approved at
-  /// creation (the verified owner of record).
+  /// assignment stamps this. [SEC-TRUST F9] The subject's registering account's link also starts
+  /// PENDING; a person's approval of one of that account's own papers for the vehicle stamps it.
   approvedAt DateTime?
 
   @@unique([accountId, subjectId, relation, validFrom])

@@ -2,6 +2,8 @@ import type { PrismaClient } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
 import { maskPhone } from '../auth/step-up';
 import { CUSTODY_CASE_ENTITY } from '../custody/custody-case';
+import { capabilitiesOf, holdsCapability } from './admin-authority';
+import { maskEmail } from './admin-email-change';
 import { assertReason, recordPhoneReveal, type PhoneRevealSubject } from './order-contact';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +83,93 @@ export function maskVendorPhones<T extends object>(vendor: T): T {
 /** A custody case's detail: the holder's and the relay rider's numbers masked. */
 export function maskCaseRiderPhones<T extends { holder?: unknown; relay?: unknown }>(kase: T): T {
   return { ...kase, holder: maskUserPhone(kase.holder as object | null), relay: maskUserPhone(kase.relay as object | null) };
+}
+
+// ---------------------------------------------------------------------------
+// [SEC-PII · security scan 28 Oct 2026] THE PERSON LISTS FOLLOW THE PAGES.
+//
+// The lists that lead to the pages above (GET /users, the people in /search,
+// /riders, /drivers, /vendors, /vendors/pending) printed every row's full
+// number and email to any grant that could open the list, so a grant refused
+// the audited door could read, in bulk, what the door refuses it one person at
+// a time. Each list now masks every row's numbers (the same helpers as the
+// pages) and emails unless the caller's LIVE grant holds the matching contact
+// capability. Searching by the full number still works server-side.
+// ---------------------------------------------------------------------------
+
+/** The contact capability that shows a list's rows in full: the same names the reveal doors demand. */
+export const PERSON_CONTACT_CAPABILITIES = {
+  user: 'user.contact.read',
+  mover: 'mover.contact.read',
+  vendor: 'vendor.contact.read',
+} as const;
+export type PersonContactKind = keyof typeof PERSON_CONTACT_CAPABILITIES;
+
+/**
+ * Does this request's LIVE grant hold the contact capability? The grant is the
+ * one the admin capability hook read from the database for THIS request
+ * (`request.adminPermissions`, the same read the route decision used), so a
+ * revoked capability masks the very next list. No grant read (the hook did not
+ * run) means masked: this never fails open.
+ */
+export function holdsPersonContact(request: unknown, kind: PersonContactKind): boolean {
+  const req = request as { user?: { role?: string | null } | null; adminPermissions?: readonly string[] | null } | null;
+  if (!req || req.adminPermissions === undefined) return false;
+  const held = capabilitiesOf({ role: req.user?.role ?? null, permissions: req.adminPermissions });
+  return holdsCapability(held, PERSON_CONTACT_CAPABILITIES[kind]);
+}
+
+/**
+ * [SEC-PII · COORD ruling] A caller WITHOUT the contact capability does not search by number or email at all.
+ * Any such search is an oracle over the masked row: a substring match recovers the number digit by digit, and
+ * even an exact match leaves about a thousand guesses (the row shows the last digits and the name). So the
+ * routes drop their phone and email clauses for that caller (names keep their search), and a query that looks
+ * like a number or an address is answered with this hint instead of a silent "no match".
+ */
+export const CONTACT_SEARCH_HINT = {
+  phoneOrEmail: 'Searching by phone number or email needs contact access.',
+  phone: 'Searching by phone number needs contact access.',
+} as const;
+
+/**
+ * The hint for a query that looks like a phone number (E.164 or a 7-digit local number: 7 to 15 digits, written
+ * with digits, spaces, + ( ) - only) or, where emails are searched, an email (contains @). Never for an order
+ * number or any other reference (letters in it), nor a short run of digits. [REVIEW-F #2170 S3-1]
+ */
+export function contactSearchHint(search: string | undefined, opts: { email: boolean }): string | undefined {
+  if (!search) return undefined;
+  const raw = search.trim();
+  const digits = raw.replace(/\D/g, '').length;
+  const phoneShaped = /^[+\d\s().-]+$/.test(raw) && digits >= 7 && digits <= 15;
+  const looksLikeContact = phoneShaped || (opts.email && raw.includes('@'));
+  if (!looksLikeContact) return undefined;
+  return opts.email ? CONTACT_SEARCH_HINT.phoneOrEmail : CONTACT_SEARCH_HINT.phone;
+}
+
+const maskedEmail = (email: string | null | undefined) => (email ? maskEmail(email) : email ?? null);
+type EmailHolder = { email?: string | null } | null | undefined;
+
+/** A row with its own email masked ("o•••@example.com"). A new object; the input is untouched. */
+function maskOwnEmail<T extends object>(row: T): T {
+  const src = row as EmailHolder & object;
+  return ('email' in src ? { ...src, email: maskedEmail(src.email) } : src) as T;
+}
+
+/** A person as a list row carries them: their number and their email masked. */
+export function maskUserListRow<T extends object>(row: T): T {
+  return maskOwnEmail(maskOwnPhone(row));
+}
+
+/** A rider or driver as a list row carries them: the person's number (and email, if selected) and the fee payer's number masked. */
+export function maskMoverListRow<T extends object>(mover: T): T {
+  const src = maskMoverPage(mover) as { user?: EmailHolder };
+  return (src.user && 'email' in src.user ? { ...src, user: maskOwnEmail(src.user) } : src) as T;
+}
+
+/** A store as a list row carries it: every number the page masks, and the store's and its owner's emails. */
+export function maskVendorListRow<T extends object>(vendor: T): T {
+  const src = maskOwnEmail(maskVendorPhones(vendor)) as Record<string, unknown> & { owner?: { user?: EmailHolder } | null };
+  return (src.owner?.user && 'email' in src.owner.user ? { ...src, owner: { ...src.owner, user: maskOwnEmail(src.owner.user) } } : src) as T;
 }
 
 export const VENDOR_CONTACT_PARTIES = ['owner', 'store'] as const;
