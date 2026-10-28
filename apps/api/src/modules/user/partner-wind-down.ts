@@ -6,6 +6,7 @@ import { formatMoney } from '../../utils/currency-amount';
 import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { openCreditRefunds } from '../billing/credit-refund';
+import { SUBSCRIPTION_OWNER_JOINS_SQL, subscriptionPaidBySql, subscriptionsPaidBy } from '../subscription/subscription-owner';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
@@ -202,7 +203,7 @@ export async function partnerObligations(
  *  and a confirmation is still credited [MMG-CHECKOUT-API, DS782]. */
 async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   const subscriptions = await tx.subscription.findMany({
-    where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
+    where: subscriptionsPaidBy(userId),
     select: { id: true },
   });
   if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0, feeRefundPendingCount: 0 };
@@ -271,9 +272,8 @@ export async function windDownPartner(
   await prisma.$queryRaw`SELECT id FROM users WHERE id=${userId} FOR UPDATE`;
   await prisma.$queryRaw`
     SELECT s.id FROM subscriptions s
-    LEFT JOIN riders r ON r.id=s."riderId" LEFT JOIN drivers d ON d.id=s."driverId"
-    LEFT JOIN vendors v ON v.id=s."vendorId" LEFT JOIN vendor_owners o ON o.id=v."ownerId"
-    WHERE r."userId"=${userId} OR d."userId"=${userId} OR o."userId"=${userId}
+    ${SUBSCRIPTION_OWNER_JOINS_SQL}
+    WHERE ${subscriptionPaidBySql(userId)}
     ORDER BY s.id FOR UPDATE OF s
   `;
   const owner = await prisma.vendorOwner.findUnique({ where: { userId }, select: { id: true } });

@@ -13,6 +13,8 @@ import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
 import { PAY_AHEAD_LIMIT, payAheadRefusal, readPayAhead } from './pay-ahead';
+import { payerUserIdOf } from '../subscription/subscription-owner';
+
 /** [REVIEW S3-2] A provider transaction whose money was refunded to the payer. */
 export const PROVIDER_REFUNDED = 'REFUNDED';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
@@ -673,7 +675,7 @@ export class AgentCashService {
           vendor: { select: { owner: { select: { userId: true } } } },
         },
       });
-      const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
+      const userId = payerUserIdOf(sub);
       if (userId) await captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : sub?.driver ? 'DRIVER' : 'RIDER', payerMsisdn: p.payerMsisdn, observed: true, observationId: paymentId, subscriptionId: committed.subscriptionId }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
     }
     return { status: 'accepted', paymentId: committed.paymentId, subscriptionId: committed.subscriptionId };

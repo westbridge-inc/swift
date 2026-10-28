@@ -16,6 +16,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/observability';
 import { ringRecipients, storeTeam } from './store-team';
 import { vendorAlertSms } from './vendor-alert-sms';
+import { payerUserIdOf } from '../subscription/subscription-owner';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -288,7 +289,7 @@ export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId:
   });
   // Durable callers cannot acknowledge a platform-only fallback after a failed
   // lookup. Only a successfully resolved user with tenantId=null is platform scoped.
-  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null, requireResolved);
+  return tenantOfUser(prisma, payerUserIdOf(sub), requireResolved);
 }
 
 /** The tracking row of one deduped ops page to one admin — derived from the

@@ -113,6 +113,7 @@ import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, stor
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
+import { moverUserOf, subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -488,13 +489,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return tenantId;
   };
 
-  const subscriptionTenantScope = (tenantId: string) => ({
-    OR: [
-      { vendor: { tenantId }, riderId: null, driverId: null },
-      { rider: { user: { tenantId } }, vendorId: null, driverId: null },
-      { driver: { user: { tenantId } }, vendorId: null, riderId: null },
-    ],
-  });
+  const subscriptionTenantScope = subscriptionTenantWhere;
 
   const requireDefaultTenantBilling = (): void => {
     const tenantId = requireTenantId();
@@ -5883,7 +5878,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // grant holding the matching contact capability; otherwise masked, and no link.
     const contactFor = { vendor: holdsPersonContact(request, 'vendor'), mover: holdsPersonContact(request, 'mover') };
     const rows = subs.map((s) => {
-      const person = s.vendor?.owner.user ?? s.rider?.user ?? s.driver?.user;
+      const person = s.vendor?.owner.user ?? moverUserOf(s);
       const fullPhone = person?.phone ?? '';
       const mayContact = s.vendor ? contactFor.vendor : contactFor.mover;
       const phone = mayContact || !fullPhone ? fullPhone : maskPhone(fullPhone);

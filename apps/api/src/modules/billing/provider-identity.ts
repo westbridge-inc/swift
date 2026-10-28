@@ -30,28 +30,9 @@ export class ProviderIdentityError extends AppError {
 }
 
 
-/**
- * [F7] The tenant a subscription's money belongs to: its payer's. A
- * Subscription carries no tenantId of its own. Read without the request's
- * tenant scope so a platform operator's command still finds it; throws rather
- * than guessing, because a guessed tenant would file the payment evidence
- * under someone else's books.
- */
-export async function subscriptionTenantInTx(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, subscriptionId: string): Promise<string> {
-  const rows = await tx.$queryRaw<Array<{ tenantId: string }>>`
-    SELECT u."tenantId" AS "tenantId"
-    FROM "subscriptions" s
-    LEFT JOIN "riders" r ON r."id" = s."riderId"
-    LEFT JOIN "drivers" d ON d."id" = s."driverId"
-    LEFT JOIN "vendors" v ON v."id" = s."vendorId"
-    LEFT JOIN "vendor_owners" vo ON vo."id" = v."ownerId"
-    JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")
-    WHERE s."id" = ${subscriptionId}
-  `;
-  const tenantId = rows[0]?.tenantId;
-  if (!tenantId) throw new AppError(500, 'SUBSCRIPTION_TENANT_UNKNOWN', `Subscription ${subscriptionId} has no payer to take a tenant from.`);
-  return tenantId;
-}
+/** [F7] The tenant a subscription's money belongs to: its payer's (the one
+ *  subscription-owner module). */
+export { subscriptionTenantInTx } from '../subscription/subscription-owner';
 
 /**
  * Claim the provider transaction for one credit, inside the caller's

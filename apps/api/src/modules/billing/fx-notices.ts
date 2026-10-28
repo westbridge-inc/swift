@@ -6,6 +6,7 @@ import { fxNoticesUndeliveredGauge, fxChargesWithoutNoticeGauge } from '../../pl
 import { log } from '../../utils/logger';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import { activePriceBook, bookAt, bookRowsAt, earliestPriceChange, priceBookKey, priceBookNoticeKey, PRICE_BOOK_NOTICE_DAYS } from './price-book';
+import { payerUserIdOf } from '../subscription/subscription-owner';
 
 // System 2 Part 12 — the >2% notice rule: when a fee payer's NEXT local
 // amount will differ >2% from their LAST charged amount (an FX move), they
@@ -42,8 +43,8 @@ type PayerSub = {
   rider: { userId: string } | null; driver: { userId: string } | null; vendor: { owner: { userId: string } } | null;
 };
 
-function payerOf(sub: PayerSub): string | undefined {
-  return sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
+function payerOf(sub: PayerSub): string | null {
+  return payerUserIdOf(sub);
 }
 
 /** The first invoice the announced amount can apply to: the payer's next

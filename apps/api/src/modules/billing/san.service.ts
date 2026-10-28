@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient, type Subscription } from '@prisma/client';
 import { generateSan, validateSanShape, type SanValidationFailure } from './san';
 import { log } from '../../utils/logger';
+import { ownerTenantOf, subscriptionOwnerTenant } from '../subscription/subscription-owner';
 
 // SAN assignment + resolution [san spec 2.3/2.4]. Uniqueness is the DB's
 // (subscriptions_san_key); collisions redraw. Tombstones are checked before
@@ -64,7 +65,7 @@ async function releaseSanInTransaction(db: Db, subscriptionId: string, reason: s
     },
   });
   if (!sub?.san) return;
-  const tenantId = sub.vendor?.tenantId ?? sub.rider?.user.tenantId ?? sub.driver?.user.tenantId;
+  const tenantId = ownerTenantOf(sub);
   if (!tenantId) throw new Error('SAN_OWNER_TENANT_UNRESOLVED');
 
   // Heal a pre-atomic partial retirement only when it is demonstrably the
@@ -107,25 +108,8 @@ export type SanResolution =
   | { ok: true; subscription: Subscription }
   | { ok: false; code: SanValidationFailure | 'SAN_UNKNOWN' | 'TOMBSTONED' | 'ACCOUNT_CLOSED'; san?: string };
 
-/** [AX363-F2] The tenant that owns a subscription, by the one ownership rule
- *  the admin tenant scope uses: exactly one owner, a vendor (its tenant) or a
- *  rider or driver (their user's tenant). Read explicitly, whatever query
- *  extension the caller's client carries. Null: missing, or ownership
- *  ambiguous; a caller comparing it to a tenant then fails closed. */
-export async function subscriptionOwnerTenant(db: Db, subscriptionId: string): Promise<string | null> {
-  const sub = await db.subscription.findUnique({
-    where: { id: subscriptionId },
-    select: {
-      vendorId: true, riderId: true, driverId: true,
-      vendor: { select: { tenantId: true } },
-      rider: { select: { user: { select: { tenantId: true } } } },
-      driver: { select: { user: { select: { tenantId: true } } } },
-    },
-  });
-  if (!sub) return null;
-  if ([sub.vendorId, sub.riderId, sub.driverId].filter((owner) => owner !== null).length !== 1) return null;
-  return sub.vendor?.tenantId ?? sub.rider?.user.tenantId ?? sub.driver?.user.tenantId ?? null;
-}
+/** [AX363-F2] The tenant that owns a subscription (the one subscription-owner module). */
+export { subscriptionOwnerTenant };
 
 /** The DB half of the validation pipeline [spec 2.2]. In payment paths these
  *  codes route to suspense — never reject the money (SO-6); entry/inquiry

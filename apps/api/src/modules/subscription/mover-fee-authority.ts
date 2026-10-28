@@ -7,6 +7,7 @@ import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './m
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
 import { partnerRateFor, subscriptionTiersIn } from '../country/country-config.service';
 import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
+import { ownerOfRow, SUBSCRIPTION_OWNER_SELECT, subscriptionOwnerOf, type SubscriptionOwner } from './subscription-owner';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -32,19 +33,15 @@ const ownershipError = () => new AppError(409, 'MOVER_FEE_OWNERSHIP_INVALID', 'T
 /** Resolve the original owner of a money record without choosing a new payer.
  * Historical provider work must keep this subscription and owner binding. */
 export async function subscriptionPayer(db: Db, subscriptionId: string): Promise<SubscriptionPayer> {
-  const sub = await db.subscription.findUnique({
-    where: { id: subscriptionId },
-    select: {
-      riderId: true, driverId: true, vendorId: true,
-      rider: { select: { user: { select: { id: true, tenantId: true } } } },
-      driver: { select: { user: { select: { id: true, tenantId: true } } } },
-      vendor: { select: { tenantId: true, owner: { select: { user: { select: { id: true, tenantId: true } } } } } },
-    },
-  });
-  if (!sub || [sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) throw ownershipError();
-  const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
-  if (!user) throw ownershipError();
-  return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
+  const payer = payerOfOwner(await subscriptionOwnerOf(db, subscriptionId));
+  if (!payer) throw ownershipError();
+  return payer;
+}
+
+/** subscriptionPayer's rule: exactly one owner, and that owner's user. */
+function payerOfOwner(owner: SubscriptionOwner | null): SubscriptionPayer | null {
+  if (!owner || owner.ownerColumns !== 1) return null;
+  return { userId: owner.userId, tenantId: owner.tenantId, kind: owner.vendorId ? 'VENDOR' : 'MOVER' };
 }
 
 /** The common lock order for activation, collection, settings and outcomes:
@@ -295,20 +292,12 @@ export async function readFeeCollectionAuthority(db: Db, subscriptionId: string)
 type FeeCollectionRead = { allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null };
 const NOT_COLLECTABLE: FeeCollectionRead = { allowed: false, canonical: false, mover: null };
 const MOVER_FEE_TYPES: Array<Subscription['type']> = ['TAXI_DRIVER', 'DELIVERY_RIDER', 'COURIER_RIDER'];
-const PAYER_SELECT = {
-  id: true, riderId: true, driverId: true, vendorId: true,
-  rider: { select: { user: { select: { id: true, tenantId: true } } } },
-  driver: { select: { user: { select: { id: true, tenantId: true } } } },
-  vendor: { select: { tenantId: true, owner: { select: { user: { select: { id: true, tenantId: true } } } } } },
-} as const;
+const PAYER_SELECT = { id: true, ...SUBSCRIPTION_OWNER_SELECT } as const;
 type PayerRow = Prisma.SubscriptionGetPayload<{ select: typeof PAYER_SELECT }>;
 
 /** subscriptionPayer's rule on a row already read: exactly one owner, and that owner's user. */
 function payerOfRow(sub: PayerRow): SubscriptionPayer | null {
-  if ([sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) return null;
-  const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
-  if (!user) return null;
-  return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
+  return payerOfOwner(ownerOfRow(sub));
 }
 
 /**

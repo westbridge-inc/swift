@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { OPERATOR, OPERATOR_ADDRESS } from '../legal/operator';
 import { formatMoney } from '../../utils/currency-amount';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { moverUserOf } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // [OWNER LEGAL PLAN 15 Oct 2026 · R11 + R12, research T3] THE weekly-fee
@@ -102,7 +103,7 @@ export async function feeReceiptDocument(
     settings ? settings.tin : companyTin(db),
     settings ? settings.vat : vatRegistration(db),
   ]);
-  const person = sub?.rider?.user ?? sub?.driver?.user;
+  const person = moverUserOf(sub);
   const partnerName = sub?.vendor?.name ?? (person ? `${person.firstName} ${person.lastName}`.trim() : 'Partner');
   const currencyCode = event?.currencyCode ?? 'GYD';
   const amount = Number(receipt.amount);

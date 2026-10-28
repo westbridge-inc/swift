@@ -5,6 +5,7 @@ import { payInfo } from './agent-cash.service';
 import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { feePauseHoldsBilling, feePauseSpanOpen } from './mmg-pause';
+import { payerUserIdOf } from '../subscription/subscription-owner';
 
 // Trial first-payment funnel [san spec 21.4]: the first fee, told before the
 // first bill ever exists. Day 10 (trial end − 4d) and day 13 (− 1d): the exact
@@ -46,7 +47,7 @@ export async function sweepTrialFeeEducation(
   for (const sub of trials) {
     const daysLeft = Math.ceil((sub.trialEndDate!.getTime() - now.getTime()) / DAY_MS);
     const stage = daysLeft <= 1 ? 'd13' : 'd10';
-    const userId = sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
+    const userId = payerUserIdOf(sub);
     if (!userId) continue;
     try {
       const allowed = await prisma.$transaction(async (tx) => {
