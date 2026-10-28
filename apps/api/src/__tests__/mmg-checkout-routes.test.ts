@@ -26,8 +26,10 @@ import { readDunningClock, resolveConfirmationInTx } from '../modules/billing/du
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
   MMG_CHECKOUT_NOTIFY_BODY_LIMIT,
+  MMG_CHECKOUT_NOTIFY_GLOBAL_RATE,
   MMG_CHECKOUT_NOTIFY_RATE,
   MMG_CHECKOUT_RETURN_BODY_LIMIT,
+  MMG_CHECKOUT_RETURN_GLOBAL_RATE,
   MMG_CHECKOUT_RETURN_RATE,
   MMG_CHECKOUT_RUNTIME_DECORATION,
   MMG_CHECKOUT_START_RATE,
@@ -1428,5 +1430,107 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
       expect(res.json().data).toMatchObject({ reopenableMmgCheckout: null, latestMmgCheckout: { ref: first.ref, status: 'OPEN' }, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, expect.anything()] });
       expect(spy.mock.calls.some(([, options]) => (options as { isolationLevel?: string } | undefined)?.isolationLevel === 'RepeatableRead')).toBe(true);
     } finally { spy.mockRestore(); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SEC-DOS F8] Opening a reply is a private-key operation on the API's one
+// event loop, and both public doors take it from anyone. A reply is opened
+// ONCE per request (the route hands the opened reply to the service, which
+// never opens it again), and only from the reply's own field: `token` (the
+// MMG demo's `?token=`, the address-path `token=` the web page forwards as
+// params.token, the 4 Oct notify form). Notify keeps trying every value only
+// when no `token` field is present at all (its transport is unconfirmed, U3).
+// Each door also has ONE ceiling shared by every source, on top of the
+// per-source one. Nothing here changes what credits: still only MMG's lookup.
+// ---------------------------------------------------------------------------
+
+describe('[SEC-DOS F8] a reply is opened once, from its token field, under a ceiling shared by every source', () => {
+  beforeEach(() => enable(true));
+
+  /** The sandbox, counting every attempt to open a reply with the private key. */
+  function countingProvider() {
+    const calls = { n: 0 };
+    const provider = new Proxy(sandbox, {
+      get(target, prop) {
+        if (prop === 'decryptCheckoutResult') {
+          return (token: string) => {
+            calls.n += 1;
+            return target.decryptCheckoutResult(token);
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as MmgCheckoutProvider;
+    checkoutProvider = () => provider;
+    return calls;
+  }
+  /** One RSA block under this file's 4096-bit key, as padded base64url: it passes every cheap check and costs a private-key operation. */
+  const garbage = () => randomBytes(512).toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
+  const garbageFields = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`field${i}`, garbage()]));
+
+  it('the return door never opens a value outside the token field', async () => {
+    const calls = countingProvider();
+    const res = await ret('success', garbageFields(16));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect(calls.n).toBe(0);
+  });
+
+  it('the return door opens its token field once, whatever else the body carries', async () => {
+    const calls = countingProvider();
+    const res = await ret('success', { ...garbageFields(15), token: garbage() });
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect(calls.n).toBe(1);
+  });
+
+  it('a genuine reply among other values is opened once and still confirms only through MMG\'s lookup', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = tx('ONCE0');
+    approved(row, txn, 1500, echoOf(row));
+    const calls = countingProvider();
+    const res = await ret('success', { ...garbageFields(15), token: officialReply(row, '0', txn) });
+    expect(res.json().data.state).toBe('CONFIRMED');
+    expect(calls.n).toBe(1);
+    expect(lookedUp).toContain(txn);
+    expect(await creditsOf(p.subId)).toBe(1);
+    expect((await observationsOf(ref)).filter((o) => o.source === 'RETURN')).toHaveLength(1);
+  });
+
+  it('the notify door opens its token field once; without one, each value at most once', async () => {
+    let calls = countingProvider();
+    expect((await notify({ ...garbageFields(15), token: garbage() })).json()).toEqual({ success: true });
+    expect(calls.n).toBe(1);
+    calls = countingProvider();
+    expect((await notify(garbageFields(16))).json()).toEqual({ success: true });
+    expect(calls.n).toBeLessThanOrEqual(16);
+  });
+
+  it('each door has one ceiling shared by every source; a source over its own ceiling does not use it up', async () => {
+    enable(false);
+    const fresh = await buildApp();
+    try {
+      const doors = [
+        { own: MMG_CHECKOUT_RETURN_RATE.max, all: MMG_CHECKOUT_RETURN_GLOBAL_RATE.max, hit: (ip: string) => fresh.inject({ method: 'POST', url: RETURN_URL, remoteAddress: ip, headers: { 'content-type': 'application/json' }, payload: { outcome: 'success', params: { token: 'x' } } }) },
+        { own: MMG_CHECKOUT_NOTIFY_RATE.max, all: MMG_CHECKOUT_NOTIFY_GLOBAL_RATE.max, hit: (ip: string) => fresh.inject({ method: 'POST', url: NOTIFY_URL, remoteAddress: ip, headers: { 'content-type': 'application/json' }, payload: { token: 'x' } }) },
+      ];
+      for (const [d, door] of doors.entries()) {
+        expect(door.all).toBeGreaterThanOrEqual(door.own);
+        // One source at its own ceiling, then over it: refused by its own ceiling.
+        for (let i = 0; i < door.own; i += 1) expect((await door.hit(`10.70.${d}.1`)).statusCode).toBe(200);
+        for (let i = 0; i < 5; i += 1) expect((await door.hit(`10.70.${d}.1`)).statusCode).toBe(429);
+        // The rest of the shared ceiling is still there for everyone else, a few requests per source.
+        for (let i = 0; i < door.all - door.own; i += 1) expect((await door.hit(`10.71.${d}.${(i % 200) + 1}`)).statusCode, `request ${i}`).toBe(200);
+        // Then the door is closed for every source, a new one included.
+        const over = await door.hit(`10.72.${d}.1`);
+        expect(over.statusCode).toBe(429);
+        expect(over.json()).toMatchObject({ success: false, error: { code: 'RATE_LIMITED', details: { retryAfterSeconds: expect.any(Number) } } });
+        expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
+      }
+    } finally {
+      await fresh.close();
+    }
   });
 });
