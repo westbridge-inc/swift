@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import { mondayOf } from './ads-weeks';
 import { assertAdvertiserApprovedWithin, SUSPENSION_PAUSE_PREFIX } from './advertiser.service';
 
 // Campaign lifecycle (ads-platform spec §6.1). ONE transition function owns
@@ -56,6 +57,9 @@ const NOTICE: Partial<Record<CampaignEvent, { title: string; body: string; kind:
   kill: { title: 'Campaign removed', body: 'Your campaign was removed for a policy reason. Contact support for details.', kind: 'ad_campaign_killed' },
 };
 
+/** [SEC-TRUST F6 follow-up] Resumed before its booked week: back on schedule, not serving yet. */
+const RESUMED_BEFORE_START = { title: 'Campaign resumed', body: 'Your campaign is back on schedule and goes live when its booked week starts.', kind: 'ad_campaign_resumed' };
+
 export class AdsLifecycleService {
   private notifications: NotificationService;
   constructor(private prisma: PrismaClient, private io: Server) {
@@ -89,6 +93,9 @@ export class AdsLifecycleService {
       log().warn({ campaignId, from: before.status, event }, 'illegal ad campaign transition rejected');
       throw new AppError(409, 'INVALID_CAMPAIGN_TRANSITION', `Cannot ${event} a ${before.status} campaign.`);
     }
+    // [SEC-TRUST F6 follow-up] A campaign paused before its booked week began (a suspension pauses SCHEDULED
+    // campaigns too) resumes to SCHEDULED, and week_start takes it LIVE when its week arrives — never early.
+    const to: AdCampaignStatus = event === 'resume' && before.startWeek.getTime() > mondayOf(new Date()).getTime() ? 'SCHEDULED' : rule.to;
     // ONE generation: the status CAS, the audit row and whatever the caller
     // stages within (the refund obligation) commit together — never a killed
     // campaign whose money obligation vanished on the way.
@@ -102,20 +109,20 @@ export class AdsLifecycleService {
       }
       const moved = await tx.adCampaign.updateMany({
         where: { id: campaignId, status: before.status },
-        data: { status: rule.to, statusReason: reason ?? null },
+        data: { status: to, statusReason: reason ?? null },
       });
       if (moved.count === 0) throw new AppError(409, 'CAMPAIGN_TRANSITION_RACE', 'The campaign changed underneath this action — retry.');
       await tx.adsAuditLog.create({
         data: {
           tenantId: before.tenantId, actorUserId: actor, action: `CAMPAIGN_${event.toUpperCase()}`,
           entityType: 'AdCampaign', entityId: campaignId,
-          before: { status: before.status } as never, after: { status: rule.to } as never, reason: reason ?? null,
+          before: { status: before.status } as never, after: { status: to } as never, reason: reason ?? null,
         },
       });
-      if (opts.within) await opts.within(tx, { before, to: rule.to });
+      if (opts.within) await opts.within(tx, { before, to });
     });
 
-    const notice = NOTICE[event];
+    const notice = to === 'SCHEDULED' && event === 'resume' ? RESUMED_BEFORE_START : NOTICE[event];
     if (notice) await this.notifyOwners(before.advertiserId, notice.title, notice.body, notice.kind, campaignId).catch(() => {});
     if (event === 'kill') {
       await notifyAdmins(this.prisma, this.notifications, {
@@ -125,7 +132,7 @@ export class AdsLifecycleService {
         data: { kind: 'ad_campaign_killed_ops', campaignId, reason },
       }).catch(() => {});
     }
-    log().info({ campaignId, from: before.status, to: rule.to, event, actor }, 'ad campaign transition');
+    log().info({ campaignId, from: before.status, to, event, actor }, 'ad campaign transition');
     return this.prisma.adCampaign.findUniqueOrThrow({ where: { id: campaignId } });
   }
 

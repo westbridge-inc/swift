@@ -88,7 +88,7 @@ afterAll(async () => {
 describe('[SEC-TRUST F6] a suspended advertiser cannot undo Swift’s suspension', () => {
   it('the owner cannot resume the campaign the suspension paused; after reinstatement it may', async () => {
     const id = await advertiser();
-    const { campaignId } = await campaign(id, 'LIVE');
+    const { campaignId } = await campaign(id, 'LIVE', mondayOf(new Date(), 'America/Guyana'));
     await service().suspend(id, adminId, 'Policy review.');
     expect(await statusOf(campaignId)).toBe('PAUSED');
 
@@ -101,6 +101,18 @@ describe('[SEC-TRUST F6] a suspended advertiser cannot undo Swift’s suspension
     const after = await call(`/api/v1/ads/campaigns/${campaignId}/resume`, owner);
     expect(after.statusCode, after.body).toBe(200);
     expect(await statusOf(campaignId)).toBe('LIVE');
+  });
+
+  it('a campaign the suspension paused before its booked week resumes to SCHEDULED, never LIVE early', async () => {
+    const id = await advertiser();
+    const { campaignId } = await campaign(id, 'LIVE', WEEK_FUTURE);
+    await raw.adCampaign.update({ where: { id: campaignId }, data: { status: 'SCHEDULED' } });
+    await service().suspend(id, adminId, 'Policy review.');
+    expect(await statusOf(campaignId)).toBe('PAUSED');
+    await service().reinstate(id, adminId);
+    const res = await call(`/api/v1/ads/campaigns/${campaignId}/resume`, owner);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await statusOf(campaignId)).toBe('SCHEDULED');
   });
 
   it('a pause Swift’s suspension made is not the advertiser’s to lift, even on an approved account', async () => {
