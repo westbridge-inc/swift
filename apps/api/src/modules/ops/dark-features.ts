@@ -216,9 +216,9 @@ export const DARK_FEATURES: DarkFeature[] = [
     source: 'env',
     // The code ignores surrounding blanks (booking/instant-booking.ts): ' 1' is ON there, so it is ON here.
     enabledWhenPattern: /^1$/,
-    title: 'Appointment slot taken when the customer books',
+    title: 'Instant appointment booking',
     whileOff:
-      "Booking an appointment is a request, as before: the customer's time is taken only when the business accepts, so two customers can wait on the same free time and the business's accept decides (the other is told the time was taken). Kept OFF until the instant-booking track passes CI, a real-Postgres race run and a staging run, then the owner decides (28 Oct 2026, B4).",
+      "Booking an appointment is a request, as before: the customer's time is taken only when the business accepts, so two customers can wait on the same free time and the business's accept decides (the other is told the time was taken). No listing can be set to confirm bookings automatically, and a booking keeps the one-minute free-cancel window. On: the time is taken when the customer books; a cash booking of a listing set to confirm automatically is confirmed in the same moment (MMG bookings still wait for the business); a confirmed booking cancels free until two hours before it starts. Kept OFF until the instant-booking track (including its Terms wording) passes CI, a real-Postgres race run and a staging run, then the owner decides (28 Oct 2026, B4, A3, A4, B1, C2).",
     impact: 'product',
   },
   // ── [row 331 · CONFIG-GUARDS] the kill switches. Each is unset (or 0) in

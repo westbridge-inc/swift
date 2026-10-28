@@ -17,6 +17,7 @@ import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/
 import { ringRecipients, storeTeam } from './store-team';
 import { vendorAlertSms } from './vendor-alert-sms';
 import { payerUserIdOf } from '../subscription/subscription-owner';
+import { formatGuyanaTime } from '../../utils/guyana-day';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -903,6 +904,35 @@ export class NotificationService {
     }
 
     return ownerNotificationId || firstNotificationId;
+  }
+
+  /**
+   * [BOOK-S3 · INSTANT_BOOKING] A booking the business's listing confirmed
+   * automatically: the store team is TOLD, never asked. No accept prompt —
+   * no "New Order!" ring, no persistent alert event, no alert-delivery row
+   * and no backup SMS (those exist so a request is answered in time, and
+   * this one is already answered). The payload carries no `kind`: every phone
+   * build (9, 11, 12) opens a business-tagged push with an orderId on the
+   * store's order desk (VendorOrderDetail), where the booking shows as
+   * confirmed. Rings the same team a new order rings (store-team.ts).
+   */
+  async instantBookingForVendor(
+    vendorOwnerId: string,
+    booking: { orderId: string; orderNumber: string; serviceName: string; slot: Date },
+  ): Promise<number> {
+    const when = formatGuyanaTime(booking.slot, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
+    const recipients = await this.newOrderRecipients(booking.orderId, vendorOwnerId);
+    for (const userId of recipients) {
+      await this.send({
+        userId,
+        type: 'ORDER_UPDATE',
+        title: 'New booking (confirmed)',
+        body: `${booking.serviceName}, ${when} (booking ${booking.orderNumber}). It is already confirmed: there is nothing to accept.`,
+        audience: 'business',
+        data: { orderId: booking.orderId, orderNumber: booking.orderNumber, status: 'ACCEPTED', instantBooking: true },
+      });
+    }
+    return recipients.length;
   }
 
   /** [STORE-ALERT · owner ruling 18 Oct 2026] The new-order alert reached no

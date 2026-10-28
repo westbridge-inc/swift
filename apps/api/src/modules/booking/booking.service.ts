@@ -23,6 +23,9 @@ export interface BookingConfig {
   bufferMinutes?: number;
   /** Optional minimum notice — no last-second bookings. Absent/0 = legacy. */
   minNoticeMinutes?: number;
+  /** [BOOK-S3 · owner A4] "Confirm bookings automatically": with INSTANT_BOOKING on, a
+   *  cash booking of this listing is confirmed at checkout. Absent = the business confirms. */
+  instantBooking?: boolean;
 }
 
 /** [AX289 F6] A transaction that lost a lock race: Prisma's P2034 (a write
@@ -85,6 +88,42 @@ export async function lockCustomerBookings(tx: Prisma.TransactionClient, custome
 /** [BOOK-S2] Refused in plain words when the customer already holds as many upcoming bookings as a cap allows. */
 function bookingLimitReached(message: string): AppError {
   return new AppError(409, 'BOOKING_LIMIT_REACHED', message);
+}
+
+/** Who is told a cap was reached: the customer booking, or the business accepting a request. */
+type LimitAudience = 'customer' | 'business';
+
+/**
+ * [BOOK-S2 · COORD 28 Oct · BOOK-S3 REVIEW-G S4-2] THE slot-squatting cap, judged under the
+ * customer's booking lock (taken here, held to commit): a customer already holding
+ * `limits.perBusiness` upcoming bookings with this business, or `limits.total` in all
+ * (RESERVED or CONFIRMED, not yet started), takes no further booking. Checkout's hold and a
+ * business accepting a request whose slot was not held at checkout both pass here, so no
+ * booking is ever added outside the cap.
+ */
+async function assertWithinBookingLimits(
+  tx: Prisma.TransactionClient,
+  customerId: string,
+  vendorId: string,
+  limits: BookingLimits,
+  audience: LimitAudience,
+): Promise<void> {
+  await lockCustomerBookings(tx, customerId);
+  const upcoming = await tx.booking.findMany({
+    where: { customerId, status: { in: ['RESERVED', 'CONFIRMED'] }, slotStart: { gt: new Date() } },
+    select: { vendorId: true },
+  });
+  const withThisBusiness = upcoming.filter((b) => b.vendorId === vendorId).length;
+  if (withThisBusiness >= limits.perBusiness) {
+    throw bookingLimitReached(audience === 'customer'
+      ? `You already have ${withThisBusiness} upcoming bookings with this business. Cancel one, or book again after one is done.`
+      : `This customer already has ${withThisBusiness} upcoming bookings with your business, the most one customer can hold. Decline this request, or accept it after one of them is done or cancelled.`);
+  }
+  if (upcoming.length >= limits.total) {
+    throw bookingLimitReached(audience === 'customer'
+      ? `You already have ${upcoming.length} upcoming bookings. Cancel one, or book again after one is done.`
+      : `This customer already has ${upcoming.length} upcoming bookings, the most one customer can hold. Decline this request, or accept it after one of them is done or cancelled.`);
+  }
 }
 
 /** Parent order states in which an appointment can still be moved. */
@@ -202,6 +241,10 @@ export class BookingService {
    * INSTANT_BOOKING was on) is not reserved twice: its booking is returned as
    * it is. The acceptance's own transition confirmed it, earlier in this same
    * commit, through the one coupling seam (booking/order-coupling.ts).
+   * [BOOK-S3 · REVIEW-G S4-2 on #2192] With `limits` (INSTANT_BOOKING on), an
+   * order whose slot was NOT held at checkout (a request placed while the
+   * switch was off, accepted after it was switched on) takes its booking under
+   * the same per-customer cap as checkout: never one over it.
    */
   /** [REPORT-007-v4 F-05] Accepts a transaction client so appointment
    *  acceptance can reserve its slot INSIDE the canonical Order-lock commit —
@@ -215,6 +258,7 @@ export class BookingService {
     slotStart: Date,
     orderId?: string,
     db?: Prisma.TransactionClient,
+    limits?: BookingLimits,
   ) {
     slotStart = canonicalSlotStart(slotStart);
     const { config, vendorId } = await this.validatedSlot(itemId, slotStart);
@@ -224,6 +268,7 @@ export class BookingService {
         const held = await tx.booking.findFirst({ where: { orderId, status: { in: ['RESERVED', 'CONFIRMED'] } } });
         if (held) return held;
       }
+      if (limits) await assertWithinBookingLimits(tx, customerId, vendorId, limits, 'business');
       return this.writeBooking(tx, { itemId, vendorId, customerId, slotStart, config, orderId, status: orderId ? 'CONFIRMED' : 'RESERVED' });
     };
     try {
@@ -256,18 +301,7 @@ export class BookingService {
     const slotStart = canonicalSlotStart(input.slotStart);
     // On the checkout's own transaction: no second connection while it holds the locks.
     const { config, vendorId } = await this.validatedSlot(input.itemId, slotStart, tx);
-    await lockCustomerBookings(tx, input.customerId);
-    const upcoming = await tx.booking.findMany({
-      where: { customerId: input.customerId, status: { in: ['RESERVED', 'CONFIRMED'] }, slotStart: { gt: new Date() } },
-      select: { vendorId: true },
-    });
-    const withThisBusiness = upcoming.filter((b) => b.vendorId === vendorId).length;
-    if (withThisBusiness >= input.limits.perBusiness) {
-      throw bookingLimitReached(`You already have ${withThisBusiness} upcoming bookings with this business. Cancel one, or book again after one is done.`);
-    }
-    if (upcoming.length >= input.limits.total) {
-      throw bookingLimitReached(`You already have ${upcoming.length} upcoming bookings. Cancel one, or book again after one is done.`);
-    }
+    await assertWithinBookingLimits(tx, input.customerId, vendorId, input.limits, 'customer');
     try {
       return await this.writeBooking(tx, { itemId: input.itemId, customerId: input.customerId, orderId: input.orderId, vendorId, slotStart, config, status: 'RESERVED' });
     } catch (error) {

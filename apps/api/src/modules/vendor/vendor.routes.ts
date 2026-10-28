@@ -33,7 +33,9 @@ import { NotificationService } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService, lockBusinessTime } from '../booking/booking.service';
 import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES, peakMoment } from '../booking/availability';
-import { mergeBookingConfig, overlappingWindows, overlappingWindowsMessage, windowsForSave } from '../booking/booking-config';
+import { INSTANT_BOOKING_OFF_MESSAGE, instantBookingSettingsForSave, mergeBookingConfig, overlappingWindows, overlappingWindowsMessage, windowsForSave } from '../booking/booking-config';
+import { instantBookingEnabled, NEW_BOOKABLE_LISTING_DEFAULTS } from '../booking/instant-booking';
+import { bookingLimitsFor } from '../booking/booking-limits';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
@@ -56,7 +58,7 @@ import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
-import { storeHoldRefusal } from './store-hold';
+import { vendorOperateRefusal, vendorOperateError } from './vendor-operate';
 import { ReviewDemoMoneyRefusedError, isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
@@ -232,7 +234,17 @@ const bookingConfigSchema = z.object({
   serviceRadiusKm: z.number().min(0).max(100).optional(),
   bufferMinutes: z.number().int().min(0).max(MAX_BUFFER_MINUTES).optional(),
   minNoticeMinutes: z.number().int().min(0).max(MAX_MIN_NOTICE_MINUTES).optional(),
+  // [BOOK-S3 · owner A4] "Confirm bookings automatically". Refused while INSTANT_BOOKING
+  // is off; with it on, a listing becoming bookable starts as automatic (instantBookingSettingsForSave).
+  instantBooking: z.boolean().optional(),
 });
+
+/** [BOOK-S3] The instant-booking settings of a save, or the refusal while the switch is off. */
+function bookingSettingsForSave(incoming: Record<string, unknown>, stored: unknown): Record<string, unknown> {
+  const settled = instantBookingSettingsForSave(incoming, stored, instantBookingEnabled(), NEW_BOOKABLE_LISTING_DEFAULTS);
+  if (!settled) throw new AppError(400, 'INSTANT_BOOKING_OFF', INSTANT_BOOKING_OFF_MESSAGE);
+  return settled;
+}
 
 /** [BOOK-S1] The refusal of a new overlap between two opening times on one day. */
 function overlappingHoursError(pair: Parameters<typeof overlappingWindowsMessage>[0]): AppError {
@@ -966,39 +978,10 @@ export async function vendorRoutes(app: FastifyInstance) {
    * A null suspension source is billing's (the transition rule reinstate uses).
    */
   async function assertVendorCanOperate(vendorId: string, work: 'NEW' | 'IN_FLIGHT' = 'NEW') {
-    const vendor = await app.prisma.vendor.findUnique({
-      where: { id: vendorId },
-      select: { isVerified: true, status: true, vendorType: true, suspensionSource: true },
-    });
-    if (!vendor) throw new NotFoundError('Vendor', vendorId);
-    // [Fable #1481 S4-1] Only a suspension billing stamped is a billing hold; one with no source (e.g. an owner
-    // closing their account) keeps the ordinary rule.
-    const billingHold = vendor.status === 'SUSPENDED' && vendor.suspensionSource === 'BILLING';
-    if ((vendor.status === 'SUSPENDED' && !(work === 'IN_FLIGHT' && billingHold)) || vendor.status === 'CLOSED') {
-      // [NO-DEAD-ENDS] Name the hold, what lifts it and what still works —
-      // never "Reopen it from Account": no such control exists (store-hold.ts).
-      throw storeHoldRefusal(vendor);
-    }
-    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId));
-    if (!verified) {
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
-    }
-    // THE canOperate rule (operate-gate.ts, G-BILL-03). Unification FIXED a
-    // real divergence here: this copy was missing the grace-lapse check, so a
-    // PAST_DUE vendor whose grace had run out kept working orders until the
-    // billing sweep flipped them SUSPENDED. Now all three actor gates agree.
-    const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
-    // The subscription arm is billing's: it gates NEW work only. (Read either
-    // way, so every order step keeps one shape between its order read and its
-    // write; the golden race suites hold the route at this read.)
-    if (work === 'IN_FLIGHT') return;
-    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' }, await readFeePause(app.prisma, process.env, sub?.id));
-    if (!operability.operable) {
-      if (operability.why === 'GRACE_LAPSED') {
-        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to keep working orders.');
-      }
-      throw new AppError(403, 'SUBSCRIPTION_INACTIVE', 'Your subscription must be active to work orders — renew from Account.');
-    }
+    // [BOOK-S3] THE predicate lives in vendor-operate.ts, shared with an instant
+    // booking's standing acceptance at checkout; the words and codes here are unchanged.
+    const refusal = await vendorOperateRefusal(app.prisma, verification, vendorId, work);
+    if (refusal) throw vendorOperateError(refusal);
   }
 
   /** Resolve only a genuinely unresolved delivery owner from the Order row
@@ -2321,6 +2304,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     const appointmentItemId = order.fulfillment === 'APPOINTMENT' && order.appointmentSlot
       ? order.items[0]?.itemId ?? null
       : null;
+    // [BOOK-S3 · REVIEW-G S4-2 on #2192] With INSTANT_BOOKING on, a request whose slot was
+    // not held at checkout (placed while the switch was off) takes its booking under the
+    // customer's slot-squatting cap, like every booking taken at checkout.
+    const bookingLimits = appointmentItemId && instantBookingEnabled()
+      ? await bookingLimitsFor(app.prisma, order.tenantId)
+      : undefined;
     // [O-3 · owner 22 Oct 2026] Accept IS the start of preparation (STORE_ACCEPT_PATH): one tap,
     // PENDING -> ACCEPTED -> PREPARING in this one commit, one push to the customer. A booking or an
     // MMG order still waiting for "Paid by MMG" stops at ACCEPTED (preparationMayStart).
@@ -2338,7 +2327,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           select: { name: true, subStatus: true, substituteDecideBy: true },
         }));
         if (appointmentItemId && order.appointmentSlot) {
-          await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
+          await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx, bookingLimits);
         }
         if (body.estimatedPrepTime) {
           await tx.order.update({
@@ -3542,7 +3531,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         allergens: body.allergens || [],
         sortOrder,
         ...(body.fulfillment ? { fulfillment: body.fulfillment } : {}),
-        ...(body.bookingConfig ? { bookingConfig: body.bookingConfig as object } : {}),
+        // [BOOK-S3] A new listing stores nothing yet: with the switch on it starts as automatic.
+        ...(body.bookingConfig ? { bookingConfig: bookingSettingsForSave(body.bookingConfig, null) as object } : {}),
         ...(body.vatClass !== undefined ? { vatClass: body.vatClass } : {}),
         optionGroups: body.optionGroups?.length
           ? {
@@ -4020,7 +4010,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (body.bookingConfig !== undefined) {
       const windows = windowsForSave(body.bookingConfig.slots, existing.bookingConfig);
       if (!windows.ok) throw overlappingHoursError(windows.pair);
-      bookingConfigToStore = mergeBookingConfig(existing.bookingConfig, { ...body.bookingConfig, slots: windows.slots });
+      bookingConfigToStore = mergeBookingConfig(existing.bookingConfig, bookingSettingsForSave({ ...body.bookingConfig, slots: windows.slots }, existing.bookingConfig));
     }
     // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] Typed text may only take the item's photo down ('') or repeat it.
     const photo = uploadOnlyPhotoField(body.imageUrl, existing.imageUrl, 'the item\'s photo');
