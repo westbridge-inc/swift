@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { BodyTooLargeError, readBoundedBody } from '@/lib/bounded-body';
 import { swiftDesignVariables as tokens } from '@/lib/design-tokens';
@@ -46,6 +47,50 @@ async function postedFields(request: Request): Promise<unknown> {
   return new Response(bytes.buffer as ArrayBuffer, { headers: { 'content-type': type } }).formData();
 }
 
+/**
+ * [SEC-DOS F8] The partner's own address, as the site's proxy set it (the first
+ * X-Forwarded-For entry), and only an IP literal. Forwarded to the API so its
+ * per-source limits and its reply gate count each partner, not this server:
+ * the API trusts the header only from the private network (TRUST_PROXY), and
+ * over the public address the proxy replaces it.
+ */
+function clientAddress(request: Request): string | null {
+  const first = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? '';
+  return isIP(first) ? first : null;
+}
+
+/**
+ * [SEC-DOS F8] This page's own limit, per partner address, before the body is
+ * read or anything is forwarded: a partner coming back from MMG sends one or
+ * two returns, so 20 a minute is generous; requests with no readable address
+ * (never, behind the site's proxy) share one bucket as large as the API's own
+ * per-source ceiling. Fixed one-minute windows in this process, bounded in size.
+ */
+const RELAY_PER_CLIENT_PER_MINUTE = 20;
+const RELAY_UNKNOWN_CLIENT_PER_MINUTE = 120;
+const RELAY_MAX_TRACKED = 10_000;
+const relayCounts = new Map<string, number>();
+let relayWindowStartedAt = 0;
+function relayAllowed(client: string | null, now = Date.now()): boolean {
+  if (now - relayWindowStartedAt >= 60_000 || relayCounts.size >= RELAY_MAX_TRACKED) {
+    relayCounts.clear();
+    relayWindowStartedAt = now;
+  }
+  const key = client ?? 'unknown';
+  const count = (relayCounts.get(key) ?? 0) + 1;
+  relayCounts.set(key, count);
+  return count <= (client ? RELAY_PER_CLIENT_PER_MINUTE : RELAY_UNKNOWN_CLIENT_PER_MINUTE);
+}
+
+/** How long the API asked us to wait before one more try (it only says so when replies are queued), 1 to 2 seconds. */
+async function retryAfterMs(response: Response): Promise<number | null> {
+  if (response.status !== 503) return null;
+  const body = await response.json().catch(() => null);
+  if (body?.error?.code !== 'TRY_AGAIN') return null;
+  const seconds = Number(body?.error?.details?.retryAfterSeconds);
+  return Math.min(2, Math.max(1, Number.isFinite(seconds) ? seconds : 1)) * 1000;
+}
+
 /** base64 or base64url with '=' padding, at most 4096 characters, like a query value. */
 function replyOf(value: string): string {
   if (value.length > 4096 || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) throw new Error('Unreadable return');
@@ -74,7 +119,13 @@ function readPath(path: unknown): { outcome: string; token: string | undefined }
 async function handle(request: Request, context: Context) {
   let state: keyof typeof words = 'UNKNOWN';
   let status = 200;
+  const client = clientAddress(request);
   try {
+    if (!relayAllowed(client)) {
+      status = 429;
+      await request.body?.cancel().catch(() => {});
+      throw new Error('Too many returns');
+    }
     const { outcome, token } = readPath((await context.params).path);
     const fields: unknown = request.method === 'POST' ? await postedFields(request) : new URL(request.url).searchParams;
     const entries: Array<[string, string]> = [];
@@ -94,11 +145,20 @@ async function handle(request: Request, context: Context) {
       const previous = params[key];
       params[key] = previous === undefined ? value : Array.isArray(previous) ? [...previous, value] : [previous, value];
     }
-    const response = await fetch(`${process.env['API_URL'] ?? BROWSER_API_ORIGIN}/api/v1/billing/mmg-checkout/return`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store', redirect: 'error',
+    // [SEC-DOS F8] The API reads a reply from its token field only: a return without one is never relayed.
+    if (!Object.keys(params).some((key) => key.toLowerCase() === 'token')) throw new Error('No reply to forward');
+    const forward = () => fetch(`${process.env['API_URL'] ?? BROWSER_API_ORIGIN}/api/v1/billing/mmg-checkout/return`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(client ? { 'X-Forwarded-For': client } : {}) }, cache: 'no-store', redirect: 'error',
       body: JSON.stringify({ outcome, params }),
       signal: AbortSignal.timeout(10_000),
     });
+    let response = await forward();
+    // Too many replies were waiting to be opened: one more try after the wait the API asked for.
+    const wait = await retryAfterMs(response);
+    if (wait !== null) {
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      response = await forward();
+    }
     if (response.ok) {
       const body = await response.json();
       const candidate = body?.data?.state;

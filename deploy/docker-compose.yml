@@ -419,6 +419,13 @@ services:
       # line; empty keeps the honest 404. Public certificate fingerprints, not
       # a secret. Changing it recreates this container; no rebuild.
       ANDROID_CERT_SHA256: ${ANDROID_CERT_SHA256:-}
+      # [SEC-DOS F8] The MMG return page (apps/web/src/app/pay/mmg) forwards each
+      # partner's reply to the API from the server, with the partner's own
+      # address. Over the private network the API trusts that address
+      # (TRUST_PROXY names this network), so its per-source limits and its reply
+      # gate count each partner instead of this one server. Only that page reads
+      # API_URL; the browser bundle keeps the public API address.
+      API_URL: http://api:3000
       # V8 collects well below the container's ceiling, so a leak restarts the
       # site instead of pressing on the database's memory.
       NODE_OPTIONS: --max-old-space-size=384
