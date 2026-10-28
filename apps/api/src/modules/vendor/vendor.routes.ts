@@ -2710,6 +2710,145 @@ export async function vendorRoutes(app: FastifyInstance) {
     return answer(adjustment, false);
   });
 
+  // ── [IN-STORE-SALE] "Sold in store −1" — one tap takes one sold-in-person item off the Swift stock ─────────
+  //
+  // A store with no till system sells an item at the counter: the next app order must not sell the one that is
+  // gone. One tap on a tracked item's row is ONE sale, through the SAME single writer and guard as a checkout sale
+  // (applyStockMovement: never below 0, ledger row with balanceAfter, all in one transaction), hidden at 0 exactly
+  // as a checkout hides it, and the owner alerted on the same crossing edge. The tap's own Idempotency-Key makes
+  // its StockAdjustment row the durable receipt: a retry or double-submit of the SAME tap answers with it; a new
+  // tap (new key) is a new sale. Who may: exactly who may use the stock adjust route above (resolveVendor: the
+  // owner or any member of the store that owns the item). Old app builds never call these; nothing above changed.
+  const IN_STORE_SALE_NONE_LEFT = "You have 0 of this left on Swift. Update the stock if that's wrong.";
+  const IN_STORE_SALE_UNTRACKED = "Stock isn't counted for this item. Add a stock number to track it.";
+  const IN_STORE_SALE_NO_SALE = "That sale isn't on Swift, so there's nothing to undo.";
+  const IN_STORE_SALE_NOT_YOURS = 'Only the person who recorded this sale can undo it. Use Adjust stock to correct the count.';
+  /** A tap's key: required, and from a plain alphabet, so it can never collide with the `undo:` receipts below. */
+  const saleTapKey = (raw: unknown): string => {
+    if (typeof raw !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(raw)) {
+      throw new AppError(400, 'INVALID_IDEMPOTENCY_KEY', 'Each tap needs its own Idempotency-Key: 8 to 128 letters, digits, - or _');
+    }
+    return raw;
+  };
+  /** The caller's tracked, live item — the same lookup and refusals as the stock adjust route. The store check
+   *  (resolveVendor) runs FIRST, before the key or the body is read, exactly as on /adjust: a token that is not a
+   *  store's is refused before anything else answers. */
+  const saleAccess = (request: { user: { userId: string }; headers: Record<string, string | string[] | undefined> }) =>
+    resolveVendor(app, request.user.userId, selectedVendorId(request));
+  const saleItem = async (access: VendorAccess, request: { params: IdParam }) => {
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds }, archivedAt: null } });
+    if (!item) throw new NotFoundError('Item', request.params.id);
+    if (item.stockQuantity == null) throw new AppError(400, 'UNTRACKED', IN_STORE_SALE_UNTRACKED);
+    return item;
+  };
+  const saleAnswer = async (itemId: string, receipt: { movementId: string | null }, replayed: boolean) => {
+    const fresh = await app.prisma.item.findUnique({ where: { id: itemId }, select: { stockQuantity: true, isAvailable: true } });
+    return { success: true, data: { movementId: receipt.movementId, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable, replayed } };
+  };
+  /** The committed receipt under this key, if any; refused when the key already named something else. */
+  const saleReceipt = async (itemId: string, commandKey: string, delta: 1 | -1, userId: string) => {
+    const receipt = await app.prisma.stockAdjustment.findUnique({ where: { itemId_commandKey: { itemId, commandKey } } });
+    if (!receipt) return null;
+    if (receipt.reason !== 'IN_STORE_SALE' || receipt.delta !== delta || receipt.createdBy !== userId) {
+      throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key already named a different stock change — use a new key for a new tap');
+    }
+    return receipt;
+  };
+
+  /** POST /items/:id/in-store-sale — one sold in person (-1). Idempotency-Key required: one key = one tap. */
+  app.post<{ Params: IdParam }>('/items/:id/in-store-sale', auth, async (request) => {
+    const access = await saleAccess(request);
+    const commandKey = saleTapKey(request.headers['idempotency-key']);
+    const item = await saleItem(access, request);
+    const userId = request.user.userId;
+    // Read BEFORE moving: a retry of a sale that took the last one answers with its receipt, never "0 left".
+    const prior = await saleReceipt(item.id, commandKey, -1, userId);
+    if (prior) return saleAnswer(item.id, prior, true);
+
+    let replayed = false;
+    let event: { itemId: string; name: string; remaining: number; kind: 'low' | 'out' } | null = null;
+    const receipt = await app.prisma.$transaction(async (tx) => {
+      const moved = await applyStockMovement(tx, { itemId: item.id, delta: -1, reason: 'IN_STORE_SALE', actorId: userId });
+      // Stock stopped being counted since the read above: nothing moved, so no sale is recorded either.
+      if (!moved.applied) throw new AppError(400, 'UNTRACKED', IN_STORE_SALE_UNTRACKED);
+      const after = await tx.item.findUniqueOrThrow({ where: { id: item.id }, select: { stockQuantity: true, lowStockThreshold: true } });
+      const remaining = after.stockQuantity ?? 0;
+      // Hidden at 0 exactly as a checkout sale hides it.
+      await tx.item.updateMany({ where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true }, data: { isAvailable: false, autoHiddenAt: new Date() } });
+      // The owner is alerted as a checkout alerts: at 0, or on the crossing edge of the low-stock level (once).
+      if (remaining <= 0) event = { itemId: item.id, name: item.name, remaining: 0, kind: 'out' };
+      else if (after.lowStockThreshold !== null && remaining <= after.lowStockThreshold && remaining + 1 > after.lowStockThreshold) {
+        event = { itemId: item.id, name: item.name, remaining, kind: 'low' };
+      }
+      return tx.stockAdjustment.create({
+        data: { itemId: item.id, delta: -1, reason: 'IN_STORE_SALE', note: null, createdBy: userId, commandKey, movementId: moved.movementId },
+      });
+    }).catch(async (err) => {
+      // The same tap sent twice at once: the first committed, this one rolled back whole and answers with its receipt.
+      // Looked for FIRST: on the last one, the copy that lost finds 0 left, yet its tap did happen. [REVIEW-M/G #2157 S4-1]
+      const insufficient = err instanceof AppError && err.code === 'INSUFFICIENT_STOCK';
+      if (insufficient || (err as { code?: unknown }).code === 'P2002') {
+        const winner = await saleReceipt(item.id, commandKey, -1, userId);
+        if (winner) { replayed = true; return winner; }
+      }
+      if (insufficient) throw new AppError(409, 'NONE_LEFT', IN_STORE_SALE_NONE_LEFT);
+      throw err;
+    });
+    if (replayed) return saleAnswer(item.id, receipt, true);
+    scheduleVendorSearchSync(app, item.vendorId);
+    const alert = event as { itemId: string; name: string; remaining: number; kind: 'low' | 'out' } | null;
+    if (alert) {
+      // After the commit, never failing the tap: the sale stands whether or not the alert goes out.
+      void (async () => {
+        const vendor = await app.prisma.vendor.findUnique({ where: { id: item.vendorId }, select: { owner: { select: { userId: true } } } });
+        if (vendor?.owner?.userId) await notifications.lowStock(vendor.owner.userId, alert);
+      })().catch((err) => request.log.warn({ err, itemId: item.id }, '[IN-STORE-SALE] low-stock alert failed; the sale stands'));
+    }
+    return saleAnswer(item.id, receipt, false);
+  });
+
+  /** POST /items/:id/in-store-sale/undo { saleKey } — puts back the one that tap took: a NEW +1 ledger row (the
+   *  ledger is append-only), once per sale whatever the retries (its receipt key is derived from the sale's). Only
+   *  the person who recorded the sale. Shows the item again as a restock does (only an auto-hidden one). */
+  app.post<{ Params: IdParam }>('/items/:id/in-store-sale/undo', auth, async (request) => {
+    const access = await saleAccess(request);
+    const { saleKey } = z.object({ saleKey: z.string() }).parse(request.body);
+    const key = saleTapKey(saleKey);
+    const item = await saleItem(access, request);
+    const userId = request.user.userId;
+    const sale = await app.prisma.stockAdjustment.findUnique({ where: { itemId_commandKey: { itemId: item.id, commandKey: key } } });
+    if (!sale || sale.reason !== 'IN_STORE_SALE' || sale.delta !== -1) {
+      throw new AppError(404, 'SALE_NOT_FOUND', IN_STORE_SALE_NO_SALE);
+    }
+    // [REVIEW-G #2157 S4-2] Another member's sale (of this store's own item) is named for what it is.
+    if (sale.createdBy !== userId) throw new AppError(403, 'SALE_NOT_YOURS', IN_STORE_SALE_NOT_YOURS);
+    const commandKey = `undo:${key}`;
+    const prior = await saleReceipt(item.id, commandKey, 1, userId);
+    if (prior) return saleAnswer(item.id, prior, true);
+
+    let replayed = false;
+    const receipt = await app.prisma.$transaction(async (tx) => {
+      const moved = await applyStockMovement(tx, { itemId: item.id, delta: 1, reason: 'IN_STORE_SALE', actorId: userId, note: `Undo of in-store sale ${sale.movementId ?? sale.id}` });
+      if (!moved.applied) throw new AppError(400, 'UNTRACKED', IN_STORE_SALE_UNTRACKED);
+      // [Owner ruling via COORD 28 Oct · REVIEW-F S4-8] The one back on the shelf shows the item again exactly as any
+      // restock does: only an item the stock engine hid (autoHiddenAt set) and now above 0 — never one the store hid by
+      // hand, never one Swift does not allow (the shared rule, judged under the item's row lock).
+      await unhideRestocked(tx, item.id);
+      return tx.stockAdjustment.create({
+        data: { itemId: item.id, delta: 1, reason: 'IN_STORE_SALE', note: 'Undo of an in-store sale', createdBy: userId, commandKey, movementId: moved.movementId },
+      });
+    }).catch(async (err) => {
+      if ((err as { code?: unknown }).code === 'P2002') {
+        const winner = await saleReceipt(item.id, commandKey, 1, userId);
+        if (winner) { replayed = true; return winner; }
+      }
+      throw err;
+    });
+    if (replayed) return saleAnswer(item.id, receipt, true);
+    scheduleVendorSearchSync(app, item.vendorId);
+    return saleAnswer(item.id, receipt, false);
+  });
+
   /** GET /items/low-stock — everything at/under its threshold. */
   app.get('/items/low-stock', auth, async (request) => {
     const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));

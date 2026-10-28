@@ -28,6 +28,7 @@ import { DAY_LABELS, GUTTER, InlineInput, SubHeader } from '../shared';
 import { vendorApi } from '../../../services/api';
 import { toast } from '../../../kit/toast';
 import { useRowHold } from '../../../lib/useRowHold';
+import { SOLD_IN_STORE } from '../../../lib/inStoreSale';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import {
   useVendorProfile,
@@ -740,7 +741,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                 <T variant="caption" tone="muted">
                   Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.
                 </T>
-              ) : null}
+              ) : (
+                // [IN-STORE-SALE] Why the menu list shows no "Sold in store −1" for this item.
+                <T variant="caption" tone="muted">
+                  {SOLD_IN_STORE.untracked}
+                </T>
+              )}
               {/* Reasoned movements (received/damaged/…) keep an audit trail —
                   different from overwriting the number above. */}
               {existing && existing.stockQuantity != null ? (

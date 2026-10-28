@@ -134,6 +134,7 @@ vi.mock('../../../stores/vendorPreview', () => ({ useVendorPreview: (select: (s:
 vi.mock('../../../lib/images', () => ({ mediaUrl: () => undefined, isKeptPhoto: () => false, storePhotoUrl: () => null, HERO_PHOTO_WIDTH: 1280 }));
 
 import { VendorItemEditorScreen } from './VendorItemEditorScreen';
+import { SOLD_IN_STORE } from '../../../lib/inStoreSale';
 
 const nav = createNavigationContainerRef<Record<string, object | undefined>>();
 const Stack = createNativeStackNavigator();
@@ -292,5 +293,15 @@ describe('[TAP-AUDIT] a refused save says why, in the server\'s words', () => {
     fx.saveError = new Error('Network Error');
     await openNewItem();
     expect(shown("Couldn't save. Check the details and try again.")).toBe(true);
+  });
+});
+
+describe('[IN-STORE-SALE] the editor says when an item\'s stock is not counted', () => {
+  it('no stock number: why the menu list shows no "Sold in store −1"; a stock number typed: the tracked words instead', async () => {
+    await openNewItem();
+    expect(shown(SOLD_IN_STORE.untracked)).toBe(true);
+    await type('Stock qty', '12');
+    expect(shown(SOLD_IN_STORE.untracked)).toBe(false);
+    expect(shown('Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.')).toBe(true);
   });
 });

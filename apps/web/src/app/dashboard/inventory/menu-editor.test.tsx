@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import InventoryPage from './page';
 import { OUTSIDE_PHOTO_NOTE } from './menu-tools';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
+import { SOLD_IN_STORE } from '../../../../../mobile/src/lib/inStoreSale';
 
 // ---------------------------------------------------------------------------
 // [TAP-AUDIT 27 Oct · owner rule 11 Oct: the website copies the app] The web Products page now does what the phone's
@@ -379,5 +380,18 @@ describe('[REVIEW-F #2142 S4-2] a removed item or section is said in plain words
     const ask = await dialog();
     await click(within(ask).getByRole('button', { name: 'Delete' }));
     expect((await within(ask).findByRole('alert')).textContent).toBe('This section or item was removed on another phone. Go back and open the menu again.');
+  });
+});
+
+describe('[IN-STORE-SALE · REVIEW-F #2157 M-F501] the web editor says when an item\'s stock is not counted, as the app', () => {
+  it('no stock number: the untracked words; a stock number typed: the tracked words instead', async () => {
+    renderWithQuery(<InventoryPage />);
+    const rice = await screen.findByRole('article', { name: 'Rice 20 kg' });
+    await click(await within(rice).findByRole('button', { name: 'Edit item' }));
+    const editor = await dialog();
+    expect(within(editor).getByText(SOLD_IN_STORE.untracked)).toBeTruthy();
+    await type(editor, 'Stock qty', '12');
+    expect(within(editor).queryByText(SOLD_IN_STORE.untracked)).toBeNull();
+    expect(within(editor).getByText('Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.')).toBeTruthy();
   });
 });
