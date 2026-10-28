@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -61,7 +62,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
-    await app.prisma.auditLog.deleteMany({ where: { OR: [{ id: { in: auditIds } }, { userId: { in: userIds } }] } }).catch(() => {});
+    // [ADM-003] Audit rows are append-only: a test removes its own rows only through the named purge helper.
+    await purgeAuditLogs(app.prisma, { OR: [{ id: { in: auditIds } }, { userId: { in: userIds } }] }, 'test-cleanup:audit-words').catch(() => 0);
     await app.prisma.privilegedApproval.deleteMany({ where: { id: { in: approvalIds } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
