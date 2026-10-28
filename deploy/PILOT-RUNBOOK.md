@@ -1162,7 +1162,11 @@ explicitly off. Beyond the earlier guards:
 - **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
-  EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE).
+  EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE), or
+  `EMAIL_PROVIDER=resend` (email over HTTPS, for a host that cannot reach
+  SMTP) with EMAIL_FROM on the domain verified in Resend and the
+  RESEND_API_KEY secret (wired as RESEND_API_KEY_FILE). Dev, unset or any
+  other value is refused.
 - **The launch money rules.** `BILLING_TOPUP_HOLD` exactly `1`, and no
   AGENT_CASH_WEBHOOK_SECRET (nor its `_FILE`): the same two rules pilot-up.sh
   checks, held by the API itself however it is started (a hand-run compose,

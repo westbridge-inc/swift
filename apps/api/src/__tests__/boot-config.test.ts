@@ -1238,6 +1238,47 @@ describe('[PROD-PATH] production needs an on-call phone and an email sender', ()
     expect(message).not.toContain(String(good['SMTP_PASS']));
   });
 
+  // [EMAIL-HTTPS 27 Oct] The droplets cannot reach SMTP, so production may send
+  // email over HTTPS through Resend instead. NOT a relaxation: a real sender is
+  // still required (unset, dev and anything else stay refused, above and below),
+  // and resend is held to its own whole configuration, by name, like smtp.
+  const RESEND_KEY = 're_synthetic_boot_key_never_echoed';
+  const resend = {
+    ...good, EMAIL_PROVIDER: 'resend', RESEND_API_KEY: RESEND_KEY, EMAIL_FROM: 'Swift <no-reply@swiftgy.com>',
+    SMTP_HOST: undefined, SMTP_PORT: undefined, SMTP_USER: undefined, SMTP_PASS: undefined,
+  };
+
+  it('accepts smtp, and accepts resend with its key and a sender (no SMTP setting needed)', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig(resend)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...resend, EMAIL_FROM: 'no-reply@swiftgy.com' })).not.toThrow();
+  });
+
+  it.each(['RESEND_API_KEY', 'EMAIL_FROM'])('refuses resend without %s (unset or blank), FATAL by name, never echoing the key', (name) => {
+    for (const value of [undefined, '', '  ']) {
+      let message = '';
+      try { assertSafeBootConfig({ ...resend, [name]: value }); } catch (e) { message = String(e); }
+      expect(message, JSON.stringify(value)).toMatch(new RegExp(`FATAL: EMAIL_PROVIDER=resend needs ${name}`));
+      expect(message).toMatch(/Refusing to start/);
+      expect(message).not.toContain(RESEND_KEY);
+    }
+  });
+
+  it('refuses resend with a sender that is not an address, never echoing the key', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...resend, EMAIL_FROM: 'Swift' }); } catch (e) { message = String(e); }
+    expect(message).toMatch(/FATAL: EMAIL_FROM must be an email address/);
+    expect(message).not.toContain(RESEND_KEY);
+  });
+
+  it.each([undefined, '', 'dev', 'sendgrid', 'postmark', 'Resend', ' resend', 'smtp,resend'])('still refuses EMAIL_PROVIDER=%j with every resend setting present', (provider) => {
+    expect(() => assertSafeBootConfig({ ...resend, EMAIL_PROVIDER: provider })).toThrow(/FATAL: EMAIL_PROVIDER must be smtp or resend in production/);
+  });
+
+  it('smtp is unchanged: a Resend key does not stand in for a missing SMTP setting', () => {
+    expect(() => assertSafeBootConfig({ ...good, RESEND_API_KEY: RESEND_KEY, SMTP_PASS: undefined })).toThrow(/EMAIL_PROVIDER=smtp needs SMTP_PASS/);
+  });
+
   it('outside production neither is required', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();

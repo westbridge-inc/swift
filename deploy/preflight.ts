@@ -141,6 +141,7 @@ const STUBS: Record<string, string> = {
   EMAIL_PROVIDER: 'smtp',
   SMTP_HOST: 'stub.invalid', SMTP_PORT: '465', SMTP_USER: 'STUB',
   SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
+  RESEND_API_KEY: 'STUB-NOT-A-REAL-SECRET',
   BILLING_TOPUP_HOLD: '1',
   AGENT_CASH_WEBHOOK_SECRET: '',
   // The hash salts come from the store (*_FILE); stubbing them lets the

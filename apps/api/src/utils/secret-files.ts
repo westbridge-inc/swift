@@ -51,6 +51,9 @@ export const SECRET_FILE_NAMES = [
   // at a hidden prompt (helper 21) into the secret store, never a compose file.
   'CALL_RELAY_CALLER_ID',
   'SMTP_PASS',
+  // [EMAIL-HTTPS] Resend's API key (EMAIL_PROVIDER=resend), set by the owner
+  // at a hidden prompt into the store.
+  'RESEND_API_KEY',
   // [L04] Non-production SMS recipient allowlist: phone numbers are personal
   // data, so they arrive by file from the store, never in a compose file.
   'SMS_RECIPIENT_ALLOWLIST',

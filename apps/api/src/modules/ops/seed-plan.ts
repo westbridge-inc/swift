@@ -514,7 +514,7 @@ async function onlyAdmin(db: Pick<PrismaClient, 'user'> | Prisma.TransactionClie
 
 /**
  * Can the owner's notices and sign-in code actually leave? The email needs a
- * working provider (production: SMTP); in production the text needs Twilio,
+ * working provider (production: SMTP or Resend); in production the text needs Twilio,
  * exactly as the API's boot demands it (boot-config.ts). Null when ready, or
  * which one is not. No notice, no solo: the send itself is still the authority.
  */
@@ -532,7 +532,7 @@ export function soloNoticeChannelsReady(env: Record<string, string | undefined> 
  * text ones. Compose hands an unset one over as an empty string, and the
  * providers read empty as a value (PUSH_PROVIDER='' is an unknown provider,
  * SMTP_TLS='' an unknown mode), so the seed unsets an empty one first
- * (seed-production.ts). The two secrets are not listed: they arrive as *_FILE,
+ * (seed-production.ts). The secrets are not listed: they arrive as *_FILE,
  * and the secret-file loader already treats an empty one as unset.
  * seed-container-channels.test.ts records what the channels read in
  * production and holds this list and the compose file to it.
@@ -541,6 +541,8 @@ export const SEED_CHANNEL_SETTINGS = [
   'NOTIFICATION_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID',
   'PUSH_PROVIDER', 'EXPO_PUSH_URL', 'EXPO_PUSH_RECEIPT_DELAY_MS',
   'EMAIL_PROVIDER', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_TLS', 'SMTP_USER', 'EMAIL_FROM', 'SMTP_TIMEOUT_MS',
+  // [EMAIL-HTTPS] EMAIL_PROVIDER=resend (its key arrives as RESEND_API_KEY_FILE).
+  'RESEND_TIMEOUT_MS',
 ] as const;
 
 /** An empty notification setting is an unset one in the seed (see SEED_CHANNEL_SETTINGS). */

@@ -43,6 +43,8 @@ describe('the allowlist', () => {
       'POSTGRES_PASSWORD', 'DATABASE_URL',
       'JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'MEILISEARCH_KEY',
       'TWILIO_API_KEY_SECRET', 'SMTP_PASS',
+      // [EMAIL-HTTPS] Resend's API key (EMAIL_PROVIDER=resend).
+      'RESEND_API_KEY',
       // [R22] The token Twilio signs inbound STOP requests with (verification only).
       'TWILIO_WEBHOOK_AUTH_TOKEN',
       'MMG_API_KEY', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET',

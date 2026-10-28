@@ -642,10 +642,12 @@ class SeedSoloCeremony(SeedBreakGlassCeremony):
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
         self.assertIn("SEED_SOLO_CANCEL: ${SEED_SOLO_CANCEL:-}", override)
         for name in ("NOTIFICATION_PROVIDER", "TWILIO_ACCOUNT_SID", "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET_FILE", "TWILIO_FROM",
-                     "TWILIO_MESSAGING_SERVICE_SID", "EMAIL_PROVIDER", "SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USER", "SMTP_PASS_FILE", "EMAIL_FROM"):
+                     "TWILIO_MESSAGING_SERVICE_SID", "EMAIL_PROVIDER", "SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USER", "SMTP_PASS_FILE", "EMAIL_FROM",
+                     # [EMAIL-HTTPS] email over HTTPS (Resend): its key as a file from the store.
+                     "RESEND_API_KEY_FILE", "RESEND_TIMEOUT_MS"):
             self.assertIn(f"{name}: ${{{name}:-}}", override)
-        # The two secrets only ever as files from the store, never a value.
-        self.assertIsNone(re.search(r"(?m)^\s*(TWILIO_API_KEY_SECRET|SMTP_PASS)\s*:", override))
+        # The secrets only ever as files from the store, never a value.
+        self.assertIsNone(re.search(r"(?m)^\s*(TWILIO_API_KEY_SECRET|SMTP_PASS|RESEND_API_KEY)\s*:", override))
 
     def test_a_notice_setting_exported_in_the_shell_is_refused(self):
         # One configuration: the seed's providers come from deploy/.env, never this shell.

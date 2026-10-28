@@ -149,7 +149,18 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     providerDirs: ['notifications'], hosts: ['secureserver.net', 'godaddy.com', 'titan.email'],
     payload: ['CONTACT'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
-    note: 'SMTP_HOST-configured; email address + message body.',
+    note: 'SMTP_HOST-configured; email address + message body. The adapter stays supported (EMAIL_PROVIDER=smtp); production sends through Resend (RESEND_EMAIL) because its servers cannot reach SMTP. GoDaddy also hosts Swift\'s own mailbox (the inbox people write to).',
+  },
+  {
+    // [EMAIL-HTTPS 27 Oct 2026] Facts from Resend's own pages: the DPA (resend.com/legal/dpa: Plus Five Five, Inc.,
+    // San Francisco; primary processing in the US; SCCs) and the regions page (resend.com/docs/dashboard/domains/regions:
+    // the region is where email is sent from; customer data is stored in the US whatever the region).
+    ref: 'RESEND_EMAIL', party: 'Resend (Plus Five Five, Inc.)', service: 'Transactional email over HTTPS',
+    modelBacked: false,
+    providerDirs: ['notifications'], hosts: ['api.resend.com', 'resend.com'],
+    payload: ['CONTACT'], lawfulBasis: 'CONTRACT',
+    country: 'US (Resend\'s records), emails sent from Brazil (sending region sa-east-1, São Paulo)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
+    note: 'USED AT LAUNCH: EMAIL_PROVIDER=resend (providers/notifications/resend-email.ts); email address + message body. The Privacy Policy names it ("Resend (delivers our emails ...").',
   },
   {
     ref: 'GOOGLE_PLACES', party: 'Google LLC (Places API (New))', service: 'Address search from Swift\'s servers: autocomplete, place details, and the address for a map pin',

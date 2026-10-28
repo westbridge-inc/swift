@@ -8,6 +8,7 @@
 import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
+import { ResendEmailProvider } from './resend-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
 import { sealReviewChannels } from './review-seal';
 import { guardNonProductionSms } from './sms-recipient-allowlist';
@@ -547,8 +548,10 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
 /**
  * Email is chosen on its own axis: `EMAIL_PROVIDER=smtp` sends through the
  * founder's mailbox (GoDaddy / Microsoft 365 over SMTP, see smtp-email.ts);
- * unset or `dev` keeps DevEmail, which REFUSES in production so a missing
- * sender is loud at the first send rather than silent forever.
+ * `EMAIL_PROVIDER=resend` sends over HTTPS through Resend's email API
+ * (resend-email.ts; the droplets cannot reach SMTP); unset or `dev` keeps
+ * DevEmail, which REFUSES in production so a missing sender is loud at the
+ * first send rather than silent forever.
  */
 function getEmailProvider(): EmailProvider {
   const provider = process.env['EMAIL_PROVIDER'] ?? 'dev';
@@ -557,6 +560,8 @@ function getEmailProvider(): EmailProvider {
       return new DevEmail();
     case 'smtp':
       return new SmtpEmailProvider();
+    case 'resend':
+      return new ResendEmailProvider();
     default:
       throw new Error(`Unknown EMAIL_PROVIDER: ${provider}`);
   }
