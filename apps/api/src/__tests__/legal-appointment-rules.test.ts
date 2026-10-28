@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { PrismaClient } from '@prisma/client';
 import { PRIVACY, TERMS, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
+import { BookingService } from '../modules/booking/booking.service';
+import { CUSTOMER_RESCHEDULE_BEFORE_MIN, RESCHEDULE_WINDOW_CLOSED_CODE, RESCHEDULE_WINDOW_CLOSED_MESSAGE } from '../modules/booking/reschedule-policy';
 import {
   APPOINTMENT_FREE_CANCEL_BEFORE_MIN,
   FREE_CANCEL_WINDOW_MIN,
@@ -114,8 +117,8 @@ describe('[BOOK-S7] instant confirmation, missed appointments, the business\'s d
 });
 
 // ---------------------------------------------------------------------------
-// The server side of the same words: the one cancel predicate (cancel-policy.ts). The customer's move is graded by
-// #2194's own suite (booking/reschedule-policy.ts, CUSTOMER_RESCHEDULE_BEFORE_MIN = APPOINTMENT_FREE_CANCEL_BEFORE_MIN).
+// The server side of the same words: the one cancel predicate (cancel-policy.ts), and the customer's move
+// (booking/reschedule-policy.ts, #2194: this branch is stacked on it, so the words and the rule ship together).
 // ---------------------------------------------------------------------------
 
 const NOW = new Date('2026-10-28T15:00:00.000Z');
@@ -127,7 +130,7 @@ const appointment = (slotIn: number, confirmedAgo: number): CancellationSnapshot
   scheduledFor: null, appointmentSlot: at(slotIn),
 });
 
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('[BOOK-S7 · B1] the cancel verdict at the cutoff the Terms name (switch on)', () => {
   it('free one minute before the cutoff and at it; refused one minute after, in words that send the customer to the business', () => {
@@ -163,5 +166,77 @@ describe('[BOOK-S7 · B1] the cancel verdict at the cutoff the Terms name (switc
     const order = appointment(5 * 60, 0);
     expect(cancellationVerdict(order, at(FREE_CANCEL_WINDOW_MIN))).toMatchObject({ allowed: true, reason: 'IN_WINDOW' });
     expect(cancellationVerdict(order, at(FREE_CANCEL_WINDOW_MIN + 1))).toMatchObject({ allowed: false, code: 'CANCEL_WINDOW_CLOSED' });
+  });
+});
+
+// The customer's own move (POST /customer/bookings/:id/reschedule -> BookingService.rescheduleBooking), on doubles: the
+// rule the Terms state ("until 2 hours before it starts", then contact the Business) is the one the server enforces.
+function moveHarness(slotIn: number, bookingConfig: Record<string, unknown> | null = null) {
+  const writes: string[] = [];
+  const tx = {
+    $queryRaw: async () => [],
+    $executeRaw: async () => 1,
+    booking: {
+      create: async (args: { data: Record<string, unknown> }) => { writes.push('booking.create'); return { id: 'booking-2', ...args.data }; },
+      updateMany: async () => { writes.push('booking.updateMany'); return { count: 1 }; },
+      findMany: async () => [],
+    },
+    vendor: { findUnique: async () => ({ bookingCapacity: 1 }) },
+    order: { findUniqueOrThrow: async () => ({ status: 'ACCEPTED' }), update: async () => { writes.push('order.update'); return {}; } },
+  };
+  const prisma = {
+    booking: {
+      findUnique: async () => ({
+        id: 'booking-1', itemId: 'item-1', customerId: 'user-1', orderId: 'order-1', status: 'CONFIRMED',
+        slotStart: at(slotIn), slotEnd: at(slotIn + 30), item: { id: 'item-1', vendorId: 'vendor-1', name: 'Cut' },
+      }),
+    },
+    item: { findUnique: async () => ({ id: 'item-1', vendorId: 'vendor-1', fulfillment: 'APPOINTMENT', isAvailable: true, bookingConfig }) },
+    $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => { writes.push('$transaction'); return fn(tx); },
+  } as unknown as PrismaClient;
+  if (bookingConfig == null) {
+    vi.spyOn(BookingService.prototype as unknown as { validatedSlot: () => Promise<unknown> }, 'validatedSlot')
+      .mockResolvedValue({ config: { durationMinutes: 30, slots: [] }, vendorId: 'vendor-1' });
+  } else {
+    vi.spyOn(BookingService.prototype, 'exceptionsFor').mockResolvedValue([]);
+  }
+  return { svc: new BookingService(prisma), writes };
+}
+const frozen = () => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW); };
+
+describe('[BOOK-S7 · B2] the customer\'s move stops where the Terms say (switch on)', () => {
+  it('the move rule uses the hours the Terms name, and its refusal sends the customer to the business', () => {
+    expect(CUSTOMER_RESCHEDULE_BEFORE_MIN).toBe(APPOINTMENT_FREE_CANCEL_BEFORE_MIN);
+    expect(RESCHEDULE_WINDOW_CLOSED_MESSAGE).toBe(`This booking can no longer be moved in the app: it starts in less than ${HOURS} hours. Contact the provider to change it.`);
+    expect(TERMS_S7).toContain(`until ${CUSTOMER_RESCHEDULE_BEFORE_MIN / 60} hours before it starts. After that, contact the Business to change or cancel it.`);
+  });
+
+  it('inside the last 2 hours: 409 in those words, and nothing is written', async () => {
+    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
+    const h = moveHarness(CUSTOMER_RESCHEDULE_BEFORE_MIN - 30);
+    await expect(h.svc.rescheduleBooking('booking-1', at(24 * 60), { customerId: 'user-1' })).rejects.toMatchObject({
+      statusCode: 409, code: RESCHEDULE_WINDOW_CLOSED_CODE, message: RESCHEDULE_WINDOW_CLOSED_MESSAGE,
+    });
+    expect(h.writes).toEqual([]);
+  });
+
+  it('control — before the cutoff the move goes through', async () => {
+    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
+    const h = moveHarness(CUSTOMER_RESCHEDULE_BEFORE_MIN + 30);
+    expect((await h.svc.rescheduleBooking('booking-1', at(24 * 60), { customerId: 'user-1' })).moved).toBe(true);
+    expect(h.writes).toEqual(['$transaction', 'booking.updateMany', 'booking.create', 'order.update']);
+  });
+
+  // [COORD 28 Oct] A moved appointment's NEW time keeps the listing's minimum notice, exactly as a new booking does:
+  // the move runs the new time through the same slot check (validatedSlot -> slotFitsConfig).
+  it('the new time must respect the listing\'s minimum notice, as a new booking does', async () => {
+    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
+    const everyDay = [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, start: '00:00', end: '23:59' }));
+    const soon = moveHarness(24 * 60, { durationMinutes: 30, slots: everyDay, minNoticeMinutes: 120 });
+    await expect(soon.svc.rescheduleBooking('booking-1', at(60), { customerId: 'user-1' })).rejects.toMatchObject({ statusCode: 400, code: 'SLOT_TOO_SOON' });
+    expect(soon.writes).toEqual([]);
+    vi.restoreAllMocks();
+    const later = moveHarness(24 * 60, { durationMinutes: 30, slots: everyDay, minNoticeMinutes: 120 });
+    expect((await later.svc.rescheduleBooking('booking-1', at(180), { customerId: 'user-1' })).moved).toBe(true);
   });
 });
