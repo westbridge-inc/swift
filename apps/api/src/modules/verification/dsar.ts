@@ -25,15 +25,19 @@ import { unpackAndDecrypt } from './extraction-ledger';
 import { isRetiredPlaceholder, POLICE_CLEARANCE_DOC_TYPE, registryCode, RETIRED_FIELDS } from './doc-registry';
 import { notifyAdmins, tenantOfUser, type NotificationService } from '../notification/notification.service';
 import { REVIEW_SLA_HOURS, type VerificationService } from './verification.service';
+import { documentsInSecondReview, documentUnderInvestigation, OPEN_INVESTIGATION_TEXT, personUnderInvestigation } from './open-investigation';
 
 export const DSAR_EXPORT_REASON = 'SUBJECT_ACCESS';
 export const RECTIFICATION_PRIORITY = 50;
 
-export type RefusalGround = 'LEGAL_HOLD' | 'AML_RECORD' | 'ACTIVE_LICENCE';
+export type RefusalGround = 'LEGAL_HOLD' | 'OPEN_INVESTIGATION' | 'AML_RECORD' | 'ACTIVE_LICENCE';
 
 /** The obligation that refuses an erasure, if any — the ground is stated, never a vague no. */
-export function refusalGround(doc: { held: boolean; amlRecord: boolean; approved: boolean; relationshipLive: boolean; docType?: string }): RefusalGround | null {
+export function refusalGround(doc: { held: boolean; underInvestigation?: boolean; amlRecord: boolean; approved: boolean; relationshipLive: boolean; docType?: string }): RefusalGround | null {
   if (doc.held) return 'LEGAL_HOLD';
+  // [SEC-PII · money/trust scan 28 Oct 2026] An open second review, fraud case or identity review keeps the document
+  // until it ends (open-investigation.ts); the person is told so in plain words.
+  if (doc.underInvestigation) return 'OPEN_INVESTIGATION';
   if (doc.amlRecord) return 'AML_RECORD';
   // [POLICE-CLEARANCE CONSENT · DPA s.9(1)(a)] A police clearance rests on the person's explicit consent, which they
   // can withdraw at any time: it is never kept as an "active licence" against their erasure (a hold still keeps it).
@@ -89,6 +93,8 @@ export interface EraseOutcome {
   docType: string;
   outcome: 'ALREADY_DESTROYED' | 'DESTROYED' | 'DESTRUCTION_PENDING' | 'REFUSED';
   ground?: RefusalGround;
+  /** [SEC-PII] The plain words for a refusal the person may not expect (an open review). */
+  message?: string;
   receipt?: { deletedAt: Date; probe: string; stores: string[] };
 }
 
@@ -109,6 +115,10 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
     orderBy: { createdAt: 'asc' },
   });
   const live = await relationshipIsLive(prisma, userId);
+  const [personInvestigated, inSecondReview] = await Promise.all([
+    personUnderInvestigation(prisma, userId),
+    documentsInSecondReview(prisma, docs.map((d) => d.id)),
+  ]);
   const receiptOf = async (id: string) => {
     const r = await prisma.deletionReceipt.findFirst({ where: { submissionId: id }, orderBy: { deletedAt: 'desc' } });
     return r ? { deletedAt: r.deletedAt, probe: r.verificationProbeResult, stores: r.storeLocations } : undefined;
@@ -119,16 +129,19 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
     const type = await prisma.docType.findUnique({ where: { code: registryCode(user.countryCode, d.docType) }, select: { amlRecordClass: true } });
     const ground = refusalGround({
       held: d.legalHoldId !== null,
+      underInvestigation: personInvestigated || inSecondReview.has(d.id),
       amlRecord: Boolean(type && type.amlRecordClass !== 'NOT_APPLICABLE'),
       approved: d.status === 'APPROVED',
       relationshipLive: live,
       docType: d.docType,
     });
-    if (ground) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground }); continue; }
-    const result = await service.purgeDocumentNow({ id: d.id, userId, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: user.tenantId } }, userId, { requireRetentionElapsed: false, shredFields: true });
+    if (ground) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground, ...(ground === 'OPEN_INVESTIGATION' ? { message: OPEN_INVESTIGATION_TEXT } : {}) }); continue; }
+    const result = await service.purgeDocumentNow({ id: d.id, userId, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: user.tenantId } }, userId, { requireRetentionElapsed: false, shredFields: true, keepUnderInvestigation: true });
     if (result === 'PURGED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTROYED', receipt: await receiptOf(d.id) });
     else if (result === 'PROBE_FAILED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTRUCTION_PENDING', receipt: await receiptOf(d.id) });
-    else outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }); // a hold landed under the lock
+    // A hold, or [SEC-PII] an investigation, landed under the lock: say which.
+    else if (await documentUnderInvestigation(prisma, userId, d.id)) outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'OPEN_INVESTIGATION', message: OPEN_INVESTIGATION_TEXT });
+    else outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' });
   }
   await prisma.auditLog.create({ data: {
     userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,

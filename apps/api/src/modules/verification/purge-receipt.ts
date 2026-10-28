@@ -80,6 +80,8 @@ export async function shredUnlessHeld(
   storage: StorageProvider,
   ref: VerificationObjectReference & { documentId: string },
   still: Prisma.VerificationDocumentWhereInput = {},
+  /** [SEC-PII] A caller's own refusal, decided under the person's row lock (true = keep the document). */
+  keep?: (tx: Prisma.TransactionClient) => Promise<boolean>,
 ): Promise<PurgeEvidence | null> {
   const meta = await db.$transaction(async (tx) => {
     await bindTenantTransaction(tx);
@@ -91,6 +93,7 @@ export async function shredUnlessHeld(
       where: { id: ref.documentId, userId: ref.userId, legalHoldId: null, ...still }, select: { id: true },
     });
     if (!live.some((d) => d.id === ref.documentId)) return null;
+    if (keep && await keep(tx)) return null;
     // A purge that shredded this key and then could not finish (store unreachable, probe failed)
     // left the person's own envelope keyless: finish destroying it rather than strand it.
     const prior = await tx.encryptedObject.findUnique({ where: { fileKey: ref.fileKey } });

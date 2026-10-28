@@ -20,6 +20,7 @@ import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLE
 import { retentionDaysFor } from './retention-policy';
 import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
+import { documentUnderInvestigation } from './open-investigation';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
@@ -3185,17 +3186,23 @@ export class VerificationService {
   async purgeDocumentNow(
     doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },
     deletedBy: string,
-    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date; still?: Prisma.VerificationDocumentWhereInput },
+    opts: {
+      requireRetentionElapsed: boolean; shredFields: boolean; now?: Date; still?: Prisma.VerificationDocumentWhereInput;
+      /** [SEC-PII] The person's own erasure: a document under an open investigation is kept (open-investigation.ts),
+       *  decided again under the person's row lock at both steps. */
+      keepUnderInvestigation?: boolean;
+    },
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const now = opts.now ?? new Date();
     const storage = getStorageProvider();
     // [Row 249] A caller's own condition (the abandoned-application sweep: still abandoned) is re-checked
     // under the person's lock at both steps, with the hold and the retention clock.
     const still: Prisma.VerificationDocumentWhereInput = opts.still ?? {};
+    const keep = opts.keepUnderInvestigation ? (tx: Prisma.TransactionClient) => documentUnderInvestigation(tx, doc.userId, doc.id) : undefined;
     // [Row 243] The bytes are destroyed only under the person's lock and only while still unheld.
     const evidence = doc.fileUrl
       ? await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
-        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still })
+        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still }, keep)
       : NOTHING_STORED;
     if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
@@ -3210,6 +3217,8 @@ export class VerificationService {
         FOR UPDATE /* verification-document-purge-authority */
       `;
       if (!users[0]) return false;
+      // [SEC-PII] A review opened since the bytes step (or a document with no bytes) still keeps the record.
+      if (keep && await keep(tx)) return false;
       const won = await tx.verificationDocument.updateMany({
         where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still },
         data: { purgedAt: new Date(), fileUrl: '' },
