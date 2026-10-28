@@ -2155,9 +2155,13 @@ export class VerificationService {
     // advisory lock for its whole length (another run that finds it taken does nothing this time), reads and writes
     // the mark inside it, and takes its times from the DATABASE clock, never the app's.
     return this.prisma.$transaction(async (tx) => {
-      const [{ locked }] = await tx.$queryRaw<Array<{ locked: boolean }>>`SELECT pg_try_advisory_xact_lock(hashtextextended('dsar-delayed-erasures-v1', 0)) AS locked`;
-      if (!locked) return 0;
-      const [{ now: dbStartedAt }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
+      const [lock] = await tx.$queryRaw<Array<{ locked: boolean }>>`SELECT pg_try_advisory_xact_lock(hashtextextended('dsar-delayed-erasures-v1', 0)) AS locked`;
+      // Fail closed: no answer about the lock is "not ours" (this run does nothing).
+      if (!lock?.locked) return 0;
+      const [clock] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
+      // Fail closed: without the database's time the mark is not moved (nothing is skipped).
+      if (!clock) throw new Error('retryDelayedErasures: the database did not return its clock');
+      const dbStartedAt = clock.now;
       const mark = await tx.auditLog.findFirst({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' }, select: { changes: true } });
       const since = new Date((mark?.changes as { since?: string } | null)?.since ?? 0);
       const { ran, oldestWaiting } = await this.finishDelayedSince(since, page);

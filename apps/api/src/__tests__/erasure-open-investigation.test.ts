@@ -52,6 +52,12 @@ const clusters: string[] = [];
 let reviewerA = '';
 let reviewerB = '';
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'erasure-open-investigation-test');
+/** The database's clock (a missing row fails the test, never hides it). */
+async function dbNow(): Promise<Date> {
+  const [row] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
+  if (!row) throw new Error('the database did not return its clock');
+  return row.now;
+}
 
 class ManualKyc implements KycProvider {
   readonly engine: KycEngine = { name: 'manual', version: 'test', external: false };
@@ -849,7 +855,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     }
     await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: new Date(Date.now() - 86_400_000).toISOString() } } }));
     await system(() => service.retryDelayedErasures());
-    const [{ now }] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
+    const now = await dbNow();
     // a request whose row carries a time from just before the run started, committed only now (after its read)
     const me = await person();
     const doc = (await submit(me)).id;
@@ -882,7 +888,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const after = await marks();
     for (let i = Math.max(1, before.length); i < after.length; i += 1) expect(after[i]!, `mark ${i}`).toBeGreaterThanOrEqual(after[i - 1]!);
     // a mark ahead of what a run would compute is never moved backwards by it
-    const [{ now }] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
+    const now = await dbNow();
     const ahead = new Date(now.getTime() - 60_000);
     await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: ahead.toISOString() } } }));
     await system(() => service.retryDelayedErasures());
