@@ -292,7 +292,7 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     const u = await person('RIDER');
     const d = await doc(u, 'RIDER', 'REJECTED', 100);
     expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1 });
-    await placeDocLegalHold(app.prisma, { subjectUserId: u, placedBy: u, ownerId: u, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * DAY) });
+    await placeDocLegalHold(app.prisma, { subjectUserId: u, placedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, ownerId: u, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * DAY) });
     expect(await sweep(later(15), u)).toMatchObject({ purged: 0 });
     expect((await docOf(d.id)).purgedAt).toBeNull();
     expect(await stored(d.fileUrl)).toBe(true);
