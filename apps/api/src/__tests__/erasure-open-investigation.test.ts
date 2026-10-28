@@ -506,4 +506,94 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     expect((await docRow(kept)).legalHoldId).not.toBe(holdB.id);
   });
 
+
+  it('[REVIEW-G S3-2 · probe Q1] a renewal never tells a person who asked for no deletion that their deletion request is delayed', async () => {
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await suspect(doc); // second review opens; the person never asks to erase anything
+    await system(() => sweepInvestigationHolds(app.prisma, new Date(Date.now() + 91 * DAY), undefined, {
+      notifyPerson: async (userId: string, revisitBy: Date) => { await service.notifyRenewalIfDelayed(userId, revisitBy); },
+    }));
+    const inbox = await system(() => app.prisma.notification.findMany({ where: { userId: me } }));
+    expect(inbox.map((n) => n.title)).not.toContain('Your deletion request is delayed');
+    expect(JSON.stringify(inbox)).not.toContain('part of a review');
+  });
+
+  it('[REVIEW-G S3-3 · probe Q2] a person who releases the system hold also frees the delayed erasure the person was promised', async () => {
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await suspect(doc);
+    const res = await erase(me, [doc]);
+    expect((outcomeOf(res, doc) as unknown as { message?: string }).message).toContain('look at your request again');
+    const hold = (await systemHoldOf(me))!;
+    await system(() => releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: reviewerB, reason: `Not needed ${RUN}` }));
+    expect((await docRow(doc)).legalHoldId).toBeNull();
+    await system(() => sweepInvestigationHolds(app.prisma, new Date(), undefined, { retryDelayedErasures: () => service.retryDelayedErasures() }));
+    expect((await docRow(doc)).purgedAt).not.toBeNull();
+  });
+
+  it('[REVIEW-G S3-1 · probe QA] a NEW identity review on a group whose earlier review hold a person released still holds the member', async () => {
+    const root = `cl-${nanoid(8)}`; clusters.push(root);
+    const me = await person();
+    const doc = (await submit(me)).id;
+    let first = '';
+    await system(async () => {
+      await app.prisma.identityCluster.create({ data: { id: root, authorityReviewRequired: true } });
+      await app.prisma.identityClusterMember.create({ data: { accountId: me, clusterId: root, linkedVia: [] } });
+      first = (await app.prisma.identityReviewCase.create({ data: { tenantId: 'swift-default', clusterId: root, snapshotDigest: nanoid(8), snapshot: { members: [{ accountId: me }] }, complete: true } })).id;
+    });
+    await system(() => sweepInvestigationHolds(app.prisma));
+    const hold = (await systemHoldOf(me))!;
+    expect(hold).not.toBeNull();
+    // a person decides the first review does not need the documents
+    // (modelled as the PR's own test models a person's release: the strict route refuses while the identity is unresolved)
+    await system(() => app.prisma.docLegalHold.update({ where: { id: hold.id }, data: { releasedAt: new Date(), releasedBy: reviewerB, releaseReason: `Decided: not needed ${RUN}` } }));
+    await system(() => app.prisma.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: null } }));
+    // the first review ends; later a NEW review of the same group opens
+    await system(() => app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      await tx.identityReviewCase.update({ where: { id: first }, data: { status: 'RETAINED', reviewedAt: new Date() } });
+      await tx.identityReviewCase.create({ data: { tenantId: 'swift-default', clusterId: root, snapshotDigest: nanoid(8), snapshot: { members: [{ accountId: me }] }, complete: true } });
+    }));
+    await system(() => sweepInvestigationHolds(app.prisma));
+    const res = await erase(me, [doc]);
+    const row = await docRow(doc);
+    expect({ outcome: outcomeOf(res, doc).outcome, purged: row.purgedAt !== null, held: row.legalHoldId !== null }).toEqual({ outcome: 'REFUSED', purged: false, held: true });
+  });
+
+  it('[REVIEW-G S3-2] a person whose erasure the review delays IS told the renewed date', async () => {
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await suspect(doc);
+    await erase(me, [doc]);
+    const before = await system(() => app.prisma.notification.count({ where: { userId: me, title: 'Your deletion request is delayed' } }));
+    await system(() => sweepInvestigationHolds(app.prisma, new Date(Date.now() + 91 * DAY), undefined, {
+      notifyPerson: async (userId: string, revisitBy: Date) => { await service.notifyRenewalIfDelayed(userId, revisitBy); },
+    }));
+    const hold = (await systemHoldOf(me))!;
+    const day = hold.reviewBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
+    const inbox = await system(() => app.prisma.notification.findMany({ where: { userId: me, title: 'Your deletion request is delayed' } }));
+    expect(inbox.length).toBe(before + 1);
+    expect(inbox.map((n) => n.body).join(' ')).toContain(day);
+  });
+
+  it('[REVIEW-G S3-3] a completion that failed after a decision is retried by the sweep; a document refused on another ground is never re-run', async () => {
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await suspect(doc);
+    await erase(me, [doc]);
+    // the review ends; the completion after the decision "fails" (modelled: the release ran, the erasure did not)
+    const hold = (await systemHoldOf(me))!;
+    await system(() => app.prisma.docLegalHold.update({ where: { id: hold.id }, data: { releasedAt: new Date(), releasedBy: INVESTIGATION_HOLD_PLACER, releaseReason: 'investigation closed' } }));
+    await system(() => app.prisma.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: null } }));
+    await system(() => app.prisma.reviewCase.updateMany({ where: { submissionId: doc, closedAt: null }, data: { closedAt: new Date() } }));
+    expect((await docRow(doc)).purgedAt).toBeNull();
+    const ran = await system(() => service.retryDelayedErasures());
+    expect(ran).toBeGreaterThanOrEqual(1);
+    expect((await docRow(doc)).purgedAt).not.toBeNull();
+    // a second run finds nothing left for this person (the latest outcome is DESTROYED)
+    const rows = await system(() => app.prisma.auditLog.count({ where: { userId: me, action: 'DSAR_DOCUMENT_ERASURE' } }));
+    await system(() => service.retryDelayedErasures());
+    expect(await system(() => app.prisma.auditLog.count({ where: { userId: me, action: 'DSAR_DOCUMENT_ERASURE' } }))).toBe(rows);
+  });
 });
