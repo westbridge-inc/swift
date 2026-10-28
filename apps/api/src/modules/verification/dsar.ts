@@ -145,9 +145,9 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
       where: { userId, id: { in: outcomes.map((o) => o.documentId) }, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } }, select: { id: true },
     })).map((d) => d.id));
     const othersDone = outcomes.every((o) => heldBySystem.has(o.documentId) || o.outcome === 'DESTROYED' || o.outcome === 'ALREADY_DESTROYED');
-    const words = erasureDelayedWords(revisitBy, othersDone);
+    const words = erasureDelayedWords(revisitBy, othersDone, heldBySystem.size);
     for (const o of outcomes) if (heldBySystem.has(o.documentId)) Object.assign(o, { message: words.body, revisitBy });
-    await service.notifyErasureDelayed(userId, revisitBy, othersDone);
+    await service.notifyErasureDelayed(userId, revisitBy, othersDone, heldBySystem.size);
   }
   await prisma.auditLog.create({ data: {
     userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,

@@ -47,11 +47,25 @@ export async function liveChainMembers(db: Db, rootClusterId: string): Promise<s
   return members.map((m) => m.accountId);
 }
 
-/** A PERSON released this investigation's system hold for this subject: a human decided, so the system neither
- *  places it again nor keeps the documents by the backstop for that investigation. */
+/** When the CURRENT case of this investigation opened (the open second-review case on the document, or the newest
+ *  open identity review of the group), or null when none is open. */
+async function currentCaseOpenedAt(db: Db, key: InvestigationKey): Promise<Date | null> {
+  if (key.kind === 'second-review') {
+    const c = await db.reviewCase.findFirst({ where: { submissionId: key.documentId, queue: 'SECOND_REVIEW', closedAt: null }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
+    return c?.createdAt ?? null;
+  }
+  const r = await db.identityReviewCase.findFirst({ where: { clusterId: key.clusterId, status: 'OPEN' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
+  return r?.createdAt ?? null;
+}
+
+/** A PERSON released this investigation's system hold for this subject DURING ITS CURRENT CASE: a human decided, so
+ *  the system neither places it again nor keeps the documents by the backstop for that case. [REVIEW-G S3-1] A
+ *  release made for an earlier case never disarms a later one (a NEW review places a new hold). */
 export async function releasedByPerson(db: Db, subjectUserId: string, key: InvestigationKey): Promise<boolean> {
+  const since = await currentCaseOpenedAt(db, key);
+  if (!since) return false;
   return await db.docLegalHold.count({ where: {
-    subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, reason: reasonOf(key), releasedAt: { not: null }, NOT: { releasedBy: INVESTIGATION_HOLD_PLACER },
+    subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, reason: reasonOf(key), releasedAt: { gte: since }, NOT: { releasedBy: INVESTIGATION_HOLD_PLACER },
   } }) > 0;
 }
 
@@ -85,7 +99,8 @@ export async function investigationOpen(db: Db, reason: string): Promise<boolean
 /** The person's open system hold whose investigation still needs their documents (oldest first), or null. */
 export async function openInvestigationSuccessor(db: Db, subjectUserId: string, now: Date, excludeHoldId?: string): Promise<string | null> {
   const holds = await db.docLegalHold.findMany({
-    where: { subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null, reviewBy: { gt: now }, ...(excludeHoldId ? { id: { not: excludeHoldId } } : {}) },
+    // [REVIEW-G S4-1] Decided on investigationOpen alone: a successor due for renewal (in this very sweep) still counts.
+    where: { subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null, ...(excludeHoldId ? { id: { not: excludeHoldId } } : {}) },
     orderBy: { placedAt: 'asc' }, select: { id: true, reason: true },
   });
   for (const hold of holds) if (await investigationOpen(db, hold.reason)) return hold.id;

@@ -1656,9 +1656,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { sweepInvestigationHolds } = await import('../modules/verification/investigation-hold');
         const { tenantOfUser } = await import('../modules/notification/notification.service');
         await sweepInvestigationHolds(ctx.prisma, new Date(), undefined, {
-          // the person is told the renewed date; a hold renewed past 180 days is an admin task; a freed document's
-          // delayed erasure is finished as the person asked
-          notifyPerson: (userId, revisitBy) => verification.notifyErasureDelayed(userId, revisitBy),
+          // a person whose erasure the hold delays is told the renewed date (nobody else is); a hold renewed past
+          // 180 days is an admin task; a freed document's delayed erasure is finished as the person asked, and the
+          // catch-all finishes any delayed request whose documents are unheld (a person's release, a failed run).
+          // (A closed account has no written path left: its email is erased with it. Follow-up logged, COORD 10:24Z.)
+          notifyPerson: (userId, revisitBy) => verification.notifyRenewalIfDelayed(userId, revisitBy),
           escalate: async (hold) => { await notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
             tenantId: await tenantOfUser(ctx.prisma, hold.subjectUserId),
             title: 'A document hold needs a decision',
@@ -1666,6 +1668,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             data: { kind: 'verification_legal_hold_overdue', overdue: 1, holdIds: [hold.id] },
           }); },
           onFreed: async (userId, documentIds) => { await verification.completeDeferredErasures(userId, documentIds); },
+          retryDelayedErasures: () => verification.retryDelayedErasures(),
         });
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
         const { alertOverdueDocLegalHolds } = await import('../modules/verification/legal-hold');

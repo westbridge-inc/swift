@@ -45,12 +45,15 @@ const PAGE = 200;
 
 /** What the sweep needs from outside: telling the person, telling the admins, and finishing a delayed erasure. */
 export interface InvestigationHoldDeps {
-  /** The person is told the new date (inbox). Skipped for a closed account (its next erasure answer carries the date). */
+  /** A person whose erasure this hold delays is told the new date (inbox). Never a person who asked for nothing. */
   notifyPerson?: (userId: string, revisitBy: Date) => Promise<void>;
   /** A hold renewed past INVESTIGATION_HOLD_ESCALATE_DAYS: an admin task, for a person to decide. */
   escalate?: (hold: { id: string; subjectUserId: string; reason: string; placedAt: Date }) => Promise<void>;
   /** Documents a release freed (no other open investigation needs them): finish any erasure their person asked for. */
   onFreed?: (userId: string, documentIds: string[]) => Promise<void>;
+  /** [REVIEW-G S3-3] The catch-all: every delayed request whose documents are now unheld (a person's release, a failed
+   *  completion) is finished. Returns how many requests it ran. */
+  retryDelayedErasures?: () => Promise<number>;
 }
 const DAY_MS = 86_400_000;
 
@@ -61,13 +64,40 @@ const lockPerson = (tx: Prisma.TransactionClient, userId: string) =>
 
 /** [Privacy §6] "If we cannot act on a deletion request straight away, we tell you why and when, in writing."
  *  The reason is generic (a review), never the review's kind or any fraud detail; the date is the hold's review date. */
-export function erasureDelayedWords(revisitBy: Date, othersDone = false): { title: string; body: string } {
-  const day = revisitBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
-  // [REVIEW-G S3-4] "Everything else ... has been deleted" only when it is true.
+export const guyanaDay = (at: Date) => at.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
+
+export function erasureDelayedWords(revisitBy: Date, othersDone = false, documents = 2): { title: string; body: string } {
+  const day = guyanaDay(revisitBy);
+  // [REVIEW-G S3-4] "Everything else ... has been deleted" only when it is true. [REVIEW-F S4-3] One document: singular.
+  const what = documents === 1
+    ? 'One of your documents is part of a review that is still open, so we cannot delete it yet.'
+    : 'Some of your documents are part of a review that is still open, so we cannot delete them yet.';
   return {
     title: 'Your deletion request is delayed',
-    body: `Some of your documents are part of a review that is still open, so we cannot delete them yet. We will look at your request again by ${day}.${othersDone ? ' Everything else you asked us to delete has been deleted.' : ''}`,
+    body: `${what} We will look at your request again by ${day}.${othersDone ? ' Everything else you asked us to delete has been deleted.' : ''}`,
   };
+}
+
+/** [REVIEW-F S4-4 · COORD] The close of a delayed request: told once its documents are deleted. */
+export function erasureCompletedWords(documents: number): { title: string; body: string } {
+  return documents === 1
+    ? { title: 'Your document has been deleted', body: 'The review has ended, and we deleted the document you asked us to delete.' }
+    : { title: 'Your documents have been deleted', body: 'The review has ended, and we deleted the documents you asked us to delete.' };
+}
+
+/** [REVIEW-F S3-2 · COORD] The account-deletion answer is a two-line toast: the date first, about 80 characters. */
+export function accountClosedKeptWords(revisitBy: Date, documents: number): string {
+  return `Account closed. ${documents === 1 ? '1 document' : `${documents} documents`} kept until ${guyanaDay(revisitBy)} for a check, then deleted.`;
+}
+
+/** How many of the person's documents the system's investigation holds keep, and the latest of their review dates. */
+export async function investigationHoldSummary(db: Db, userId: string): Promise<{ revisitBy: Date | null; documents: number }> {
+  const held = await db.verificationDocument.findMany({
+    where: { userId, purgedAt: null, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } },
+    select: { legalHold: { select: { reviewBy: true } } },
+  });
+  const dates = held.map((d) => d.legalHold?.reviewBy.getTime() ?? 0).filter((t) => t > 0);
+  return { revisitBy: dates.length > 0 ? new Date(Math.max(...dates)) : null, documents: held.length };
 }
 
 /** The latest review date among the person's documents a system investigation hold keeps, or null. */
@@ -221,6 +251,7 @@ export async function sweepInvestigationHolds(prisma: PrismaClient, now = new Da
     out.held += await holdIdentityReviewMembers(prisma, reviews.map((r) => ({ clusterId: r.clusterId, status: 'OPEN' })), now);
     if (reviews.length < page) break;
   }
+  if (deps.retryDelayedErasures) await deps.retryDelayedErasures().catch(() => 0);
   return out;
 }
 

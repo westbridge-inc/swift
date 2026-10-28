@@ -20,7 +20,7 @@ import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
-import { holdForOpenIdentityReviews, investigationHoldRevisitBy } from '../verification/investigation-hold';
+import { accountClosedKeptWords, holdForOpenIdentityReviews, investigationHoldSummary } from '../verification/investigation-hold';
 import { identityReviewOpenFor } from '../verification/investigation-hold-core';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
@@ -591,7 +591,7 @@ export class AccountService {
       },
     });
 
-    const revisitBy = deferred.count > 0 ? await investigationHoldRevisitBy(prisma, userId) : null;
+    const { revisitBy, documents: keptForReview } = deferred.count > 0 ? await investigationHoldSummary(prisma, userId) : { revisitBy: null, documents: 0 };
     // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
     const heldUploads = uploads.held + liveness.held;
     if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
@@ -600,7 +600,7 @@ export class AccountService {
         pendingDocuments, pendingAvatarObjects, pendingUploads,
         // [SEC-PII · Privacy §6] Delayed by an open review: why (generically) and when, in the words the app shows.
         message: revisitBy
-          ? `Your account is closed. Some of your documents are part of a review that is still open, so they are kept until it ends; we will look at your request again by ${revisitBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' })}. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.`
+          ? accountClosedKeptWords(revisitBy, keptForReview)
           : 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }

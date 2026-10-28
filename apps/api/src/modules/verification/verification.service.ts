@@ -20,8 +20,8 @@ import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLE
 import { retentionDaysFor } from './retention-policy';
 import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
-import { erasureDelayedWords, placeInvestigationHold, releaseClosedInvestigationHolds } from './investigation-hold';
-import { identityReviewOpenFor } from './investigation-hold-core';
+import { erasureCompletedWords, erasureDelayedWords, placeInvestigationHold, releaseClosedInvestigationHolds } from './investigation-hold';
+import { identityReviewOpenFor, INVESTIGATION_HOLD_PLACER } from './investigation-hold-core';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
@@ -2038,32 +2038,85 @@ export class VerificationService {
   }
 
   /** [SEC-PII · Privacy §6] A person's deletion request delayed by an open review: told why (generically) and when, in
-   *  writing. [REVIEW-G S4-2] Once a day for the same words (a new date is new words); never to a closed account. */
-  async notifyErasureDelayed(userId: string, revisitBy: Date, othersDone = false): Promise<void> {
-    const words = erasureDelayedWords(revisitBy, othersDone);
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
-    if (!user || user.phone === `deleted:${userId}`) return;
+   *  writing. [REVIEW-G S4-2] Once a day for the same words (a new date is new words); never to a closed account (its
+   *  email is erased with it, so there is no written path left: a logged follow-up, COORD 10:24Z). */
+  async notifyErasureDelayed(userId: string, revisitBy: Date, othersDone = false, documents = 2): Promise<void> {
+    const words = erasureDelayedWords(revisitBy, othersDone, documents);
+    if (!(await this.openAccount(userId))) return;
     const recent = await this.prisma.notification.count({ where: { userId, title: words.title, body: words.body, createdAt: { gt: new Date(Date.now() - 86_400_000) } } });
     if (recent > 0) return;
     await this.notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', ...words, audience: 'customer', data: { kind: 'erasure_delayed', revisitBy: revisitBy.toISOString() } } as never);
   }
 
+  private async openAccount(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    return Boolean(user) && user!.phone !== `deleted:${userId}`;
+  }
+
+  /** The person's documents whose LATEST erasure answer was the hold refusal: a request the hold delayed and nothing has
+   *  answered since (a later answer, destroyed or refused on another ground, closes it). Bounded: newest 200 answers. */
+  private async delayedRequestDocs(userId: string): Promise<string[]> {
+    const rows = await this.prisma.auditLog.findMany({ where: { userId, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'desc' }, take: 200, select: { changes: true } });
+    const latest = new Map<string, { outcome?: string; ground?: string | null }>();
+    for (const row of rows) {
+      for (const o of ((row.changes as { outcomes?: Array<{ documentId?: string; outcome?: string; ground?: string | null }> } | null)?.outcomes ?? [])) {
+        if (typeof o.documentId === 'string' && !latest.has(o.documentId)) latest.set(o.documentId, o);
+      }
+    }
+    return [...latest].filter(([, o]) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD').map(([id]) => id);
+  }
+
+  /** [REVIEW-G S3-2 · COORD 10:20Z] A renewal tells ONLY a person with a delayed request for documents a system hold
+   *  keeps; a subject who asked for nothing is told nothing (no false words, no tip-off). */
+  async notifyRenewalIfDelayed(userId: string, revisitBy: Date): Promise<void> {
+    const delayed = await this.delayedRequestDocs(userId);
+    if (delayed.length === 0) return;
+    const held = await this.prisma.verificationDocument.count({ where: { id: { in: delayed }, userId, purgedAt: null, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } } });
+    if (held === 0) return;
+    await this.notifyErasureDelayed(userId, revisitBy, false, held);
+  }
+
   /** [REVIEW-G S3-1 · Privacy §6] The promise kept: documents an investigation hold freed, whose person asked for their
-   *  erasure while it held them (a refused document-erasure request on the record), are erased now, as asked (bytes,
-   *  key and extracted values), with the purge's own checks. Account deletion has its own standing retry. */
+   *  erasure while it held them (the latest answer on the record is the hold refusal), are erased now, as asked: the
+   *  request is run again with the same rules (an AML record or a live licence still refuses), its own record, and
+   *  [COORD 10:24Z] one notice to the requester once it is done. Account deletion has its own standing retry. */
   async completeDeferredErasures(userId: string, documentIds: string[]): Promise<number> {
-    const asked = await this.prisma.auditLog.findMany({ where: { userId, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'desc' }, take: 200, select: { changes: true } });
-    // Only a request the hold delayed (refused on the hold ground); the request is then run again, as the person made
-    // it: the same rules (an AML record or a live licence still refuses), the same destruction, its own record.
-    const delayed = new Set(asked.flatMap((row) => ((row.changes as { outcomes?: Array<{ documentId?: string; outcome?: string; ground?: string | null }> } | null)?.outcomes ?? [])
-      .filter((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD' && typeof o.documentId === 'string').map((o) => o.documentId!)));
+    const delayed = new Set(await this.delayedRequestDocs(userId));
     const due = documentIds.filter((id) => delayed.has(id));
     if (due.length === 0) return 0;
     const { eraseDocumentsFor } = await import('./dsar');
     const outcomes = await eraseDocumentsFor(this.prisma, this, userId, due);
-    return outcomes.filter((o) => o.outcome === 'DESTROYED').length;
+    const destroyed = outcomes.filter((o) => o.outcome === 'DESTROYED').length;
+    if (destroyed > 0 && await this.openAccount(userId)) {
+      await this.notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', ...erasureCompletedWords(destroyed), audience: 'customer', data: { kind: 'erasure_completed' } } as never);
+    }
+    return destroyed;
   }
 
+  /** [REVIEW-G S3-3] The daily catch-all: every delayed request whose documents are now unheld and unpurged (a person's
+   *  release; a completion that failed after a decision) is finished. Paged over the erasure answers by id. */
+  async retryDelayedErasures(page = 200): Promise<number> {
+    let ran = 0;
+    let cursor: string | undefined;
+    const seen = new Set<string>();
+    for (;;) {
+      const rows = await this.prisma.auditLog.findMany({ where: { action: 'DSAR_DOCUMENT_ERASURE', ...(cursor ? { id: { gt: cursor } } : {}) }, orderBy: { id: 'asc' }, take: page, select: { id: true, userId: true } });
+      if (rows.length === 0) break;
+      cursor = rows[rows.length - 1]!.id;
+      for (const row of rows) {
+        if (!row.userId || seen.has(row.userId)) continue;
+        seen.add(row.userId);
+        const delayed = await this.delayedRequestDocs(row.userId);
+        if (delayed.length === 0) continue;
+        const free = await this.prisma.verificationDocument.findMany({ where: { id: { in: delayed }, userId: row.userId, purgedAt: null, legalHoldId: null }, select: { id: true } });
+        if (free.length === 0) continue;
+        await this.completeDeferredErasures(row.userId, free.map((d) => d.id));
+        ran += 1;
+      }
+      if (rows.length < page) break;
+    }
+    return ran;
+  }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
     // [PERF C2] A mover's app shows a spinner until this answers (MoverRoot gates Home on it), so
