@@ -13,8 +13,10 @@ import { BookingService } from '../modules/booking/booking.service';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { bookingResourceDdl } from '../modules/booking/one-at-a-time';
+import { installDdl } from './helpers/install-ddl';
 
-// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+// [R048-001 · BOOK-S1] this suite installs the business-time DDL (booking/one-at-a-time.ts) by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
@@ -120,9 +122,7 @@ beforeAll(async () => {
   registerErrorHandler(app);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.ready();
-  await app.prisma.$executeRawUnsafe(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "bookings_item_slot_live_key" ON "bookings"("itemId", "slotStart") WHERE status <> 'CANCELLED'`,
-  );
+  await installDdl(app.prisma, bookingResourceDdl());
   orders = new OrderService(app.prisma, app.io);
   bookings = new BookingService(app.prisma);
 });

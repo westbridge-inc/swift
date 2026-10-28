@@ -170,6 +170,8 @@ const TENANT_QUERY_EXTENSIONS = {
   // [STA-1 §4 lineage] child tables now walled on the row itself.
   item: scoped,
   category: scoped,
+  // [BOOK-S1] A booking is one operator's business time, walled like its listing.
+  booking: scoped,
   // [STA-1 §4 lineage · money]
   transaction: scoped,
   earning: scoped,

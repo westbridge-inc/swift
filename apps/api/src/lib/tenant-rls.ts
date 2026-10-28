@@ -50,6 +50,8 @@ export const TENANT_TABLES = [
   // [STA-1 §4 lineage] Child tables walled on the row itself, not only through their vendor.
   'items',
   'categories',
+  // [BOOK-S1] A booking takes its business time: walled on the row like the listing it was made on.
+  'bookings',
   // [STA-1 §4 lineage · money] personal and operator money rows, walled on the row itself.
   // (No apostrophes in comments inside this array: the CI gate extracts the names by quote.)
   'transactions',
@@ -255,6 +257,8 @@ export interface TenantLineageRule {
 export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  // [BOOK-S1] one hop: a booking inherits the tenant of the business whose time it takes
+  { table: 'bookings', trigger: 'bookings_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   // [money] one hop through the owner
   { table: 'transactions', trigger: 'transactions_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'payout_requests', trigger: 'payout_requests_tenant_matches_user', parent: 'users', fk: 'userId' },

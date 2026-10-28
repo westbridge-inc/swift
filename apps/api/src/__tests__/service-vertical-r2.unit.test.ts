@@ -135,7 +135,7 @@ describe('F01 — a booking is cancelled by its LOCAL slot, resolved through the
   const slot = computeDaySlots({
     itemId: 'item-haircut',
     config: { durationMinutes: 30, slots: [{ dayOfWeek: 4, start: '10:00', end: '10:30' }] },
-    year: 2026, month: 9, day: 24, exceptions: [], takenStarts: [], now: PLACED_AT,
+    year: 2026, month: 9, day: 24, exceptions: [], busy: [], now: PLACED_AT,
   })[0]!;
   /** 09:55 in America/Guyana on the 24th — five minutes before the 10:00 the picker shows. */
   const LOCAL_CUTOFF = new Date('2026-09-24T13:55:00.000Z');

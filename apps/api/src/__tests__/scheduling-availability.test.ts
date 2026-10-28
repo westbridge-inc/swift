@@ -13,8 +13,10 @@ import { BookingService } from '../modules/booking/booking.service';
 import { computeDaySlots, slotFitsConfig, strideMinutes } from '../modules/booking/availability';
 import { guyanaDayKey, guyanaWallClockParts, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { bookingResourceDdl } from '../modules/booking/one-at-a-time';
+import { installDdl } from './helpers/install-ddl';
 
-// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+// [R048-001 · BOOK-S1] this suite installs the business-time DDL (booking/one-at-a-time.ts) by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
@@ -115,9 +117,7 @@ beforeAll(async () => {
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.ready();
-  await app.prisma.$executeRawUnsafe(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "bookings_item_slot_live_key" ON "bookings"("itemId", "slotStart") WHERE status <> 'CANCELLED'`,
-  );
+  await installDdl(app.prisma, bookingResourceDdl());
   bookings = new BookingService(app.prisma);
 });
 
@@ -135,7 +135,7 @@ afterAll(async () => {
 });
 
 describe('SCH-E: buffers + lead time (pure math table)', () => {
-  const base = { itemId: 'i1', exceptions: [], takenStarts: [], now: new Date('2026-08-04T00:00:00Z') };
+  const base = { itemId: 'i1', exceptions: [], busy: [], now: new Date('2026-08-04T00:00:00Z') };
   const cfg = (over: object) => ({
     durationMinutes: 60,
     slots: [{ dayOfWeek: 3, start: '09:00', end: '12:00' }], // 2026-08-05 is a Wednesday

@@ -40,7 +40,7 @@ import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery }
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
-import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import {
   publicOperatingHours,
@@ -1978,17 +1978,19 @@ export async function customerRoutes(app: FastifyInstance) {
     // THE availability computation (scheduling law: no double-source):
     // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
     // honoring buffers + lead time — the same math reservation validates.
+    // [BOOK-S1] The bookings are the BUSINESS's, on every listing: a time
+    // another listing holds is not offered here either.
     const dayStart = startOfGuyanaDay(date);
     const dayEnd = endOfGuyanaDay(date);
-    const [exceptions, takenRows] = item.isAvailable
+    // A candidate starts on this Guyana day and may run past its end by up to
+    // the listing's duration and gap.
+    const reachEnd = new Date(dayEnd.getTime() + (Math.max(0, duration) + MAX_BUFFER_MINUTES) * 60_000);
+    const [exceptions, time] = item.isAvailable
       ? await Promise.all([
           bookingService.exceptionsFor(item.vendorId, dayStart),
-          app.prisma.booking.findMany({
-            where: { itemId: id, status: { not: 'CANCELLED' }, slotStart: { gte: dayStart, lte: dayEnd } },
-            select: { slotStart: true },
-          }),
+          bookingService.businessTime(item.vendorId, dayStart, reachEnd),
         ])
-      : [[], [] as { slotStart: Date }[]];
+      : [[], { busy: [], capacity: 1 }];
     const slots = (item.isAvailable
       ? computeDaySlots({
           itemId: id,
@@ -1997,7 +1999,8 @@ export async function customerRoutes(app: FastifyInstance) {
           month: m!,
           day: d!,
           exceptions,
-          takenStarts: takenRows.map((b) => b.slotStart),
+          busy: time.busy,
+          capacity: time.capacity,
           now,
         })
       : []
@@ -2018,8 +2021,8 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   /** POST /bookings/:id/reschedule — move my appointment (scheduling 2.4).
-   *  New slot reserved FIRST (the partial unique judges the race), old freed
-   *  in the same transaction; the provider hears about it immediately. */
+   *  Old slot freed and new one judged and written in ONE transaction under
+   *  the business's lock [BOOK-S1]; the provider hears about it immediately. */
   app.post('/bookings/:id/reschedule', async (request: AuthRequest) => {
     const { userId } = request.user;
     const { id } = request.params as { id: string };

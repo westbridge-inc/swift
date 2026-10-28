@@ -618,6 +618,20 @@ jobs:
             if [ "$found" != "1" ]; then echo "::error::MISSING ledger trigger: $t (raw-SQL migration did not apply)"; exit 1; fi
             echo "ok: $t present"
           done
+      # [BOOK-S1] One provider, one time: the business-time laws are raw SQL
+      # (Prisma cannot model an exclusion constraint) — a business silently
+      # becoming double-bookable again must go RED.
+      - name: Booking one-at-a-time constraints exist
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          for c in bookings_vendor_one_at_a_time bookings_slot_range_check vendors_booking_capacity_check; do
+            found=$(psql "$DB" -tAc "SELECT 1 FROM pg_constraint WHERE conname='$c'")
+            if [ "$found" != "1" ]; then echo "::error::MISSING booking constraint: $c (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $c present"
+          done
+          found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='bookings_vendor_matches_item' AND NOT tgisinternal")
+          if [ "$found" != "1" ]; then echo "::error::MISSING booking trigger: bookings_vendor_matches_item"; exit 1; fi
+          echo "ok: bookings_vendor_matches_item present"
       # Row 106 (#1217): QR tenant lineage, store-tenant immutability and the
       # permanent printed-token identity registry are raw SQL — a printed code
       # becoming reissuable, or a store becoming movable, must go RED.

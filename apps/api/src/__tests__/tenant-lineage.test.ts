@@ -31,7 +31,6 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   VendorStaff: ['Vendor', 'User'],
   VendorImage: ['Vendor'],
   OperatingHours: ['Vendor'],
-  Booking: ['Item'],
   OptionGroup: ['Item'],
   OrderItem: ['Order'],
   StockAdjustment: ['Item'],

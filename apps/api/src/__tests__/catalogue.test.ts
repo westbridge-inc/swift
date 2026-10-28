@@ -533,7 +533,7 @@ describe('deleting a menu item archives its order and booking references', () =>
   it('does not erase an existing booking when the service listing is deleted', async () => {
     const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
-    const held = await app.prisma.booking.create({ data: { itemId: item.id, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
+    const held = await app.prisma.booking.create({ data: { itemId: item.id, vendorId, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
     expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
     expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: item.id, status: 'RESERVED' });
     await booking.cancelBooking(held.id, customerId);
@@ -566,7 +566,10 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
       items: { create: { itemId: dish.id, name: dish.name, quantity: 1, basePrice: 500, markedUpPrice: 500, markupAmount: 0, totalBase: 500, totalMarkup: 0, totalCustomer: 500 } },
     } });
     fixtureOrderIds.push(order.id);
-    const held = await app.prisma.booking.create({ data: { itemId: service.id, customerId, slotStart: new Date(Date.now() + 2 * DAY), slotEnd: new Date(Date.now() + 2 * DAY + 1800000) } });
+    // [BOOK-S1] Each fixture's booking takes its own hour, away from the appointments other cases book:
+    // one business is never booked twice at once.
+    const heldAt = Date.now() + 40 * DAY + fixtureOrderIds.length * 3_600_000;
+    const held = await app.prisma.booking.create({ data: { itemId: service.id, vendorId, customerId, slotStart: new Date(heldAt), slotEnd: new Date(heldAt + 1800000) } });
     const response = await inject('DELETE', `/api/v1/vendor/categories/${category.id}`, undefined, vendorToken);
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json().data).toMatchObject({ deleted: true, itemsRemoved: 2 }); // the shipped contract

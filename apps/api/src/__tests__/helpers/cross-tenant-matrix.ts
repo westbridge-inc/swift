@@ -137,7 +137,7 @@ export async function seedWorld(owner: PrismaClient): Promise<World> {
   const document = await owner.verificationDocument.create({ data: { userId: riderUser.id, role: 'MOVER', docType: 'drivers_licence', fileUrl: `storage://matrix/${mark}`, status: 'PENDING' } as never });
   const optionGroup = await owner.optionGroup.create({ data: { itemId: item.id, name: `${mark} Spice`, options: { create: [{ name: `${mark} Hot`, additionalPrice: 100 }] } }, include: { options: true } });
   const cart = await owner.cart.create({ data: { customerId: customer.id, vendorId: vendor.id, items: { create: [{ itemId: item.id, quantity: 2, selectedOptions: [], specialInstructions: `${mark} no onions` }] } }, include: { items: true } });
-  const booking = await owner.booking.create({ data: { itemId: item.id, customerId: customer.id, slotStart: new Date(Date.now() + 86_400_000), slotEnd: new Date(Date.now() + 90_000_000) } });
+  const booking = await owner.booking.create({ data: { itemId: item.id, vendorId: vendor.id, customerId: customer.id, slotStart: new Date(Date.now() + 86_400_000), slotEnd: new Date(Date.now() + 90_000_000) } });
   const subscription = await owner.subscription.create({ data: {
     vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2000, currentPeriodStart: new Date(),
     currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
