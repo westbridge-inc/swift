@@ -59,6 +59,9 @@ describe('[PT-1] sub.paymentToken stays null', () => {
 
   it('the only readers are the two lines of the legacy card branch and one absence check; the v2 code never names it', () => {
     expect(paymentTokenLines()).toEqual([
+      // [#2162 · REVIEW-M S4-1] The admin person pages DROP it from the subscription they send (never read, never
+      // written: the console never sees a card token).
+      { file: 'modules/admin/person-contact.ts', line: "delete copy['paymentToken'];" },
       { file: 'modules/billing/billing.service.ts', line: "if (sub.billingMethod === 'CARD' && sub.paymentToken) {" },
       { file: 'modules/billing/billing.service.ts', line: 'token: sub.paymentToken,' },
       // [#1393] The one mover fee authority merges only trials with no payment
