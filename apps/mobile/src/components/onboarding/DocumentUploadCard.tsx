@@ -17,6 +17,7 @@ import { docLabel } from './docLabels';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { SENSITIVE_CONSENT_ASK, policeWithdrawOutcome, type PoliceClearanceWords } from './documentConsentRecord';
 import type { UploadConsentVia } from '../../services/api';
+import { documentExpiryDay } from '../../lib/documentExpiry';
 
 const label = docLabel;
 /** Friendly document name for other surfaces (suspension banners etc.); the names live in ./docLabels. */
@@ -232,7 +233,7 @@ function explainPermissionDenied(
     ? uploadErr
     : approved
       ? daysLeft != null
-        ? `Approved — valid until ${new Date(expiresAt!).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`
+        ? `Approved — valid until ${documentExpiryDay(expiresAt)}`
         : 'Approved'
       : expiringSoon
         ? `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'} — tap to upload the renewal`
