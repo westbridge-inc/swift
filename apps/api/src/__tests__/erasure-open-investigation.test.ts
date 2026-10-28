@@ -326,14 +326,20 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const result = await accounts.deleteAccount(me) as { message: string };
     expect(result).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
     // [REVIEW-F S3-2 · COORD] a two-line toast: the date first, about 80 characters, singular for one, no jargon
-    const day = reviewBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
+    // [REVIEW-F · COORD 16:02Z] a short month (Jan..Dec, never 'Sept') so it fits at large font sizes
+    const SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'numeric', year: 'numeric' }).formatToParts(reviewBy);
+    const pick = (t: string) => Number(parts.find((p) => p.type === t)!.value);
+    const day = `${pick('day')} ${SHORT[pick('month') - 1]} ${pick('year')}`;
     expect(result.message).toBe(`Account closed. 1 document kept for a check until at least ${day}, then deleted.`);
     expect(result.message.length).toBeLessThanOrEqual(90);
-    // [COORD 10:44Z] the date always sits inside the two-line toast: with the longest date (two-digit day, September)
-    // and a two-digit count it still ends by character 80; the whole line stays at 93 or under in that worst case
+    // the worst case (two-digit day and count) now fits 90, and the date ends by character 80
     const worst = accountClosedKeptWords(new Date('2027-09-30T15:00:00Z'), 12);
-    expect(worst.indexOf('30 September 2027') + '30 September 2027'.length).toBeLessThanOrEqual(80);
-    expect(worst.length).toBeLessThanOrEqual(93);
+    expect(worst).toBe('Account closed. 12 documents kept for a check until at least 30 Sep 2027, then deleted.');
+    expect(worst.indexOf('30 Sep 2027') + '30 Sep 2027'.length).toBeLessThanOrEqual(80);
+    expect(worst.length).toBeLessThanOrEqual(90);
+    // the day is Guyana's: 02:00 UTC on 1 October is still 30 September in Georgetown
+    expect(accountClosedKeptWords(new Date('2027-10-01T02:00:00Z'), 1)).toContain('until at least 30 Sep 2027,');
     expect(result.message).not.toMatch(/fraud|tamper|legal hold/i);
     expect((await docRow(doc)).purgedAt).toBeNull();
     // the review ends (any way): the sweep releases the hold, and the existing retry (the reaper on the deferred clock) erases it
@@ -707,7 +713,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
   it('[COORD 10:44Z F S4] the words: plural forms, and the toast counts every kept document, a person\'s holds included', async () => {
     expect(erasureCompletedWords(2)).toEqual({ title: 'Your documents have been deleted', body: 'We have now deleted the documents you asked us to delete.' });
     const at = new Date('2027-09-30T15:00:00Z');
-    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. 3 documents kept for a check until at least 30 September 2027, then deleted.');
+    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. 3 documents kept for a check until at least 30 Sep 2027, then deleted.');
     // an account with one document under the review's hold and one under a person's hold: both are counted
     const me = await person();
     const suspected = (await submit(me)).id;
@@ -767,5 +773,46 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     } finally { spy.mockRestore(); }
     expect((await docRow(doc)).legalHoldId).toBeNull();
     expect((await docRow(doc)).purgedAt).toBeNull();
+  });
+
+  it('[COORD 16:02Z] the catch-all keeps a durable watermark: it reads only from the oldest request still waiting, and that request is still finished when its hold ends', async () => {
+    // an older request that is settled (the review ended and the erasure ran)
+    const settled = await person();
+    const settledDoc = (await submit(settled)).id;
+    await suspect(settledDoc);
+    await erase(settled, [settledDoc]);
+    await runWithTenant('swift-default', () => service.rejectDocument(settledDoc, reviewerB, `Photo too dark ${RUN}`, 'UNREADABLE'));
+    expect((await docRow(settledDoc)).purgedAt).not.toBeNull();
+    // a later request still waiting on its review
+    const waiting = await person();
+    const waitingDoc = (await submit(waiting)).id;
+    await suspect(waitingDoc);
+    await erase(waiting, [waitingDoc]);
+    const waitingRow = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: waiting, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'asc' } }));
+    await system(() => service.retryDelayedErasures());
+    // the watermark sits at the oldest request still waiting: nothing older is read again
+    const mark = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' } }));
+    expect(new Date((mark.changes as { since: string }).since).getTime()).toBeLessThanOrEqual(waitingRow.createdAt.getTime());
+    const settledRow = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: settled, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'asc' } }));
+    expect(new Date((mark.changes as { since: string }).since).getTime()).toBeGreaterThan(settledRow.createdAt.getTime());
+    const read: number[] = [];
+    const original = app.prisma.auditLog.findMany.bind(app.prisma.auditLog);
+    const spy = vi.spyOn(app.prisma.auditLog, 'findMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
+      const rows = await original(args as never);
+      if ((args as { where?: { action?: string } } | undefined)?.where?.action === 'DSAR_DOCUMENT_ERASURE' && (args as { select?: { createdAt?: boolean } }).select?.createdAt) {
+        read.push(...(rows as Array<{ createdAt: Date }>).map((r) => r.createdAt.getTime()));
+      }
+      return rows;
+    }) as never);
+    try {
+      await system(() => service.retryDelayedErasures());
+    } finally { spy.mockRestore(); }
+    expect(read.length).toBeGreaterThan(0);
+    expect(read.every((t) => t >= waitingRow.createdAt.getTime())).toBe(true); // the settled request is never read again
+    // the waiting request becomes unheld much later (a person releases its hold): it is still finished
+    const hold = (await systemHoldOf(waiting))!;
+    await system(() => releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: reviewerB, reason: `Not needed ${RUN}` }));
+    await system(() => service.retryDelayedErasures());
+    expect((await docRow(waitingDoc)).purgedAt).not.toBeNull();
   });
 });
