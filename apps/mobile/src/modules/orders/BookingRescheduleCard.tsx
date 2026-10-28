@@ -69,7 +69,7 @@ export function BookingRescheduleCard({ orderId, booking }: { orderId: string; b
     <View style={{ marginTop: space.md, padding: space.lg, borderRadius: radius.lg, backgroundColor: color.surface.sunken }}>
       <T variant="body" weight="bold" accessibilityRole="header">Change time</T>
       <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-        Pick another free time for the same service. Your current time stays booked until the new one is confirmed.
+        Pick another free time for the same service. Your current time stays booked until the move goes through.
       </T>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.md, flexGrow: 0 }} contentContainerStyle={{ gap: space.md }}>
         {Array.from({ length: 7 }, (_, i) => {
