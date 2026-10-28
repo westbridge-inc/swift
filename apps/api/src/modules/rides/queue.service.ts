@@ -8,7 +8,7 @@ import { createRideRequest, type RideRequestApp } from './rides.service';
 import { formatMoney } from '../../utils/currency-amount';
 import { log } from '../../utils/logger';
 import { SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
-import { coarsePoint } from '../dispatch/board-privacy';
+import { coarsePoint, PRIVATE_POINT_SNAP_DEG } from '../dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // The 5.5B ride queue (rides spec): position is DERIVED (createdAt FIFO among
@@ -347,24 +347,34 @@ export async function presenceNear(
   point: { lat: number; lng: number },
   tenantId: string,
 ): Promise<{ lat: number; lng: number }[]> {
+  // [F17 · REVIEW-M S3-1] Membership is decided on the SNAPPED cell, never on
+  // the true position: a radius judged on the true point is a distance oracle
+  // (walk the query point across the edge and the car is found to metres).
+  // The cell is the same grid coarsePoint draws below.
   const rows = await prisma.$queryRaw<{ id: string; lat: number; lng: number }[]>(Prisma.sql`
-    SELECT d."id", d."currentLat" AS lat, d."currentLng" AS lng
-    FROM drivers d
-    JOIN users u ON u."id" = d."userId"
-    WHERE u."tenantId" = ${tenantId}
-      AND d."isOnline" AND d."isAvailable"
-      AND d."currentLat" IS NOT NULL AND d."currentLng" IS NOT NULL
-      AND (
+    SELECT c."id", c.lat, c.lng
+    FROM (
+      SELECT d."id",
+        ROUND(d."currentLat" / ${PRIVATE_POINT_SNAP_DEG}) * ${PRIVATE_POINT_SNAP_DEG} AS lat,
+        ROUND(d."currentLng" / ${PRIVATE_POINT_SNAP_DEG}) * ${PRIVATE_POINT_SNAP_DEG} AS lng
+      FROM drivers d
+      JOIN users u ON u."id" = d."userId"
+      WHERE u."tenantId" = ${tenantId}
+        AND d."isOnline" AND d."isAvailable"
+        AND d."currentLat" IS NOT NULL AND d."currentLng" IS NOT NULL
+    ) c
+    WHERE (
         6371 * acos(
           LEAST(1.0,
-            cos(radians(${point.lat})) * cos(radians(d."currentLat")) *
-            cos(radians(d."currentLng") - radians(${point.lng})) +
-            sin(radians(${point.lat})) * sin(radians(d."currentLat"))
+            cos(radians(${point.lat})) * cos(radians(c.lat)) *
+            cos(radians(c.lng) - radians(${point.lng})) +
+            sin(radians(${point.lat})) * sin(radians(c.lat))
           )
         )
       ) <= ${PRESENCE_RADIUS_KM}
     LIMIT ${PRESENCE_CAP}
   `);
+  // The rows are already cells; coarsePoint keeps the wire values on the one grid function.
   return rows.flatMap((r) => {
     const cell = coarsePoint(Number(r.lat), Number(r.lng));
     return cell ? [cell] : [];

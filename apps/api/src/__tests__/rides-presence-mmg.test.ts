@@ -155,6 +155,37 @@ describe('[F17] presence carries nothing a passenger can undo with a driver id',
   });
 });
 
+describe('[F17 · REVIEW-M S3-1] the presence radius decides on the cell, never on the true position', () => {
+  it('walking the query point across the radius edge finds the grid cell, not the parked car', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // Far from every other fixture here, so this lone car is the only one the walk can see.
+    const truth = { lat: 7.41237, lng: -58.98431 };
+    await makeDriver({ at: truth });
+    const cell = coarsePoint(truth.lat, truth.lng)!;
+    const seen = async (lat: number, lng: number) => {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/rides/presence?lat=${lat}&lng=${lng}`, headers: { authorization: `Bearer ${c.token}` } });
+      expect(res.statusCode, res.body).toBe(200);
+      return (res.json().data.cars as unknown[]).length > 0;
+    };
+    // Binary-search the north and south edges of visibility along the cell's own meridian.
+    const edge = async (outward: number) => {
+      let inside = truth.lat;
+      let outside = truth.lat + outward;
+      for (let i = 0; i < 40; i += 1) {
+        const mid = (inside + outside) / 2;
+        if (await seen(mid, cell.lng)) inside = mid; else outside = mid;
+      }
+      return inside;
+    };
+    const recoveredLat = ((await edge(0.2)) + (await edge(-0.2))) / 2;
+    const metres = (dLat: number) => Math.abs(dLat) * 111_195;
+    // The walk recovers the cell (what the map already shows), not the car inside it.
+    expect(metres(recoveredLat - cell.lat)).toBeLessThan(2);
+    expect(metres(cell.lat - truth.lat)).toBeGreaterThan(50); // this fixture's car sits well inside its cell
+    expect(metres(recoveredLat - truth.lat)).toBeGreaterThan(10);
+  });
+});
+
 describe('MMG pay-link exposure (trip-end surface only)', () => {
   it('hides the link before the trip and reveals it in progress and on the receipt', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
