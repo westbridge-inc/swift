@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
+import type {} from '@fastify/rate-limit';
 import { AppError } from '../utils/errors';
 import { ZodError } from '../lib/zod';
 import { isDevelopment } from '../utils/runtime-mode';
@@ -138,7 +139,10 @@ export function registerErrorHandler(app: FastifyInstance) {
 
   // 404 handler. Echo only the path — never the query string (reflected
   // attacker input has no business in responses) — and cap the length.
-  app.setNotFoundHandler((request, reply) => {
+  // A path no route matched is behind the same rate limiter as every route:
+  // the limiter's per-route hook never runs for it, so without this a caller
+  // could send unmatched requests without any ceiling.
+  app.setNotFoundHandler({ preHandler: notFoundRateLimit(app) }, (request, reply) => {
     const path = request.url.split('?')[0]!.slice(0, 200);
     reply.status(404).send({
       success: false,
@@ -148,4 +152,22 @@ export function registerErrorHandler(app: FastifyInstance) {
       },
     });
   });
+}
+
+/**
+ * The limiter's own pre-handler for the not-found handler, resolved on the
+ * first unmatched request: app.ts registers the error handler BEFORE the
+ * rate-limit plugin, so `app.rateLimit` does not exist yet when the not-found
+ * handler is set. An app with no limiter registered (a bare test app) answers
+ * the plain 404.
+ */
+function notFoundRateLimit(app: FastifyInstance) {
+  let limiter: ReturnType<FastifyInstance['rateLimit']> | null = null;
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (!limiter) {
+      if (!app.hasDecorator('rateLimit')) return;
+      limiter = app.rateLimit();
+    }
+    await limiter.call(app, request, reply);
+  };
 }
