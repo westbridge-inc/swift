@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
-import { INVESTIGATION_HOLD_PLACER } from './legal-hold';
+import {
+  INVESTIGATION_HOLD_PLACER, INVESTIGATION_HOLD_REASON, investigationOpen, liveChainMembers, openInvestigationSuccessor, reasonOf, type InvestigationKey,
+} from './investigation-hold-core';
 
 // ---------------------------------------------------------------------------
 // [SEC-PII · money/trust scan 28 Oct 2026 · COORD rulings] AN OPEN INVESTIGATION PLACES A REAL SAFETY HOLD.
@@ -29,32 +31,12 @@ import { INVESTIGATION_HOLD_PLACER } from './legal-hold';
 // and a request this delays is told why (generically) and when, in writing (erasureDelayedWords).
 // ---------------------------------------------------------------------------
 
-export { INVESTIGATION_HOLD_PLACER };
-export const INVESTIGATION_HOLD_REASON = 'INVESTIGATION_OPEN';
+export { INVESTIGATION_HOLD_PLACER, INVESTIGATION_HOLD_REASON, type InvestigationKey };
 export const INVESTIGATION_HOLD_DAYS = 90;
+const PAGE = 200;
 const DAY_MS = 86_400_000;
 
 type Db = PrismaClient | Prisma.TransactionClient;
-export type InvestigationKey = { kind: 'second-review'; documentId: string } | { kind: 'identity-review'; clusterId: string };
-
-const reasonOf = (key: InvestigationKey) =>
-  `${INVESTIGATION_HOLD_REASON} ${key.kind === 'second-review' ? `second-review:${key.documentId}` : `identity-review:${key.clusterId}`}`;
-
-function keyOf(reason: string): InvestigationKey | null {
-  const m = /^INVESTIGATION_OPEN (second-review|identity-review):(\S+)$/.exec(reason);
-  if (!m) return null;
-  return m[1] === 'second-review' ? { kind: 'second-review', documentId: m[2]! } : { kind: 'identity-review', clusterId: m[2]! };
-}
-
-/** Is THIS investigation still open? (An unreadable key reads as closed: the hold then ends at the latest by its date.) */
-async function investigationOpen(db: Db, reason: string): Promise<boolean> {
-  const key = keyOf(reason);
-  if (!key) return false;
-  if (key.kind === 'second-review') {
-    return await db.reviewCase.count({ where: { submissionId: key.documentId, queue: 'SECOND_REVIEW', closedAt: null } }) > 0;
-  }
-  return await db.identityReviewCase.count({ where: { clusterId: key.clusterId, status: 'OPEN' } }) > 0;
-}
 
 const lockPerson = (tx: Prisma.TransactionClient, userId: string) =>
   tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */`;
@@ -116,10 +98,7 @@ async function releaseSystemHold(tx: Prisma.TransactionClient, hold: { id: strin
     data: { releasedAt: now, releasedBy: INVESTIGATION_HOLD_PLACER, releaseReason: why },
   });
   if (won.count !== 1) return;
-  let successor: string | null = null;
-  for (const other of await tx.docLegalHold.findMany({ where: { subjectUserId: hold.subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null, reviewBy: { gt: now } }, orderBy: { placedAt: 'asc' }, select: { id: true, reason: true } })) {
-    if (await investigationOpen(tx, other.reason)) { successor = other.id; break; }
-  }
+  const successor = await openInvestigationSuccessor(tx, hold.subjectUserId, now, hold.id);
   const moved = await tx.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: successor } });
   await tx.auditLog.create({ data: {
     userId: null, action: 'RELEASE_INVESTIGATION_HOLD', entity: 'DocLegalHold', entityId: hold.id,
@@ -140,32 +119,55 @@ export async function releaseClosedInvestigationHolds(tx: Prisma.TransactionClie
   return released;
 }
 
-/** Daily: each active system hold ends when its own investigation has closed, or when its review date has passed
- *  (the system never renews it: a person does, by placing their own hold). */
-export async function sweepInvestigationHolds(prisma: PrismaClient, now = new Date()): Promise<{ closed: number; expired: number }> {
-  const holds = await prisma.docLegalHold.findMany({ where: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null }, orderBy: { placedAt: 'asc' }, select: { id: true, subjectUserId: true, reason: true, reviewBy: true }, take: 500 });
-  const out = { closed: 0, expired: 0 };
-  for (const hold of holds) {
-    await prisma.$transaction(async (tx) => {
-      if (hold.reviewBy.getTime() <= now.getTime()) {
-        await releaseSystemHold(tx, hold, 'review date passed; not renewed by a person', now);
-        out.expired += 1;
-      } else if (!(await investigationOpen(tx, hold.reason))) {
-        await releaseSystemHold(tx, hold, 'investigation closed', now);
-        out.closed += 1;
-      }
+/** Daily: every active system hold is examined (paged by id, never only the oldest few): it ends when its own
+ *  investigation has closed, or when its review date has passed (the system never renews it: a person does, by
+ *  placing their own hold). Then every open identity review holds every member of its LIVE chain (the backfill for
+ *  reviews opened before this rule, and the refresh for members who joined or groups merged in since). */
+export async function sweepInvestigationHolds(prisma: PrismaClient, now = new Date(), page = PAGE): Promise<{ closed: number; expired: number; examined: number; held: number }> {
+  const out = { closed: 0, expired: 0, examined: 0, held: 0 };
+  let cursor: string | undefined;
+  for (;;) {
+    const holds = await prisma.docLegalHold.findMany({
+      where: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+      orderBy: { id: 'asc' }, take: page, select: { id: true, subjectUserId: true, reason: true, reviewBy: true },
     });
+    if (holds.length === 0) break;
+    cursor = holds[holds.length - 1]!.id;
+    for (const hold of holds) {
+      out.examined += 1;
+      await prisma.$transaction(async (tx) => {
+        if (hold.reviewBy.getTime() <= now.getTime()) {
+          await releaseSystemHold(tx, hold, 'review date passed; not renewed by a person', now);
+          out.expired += 1;
+        } else if (!(await investigationOpen(tx, hold.reason))) {
+          await releaseSystemHold(tx, hold, 'investigation closed', now);
+          out.closed += 1;
+        }
+      });
+    }
+    if (holds.length < page) break;
+  }
+  let reviewCursor: string | undefined;
+  for (;;) {
+    const reviews = await prisma.identityReviewCase.findMany({
+      where: { status: 'OPEN', ...(reviewCursor ? { id: { gt: reviewCursor } } : {}) }, orderBy: { id: 'asc' }, take: page, select: { id: true, clusterId: true },
+    });
+    if (reviews.length === 0) break;
+    reviewCursor = reviews[reviews.length - 1]!.id;
+    out.held += await holdIdentityReviewMembers(prisma, reviews.map((r) => ({ clusterId: r.clusterId, status: 'OPEN' })), now);
+    if (reviews.length < page) break;
   }
   return out;
 }
 
-/** Staging an identity review: each member of each open case is held by that review's own system hold. */
-export async function holdIdentityReviewMembers(prisma: PrismaClient, cases: ReadonlyArray<{ clusterId: string; status: string; snapshot: unknown }>, now = new Date()): Promise<number> {
+/** An identity review is open on a group: EVERY member of the group's live chain (its members and those of every
+ *  group merged into it, read now, never a snapshot's possibly truncated list) is held by that review's own system
+ *  hold. Idempotent: called when a review is staged and again by the daily sweep. Returns the members it looked at. */
+export async function holdIdentityReviewMembers(prisma: PrismaClient, cases: ReadonlyArray<{ clusterId: string; status: string }>, now = new Date()): Promise<number> {
   let held = 0;
   for (const c of cases) {
     if (c.status !== 'OPEN') continue;
-    const members = ((c.snapshot as { members?: Array<{ accountId?: string }> } | null)?.members ?? []).map((m) => m.accountId).filter((id): id is string => typeof id === 'string');
-    for (const accountId of members) {
+    for (const accountId of await liveChainMembers(prisma, c.clusterId)) {
       await prisma.$transaction((tx) => placeInvestigationHold(tx, accountId, { kind: 'identity-review', clusterId: c.clusterId }, now));
       held += 1;
     }

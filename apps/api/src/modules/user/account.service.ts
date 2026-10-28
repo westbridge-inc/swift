@@ -21,6 +21,7 @@ import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import { investigationHoldRevisitBy } from '../verification/investigation-hold';
+import { identityReviewOpenFor } from '../verification/investigation-hold-core';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -401,6 +402,8 @@ export class AccountService {
           SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
         `;
         if (person.length !== 1) return false;
+        // [SEC-PII · COORD] Backstop: an identity review open on the person's live group chain keeps the record.
+        if (await identityReviewOpenFor(tx, userId)) return false;
         const close = await tx.verificationDocument.updateMany({
           where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
         });

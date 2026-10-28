@@ -21,6 +21,7 @@ import { retentionDaysFor } from './retention-policy';
 import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { erasureDelayedWords, placeInvestigationHold, releaseClosedInvestigationHolds } from './investigation-hold';
+import { identityReviewOpenFor } from './investigation-hold-core';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
@@ -3230,6 +3231,8 @@ export class VerificationService {
         FOR UPDATE /* verification-document-purge-authority */
       `;
       if (!users[0]) return false;
+      // [SEC-PII · COORD] The same backstop for the record (and for a document with no bytes): an open identity review.
+      if (await identityReviewOpenFor(tx, doc.userId)) return false;
       const won = await tx.verificationDocument.updateMany({
         where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still },
         data: { purgedAt: new Date(), fileUrl: '' },

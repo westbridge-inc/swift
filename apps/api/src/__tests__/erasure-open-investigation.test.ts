@@ -27,7 +27,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { AccountService } from '../modules/user/account.service';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { purgeAuditLogs } from '../lib/audit-immutability';
-import { placeDocLegalHold } from '../modules/verification/legal-hold';
+import { placeDocLegalHold, releaseDocLegalHold } from '../modules/verification/legal-hold';
 import { holdIdentityReviewMembers, INVESTIGATION_HOLD_PLACER, sweepInvestigationHolds } from '../modules/verification/investigation-hold';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -311,5 +311,73 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     // ... and the expiry sweep never touches a person's hold either
     await system(() => sweepInvestigationHolds(app.prisma, new Date(Date.now() + 400 * DAY)));
     expect((await system(() => app.prisma.docLegalHold.findUniqueOrThrow({ where: { id: human.hold.id } }))).releasedAt).toBeNull();
+  });
+
+  it('[review gap 1] a person releasing their own hold never frees a document an open investigation of the subject still needs', async () => {
+    const me = await person();
+    const doc = (await submit(me)).id;
+    const human = await system(() => placeDocLegalHold(app.prisma, { subjectUserId: me, documentIds: [doc], reason: `Court order ${RUN}`, ownerId: reviewerB, placedBy: reviewerB, reviewBy: new Date(Date.now() + 30 * DAY) }));
+    await suspect(doc); // the second review opens; the person's hold keeps the document, the system hold waits empty
+    const systemHold = (await systemHoldOf(me))!;
+    expect((await docRow(doc)).legalHoldId).toBe(human.hold.id);
+    await system(() => releaseDocLegalHold(app.prisma, { holdId: human.hold.id, releasedBy: reviewerB, reason: `Court order lifted ${RUN}` }));
+    expect((await docRow(doc)).legalHoldId).toBe(systemHold.id);
+    expect(outcomeOf(await erase(me, [doc]), doc)).toMatchObject({ outcome: 'REFUSED', ground: 'LEGAL_HOLD' });
+  });
+
+  it('[review gap 2] an identity review opened by any path holds EVERY member of the live group chain (the daily sweep: refresh and backfill)', async () => {
+    const root = `cl-${nanoid(8)}`; const child = `cl-${nanoid(8)}`; clusters.push(child, root);
+    const inSnapshot = await person();
+    const joinedLater = await person();
+    const mergedIn = await person();
+    const docs = { inSnapshot: (await submit(inSnapshot)).id, joinedLater: (await submit(joinedLater)).id, mergedIn: (await submit(mergedIn)).id };
+    await system(async () => {
+      await app.prisma.identityCluster.create({ data: { id: root, authorityReviewRequired: true } });
+      await app.prisma.identityClusterMember.create({ data: { accountId: inSnapshot, clusterId: root, linkedVia: [] } });
+    });
+    // opened directly (not through the scan route), with a snapshot that names one member only
+    await system(() => app.prisma.identityReviewCase.create({ data: { tenantId: 'swift-default', clusterId: root, snapshotDigest: nanoid(8), snapshot: { members: [{ accountId: inSnapshot }] }, complete: true } }));
+    // since then: a member joined the group, and another group (with its member) was merged into it
+    await system(async () => {
+      await app.prisma.identityClusterMember.create({ data: { accountId: joinedLater, clusterId: root, linkedVia: [] } });
+      await app.prisma.identityCluster.create({ data: { id: child, mergedIntoId: root } });
+      await app.prisma.identityClusterMember.create({ data: { accountId: mergedIn, clusterId: child, linkedVia: [] } });
+    });
+    await system(() => sweepInvestigationHolds(app.prisma));
+    for (const [who, doc] of Object.entries(docs)) {
+      expect((await docRow(doc)).legalHold, who).toMatchObject({ placedBy: INVESTIGATION_HOLD_PLACER, reason: `INVESTIGATION_OPEN identity-review:${root}`, releasedAt: null });
+    }
+  });
+
+  it('[review gap 2] backstop: a member who joined after the last sweep is still kept by erasure, under the lock', async () => {
+    const root = `cl-${nanoid(8)}`; clusters.push(root);
+    const anchor = await person();
+    const newcomer = await person();
+    const doc = (await submit(newcomer)).id;
+    await system(async () => {
+      await app.prisma.identityCluster.create({ data: { id: root, authorityReviewRequired: true } });
+      await app.prisma.identityClusterMember.create({ data: { accountId: anchor, clusterId: root, linkedVia: [] } });
+      await app.prisma.identityReviewCase.create({ data: { tenantId: 'swift-default', clusterId: root, snapshotDigest: nanoid(8), snapshot: { members: [{ accountId: anchor }] }, complete: true } });
+      await app.prisma.identityClusterMember.create({ data: { accountId: newcomer, clusterId: root, linkedVia: [] } });
+    });
+    expect((await docRow(doc)).legalHoldId).toBeNull(); // no sweep yet
+    expect(outcomeOf(await erase(newcomer, [doc]), doc).outcome).toBe('REFUSED');
+    expect((await docRow(doc)).purgedAt).toBeNull();
+    // nor the retention reaper, with its clock run out
+    await system(() => app.prisma.verificationDocument.update({ where: { id: doc }, data: { retentionExpiresAt: new Date(Date.now() - DAY) } }));
+    await system(() => service.purgeExpiredDocuments());
+    expect((await docRow(doc)).purgedAt).toBeNull();
+  });
+
+  it('[review gap 3] the sweep examines every system hold, page by page, never only the oldest few', async () => {
+    const people = [await person(), await person(), await person()];
+    for (const p of people) {
+      const doc = (await submit(p)).id;
+      await suspect(doc);
+      await system(() => app.prisma.reviewCase.updateMany({ where: { submissionId: doc, closedAt: null }, data: { closedAt: new Date() } }));
+    }
+    const swept = await system(() => sweepInvestigationHolds(app.prisma, new Date(), 1));
+    expect(swept.examined).toBeGreaterThanOrEqual(3);
+    for (const p of people) expect(await systemHoldOf(p)).toBeNull();
   });
 });
