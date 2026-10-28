@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { nanoid } from 'nanoid';
 import type { Prisma, PrismaClient, SubscriptionStatus, UserRole } from '@prisma/client';
@@ -26,10 +27,8 @@ import { readDunningClock, resolveConfirmationInTx } from '../modules/billing/du
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
   MMG_CHECKOUT_NOTIFY_BODY_LIMIT,
-  MMG_CHECKOUT_NOTIFY_GLOBAL_RATE,
   MMG_CHECKOUT_NOTIFY_RATE,
   MMG_CHECKOUT_RETURN_BODY_LIMIT,
-  MMG_CHECKOUT_RETURN_GLOBAL_RATE,
   MMG_CHECKOUT_RETURN_RATE,
   MMG_CHECKOUT_RUNTIME_DECORATION,
   MMG_CHECKOUT_START_RATE,
@@ -1441,21 +1440,24 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
 // MMG demo's `?token=`, the address-path `token=` the web page forwards as
 // params.token, the 4 Oct notify form), on both doors: MMG's docs do not
 // describe Notify, so it reads the same field and nothing else (COORD, 28 Oct).
-// Each door also has ONE ceiling shared by every source, on top of the
-// per-source one. Nothing here changes what credits: still only MMG's lookup.
+// The private-key work itself is bounded (mmg-reply-gate.ts): one at a time,
+// the loop gets its turn between them, and the wait is bounded per source.
+// Nothing here changes what credits: still only MMG's lookup.
 // ---------------------------------------------------------------------------
 
-describe('[SEC-DOS F8] a reply is opened once, from its token field, under a ceiling shared by every source', () => {
+describe('[SEC-DOS F8] a reply is opened once, from its token field, and the private-key work is bounded', () => {
   beforeEach(() => enable(true));
 
   /** The sandbox, counting every attempt to open a reply with the private key. */
-  function countingProvider() {
+  function countingProvider(costMs = 0) {
     const calls = { n: 0 };
     const provider = new Proxy(sandbox, {
       get(target, prop) {
         if (prop === 'decryptCheckoutResult') {
           return (token: string) => {
             calls.n += 1;
+            const until = Date.now() + costMs;
+            while (Date.now() < until) { /* a slow private-key operation: the loop is blocked */ }
             return target.decryptCheckoutResult(token);
           };
         }
@@ -1508,29 +1510,38 @@ describe('[SEC-DOS F8] a reply is opened once, from its token field, under a cei
     expect(calls.n).toBe(0);
   });
 
-  it('each door has one ceiling shared by every source; a source over its own ceiling does not use it up', async () => {
-    enable(false);
-    const fresh = await buildApp();
-    try {
-      const doors = [
-        { own: MMG_CHECKOUT_RETURN_RATE.max, all: MMG_CHECKOUT_RETURN_GLOBAL_RATE.max, hit: (ip: string) => fresh.inject({ method: 'POST', url: RETURN_URL, remoteAddress: ip, headers: { 'content-type': 'application/json' }, payload: { outcome: 'success', params: { token: 'x' } } }) },
-        { own: MMG_CHECKOUT_NOTIFY_RATE.max, all: MMG_CHECKOUT_NOTIFY_GLOBAL_RATE.max, hit: (ip: string) => fresh.inject({ method: 'POST', url: NOTIFY_URL, remoteAddress: ip, headers: { 'content-type': 'application/json' }, payload: { token: 'x' } }) },
-      ];
-      for (const [d, door] of doors.entries()) {
-        expect(door.all).toBeGreaterThanOrEqual(door.own);
-        // One source at its own ceiling, then over it: refused by its own ceiling.
-        for (let i = 0; i < door.own; i += 1) expect((await door.hit(`10.70.${d}.1`)).statusCode).toBe(200);
-        for (let i = 0; i < 5; i += 1) expect((await door.hit(`10.70.${d}.1`)).statusCode).toBe(429);
-        // The rest of the shared ceiling is still there for everyone else, a few requests per source.
-        for (let i = 0; i < door.all - door.own; i += 1) expect((await door.hit(`10.71.${d}.${(i % 200) + 1}`)).statusCode, `request ${i}`).toBe(200);
-        // Then the door is closed for every source, a new one included.
-        const over = await door.hit(`10.72.${d}.1`);
-        expect(over.statusCode).toBe(429);
-        expect(over.json()).toMatchObject({ success: false, error: { code: 'RATE_LIMITED', details: { retryAfterSeconds: expect.any(Number) } } });
-        expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
+  it('a flood of junk from a few sources never starves the event loop, and a genuine return still completes', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = tx('FLOOD0');
+    approved(row, txn, 1500, echoOf(row));
+    const genuine = officialReply(row, '0', txn);
+    // Every private-key open costs 15 ms of the loop here, as a slow server would pay for it.
+    const calls = countingProvider(15);
+    const loop = monitorEventLoopDelay({ resolution: 5 });
+    loop.enable();
+    const junk = (ip: string) => app.inject({
+      method: 'POST', url: RETURN_URL, remoteAddress: ip, headers: { 'content-type': 'application/json' },
+      payload: { outcome: 'success', params: { ...garbageFields(15), token: garbage() } },
+    });
+    const flood = ['10.80.0.1', '10.80.0.2', '10.80.0.3'].flatMap((ip) => Array.from({ length: 12 }, () => junk(ip)));
+    const real = app.inject({ method: 'POST', url: RETURN_URL, remoteAddress: '10.81.0.1', headers: { 'content-type': 'application/json' }, payload: { outcome: 'success', params: { token: genuine } } });
+    const [answers, mine] = await Promise.all([Promise.all(flood), real]);
+    loop.disable();
+    expect(mine.statusCode).toBe(200);
+    expect(mine.json().data.state).toBe('CONFIRMED');
+    expect(await creditsOf(p.subId)).toBe(1);
+    expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
+    // Junk is answered UNKNOWN, or refused as retryable once its sources' share of the wait is full.
+    for (const a of answers) {
+      if (a.statusCode === 200) expect(a.json().data.state).toBe('UNKNOWN');
+      else {
+        expect(a.statusCode).toBe(503);
+        expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN', details: { retryAfterSeconds: expect.any(Number) } } });
       }
-    } finally {
-      await fresh.close();
     }
+    // At most one open per request, and the loop was never blocked for much more than one of them.
+    expect(calls.n).toBeLessThanOrEqual(flood.length + 1);
+    expect(loop.max / 1e6).toBeLessThan(120);
   });
 });

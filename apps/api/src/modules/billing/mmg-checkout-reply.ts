@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import type { MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
+import { ReplyGateBusyError, mmgReplyGate, plausibleReplyToken, type ReplyDecryptGate } from './mmg-reply-gate';
 
 // ---------------------------------------------------------------------------
 // What a reply from MMG's checkout page SAYS, before anything is done with it
@@ -102,12 +103,25 @@ export interface OpenedReply {
   readonly reply: Record<string, unknown> | null;
 }
 
-/** The first token-field value that decrypts under our key is the reply; nothing else is. */
-export function openReply(provider: MmgCheckoutProvider, params: unknown): Record<string, unknown> | null {
+/**
+ * The first token-field value that decrypts under our key is the reply;
+ * nothing else is. Each value must look like one RSA block before it is
+ * tried, and the private-key operation runs under the process's reply gate
+ * (mmg-reply-gate.ts), which throws ReplyGateBusyError when too many wait.
+ * `source` is who sent it (the per-source share of the wait).
+ */
+export async function openReply(
+  provider: MmgCheckoutProvider,
+  params: unknown,
+  source: string,
+  gate: ReplyDecryptGate = mmgReplyGate,
+): Promise<Record<string, unknown> | null> {
   for (const value of replyTokenValues(params)) {
+    if (!plausibleReplyToken(value)) continue;
     try {
-      return provider.decryptCheckoutResult(value);
-    } catch {
+      return await gate.run(source, () => provider.decryptCheckoutResult(value));
+    } catch (err) {
+      if (err instanceof ReplyGateBusyError) throw err;
       // not a token for us; try the next value
     }
   }
