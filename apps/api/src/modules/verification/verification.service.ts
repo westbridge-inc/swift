@@ -2043,14 +2043,15 @@ export class VerificationService {
   async notifyErasureDelayed(userId: string, revisitBy: Date, othersDone = false, documents = 2): Promise<void> {
     const words = erasureDelayedWords(revisitBy, othersDone, documents);
     if (!(await this.openAccount(userId))) return;
-    const recent = await this.prisma.notification.count({ where: { userId, title: words.title, body: words.body, createdAt: { gt: new Date(Date.now() - 86_400_000) } } });
+    // Read for the person by the system (the daily job, or another person's decision): through the owner wall's named capability.
+    const recent = await ownerWallSystem('verification:erasure-delayed-once', () => this.prisma.notification.count({ where: { userId, title: words.title, body: words.body, createdAt: { gt: new Date(Date.now() - 86_400_000) } } }));
     if (recent > 0) return;
     await this.notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', ...words, audience: 'customer', data: { kind: 'erasure_delayed', revisitBy: revisitBy.toISOString() } } as never);
   }
 
   private async openAccount(userId: string): Promise<boolean> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
-    return Boolean(user) && user!.phone !== `deleted:${userId}`;
+    // An erased account carries the exact erasure marker in place of its number (read as a filter, never selected).
+    return (await this.prisma.user.count({ where: { id: userId, NOT: { phone: `deleted:${userId}` } } })) > 0;
   }
 
   /** The person's documents whose LATEST erasure answer was the hold refusal: a request the hold delayed and nothing has
