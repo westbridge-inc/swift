@@ -202,6 +202,15 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('OrdersHistory', undefined);
     expect(mocks.safeNavigate).not.toHaveBeenCalledWith('Schedule', expect.anything());
   });
+
+  it('[BOOK-FU2] the customer copy of a moved appointment, as the API sends it now, opens the booking\'s own order', () => {
+    // appointment_moved replaced booking_rescheduled (above: the rows sent before it).
+    const data = { kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'customer' };
+    const button = pressTheRow(renderRow(row(data)));
+    expect(button.props['accessibilityRole']).toBe('button');
+    expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'o1' });
+    expect(mocks.safeNavigate).not.toHaveBeenCalledWith('ServiceJobs', expect.anything());
+  });
 });
 
 describe('a row with nowhere to go is not a button [E28]', () => {

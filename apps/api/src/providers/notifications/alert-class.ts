@@ -89,9 +89,11 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ride_queue_unavailable',
     // Bookings and service jobs, other than the two that ring or need action now
     'booking_quoted', 'booking_confirmed', 'booking_slot_declined', 'booking_started',
-    'booking_completed', 'booking_cancelled', 'booking_reminder', 'booking_rescheduled',
+    'booking_completed', 'booking_cancelled', 'booking_reminder',
     // [S4] A store appointment's 24h reminder, to the customer and the business (standard, like booking_reminder)
     'appointment_reminder',
+    // [BOOK-FU2] A store appointment moved, to the other side (standard, as booking_rescheduled was before it)
+    'appointment_moved',
     // Safety of the person receiving it (the driver confirm is a job update)
     'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',

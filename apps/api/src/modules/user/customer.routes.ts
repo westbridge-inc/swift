@@ -44,6 +44,7 @@ import { instantBookingEnabled, listingConfirmsAutomatically } from '../booking/
 import { customerRescheduleVerdict } from '../booking/reschedule-policy';
 import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
 import {
   publicOperatingHours,
   publicStorefrontCategory,
@@ -2070,7 +2071,9 @@ export async function customerRoutes(app: FastifyInstance) {
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
           audience: 'business',
-          data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+          // [BOOK-FU2] With the booking's order, so every released build opens the booking itself (appointment-moved.ts).
+          dedupeKey: appointmentMovedDedupeKey(result.booking.id),
+          data: appointmentMovedData(result.booking),
         }).catch(() => undefined);
       }
     }
