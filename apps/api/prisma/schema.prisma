@@ -1897,7 +1897,7 @@ model Booking {
   tenantId   String        @default("swift-default")
   tenant     Tenant        @relation(fields: [tenantId], references: [id])
   customerId String
-  /// Wired to the order at acceptance
+  /// Wired to the order at acceptance, or at checkout while INSTANT_BOOKING is on [BOOK-S2]
   orderId    String?
   slotStart  DateTime
   slotEnd    DateTime

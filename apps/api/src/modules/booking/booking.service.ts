@@ -6,6 +6,7 @@ import {
   type BusyInterval, MAX_BUFFER_MINUTES, bufferOf, busyIntervalOf, candidateInterval, hasRoom,
 } from './availability';
 import { isBookingExclusionViolation } from './one-at-a-time';
+import { syncOrderBookings } from './order-coupling';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
 import { emitToStoreRoom } from '../order/order-room-emission.service';
 
@@ -182,6 +183,9 @@ export class BookingService {
   /**
    * Reserve a slot. Throws 409 SLOT_TAKEN when someone else got there first.
    * With an orderId (vendor acceptance), the booking is CONFIRMED directly.
+   * [BOOK-S2] An order that already holds its slot (taken at checkout while
+   * INSTANT_BOOKING was on) is not reserved twice: its RESERVED booking is
+   * confirmed through the one coupling seam and returned.
    */
   /** [REPORT-007-v4 F-05] Accepts a transaction client so appointment
    *  acceptance can reserve its slot INSIDE the canonical Order-lock commit —
@@ -198,25 +202,16 @@ export class BookingService {
   ) {
     slotStart = canonicalSlotStart(slotStart);
     const { config, vendorId } = await this.validatedSlot(itemId, slotStart);
-    const slotEnd = new Date(slotStart.getTime() + config.durationMinutes * 60_000);
 
-    // [BOOK-S1] Under the business's lock: every live booking of the business,
-    // on any listing, is judged before the row is written.
     const write = async (tx: Prisma.TransactionClient) => {
-      await lockBusinessTime(tx, vendorId);
-      const capacity = await this.assertRoom(tx, vendorId, slotStart, config);
-      return tx.booking.create({
-        data: {
-          itemId,
-          vendorId,
-          customerId,
-          slotStart,
-          slotEnd,
-          orderId,
-          status: orderId ? 'CONFIRMED' : 'RESERVED',
-          exclusive: capacity <= 1,
-        },
-      });
+      if (orderId) {
+        const held = await tx.booking.findFirst({ where: { orderId, status: { in: ['RESERVED', 'CONFIRMED'] } } });
+        if (held) {
+          await syncOrderBookings(tx, orderId, 'CONFIRM');
+          return tx.booking.findUniqueOrThrow({ where: { id: held.id } });
+        }
+      }
+      return this.writeBooking(tx, { itemId, vendorId, customerId, slotStart, config, orderId, status: orderId ? 'CONFIRMED' : 'RESERVED' });
     };
     try {
       const booking = db ? await write(db) : await this.prisma.$transaction(write);
@@ -228,11 +223,58 @@ export class BookingService {
     }
   }
 
+  /**
+   * [BOOK-S2 · INSTANT_BOOKING] Take the slot for an order being placed, INSIDE
+   * the checkout transaction: the booking is RESERVED and linked to the order,
+   * judged under the business's lock against every live booking of the
+   * business. A lost race throws 409 SLOT_TAKEN, which rolls the whole
+   * checkout back: no order, no payment instruction. The caller nudges the
+   * business's calendars after its commit.
+   */
+  async holdSlotAtCheckout(
+    tx: Prisma.TransactionClient,
+    input: { itemId: string; customerId: string; slotStart: Date; orderId: string },
+  ) {
+    const slotStart = canonicalSlotStart(input.slotStart);
+    const { config, vendorId } = await this.validatedSlot(input.itemId, slotStart);
+    try {
+      return await this.writeBooking(tx, { ...input, vendorId, slotStart, config, status: 'RESERVED' });
+    } catch (error) {
+      if (isSlotConflict(error)) throw slotTaken();
+      throw error;
+    }
+  }
+
+  /** [BOOK-S1] The one booking write: under the business's lock, every live
+   *  booking of the business, on any listing, is judged before the row is
+   *  written. */
+  private async writeBooking(
+    tx: Prisma.TransactionClient,
+    b: { itemId: string; vendorId: string; customerId: string; slotStart: Date; config: BookingConfig; orderId?: string; status: 'RESERVED' | 'CONFIRMED' },
+  ) {
+    await lockBusinessTime(tx, b.vendorId);
+    const capacity = await this.assertRoom(tx, b.vendorId, b.slotStart, b.config);
+    return tx.booking.create({
+      data: {
+        itemId: b.itemId,
+        vendorId: b.vendorId,
+        customerId: b.customerId,
+        slotStart: b.slotStart,
+        slotEnd: new Date(b.slotStart.getTime() + b.config.durationMinutes * 60_000),
+        orderId: b.orderId,
+        status: b.status,
+        exclusive: capacity <= 1,
+      },
+    });
+  }
+
   /** [Q12] Checkout's fail-fast twin of the reservation's rule: a slot another
    *  booking already holds is refused when the customer asks for it — the same
    *  subtraction the picker makes — instead of a request the provider can
-   *  never confirm waiting up to a day for its auto-decline. Two open requests
-   *  for a FREE slot still both wait for the provider; acceptance decides. */
+   *  never confirm waiting up to a day for its auto-decline. While
+   *  INSTANT_BOOKING is off, two open requests for a FREE slot still both wait
+   *  for the provider and acceptance decides; with it on, checkout takes the
+   *  slot itself (holdSlotAtCheckout) and this stays the friendly fast fail. */
   async assertSlotFree(itemId: string, requestedSlotStart: Date): Promise<void> {
     const slotStart = canonicalSlotStart(requestedSlotStart);
     // [BOOK-S1] The business's time, not the listing's: a time another listing
@@ -240,21 +282,6 @@ export class BookingService {
     const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true, bookingConfig: true } });
     if (!item?.bookingConfig) throw new NotFoundError('Listing', itemId);
     await this.assertRoom(this.prisma, item.vendorId, slotStart, item.bookingConfig as unknown as BookingConfig);
-  }
-
-  /** Cancelling frees the slot: no rule counts a CANCELLED row (the overlap rule, the exclusion). */
-  async cancelBooking(bookingId: string, customerId: string) {
-    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
-    if (!booking || booking.customerId !== customerId) {
-      throw new NotFoundError('Booking', bookingId);
-    }
-    if (booking.status === 'CANCELLED') return booking;
-    const cancelled = await this.prisma.booking.update({
-      where: { id: bookingId },
-      data: { status: 'CANCELLED' },
-    });
-    await this.nudgeForItem(booking.itemId);
-    return cancelled;
   }
 
   /**

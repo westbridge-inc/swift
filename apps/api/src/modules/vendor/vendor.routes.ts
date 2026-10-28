@@ -2310,6 +2310,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Appointment orders book their slot AT ACCEPTANCE (locked model). If the
     // slot was taken since checkout, this 409s and the order stays PENDING —
     // the customer picks a new time instead of holding a phantom booking.
+    // [BOOK-S2] A slot already taken at checkout (INSTANT_BOOKING on) is not
+    // taken twice: the transition's coupling seam confirms it, and the
+    // reservation below finds it held and returns it.
     // [REPORT-007-v4 F-05] The reservation and prep-time write ride the SAME
     // Order-lock transaction as the ACCEPTED transition: a concurrent
     // cancellation serializes on that lock, so acceptance can no longer lose

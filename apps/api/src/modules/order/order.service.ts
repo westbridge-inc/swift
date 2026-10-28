@@ -48,7 +48,9 @@ import {
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
-import { BookingService } from '../booking/booking.service';
+import { BookingService, lockBusinessTime } from '../booking/booking.service';
+import { instantBookingEnabled } from '../booking/instant-booking';
+import { bookingChangeForOrderTransition, syncOrderBookings } from '../booking/order-coupling';
 import { canonicalSlotStart } from '../booking/availability';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, normalizeItemNote, rebuildSelectionFromSnapshot, selectionKey, validateSelectedOptions, type OptionSelection, type ResolvedOption } from './options';
@@ -996,6 +998,9 @@ export class OrderService {
     }
 
     const requestedSlots = new Map((input.appointments ?? []).map((a) => [a.itemId, a.slotStart]));
+    // [BOOK-S2 · owner B4] Read ONCE per checkout: with INSTANT_BOOKING on, an
+    // appointment's slot is taken inside the commit below (not at acceptance).
+    const reserveAtCheckout = instantBookingEnabled();
     const requestedModes = new Map((input.appointments ?? []).map((a) => [a.itemId, a.mode]));
 
     // Default address (only required when some group is DELIVERY)
@@ -1141,7 +1146,8 @@ export class OrderService {
           throw new AppError(400, 'SLOT_REQUIRED', `Pick a time slot for ${only.item.name}`);
         }
         // Validates config, day window, alignment, and that it's in the future.
-        // The slot is RESERVED at vendor acceptance, not here — but one another
+        // While INSTANT_BOOKING is off the slot is reserved at vendor acceptance;
+        // with it on, inside the commit below [BOOK-S2]. Either way one another
         // customer already holds is refused now, never left pending [Q12].
         await this.booking.validateSlot(only.itemId, slot);
         await this.booking.assertSlotFree(only.itemId, slot);
@@ -1503,6 +1509,15 @@ export class OrderService {
       // availability are re-read on THIS transaction. The pre-transaction
       // checks above remain the friendly fast-fail; they authorize nothing.
       const planVendorIds = [...new Set(plans.map((p) => p.vendor.id))].sort();
+      // [BOOK-S2] The business's time lock comes BEFORE its vendor row, the
+      // order every other holder of both keeps (the "how many at once" profile
+      // write takes the time lock, then writes the vendor row). Held to commit:
+      // the slot is judged and written under it below, after the order exists.
+      if (reserveAtCheckout) {
+        for (const vendorWithSlot of [...new Set(plans.filter((p) => p.appointmentSlot).map((p) => p.vendor.id))].sort()) {
+          await lockBusinessTime(tx, vendorWithSlot);
+        }
+      }
       await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
@@ -1818,6 +1833,20 @@ export class OrderService {
           include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
         });
 
+        // [BOOK-S2 · owner B4] With INSTANT_BOOKING on, the customer's slot is
+        // taken HERE, in the order's own commit: RESERVED, linked to the order,
+        // judged against every live booking of the business. A lost race
+        // throws 409 SLOT_TAKEN and rolls the whole checkout back: no order,
+        // no payment instruction, nothing for the business to accept.
+        if (reserveAtCheckout && plan.appointmentSlot) {
+          await this.booking.holdSlotAtCheckout(tx, {
+            itemId: plan.orderItems[0]!.itemId,
+            customerId: input.userId,
+            slotStart: plan.appointmentSlot,
+            orderId: order.id,
+          });
+        }
+
         // A held order is counted at its release, never here [Q12].
         if (order.holdExpiresAt == null) {
           await countOrderForStore(tx, plan.vendor.id, plan.orderItems.map((oi) => oi.itemId));
@@ -2033,6 +2062,14 @@ export class OrderService {
     for (const order of orders) {
       log().info({ orderId: order.id, orderNumber: order.orderNumber, vendorId: order.vendorId, orderType: order.orderType, fulfillment: order.fulfillment, total: Number(order.totalAmount), customerId: input.userId }, 'order: placed');
     }
+    // [BOOK-S2] A slot taken at checkout refreshes the business's calendars now
+    // (best-effort, after the commit; the 20 s poll stays the floor).
+    if (reserveAtCheckout) {
+      for (const order of orders) {
+        const itemId = order.fulfillment === 'APPOINTMENT' ? order.items[0]?.itemId : undefined;
+        if (itemId) await this.booking.nudgeForItem(itemId).catch(() => undefined);
+      }
+    }
 
     return answer;
   }
@@ -2147,10 +2184,7 @@ export class OrderService {
     // auto-cancel left bookings CONFIRMED forever, permanently blocking the
     // provider's chair. No booking rule counts a CANCELLED row [BOOK-S1], so
     // the slot is instantly sellable again.
-    await this.prisma.booking.updateMany({
-      where: { orderId: order.id, status: { not: 'CANCELLED' } },
-      data: { status: 'CANCELLED' },
-    });
+    await syncOrderBookings(this.prisma, order.id, 'FREE');
     if (opts.restock) await this.restockCancelledOrder(order.id);
     if (order.riderId) {
       await new FloatService(this.prisma).release(this.prisma, order.riderId, riderFloatForOrder(order));
@@ -2451,19 +2485,19 @@ export class OrderService {
     // different order owned by the same mover.
     const cancellationLike = operationalCancellation;
     let cancelledSearches = 0;
-    // [L09 · M018] An appointment that completes completes its booking in the
-    // same transaction, so a finished appointment cannot be moved or re-held.
-    if (input.target === 'COMPLETED') {
-      await tx.booking.updateMany({
-        where: { orderId: input.orderId, status: { in: ['RESERVED', 'CONFIRMED'] } },
-        data: { status: 'COMPLETED' },
-      });
+    // [BOOK-S2] THE coupling seam (booking/order-coupling.ts): the booking
+    // follows its order in this same commit. Acceptance confirms a slot taken
+    // at checkout; [L09 · M018] an appointment that completes completes its
+    // booking, so a finished appointment cannot be moved or re-held; every
+    // order death (the business rejects, the no-response auto-cancel, an admin
+    // or ops cancel, the unpaid-MMG expiry) gives the business its time back.
+    // Only an appointment confirms (no other order holds a slot); freeing and
+    // completing stay unconditional, as they always were.
+    const bookingChange = bookingChangeForOrderTransition(input.target, cancellationLike);
+    if (bookingChange && (bookingChange !== 'CONFIRM' || source.fulfillment === 'APPOINTMENT')) {
+      await syncOrderBookings(tx, input.orderId, bookingChange);
     }
     if (cancellationLike) {
-      await tx.booking.updateMany({
-        where: { orderId: input.orderId, status: { not: 'CANCELLED' } },
-        data: { status: 'CANCELLED' },
-      });
       const searches = await tx.dispatchSearch.updateMany({
         where: { subjectId: input.orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
         data: { status: 'CANCELLED', resolution: 'CANCELLED' },
@@ -2810,10 +2844,8 @@ export class OrderService {
             },
           });
 
-          await tx.booking.updateMany({
-            where: { orderId, status: { not: 'CANCELLED' } },
-            data: { status: 'CANCELLED' },
-          });
+          // [BOOK-S2] The one coupling seam: the slot is free again in this commit.
+          await syncOrderBookings(tx, orderId, 'FREE');
 
           const searches = await tx.dispatchSearch.updateMany({
             where: { subjectId: orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },

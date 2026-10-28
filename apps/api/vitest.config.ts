@@ -86,6 +86,8 @@ export default defineConfig({
       DRIVER_MMG_PAY_LINK: '',
       // [Row 117] Web taxi booking is off unless a test switches it on.
       WEB_TAXI_BOOKING: '',
+      // [BOOK-S2] Appointment slots are taken at acceptance unless a test switches this on.
+      INSTANT_BOOKING: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
