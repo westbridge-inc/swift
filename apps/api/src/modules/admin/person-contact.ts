@@ -131,10 +131,17 @@ export const CONTACT_SEARCH_HINT = {
   phone: 'Searching by phone number needs contact access.',
 } as const;
 
-/** The hint for a query that looks like a number (4 or more digits) or, where emails are searched, an address. */
+/**
+ * The hint for a query that looks like a phone number (E.164 or a 7-digit local number: 7 to 15 digits, written
+ * with digits, spaces, + ( ) - only) or, where emails are searched, an email (contains @). Never for an order
+ * number or any other reference (letters in it), nor a short run of digits. [REVIEW-F #2170 S3-1]
+ */
 export function contactSearchHint(search: string | undefined, opts: { email: boolean }): string | undefined {
   if (!search) return undefined;
-  const looksLikeContact = search.replace(/\D/g, '').length >= 4 || (opts.email && search.includes('@'));
+  const raw = search.trim();
+  const digits = raw.replace(/\D/g, '').length;
+  const phoneShaped = /^[+\d\s().-]+$/.test(raw) && digits >= 7 && digits <= 15;
+  const looksLikeContact = phoneShaped || (opts.email && raw.includes('@'));
   if (!looksLikeContact) return undefined;
   return opts.email ? CONTACT_SEARCH_HINT.phoneOrEmail : CONTACT_SEARCH_HINT.phone;
 }

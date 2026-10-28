@@ -111,6 +111,27 @@ describe('[MC shell] ⌘K search', () => {
     expect(status.getAttribute('role')).toBe('status');
   });
 
+  // [REVIEW-F #2170 S4-1] The hint belongs to the answer for the words in the box: a new query never shows the last one's.
+  it('the contact-access hint never shows for a newer query than the answer it came with', async () => {
+    let releaseName: () => void = () => undefined;
+    mockApi((r) => {
+      const q = r.url.searchParams.get('q') ?? '';
+      if (q.startsWith('+592')) return { body: { success: true, data: { orders: [], users: [], vendors: [], searchHint: 'Searching by phone number or email needs contact access.' } } };
+      return new Promise((resolve) => { releaseName = () => resolve({ body: { success: true, data: { orders: [], users: [], vendors: [] } } }); });
+    });
+    const { user } = renderWithQuery(<SearchLauncher />);
+    await user.keyboard('{Meta>}k{/Meta}');
+    const box = screen.getByRole('combobox', { name: 'Search everything' });
+    await user.type(box, '+5926001234');
+    await screen.findByText('Searching by phone number or email needs contact access.');
+    await user.clear(box);
+    await user.type(box, 'Test');
+    // the name's answer has not come back (or the term has not caught up): no hint from the phone query
+    expect(screen.queryByText('Searching by phone number or email needs contact access.')).toBeNull();
+    releaseName();
+    await waitFor(() => expect(screen.queryByText('Searching by phone number or email needs contact access.')).toBeNull());
+  });
+
   it('a screen can be reached by what it is for', async () => {
     mockApi(() => ({ body: { success: true, data: { orders: [], users: [], vendors: [] } } }));
     const { user } = renderWithQuery(<SearchLauncher />);
