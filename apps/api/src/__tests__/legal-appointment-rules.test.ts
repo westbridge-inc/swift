@@ -220,7 +220,9 @@ describe('[BOOK-S7 · B2] the customer moves a confirmed appointment only until 
 
   it('the floor: within one minute of the confirmation it still moves; after that minute, refused', async () => {
     vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
-    expect((await harness({ status: 'ACCEPTED', acceptedAt: NOW, placedAt: at(-1) }, 30).svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).moved).toBe(true);
+    // A request placed three hours ago and confirmed just now, for a time 30 minutes away: the minute counts from the
+    // CONFIRMATION, never from placing (placing + 1 minute is long gone).
+    expect((await harness({ status: 'ACCEPTED', acceptedAt: NOW, placedAt: at(-180) }, 30).svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).moved).toBe(true);
     await expect(harness(accepted(FREE_CANCEL_WINDOW_MIN + 1), 30).svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' }))
       .rejects.toMatchObject({ code: RESCHEDULE_CUTOFF_CODE });
   });
