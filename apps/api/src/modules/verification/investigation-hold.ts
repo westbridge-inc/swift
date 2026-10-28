@@ -88,7 +88,17 @@ export function erasureCompletedWords(documents: number): { title: string; body:
 /** [REVIEW-F S3-2 · COORD 10:44Z] The account-deletion answer is a two-line toast (90 characters at most, the date
  *  inside it). 'At least': a renewal can move the date, so it is never promised as firm. Counts every kept document. */
 export function accountClosedKeptWords(revisitBy: Date, documents: number): string {
-  return `Account closed. ${documents === 1 ? '1 document' : `${documents} documents`} kept for a check until at least ${guyanaDay(revisitBy)}, then deleted.`;
+  return `Account closed. ${documents === 1 ? '1 document' : `${documents} documents`} kept for a check until at least ${guyanaShortDay(revisitBy)}, then deleted.`;
+}
+
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+
+/** [REVIEW-F · COORD 16:02Z] "30 Sep 2027": the Guyana day with a fixed three-letter month (never the locale's 'Sept'),
+ *  so the toast fits at large font sizes. */
+export function guyanaShortDay(at: Date): string {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'numeric', year: 'numeric' }).formatToParts(at);
+  const pick = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  return `${pick('day')} ${SHORT_MONTHS[pick('month') - 1]} ${pick('year')}`;
 }
 
 /** How many of the person's documents the system's investigation holds keep, and the latest of their review dates. */

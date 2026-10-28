@@ -793,11 +793,33 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     // the watermark sits at the oldest request still waiting: nothing older is read again
     const mark = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' } }));
     expect(new Date((mark.changes as { since: string }).since).getTime()).toBeLessThanOrEqual(waitingRow.createdAt.getTime());
-    const settledRow = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: settled, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'asc' } }));
-    expect(new Date((mark.changes as { since: string }).since).getTime()).toBeGreaterThan(settledRow.createdAt.getTime());
+    const since = new Date((mark.changes as { since: string }).since).getTime();
+    // (other requests in this database may still wait, so the mark may sit earlier than this person's: never later)
     const read: number[] = [];
+    const notDelayed: string[] = [];
     const original = app.prisma.auditLog.findMany.bind(app.prisma.auditLog);
     const spy = vi.spyOn(app.prisma.auditLog, 'findMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
+      const rows = await original(args as never);
+      if ((args as { where?: { action?: string } } | undefined)?.where?.action === 'DSAR_DOCUMENT_ERASURE' && (args as { select?: { createdAt?: boolean } }).select?.createdAt) {
+        for (const r of rows as Array<{ id: string; createdAt: Date; changes: { outcomes?: Array<{ outcome?: string; ground?: string }> } }>) {
+          read.push(r.createdAt.getTime());
+          // only answers that delayed something are read (a fully destroyed or refused-elsewhere answer never is)
+          if (!(r.changes?.outcomes ?? []).some((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD')) notDelayed.push(r.id);
+        }
+      }
+      return rows;
+    }) as never);
+    try {
+      await system(() => service.retryDelayedErasures());
+    } finally { spy.mockRestore(); }
+    expect(read.length).toBeGreaterThan(0);
+    expect(read.every((t) => t >= since)).toBe(true); // nothing behind the mark is read again
+    expect(notDelayed).toEqual([]);
+    // a mark that has passed a settled request: once nothing older waits, it is never read again
+    const settledRow = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: settled, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'asc' } }));
+    await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: new Date(settledRow.createdAt.getTime() + 1).toISOString() } } }));
+    read.length = 0;
+    const spy2 = vi.spyOn(app.prisma.auditLog, 'findMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
       const rows = await original(args as never);
       if ((args as { where?: { action?: string } } | undefined)?.where?.action === 'DSAR_DOCUMENT_ERASURE' && (args as { select?: { createdAt?: boolean } }).select?.createdAt) {
         read.push(...(rows as Array<{ createdAt: Date }>).map((r) => r.createdAt.getTime()));
@@ -806,9 +828,8 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     }) as never);
     try {
       await system(() => service.retryDelayedErasures());
-    } finally { spy.mockRestore(); }
-    expect(read.length).toBeGreaterThan(0);
-    expect(read.every((t) => t >= waitingRow.createdAt.getTime())).toBe(true); // the settled request is never read again
+    } finally { spy2.mockRestore(); }
+    expect(read).not.toContain(settledRow.createdAt.getTime());
     // the waiting request becomes unheld much later (a person releases its hold): it is still finished
     const hold = (await systemHoldOf(waiting))!;
     await system(() => releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: reviewerB, reason: `Not needed ${RUN}` }));

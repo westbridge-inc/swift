@@ -2135,27 +2135,62 @@ export class VerificationService {
     return destroyed;
   }
 
-  /** [REVIEW-G S3-3] The daily catch-all: every delayed request whose documents are now unheld and unpurged (a person's
-   *  release; a completion that failed after a decision) is finished. Paged over the erasure answers by id. */
+  /** [REVIEW-G S3-3 · COORD 16:02Z] The daily catch-all: every delayed request whose documents are now unheld and
+   *  unpurged (a person's release; a completion that failed after a decision) is finished.
+   *
+   *  It does not read the whole erasure history each day. A durable WATERMARK (an append-only audit row,
+   *  DSAR_DELAYED_WATERMARK, newest wins) holds the time of the oldest request that still waits; each run reads only
+   *  the hold-refused answers from there on, and moves the mark to the oldest one still waiting after it ran (or to
+   *  the run's start when none waits). Correct by construction: a request only stops waiting once its documents are
+   *  answered since (destroyed, refused on another ground) or purged, and a later answer is a newer row, so nothing
+   *  behind the mark can ever need finishing again; a request that becomes unheld later is still ahead of the mark. */
   async retryDelayedErasures(page = 200): Promise<number> {
+    const startedAt = new Date();
+    const mark = await this.prisma.auditLog.findFirst({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' }, select: { changes: true } });
+    const since = new Date((mark?.changes as { since?: string } | null)?.since ?? 0);
     let ran = 0;
-    let cursor: string | undefined;
-    const seen = new Set<string>();
+    let oldestWaiting: Date | null = null;
+    let cursor: { createdAt: Date; id: string } | null = null;
+    const done = new Set<string>();
     for (;;) {
-      const rows = await this.prisma.auditLog.findMany({ where: { action: 'DSAR_DOCUMENT_ERASURE', ...(cursor ? { id: { gt: cursor } } : {}) }, orderBy: { id: 'asc' }, take: page, select: { id: true, userId: true } });
+      const rows: Array<{ id: string; userId: string | null; createdAt: Date; changes: unknown }> = await this.prisma.auditLog.findMany({
+        where: {
+          action: 'DSAR_DOCUMENT_ERASURE',
+          changes: { path: ['outcomes'], array_contains: [{ outcome: 'REFUSED', ground: 'LEGAL_HOLD' }] },
+          ...(cursor
+            ? { OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }
+            : { createdAt: { gte: since } }),
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: page, select: { id: true, userId: true, createdAt: true, changes: true },
+      });
       if (rows.length === 0) break;
-      cursor = rows[rows.length - 1]!.id;
+      const last = rows[rows.length - 1]!;
+      cursor = { createdAt: last.createdAt, id: last.id };
       for (const row of rows) {
-        if (!row.userId || seen.has(row.userId)) continue;
-        seen.add(row.userId);
-        const delayed = await this.delayedRequestDocs(row.userId);
-        if (delayed.length === 0) continue;
-        const free = await this.prisma.verificationDocument.findMany({ where: { id: { in: delayed }, userId: row.userId, purgedAt: null, legalHoldId: null }, select: { id: true } });
-        if (free.length === 0) continue;
-        await this.completeDeferredErasures(row.userId, free.map((d) => d.id));
-        ran += 1;
+        if (!row.userId) continue;
+        const asked = ((row.changes as { outcomes?: Array<{ documentId?: string; outcome?: string; ground?: string | null }> } | null)?.outcomes ?? [])
+          .filter((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD' && typeof o.documentId === 'string').map((o) => o.documentId!);
+        if (!done.has(row.userId)) {
+          done.add(row.userId);
+          const delayed = await this.delayedRequestDocs(row.userId);
+          const free = delayed.length === 0 ? [] : await this.prisma.verificationDocument.findMany({ where: { id: { in: delayed }, userId: row.userId, purgedAt: null, legalHoldId: null }, select: { id: true } });
+          if (free.length > 0) {
+            await this.completeDeferredErasures(row.userId, free.map((d) => d.id));
+            ran += 1;
+          }
+        }
+        // Does THIS request still wait (a document it asked about whose latest answer is still the hold refusal)?
+        if (!oldestWaiting) {
+          const stillDelayed = new Set(await this.delayedRequestDocs(row.userId));
+          const waiting = asked.length > 0 && await this.prisma.verificationDocument.count({ where: { id: { in: asked.filter((id) => stillDelayed.has(id)) }, purgedAt: null } }) > 0;
+          if (waiting) oldestWaiting = row.createdAt;
+        }
       }
       if (rows.length < page) break;
+    }
+    const next = oldestWaiting ?? startedAt;
+    if (next.getTime() !== since.getTime()) {
+      await this.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: next.toISOString(), finished: ran } } });
     }
     return ran;
   }
