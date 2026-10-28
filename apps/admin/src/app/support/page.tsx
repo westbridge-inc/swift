@@ -71,23 +71,28 @@ export default function SupportPage() {
   // ticket's button. It used to share the close mutation, whose error renders
   // only inside an open close panel (possibly another ticket's), so a failed
   // take showed nothing.
-  const take = useMutation({
-    mutationFn: ({ id, expectedStatus }: { id: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
-      resolveSupportTicket(id, 'IN_PROGRESS', undefined, undefined, expectedStatus),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['support'] }),
-  });
-
   // [ADMIN-AUDIT S3-6] Each act says where the ticket went, with a door to that tab: the ticket used to just
   // leave the list. And only the ticket being taken waits (one pending take used to hold every row's button).
+  // [REVIEW-F #2156 S4-1] Each take's answer is kept by the mutation itself, with the ticket it was for: callbacks
+  // passed to mutate() run only for the latest call, so with two takes in flight the first one's answer was lost.
   const [done, setDone] = useState<{ words: string; tab: (typeof FILTERS)[number] } | null>(null);
   const [taking, setTaking] = useState<ReadonlySet<string>>(new Set());
+  const [takeFailed, setTakeFailed] = useState<ReadonlyMap<string, string>>(new Map());
+  const take = useMutation({
+    mutationFn: ({ id, expectedStatus }: { id: string; subject: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
+      resolveSupportTicket(id, 'IN_PROGRESS', undefined, undefined, expectedStatus),
+    onSuccess: (_data, t) => {
+      setDone({ words: `You took “${t.subject}”. It is now under ${label('SupportStatus', 'IN_PROGRESS')}.`, tab: 'IN_PROGRESS' });
+      return qc.invalidateQueries({ queryKey: ['support'] });
+    },
+    onError: (error, t) => setTakeFailed((m) => new Map(m).set(t.id, (error as Error).message)),
+    onSettled: (_data, _error, t) => setTaking((ids) => { const next = new Set(ids); next.delete(t.id); return next; }),
+  });
   const takeTicket = (t: { id: string; subject: string; status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) => {
     setDone(null);
+    setTakeFailed((m) => { const next = new Map(m); next.delete(t.id); return next; });
     setTaking((ids) => new Set(ids).add(t.id));
-    take.mutate({ id: t.id, expectedStatus: t.status }, {
-      onSuccess: () => setDone({ words: `You took “${t.subject}”. It is now under ${label('SupportStatus', 'IN_PROGRESS')}.`, tab: 'IN_PROGRESS' }),
-      onSettled: () => setTaking((ids) => { const next = new Set(ids); next.delete(t.id); return next; }),
-    });
+    take.mutate({ id: t.id, subject: t.subject, expectedStatus: t.status });
   };
 
   /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
@@ -267,8 +272,8 @@ export default function SupportPage() {
                         >
                           Close this ticket
                         </button>
-                        {take.isError && take.variables?.id === t.id ? (
-                          <p role="alert" className="mc-text-bad self-center">{(take.error as Error).message}</p>
+                        {takeFailed.has(t.id) ? (
+                          <p role="alert" className="mc-text-bad self-center">{takeFailed.get(t.id)}</p>
                         ) : null}
                       </div>
                     ) : (

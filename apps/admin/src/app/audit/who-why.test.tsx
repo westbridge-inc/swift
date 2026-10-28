@@ -74,4 +74,26 @@ describe('[ADMIN-AUDIT S3-5] the audit log says who, what and why', () => {
     });
     expect(within(list()).getAllByRole('listitem').length).toBeGreaterThan(0);
   });
+
+  it('a new filter starts again at page 1 (REVIEW-F #2156 S4-2)', async () => {
+    const fetch = server(120);
+    const { user } = renderWithQuery(<AuditPage />);
+    await screen.findByText(/120 events · page 1 of 3/);
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText(/page 2 of 3/);
+    await user.type(screen.getByLabelText('What happened'), 'waive');
+    await user.click(screen.getByRole('button', { name: 'Show' }));
+    await waitFor(() => {
+      const last = new URL(String(fetch.mock.calls.at(-1)![0]));
+      expect(last.searchParams.get('action')).toBe('waive');
+      expect(last.searchParams.get('page')).toBe('1');
+    });
+  });
+
+  it('says the filters search the recorded codes, not the words shown (REVIEW-F #2156 S4-3)', async () => {
+    server();
+    renderWithQuery(<AuditPage />);
+    await screen.findByText('Change: Subscriptions → Waive Fee');
+    expect(screen.getByText(/search the code each action was recorded with/)).toBeTruthy();
+  });
 });

@@ -12,7 +12,7 @@ import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX,
   canApply, awaitsRequester, snapshotEntries, soloWaitCopy, SOLO_EXPLAIN, needsStepUp,
-  type ApprovalRow, personWords } from '@/lib/approvals';
+  type ApprovalRow, decidedBy, personWords } from '@/lib/approvals';
 
 const FILTERS = ['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED'] as const;
 
@@ -192,7 +192,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
 
       {row.decidedAt && (
         <p className="text-xs mc-muted mb-2">
-          {row.status.toLowerCase()} by {personWords(row.approvedByName, row.approvedBy)} · {new Date(row.decidedAt).toLocaleString()}
+          {row.status.toLowerCase()}{decidedBy(row) ? ` by ${decidedBy(row)}` : ''} · {new Date(row.decidedAt).toLocaleString()}
           {row.decisionNote ? ` — “${row.decisionNote}”` : ''}
         </p>
       )}

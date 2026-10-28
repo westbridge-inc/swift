@@ -108,6 +108,22 @@ describe('[ADMIN-AUDIT S3-5] the audit log names the admin and says the stated r
     expect(p2.data).toHaveLength(1);
     expect(new Set([...p1.data, ...p2.data].map((r: { id: string }) => r.id)).size).toBe(3);
   });
+
+  // [REVIEW-M #2156 S4-2, lifted from M's probe P3/P4] Only a written reason is a reason: anything else would reach the
+  // console as an object (a React child the audit page cannot render). An erased account reads as the erasure left it.
+  it('a non-string or blank reason is null; an erased account reads Deleted User, never the old name', async () => {
+    const gone = await makeAdmin('Real', `Person${RUN}`);
+    await runWithoutTenant(() => app.prisma.user.update({ where: { id: gone.id }, data: { firstName: 'Deleted', lastName: 'User', status: 'DEACTIVATED' } }));
+    const rows = await Promise.all([{ reason: { nested: 'x' } }, { reason: 42 }, { reason: '   ' }, null].map((changes) => runWithoutTenant(() => app.prisma.auditLog.create({ data: {
+      userId: gone.id, action: 'ADMIN PUT /y', entity: 'y', entityId: `p3_${RUN}`, changes: changes as never } }))));
+    auditIds.push(...rows.map((r) => r.id));
+    const res = await call(viewer.token, `/api/v1/admin/audit-logs?userId=${gone.id}&limit=10`);
+    expect(res.statusCode, res.body).toBe(200);
+    const data = res.json().data as { reason: unknown; actorName: string | null }[];
+    expect(data).toHaveLength(4);
+    for (const d of data) { expect(d.reason).toBeNull(); expect(d.actorName).toBe('Deleted User'); }
+    expect(res.body).not.toContain(`Person${RUN}`);
+  });
 });
 
 describe('[ADMIN-AUDIT S3-7] an approval names who asked and who decided', () => {

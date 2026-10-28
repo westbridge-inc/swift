@@ -77,6 +77,7 @@ export default function AuditPage() {
         <label className="text-xs">To<input type="date" className="mc-input block" aria-label="To" value={draft.to} onChange={(e) => setDraft({ ...draft, to: e.target.value })} /></label>
         <button type="submit" className="mc-btn mc-btn-primary">Show</button>
         {filtered && <button type="button" className="mc-btn" onClick={() => { setDraft(NO_FILTERS); setFilters(NO_FILTERS); setPage(1); }}>Clear</button>}
+        <p className="text-xs mc-muted w-full">What happened and Record search the code each action was recorded with (for example waive-fee or Vendor), not the words shown on a row.</p>
       </form>
 
       {isLoading ? (

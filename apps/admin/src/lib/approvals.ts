@@ -249,3 +249,12 @@ export function personWords(name: string | null | undefined, id: string | null |
   if (name === null) return 'an account not found here';
   return id ?? 'an unknown account';
 }
+
+/** [REVIEW-G #2156 S3-1] Who decided a request, in words; null when the record names nobody. A withdrawn request
+ *  (CANCELLED) is only ever withdrawn by its asker (the server never records an approver on it), so it names the
+ *  asker; any other decision names the approver. */
+export function decidedBy(row: ApprovalRow): string | null {
+  if (row.status === 'CANCELLED') return personWords(row.requestedByName, row.requestedBy);
+  if (!row.approvedBy && !row.approvedByName) return null;
+  return personWords(row.approvedByName, row.approvedBy);
+}
