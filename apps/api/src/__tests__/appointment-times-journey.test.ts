@@ -566,8 +566,8 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     expect(notice.title).toBe('Appointment moved');
     expect(notice.body).toContain(`${weekdayOf(day)} ${dayNum}`);
     expect(notice.body).toMatch(/moved from .*13:00 to .*17:30\.$/);
-    // [BOOK-FU2] The store's copy names the booking's ORDER and is tagged for the business: on builds 9-12 it
-    // opens that order on the order desk (a booking_ kind opened the marketplace jobs list there).
+    // [BOOK-FU2] The store's copy names the booking's ORDER and is tagged for the business: on builds 9, 11 and 12
+    // it opens that order on the order desk (booking_rescheduled, with no order, opened Schedule there).
     expect(notice.data).toEqual({ kind: 'appointment_moved', bookingId: moved.json().data.id, orderId: order.id, audience: 'business' });
 
     // The provider can move it back; the customer is told, and every surface follows.

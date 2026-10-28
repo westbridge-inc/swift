@@ -152,8 +152,8 @@ describe('reschedule — both directions, notified', () => {
     // [E28] the vendor-owner recipient is tagged as the business surface, so
     // a tap opens their Schedule agenda — the customer-side copy is tagged
     // separately and must never aim at that vendor-only screen.
-    // [BOOK-FU2] Not a booking_ kind (builds 9-12 open that family on ServiceJobs, a jobs list with no store
-    // bookings): appointment_moved, naming the NEW booking row, once per move per person.
+    // [BOOK-FU2] appointment_moved (outside the booking_ family), naming the NEW booking row, once per move per
+    // person. These bookings have no order; with one, the notice carries it (appointment-times-journey).
     expect(note?.data).toEqual({ kind: 'appointment_moved', bookingId: moved.id, audience: 'business' });
     expect(note?.dedupeKey).toBe(`appointment-moved:${moved.id}`);
   });

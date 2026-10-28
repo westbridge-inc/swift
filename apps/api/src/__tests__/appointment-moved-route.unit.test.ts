@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { appointmentMovedData, appointmentMovedDedupeKey } from '../modules/booking/appointment-moved';
 
 // ---------------------------------------------------------------------------
-// [BOOK-FU2 · the #2188 family] A STORE appointment's move notice. It was sent as booking_rescheduled, and the
-// phone builds in the stores route the booking_ family to ServiceJobs (the marketplace jobs list) unless a case
-// names the kind. Its own kind keeps it out of that family; the booking's order lets every released router open
-// the booking itself (customer: its order screen; business: that order on the order desk). The routes are
+// [BOOK-FU2 · the #2188 family] A STORE appointment's move notice. It was sent as booking_rescheduled with only the
+// booking id: builds 9 and 11 opened nothing for the customer and Schedule for the business, build 12 the orders
+// list and Schedule. Its own kind (outside the booking_ family, whose unnamed kinds the released routers open on
+// ServiceJobs) carries the booking's order, so every released router opens the booking itself (customer: its
+// order screen; business: that order on the order desk). The routes are
 // proved on real Postgres in scheduling-reschedule.test.ts and appointment-times-journey.test.ts; the released
 // routers were replayed outside the repo.
 // ---------------------------------------------------------------------------

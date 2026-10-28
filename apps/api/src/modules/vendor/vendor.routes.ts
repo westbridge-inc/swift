@@ -4509,7 +4509,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         title: 'Your appointment moved',
         body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
         audience: 'customer',
-        // [BOOK-FU2] Not a booking_ kind: builds 9-12 open that family on the jobs list (appointment-moved.ts).
+        // [BOOK-FU2] With the booking's order, so every released build opens the booking itself (appointment-moved.ts).
         dedupeKey: appointmentMovedDedupeKey(result.booking.id),
         data: appointmentMovedData(result.booking),
       }).catch(() => undefined);
