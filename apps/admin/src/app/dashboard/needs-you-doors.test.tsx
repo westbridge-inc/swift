@@ -34,7 +34,7 @@ describe('[REVIEW-F #2152 S4-5] a count without a door', () => {
       return { body: { success: true, data: [] } };
     });
     renderWithQuery(<DashboardPage />);
-    const line = await screen.findByText('13 documents waiting for review. A document reviewer decides these.');
+    const line = await screen.findByText('13 documents waiting for review (both lanes; VAT certificates are under Store VAT). A document reviewer decides these.');
     expect(line.closest('a')).toBeNull();
     const panel = screen.getByRole('heading', { name: 'Needs you' }).parentElement!;
     await waitFor(() => expect(within(panel).getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual(['/support?status=OPEN']));

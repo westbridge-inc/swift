@@ -15,11 +15,12 @@ const plural = (n: number, s: string) => `${n} ${s}${n === 1 ? '' : 's'}`;
 // [ADMIN-AUDIT S2-1] Every queue the server counts, in the words of its own page. SOS / ops pages and
 // safety tickets first. `many` also names the queue when its count could not be read. Each row opens the
 // tab that lists it (REVIEW-F #2152 S4-4). `noDoor`: said when this account may only know the count.
-const QUEUES: Record<WaitingKey, { one: string; many: string; href: string; level: Level; noDoor?: string }> = {
+// `detail` says how the count is made when the page it opens counts differently (REVIEW-F #2152 delta S4-3).
+const QUEUES: Record<WaitingKey, { one: string; many: string; href: string; level: Level; noDoor?: string; detail?: string }> = {
   opsAlerts: { one: 'SOS or ops page waiting to be acknowledged', many: 'SOS or ops pages waiting to be acknowledged', href: '/ops-alerts', level: 'error' },
   supportSafety: { one: 'safety ticket open', many: 'safety tickets open', href: '/support?status=OPEN', level: 'error' },
   supportSafetyInProgress: { one: 'safety ticket being handled, not resolved yet', many: 'safety tickets being handled, not resolved yet', href: '/support?status=IN_PROGRESS', level: 'error' },
-  documents: { one: 'document waiting for review', many: 'documents waiting for review', href: '/verification', level: 'warning', noDoor: 'A document reviewer decides these.' },
+  documents: { one: 'document waiting for review', many: 'documents waiting for review', href: '/verification', level: 'warning', noDoor: 'A document reviewer decides these.', detail: 'both lanes; VAT certificates are under Store VAT' },
   approvals: { one: 'request waiting for a second admin', many: 'requests waiting for a second admin', href: '/approvals', level: 'warning' },
   paymentConfirmations: { one: 'weekly-fee payment waiting for PAID or NOT PAID', many: 'weekly-fee payments waiting for PAID or NOT PAID', href: '/payment-confirmations', level: 'warning' },
   support: { one: 'support ticket open', many: 'support tickets open', href: '/support?status=OPEN', level: 'warning' },
@@ -74,7 +75,7 @@ export function AlertsPanel({
     const door = q.door !== false;
     const after = door || !words.noDoor ? '' : ` ${words.noDoor}`;
     if (q.count === null) items.push({ level: 'unknown', message: `Could not count ${words.many}. This is not zero.${after}`, href: words.href, door });
-    else if (q.count > 0) items.push({ level: words.level, message: `${q.count} ${q.count === 1 ? words.one : words.many}${after ? `.${after}` : ''}`, href: words.href, door });
+    else if (q.count > 0) items.push({ level: words.level, message: `${q.count} ${q.count === 1 ? words.one : words.many}${words.detail ? ` (${words.detail})` : ''}${after ? `.${after}` : ''}`, href: words.href, door });
   };
   const FIRST: WaitingKey[] = ['opsAlerts', 'supportSafety', 'supportSafetyInProgress'];
   FIRST.forEach(queue);

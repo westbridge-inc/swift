@@ -72,11 +72,29 @@ export default function SupportPage() {
   // ticket's button. It used to share the close mutation, whose error renders
   // only inside an open close panel (possibly another ticket's), so a failed
   // take showed nothing.
+  // [ADMIN-AUDIT S3-6] Each act says where the ticket went, with a door to that tab: the ticket used to just
+  // leave the list. And only the ticket being taken waits (one pending take used to hold every row's button).
+  // [REVIEW-F #2156 S4-1] Each take's answer is kept by the mutation itself, with the ticket it was for: callbacks
+  // passed to mutate() run only for the latest call, so with two takes in flight the first one's answer was lost.
+  const [done, setDone] = useState<{ words: string; tab: (typeof FILTERS)[number] } | null>(null);
+  const [taking, setTaking] = useState<ReadonlySet<string>>(new Set());
+  const [takeFailed, setTakeFailed] = useState<ReadonlyMap<string, string>>(new Map());
   const take = useMutation({
-    mutationFn: ({ id, expectedStatus }: { id: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
+    mutationFn: ({ id, expectedStatus }: { id: string; subject: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
       resolveSupportTicket(id, 'IN_PROGRESS', undefined, undefined, expectedStatus),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['support'] }),
+    onSuccess: (_data, t) => {
+      setDone({ words: `You took “${t.subject}”. It is now under ${label('SupportStatus', 'IN_PROGRESS')}.`, tab: 'IN_PROGRESS' });
+      return qc.invalidateQueries({ queryKey: ['support'] });
+    },
+    onError: (error, t) => setTakeFailed((m) => new Map(m).set(t.id, (error as Error).message)),
+    onSettled: (_data, _error, t) => setTaking((ids) => { const next = new Set(ids); next.delete(t.id); return next; }),
   });
+  const takeTicket = (t: { id: string; subject: string; status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) => {
+    setDone(null);
+    setTakeFailed((m) => { const next = new Map(m); next.delete(t.id); return next; });
+    setTaking((ids) => new Set(ids).add(t.id));
+    take.mutate({ id: t.id, subject: t.subject, expectedStatus: t.status });
+  };
 
   /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
   const [completing, setCompleting] = useState<{ id: string; reason: string } | null>(null);
@@ -111,6 +129,15 @@ export default function SupportPage() {
           ))}
         </div>
       </div>
+      {done && (
+        <div role="status" className="mc-note mc-note-good mb-3 flex flex-wrap items-center gap-3">
+          <span className="flex-1 text-sm">{done.words}</span>
+          {done.tab !== filter && (
+            <button type="button" className="mc-btn" onClick={() => { setFilter(done.tab); setDone(null); }}>Show {label('SupportStatus', done.tab)}</button>
+          )}
+          <button type="button" className="mc-btn" aria-label="Dismiss" onClick={() => setDone(null)}>×</button>
+        </div>
+      )}
       <div className="mc-list">
         {isLoading ? (
           <div className="mc-loading" aria-busy="true">Loading tickets…</div>
@@ -233,11 +260,11 @@ export default function SupportPage() {
                         {t.status === 'OPEN' && (
                           <button
                             type="button"
-                            onClick={() => take.mutate({ id: t.id, expectedStatus: t.status })}
-                            disabled={take.isPending}
+                            onClick={() => takeTicket(t)}
+                            disabled={taking.has(t.id)}
                             className="mc-btn"
                           >
-                            {take.isPending && take.variables?.id === t.id ? 'Taking…' : 'Take it'}
+                            {taking.has(t.id) ? 'Taking…' : 'Take it'}
                           </button>
                         )}
                         <button
@@ -246,8 +273,8 @@ export default function SupportPage() {
                         >
                           Close this ticket
                         </button>
-                        {take.isError && take.variables?.id === t.id ? (
-                          <p role="alert" className="mc-text-bad self-center">{(take.error as Error).message}</p>
+                        {takeFailed.has(t.id) ? (
+                          <p role="alert" className="mc-text-bad self-center">{takeFailed.get(t.id)}</p>
                         ) : null}
                       </div>
                     ) : (
@@ -285,15 +312,21 @@ export default function SupportPage() {
                         ) : null}
                         <div className="mc-actions">
                           <button
-                            onClick={() =>
+                            onClick={() => {
+                              const note = closing?.note?.trim() || undefined;
+                              const how = RESOLUTIONS.find((r) => r.value === closing?.resolution)?.label;
+                              setDone(null);
                               resolve.mutate({
                                 id: t.id,
                                 status: 'RESOLVED',
-                                note: closing?.note?.trim() || undefined,
+                                note,
                                 resolution: (closing?.resolution || undefined) as SupportResolution | undefined,
                                 expectedStatus: t.status,
-                              })
-                            }
+                              }, {
+                                // [ADMIN-AUDIT S3-6] the note is what the reporter reads (WR-022): say it went to them
+                                onSuccess: () => setDone({ words: `Closed “${t.subject}”${how ? `: ${how}` : ''}.${note ? ' Your note was sent to them.' : ''}`, tab: 'RESOLVED' }),
+                              });
+                            }}
                             disabled={resolve.isPending || cannotClose}
                             className="mc-btn mc-btn-primary"
                           >

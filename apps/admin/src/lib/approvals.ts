@@ -24,6 +24,10 @@ export interface ApprovalRow {
   fingerprint: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
   requestedBy: string;
+  /** [ADMIN-AUDIT S3-7] The asker's and the approver's names, read by the server inside this market (null: not an
+   *  account found here; absent: an older server). */
+  requestedByName?: string | null;
+  approvedByName?: string | null;
   /** The requester's stated reason — the thing the approver is here to read. */
   reason: string;
   /** [DS110-13] The canonical `{ params, body, query }` of the reviewed
@@ -257,4 +261,20 @@ export function canApply(row: ApprovalRow, now = new Date()): boolean {
 /** Approved and replayable, but it is the requester's to execute, not this admin's. */
 export function awaitsRequester(row: ApprovalRow, now = new Date()): boolean {
   return !row.isOwnRequest && replayable(row, now);
+}
+
+/** [ADMIN-AUDIT S3-7] A person on an approval, by name: the id only when an older server sent no name. */
+export function personWords(name: string | null | undefined, id: string | null | undefined): string {
+  if (name) return name;
+  if (name === null) return 'an account not found here';
+  return id ?? 'an unknown account';
+}
+
+/** [REVIEW-G #2156 S3-1] Who decided a request, in words; null when the record names nobody. A withdrawn request
+ *  (CANCELLED) is only ever withdrawn by its asker (the server never records an approver on it), so it names the
+ *  asker; any other decision names the approver. */
+export function decidedBy(row: ApprovalRow): string | null {
+  if (row.status === 'CANCELLED') return personWords(row.requestedByName, row.requestedBy);
+  if (!row.approvedBy && !row.approvedByName) return null;
+  return personWords(row.approvedByName, row.approvedBy);
 }

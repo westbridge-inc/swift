@@ -6838,10 +6838,14 @@ export async function adminRoutes(app: FastifyInstance) {
       coolOffHours: await soloCoolOffHours(app.prisma),
       now: new Date(),
     } : null;
+    const names = await accountNames(rows.flatMap((row) => [row.requestedBy, row.approvedBy]));
     return {
       success: true,
       data: rows.map((row) => ({
         ...row,
+        // [ADMIN-AUDIT S3-7] who asked and who decided, by name (null: not an account of this tenant)
+        requestedByName: names.get(row.requestedBy) ?? null,
+        approvedByName: (row.approvedBy && names.get(row.approvedBy)) ?? null,
         isOwnRequest: row.requestedBy === mine,
         solo: soloContext && row.requestedBy === mine ? soloRowState(row as never, soloContext) : null,
       })),
@@ -6998,6 +7002,21 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── Audit Logs ────────────────────────────────────────────────────────
 
+  // [ADMIN-AUDIT S3-5, S3-7] An account's name for the console (the audit log also records customers' and partners'
+  // own claims, so this is never called an admin's), read through the tenant-scoped User model: an id from another
+  // tenant (or no longer an account) resolves to null, never to a foreign name.
+  const accountNames = async (ids: readonly (string | null | undefined)[]): Promise<Map<string, string>> => {
+    const wanted = [...new Set(ids.filter((id): id is string => typeof id === 'string' && id.length > 0))];
+    if (wanted.length === 0) return new Map();
+    const users = await app.prisma.user.findMany({ where: { id: { in: wanted } }, select: { id: true, firstName: true, lastName: true } });
+    return new Map(users.map((u) => [u.id, [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || 'An account with no name on file']));
+  };
+  /** The reason the admin stated, as the audit row recorded it (changes.reason); null when none was stated. */
+  const statedReason = (changes: unknown): string | null => {
+    const reason = changes && typeof changes === 'object' ? (changes as Record<string, unknown>)['reason'] : null;
+    return typeof reason === 'string' && reason.trim() ? reason.trim() : null;
+  };
+
   app.get('/audit-logs', { preHandler: [adminGuard] }, async (request) => {
     requireTenantId();
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
@@ -7041,7 +7060,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.auditLog.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(logs, total, { page, limit, skip }) };
+    const names = await accountNames(logs.map((log) => log.userId));
+    const rows = logs.map((log) => ({ ...log, actorName: (log.userId && names.get(log.userId)) ?? null, reason: statedReason(log.changes) }));
+    return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
 
   // ── Support tickets ──────────────────────────────────────────────────────

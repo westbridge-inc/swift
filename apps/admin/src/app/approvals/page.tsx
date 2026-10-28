@@ -12,7 +12,7 @@ import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX, CLASS_WORD, APPROVAL_STATUS_WORDS, DECIDED_WORDS, timeLeftWords,
   canApply, awaitsRequester, snapshotEntries, soloWaitCopy, SOLO_EXPLAIN, needsStepUp,
-  type ApprovalRow,
+  type ApprovalRow, decidedBy, personWords,
 } from '@/lib/approvals';
 import { gyDateTime } from '@/lib/dates';
 
@@ -154,7 +154,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
       <blockquote className="border-l-2 border-[var(--mc-accent)] pl-3 mb-3">
         <p className="text-sm">{row.reason}</p>
         <p className="text-xs mc-muted mt-1">
-          asked by {row.requestedBy}
+          asked by {personWords(row.requestedByName, row.requestedBy)}
           {row.isOwnRequest ? ' (you)' : ''} · {gyDateTime(row.createdAt)}
         </p>
       </blockquote>
@@ -194,7 +194,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
 
       {row.decidedAt && (
         <p className="text-xs mc-muted mb-2">
-          {DECIDED_WORDS[row.status] ?? 'Decided'} by {row.approvedBy} · {gyDateTime(row.decidedAt)}
+          {DECIDED_WORDS[row.status] ?? 'Decided'}{decidedBy(row) ? ` by ${decidedBy(row)}` : ''} · {gyDateTime(row.decidedAt)}
           {row.decisionNote ? ` — “${row.decisionNote}”` : ''}
         </p>
       )}
