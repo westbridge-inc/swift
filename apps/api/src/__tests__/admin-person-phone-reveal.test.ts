@@ -450,49 +450,55 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
     for (const person of people) expect(person.phone).toMatch(/•/);
   });
 
-  it('the server still finds a person by their full number; the answer is masked', async () => {
-    const res = await get(`/users?search=${encodeURIComponent(phones.person)}`, tokens['listReaders']!);
-    expect(res.statusCode).toBe(200);
-    expect((res.json().data as Array<{ id: string }>).map((u) => u.id)).toContain(ids.person);
-    expect(res.payload).not.toContain(phones.person);
-    const riders = await get(`/riders?search=${encodeURIComponent(phones.rider)}`, tokens['listReaders']!);
-    expect((riders.json().data as Array<{ id: string }>).map((r) => r.id)).toEqual([ids.rider]);
-    expect(riders.payload).not.toContain(phones.rider);
-  });
-
-  // [SEC-PII · COORD] A substring search over the number or the email is an oracle: a caller who sees only the
-  // masked row could still recover the number digit by digit from which rows come back. Without the contact
-  // capability, the number and the email match only the EXACT full value; names keep substring search.
-  it('without the contact capability, a person is found only by the exact full number or email, never a part of it', async () => {
-    const found = async (url: string, token: string) => {
+  // [SEC-PII · COORD ruling] Any search over the number or the email is an oracle for a caller who sees only
+  // the masked row: a substring match recovers it digit by digit, and even an exact match leaves ~1000 guesses
+  // (the row shows the last digits and the name). Without the contact capability, phone and email search is
+  // OFF: the clauses are dropped, and a query that looks like a number or an address says that searching by
+  // it needs contact access. Names keep their search. A caller holding the capability keeps full search.
+  it('without the contact capability, no match by a number or an email, full or partial, and a hint says why', async () => {
+    const search = async (url: string, token: string) => {
       const res = await get(url, token);
       expect(res.statusCode, url).toBe(200);
-      const body = res.json().data;
-      return (Array.isArray(body) ? body : body.users as unknown[]).map((row) => (row as { id: string }).id);
+      const json = res.json();
+      const rows = (Array.isArray(json.data) ? json.data : json.data.users) as Array<{ id: string }>;
+      return { ids: rows.map((row) => row.id), hint: (json.meta?.searchHint ?? json.data?.searchHint ?? null) as string | null };
     };
-    const partials = [phones.person.slice(-6), phones.person.slice(0, 8), phones.person.slice(2, 9), `${phones.person.slice(0, -1)}%`, emails.person.slice(0, 6), `${emails.person.slice(0, 4)}%`, emails.person.replace(/^./, '_'), emails.person.split('@')[0]!, '@example.test'];
-    for (const part of partials) {
-      expect(await found(`/users?search=${encodeURIComponent(part)}`, tokens['listReaders']!), part).not.toContain(ids.person);
-      expect(await found(`/search?q=${encodeURIComponent(part)}`, tokens['listReaders']!), part).not.toContain(ids.person);
-    }
-    for (const part of [phones.rider.slice(-6), phones.rider.slice(0, 9)]) {
-      expect(await found(`/riders?search=${encodeURIComponent(part)}`, tokens['listReaders']!), part).not.toContain(ids.rider);
-    }
-    expect(await found(`/drivers?search=${encodeURIComponent(phones.driver.slice(-6))}`, tokens['listReaders']!)).not.toContain(ids.driver);
-    // The exact full number (as typed, with spaces, or without the +) and the exact email still find the person.
     const spaced = `${phones.person.slice(0, 4)} ${phones.person.slice(4, 7)} ${phones.person.slice(7)}`;
-    for (const exact of [phones.person, spaced, phones.person.slice(1), emails.person, emails.person.toUpperCase()]) {
-      expect(await found(`/users?search=${encodeURIComponent(exact)}`, tokens['listReaders']!), exact).toContain(ids.person);
-      expect(await found(`/search?q=${encodeURIComponent(exact)}`, tokens['listReaders']!), exact).toContain(ids.person);
+    const personQueries = [phones.person, spaced, phones.person.slice(1), phones.person.slice(-6), phones.person.slice(0, 8), `${phones.person.slice(0, -1)}%`,
+      emails.person, emails.person.toUpperCase(), emails.person.slice(0, 6), `${emails.person.slice(0, 4)}%`, '@example.test'];
+    for (const q of personQueries) {
+      const users = await search(`/users?search=${encodeURIComponent(q)}`, tokens['listReaders']!);
+      expect(users.ids, q).not.toContain(ids.person);
+      const found = await search(`/search?q=${encodeURIComponent(q)}`, tokens['listReaders']!);
+      expect(found.ids, q).not.toContain(ids.person);
+      if (/\d{4}|@/.test(q)) {
+        expect(users.hint, q).toBe('Searching by phone number or email needs contact access.');
+        expect(found.hint, q).toBe('Searching by phone number or email needs contact access.');
+      }
     }
-    expect(await found(`/riders?search=${encodeURIComponent(phones.rider)}`, tokens['listReaders']!)).toEqual([ids.rider]);
-    expect(await found(`/drivers?search=${encodeURIComponent(phones.driver)}`, tokens['listReaders']!)).toEqual([ids.driver]);
-    // Names keep substring search.
-    expect(await found(`/users?search=${encodeURIComponent(`P${RUN}`.slice(0, 5))}`, tokens['listReaders']!)).toContain(ids.person);
-    // A caller holding the capability keeps today's substring search.
-    expect(await found(`/users?search=${encodeURIComponent(phones.person.slice(-6))}`, tokens['userContactPlus']!)).toContain(ids.person);
-    expect(await found(`/users?search=${encodeURIComponent(emails.person.slice(0, 6))}`, tokens['userContactPlus']!)).toContain(ids.person);
-    expect(await found(`/riders?search=${encodeURIComponent(phones.rider.slice(-6))}`, tokens['moverContact']!)).toContain(ids.rider);
+    for (const [list, phone, id] of [['riders', phones.rider, ids.rider], ['drivers', phones.driver, ids.driver]] as const) {
+      for (const q of [phone, phone.slice(-6)]) {
+        const res = await search(`/${list}?search=${encodeURIComponent(q)}`, tokens['listReaders']!);
+        expect(res.ids, `${list} ${q}`).not.toContain(id);
+        expect(res.hint, `${list} ${q}`).toBe('Searching by phone number needs contact access.');
+      }
+    }
+    // Names keep their search, and a name search carries no hint.
+    const byName = await search(`/users?search=${encodeURIComponent(`P${RUN}`)}`, tokens['listReaders']!);
+    expect(byName.ids).toContain(ids.person);
+    expect(byName.hint).toBeNull();
+    expect((await search(`/riders?search=${encodeURIComponent(`P${RUN}`)}`, tokens['listReaders']!)).ids).toContain(ids.rider);
+    // A caller holding the capability keeps full search: full and partial numbers and emails, no hint.
+    for (const q of [phones.person, phones.person.slice(-6), emails.person, emails.person.slice(0, 6)]) {
+      const users = await search(`/users?search=${encodeURIComponent(q)}`, tokens['userContactPlus']!);
+      expect(users.ids, q).toContain(ids.person);
+      expect(users.hint, q).toBeNull();
+      expect((await search(`/search?q=${encodeURIComponent(q)}`, tokens['userContactPlus']!)).ids, q).toContain(ids.person);
+    }
+    for (const q of [phones.rider, phones.rider.slice(-6)]) {
+      expect((await search(`/riders?search=${encodeURIComponent(q)}`, tokens['moverContact']!)).ids, q).toContain(ids.rider);
+    }
+    expect((await search(`/drivers?search=${encodeURIComponent(phones.driver.slice(-6))}`, tokens['moverContact']!)).ids).toContain(ids.driver);
   });
 
   it('each contact capability unmasks only its own lists: user.contact.read shows people, never movers or stores', async () => {
