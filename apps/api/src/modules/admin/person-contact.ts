@@ -120,26 +120,23 @@ export function holdsPersonContact(request: unknown, kind: PersonContactKind): b
 }
 
 /**
- * [SEC-PII · COORD] The number and email clauses of a person search for a caller WITHOUT the contact
- * capability. A substring match over a number or an address is an oracle: from which rows come back, a
- * caller who sees only the masked row recovers the number digit by digit. So they match only the EXACT
- * full value: the number in its stored form (E.164; spaces, dashes and a missing + forgiven; a 7-digit
- * local number read as +592), the email exactly as typed or lowercased. Plain `in` lists, never a
- * pattern (no contains, prefix or ILIKE, whose % and _ are wildcards). Names keep substring search.
+ * [SEC-PII · COORD ruling] A caller WITHOUT the contact capability does not search by number or email at all.
+ * Any such search is an oracle over the masked row: a substring match recovers the number digit by digit, and
+ * even an exact match leaves about a thousand guesses (the row shows the last digits and the name). So the
+ * routes drop their phone and email clauses for that caller (names keep their search), and a query that looks
+ * like a number or an address is answered with this hint instead of a silent "no match".
  */
-export function exactContactSearch(search: string, opts: { email: boolean }): Array<{ phone: { in: string[] } } | { email: { in: string[] } }> {
-  const raw = search.trim();
-  const clauses: Array<{ phone: { in: string[] } } | { email: { in: string[] } }> = [];
-  if (/^[+\d\s().-]+$/.test(raw)) {
-    const digits = raw.replace(/\D/g, '');
-    if (digits.length >= 7 && digits.length <= 15) {
-      const phones = new Set([`+${digits}`]);
-      if (!raw.startsWith('+') && digits.length === 7) phones.add(`+592${digits}`);
-      clauses.push({ phone: { in: [...phones] } });
-    }
-  }
-  if (opts.email && raw.includes('@')) clauses.push({ email: { in: [...new Set([raw, raw.toLowerCase()])] } });
-  return clauses;
+export const CONTACT_SEARCH_HINT = {
+  phoneOrEmail: 'Searching by phone number or email needs contact access.',
+  phone: 'Searching by phone number needs contact access.',
+} as const;
+
+/** The hint for a query that looks like a number (4 or more digits) or, where emails are searched, an address. */
+export function contactSearchHint(search: string | undefined, opts: { email: boolean }): string | undefined {
+  if (!search) return undefined;
+  const looksLikeContact = search.replace(/\D/g, '').length >= 4 || (opts.email && search.includes('@'));
+  if (!looksLikeContact) return undefined;
+  return opts.email ? CONTACT_SEARCH_HINT.phoneOrEmail : CONTACT_SEARCH_HINT.phone;
 }
 
 const maskedEmail = (email: string | null | undefined) => (email ? maskEmail(email) : email ?? null);

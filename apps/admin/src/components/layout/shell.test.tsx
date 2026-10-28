@@ -100,6 +100,17 @@ describe('[MC shell] ⌘K search', () => {
     expect(within(list).getByText('Test Person')).toBeTruthy();
   });
 
+  // [SEC-PII · COORD ruling] Without contact access the server does not search people by number or email, and says so.
+  it('the server\'s contact-access hint is shown in the search, and the standing hint says phone search needs contact access', async () => {
+    mockApi(() => ({ body: { success: true, data: { orders: [], users: [], vendors: [], searchHint: 'Searching by phone number or email needs contact access.' } } }));
+    const { user } = renderWithQuery(<SearchLauncher />);
+    await user.keyboard('{Meta>}k{/Meta}');
+    expect(screen.getByText('Orders by number · people by name, or by phone with contact access · businesses by name')).toBeTruthy();
+    await user.type(screen.getByRole('combobox', { name: 'Search everything' }), '6001234');
+    const status = await screen.findByText('Searching by phone number or email needs contact access.');
+    expect(status.getAttribute('role')).toBe('status');
+  });
+
   it('a screen can be reached by what it is for', async () => {
     mockApi(() => ({ body: { success: true, data: { orders: [], users: [], vendors: [] } } }));
     const { user } = renderWithQuery(<SearchLauncher />);

@@ -199,3 +199,25 @@ describe('[SEC-PII] the lists show the server\'s masked numbers and emails', () 
     expect(table.textContent).toContain('Masked Counter');
   });
 });
+
+// [SEC-PII · COORD ruling] Staff without contact access cannot search by phone number or email: the server says so
+// in the list's meta, and the list shows those words instead of a silent "Nobody matches".
+describe('[SEC-PII] the lists show the server\'s hint when searching by number needs contact access', () => {
+  it.each([
+    ['People', UsersPage, 'Searching by phone number or email needs contact access.'],
+    ['Riders', RidersPage, 'Searching by phone number needs contact access.'],
+    ['Drivers', DriversPage, 'Searching by phone number needs contact access.'],
+  ] as const)('%s: the hint is shown beside the empty answer', async (name, Page, hint) => {
+    mockApi(() => ({ body: { success: true, data: [], meta: { ...meta(1, 0), searchHint: hint } } }));
+    renderWithQuery(<Page />);
+    await screen.findByRole('table', { name });
+    expect((await screen.findByText(hint)).closest('[role="status"]')).toBeTruthy();
+  });
+
+  it('no hint from the server, no hint on the page', async () => {
+    mockApi(() => ({ body: { success: true, data: people, meta: meta(1, 1) } }));
+    renderWithQuery(<UsersPage />);
+    await screen.findByRole('table', { name: 'People' });
+    expect(screen.queryByText(/needs contact access/)).toBeNull();
+  });
+});
