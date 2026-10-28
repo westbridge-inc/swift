@@ -99,6 +99,9 @@ import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugi
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
 import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
+// [SEC-PII · #2170 S3-2] the five more masked reads (their own line: the line above is shared with other open changes)
+import { maskOwnPhone } from './person-contact';
+import { maskPhone } from '../auth/step-up';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -4969,7 +4972,8 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id: { in: members.map((m) => m.accountId) } },
       select: { id: true, phone: true, firstName: true, lastName: true, roles: true, status: true },
     });
-    const userById = new Map(users.map((u) => [u.id, u]));
+    // [SEC-PII · #2170 S3-2] Each member's number masked unless the live grant holds user.contact.read.
+    const userById = new Map((holdsPersonContact(request, 'user') ? users : users.map(maskOwnPhone)).map((u) => [u.id, u]));
     return {
       success: true,
       data: {
@@ -5870,9 +5874,14 @@ export async function adminRoutes(app: FastifyInstance) {
     for (const c of contacts) if (!lastContactBy.has(c.subscriptionId)) lastContactBy.set(c.subscriptionId, c);
     const lastPayBy = new Map(lastPayments.map((p) => [p.subscriptionId, p]));
 
+    // [SEC-PII · #2170 S3-2] A store owner's or mover's number (and the wa.me link that spells it out) only to a live
+    // grant holding the matching contact capability; otherwise masked, and no link.
+    const contactFor = { vendor: holdsPersonContact(request, 'vendor'), mover: holdsPersonContact(request, 'mover') };
     const rows = subs.map((s) => {
       const person = s.vendor?.owner.user ?? s.rider?.user ?? s.driver?.user;
-      const phone = person?.phone ?? '';
+      const fullPhone = person?.phone ?? '';
+      const mayContact = s.vendor ? contactFor.vendor : contactFor.mover;
+      const phone = mayContact || !fullPhone ? fullPhone : maskPhone(fullPhone);
       const weekly = weeklyFeeAmount(s);
       const due = Math.max(0, weekly - (balanceBy.get(s.id) ?? 0));
       const contact = lastContactBy.get(s.id);
@@ -5887,7 +5896,7 @@ export async function adminRoutes(app: FastifyInstance) {
         type: s.type,
         san: s.san,
         phone,
-        waLink: phone ? `https://wa.me/${phone.replace(/\D/g, '')}` : null,
+        waLink: mayContact && fullPhone ? `https://wa.me/${fullPhone.replace(/\D/g, '')}` : null,
         amountDueGyd: due,
         status: s.status,
         nextBillingDate: s.nextBillingDate,
@@ -6104,12 +6113,14 @@ export async function adminRoutes(app: FastifyInstance) {
       sub.riderId ? tenantPrisma.rider.findUnique({ where: { id: sub.riderId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
       sub.driverId ? tenantPrisma.driver.findUnique({ where: { id: sub.driverId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
     ]);
+    // [SEC-PII · #2170 S3-2] The mover's number masked unless the live grant holds mover.contact.read.
+    const moverPhone = (phone: string) => (holdsPersonContact(request, 'mover') ? phone : maskPhone(phone));
     const holder = vendor
       ? { kind: 'VENDOR', name: vendor.name, city: vendor.city }
       : rider
-        ? { kind: 'RIDER', name: `${rider.user.firstName} ${rider.user.lastName}`, phone: rider.user.phone }
+        ? { kind: 'RIDER', name: `${rider.user.firstName} ${rider.user.lastName}`, phone: moverPhone(rider.user.phone) }
         : driver
-          ? { kind: 'DRIVER', name: `${driver.user.firstName} ${driver.user.lastName}`, phone: driver.user.phone }
+          ? { kind: 'DRIVER', name: `${driver.user.firstName} ${driver.user.lastName}`, phone: moverPhone(driver.user.phone) }
           : { kind: 'UNKNOWN' };
     return {
       success: true,
@@ -6128,7 +6139,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */
-  app.get('/integrity/appeals', { preHandler: [platformControlGuard] }, async () => {
+  app.get('/integrity/appeals', { preHandler: [platformControlGuard] }, async (request) => {
     const { appealOverturnRate } = await import('../integrity/enforcement');
     const open = await app.prisma.enforcementAction.findMany({
       where: { appeal: 'OPEN' },
@@ -6139,7 +6150,8 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id: { in: open.map((a) => a.accountId) } },
       select: { id: true, phone: true, firstName: true, lastName: true },
     });
-    const userById = new Map(users.map((u) => [u.id, u]));
+    // [SEC-PII · #2170 S3-2] The appellant's number masked unless the live grant holds user.contact.read.
+    const userById = new Map((holdsPersonContact(request, 'user') ? users : users.map(maskOwnPhone)).map((u) => [u.id, u]));
     return {
       success: true,
       data: {
@@ -6280,7 +6292,9 @@ export async function adminRoutes(app: FastifyInstance) {
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
     // [VERIFY-DOCS] Each row says what the reviewer must type to approve it.
-    const rows = withEarlier.map((document) => ({ ...document, reviewerTypes: reviewerTypedFields(document.docType) }));
+    // [SEC-PII · #2170 S3-2] The applicant's number masked unless the live grant holds user.contact.read.
+    const applicantContact = holdsPersonContact(request, 'user');
+    const rows = withEarlier.map((document) => ({ ...(applicantContact || !document.user ? document : { ...document, user: maskOwnPhone(document.user) }), reviewerTypes: reviewerTypedFields(document.docType) }));
 
     return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });

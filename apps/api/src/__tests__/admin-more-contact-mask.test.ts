@@ -87,6 +87,7 @@ beforeAll(async () => {
   await adminWith('readers', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'verification.read', 'integrity.read', 'integrity.identity.read']);
   await adminWith('contacts', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'verification.read', 'integrity.read', 'integrity.identity.read', 'user.contact.read', 'mover.contact.read', 'vendor.contact.read']);
   await adminWith('all', 'SUPER_ADMIN', ['*']);
+  await adminWith('moverOnly', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'mover.contact.read']);
 });
 
 afterAll(async () => {
@@ -141,5 +142,12 @@ describe('[SEC-PII #2170 S3-2] five more admin reads mask phone numbers without 
       const row = (await get(reads().collections.url, tokens[token]!)).json().data.find((c: { subscriptionId: string }) => c.subscriptionId === ids.vendorSub);
       expect(row.waLink).toBe(`https://wa.me/${phones.owner.replace(/\D/g, '')}`);
     }
+  });
+
+  it('each capability opens only its own people: mover.contact.read shows the mover behind a payment reference, never a store owner', async () => {
+    expect((await get(reads().san.url, tokens['moverOnly']!)).json().data.holder.phone).toBe(phones.rider);
+    const row = (await get(reads().collections.url, tokens['moverOnly']!)).json().data.find((c: { subscriptionId: string }) => c.subscriptionId === ids.vendorSub);
+    expect(row.phone).toMatch(masked(phones.owner));
+    expect(row.waLink).toBeNull();
   });
 });
