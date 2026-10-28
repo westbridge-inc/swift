@@ -11,7 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { luhnCheckDigit } from '../modules/billing/san';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [SEC-PII · REVIEW-G #2170 S3-2] The person lists mask phone numbers unless the admin's live grant holds the
@@ -25,6 +25,8 @@ import { testPhone } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+// A store name the catalogue checker reads: word-free letters only (checked-names.test.ts).
+const STORE_TAG = wordFreeTag();
 const DAY = 86_400_000;
 const SAN_BODY = String(100000000 + Math.floor(Math.random() * 800000000)).slice(0, 9);
 const SAN = `${SAN_BODY}${luhnCheckDigit(SAN_BODY)}`;
@@ -62,7 +64,7 @@ beforeAll(async () => {
   ids.owner = await person(phones.owner, ['VENDOR_OWNER', 'CUSTOMER']);
   ids.vendorOwner = (await system(() => app.prisma.vendorOwner.create({ data: { userId: ids.owner } }))).id;
   ids.vendor = (await system(() => app.prisma.vendor.create({ data: {
-    ownerId: ids.vendorOwner, name: `Mask Counter ${RUN}`, slug: `mm-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(),
+    ownerId: ids.vendorOwner, name: `Mask Counter ${STORE_TAG}`, slug: `mm-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(),
     addressLine1: '1 Mask St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.801, longitude: -58.156, status: 'ACTIVE',
   } as never }))).id;
   ids.vendorSub = (await system(() => app.prisma.subscription.create({ data: {
