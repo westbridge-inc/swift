@@ -180,6 +180,31 @@ describe('[2026-10-18] a non-material bump asks nobody again', () => {
     }
   });
 
+  // [EMAIL-HTTPS · COORD 27 Oct — 2026-10-27 MATERIAL] Resend as the processor that delivers Swift's emails: a new
+  // processor flow (as 2026-10-25.1), so everyone below it is asked again, with this summary.
+  it('[2026-10-27 material] everyone below it is asked again with the email summary (and anything older they missed); at it, nobody', () => {
+    const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
+    const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
+    const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
+    expect(v27.join(' ')).toMatch(/Resend/);
+    expect(v27.join(' ')).toMatch(/your email address/);
+    expect(v27.join(' ')).toMatch(/United States/);
+    expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-27');
+    expect(materialVersion('2026-10-27')).toBe('2026-10-27');
+    for (const roles of [['CUSTOMER'], ['MOVER', 'CUSTOMER'], ['VENDOR_OWNER', 'CUSTOMER']] as UserRole[][]) {
+      for (const tosVersion of ['2026-10-25.1', '2026-10-25.2']) {
+        expect(acceptanceStatus({ tosVersion, roles }, '2026-10-27'), `${tosVersion} ${roles.join('+')}`).toMatchObject({ needsAcceptance: true, summary: [...v27] });
+      }
+      for (const tosVersion of ['2026-10-21', '2026-10-22', '2026-10-22.1', '2026-10-25']) {
+        expect(acceptanceStatus({ tosVersion, roles }, '2026-10-27'), `${tosVersion} ${roles.join('+')}`).toMatchObject({ needsAcceptance: true, summary: [...v251, ...v27] });
+      }
+      for (const tosVersion of ['2026-10-17', '2026-10-18']) {
+        expect(acceptanceStatus({ tosVersion, roles }, '2026-10-27'), `${tosVersion} ${roles.join('+')}`).toMatchObject({ needsAcceptance: true, summary: [...v21, ...v251, ...v27] });
+      }
+      expect(acceptanceStatus({ tosVersion: '2026-10-27', roles }, '2026-10-27')).toMatchObject({ needsAcceptance: false, summary: [] });
+    }
+  });
+
   it('builds 9-11 are never asked: only GET/POST /auth/legal-acceptance read acceptance, and sign-up stamps the server\'s version', () => {
     const SRC = join(__dirname, '..');
     const files: string[] = [];
@@ -271,21 +296,26 @@ describe('GET/POST /auth/legal-acceptance', () => {
   // The served version is now 2026-10-25.1, MATERIAL: a person at 2026-10-17 or 2026-10-18 is asked once with the
   // 2026-10-21 summary and the call summary; a person at 2026-10-21 or 2026-10-25 with the call summary only; after
   // the tick, nobody is asked again.
-  it('[2026-10-25.1 material, served] people are asked once, with exactly what changed materially since they accepted', async () => {
+  // [EMAIL-HTTPS · COORD 27 Oct] Now served as 2026-10-27, MATERIAL (Resend delivers the emails): a person at
+  // 2026-10-25.1 or 2026-10-25.2 is asked once with the email summary; earlier ones also get what they missed.
+  it('[2026-10-27 material, served] people are asked once, with exactly what changed materially since they accepted', async () => {
     const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
-    // [POLICE-CLEARANCE CONSENT] served as 2026-10-25.2 (non-material on top): the material summary is still 2026-10-25.1's.
-    expect(LEGAL_VERSION).toBe('2026-10-25.2');
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-25.1');
-    for (const [accepted, summary] of [['2026-10-17', [...v21, ...v251]], ['2026-10-18', [...v21, ...v251]], ['2026-10-21', [...v251]], ['2026-10-25', [...v251]]] as const) {
+    const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
+    expect(LEGAL_VERSION).toBe('2026-10-27');
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-27');
+    for (const [accepted, summary] of [
+      ['2026-10-17', [...v21, ...v251, ...v27]], ['2026-10-18', [...v21, ...v251, ...v27]], ['2026-10-21', [...v251, ...v27]], ['2026-10-25', [...v251, ...v27]],
+      ['2026-10-25.1', [...v27]], ['2026-10-25.2', [...v27]],
+    ] as const) {
       const person = await mkUser(['CUSTOMER'] as UserRole[], accepted);
       expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: accepted, needsAcceptance: true, summary: [...summary] });
       expect((await call('POST', person.token, { version: LEGAL_VERSION, accept: true })).statusCode).toBe(200);
       expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: LEGAL_VERSION, needsAcceptance: false, summary: [] });
     }
-    // A person at 2026-10-25.1 is not asked under 2026-10-25.2.
-    const atV251 = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-25.1');
-    expect((await call('GET', atV251.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: '2026-10-25.1', needsAcceptance: false, summary: [] });
+    // A person at 2026-10-27 is not asked.
+    const atV27 = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-27');
+    expect((await call('GET', atV27.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: '2026-10-27', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {

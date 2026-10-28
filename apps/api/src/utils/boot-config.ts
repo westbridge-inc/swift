@@ -11,6 +11,7 @@ import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settl
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
 import { identitySalt } from '../modules/integrity/normalize';
 import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
+import { resendConfigFromEnv } from '../providers/notifications/resend-email';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
@@ -448,14 +449,17 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [PROD-PATH] Email: receipts, expiry warnings, data-export links. The dev
   // sender refuses only at the FIRST send in production (channels.ts), so a
   // missing sender stayed invisible until a customer was owed an email. The
-  // launch sender is SMTP; its whole configuration is checked here, by the
-  // same reader the sender uses (it names missing settings, never values).
+  // launch sender is a real one, SMTP or (EMAIL-HTTPS 27 Oct: the droplets
+  // cannot reach SMTP) Resend over HTTPS; its whole configuration is checked
+  // here, by the same reader the sender uses (it names missing settings, never
+  // values). Unset, dev and anything else stay refused.
   const emailProvider = env['EMAIL_PROVIDER'];
-  if (emailProvider !== 'smtp') {
-    throw new Error('FATAL: EMAIL_PROVIDER must be smtp in production — unset or dev sends no receipt, notice or export link. Set EMAIL_PROVIDER=smtp with SMTP_HOST, SMTP_PORT, SMTP_USER, EMAIL_FROM and the SMTP_PASS secret. Refusing to start.');
+  if (emailProvider !== 'smtp' && emailProvider !== 'resend') {
+    throw new Error('FATAL: EMAIL_PROVIDER must be smtp or resend in production — unset or dev sends no receipt, notice or export link. Set EMAIL_PROVIDER=smtp with SMTP_HOST, SMTP_PORT, SMTP_USER, EMAIL_FROM and the SMTP_PASS secret, or EMAIL_PROVIDER=resend with EMAIL_FROM and the RESEND_API_KEY secret. Refusing to start.');
   }
   try {
-    smtpConfigFromEnv(env);
+    if (emailProvider === 'smtp') smtpConfigFromEnv(env);
+    else resendConfigFromEnv(env);
   } catch (error) {
     throw new Error(`FATAL: ${error instanceof Error ? error.message : String(error)}. Refusing to start.`);
   }

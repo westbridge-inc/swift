@@ -19,7 +19,7 @@ import { devChannelLog, resetDevChannelLog } from '../providers/notifications/ch
 import { SmtpEmailProvider } from '../providers/notifications/smtp-email';
 import { testPhone } from './helpers/fixture-ids';
 import { testPrismaClient } from './helpers/test-prisma-client';
-import { isTestRunnerSetting, PRODUCTION_CHANNELS, seedContainerNames, UNSET_IN_THE_SEED } from './helpers/seed-channel-settings';
+import { isTestRunnerSetting, PRODUCTION_CHANNELS, PRODUCTION_CHANNELS_RESEND, seedContainerNames, UNSET_IN_THE_SEED } from './helpers/seed-channel-settings';
 
 // This suite pins the deployment identity singleton and the admin roster for the whole file and restores both after.
 grantSuiteCapability('unscoped-mutation');
@@ -511,6 +511,16 @@ describe('[SOLO RE-SEED] the owner\'s notices must be able to leave', () => {
     expect(soloNoticeChannelsReady({ NODE_ENV: 'production', ...SMTP, ...TWILIO })).toBeNull();
     expect(soloNoticeChannelsReady({ NODE_ENV: 'test' })).toBeNull();
   });
+
+  // [EMAIL-HTTPS 27 Oct] The droplets cannot reach SMTP: production email may go over HTTPS through Resend.
+  it('production email over HTTPS (Resend) counts once its key and sender are set; never without them', () => {
+    const RESEND = { EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'not-a-real-key', EMAIL_FROM: 'Swift <no-reply@swiftgy.com>' };
+    expect(soloNoticeChannelsReady({ NODE_ENV: 'production', ...RESEND, ...TWILIO })).toBeNull();
+    expect(soloNoticeChannelsReady({ NODE_ENV: 'production', ...RESEND })).toBe('text');
+    expect(soloNoticeChannelsReady({ NODE_ENV: 'production', ...RESEND, ...TWILIO, RESEND_API_KEY: '' })).toBe('email');
+    expect(soloNoticeChannelsReady({ NODE_ENV: 'production', ...RESEND, ...TWILIO, EMAIL_FROM: undefined })).toBe('email');
+    expect(soloNoticeChannelsReady({ NODE_ENV: 'production', ...RESEND, ...TWILIO, EMAIL_PROVIDER: 'postmark' })).toBe('email');
+  });
 });
 
 describe('[SOLO RE-SEED] the real seed entry point', () => {
@@ -598,7 +608,7 @@ describe('[SOLO RE-SEED] the real seed entry point', () => {
 // docker-compose.seed.yml passes, valued as deploy/.env holds them for the api
 // (seed-channel-settings.ts takes the names from the code, not a list).
 // ---------------------------------------------------------------------------
-interface Wire { texts: Array<{ to: string; body: string }>; emails: Array<{ to: string; subject: string }>; reads: Set<string> }
+interface Wire { texts: Array<{ to: string; body: string }>; emails: Array<{ to: string; subject: string }>; via: string[]; reads: Set<string> }
 
 /**
  * Run `fn` as the seed container runs it, in production posture: the process
@@ -608,21 +618,29 @@ interface Wire { texts: Array<{ to: string; body: string }>; emails: Array<{ to:
  * recorded (wire.reads) so a case can prove it needed nothing the container
  * lacks. Only the test runner's own settings pass through besides.
  */
-async function inSeedContainer<T>(fn: (wire: Wire) => Promise<T>, omit: readonly string[] = []): Promise<T> {
+async function inSeedContainer<T>(fn: (wire: Wire) => Promise<T>, omit: readonly string[] = [], channels: Readonly<Record<string, string>> = PRODUCTION_CHANNELS): Promise<T> {
   const held = seedContainerNames();
   const saved = process.env;
-  const wire: Wire = { texts: [], emails: [], reads: new Set() };
+  const wire: Wire = { texts: [], emails: [], via: [], reads: new Set() };
   const env: Record<string, string> = {};
   for (const name of held) {
     if (omit.includes(name)) continue;
-    const value = name === 'DATABASE_URL' ? saved['DATABASE_URL'] : PRODUCTION_CHANNELS[name];
+    const value = name === 'DATABASE_URL' ? saved['DATABASE_URL'] : channels[name];
     if (value !== undefined) env[name] = value;
   }
   for (const [name, value] of Object.entries(saved)) if (isTestRunnerSetting(name) && value !== undefined) env[name] = value;
   const record = (key: string | symbol) => { if (typeof key === 'string') wire.reads.add(key); };
-  // Only Twilio is reached: each text is answered the way Twilio answers one.
-  vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: { body?: unknown }) => {
-    if (!String(url).startsWith('https://api.twilio.com/')) throw new Error(`the seed reached the network outside Twilio: ${String(url)}`);
+  // Only Twilio is reached, and Resend when the email goes over HTTPS: each is
+  // answered the way that provider answers (Resend: 200 with the email id).
+  vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: { body?: unknown; headers?: Record<string, string> }) => {
+    if (String(url) === 'https://api.resend.com/emails') {
+      const mail = JSON.parse(String(init?.body ?? '{}')) as { to?: string[]; subject?: string };
+      if (init?.headers?.['Authorization'] !== `Bearer ${channels['RESEND_API_KEY']}`) throw new Error('the Resend call did not carry the key from the store');
+      wire.emails.push({ to: mail.to?.join(',') ?? '', subject: mail.subject ?? '' });
+      wire.via.push('resend');
+      return new Response(JSON.stringify({ id: `00000000-0000-4000-8000-${String(wire.emails.length).padStart(12, '0')}` }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (!String(url).startsWith('https://api.twilio.com/')) throw new Error(`the seed reached the network outside Twilio and Resend: ${String(url)}`);
     const form = new URLSearchParams(String(init?.body ?? ''));
     wire.texts.push({ to: form.get('To') ?? '', body: form.get('Body') ?? '' });
     return new Response(JSON.stringify({ sid: `SM${String(wire.texts.length).padStart(32, '0')}` }), { status: 201, headers: { 'Content-Type': 'application/json' } });
@@ -630,6 +648,7 @@ async function inSeedContainer<T>(fn: (wire: Wire) => Promise<T>, omit: readonly
   // The mailbox is built from the settings for real; only the SMTP dialogue is not run.
   const smtp = vi.spyOn(SmtpEmailProvider.prototype, 'sendEmail').mockImplementation(async (to: string, subject: string) => {
     wire.emails.push({ to, subject });
+    wire.via.push('smtp');
     return { ref: `<seed-${wire.emails.length}@example.invalid>` };
   });
   process.env = new Proxy(env, {
@@ -705,5 +724,76 @@ describe('[SEED-FIX] in the seed container, in production: what docker-compose.s
     expect(await eventsFor(line)).toEqual([]);
     expect(wire.emails).toEqual([]);
     expect(wire.texts).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [EMAIL-HTTPS 27 Oct] The owner's second real start on production was refused
+// again (SOLO_EMAIL_UNAVAILABLE at the SEND, nothing changed): the hosting
+// provider blocks outbound SMTP from the droplets. With EMAIL_PROVIDER=resend
+// the same seed container emails over HTTPS through Resend's email API, with
+// the key from the store (RESEND_API_KEY_FILE), and the real Resend adapter
+// runs here (only the network answer is stubbed).
+// ---------------------------------------------------------------------------
+describe('[EMAIL-HTTPS] in the seed container, in production, with email over HTTPS (Resend)', () => {
+  it('the start (A7f): the wait starts, the owner is emailed through Resend and texted through Twilio', async () => {
+    const c = await reseedCase(34);
+    const line = sign('owner', c.request);
+    const { started, wire } = await inSeedContainer(async (w) => ({
+      started: await startSoloReseed(prisma, URL_, c.desired, c.plan, { approvals: [line], approverKeys: OWNER_ONLY, request: c.ctx, actor: 'owner' }),
+      wire: w,
+    }), [], PRODUCTION_CHANNELS_RESEND);
+    expect(started.eligibleAt.getTime()).toBeGreaterThan(Date.now() + SOLO_COOLING_OFF_MS - 60_000);
+    expect(await eventsFor(line)).toEqual(['REQUESTED']);
+    expect(wire.emails).toEqual([{ to: EMAIL, subject: 'Swift: a production settings re-seed is waiting for your solo approval' }]);
+    expect(wire.via).toEqual(['resend']);
+    expect(wire.texts.map((t) => t.to)).toEqual([PHONE]);
+    expect(devChannelLog).toHaveLength(0);
+    expect([...wire.reads]).toEqual(expect.arrayContaining(['NODE_ENV', 'PUSH_PROVIDER', 'EMAIL_PROVIDER', 'RESEND_API_KEY', 'EMAIL_FROM', 'NOTIFICATION_PROVIDER', 'TWILIO_API_KEY_SECRET']));
+    expect(readsTheContainerLacks(wire), 'settings the start read that the seed container does not hold').toEqual([]);
+  });
+
+  it('the apply after the wait (A7g): code by Twilio, the plan applies, the owner is emailed through Resend and texted', async () => {
+    const c = await startedCase(35);
+    resetDevChannelLog();
+    const { res, wire } = await inSeedContainer(async (w) => ({
+      res: await applyWith(c, c.line, { readSignInCode: async () => CODE.exec(w.texts.at(-1)?.body ?? '')?.[1] ?? '' }),
+      wire: w,
+    }), [], PRODUCTION_CHANNELS_RESEND);
+    expect(res.applied).toBe(1);
+    expect(await keyValue()).toBe(35);
+    expect(await eventsFor(c.line)).toEqual(['REQUESTED', 'APPLIED']);
+    expect(wire.emails).toEqual([{ to: EMAIL, subject: 'Swift: production settings re-seed applied (solo approval)' }]);
+    expect(wire.via).toEqual(['resend']);
+    expect(devChannelLog).toHaveLength(0);
+    expect(readsTheContainerLacks(wire), 'settings the apply read that the seed container does not hold').toEqual([]);
+  });
+
+  it('without the key from the store it is refused and starts nothing (no email, no text)', async () => {
+    const c = await reseedCase(36);
+    const line = sign('owner', c.request);
+    const { err, wire } = await inSeedContainer(async (w) => ({
+      err: await startSoloReseed(prisma, URL_, c.desired, c.plan, { approvals: [line], approverKeys: OWNER_ONLY, request: c.ctx }).catch((e: unknown) => e),
+      wire: w,
+    }), ['RESEND_API_KEY'], PRODUCTION_CHANNELS_RESEND);
+    expect((err as { code?: string }).code).toBe('SOLO_EMAIL_UNAVAILABLE');
+    expect(await eventsFor(line)).toEqual([]);
+    expect(wire.emails).toEqual([]);
+    expect(wire.texts).toEqual([]);
+  });
+
+  it('Resend refusing the email (HTTP 403, an unverified sender) is a send that did not go: nothing starts', async () => {
+    const c = await reseedCase(37);
+    const line = sign('owner', c.request);
+    const { err, wire } = await inSeedContainer(async (w) => {
+      const real = globalThis.fetch;
+      vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: unknown) => (String(url) === 'https://api.resend.com/emails'
+        ? new Response(JSON.stringify({ statusCode: 403, name: 'validation_error', message: 'The domain is not verified.' }), { status: 403 })
+        : (real as (u: unknown, i?: unknown) => Promise<Response>)(url, init))));
+      return { err: await startSoloReseed(prisma, URL_, c.desired, c.plan, { approvals: [line], approverKeys: OWNER_ONLY, request: c.ctx }).catch((e: unknown) => e), wire: w };
+    }, [], PRODUCTION_CHANNELS_RESEND);
+    expect((err as { code?: string }).code).toBe('SOLO_EMAIL_UNAVAILABLE');
+    expect(await eventsFor(line)).toEqual([]);
+    expect(wire.emails).toEqual([]);
   });
 });

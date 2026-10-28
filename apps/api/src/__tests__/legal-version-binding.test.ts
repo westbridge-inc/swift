@@ -264,6 +264,16 @@ const PUBLISHED: Record<
     driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
     vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
   },
+  // [EMAIL-HTTPS · COORD 27 Oct — MATERIAL] Privacy only: section 5's processor list names Resend as the deliverer of
+  // Swift's emails (the email address and the email itself; sent from Brazil, records kept in the United States) and
+  // GoDaddy as the host of Swift's own mailbox. A new day, so LAST_UPDATED moves and every document re-pins. Putting
+  // the GoDaddy wording and 25 October back reproduces all four 2026-10-25.2 pins exactly.
+  '2026-10-27': {
+    terms: 'ab18c3a2c4d6fac9d8f852f33ebc4862eed91d5908dfc258498b330abd7702b9',
+    privacy: '2903780caa177241c7c6541def8caae34d6275f7ff65aef15003cefa3f8018f8',
+    driver_agreement: '58dad790f05ad3b097dcd9b7adc07307b2c2438accb819f9275ca475bdaa7115',
+    vendor_agreement: '9f3f9ddadd2753ef60760bfe16b56904858d09d2ce91966d5988b4de8a105f93',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

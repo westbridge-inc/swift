@@ -87,13 +87,15 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
   // [O-1 · COORD 25 Oct] 2026-10-25.1 (material: Swift-bridged calling, Twilio for calls) is served on top of all of
   // these and is now the newest material version; 2026-10-21 stays material, and stays the newest one below it.
   // [POLICE-CLEARANCE CONSENT] 2026-10-25.2 (non-material) is served on top: the newest material version stays 2026-10-25.1.
-  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-25.2', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-25.2');
+  // [EMAIL-HTTPS] 2026-10-27 (material: Resend delivers the emails) is served on top and is now the newest material version.
+  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-27 (material: email)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-27');
     expect(materialVersion('2026-10-25')).toBe('2026-10-21');
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-25.1');
+    expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-27');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-21');
-    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-2), 'newest last').toEqual(['2026-10-21', '2026-10-25.1']);
+    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-3), 'newest last').toEqual(['2026-10-21', '2026-10-25.1', '2026-10-27']);
   });
 
   it('the summary names both changes', () => {

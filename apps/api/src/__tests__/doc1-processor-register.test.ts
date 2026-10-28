@@ -101,7 +101,7 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
   const POLICY_TO_REGISTER: ReadonlyArray<readonly [string, string, RegExp]> = [
     ['DigitalOcean', 'HOSTING', /^DigitalOcean\b/], ['DigitalOcean', 'OBJECT_STORE', /^DigitalOcean Spaces\b/],
     ['Cloudflare', 'CLOUDFLARE', /^Cloudflare\b/], ['Twilio', 'TWILIO', /^Twilio\b/], ['Expo', 'EXPO_PUSH', /^Expo\b/],
-    ['GoDaddy', 'SMTP_EMAIL', /^GoDaddy\b/], ['MMG', 'MMG', /^Mobile Money Guyana\b/],
+    ['GoDaddy', 'SMTP_EMAIL', /^GoDaddy\b/], ['Resend', 'RESEND_EMAIL', /^Resend\b/], ['MMG', 'MMG', /^Mobile Money Guyana\b/],
     ['Google Places', 'GOOGLE_PLACES', /^Google LLC \(Places API/], ['MapTiler', 'MAPTILER', /^MapTiler\b/],
   ];
   it('every processor the Privacy Policy names has a register row or a declared no-egress reason', () => {
@@ -120,6 +120,20 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
       expect(processorsParagraph, `${p.ref} is not used at launch but the policy names it`).not.toContain(p.party);
     }
     expect(processorsParagraph).not.toMatch(/Distance Matrix/);
+  });
+
+  // [EMAIL-HTTPS 27 Oct] Swift's emails leave over HTTPS through Resend: its host resolves to its own row, which
+  // carries what an email is (the address and the message), that it leaves Guyana, and on what basis.
+  it('Resend: api.resend.com resolves to the RESEND_EMAIL row (contact data, leaves the country, contract clauses); a look-alike does not', () => {
+    expect(coverageOfHost('api.resend.com')).toEqual({ kind: 'PROCESSOR', ref: 'RESEND_EMAIL' });
+    expect(coverageOfHost('notresend.com')).toBeNull();
+    const row = processorByRef('RESEND_EMAIL')!;
+    expect(row.providerDirs).toEqual(['notifications']);
+    expect(row.payload).toEqual(['CONTACT']);
+    expect(row.modelBacked).toBe(false);
+    expect(row).toMatchObject({ leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null });
+    expect(row.country).toMatch(/^US\b/);
+    expect(processorsParagraph).toMatch(/Resend \(delivers our emails — your email address, if you gave one, and the email itself; it sends them from Brazil and keeps its records in the United States\)/);
   });
 
   it('Google: address search from Swift\'s servers is the live row; the routing adapter is not used at launch', () => {

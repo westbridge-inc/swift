@@ -61,7 +61,7 @@ services:
       SEED_SOLO_CANCEL: ${SEED_SOLO_CANCEL:-}
       # [SOLO RE-SEED] The owner's notices (email and text) and the sign-in
       # code leave through the stack's own providers, set in deploy/.env as the
-      # api's are; the two secrets arrive as files from the store. An empty
+      # api's are; the secrets arrive as files from the store. An empty
       # value is unset to the seed (seed-production.ts). Without working email
       # and texts a solo re-seed refuses; the two-person ceremony never uses them.
       NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
@@ -78,6 +78,10 @@ services:
       SMTP_PASS_FILE: ${SMTP_PASS_FILE:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
       SMTP_TIMEOUT_MS: ${SMTP_TIMEOUT_MS:-}
+      # [EMAIL-HTTPS 27 Oct] EMAIL_PROVIDER=resend: email over HTTPS (the host
+      # cannot reach SMTP). The key arrives as a file from the store, like SMTP_PASS.
+      RESEND_API_KEY_FILE: ${RESEND_API_KEY_FILE:-}
+      RESEND_TIMEOUT_MS: ${RESEND_TIMEOUT_MS:-}
       # [SEED-FIX 27 Oct] getChannels() builds EVERY channel, push included,
       # even for a caller that only emails and texts, and production refuses a
       # missing push provider (PUSH_PROVIDER unset is dev, which swallows every

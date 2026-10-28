@@ -197,7 +197,7 @@ describe('deploy/.env.deploy.example — the template declares no secret', () =>
 
   it('documents the *_FILE wiring for the optional provider secrets it names', () => {
     for (const name of [
-      'TWILIO_API_KEY_SECRET', 'TWILIO_WEBHOOK_AUTH_TOKEN', 'SMTP_PASS', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD',
+      'TWILIO_API_KEY_SECRET', 'TWILIO_WEBHOOK_AUTH_TOKEN', 'SMTP_PASS', 'RESEND_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD',
       'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
       'GOOGLE_MAPS_API_KEY_BACKEND', 'SENTRY_DSN', 'AGENT_CASH_WEBHOOK_SECRET',
       'SWIFT_BOOTSTRAP_PASSWORD', 'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET',

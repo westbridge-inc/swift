@@ -74,7 +74,8 @@ describe('Terms of Service (Part 4)', () => {
 
 describe('Privacy Policy (Part 4)', () => {
   it.each([
-    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 25 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
+    // [EMAIL-HTTPS · 2026-10-27] the "as of" date is LAST_UPDATED: it moves with the new day's version.
+    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 27 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
     // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] taxi rides and larger orders no longer need a customer's ID.
     ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and the ID a customer adds (asked for only after repeated failed deliveries or payments, or for a high-value promotion), for safety and fraud prevention.</li>"],
@@ -174,7 +175,8 @@ describe('one version for the whole batch', () => {
   // [O-1 · COORD 25 Oct, material] Swift-bridged calling and Twilio for calls (Privacy s.5 + s.6) as 2026-10-25.1;
   // [POLICE-CLEARANCE CONSENT · COORD 25 Oct, non-material] what is kept of a police clearance and its withdrawal
   // (Privacy s.6) as 2026-10-25.2.
-  it('is 2026-10-25.2', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-25.2');
+  // [EMAIL-HTTPS · COORD 27 Oct, material] Resend delivers Swift's emails (Privacy s.5) as 2026-10-27.
+  it('is 2026-10-27', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-27');
   });
 });

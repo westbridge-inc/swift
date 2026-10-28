@@ -51,6 +51,13 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
       'Privacy: calls through Swift are never recorded. For each call Swift keeps who asked for it (their account and their role on the order), the role they called, when, and whether it connected, never a phone number; the record of a call you asked for is deleted with your account.',
     ],
   },
+  {
+    // [EMAIL-HTTPS · owner 27 Oct 2026 · COORD 27 Oct: MATERIAL — a new processor flow (Resend, for email)]
+    version: '2026-10-27',
+    summary: [
+      'Privacy: Swift’s emails (receipts, notices and the link to your data export) are now delivered by Resend, an email service. It receives your email address, if you gave one, and the email itself; it sends them from Brazil and keeps its records in the United States.',
+    ],
+  },
 ];
 
 /**

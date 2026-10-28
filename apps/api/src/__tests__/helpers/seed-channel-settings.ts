@@ -18,7 +18,7 @@ import { SECRET_FILE_NAMES } from '../../utils/secret-files';
 
 /**
  * The production channels, with placeholder values only. boot-config.ts lets
- * production run on exactly these providers (twilio, expo, smtp). The secrets
+ * production run on exactly these providers (twilio, expo, and smtp or resend). The secrets
  * are given here as their values, the way the secret-file loader hands them
  * to the process after it reads NAME_FILE.
  */
@@ -39,15 +39,31 @@ export const PRODUCTION_CHANNELS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * [EMAIL-HTTPS 27 Oct] The same production channels with email over HTTPS
+ * (EMAIL_PROVIDER=resend): the droplets cannot reach SMTP. No SMTP setting.
+ */
+export const PRODUCTION_CHANNELS_RESEND: Readonly<Record<string, string>> = Object.fromEntries([
+  ...Object.entries(PRODUCTION_CHANNELS).filter(([name]) => !name.startsWith('SMTP_')),
+  ['EMAIL_PROVIDER', 'resend'],
+  ['RESEND_API_KEY', 'placeholder-not-a-secret'],
+]);
+
+/** Every email posture production boots on (boot-config.ts: smtp or resend). */
+export const PRODUCTION_EMAIL_POSTURES: Readonly<Record<'smtp' | 'resend', Readonly<Record<string, string>>>> = {
+  smtp: PRODUCTION_CHANNELS,
+  resend: PRODUCTION_CHANNELS_RESEND,
+};
+
+/**
  * Every environment name getChannels() reads while it builds the channels in
  * production, recorded through a proxy over process.env. The proxy holds only
  * PRODUCTION_CHANNELS, so this also proves those values build every channel
  * (a new required setting makes getChannels() throw here, loudly).
  */
-export function channelSettingsReadInProduction(): string[] {
+export function channelSettingsReadInProduction(channels: Readonly<Record<string, string>> = PRODUCTION_CHANNELS): string[] {
   const saved = process.env;
   const read = new Set<string>();
-  const env: Record<string, string | undefined> = { ...PRODUCTION_CHANNELS };
+  const env: Record<string, string | undefined> = { ...channels };
   process.env = new Proxy(env, {
     get: (target, key) => {
       if (typeof key === 'string') read.add(key);
@@ -64,6 +80,11 @@ export function channelSettingsReadInProduction(): string[] {
     process.env = saved;
   }
   return [...read].sort();
+}
+
+/** [EMAIL-HTTPS] The names read in ANY production email posture: the seed container must carry them all. */
+export function channelSettingsReadInEveryProductionPosture(): string[] {
+  return [...new Set(Object.values(PRODUCTION_EMAIL_POSTURES).flatMap((channels) => channelSettingsReadInProduction(channels)))].sort();
 }
 
 /** A secret reaches a process only as NAME_FILE (utils/secret-files.ts). */

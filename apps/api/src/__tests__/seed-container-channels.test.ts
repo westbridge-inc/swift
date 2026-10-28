@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SEED_CHANNEL_SETTINGS, unsetEmptyChannelSettings } from '../modules/ops/seed-plan';
 import {
-  channelSettingsReadInProduction, isSecretSetting, SEED_COMPOSE, seedContainerEnvironment,
+  channelSettingsReadInEveryProductionPosture, channelSettingsReadInProduction, isSecretSetting, PRODUCTION_EMAIL_POSTURES,
+  SEED_COMPOSE, seedContainerEnvironment,
 } from './helpers/seed-channel-settings';
 
 // ---------------------------------------------------------------------------
@@ -19,12 +20,22 @@ import {
 // every one the container gets as text is unset when Compose hands it over empty.
 // ---------------------------------------------------------------------------
 
-const read = channelSettingsReadInProduction();
+// [EMAIL-HTTPS 27 Oct] Production boots on smtp OR resend email: the seed
+// container carries what either one reads (deploy/.env picks one).
+const read = channelSettingsReadInEveryProductionPosture();
 const compose = seedContainerEnvironment();
 
 describe('[SEED-FIX] the seed container gets every setting the notification channels read in production', () => {
   it('the recording sees the channels being built (so an empty recording can never pass the checks below)', () => {
-    expect(read).toEqual(expect.arrayContaining(['NODE_ENV', 'NOTIFICATION_PROVIDER', 'PUSH_PROVIDER', 'EMAIL_PROVIDER', 'TWILIO_API_KEY_SECRET', 'SMTP_PASS']));
+    expect(read).toEqual(expect.arrayContaining(['NODE_ENV', 'NOTIFICATION_PROVIDER', 'PUSH_PROVIDER', 'EMAIL_PROVIDER', 'TWILIO_API_KEY_SECRET', 'SMTP_PASS', 'RESEND_API_KEY']));
+  });
+
+  it('[EMAIL-HTTPS] each email posture is recorded on its own: resend reads its key and no SMTP setting, smtp no Resend setting', () => {
+    const smtp = channelSettingsReadInProduction(PRODUCTION_EMAIL_POSTURES.smtp);
+    const resend = channelSettingsReadInProduction(PRODUCTION_EMAIL_POSTURES.resend);
+    expect(resend).toEqual(expect.arrayContaining(['EMAIL_PROVIDER', 'RESEND_API_KEY', 'EMAIL_FROM', 'RESEND_TIMEOUT_MS']));
+    expect(resend.filter((name) => name.startsWith('SMTP_'))).toEqual([]);
+    expect(smtp.filter((name) => name.startsWith('RESEND_'))).toEqual([]);
   });
 
   it('every one is passed by docker-compose.seed.yml from deploy/.env (a secret only as NAME_FILE, never as a value)', () => {
