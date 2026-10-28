@@ -278,6 +278,59 @@ describe('[R048-004] a live PIN typed into chat is redacted AND rotated', () => 
   });
 });
 
+describe('[F18] a ride PIN typed in pieces across messages is rotated too, and the customer is told', () => {
+  const pinNotices = () => vi.mocked(NotificationService.prototype.send).mock.calls
+    .map(([n]) => n as { userId: string; title: string; body: string; data?: Record<string, unknown> })
+    .filter((n) => n.data?.['orderId'] === orderId && n.title === 'Your ride PIN has changed');
+
+  it('the piece that completes the PIN is redacted, the PIN is re-issued once, and only the customer gets one notice without the new PIN', async () => {
+    const SPLIT_PIN = '556677';
+    await app.prisma.order.update({ where: { id: orderId }, data: { ridePin: SPLIT_PIN, ridePinAttempts: 2 } });
+    const before = await count('send', 'ride_pin_rotated');
+    const noticesBefore = pinNotices().length;
+
+    // The first pieces look innocent on their own and pass as typed.
+    for (const piece of ['55', '66']) {
+      const res = await inject('POST', `/rooms/${roomId}/messages`, customerToken, { message: piece });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data.message).toBe(piece);
+    }
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { ridePin: true } })).ridePin).toBe(SPLIT_PIN);
+
+    // The last piece completes the PIN in the transcript: redacted, and the PIN re-issued.
+    const last = await inject('POST', `/rooms/${roomId}/messages`, customerToken, { message: '77' });
+    expect(last.statusCode).toBe(200);
+    expect(last.json().data.message).toBe(SECRET_REDACTION);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { ridePin: true, ridePinAttempts: true, ridePinVerified: true } });
+    expect(order.ridePin).not.toBe(SPLIT_PIN);
+    expect(order.ridePin).toMatch(/^\d{4,8}$/);
+    expect(order.ridePinAttempts).toBe(0);
+    expect(order.ridePinVerified).toBe(false);
+    expect(await count('send', 'ride_pin_rotated')).toBe(before + 1);
+
+    // The holder is told through the one notification path; the new PIN is read on
+    // their own ride screen, never put on a lock screen.
+    const notices = pinNotices().slice(noticesBefore);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.userId).toBe(customerId);
+    expect(notices[0]!.body).not.toContain(order.ridePin!);
+    expect(JSON.stringify(notices[0]!.data)).not.toContain(order.ridePin!);
+  });
+
+  it('a pickup code typed in pieces is redacted but never rotates the ride PIN or tells anyone', async () => {
+    const pinNow = (await app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { ridePin: true } })).ridePin;
+    const noticesBefore = pinNotices().length;
+    const before = await count('send', 'ride_pin_rotated');
+    expect((await inject('POST', `/rooms/${roomId}/messages`, customerToken, { message: PICKUP_CODE.slice(0, 2) })).statusCode).toBe(200);
+    const last = await inject('POST', `/rooms/${roomId}/messages`, customerToken, { message: PICKUP_CODE.slice(2) });
+    expect(last.statusCode).toBe(200);
+    expect(last.json().data.message).toBe(SECRET_REDACTION);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { ridePin: true } })).ridePin).toBe(pinNow);
+    expect(await count('send', 'ride_pin_rotated')).toBe(before);
+    expect(pinNotices().length).toBe(noticesBefore);
+  });
+});
+
 describe('[R048-004] room authority is the order’s CURRENT people', () => {
   it('a driver reassigned off the order loses history, list and send; the new driver gains them; the cache is reconciled', async () => {
     await app.prisma.order.update({ where: { id: orderId }, data: { driverId: driver2Id } });
