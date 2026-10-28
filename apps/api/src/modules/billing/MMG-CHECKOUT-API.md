@@ -318,6 +318,8 @@ The official merchant page says MMG posts an encrypted TOKEN to the configured R
    - answer `{ success: true, data: { state: 'CONFIRMED' | 'CONFIRMING' | 'NOT_PAID' | 'UNKNOWN' } }`
 
    The answer carries no amount, name or `ref`: anyone who holds the link would see the page.
+
+   [SEC-DOS F8] The page forwards the partner's own address (the first `X-Forwarded-For` entry the site's proxy set, an IP literal only), over the private network (`API_URL` on the web container), where the API trusts it through `TRUST_PROXY`. So the API's per-source limits and its reply gate count each partner, not the web server. The page also limits each partner address to 20 returns a minute before it reads the body. It relays nothing when there is no `token` field: the API reads the reply from that field only. When the API answers `503 TRY_AGAIN` (too many replies waiting to be opened), the page tries once more after the wait the API asked for (1 to 2 seconds).
 3. **Render only that state:**
 
    | State | Page text |

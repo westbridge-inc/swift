@@ -896,9 +896,14 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         # /.well-known/assetlinks.json: a public value, empty unless deploy/.env sets it.
         # [G11] And the App Store / Google Play links switch, read while it runs
         # (no store link unless APP_STORES=live).
+        # [SEC-DOS F8] And API_URL: the API's PRIVATE address, read only by the
+        # MMG return page, so its relay reaches the API over the private network
+        # (where TRUST_PROXY trusts the partner address it forwards). Never a
+        # public address, never a secret.
         # No other setting, and never a settings file, reaches the website.
         self.assertEqual(sorted((web.get("environment") or {}).keys()),
-                         ["ANDROID_CERT_SHA256", "NODE_OPTIONS", "SWIFT_APP_STORES", "SWIFT_WEB_ORDERING"])
+                         ["ANDROID_CERT_SHA256", "API_URL", "NODE_OPTIONS", "SWIFT_APP_STORES", "SWIFT_WEB_ORDERING"])
+        self.assertEqual(web["environment"]["API_URL"], "http://api:3000")
         self.assertEqual(web["environment"]["SWIFT_WEB_ORDERING"], "")
         self.assertEqual(web["environment"]["SWIFT_APP_STORES"], "")
         self.assertNotIn("NEXT_PUBLIC_APP_STORES", web["build"]["args"])
