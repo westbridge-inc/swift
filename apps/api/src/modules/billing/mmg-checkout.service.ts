@@ -33,6 +33,7 @@ export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../provi
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
+import { openReply, type OpenedReply } from './mmg-checkout-reply';
 import { FEE_SELLER, type FeeSeller } from './fee-seller';
 import { AUTO_CLOSE_LATE_PAYMENT_LIKELY, AUTO_CLOSE_POSSIBLE_MATCH, checkExpiredNoReplyHolds, watchAutoClosedCheckouts } from './mmg-expired-hold-check';
 
@@ -87,8 +88,6 @@ export const CHECKOUT_CLOCK_TOLERANCE_MS = MMG_HISTORY_CLOCK_TOLERANCE_MS;
 /** An MMG transaction id or ledger number as MMG writes it. */
 export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
-const MAX_REPLY_PARAMS = 16;
-const MAX_REPLY_PARAM_CHARS = 4096;
 const POLL_BATCH = 50;
 /** [Sol, DS659 · delta3] How far back the poll looks for a CONFIRMED
  *  checkout's unapplied payment whose operator page was never saved, and how
@@ -769,30 +768,27 @@ export class MmgCheckoutService {
 
   /**
    * A reply from MMG — the partner's browser through the web return page
-   * (RETURN), or MMG's own server (NOTIFY). Every value is tried as a token;
-   * the first that decrypts is the reply. Answers only the state for the page:
-   * never an amount, a name or a checkout id.
+   * (RETURN), or MMG's own server (NOTIFY). Only the token field is tried
+   * (mmg-checkout-reply.ts); the first value that decrypts is the reply. A
+   * route that already opened it passes `opened`, and it is never opened
+   * again here. Answers only the state for the page: never an amount, a name
+   * or a checkout id.
    */
-  async observeReply(input: { source: 'RETURN' | 'NOTIFY'; outcome?: unknown; params: unknown }): Promise<ReturnState> {
+  async observeReply(input: { source: 'RETURN' | 'NOTIFY'; outcome?: unknown; params: unknown; opened?: OpenedReply }): Promise<ReturnState> {
     return runAsSystem('mmg-checkout-reply', async () => {
       const now = new Date();
       const hint = hintFrom(input.outcome);
-      let provider: MmgCheckoutProvider | null = null;
-      try {
-        provider = this.checkout();
-      } catch {
-        provider = null;
-      }
-      let reply: Record<string, unknown> | null = null;
-      if (provider && provider.driver !== 'disabled') {
-        for (const value of replyParams(input.params)) {
-          try {
-            reply = provider.decryptCheckoutResult(value);
-            break;
-          } catch {
-            // not a token for us; try the next value
-          }
+      let reply: Record<string, unknown> | null;
+      if (input.opened) {
+        reply = input.opened.reply;
+      } else {
+        let provider: MmgCheckoutProvider | null = null;
+        try {
+          provider = this.checkout();
+        } catch {
+          provider = null;
         }
+        reply = provider && provider.driver !== 'disabled' ? await openReply(provider, input.params, `service:${input.source}`) : null;
       }
       if (!reply) {
         await this.observe({ source: input.source, detail: hint, failure: 'NO_TOKEN' });
@@ -1688,14 +1684,4 @@ export class MmgCheckoutService {
       seller: FEE_SELLER,
     };
   }
-}
-
-/** The values a reply may be carried in: every string, bounded in count and size. */
-function replyParams(params: unknown): string[] {
-  if (!params || typeof params !== 'object' || Array.isArray(params)) return [];
-  // A key the return page saw more than once arrives as an array of its values.
-  return Object.values(params as Record<string, unknown>)
-    .flatMap((value) => (Array.isArray(value) ? value : [value]))
-    .slice(0, MAX_REPLY_PARAMS)
-    .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= MAX_REPLY_PARAM_CHARS);
 }
