@@ -12,6 +12,7 @@
  * by the service-provider projection — one rule, one implementation.
  */
 import type { CoverageClass, Prisma, PrismaClient } from '@prisma/client';
+import { validExpiryOr } from './document-validity';
 import { HIRE_SPLIT_DOC_TYPES } from './hire-permit-grace';
 
 export type EvidenceDb = Prisma.TransactionClient | PrismaClient;
@@ -50,7 +51,8 @@ export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklis
       docType: { in: [...checklist] },
       status: 'VALID',
       AND: [
-        { OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+        // [FOLLOWUPS ruling] valid through the end of its expiry day in Guyana (document-validity.ts)
+        { OR: validExpiryOr('expiresOn', now) },
         { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
         { submission: { purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
       ],

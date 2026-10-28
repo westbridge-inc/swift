@@ -1,4 +1,5 @@
 import { accountErasedUnderLock } from '../user/account-closure';
+import { documentLapsesAt, isDocumentValidAt, lapsedExpiryAnd, validExpiryOr } from './document-validity';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
@@ -835,7 +836,7 @@ export class VerificationService {
         status: 'APPROVED',
         state: 'COMMITTED',
         AND: [
-          { OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }] },
+          { OR: validExpiryOr('expiresAt', renewalOpensAt) },
           ...(sameVehicle ? [sameVehicle] : []),
         ],
       },
@@ -2132,7 +2133,7 @@ export class VerificationService {
 
     const approved = new Set(
       documents
-        .filter((d) => d.status === 'APPROVED' && (!d.expiresAt || d.expiresAt > new Date()))
+        .filter((d) => d.status === 'APPROVED' && isDocumentValidAt(d.expiresAt, new Date()))
         .map((d) => d.docType),
     );
     // [Owner ruling 15 Oct 2026 · no grace] The old hire-car permit never marks the two hire licences
@@ -2269,9 +2270,11 @@ export class VerificationService {
     if (checklist.length === 0) return null;
     const docs = await this.approvedEvidence(db, userId, checklist, new Date());
     const docEnd = (d: { expiresAt: Date | null; retentionExpiresAt: Date | null }): Date | null => {
-      if (d.expiresAt == null) return d.retentionExpiresAt;
-      if (d.retentionExpiresAt == null) return d.expiresAt;
-      return d.expiresAt < d.retentionExpiresAt ? d.expiresAt : d.retentionExpiresAt;
+      // [FOLLOWUPS ruling] a calendar-day expiry counts through the end of that Guyana day (document-validity.ts)
+      const lapses = d.expiresAt == null ? null : documentLapsesAt(d.expiresAt);
+      if (lapses == null) return d.retentionExpiresAt;
+      if (d.retentionExpiresAt == null) return lapses;
+      return lapses < d.retentionExpiresAt ? lapses : d.retentionExpiresAt;
     };
     let bound: Date | null = null;
     for (const docType of checklist) {
@@ -2699,7 +2702,8 @@ export class VerificationService {
     }
     const now = new Date();
     const lapsed = await this.prisma.verificationDocument.findMany({
-      where: { status: { in: ['APPROVED', 'PENDING'] }, expiresAt: { lt: now } },
+      // [FOLLOWUPS ruling] lapsed = past the end of its expiry day in Guyana (document-validity.ts)
+      where: { status: { in: ['APPROVED', 'PENDING'] }, AND: lapsedExpiryAnd('expiresAt', now) },
     });
 
     let expired = 0;
@@ -2722,7 +2726,7 @@ export class VerificationService {
               id: doc.id,
               userId: doc.userId,
               status: { in: ['APPROVED', 'PENDING'] },
-              expiresAt: { lt: now },
+              AND: lapsedExpiryAnd('expiresAt', now),
             },
             data: { status: 'EXPIRED' },
           });
@@ -2845,7 +2849,7 @@ export class VerificationService {
   async hireLicenceSweep(now = new Date()): Promise<number> {
     const started = await hireSplitStartedAt(this.prisma);
     const permits = await this.prisma.documentRecord.findMany({
-      where: { docType: HIRE_PERMIT_DOC_TYPE, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
+      where: { docType: HIRE_PERMIT_DOC_TYPE, status: 'VALID', OR: validExpiryOr('expiresOn', now),
         submission: { purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
       select: { accountId: true, submissionId: true },
       orderBy: { approvedAt: 'desc' },

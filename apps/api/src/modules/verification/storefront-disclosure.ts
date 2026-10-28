@@ -1,4 +1,5 @@
 import { readFeePause } from '../billing/mmg-pause';
+import { validExpiryOr } from './document-validity';
 /**
  * [DOC-1 Part XIX · DOC-INV-27 · P19] The storefront disclosure compiler.
  *
@@ -153,7 +154,7 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: Disc
   const missing: string[] = [];
   const accountId = vendor.owner.userId;
   const records = (await db.documentRecord.findMany({
-    where: { tenantId: vendor.tenantId, accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
+    where: { tenantId: vendor.tenantId, accountId, status: 'VALID', OR: validExpiryOr('expiresOn', now),
       submission: { userId: accountId, purgedAt: null } },
     select: { id: true, tenantId: true, accountId: true, subjectId: true, docType: true, submissionId: true, updatedAt: true,
       submission: { select: { docType: true, subjectId: true } } },
