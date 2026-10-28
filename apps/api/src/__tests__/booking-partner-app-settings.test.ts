@@ -27,10 +27,9 @@ import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 // Real mounted routes, real PostgreSQL.
 // ---------------------------------------------------------------------------
 
-// This file's fixture block (+5920866nnn): no other file uses it.
+// This file's fixture block (+5920868nnn): no other file uses it.
 const PHONE_PREFIX = '+5920868';
 const DAY = 24 * 60 * 60 * 1000;
-const MIN = 60_000;
 
 let app: FastifyInstance;
 let seq = 0;
