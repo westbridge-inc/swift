@@ -169,7 +169,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'serviceJobs', model: 'ServiceJob', by: ['customerId'], key: 'id',
-    fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
+    // [BOOK-P1] The service booked (its id) and when the booked time ends.
+    fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
   },
   {
     // [BOOK-S1] Whether the business took one booking at a time when it was made is bookkeeping for the database's overlap rule.
@@ -330,7 +331,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'serviceProviderProfile', model: 'ServiceProvider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'trade', 'bio', 'selfSkilled', 'isVerified', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'trade', 'bio', 'selfSkilled', 'isVerified', 'weeklyHours', 'createdAt', 'updatedAt'],
   },
   {
     category: 'storeOwnership', model: 'VendorOwner', by: ['userId'], key: 'id',
@@ -415,7 +416,17 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'serviceJobsAsProvider', model: 'ServiceJob', by: ['providerId'], via: 'provider', key: 'id', rest: 'OTHER_PERSON',
-    fields: ['providerId', 'status', 'quoteAmount', 'scheduledFor', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt'],
+    fields: ['providerId', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt'],
+  },
+  {
+    // [BOOK-P1] The services the person offers as a provider: name, length, price.
+    category: 'serviceOfferings', model: 'ServiceOffering', by: ['providerId'], via: 'provider', key: 'id',
+    fields: ['id', 'providerId', 'name', 'durationMinutes', 'price', 'active', 'createdAt', 'updatedAt'],
+  },
+  {
+    // [BOOK-P1] The days and hours the person set as away, as a provider.
+    category: 'serviceTimeOff', model: 'ServiceProviderTimeOff', by: ['providerId'], via: 'provider', key: 'id',
+    fields: ['id', 'providerId', 'date', 'start', 'end', 'createdAt'],
   },
   {
     category: 'serviceQualifications', model: 'ServiceQualification', by: ['providerId'], via: 'provider', key: 'id',

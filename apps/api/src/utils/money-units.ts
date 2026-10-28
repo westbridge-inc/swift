@@ -160,6 +160,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'RunStop', field: 'cashToCollect', unit: 'MAJOR_WHOLE' },
   { model: 'RunStop', field: 'changeFor', unit: 'MAJOR_WHOLE' },
   { model: 'ServiceJob', field: 'quoteAmount', unit: 'MAJOR_WHOLE' },
+  // [BOOK-P1] A pro's fixed price becomes the booked job's quoteAmount: the same unit.
+  { model: 'ServiceOffering', field: 'price', unit: 'MAJOR_WHOLE' },
   { model: 'Settlement', field: 'netSales', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'goodsSales', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'vendorPromoDiscount', unit: 'MAJOR_2DP' },

@@ -48,7 +48,7 @@ export const ERASURE_CLEARED: Readonly<Record<string, string>> = {
 export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
   'Rider.userId': 'the profile row stays for order history; vehicle, plate and last location are cleared (photos and documents go through the mover-object erasure)',
   'Driver.userId': 'the profile row stays for ride history; vehicle, plate, colour, last location and MMG pay link are cleared (photos and documents go through the mover-object erasure)',
-  'ServiceProvider.userId': 'the profile row stays for job history; the bio is cleared, and every portfolio photo Swift keeps gets a storage_orphans deletion row before its pointer is cleared (deleted after, a failed delete keeps the receipt pending)',
+  'ServiceProvider.userId': 'the profile row stays for job history; the bio and the weekly hours are cleared, and every portfolio photo Swift keeps gets a storage_orphans deletion row before its pointer is cleared (deleted after, a failed delete keeps the receipt pending)',
   'Customer.userId': 'order totals stay; the referral link is cleared and the referral code retired',
   'CheckoutReceipt.userId': 'the replay record stays with its order ids and date (the amounts are on the kept orders); the frozen checkout response (names, phones, addresses, notes) and the request hash are replaced',
   // Owner 19 Oct (PRIVACY ASK 00:01Z, option A for all three; no LEGAL_VERSION): G1 fraud and abuse marks.
@@ -83,6 +83,9 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'ServiceJob.customerId': 'order history, kept for disputes, guarantees, tax and legal duties (Privacy Policy §6)',
   'ServiceJob.providerId': 'job history (Privacy Policy §6)',
   'ServiceQualification.providerId': 'the qualification a kept job was done under (job history, Privacy Policy §6); its document is purged',
+  // [BOOK-P1]
+  'ServiceOffering.providerId': 'the service, length and price a kept job was booked under (job history, Privacy Policy §6); the erasure switches every one off, so a closed account is never booked',
+  'ServiceProviderTimeOff.providerId': 'dates and hours away only, no text: nothing about the person but the link to the kept, de-identified provider profile; a closed account is never booked, so they are never read again',
   'DeliveryRun.riderId': 'order history: the delivery run that carried kept orders (Privacy Policy §6)',
   'BatchEvaluation.riderId': 'order history: the dispatch check made for a kept order (Privacy Policy §6)',
   'AlertDelivery.recipientId': 'order history: the job offers made while dispatching a kept order (Privacy Policy §6)',

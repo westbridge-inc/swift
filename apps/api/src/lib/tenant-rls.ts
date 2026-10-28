@@ -52,6 +52,9 @@ export const TENANT_TABLES = [
   'categories',
   // [BOOK-S1] A booking takes its business time: walled on the row like the listing it was made on.
   'bookings',
+  // [BOOK-P1] The bookable services and time off of a pro: walled on the row like the jobs they book.
+  'service_offerings',
+  'service_provider_time_off',
   // [STA-1 §4 lineage · money] personal and operator money rows, walled on the row itself.
   // (No apostrophes in comments inside this array: the CI gate extracts the names by quote.)
   'transactions',
@@ -259,6 +262,11 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   // [BOOK-S1] one hop: a booking inherits the tenant of the business whose time it takes
   { table: 'bookings', trigger: 'bookings_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  // [BOOK-P1] two hops: a pro's service and time off inherit the tenant of the person the provider profile belongs to
+  { table: 'service_offerings', trigger: 'service_offerings_tenant_matches_provider', parent: 'service_providers', fk: 'providerId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN service_providers p ON p."userId" = u.id WHERE p.id = NEW."providerId"` },
+  { table: 'service_provider_time_off', trigger: 'service_provider_time_off_tenant_matches_provider', parent: 'service_providers', fk: 'providerId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN service_providers p ON p."userId" = u.id WHERE p.id = NEW."providerId"` },
   // [money] one hop through the owner
   { table: 'transactions', trigger: 'transactions_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'payout_requests', trigger: 'payout_requests_tenant_matches_user', parent: 'users', fk: 'userId' },

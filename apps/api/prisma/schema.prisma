@@ -3234,13 +3234,62 @@ model ServiceProvider {
   isVerified      Boolean                @default(false)
   averageRating   Float                  @default(5)
   totalRatings    Int                    @default(0)
+  /// [BOOK-P1] When the provider takes bookings: weekly windows in Guyana wall-clock time,
+  /// [{ dayOfWeek, start: "09:00", end: "17:00" }], the shape of a listing's bookingConfig.slots.
+  /// Null = no hours set (nothing bookable). Written only while INSTANT_BOOKING is on.
+  weeklyHours     Json?
   qualifications  ServiceQualification[]
   jobs            ServiceJob[]
+  offerings       ServiceOffering[]
+  timeOff         ServiceProviderTimeOff[]
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
   @@index([trade])
   @@map("service_providers")
+}
+
+/// [BOOK-P1 Track P] A provider's bookable service: a fixed name, length and price, shown
+/// before booking (Track P, P2 books it). Never deleted: a service the provider stops offering
+/// is switched off (active = false), so a kept job still names what was booked.
+model ServiceOffering {
+  id              String          @id @default(cuid())
+  /// [BOOK-P1 · STA-1 §4 lineage] The provider's tenant, held equal to it by
+  /// service_offerings_tenant_matches_provider (a DB trigger); walled on the row itself.
+  tenantId        String          @default("swift-default")
+  providerId      String
+  provider        ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  name            String
+  /// How long one booking of it takes the provider, 5 to 600 minutes (service_offerings_duration_check).
+  durationMinutes Int
+  /// The fixed price, GYD, shown before booking; a booked job carries it as its quoteAmount.
+  price           Decimal         @db.Decimal(12, 2)
+  active          Boolean         @default(true)
+  jobs            ServiceJob[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([providerId])
+  @@index([tenantId])
+  @@map("service_offerings")
+}
+
+/// [BOOK-P1 Track P] A provider's time away on one Guyana calendar date: the whole day (start
+/// and end null) or one window ("13:00"-"15:00"). The twin of a business's booking_exceptions.
+model ServiceProviderTimeOff {
+  id         String          @id @default(cuid())
+  /// [BOOK-P1 · STA-1 §4 lineage] The provider's tenant (service_provider_time_off_tenant_matches_provider).
+  tenantId   String          @default("swift-default")
+  providerId String
+  provider   ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  date       DateTime        @db.Date
+  start      String?
+  end        String?
+  createdAt  DateTime        @default(now())
+
+  @@index([providerId, date])
+  @@index([tenantId])
+  @@map("service_provider_time_off")
 }
 
 model ServiceQualification {
@@ -3286,6 +3335,13 @@ model ServiceJob {
   status              ServiceJobStatus @default(REQUESTED)
   quoteAmount         Decimal?         @db.Decimal(12, 2)
   scheduledFor        DateTime?
+  /// [BOOK-P1] The booked service, for a job booked from a provider's menu (P2). Null = a quote job.
+  offeringId          String?
+  offering            ServiceOffering? @relation(fields: [offeringId], references: [id], onDelete: Restrict)
+  /// [BOOK-P1] When the provider's time on this job ends: [scheduledFor, endsAt). Null = a quote
+  /// job, which holds its minimum block (provider-time.ts). No two live jobs of one provider
+  /// overlap (service_jobs_provider_one_at_a_time, a DB exclusion).
+  endsAt              DateTime?
   /// Booking accept/decline (master plan §4.3): the provider confirms the
   /// customer's slot. Null on a SCHEDULED job = awaiting confirmation.
   providerConfirmedAt DateTime?
@@ -3299,6 +3355,7 @@ model ServiceJob {
   @@index([providerId])
   @@index([status])
   @@index([tenantId])
+  @@index([offeringId])
   @@map("service_jobs")
 }
 

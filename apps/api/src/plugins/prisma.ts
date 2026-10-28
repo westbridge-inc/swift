@@ -172,6 +172,9 @@ const TENANT_QUERY_EXTENSIONS = {
   category: scoped,
   // [BOOK-S1] A booking is one operator's business time, walled like its listing.
   booking: scoped,
+  // [BOOK-P1] A pro's bookable services and time off, walled like the jobs they book.
+  serviceOffering: scoped,
+  serviceProviderTimeOff: scoped,
   // [STA-1 §4 lineage · money]
   transaction: scoped,
   earning: scoped,
