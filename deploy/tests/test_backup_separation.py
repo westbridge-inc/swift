@@ -625,11 +625,24 @@ sys.exit(7)
         self.key = self.tmp / "id"
         self.key.write_text("k")
 
+    def armored_private_key(self):
+        """A throwaway owner key without a passphrase (the drill imports it before anything else)."""
+        home = Path(tempfile.mkdtemp())
+        os.chmod(home, 0o700)
+        try:
+            subprocess.run(["gpg", "--homedir", str(home), "--batch", "--passphrase", "", "--quick-gen-key",
+                            "drill-test@example.invalid", "default", "default", "never"], check=True, capture_output=True)
+            return subprocess.run(["gpg", "--homedir", str(home), "--batch", "--armor", "--export-secret-keys"],
+                                  check=True, capture_output=True, text=True).stdout
+        finally:
+            subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"], capture_output=True)
+            shutil.rmtree(home, True)
+
     def drill(self, *pre, bundle=None):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", SSH_LOG=str(self.log), SWIFT_RESTORE_PROJECT="swift")
         if bundle is not None:
             env["BUNDLE"] = bundle
-        armored = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n-----END PGP PRIVATE KEY BLOCK-----\n"
+        armored = self.armored_private_key()
         return subprocess.run(["bash", str(DEPLOY / "backup-drill.sh"), *pre, "swift-deploy@host.example.invalid", str(self.key),
                                "s3://swift-backups/db/swift-20261028T091500Z.dump.gpg"], env=env, input=armored + "\n",
                               text=True, capture_output=True, timeout=60)
@@ -649,6 +662,61 @@ sys.exit(7)
         self.assertIn('if [ "${1:-}" = --allow-unsigned-legacy ]; then ALLOW_UNSIGNED=1; shift; fi', drill)
         self.assertIn("--allow-unsigned-legacy --compare-source -", drill)
         self.assertIn("--signature-b64 '$SIGNATURE_B64' --signed-object '${OBJECT##*/}' --compare-source -", drill)
+
+
+class OwnerBackupKeyTool(unittest.TestCase):
+    """deploy/owner/swift-backup-key.command: the owner's double-click helper. The key pair travels on
+    stdin only, to `swift-secrets backup set-keys`; nothing secret is in argv or printed."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-owner-backup-key-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.log = self.tmp / "ssh.log"
+        self.stdin_log = self.tmp / "ssh.stdin"
+        (self.bin / "ssh").write_text(r'''#!/usr/bin/env python3
+import os, sys
+argv = sys.argv[1:]
+open(os.environ["SSH_LOG"], "a").write("ssh " + " ".join(argv).replace("\n", " ; ") + "\n")
+data = b"" if "-n" in argv else sys.stdin.buffer.read()
+if data:
+    open(os.environ["SSH_STDIN"], "ab").write(b"<<" + data + b">>\n")
+sys.exit(0)
+''')
+        (self.bin / "ssh").chmod(0o755)
+        self.key = self.tmp / "id"
+        self.key.write_text("k")
+
+    def run_tool(self, answers):
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", SSH_LOG=str(self.log), SSH_STDIN=str(self.stdin_log))
+        return subprocess.run(["bash", str(DEPLOY / "owner" / "swift-backup-key.command"), "swift-deploy@host.example.invalid", str(self.key)],
+                              input=answers, env=env, text=True, capture_output=True, timeout=60)
+
+    def test_the_pair_goes_on_stdin_only_to_set_keys_and_is_never_shown(self):
+        r = self.run_tool("y\ny\nBACKUPKEYID01\nbackup-secret-value\nbackup-secret-value\nn\nn\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("saved the backup storage key pair", r.stdout)
+        argv = self.log.read_text()
+        self.assertNotIn("backup-secret-value", argv)
+        self.assertNotIn("BACKUPKEYID01", argv)
+        self.assertNotIn("backup-secret-value", r.stdout + r.stderr)
+        self.assertEqual(self.stdin_log.read_bytes(), b"<<BACKUPKEYID01\nbackup-secret-value\n>>\n")
+        set_keys = [l for l in argv.splitlines() if l.endswith("sudo -n swift-secrets backup set-keys")]
+        self.assertEqual(len(set_keys), 1, argv)
+        install = next(l for l in argv.splitlines() if "swift-secrets backup init" in l)
+        for piece in ("install -m 0755 -o root -g root /opt/swift/deploy/swift-secrets /usr/local/sbin/swift-secrets",
+                      "/etc/systemd/system/swift-backup.service", "/etc/systemd/system/swift-erasure-ledger.service",
+                      "systemctl daemon-reload"):
+            self.assertIn(piece, install)
+        self.assertLess(install.index("/usr/local/sbin/swift-secrets"), install.index("swift-secrets backup init"))
+        self.assertLess(install.index("swift-secrets backup init"), install.index("swift-backup.service"))
+
+    def test_a_mistyped_secret_is_asked_again_and_nothing_is_sent_until_it_matches(self):
+        r = self.run_tool("n\ny\nBACKUPKEYID01\nfirst\nsecond\nBACKUPKEYID01\nright\nright\nn\nn\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("differ", r.stderr)
+        self.assertEqual(self.stdin_log.read_bytes(), b"<<BACKUPKEYID01\nright\n>>\n")
 
 
 if __name__ == "__main__":

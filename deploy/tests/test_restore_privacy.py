@@ -2,9 +2,15 @@
 erasure ledger onto it BEFORE it reports a restore. Drives the real script with
 command stand-ins (no services): every docker call is logged with the database
 it targets and what it was fed. The SQL itself is proven on real databases by
-apps/api/src/__tests__/restore-erasure-replay.test.ts."""
+apps/api/src/__tests__/restore-erasure-replay.test.ts.
+
+[SEC-BACKUP F2] The scratch copy lives in a throwaway instance (`docker run`,
+then `docker exec <instance>`), the live database stays behind `docker compose
+exec postgres`: the stand-in logs both in the same shape, and every dump here is
+signed as backup.sh signs it."""
 import json
 import os
+import sys
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,14 +22,47 @@ DEPLOY = Path(__file__).resolve().parents[1]
 FAKE_DOCKER = r'''#!/usr/bin/env python3
 import os, sys
 args = sys.argv[1:]
-if '-p' in args:
-    with open(os.environ['CALL_LOG'] + '.projects', 'a') as projects:
-        projects.write(args[args.index('-p') + 1] + '\n')
-# compose ... exec -T postgres sh -c <script> sh <database> <psql args...>
-i = args.index('postgres')
+INSTANCE = 'swift-restore-swift_restore_privacy'
+def note(line):
+    with open(os.environ['CALL_LOG'], 'a') as log:
+        log.write(line + '\n')
+if args[:1] == ['compose']:
+    with open(os.environ['CALL_LOG'] + '.compose', 'a') as composed:
+        composed.write(' '.join(args)[:120] + '\n')
+    if '-p' in args:
+        with open(os.environ['CALL_LOG'] + '.projects', 'a') as projects:
+            projects.write(args[args.index('-p') + 1] + '\n')
+    if 'ps' in args: sys.exit(0)
+    if 'config' in args:
+        print('{"services":{"postgres":{"image":"postgis/postgis:16-3.4"}}}'); sys.exit(0)
+    # compose ... exec -T postgres sh -c <script> sh <database> <psql args...>
+    i = args.index('postgres')
+else:
+    # the throwaway instance
+    if args[:2] in (['container', 'inspect'], ['volume', 'inspect']): sys.exit(1)
+    if args[:1] in (['volume'], ['run']): sys.exit(0)
+    if args[:1] == ['rm']:
+        note('INSTANCE REMOVED ' + ' '.join(args[1:])); sys.exit(0)
+    if args[:1] == ['logs']:
+        print('PostgreSQL init process complete; ready for start up.'); sys.exit(0)
+    assert args[:1] == ['exec'], args
+    i = args.index(INSTANCE)
+    cmd = args[i + 1:]
+    if cmd[:1] == ['pg_isready']: sys.exit(0)
+    if cmd[:1] == ['pg_restore']:
+        if '--list' in cmd:
+            print('4002; 1259 16400 TABLE public users swift'); sys.exit(0)
+        if '-f' in cmd: sys.exit(0)
+        db = next(a.split('=', 1)[1] for a in cmd if a.startswith('--dbname='))
+        note(f'pg_restore db={db} :: as={cmd[cmd.index("-U") + 1]} in={INSTANCE}')
+        sys.exit(0)
+    if cmd[:2] == ['sh', '-c'] and 'cat >' in cmd[2]:
+        sys.stdin.read(); sys.exit(0)
 script = args[i + 3]
 target = args[i + 5] if len(args) > i + 5 else ''
 rest = args[i + 6:]
+with open(os.environ['CALL_LOG'] + ('.live' if args[:1] == ['compose'] else '.instance'), 'a') as where:
+    where.write(target + '\n')
 fed = '' if sys.stdin.isatty() else sys.stdin.read()
 sql = rest[rest.index('-c') + 1] if '-c' in rest else (rest[rest.index('-tAc') + 1] if '-tAc' in rest else fed)
 kind = 'pg_restore' if 'pg_restore' in script else 'psql'
@@ -45,6 +84,8 @@ if 'restore_ledger_' in sql and 'BEGIN;' in sql:
     if fail == 'replay': sys.exit(9)
     print('erasure ledger replayed: 0 destroyed keys, 0 receipts, 0 retired documents, 0 closed accounts in the live ledger; changed in this copy: nothing (the copy already matched)')
     sys.exit(0)
+if 'rolsuper FROM pg_roles WHERE rolname = current_user' in sql:
+    print('f'); sys.exit(0)
 if "to_regclass('public.deployment_identity')" in sql:
     print('t' if os.environ.get('IDENT_LIVE') or os.environ.get('IDENT_COPY') else 'f'); sys.exit(0)
 if 'FROM deployment_identity' in sql:
@@ -60,7 +101,8 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         deploy = root / 'deploy'
         deploy.mkdir()
-        for name in ('restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql', 'restore-offsite-ledger.sql'):
+        for name in ('restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql', 'restore-offsite-ledger.sql',
+                     'secret-env.sh', 'backup-signature.py'):
             shutil.copy2(DEPLOY / name, deploy / name)
         (deploy / '.env').write_text('POSTGRES_DB=swift_live_fixture\n')
         bins = root / 'bin'
@@ -71,9 +113,17 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
             b.chmod(0o755)
         dump = root / 'backup.dump'
         dump.write_bytes(b'PGDMP synthetic')
+        # [SEC-BACKUP F2] signed as backup.sh signs it
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'swift-backup-signing', '-f', str(root / 'signing')], check=True)
+        allowed = root / 'allowed_signers'
+        allowed.write_text('swift-backup namespaces="swift-backup" ' + ' '.join((root / 'signing.pub').read_text().split()[:2]) + '\n')
+        allowed.chmod(0o644)
+        subprocess.run([sys.executable, '-I', str(DEPLOY / 'backup-signature.py'), 'sign', '--key', str(root / 'signing'),
+                        '--object', str(dump), '--out', f'{dump}.sig', '--created', '20261028T000000Z'], check=True, capture_output=True)
         log = root / 'calls'
         log.write_text('')
-        env = dict(os.environ, PATH=f'{bins}:{os.environ["PATH"]}', CALL_LOG=str(log), FAIL=fail, **env_extra)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('BACKUP_', 'POSTGRES_'))}
+        env.update(PATH=f'{bins}:{os.environ["PATH"]}', CALL_LOG=str(log), FAIL=fail, BACKUP_SIGNING_ALLOWED_SIGNERS=str(allowed), **env_extra)
         self.replay_script = ''
         r = subprocess.run(['bash', str(deploy / 'restore.sh'), *project, *extra_args, str(dump), 'swift_restore_privacy'],
                            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
@@ -81,6 +131,10 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         self.replay_script = replay.read_text() if replay.exists() else ''
         projects = Path(str(log) + '.projects')
         self.projects = projects.read_text().split() if projects.exists() else []
+        composed = Path(str(log) + '.compose')
+        self.compose_calls = composed.read_text().splitlines() if composed.exists() else []
+        read = lambda suffix: set(Path(str(log) + suffix).read_text().split()) if Path(str(log) + suffix).exists() else set()
+        self.live_dbs, self.instance_dbs = read('.live'), read('.instance')
         return r, log.read_text().splitlines()
 
     @staticmethod
@@ -153,13 +207,13 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
                 r, calls = self.run_restore(fail)
                 self.assertNotEqual(r.returncode, 0)
                 restore = self.first(calls, 'pg_restore db=swift_restore_privacy')
-                drop = self.first(calls, 'DROP DATABASE "swift_restore_privacy"')
+                drop = self.first(calls, 'INSTANCE REMOVED -f swift-restore-swift_restore_privacy')
                 self.assertLess(restore, drop)
                 self.assertIn('was dropped', r.stderr)
                 self.assertNotIn('RESTORE OK', r.stdout)
         r, calls = self.run_restore('replay', ('--keep-failed',))
         self.assertNotEqual(r.returncode, 0)
-        self.assertFalse(any('DROP DATABASE' in l for l in calls))
+        self.assertFalse(any('INSTANCE REMOVED' in l for l in calls))
         self.assertIn('--keep-failed', r.stderr)
         self.assertIn('quarantined', r.stderr)
 
@@ -175,7 +229,7 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('different environments', r.stderr)
         self.assertFalse(any('BEGIN; CREATE TEMP TABLE restore_ledger_' in l for l in calls))
-        self.assertTrue(any('DROP DATABASE "swift_restore_privacy"' in l for l in calls))
+        self.assertTrue(any('INSTANCE REMOVED -f swift-restore-swift_restore_privacy' in l for l in calls))
 
     # G S4-1: the production path can never write the live database while it reads the ledger.
     def test_every_ledger_read_of_the_live_database_is_read_only(self):
@@ -219,8 +273,14 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         r, calls = self.run_restore()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('compose project : swift-restore-test', r.stdout)
-        self.assertEqual(len(self.projects), len(calls))
+        self.assertTrue(self.compose_calls)
+        self.assertEqual(len(self.projects), len(self.compose_calls))
         self.assertEqual(set(self.projects), {'swift-restore-test'})
+        # [SEC-BACKUP F2] and only the LIVE database goes through it: the copy never does
+        self.assertNotIn('swift_restore_privacy', self.live_dbs)
+        self.assertIn('swift_restore_privacy', self.instance_dbs)
+        self.assertNotIn('swift_live_fixture', self.instance_dbs)
+        self.assertIn('pg_restore db=swift_restore_privacy :: as=swift in=swift-restore-swift_restore_privacy', calls)
 
 
 class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):
@@ -251,7 +311,7 @@ class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):
         self.assertEqual([l for l in calls if 'db=swift_live_fixture' in l], [])
         self.assertIn('NOT erasure-complete: replay the off-site ledger before use', r.stdout + r.stderr)
         self.assertNotIn('RESTORE OK', r.stdout + r.stderr)
-        self.assertFalse(any('DROP DATABASE' in l for l in calls))
+        self.assertFalse(any('INSTANCE REMOVED' in l for l in calls))
 
 
 
