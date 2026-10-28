@@ -270,6 +270,29 @@ describe('[BOOK-FU2 · owner B3] the business records "Customer didn\'t come"', 
     expect(await app.prisma.notification.count({ where: { userId: customer.userId, title: 'Appointment closed' } })).toBe(1);
   });
 
+  it('the same operate gate as complete-appointment: a store Swift suspended, or a closed one, is refused the same way; a weekly-fee hold still finishes accepted work', async () => {
+    const customer = await makeUser('Quin', ['CUSTOMER'], 'CUSTOMER');
+    const { order } = await acceptedAppointment(customer, 20);
+    try {
+      for (const hold of [{ status: 'SUSPENDED', suspensionSource: 'ADMIN' }, { status: 'CLOSED', suspensionSource: null }] as const) {
+        await app.prisma.vendor.update({ where: { id: vendorId }, data: hold });
+        const completing = await call('PUT', `/api/v1/vendor/orders/${order.id}/complete-appointment`, provider.token, {});
+        const res = await noShow(order.id);
+        expect(completing.statusCode, `${hold.status} complete-appointment`).toBeGreaterThanOrEqual(400);
+        expect(res.statusCode, `${hold.status} ${res.body}`).toBe(completing.statusCode);
+        expect(res.json().error.code, hold.status).toBe(completing.json().error.code);
+        expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
+        expect(await app.prisma.appointmentNoShow.count({ where: { orderId: order.id } })).toBe(0);
+      }
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', suspensionSource: 'BILLING' } });
+      const res = await noShow(order.id);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await app.prisma.appointmentNoShow.count({ where: { orderId: order.id } })).toBe(1);
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', suspensionSource: null } });
+    }
+  });
+
   it('another business cannot record it: not found, nothing written', async () => {
     const customer = await makeUser('Vic', ['CUSTOMER'], 'CUSTOMER');
     const { order } = await acceptedAppointment(customer, 20);

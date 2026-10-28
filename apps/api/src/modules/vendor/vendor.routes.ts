@@ -3245,7 +3245,12 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  booking, when and who (booking/appointment-no-show.ts). No fee, no strike, no money moved; the customer is told
    *  in neutral words; a person at Swift reviews repeated cases. */
   app.put<{ Params: IdParam }>('/orders/:id/no-show', tap, async (request) => {
+    // The same team (any member of the store, like complete-appointment) and the same operate gate as
+    // complete-appointment: recording an outcome about a customer is progress on accepted work, not a decline, so a
+    // store under a hold (suspended by Swift, closed, expired documents) cannot record one; a weekly-fee hold still
+    // lets it finish accepted work (IN_FLIGHT), exactly as completing it.
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     const refusal = noShowRefusal(order, new Date());
     if (refusal) throw refusal;
     await orderService.transitionOrderAtomically({
