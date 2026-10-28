@@ -34,6 +34,8 @@ import {
   orderActions,
 } from '../shared';
 import { deliveryOwnerView } from './delivery-owner';
+import { NO_SHOW_WORDS, orderNoShowOpen } from '../noShow';
+import { NoShowConfirm, useStartClock } from '../NoShowConfirm';
 
 /** [MOB-050] The customer's collection code, as the server mints it. */
 export const PICKUP_CODE_LENGTH = 6;
@@ -153,6 +155,10 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   // [TAP-AUDIT] Each line's tick waits alone: a second tap on a box whose tick is still on its way sends nothing.
   const pickPending = usePendingPickLines(orderId);
   const menu = useVendorMenu();
+  // [BOOK-NS-APP · owner B3] "Customer didn't come": the screen draws again at the appointment's start, and the
+  // popup asks once, then shows the server's answer (NoShowConfirm).
+  const noShowNow = useStartClock(order?.fulfillment === 'APPOINTMENT' ? order?.appointmentSlot : null);
+  const [noShowAsk, setNoShowAsk] = useState(false);
 
   // [MOB-050] A missing orderId is not a slow network. It used to render the
   // loading block forever, so a bad deep link looked like a hang.
@@ -207,6 +213,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
   // [STORE-DASH · O-2] The hand-overs ride on top of the shared steps (storeHandover).
   const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
+  // [BOOK-NS-APP · owner B3] Beside "Mark complete": an accepted appointment whose time has started.
+  const canNoShow = orderNoShowOpen(order, noShowNow);
+  const actionBar = actions.length > 0 || canNoShow;
   // [MOB-050] The one state where a counter hand-over is due.
   const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
   // [TAP-AUDIT] The step buttons also wait while a pick tick is still on its way (a Ready sent before it lands would be
@@ -243,7 +252,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
     <Screen>
       <SubHeader title={order.orderNumber ? `#${order.orderNumber}` : 'Order'} navigation={navigation} />
       <ScrollView
-        contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: actions.length ? 140 : space['3xl'] }}
+        contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: actionBar ? 140 : space['3xl'] }}
         showsVerticalScrollIndicator={false}
       >
         {/* Status line */}
@@ -692,7 +701,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
       </ScrollView>
 
       {/* Action bar — same transitions as the board */}
-      {actions.length > 0 ? (
+      {actionBar ? (
         <View
           style={{
             position: 'absolute',
@@ -720,8 +729,20 @@ function VendorOrderDetailBody({ navigation, route }: any) {
               onPress={() => runAction(a.action)}
             />
           ))}
+          {canNoShow ? (
+            <PillButton
+              label={NO_SHOW_WORDS.button}
+              variant="outline"
+              style={{ flex: 1 }}
+              disabled={busy}
+              onPress={() => setNoShowAsk(true)}
+            />
+          ) : null}
         </View>
       ) : null}
+
+      {/* [BOOK-NS-APP · owner B3] Asks once; stays up with the server's refusal or its closed state. */}
+      {noShowAsk ? <NoShowConfirm orderId={order.id} onClose={() => setNoShowAsk(false)} /> : null}
 
       {/* Reject confirm — destructive, so it gets the kit popup */}
       <PopupCard visible={confirmReject} onClose={() => setConfirmReject(false)}>

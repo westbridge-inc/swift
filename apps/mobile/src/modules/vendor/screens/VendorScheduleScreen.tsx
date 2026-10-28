@@ -35,6 +35,8 @@ import { errorMessage } from '../../../lib/apiError';
 import { touchTarget } from '../../../kit/touch-target';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
 import { MoveBookingSheet, bookingMovable } from '../MoveBookingSheet';
+import { NO_SHOW_WORDS, bookingNoShowOpen } from '../noShow';
+import { NoShowConfirm, useStartClock } from '../NoShowConfirm';
 
 /** [UI-SWEEP, REVIEW-F 07:08Z] A booking's words. This is BookingStatus
  *  (RESERVED, CONFIRMED, COMPLETED, CANCELLED), its own vocabulary, not an
@@ -51,8 +53,12 @@ export function bookingStatusPill(status: string): { label: string; tone: 'succe
   }
 }
 
-function AppointmentCard({ b, onMove }: { b: VendorBooking; onMove?: () => void }) {
+function AppointmentCard({ b, onMove, onNoShow }: { b: VendorBooking; onMove?: () => void; onNoShow: (orderId: string) => void }) {
   const pill = bookingStatusPill(b.status);
+  // [BOOK-NS-APP · owner B3] A confirmed booking whose time has started: "Customer didn't come" (the card draws
+  // again at the start, so it appears then).
+  const now = useStartClock(b.status === 'CONFIRMED' ? b.slotStart : null);
+  const noShow = bookingNoShowOpen(b, now) ? b.orderId : null;
   return (
     <Card style={{ marginBottom: space.sm }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
@@ -70,9 +76,10 @@ function AppointmentCard({ b, onMove }: { b: VendorBooking; onMove?: () => void 
         <TonePill tone={pill.tone} label={pill.label} />
       </View>
       {/* [BOOK-S5a · owner B2] Move it to another free time of the same service. */}
-      {onMove ? (
-        <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: space.sm }}>
-          <LinkText label="Move" onPress={onMove} />
+      {onMove || noShow ? (
+        <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: space.lg, marginTop: space.sm }}>
+          {noShow ? <LinkText label={NO_SHOW_WORDS.button} onPress={() => onNoShow(noShow)} /> : null}
+          {onMove ? <LinkText label="Move" onPress={onMove} /> : null}
         </View>
       ) : null}
     </Card>
@@ -101,6 +108,8 @@ export function VendorScheduleScreen({ navigation }: any) {
   const [blockEnd, setBlockEnd] = useState('17:00');
   const [blockReason, setBlockReason] = useState('');
   const [moving, setMoving] = useState<VendorBooking | null>(null);
+  // [BOOK-NS-APP] The order whose "Customer didn't come" is being asked (NoShowConfirm is mounted only then).
+  const [noShowFor, setNoShowFor] = useState<string | null>(null);
 
   const rows: VendorBooking[] = q.data ?? [];
   const exceptions: VendorBookingException[] = exceptionsQ.data ?? [];
@@ -221,13 +230,15 @@ export function VendorScheduleScreen({ navigation }: any) {
               body="Your open hours are visible to customers — reservations land here."
             />
           ) : (
-            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} />)
+            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} onNoShow={setNoShowFor} />)
           )}
         </ScrollView>
       )}
 
       {/* Mounted only while a booking is being moved (its free-times read runs only then). */}
       {moving ? <MoveBookingSheet booking={moving} onClose={() => setMoving(null)} /> : null}
+      {/* [BOOK-NS-APP · owner B3] Asks once; stays up with the server's refusal or its closed state. */}
+      {noShowFor ? <NoShowConfirm orderId={noShowFor} onClose={() => setNoShowFor(null)} /> : null}
 
       {/* Block time — two taps for a funeral afternoon. */}
       <PopupCard visible={blocking} onClose={() => setBlocking(false)}>

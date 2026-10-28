@@ -729,7 +729,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               Minimum notice
             </T>
             <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
-              How soon before a time a customer can still book it.
+              How close to its start a customer can still book a time.
             </T>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
               {choicesWith(NOTICE_CHOICES, notice).map((m) => (

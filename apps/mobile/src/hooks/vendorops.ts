@@ -627,6 +627,27 @@ export function useOrderAction() {
   });
 }
 
+/** [BOOK-NS-APP · owner B3] "Customer didn't come" on a started appointment the store accepted. The server judges it
+ *  and closes the booking (no fee, no strike); its popup (NoShowConfirm) shows the server's own refusal words or the
+ *  closed state from its answer, so the app-wide toast stays out. The order and the Schedule are read again whatever
+ *  the outcome: a refusal can mean the booking already moved on. */
+export const NO_SHOW_KEY = ['vendor', 'order-no-show'] as const;
+export function useMarkNoShow() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationKey: NO_SHOW_KEY,
+    mutationFn: (id: string) => unwrap(vendorApi.markNoShow(id)),
+    meta: { silent: true },
+    onSuccess: (answer, id) => {
+      applyConfirmedOrder(qc, id, answer);
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
+    },
+  });
+}
+
 /** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
 const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt', 'handedToRiderAt'] as const;
 
