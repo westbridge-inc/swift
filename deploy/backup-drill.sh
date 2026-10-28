@@ -4,7 +4,7 @@
 # 13 Oct), so they cannot decrypt a backup; this script is the only way one is
 # restored:
 #
-#   ./deploy/backup-drill.sh [--allow-unsigned-legacy] <user@host> <ssh-key-file> s3://<bucket>/<prefix>/swift-<stamp>.dump.gpg [scratch-db]
+#   ./deploy/backup-drill.sh [--allow-unsigned-legacy [--legacy-without-signing-record]] <user@host> <ssh-key-file> s3://<bucket>/<prefix>/swift-<stamp>.dump.gpg [scratch-db]
 #
 #   0. [SEC-BACKUP F2] the host fetches the object's signature (<object>.sig)
 #      and verifies it against its own trusted backup signing keys; the drill
@@ -43,6 +43,9 @@ export HISTFILE=/dev/null
 die() { echo "backup-drill: $*" >&2; exit 1; }
 ALLOW_UNSIGNED=0
 if [ "${1:-}" = --allow-unsigned-legacy ]; then ALLOW_UNSIGNED=1; shift; fi
+# [COORD 12:20Z] Only for a host that never signed a backup (no record of when signing began).
+LEGACY_NO_RECORD=0
+if [ "$ALLOW_UNSIGNED" = 1 ] && [ "${1:-}" = --legacy-without-signing-record ]; then LEGACY_NO_RECORD=1; shift; fi
 TARGET="${1:-}"
 SSH_KEY="${2:-}"
 OBJECT="${3:-}"
@@ -117,6 +120,7 @@ only_encrypted_to_this_key() {
 # with a warning: never both.
 LEGACY_ARG=""
 [ "$ALLOW_UNSIGNED" = 0 ] || LEGACY_ARG="--allow-unsigned-legacy"
+[ "$LEGACY_NO_RECORD" = 0 ] || LEGACY_ARG="$LEGACY_ARG --legacy-without-signing-record"
 PICK_KEYS="if sudo -n swift-secrets backup list 2>/dev/null | grep -qx BACKUP_AWS_SECRET_ACCESS_KEY; then \
 K='-p LoadCredentialEncrypted=BACKUP_AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_ACCESS_KEY_ID.cred \
 -p LoadCredentialEncrypted=BACKUP_AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_SECRET_ACCESS_KEY.cred \

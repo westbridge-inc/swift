@@ -630,7 +630,13 @@ class RestoreRefusesWhatWasNotSigned(unittest.TestCase):
         self.assertIn("--allow-unsigned-legacy", r.stderr)
 
     def test_the_owner_flag_restores_an_unsigned_legacy_dump_with_a_loud_warning(self):
-        r = self.restore("--allow-unsigned-legacy")
+        # [COORD 12:20Z] no record of when signing began: the flag alone is not enough
+        r = self.restore("--allow-unsigned-legacy", BACKUP_FIRST_SIGNED_FILE=str(self.tmp / "absent"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no record of the first signed backup", r.stderr)
+        self.assertFalse([c for c in self.calls() if c.startswith("INSTANCE")])
+        # the dump's name stamp (09:15Z) is before the owner's recorded cutover
+        r = self.restore("--allow-unsigned-legacy", BACKUP_SIGNED_SINCE="20261029T000000Z")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("WARNING: RESTORING AN UNSIGNED DUMP", r.stderr)
         self.assertIn("RESTORE OK", r.stdout)
@@ -816,9 +822,19 @@ class TheLegacyFlagEndsWhereSigningBegan(unittest.TestCase):
         self.bucket.mkdir(parents=True)
         self.log = self.tmp / "calls"
         self.log.write_text("")
+        # head-object answers LastModified, VersionId and ETag; get-object serves the object and
+        # refuses a changed ETag (PreconditionFailed), as the S3 API does.
         (self.bin / "docker").write_text(FAKE_DOCKER.replace(
             'if "head-object" in args:',
-            'if "head-object" in args and "LastModified" in " ".join(args):\n        print(os.environ["OBJ_LAST_MODIFIED"]); sys.exit(0)\n    if "head-object" in args:'))
+            'if "head-object" in args and "LastModified" in " ".join(args):\n'
+            '        print(os.environ["OBJ_LAST_MODIFIED"] + "\\t" + os.environ.get("OBJ_VERSION", "v-checked") + "\\t" + os.environ.get("OBJ_ETAG", \'"etag-1"\')); sys.exit(0)\n'
+            '    if "get-object" in args:\n'
+            '        with open(os.environ["CALL_LOG"] + ".get", "a") as g: g.write(" ".join(args[args.index("get-object"):]) + "\\n")\n'
+            '        if os.environ.get("ETAG_CHANGED"):\n'
+            '            sys.stderr.write("An error occurred (PreconditionFailed) when calling the GetObject operation\\n"); sys.exit(254)\n'
+            '        key = args[args.index("--key") + 1]\n'
+            '        shutil.copyfile(os.path.join(bucket, key), local(args[-1])); sys.exit(0)\n'
+            '    if "head-object" in args:'))
         (self.bin / "pg_restore").write_text(FAKE_PG_RESTORE)
         for b in self.bin.iterdir():
             b.chmod(0o755)
@@ -827,11 +843,12 @@ class TheLegacyFlagEndsWhereSigningBegan(unittest.TestCase):
         _, self.allowed = make_signing_key(self.tmp)
         (self.bucket / "swift-20261020T010000Z.dump.gpg").write_bytes(os.urandom(256))
 
-    def fetch(self, last_modified, *flags, marker=True):
+    def fetch(self, last_modified, *flags, marker=True, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("BACKUP_", "AWS_"))}
         env.update({"PATH": f"{self.bin}:{os.environ['PATH']}", "CALL_LOG": str(self.log), "FAKE_BUCKET": str(self.tmp / "bucket"),
                     "BACKUP_BUCKET": "swift-backups", "AWS_ACCESS_KEY_ID": "id", "AWS_SECRET_ACCESS_KEY": "secret",
                     "AWS_CLI_IMAGE": IMAGE, "BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.allowed), "OBJ_LAST_MODIFIED": last_modified})
+        env.update(extra)
         if marker:
             env["BACKUP_FIRST_SIGNED_FILE"] = str(self.marker)
         else:
@@ -852,10 +869,41 @@ class TheLegacyFlagEndsWhereSigningBegan(unittest.TestCase):
         self.assertIn("WARNING: RESTORING AN UNSIGNED DUMP", r.stderr)
         self.assertIn("server time 2026-10-28T11:59:00", r.stderr)
 
-    def test_without_a_record_of_when_signing_began_the_flag_still_warns_and_says_so(self):
-        r = self.fetch("2026-10-28T12:30:00+00:00", "--allow-unsigned-legacy", marker=False)
+    # [COORD 12:20Z (2)] a missing record never widens the legacy window
+    def test_without_a_record_of_when_signing_began_the_flag_alone_is_refused(self):
+        r = self.fetch("2026-10-20T01:00:00+00:00", "--allow-unsigned-legacy", marker=False)
+        self.assertNotEqual(r.returncode, 0)
         self.assertIn("no record of the first signed backup", r.stderr)
+        self.assertIn("BACKUP_SIGNED_SINCE", r.stderr)
+        self.assertIn("--legacy-without-signing-record", r.stderr)
+        self.assertNotIn("RESTORING AN UNSIGNED DUMP", r.stderr)
+        self.assertFalse(Path(str(self.log) + ".get").exists())
+
+    def test_without_a_record_the_owner_names_the_cutover_or_takes_the_second_flag(self):
+        r = self.fetch("2026-10-28T12:30:00+00:00", "--allow-unsigned-legacy", marker=False, BACKUP_SIGNED_SINCE="20261028T120000Z")
+        self.assertIn("written after the first signed backup", r.stderr)
+        r = self.fetch("2026-10-28T12:30:00+00:00", "--allow-unsigned-legacy", "--legacy-without-signing-record", marker=False)
+        self.assertIn("--legacy-without-signing-record", r.stderr)
         self.assertIn("WARNING: RESTORING AN UNSIGNED DUMP", r.stderr)
+
+    # [COORD 12:20Z (1)] the object checked is the object downloaded
+    def test_the_unsigned_object_downloaded_is_exactly_the_version_whose_time_was_checked(self):
+        r = self.fetch("2026-10-28T11:59:00+00:00", "--allow-unsigned-legacy")
+        self.assertIn("WARNING: RESTORING AN UNSIGNED DUMP", r.stderr)
+        [got] = Path(str(self.log) + ".get").read_text().splitlines()
+        self.assertIn("--version-id v-checked", got)
+        self.assertIn('--if-match "etag-1"', got)
+        self.assertFalse([l for l in self.log.read_text().splitlines() if " s3 cp s3://swift-backups/db/swift-20261020T010000Z.dump.gpg " in l])
+
+    def test_an_unversioned_bucket_pins_the_etag_and_a_changed_object_is_refused(self):
+        r = self.fetch("2026-10-28T11:59:00+00:00", "--allow-unsigned-legacy", OBJ_VERSION="None")
+        [got] = Path(str(self.log) + ".get").read_text().splitlines()
+        self.assertNotIn("--version-id", got)
+        self.assertIn('--if-match "etag-1"', got)
+        r = self.fetch("2026-10-28T11:59:00+00:00", "--allow-unsigned-legacy", ETAG_CHANGED="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("changed between the check and the download", r.stderr)
+        self.assertNotIn("RESTORING AN UNSIGNED DUMP", r.stderr)
 
 
 class DrillCarriesTheHostVerifiedSignature(unittest.TestCase):
@@ -917,6 +965,8 @@ sys.exit(7)
     def test_the_drill_takes_the_legacy_flag_first_and_passes_it_to_the_host(self):
         drill = (DEPLOY / "backup-drill.sh").read_text()
         self.assertIn('if [ "${1:-}" = --allow-unsigned-legacy ]; then ALLOW_UNSIGNED=1; shift; fi', drill)
+        self.assertIn('if [ "$ALLOW_UNSIGNED" = 1 ] && [ "${1:-}" = --legacy-without-signing-record ]; then LEGACY_NO_RECORD=1; shift; fi', drill)
+        self.assertIn('[ "$LEGACY_NO_RECORD" = 0 ] || LEGACY_ARG="$LEGACY_ARG --legacy-without-signing-record"', drill)
         self.assertIn("--allow-unsigned-legacy --compare-source -", drill)
         self.assertIn("--signature-b64 '$SIGNATURE_B64' --signed-object '${OBJECT##*/}' --compare-source -", drill)
 

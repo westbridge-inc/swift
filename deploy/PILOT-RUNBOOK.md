@@ -745,7 +745,11 @@ the owner's explicit decision, and it warns loudly; and only when the bucket's
 own LastModified for the object is BEFORE the first signed backup (backup.sh
 records that stamp once in /var/backups/swift/.first-signed-backup; on a new
 host set the owner's copy as BACKUP_SIGNED_SINCE in deploy/.env). An unsigned
-object written after signing began is refused even with the flag. A signature
+object written after signing began is refused even with the flag; with no
+record at all it is refused unless BACKUP_SIGNED_SINCE is set or
+`--legacy-without-signing-record` is added too (a host that never signed). The
+version whose time is checked is the version downloaded (VersionId and ETag
+pinned). A signature
 that fails is refused whatever the flags. The archive is then restored into a THROWAWAY
 Postgres instance (a container of the live database's image, no network, its
 own volume `swift-restore-<scratch>`), never into the live cluster, by a login

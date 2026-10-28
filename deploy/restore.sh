@@ -50,7 +50,9 @@
 # off-site object is accepted unsigned only when the bucket's own LastModified
 # predates the first signed backup (recorded by backup.sh in
 # /var/backups/swift/.first-signed-backup, BACKUP_FIRST_SIGNED_FILE; or the
-# owner's copy of that stamp, BACKUP_SIGNED_SINCE, on a new host).
+# owner's copy of that stamp, BACKUP_SIGNED_SINCE, on a new host). With no
+# record at all it refuses unless --legacy-without-signing-record is given too.
+# The version whose time is checked is the version downloaded (VersionId/ETag).
 #
 # [BACKUP-ENC] Production dumps are encrypted to the OWNER's key (backup.sh),
 # and this server never decrypts: an encrypted dump (.gpg) given here is
@@ -104,12 +106,15 @@ LEDGER_FROM=""
 # the drill's verified bundle (base64) and object name for the plain dump it pipes in; and
 # --fetch-signature, which prints an off-site object's verified signature.
 ALLOW_UNSIGNED=0
+# [COORD 12:20Z] With no record of when signing began, the owner must say so explicitly too.
+LEGACY_NO_RECORD=0
 FETCH_SIGNATURE=0
 SIGNATURE_B64=""
 SIGNED_OBJECT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-unsigned-legacy) ALLOW_UNSIGNED=1 ;;
+    --legacy-without-signing-record) LEGACY_NO_RECORD=1 ;;
     --fetch-signature) FETCH_SIGNATURE=1 ;;
     --signature-b64) [ $# -ge 2 ] || die "--signature-b64 needs the signature bundle"; SIGNATURE_B64="$2"; shift ;;
     --signed-object) [ $# -ge 2 ] || die "--signed-object needs the signed object's name"; SIGNED_OBJECT="$2"; shift ;;
@@ -431,10 +436,14 @@ unsigned_or_die() {
       die "$1 has NO signature and was written after the first signed backup (server time ${written:-unknown}, signing began $since): an unsigned object from after that is not a legacy dump. Refused even with --allow-unsigned-legacy; nothing was restored"
     echo "legacy check: $1 was written at server time $written, before the first signed backup ($since)" >&2
   elif [ -n "${4:-}" ]; then
-    echo "WARNING: there is no record of the first signed backup on this host (BACKUP_FIRST_SIGNED_FILE / BACKUP_SIGNED_SINCE): the object's time (${written:-unknown}) cannot be checked against it." >&2
+    # A missing record never widens the window: the owner names the cutover, or says twice.
+    [ "$LEGACY_NO_RECORD" = 1 ] ||
+      die "$1 has NO signature, and there is no record of the first signed backup on this host (BACKUP_FIRST_SIGNED_FILE): its time (${written:-unknown}) cannot be checked against when signing began. Set BACKUP_SIGNED_SINCE to the owner's recorded stamp, or, only if this host never signed a backup, add --legacy-without-signing-record as well. Nothing was restored"
+    echo "WARNING: --legacy-without-signing-record: no record of when signing began; the object's time (${written:-unknown}) is NOT checked against it." >&2
   fi
-  echo "WARNING: RESTORING AN UNSIGNED DUMP ($1) because --allow-unsigned-legacy was given. Its origin is NOT proven." >&2
+  [ "${5:-}" = defer ] || unsigned_warning "$1"
 }
+unsigned_warning() { echo "WARNING: RESTORING AN UNSIGNED DUMP ($1) because --allow-unsigned-legacy was given. Its origin is NOT proven." >&2; }
 # A server or name time as UTC YYYYmmddTHHMMSSZ (empty when it cannot be read).
 utc_stamp() {
   python3 -I -c 'import datetime, re, sys
@@ -495,15 +504,34 @@ if [[ "$SOURCE" == s3://* ]]; then
     verify_signature "$SIG" "$(basename "$SOURCE")" --print
     exit 0
   fi
-  aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors
-  chmod 600 "$DUMP"
   if [ "$HAVE_SIG" = 1 ]; then
+    # Any version the bucket serves must carry this signature: the bytes are checked against it.
+    aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors
+    chmod 600 "$DUMP"
     verify_signature "$SIG" "$(basename "$SOURCE")" --object "$DUMP"
   else
+    [ "$ALLOW_UNSIGNED" = 1 ] || unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket"
+    # [COORD 12:20Z] The version whose server time is checked is the version downloaded: the
+    # head-object answer pins it (VersionId on a versioned bucket, and its ETag either way).
     KEY_PATH="${SOURCE#s3://"$BACKUP_BUCKET"/}"
-    WRITTEN="$(aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" --query LastModified --output text 2>/dev/null || true)"
+    HEAD="$(aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" \
+      --query '[LastModified,VersionId,ETag]' --output text 2>/dev/null)" || die "could not read the object's details from the bucket; nothing was restored"
+    IFS=$'\t' read -r WRITTEN VERSION ETAG <<<"$HEAD" || true
     echo "legacy check: the bucket says $(basename "$SOURCE") was written at server time ${WRITTEN:-unknown}" >&2
-    unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket" "$(utc_stamp "$WRITTEN")" checked
+    unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket" "$(utc_stamp "${WRITTEN:-}")" checked defer
+    [ -n "${ETAG:-}" ] && [ "$ETAG" != None ] || die "the bucket gave no ETag for $(basename "$SOURCE"), so the object checked cannot be pinned; nothing was restored"
+    PIN=()
+    if [ -n "${VERSION:-}" ] && [ "$VERSION" != None ] && [ "$VERSION" != null ]; then PIN=(--version-id "$VERSION"); fi
+    if ! aws_s3 "$TMP_DIR:/data" s3api get-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" ${PIN[@]+"${PIN[@]}"} \
+         --if-match "$ETAG" /data/restore.dump >/dev/null 2>"$TMP_DIR/get.err"; then
+      if grep -qE 'PreconditionFailed|\(412\)' "$TMP_DIR/get.err"; then
+        die "$(basename "$SOURCE") changed between the check and the download (its ETag no longer matches); nothing was restored"
+      fi
+      cat "$TMP_DIR/get.err" >&2
+      die "could not download the version of $(basename "$SOURCE") that was checked; nothing was restored"
+    fi
+    chmod 600 "$DUMP"
+    unsigned_warning "$SOURCE"
   fi
   if [ "$FETCH_ENCRYPTED" = 1 ]; then
     # Only ciphertext: an OpenPGP message, never a plain archive.
