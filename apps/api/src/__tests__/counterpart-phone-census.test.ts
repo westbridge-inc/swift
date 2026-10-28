@@ -44,7 +44,8 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'modules/vendor/vendor.routes.ts': { count: 5, why: `3 ${GATED}; 1 ${OWN} (store team; GET+PUT /staff share staffMemberUserSelect); 1 ${INTERNAL} (reserved-name check)` },
   'utils/counterparty.ts': { count: 1, why: 'the opt-in itself (riderCounterpartySelect withPhone)' },
   'modules/calls/call-bridge.ts': { count: 5, why: `${INTERNAL} (the Swift call bridge: each party's number, and the caller's own, read at the moment a leg is dialled and handed only to the voice provider; never in a response, a push or a call_sessions row)` },
-  'modules/admin/admin.routes.ts': { count: 24, why: OPS },
+  // [BOOK-FU2 · owner B3] +1: the missed-appointment review's customer row (masked unless user.contact.read, like the people list).
+  'modules/admin/admin.routes.ts': { count: 25, why: OPS },
   'modules/admin/order-contact.ts': { count: 4, why: `${OPS}: masked on the order desk; one party's full number only through the audited reveal (reason + audit row before the value)` },
   'modules/admin/person-contact.ts': { count: 5, why: `${OPS}: the person pages (person, store, rider/driver, custody case) masked; one party's full number only through the order desk's audited reveal (reason + audit row before the value)` },
   'modules/admin/solo-approval.ts': { count: 1, why: INTERNAL },

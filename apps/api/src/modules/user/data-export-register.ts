@@ -177,6 +177,14 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'itemId', 'customerId', 'orderId', 'slotStart', 'slotEnd', 'status', 'createdAt'],
   },
   {
+    // [BOOK-FU2 · owner B3] "Customer didn't come": a business recorded that you did not come to an appointment of
+    // yours (Privacy Policy section 6). The whole record is yours to see, through your order: which booking and
+    // when it was recorded. Who at the business recorded it is a person at that business (OTHER_PERSON).
+    category: 'missedAppointments', model: 'AppointmentNoShow', through: 'order', by: ['customerId'], key: 'id', sortBy: ['recordedAt', 'orderId'],
+    omit: { id: 'SYSTEM' },
+    fields: ['orderId', 'bookingId', 'recordedAt'],
+  },
+  {
     category: 'cart', model: 'Cart', by: ['customerId'], key: 'id',
     fields: ['id', 'customerId', 'deliveryAddressId', 'scheduledFor', 'promoCodeId', 'tipAmount', 'specialInstructions', 'lastActivityAt', 'createdAt', 'updatedAt'],
   },
@@ -463,6 +471,8 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'StockAdjustment.createdBy': { reason: 'STAFF_WORK', note: 'stock changes made for a store' },
   'StockMovement.actorId': { reason: 'STAFF_WORK', note: 'stock changes made for a store' },
   'SupportTicket.resolvedById': { reason: 'STAFF_WORK', note: 'support tickets resolved as staff' },
+  // [BOOK-FU2 · owner B3] The business's own record that its customer did not come (the customer's copy is missedAppointments).
+  'AppointmentNoShow.recordedByUserId': { reason: 'STAFF_WORK', note: 'missed appointments you recorded for a business' },
   'DocLegalHold.subjectUserId': { reason: 'LEGAL_HOLD', note: 'a legal hold on your documents' },
   'AlertDelivery.recipientId': { reason: 'SYSTEM', note: 'delivery of job offers (the jobs you did are in deliveriesAsRider and tripsAsDriver)' },
   'AlgoDecision.subjectId': { reason: 'SYSTEM', note: 'logs of automated dispatch and pricing steps' },
