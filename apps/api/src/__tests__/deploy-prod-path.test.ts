@@ -1433,6 +1433,9 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string; 
     'exec "$@"',
   ].join('\n'));
   instances.push(`swift-restore-${scratch}`);
+  // The file's base shims make `sleep` return at once (other suites wait on nothing); the restore
+  // waits for its throwaway instance by the clock, so give it the real one.
+  rmSync(join(tmp, 'bin', 'sleep'), { force: true });
   // [#1977] restore.sh never guesses the Compose project; the stand-in docker ignores it.
   const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
@@ -1450,6 +1453,10 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     expect(r.stdout).toMatch(/source \(swift_test_rcmp_\w+\): 3 tables, 4 rows, \d+ columns, RLS enabled on 1, forced on 1, 1 policies, \d+ constraints, \d+ indexes, 1 triggers, 1 functions, 1 views, \d+ grant entries, 1 sequences/);
     expect(r.stdout).toContain('in schemas public and swift_qr the scratch restore equals its source in every table\'s row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions');
     expect(r.stdout).toContain('RESTORE OK');
+    // [SEC-BACKUP · REVIEW-M S3-1] removed with its volume once the run ends
+    expect(r.stdout).toContain(`the scratch instance swift-restore-${r.scratch} was removed with its volume`);
+    expect(spawnSync(REAL_DOCKER, ['container', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
+    expect(spawnSync(REAL_DOCKER, ['volume', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
   });
 
   it.each([
@@ -1468,12 +1475,14 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     ['a view switched to run with its caller\'s rights', `ALTER VIEW public.active_users SET (security_invoker = true)`, 'view|public.active_users|'],
     // Positive control: default privileges were compared already.
     ['a new default privilege', `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC`, 'grant|default|public|'],
-  ])('fails on %s, names it, and keeps the scratch database', (_what, change, named) => {
+  ])('fails on %s, names it, and removes the scratch copy with its instance', (_what, change, named) => {
     const r = drill(change);
     expect(r.status, r.stdout).not.toBe(0);
     expect(r.stdout).toContain('MISMATCH');
     expect(r.stdout).toContain(named);
-    expect(r.stderr).toContain('scratch database retained');
+    // [SEC-BACKUP · REVIEW-M S3-1] a failed comparison does not leave a copy of the data behind
+    expect(r.stderr).toContain('was dropped with its throwaway instance');
+    expect(spawnSync(REAL_DOCKER, ['volume', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
     expect(r.stdout).not.toContain('RESTORE OK');
   });
 
@@ -1484,7 +1493,7 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     });
 
   it('[SEC-BACKUP F2] restores into a throwaway instance, never the live cluster, as a login that is not a superuser there', () => {
-    const r = drill(null);
+    const r = drill(null, { args: ['--compare-source', '--keep-for-inspection'] });
     expect(r.status, r.stderr + r.stdout).toBe(0);
     const instance = `swift-restore-${r.scratch}`;
     expect(r.stdout).toContain(`scratch instance : ${instance} (throwaway, no network`);

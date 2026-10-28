@@ -741,17 +741,27 @@ scratch database through a transient unit that receives the same two keys:
 against /etc/swift/backup-allowed-signers (BACKUP_SIGNING_ALLOWED_SIGNERS):
 the signature, the object's name, size and SHA-256. A dump with NO signature
 (made before signing existed) is restored only with `--allow-unsigned-legacy`,
-the owner's explicit decision, and it warns loudly; a signature that fails is
-refused whatever the flags. The archive is then restored into a THROWAWAY
+the owner's explicit decision, and it warns loudly; and only when the bucket's
+own LastModified for the object is BEFORE the first signed backup (backup.sh
+records that stamp once in /var/backups/swift/.first-signed-backup; on a new
+host set the owner's copy as BACKUP_SIGNED_SINCE in deploy/.env). An unsigned
+object written after signing began is refused even with the flag. A signature
+that fails is refused whatever the flags. The archive is then restored into a THROWAWAY
 Postgres instance (a container of the live database's image, no network, its
 own volume `swift-restore-<scratch>`), never into the live cluster, by a login
 named like the live owner that is NOT a superuser there and owns only the
 scratch database; the instance's own superuser only creates the roles the
 dump grants to (no login) and the extensions it names (a fixed allowlist).
 The live database is only read (erasure ledger, --compare-source snapshot).
-The instance stays up for inspection; remove it with
-`docker rm -f swift-restore-<scratch> && docker volume rm swift-restore-<scratch>`
-(doctor.sh warns while one is left). For a disaster recovery on a NEW host,
+When the run ends the instance AND its volume are removed, whatever the
+outcome (success, a failed comparison or check, any error): the copy holds
+everyone's data and is erasure-complete only at the moment of the restore.
+`--keep-for-inspection` keeps it and prints how to remove it
+(`docker rm -f swift-restore-<scratch> && docker volume rm swift-restore-<scratch>`)
+within 24 hours; doctor.sh lists every labelled restore volume and FAILs on
+one older than a day. A disaster-recovery restore (`--no-live-ledger
+--i-know-live-is-gone`) keeps its copy by purpose, so it needs
+`--keep-for-inspection` up front. For a disaster recovery on a NEW host,
 put the owner's copy of the allowed-signers file at
 /etc/swift/backup-allowed-signers first.
 
@@ -804,9 +814,11 @@ are left out, since backup.sh writes them after the dump). A row written to
 the live database since the dump is a mismatch, so run it right after the
 backup. Restore an encrypted document from the separate document
 bucket and verify it can be decrypted with the off-host MASTER_KEK escrow
-copy; the database dump alone cannot prove this. Keep the scratch database
-until the drill evidence is reviewed. A controlled cleanup then uses a
-separately reviewed SQL DROP DATABASE command against that scratch name only.
+copy; the database dump alone cannot prove this. The drill's evidence is its
+printed lines (both summaries, the compare-source line, RESTORE OK); the
+scratch copy itself is removed with its throwaway instance when the run ends
+(add `--keep-for-inspection` to restore.sh only to look inside it, and remove
+it the same day).
 
 ## 6. Seed the platform spine (first SUPER_ADMIN)
 

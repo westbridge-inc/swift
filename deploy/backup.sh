@@ -280,6 +280,9 @@ fi
 # allowed-signers file, exactly as a restore will. No key: unsigned, loudly.
 SIGNED=0
 SIG=""
+# [SEC-BACKUP · REVIEW-M S4-3] A key that is there but does not produce a signature restores accept
+# is a FAILED run (after the upload, so the data is still off-site): the unit fails, not only the page.
+SIGN_FAILED=0
 if [ -n "$SIGNING_KEY" ] && [ -r "$SIGNING_KEY" ]; then
   SIG_ARGS=(--key "$SIGNING_KEY" --object "$TARGET" --out "$TARGET.sig" --created "$STAMP")
   [ "$ENCRYPT" = 1 ] && SIG_ARGS+=(--plain-sha256 "$PLAIN_SHA")
@@ -290,10 +293,12 @@ if [ -n "$SIGNING_KEY" ] && [ -r "$SIGNING_KEY" ]; then
       SIGNED=1
       echo "signed → $(basename "$SIG") (verifies against $ALLOWED_SIGNERS)"
     else
+      SIGN_FAILED=1
       echo "WARNING: the dump is signed but the signature does NOT verify against $ALLOWED_SIGNERS: restores here would refuse it. Run: sudo swift-secrets backup init" >&2
     fi
   else
     rm -f -- "$TARGET.sig"
+    SIGN_FAILED=1
     echo "WARNING: BACKUP NOT SIGNED: signing with the backup signing key failed. A restore will refuse this dump without --allow-unsigned-legacy." >&2
   fi
 else
@@ -384,6 +389,21 @@ if [ "$RETAIN_DAYS" -gt 0 ]; then
   DELETED=$(find "$OUT_DIR" \( -name 'swift-*.dump' -o -name 'swift-*.dump.gpg' \) -type f -mtime +"$RETAIN_DAYS" -print -delete | wc -l | tr -d ' ')
   find "$OUT_DIR" \( -name 'swift-*.dump.sig' -o -name 'swift-*.dump.gpg.sig' \) -type f -mtime +"$RETAIN_DAYS" -delete
   [ "$DELETED" != "0" ] && echo "pruned $DELETED backup(s) older than $RETAIN_DAYS days"
+fi
+
+# [SEC-BACKUP · REVIEW-G S4-1] When signing began: the first signed backup that is safe (off-site,
+# or explicitly local-only) records its stamp, once. restore.sh accepts an UNSIGNED object with
+# --allow-unsigned-legacy only when the bucket says it was written before this moment.
+FIRST_SIGNED="$OUT_DIR/.first-signed-backup"
+if [ "$SIGNED" = 1 ] && { [ "$UPLOADED" = 1 ] || [ -z "${BACKUP_BUCKET:-}" ]; } && [ ! -e "$FIRST_SIGNED" ]; then
+  (umask 077; printf '%s\n' "$STAMP" > "$FIRST_SIGNED.partial" && mv -f "$FIRST_SIGNED.partial" "$FIRST_SIGNED") &&
+    echo "signing began: $STAMP (recorded in $FIRST_SIGNED; keep a copy of this stamp with the allowed-signers file)" ||
+    echo "WARNING: could not record when signing began in $FIRST_SIGNED" >&2
+fi
+
+if [ "$SIGN_FAILED" = 1 ]; then
+  echo "FATAL: this backup is off-site but its signature cannot be verified here, so every restore refuses it. Treating this run as FAILED: fix the signing key (sudo swift-secrets backup init) before the next run." >&2
+  exit 1
 fi
 
 cat <<MSG

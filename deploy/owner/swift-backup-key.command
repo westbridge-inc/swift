@@ -21,7 +21,9 @@
 #      key. The values are never a command-line argument, never written to a
 #      file, never echoed.
 #   3. VERSIONING: turns on versioning for the backup bucket (an overwritten
-#      or deleted dump keeps its previous version). DigitalOcean allows this
+#      or deleted dump keeps its previous version), after a lifecycle rule that
+#      deletes those old versions after 30 days (each one is a full copy of
+#      everyone's data; BACKUP_VERSION_RETAIN_DAYS). DigitalOcean allows this
 #      only through its API and only with a FULL-access key, so it runs with the
 #      API's current key (deploy/backup-versioning.sh): do it BEFORE that key
 #      is narrowed to the uploads bucket.
@@ -98,7 +100,7 @@ else
 fi
 
 say ""
-say "Step 3 of 4 — versioning for the backup bucket (uses the API's current full-access key, once)."
+say "Step 3 of 4 — versioning for the backup bucket, old versions deleted after 30 days (uses the API's current full-access key, once)."
 if ask "Turn versioning on now (safe to repeat)?"; then
   "${SSH[@]}" -n "sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-deploy --gid=swift-deploy \
 -p SupplementaryGroups=docker -p WorkingDirectory=/opt/swift \
@@ -117,6 +119,7 @@ if ask "Run one backup now?"; then
   "${SSH[@]}" -n "sudo -n systemctl start swift-backup.service; sudo -n journalctl -u swift-backup.service -n 25 --no-pager -o cat" </dev/null ||
     die "the backup did not finish cleanly: read the lines above, then the owner sheet (nothing was lost: the previous backups are untouched)"
   say "Look above for: signed →, verified offsite, and NO line saying BACKUPS STILL SHARE THE API'S STORAGE KEY."
+  say "The first signed backup also prints 'signing began: <stamp>': keep that stamp with your copy of the allowed-signers file."
 else
   say "skipped."
 fi

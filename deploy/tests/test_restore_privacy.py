@@ -241,9 +241,15 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
 
     # G S4-2: the closing words say the quarantine covers today's logins only.
     def test_the_report_says_to_requarantine_before_use_and_drop_after(self):
-        r, _ = self.run_restore()
+        # [SEC-BACKUP · REVIEW-M S3-1] only a copy kept on purpose is left to use; by default it is gone
+        r, calls = self.run_restore('', ('--keep-for-inspection',))
         self.assertIn('re-run the quarantine before use', r.stdout)
         self.assertIn('drop the copy after use', r.stdout)
+        self.assertFalse(any('INSTANCE REMOVED' in l for l in calls))
+        r, calls = self.run_restore()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any('INSTANCE REMOVED -f swift-restore-swift_restore_privacy' in l for l in calls))
+        self.assertIn('was removed with its volume', r.stdout)
 
     # [#1977 · copy run #5c gap (a)] Closed from birth: the new database is created refusing every
     # connection, closed to PUBLIC and to each login, and only then opened for the restore.
@@ -299,7 +305,8 @@ class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):
                 self.assertNotIn('RESTORE OK', r.stdout)
 
     def test_the_dr_mode_restores_quarantined_and_never_says_restore_ok(self):
-        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone'))
+        # [SEC-BACKUP · REVIEW-M S3-1] a DR restore keeps its copy, so it says so up front
+        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection'))
         self.assertEqual(r.returncode, 3, r.stderr)
         create = self.first(calls, 'CREATE DATABASE')
         revoke = self.first(calls, 'REVOKE ALL ON DATABASE "swift_restore_privacy" FROM PUBLIC')
@@ -356,7 +363,7 @@ class TheOffsiteLedger(unittest.TestCase):
         self.assertIn('RESTORE OK', r.stdout)
 
     def test_without_the_live_database_the_offsite_ledger_makes_the_copy_erasure_complete_up_to_its_newest_entry(self):
-        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone', '--ledger-from', self.ledger(OFFSITE)))
+        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection', '--ledger-from', self.ledger(OFFSITE)))
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertEqual([l for l in calls if 'db=swift_live_fixture' in l], [])
         self.assertIn('CREATE TEMP TABLE restore_ledger_closed_accounts', self.replay_script)
@@ -377,7 +384,7 @@ class TheDeidentificationGap(unittest.TestCase):
 
     def test_every_restore_says_so(self):
         # (--compare-source takes the same closing path; the stand-in has no tables to compare)
-        for args, code in (((), 0), (('--no-live-ledger', '--i-know-live-is-gone'), 3)):
+        for args, code in (((), 0), (('--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection'), 3)):
             with self.subTest(args=args):
                 r, _ = self.run_restore('', args)
                 self.assertEqual(r.returncode, code, r.stderr)

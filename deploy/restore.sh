@@ -8,6 +8,7 @@
 #   ./deploy/restore.sh --fetch-signature s3://backup-bucket/key.dump.gpg > file   (verified; or the
 #                       line "swift-backup-signature none" when the object has no signature)
 #   ... --signature-b64 <bundle> --signed-object <name> -     (the drill's plain dump on stdin)
+#   ... --keep-for-inspection   keep the throwaway instance afterwards (otherwise it is removed)
 #
 # [SEC-BACKUP F2] SIGNED DUMPS ONLY. backup.sh signs every dump on the host
 # (deploy/backup-signature.py) and keeps the signature beside it as
@@ -36,6 +37,20 @@
 # from the archive ever runs with superuser rights, and nothing from it reaches
 # the live cluster: the live database is only read (the erasure ledger, the
 # --compare-source snapshot) and gets the rehearsal heartbeat.
+#
+# [SEC-BACKUP · REVIEW-M S3-1] THROWN AWAY. The copy holds every person's data,
+# and is erasure-complete only at the moment of the restore: the instance AND
+# its volume are removed when the run ends, whatever the outcome (success, a
+# failed comparison or check, any error). Only --keep-for-inspection keeps it,
+# and says how and by when to remove it (doctor.sh lists every labelled
+# restore volume and FAILS on one older than a day). A disaster-recovery
+# restore exists to keep its copy, so it needs --keep-for-inspection up front.
+#
+# [SEC-BACKUP · REVIEW-G S4-1] --allow-unsigned-legacy is bounded in time: an
+# off-site object is accepted unsigned only when the bucket's own LastModified
+# predates the first signed backup (recorded by backup.sh in
+# /var/backups/swift/.first-signed-backup, BACKUP_FIRST_SIGNED_FILE; or the
+# owner's copy of that stamp, BACKUP_SIGNED_SINCE, on a new host).
 #
 # [BACKUP-ENC] Production dumps are encrypted to the OWNER's key (backup.sh),
 # and this server never decrypts: an encrypted dump (.gpg) given here is
@@ -77,6 +92,8 @@ NO_LIVE_LEDGER=0
 LIVE_IS_GONE=0
 # [#1977] A failed replay drops the copy (it holds people the live database erased) unless kept.
 KEEP_FAILED=0
+# [SEC-BACKUP · REVIEW-M S3-1] Keep the instance after the run (it is removed otherwise).
+KEEP_INSPECT=0
 # [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
 # base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
 PROJECT=""
@@ -103,6 +120,7 @@ while [ $# -gt 0 ]; do
     --no-live-ledger) NO_LIVE_LEDGER=1 ;;
     --i-know-live-is-gone) LIVE_IS_GONE=1 ;;
     --keep-failed) KEEP_FAILED=1 ;;
+    --keep-for-inspection) KEEP_INSPECT=1; KEEP_FAILED=1 ;;
     --*) die "unknown option $1" ;;
     *) break ;;
   esac
@@ -113,6 +131,8 @@ if [ "$NO_LIVE_LEDGER" = 1 ] || [ "$LIVE_IS_GONE" = 1 ]; then
     die "the disaster-recovery restore needs BOTH --no-live-ledger and --i-know-live-is-gone: without the live database there is no erasure ledger, and the copy will not be erasure-complete"
   [ "$COMPARE_SOURCE" = 0 ] && [ "$FETCH_ENCRYPTED" = 0 ] ||
     die "--no-live-ledger --i-know-live-is-gone restores without a live database: it cannot be combined with --compare-source or --fetch-encrypted"
+  [ "$KEEP_INSPECT" = 1 ] ||
+    die "a disaster-recovery restore exists to keep its copy, and every copy is removed at the end unless kept: add --keep-for-inspection (nothing was started)"
 fi
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
@@ -193,7 +213,8 @@ scratch_admin_psql() {
 }
 remove_instance() {
   [ "$INSTANCE_UP" = 1 ] || return 0
-  docker rm -f "$SCRATCH_CTR" >/dev/null 2>&1 && docker volume rm "$SCRATCH_CTR" >/dev/null 2>&1
+  docker rm -f "$SCRATCH_CTR" >/dev/null 2>&1 && docker volume rm "$SCRATCH_CTR" >/dev/null 2>&1 || return 1
+  INSTANCE_UP=0
 }
 # [#1977 · REVIEW-F S4-1] Once rows are in the copy, a failure DROPS it: a copy the replay did not
 # finish still holds people the live database has erased. --keep-failed keeps it, quarantined.
@@ -218,7 +239,14 @@ deployment_identity_of() {
   if [ "$has" != t ]; then echo "none/none"; return 0; fi
   "$fn" "$1" -tAc "SELECT coalesce(max(environment), 'none') || '/' || coalesce(max(\"deploymentId\"), 'none') FROM deployment_identity;" | tr -d '[:space:]'
 }
-cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
+# Whatever ends the run, an instance nobody asked to keep goes with it (a failure that kept it on
+# purpose, --keep-failed / --keep-for-inspection, already said so).
+cleanup() {
+  [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"
+  if [ "$INSTANCE_UP" = 1 ] && [ "$KEEP_FAILED" = 0 ]; then
+    remove_instance || echo "FATAL: removing the scratch instance $SCRATCH_CTR FAILED: remove it now (docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR), it holds a copy of the database" >&2
+  fi
+}
 trap cleanup EXIT
 private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_DIR"; }; }
 
@@ -376,10 +404,48 @@ verify_signature() {
     *) die "the backup signature of $name was REFUSED (above): this dump was not made and signed by a Swift backup host, or it was changed. Nothing was restored; --allow-unsigned-legacy does not override a signature that fails" ;;
   esac
 }
+# [SEC-BACKUP · REVIEW-G S4-1] When signing began here: the owner's stamp, or backup.sh's record.
+signed_since() {
+  local stamp="${BACKUP_SIGNED_SINCE:-$(env_value BACKUP_SIGNED_SINCE)}" file
+  if [ -z "$stamp" ]; then
+    file="${BACKUP_FIRST_SIGNED_FILE:-$(env_value BACKUP_FIRST_SIGNED_FILE)}"
+    file="${file:-/var/backups/swift/.first-signed-backup}"
+    [ -r "$file" ] && stamp="$(head -1 "$file" | tr -d '[:space:]')"
+  fi
+  [ -z "$stamp" ] && return 0
+  [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "the record of the first signed backup is malformed ($stamp); nothing was restored"
+  printf '%s\n' "$stamp"
+}
+# unsigned_or_die WHAT WHY [WRITTEN]: WRITTEN is when the object was written, as UTC
+# YYYYmmddTHHMMSSZ (the bucket's own LastModified, or a local dump's name stamp).
 unsigned_or_die() {
+  local since="" written="${3:-}"
   [ "$ALLOW_UNSIGNED" = 1 ] ||
     die "$1 has NO signature ($2). Swift backups are signed; an unsigned dump is refused, because anyone who can write to the backup bucket could have planted it. For a dump made before signing existed, the owner may pass --allow-unsigned-legacy"
+  since="$(signed_since)"
+  if [ -n "$since" ] && [ -n "${4:-}" ]; then
+    { [ -n "$written" ] && [[ "$written" < "$since" ]]; } ||
+      die "$1 has NO signature and was written after the first signed backup (server time ${written:-unknown}, signing began $since): an unsigned object from after that is not a legacy dump. Refused even with --allow-unsigned-legacy; nothing was restored"
+    echo "legacy check: $1 was written at server time $written, before the first signed backup ($since)" >&2
+  elif [ -n "${4:-}" ]; then
+    echo "WARNING: there is no record of the first signed backup on this host (BACKUP_FIRST_SIGNED_FILE / BACKUP_SIGNED_SINCE): the object's time (${written:-unknown}) cannot be checked against it." >&2
+  fi
   echo "WARNING: RESTORING AN UNSIGNED DUMP ($1) because --allow-unsigned-legacy was given. Its origin is NOT proven." >&2
+}
+# A server or name time as UTC YYYYmmddTHHMMSSZ (empty when it cannot be read).
+utc_stamp() {
+  python3 -I -c 'import datetime, re, sys
+v = sys.argv[1].strip()
+m = re.search(r"(\d{8}T\d{6}Z)", v)
+if m and not re.search(r"\d{4}-\d{2}-\d{2}", v):
+    print(m.group(1)); sys.exit(0)
+try:
+    t = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+except ValueError:
+    sys.exit(0)
+if t.tzinfo is None:
+    t = t.replace(tzinfo=datetime.timezone.utc)
+print(t.astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))' "$1"
 }
 if [ "$FETCH_ENCRYPTED" = 1 ]; then
   [[ "$SOURCE" == s3://*.dump.gpg ]] || die "--fetch-encrypted streams only an encrypted off-site dump (s3://…/….dump.gpg); a plain dump never leaves this way"
@@ -431,7 +497,10 @@ if [[ "$SOURCE" == s3://* ]]; then
   if [ "$HAVE_SIG" = 1 ]; then
     verify_signature "$SIG" "$(basename "$SOURCE")" --object "$DUMP"
   else
-    unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket"
+    KEY_PATH="${SOURCE#s3://"$BACKUP_BUCKET"/}"
+    WRITTEN="$(aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" --query LastModified --output text 2>/dev/null || true)"
+    echo "legacy check: the bucket says $(basename "$SOURCE") was written at server time ${WRITTEN:-unknown}" >&2
+    unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket" "$(utc_stamp "$WRITTEN")" checked
   fi
   if [ "$FETCH_ENCRYPTED" = 1 ]; then
     # Only ciphertext: an OpenPGP message, never a plain archive.
@@ -477,7 +546,7 @@ else
   if [ -f "$DUMP.sig" ]; then
     verify_signature "$DUMP.sig" "$(basename "$DUMP")" --object "$DUMP"
   else
-    unsigned_or_die "$DUMP" "no $(basename "$DUMP").sig beside it"
+    unsigned_or_die "$DUMP" "no $(basename "$DUMP").sig beside it" "$(utc_stamp "$(basename "$DUMP")")" checked
   fi
 fi
 [ -f "$DUMP" ] || die "dump file does not exist"
@@ -517,7 +586,10 @@ docker run -d --name "$SCRATCH_CTR" --label swift.restore=1 --network none \
   -v "$SCRATCH_CTR:/var/lib/postgresql/data" "$SCRATCH_IMAGE" >/dev/null ||
   die_copy "the throwaway instance could not be started"
 READY=0
-for _ in $(seq 1 180); do
+# [SEC-BACKUP · CI 28 Oct] 180 SECONDS, by the clock: a `sleep` that returns at once must not
+# turn the wait into 180 quick tries.
+READY_BY=$((SECONDS + 180))
+while [ "$SECONDS" -lt "$READY_BY" ]; do
   INIT_LOG="$(docker logs "$SCRATCH_CTR" 2>&1 || true)"
   if [[ "$INIT_LOG" == *"PostgreSQL init process complete"* ]] &&
      docker exec "$SCRATCH_CTR" pg_isready -q -h /var/run/postgresql -U "$SCRATCH_ADMIN" >/dev/null 2>&1; then
@@ -746,9 +818,9 @@ SELECT line FROM (
 ) s ORDER BY line COLLATE \"C\";"
 compare_with_source() {
   local live_snapshot scratch_snapshot
-  live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
-  scratch_snapshot="$(scratch_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
-  grep -q '^rows|' <<<"$live_snapshot" || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die_copy "could not read the source database $LIVE_DB"
+  scratch_snapshot="$(scratch_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die_copy "could not read the scratch database"
+  grep -q '^rows|' <<<"$live_snapshot" || die_copy "the source database $LIVE_DB has no tables to compare"
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
@@ -770,7 +842,7 @@ compare_with_source() {
   if [ "$live_snapshot" != "$scratch_snapshot" ]; then
     echo "MISMATCH between the source and the scratch restore (first differences; < source, > scratch):"
     diff <(printf '%s\n' "$live_snapshot") <(printf '%s\n' "$scratch_snapshot") | grep -E '^[<>]' | cut -c1-240 | head -40 || true
-    die "the restore does not match its source; scratch database retained"
+    die_copy "the restore does not match its source"
   fi
   echo "compare-source: in schemas public and swift_qr the scratch restore equals its source in every table's row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions"
 }
@@ -781,7 +853,7 @@ else
   check users "SELECT count(*) FROM users;" 1
   check vendors "SELECT count(*) FROM vendors;" 0
   check orders "SELECT count(*) FROM orders;" 0
-  [ "$FAILED" -eq 0 ] || die "restore failed sanity checks; scratch database retained"
+  [ "$FAILED" -eq 0 ] || die_copy "restore failed sanity checks"
 fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
@@ -802,11 +874,11 @@ if [ "$NO_LIVE_LEDGER" = 1 ]; then
     echo "NOT erasure-complete: replay the off-site ledger before use" >&2
     echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
   fi
-  echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained in $SCRATCH_CTR, quarantined, NOT for use (remove: docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR)"
+  echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database kept in $SCRATCH_CTR (--keep-for-inspection), quarantined, NOT for use (remove: docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR)"
   exit 3
 fi
 echo "quarantine: $SCRATCH lives in the throwaway instance $SCRATCH_CTR (no network); only the restore login (and the instance's superuser) can connect; no application login can"
-echo "RESTORE OK — ${SECONDS_TAKEN}s; scratch database retained for inspection in the throwaway instance $SCRATCH_CTR"
+echo "RESTORE OK — ${SECONDS_TAKEN}s (in the throwaway instance $SCRATCH_CTR)"
 # A failed rehearsal heartbeat cannot turn a verified scratch restore into a
 # failure, but doctor.sh will keep warning until a successful record exists.
 db_psql "$LIVE_DB" -q <<SQL >/dev/null 2>&1 || echo "note: rehearsal heartbeat write failed" >&2
@@ -817,6 +889,13 @@ INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_restore_rehearsal_seconds', to_jsonb($SECONDS_TAKEN), now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
 SQL
-echo "Inspect it: docker exec -it $SCRATCH_CTR psql -h /var/run/postgresql -U $RESTORE_LOGIN -d $SCRATCH. The quarantine covers the logins that exist now: re-run the quarantine before use (a login created later is not covered), and drop the copy after use: docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR"
 echo "Document objects and MASTER_KEK require separate recovery proof."
-echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."
+if [ "$KEEP_INSPECT" = 1 ]; then
+  echo "KEPT (--keep-for-inspection): $SCRATCH_CTR holds a full copy of the database. Inspect it: docker exec -it $SCRATCH_CTR psql -h /var/run/postgresql -U $RESTORE_LOGIN -d $SCRATCH. The quarantine covers the logins that exist now: re-run the quarantine before use (a login created later is not covered)."
+  echo "Remove it within 24 hours (doctor.sh fails after that), and drop the copy after use: docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR"
+  echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."
+else
+  remove_instance ||
+    die "the restore passed but removing the scratch instance $SCRATCH_CTR FAILED: remove it now (docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR), it holds a copy of the database"
+  echo "the scratch instance $SCRATCH_CTR was removed with its volume (pass --keep-for-inspection to keep a copy)"
+fi

@@ -177,7 +177,8 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(one(LIVE, `SELECT "wrappedDek" IS NULL FROM encrypted_objects WHERE "fileKey" = '${people.key}'`)).toBe('t');
     expect(Number(one(LIVE, `SELECT count(*) FROM deletion_receipt WHERE "subjectId" = '${people.closed}'`))).toBe(1);
 
-    const r = restore(before);
+    // (kept on purpose to look inside it; by default the copy goes with its instance: proven below)
+    const r = restore(before, { args: ['--keep-for-inspection'] });
     expect(r.status, r.stderr + r.stdout).toBe(0);
     expect(r.stdout).toContain('RESTORE OK');
     expect(r.stdout).toMatch(/erasure ledger replayed: 1 destroyed keys, 1 receipts, 1 retired documents, 1 closed accounts in the live ledger; changed in this copy: .*1 closed accounts/);
@@ -214,6 +215,9 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(r.stdout).toContain('changed in this copy: nothing (the copy already matched)');
     expect(r.stdout).toContain('the scratch restore equals its source');
     expect(r.stdout).toContain('RESTORE OK');
+    // [SEC-BACKUP · REVIEW-M S3-1] not kept: the copy is gone with its instance and volume
+    expect(instanceExists(r.scratch)).toBe(false);
+    expect(spawnSync(REAL_DOCKER, ['volume', 'inspect', instanceOf(r.scratch)], { stdio: 'ignore' }).status).not.toBe(0);
   });
 
   it('a replay that fails reports no restore and DROPS the copy (erased people must not sit in it); --keep-failed keeps it quarantined and unchanged', () => {
@@ -232,7 +236,7 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
   });
 
   it('the disaster-recovery mode (no live ledger) restores the copy quarantined and never calls it restored', () => {
-    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone'] });
+    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection'] });
     expect(r.status, r.stderr + r.stdout).toBe(3);
     expect(r.stdout + r.stderr).toContain('NOT erasure-complete: replay the off-site ledger before use');
     expect(r.stdout + r.stderr).not.toContain('RESTORE OK');
@@ -250,7 +254,7 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     const file = join(tmp, 'offsite-ledger.jsonl');
     writeFileSync(file, lines + '\n', { mode: 0o600 });
     const newest = psql(LIVE, `SELECT to_char(max("createdAt"), 'YYYY-MM-DD"T"HH24:MI:SS.MS') FROM erasure_ledger_entry`);
-    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--ledger-from', file] });
+    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection', '--ledger-from', file] });
     expect(r.status, r.stderr + r.stdout).toBe(3);
     expect(r.stdout + r.stderr).toContain(`erasure-complete up to ${newest}`);
     expect(r.stdout + r.stderr).not.toContain('RESTORE OK');

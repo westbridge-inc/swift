@@ -945,6 +945,86 @@ sys.exit(0)
         self.assertEqual(self.stdin_log.read_bytes(), b"<<BACKUPKEYID01\nright\n>>\n")
 
 
+FAKE_BUCKET_ADMIN = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+state = os.environ["BUCKET_STATE"]
+st = json.load(open(state)) if os.path.exists(state) else {}
+with open(os.environ["CALL_LOG"], "a") as log:
+    log.write(" ".join(a for a in args if a.startswith(("put-", "get-"))) + "\n")
+mount = args[args.index("-v") + 1].split(":")
+local = lambda p: p.replace(mount[1], mount[0], 1)
+def save(): json.dump(st, open(state, "w"))
+if "get-bucket-lifecycle-configuration" in args:
+    if not st.get("rules"):
+        sys.stderr.write("An error occurred (NoSuchLifecycleConfiguration) when calling the GetBucketLifecycleConfiguration operation\n"); sys.exit(254)
+    print(json.dumps({"Rules": st["rules"]})); sys.exit(0)
+if "put-bucket-lifecycle-configuration" in args:
+    if os.environ.get("REFUSE_LIFECYCLE"): sys.stderr.write("AccessDenied\n"); sys.exit(254)
+    src = args[args.index("--lifecycle-configuration") + 1][len("file://"):]
+    st["rules"] = json.load(open(local(src)))["Rules"]; save(); sys.exit(0)
+if "put-bucket-versioning" in args:
+    st["versioning"] = "Enabled"; save(); sys.exit(0)
+if "get-bucket-versioning" in args:
+    print(st.get("versioning", "None")); sys.exit(0)
+sys.exit(9)
+'''
+
+
+class VersioningIsBounded(unittest.TestCase):
+    """[SEC-BACKUP · REVIEW-M S3-2] Versioning keeps each overwritten or deleted dump: bounded by a
+    lifecycle rule that expires old versions, set BEFORE versioning is on, keeping the bucket's other
+    rules; --status fails while versioning runs without that bound."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-versioning-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        (self.bin / "docker").write_text(FAKE_BUCKET_ADMIN)
+        (self.bin / "docker").chmod(0o755)
+        self.state = self.tmp / "bucket.json"
+        self.log = self.tmp / "calls"
+        self.log.write_text("")
+
+    def run_it(self, *args, **extra):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("BACKUP_", "AWS_"))}
+        env.update({"PATH": f"{self.bin}:{os.environ['PATH']}", "BUCKET_STATE": str(self.state), "CALL_LOG": str(self.log),
+                    "BACKUP_BUCKET": "swift-backups", "AWS_CLI_IMAGE": IMAGE, "AWS_ACCESS_KEY_ID": "id",
+                    "AWS_SECRET_ACCESS_KEY": "secret", **extra})
+        return subprocess.run(["bash", str(DEPLOY / "backup-versioning.sh"), *args], env=env, text=True,
+                              capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def test_old_versions_expire_and_the_rule_comes_before_versioning_keeping_other_rules(self):
+        import json
+        self.state.write_text(json.dumps({"rules": [{"ID": "dumps-90d", "Status": "Enabled", "Prefix": "db/", "Expiration": {"Days": 90}}]}))
+        r = self.run_it(BACKUP_VERSION_RETAIN_DAYS="14")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("old versions: expire after 14 days", r.stdout)
+        self.assertIn("versioning: Enabled", r.stdout)
+        st = json.loads(self.state.read_text())
+        ours = next(x for x in st["rules"] if x["ID"] == "swift-backup-noncurrent-versions")
+        self.assertEqual(ours["NoncurrentVersionExpiration"], {"NoncurrentDays": 14})
+        self.assertEqual(ours["Expiration"], {"ExpiredObjectDeleteMarker": True})
+        self.assertTrue(any(x["ID"] == "dumps-90d" for x in st["rules"]))
+        calls = self.log.read_text().splitlines()
+        self.assertLess(calls.index("put-bucket-lifecycle-configuration"), calls.index("put-bucket-versioning"))
+
+    def test_without_the_bound_versioning_is_not_turned_on(self):
+        r = self.run_it(REFUSE_LIFECYCLE="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("versioning was NOT turned on", r.stderr)
+        self.assertNotIn("put-bucket-versioning", self.log.read_text())
+
+    def test_status_fails_while_versioning_runs_without_an_expiry(self):
+        import json
+        self.state.write_text(json.dumps({"versioning": "Enabled"}))
+        r = self.run_it("--status")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("NO expiry rule", r.stdout)
+        self.assertIn("kept forever", r.stderr)
+
+
 class DoctorSeesWhatBackupsLeaveBehind(unittest.TestCase):
     """[SEC-BACKUP · REVIEW-M S3-1 + REVIEW-G S4-2] doctor.sh lists every labelled restore volume (a
     container can be removed and leave its volume) and FAILS past 24 h; and it FAILS when an installed
@@ -994,17 +1074,17 @@ esac
         self.assertIn("docker volume rm swift-restore-swift_restore_x", out)
         fresh = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         out = self.doctor(volumes="swift-restore-swift_restore_x", ages=fresh)
-        line = next(l for l in out.splitlines() if "swift-restore-swift_restore_x" in l)
+        line = next(l.strip() for l in out.splitlines() if "swift-restore-swift_restore_x" in l)
         self.assertTrue(line.startswith("WARN"), line)
 
     def test_a_backup_unit_installed_before_the_backup_store_fails_the_doctor(self):
         names = ("BACKUP_AWS_ACCESS_KEY_ID", "BACKUP_AWS_SECRET_ACCESS_KEY", "BACKUP_KEY_SOURCE", "BACKUP_SIGNING_KEY")
         out = self.doctor(unit_creds=names, present=names[:2])
-        line = next(l for l in out.splitlines() if "swift-backup.service" in l and "BACKUP_KEY_SOURCE" in l)
+        line = next(l.strip() for l in out.splitlines() if "swift-backup.service" in l and "BACKUP_KEY_SOURCE" in l)
         self.assertTrue(line.startswith("FAIL"), line)
         self.assertIn("swift-secrets backup init", line)
         out = self.doctor(unit_creds=names, present=names)
-        self.assertFalse([l for l in out.splitlines() if l.startswith("FAIL") and "swift-backup.service" in l], out)
+        self.assertFalse([l for l in out.splitlines() if l.strip().startswith("FAIL") and "swift-backup.service" in l], out)
         self.assertIn("ok    swift-backup.service: every credential it loads is in the backup store", out)
 
 

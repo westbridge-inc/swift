@@ -32,7 +32,8 @@
 #
 # Pass means the host's last lines: the compare-source line and RESTORE OK,
 # then DRILL OK here. Run it on a quiet database right after a backup, as the
-# runbook says; the scratch database stays on the host for inspection.
+# runbook says; the scratch copy is removed with its throwaway instance when
+# the host's restore ends (its printed lines are the evidence).
 #
 # Needs here: bash, ssh, gpg (GnuPG 2.1+). Nothing is installed.
 set -euo pipefail
@@ -161,5 +162,5 @@ PASSPHRASE=""
 [ "${STAGES[0]}" = 0 ] || die "the host could not stream the encrypted backup (exit ${STAGES[0]}); nothing was restored from it"
 [ "${STAGES[1]}" = 0 ] || die "nothing arrived from the host; nothing was restored"
 [ "${STAGES[2]}" = 0 ] || die "this computer could not decrypt the backup (wrong key or passphrase, or it is not encrypted to this key); the host received nothing usable"
-[ "${STAGES[3]}" = 0 ] || die "the host's restore or comparison failed (exit ${STAGES[3]}); see its lines above. The scratch database, if created, is kept for inspection"
+[ "${STAGES[3]}" = 0 ] || die "the host's restore or comparison failed (exit ${STAGES[3]}); see its lines above. The scratch copy, if one was made, was removed with its throwaway instance"
 echo "DRILL OK: $OBJECT decrypted on this computer and restored on the host into $SCRATCH"
