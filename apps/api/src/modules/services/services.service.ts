@@ -5,7 +5,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { assertUsersMayContact } from '../moderation/user-block.service';
-import { formatGuyanaTime } from '../../utils/guyana-day';
+import { formatGuyanaTime, guyanaDayKey } from '../../utils/guyana-day';
 import { ownerWallSystem } from '../../lib/owner-rls';
 
 /** The verification projection is used both on the root client and inside
@@ -29,6 +29,18 @@ export {
   qualificationTypeMatchesTrade,
   type ServiceTradeId,
 } from './service-catalog';
+/** [S4 · REVIEW-F S3-1] The day a reminder names, from the Guyana calendar
+ * days of the slot and of the sweep: the sweep runs hourly over the next 24
+ * hours, so a slot later TODAY is reminded at once and must not read
+ * "tomorrow". Anything else (never, inside a 24 h window) reads "coming up". */
+export function reminderDayWord(slot: Date, now: Date): 'today' | 'tomorrow' | 'coming up' {
+  const slotDay = guyanaDayKey(slot);
+  if (slotDay === guyanaDayKey(now)) return 'today';
+  const [y, m, d] = guyanaDayKey(now).split('-').map(Number);
+  const nextDay = new Date(Date.UTC(y!, m! - 1, d! + 1)).toISOString().slice(0, 10);
+  return slotDay === nextDay ? 'tomorrow' : 'coming up';
+}
+
 /** The once-per-booking-per-person key (Notification's per-user dedupe key):
  * the unique index refuses a second reminder for the same booking to the same
  * person, even from a retried or overlapping sweep. */
@@ -99,7 +111,7 @@ export async function sendBookingReminders(
       if (await alreadyReminded(userId, [{ kind: 'booking_reminder', idKey: 'refId' }], job.id)) continue;
       await notify({
         userId,
-        title: 'Booking tomorrow',
+        title: `Booking ${reminderDayWord(job.scheduledFor!, now)}`,
         body,
         data: { kind: 'booking_reminder', refId: job.id },
       });
@@ -124,9 +136,11 @@ export async function sendBookingReminders(
   });
   for (const b of bookings) {
     const when = formatGuyanaTime(b.slotStart, { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
+    const weekday = formatGuyanaTime(b.slotStart, { weekday: 'short' }, 'en-US');
+    const time = formatGuyanaTime(b.slotStart, { hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
     for (const [userId, audience, body] of [
       [b.customerId, 'customer', `${b.item.name} at ${b.item.vendor.name} is booked for ${when}.`],
-      [b.item.vendor.owner.userId, 'business', `${b.item.name} appointment coming up ${when}.`],
+      [b.item.vendor.owner.userId, 'business', `${b.item.name} appointment on ${weekday} at ${time}.`],
     ] as Array<[string, 'customer' | 'business', string]>) {
       // A person who is both sides finds the copy just sent under the same booking and is skipped.
       if (await alreadyReminded(userId, [
@@ -135,7 +149,7 @@ export async function sendBookingReminders(
       ], b.id)) continue;
       await notify({
         userId,
-        title: 'Appointment tomorrow',
+        title: `Appointment ${reminderDayWord(b.slotStart, now)}`,
         body,
         audience,
         dedupeKey: appointmentReminderDedupeKey(b.id),

@@ -330,11 +330,16 @@ describe('Q12 · B1 — a 10:00 Guyana slot is stored as 14:00Z and returned ide
     expect((await accept(order.id)).statusCode).toBe(200);
     const bookingId = (await bookingOf(order.id)).id;
 
-    const sent: Array<{ userId: string; body: string; data: Record<string, unknown> }> = [];
+    const sent: Array<{ userId: string; title: string; body: string; data: Record<string, unknown> }> = [];
     await sendBookingReminders(app.prisma, async (n) => { sent.push(n); });
     const mine = sent.filter((n) => n.data['bookingId'] === bookingId);
+    // [REVIEW-F S3-1] The title names the slot's Guyana day against the sweep's (UTC−4, read as UTC fields).
+    const sweepLocal = new Date(Date.now() - 4 * 60 * MINUTE);
+    const sameDay = sweepLocal.toISOString().slice(0, 10) === localClock.toISOString().slice(0, 10);
+    expect(mine.map((n) => n.title)).toEqual([sameDay ? 'Appointment today' : 'Appointment tomorrow', sameDay ? 'Appointment today' : 'Appointment tomorrow']);
     expect(mine.find((n) => n.userId === customer.userId)?.body).toBe(`Q12 Cut at Q12 Barber is booked for ${expectedWhen}.`);
-    expect(mine.find((n) => n.userId === provider.userId)?.body).toBe(`Q12 Cut appointment coming up ${expectedWhen}.`);
+    const [expectedDay, ...expectedTime] = expectedWhen.split(' ');
+    expect(mine.find((n) => n.userId === provider.userId)?.body).toBe(`Q12 Cut appointment on ${expectedDay} at ${expectedTime.join(' ')}.`);
   });
 
   // [S4 · BOOK-MEASURE R5] Composed exactly as the booking-reminders worker
@@ -369,7 +374,7 @@ describe('Q12 · B1 — a 10:00 Guyana slot is stored as 14:00Z and returned ide
     await tick(); // and a later sweep
 
     const rows = (await app.prisma.notification.findMany({
-      where: { userId: { in: [...parties] }, title: 'Appointment tomorrow' },
+      where: { userId: { in: [...parties] }, title: { in: ['Appointment today', 'Appointment tomorrow'] } },
       select: { userId: true, data: true },
     })).filter((row) => namesThisBooking(row.data as Record<string, unknown>));
     expect(rows.filter((row) => row.userId === customer.userId).map((row) => row.data)).toEqual([

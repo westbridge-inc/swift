@@ -201,13 +201,13 @@ describe('Reminders — once per side inside 24h', () => {
     // assert on THIS job's two parties rather than the return total.
     await sendBookingReminders(app.prisma, notify);
     const afterFirst = await app.prisma.notification.count({
-      where: { userId: { in: [customer.userId, providerUser.userId] }, title: 'Booking tomorrow' },
+      where: { userId: { in: [customer.userId, providerUser.userId] }, title: { in: ['Booking today', 'Booking tomorrow'] } },
     });
     expect(afterFirst).toBe(2); // customer + provider, once each
 
     await sendBookingReminders(app.prisma, notify);
     const afterSecond = await app.prisma.notification.count({
-      where: { userId: { in: [customer.userId, providerUser.userId] }, title: 'Booking tomorrow' },
+      where: { userId: { in: [customer.userId, providerUser.userId] }, title: { in: ['Booking today', 'Booking tomorrow'] } },
     });
     expect(afterSecond).toBe(2); // dedupe holds
   });
@@ -237,7 +237,7 @@ describe('Reminders — once per side inside 24h', () => {
     };
     await sendBookingReminders(app.prisma, notify);
     const notes = await app.prisma.notification.count({
-      where: { userId: { in: [other.userId, provider2User.userId] }, title: 'Booking tomorrow' },
+      where: { userId: { in: [other.userId, provider2User.userId] }, title: { in: ['Booking today', 'Booking tomorrow'] } },
     });
     expect(notes).toBe(0); // unconfirmed → silent
   });

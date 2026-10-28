@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { appointmentReminderDedupeKey, sendBookingReminders, type BookingReminder } from '../modules/services/services.service';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { appointmentReminderDedupeKey, reminderDayWord, sendBookingReminders, type BookingReminder } from '../modules/services/services.service';
 
 // ---------------------------------------------------------------------------
 // [S4 · BOOK-MEASURE R5] RIGHT SCREEN, RIGHT PERSON — the store appointment's
@@ -92,16 +92,16 @@ describe('[S4] a store appointment reminder names the booking and whose copy it 
     const customer = h.delivered.find((n) => n.userId === 'cust-7');
     const store = h.delivered.find((n) => n.userId === 'owner-7');
     expect(customer).toMatchObject({
-      title: 'Appointment tomorrow', audience: 'customer', dedupeKey: appointmentReminderDedupeKey('booking-7'),
+      audience: 'customer', dedupeKey: appointmentReminderDedupeKey('booking-7'),
       data: { kind: 'appointment_reminder', bookingId: 'booking-7', orderId: 'order-7' },
     });
     expect(store).toMatchObject({
-      title: 'Appointment tomorrow', audience: 'business', dedupeKey: appointmentReminderDedupeKey('booking-7'),
+      audience: 'business', dedupeKey: appointmentReminderDedupeKey('booking-7'),
       data: { kind: 'appointment_reminder', bookingId: 'booking-7', orderId: 'order-7' },
     });
-    // The words did not change.
+    // The customer's words did not change; the store's read naturally (REVIEW-F S4-1, pinned below).
     expect(customer!.body).toMatch(/^Haircut at Sharp Cuts is booked for /);
-    expect(store!.body).toMatch(/^Haircut appointment coming up /);
+    expect(store!.body).toMatch(/^Haircut appointment on [A-Z][a-z]{2} at \d{1,2}:\d{2} [AP]M\.$/);
   });
 
   it('a confirmed booking with no order on file names no order (never an invented one) and keeps its audience', async () => {
@@ -177,5 +177,61 @@ describe('[S4] once per booking per person', () => {
     await Promise.all([sendBookingReminders(h.prisma, h.deliver), sendBookingReminders(h.prisma, h.deliver)]);
     const perPerson = h.inbox.reduce<Record<string, number>>((acc, row) => ({ ...acc, [row.userId]: (acc[row.userId] ?? 0) + 1 }), {});
     expect(perPerson).toEqual({ 'customer-1': 1, 'owner-1': 1 });
+  });
+});
+
+// [REVIEW-F S3-1] The sweep runs hourly over the next 24 hours, so a slot later
+// TODAY is reminded at once: its title must not say "tomorrow". The day is the
+// Guyana calendar day (UTC−4, no daylight saving) of the slot against the sweep.
+describe('[S4] the reminder title names the right day, in Guyana time', () => {
+  afterEach(() => vi.useRealTimers());
+
+  /** One sweep at `nowIso` over one store booking and one service job, both at `slotIso`. */
+  async function titlesAt(nowIso: string, slotIso: string) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(nowIso));
+    const slot = new Date(slotIso);
+    const booking = { ...storeBooking(), slotStart: slot };
+    const job = { id: 'job-1', customerId: 'cust-j', scheduledFor: slot, provider: { userId: 'pro-j', trade: 'Plumber' } };
+    const h = harness([booking], [job]);
+    await sendBookingReminders(h.prisma, h.deliver);
+    return {
+      appointment: [...new Set(h.delivered.filter((n) => n.data['kind'] === 'appointment_reminder').map((n) => n.title))],
+      job: [...new Set(h.delivered.filter((n) => n.data['kind'] === 'booking_reminder').map((n) => n.title))],
+      store: h.delivered.find((n) => n.audience === 'business')!.body,
+    };
+  }
+
+  it('a slot later the same Guyana day says today (08:00 now, 15:00 slot)', async () => {
+    const t = await titlesAt('2026-10-28T12:00:00.000Z', '2026-10-28T19:00:00.000Z');
+    expect(t.appointment).toEqual(['Appointment today']);
+    expect(t.job).toEqual(['Booking today']);
+  });
+
+  it('a slot on the next Guyana day says tomorrow (08:00 now, 09:00 next day)', async () => {
+    const t = await titlesAt('2026-10-28T12:00:00.000Z', '2026-10-29T13:00:00.000Z');
+    expect(t.appointment).toEqual(['Appointment tomorrow']);
+    expect(t.job).toEqual(['Booking tomorrow']);
+  });
+
+  it('the Guyana midnight decides, not the UTC one: 23:30 now, 23:50 is today and 00:30 is tomorrow', async () => {
+    // 03:30Z, 03:50Z and 04:30Z share one UTC date; in Guyana the last one is past midnight.
+    expect((await titlesAt('2026-10-29T03:30:00.000Z', '2026-10-29T03:50:00.000Z')).appointment).toEqual(['Appointment today']);
+    expect((await titlesAt('2026-10-29T03:30:00.000Z', '2026-10-29T04:30:00.000Z')).appointment).toEqual(['Appointment tomorrow']);
+    expect((await titlesAt('2026-10-29T03:30:00.000Z', '2026-10-29T04:30:00.000Z')).job).toEqual(['Booking tomorrow']);
+    // 20:00 in Guyana is already the next UTC date: a 22:00 slot is still today.
+    expect((await titlesAt('2026-10-29T00:00:00.000Z', '2026-10-29T02:00:00.000Z')).appointment).toEqual(['Appointment today']);
+  });
+
+  it('the store\'s copy reads naturally: the service, the day and the time', async () => {
+    const t = await titlesAt('2026-10-28T12:00:00.000Z', '2026-10-28T19:00:00.000Z');
+    expect(t.store).toBe('Haircut appointment on Wed at 3:00 PM.');
+  });
+
+  it('reminderDayWord never says tomorrow for today, and falls back to "coming up" beyond tomorrow', () => {
+    const now = new Date('2026-10-28T12:00:00.000Z');
+    expect(reminderDayWord(new Date('2026-10-29T03:59:00.000Z'), now)).toBe('today'); // 23:59 Guyana
+    expect(reminderDayWord(new Date('2026-10-29T04:00:00.000Z'), now)).toBe('tomorrow'); // 00:00 Guyana
+    expect(reminderDayWord(new Date('2026-10-31T04:00:00.000Z'), now)).toBe('coming up');
   });
 });
