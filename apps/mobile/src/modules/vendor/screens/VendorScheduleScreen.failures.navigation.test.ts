@@ -248,8 +248,8 @@ describe('[BOOK-S5a] Move a booking from the Schedule', () => {
       await act(async () => { [...dialog.querySelectorAll('button')].find((b) => b.textContent === formatAppointmentDay(appointmentDayKey(later)))!.click(); });
       await settle();
     }
-    await act(async () => { [...host.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent === formatAppointmentClock(later))!.click(); });
-    await act(async () => { [...host.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent?.startsWith('Move to '))!.click(); });
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent === formatAppointmentClock(later))!.click(); });
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent?.startsWith('Move to '))!.click(); });
     await settle();
     expect(fx.move).toHaveBeenCalledExactlyOnceWith({ bookingId: 'b-1', newSlotStart: later.toISOString() });
     expect(host.querySelector('[role="dialog"]'), 'a moved booking closes the popup').toBeNull();
