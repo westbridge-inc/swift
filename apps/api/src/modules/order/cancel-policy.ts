@@ -25,6 +25,8 @@
 // loads boot-config with no services) stay free of services, so nothing heavy (Prisma, queues, notification) may be imported by this file.
 // The food-age fact is read by `readTooLateToDeliver` in dispatch/rescue.ts.
 import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
+// [BOOK-S3] The switch reader is a pure function with no imports: this file stays light.
+import { instantBookingEnabled } from '../booking/instant-booking';
 
 /** [owner #50 · owner ruling 14 Oct · owner 22 Oct 2026] Minutes after the
  *  driver, rider or provider ACCEPTED a ride, a parcel or a booking during
@@ -33,6 +35,21 @@ import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-genera
  *  free at any age; under LIFECYCLE_V2 a held order nobody holds is free for
  *  its whole hold (ORDER_HOLD_MINUTES — a different, unchanged timer). */
 export const FREE_CANCEL_WINDOW_MIN = 1;
+
+/** [BOOK-S3 · owner B1 28 Oct 2026] With INSTANT_BOOKING on, an APPOINTMENT
+ *  (a Services store booking) the business has confirmed cancels free until
+ *  this many minutes before it starts — never less than the one-minute window
+ *  after its confirmation (`FREE_CANCEL_WINDOW_MIN`), so a booking made close
+ *  to its time can still be undone at once. Rides and parcels keep the
+ *  one-minute rule. Switch OFF: bookings keep the one-minute rule too.
+ *  The Terms and refunds-page wording for it is owed by BOOK-S7 (LEGAL_VERSION
+ *  bump + pins); the switch stays off until then. */
+export const APPOINTMENT_FREE_CANCEL_BEFORE_MIN = 120;
+
+/** [BOOK-S3 · B1] Does the appointment rule decide this order's free window? */
+function appointmentWindowApplies(order: CancellationSnapshot): order is CancellationSnapshot & { appointmentSlot: Date } {
+  return order.fulfillment === 'APPOINTMENT' && order.appointmentSlot != null && instantBookingEnabled();
+}
 
 /** [owner #52 · #50] How long past its promised moment a RIDE, a PARCEL or a
  *  BOOKING (or the driver, rider or provider serving it) must be before the
@@ -282,7 +299,12 @@ function notAcceptedYet(order: CancellationSnapshot): boolean {
 function freeWindowEnd(order: CancellationSnapshot): Date | null {
   if (notAcceptedYet(order)) return order.holdExpiresAt ?? null;
   const accepted = order.assignedAt ?? order.acceptedAt ?? order.placedAt;
-  return plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
+  const afterAcceptance = plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
+  // [BOOK-S3 · owner B1] An appointment: free until two hours before it starts.
+  if (appointmentWindowApplies(order)) {
+    return latest([plusMinutes(order.appointmentSlot, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN), afterAcceptance]);
+  }
+  return afterAcceptance;
 }
 
 /**
@@ -348,6 +370,9 @@ function tooLateMessage(order: CancellationSnapshot): string {
 
 /** [owner #50] Who the customer contacts instead, in the refusal's words. */
 function windowClosedMessage(order: CancellationSnapshot): string {
+  if (appointmentWindowApplies(order)) {
+    return `This booking can no longer be cancelled in the app: it starts in less than ${APPOINTMENT_FREE_CANCEL_BEFORE_MIN / 60} hours. Contact the provider to change or cancel it.`;
+  }
   const closed = `the ${FREE_CANCEL_WINDOW_MIN}-minute cancellation window has passed`;
   if (order.fulfillment === 'APPOINTMENT') return `This booking can no longer be cancelled in the app: ${closed}. Contact the provider to change or cancel it.`;
   if (order.orderType === 'TAXI') return `This ride can no longer be cancelled in the app: ${closed}. Contact your driver.`;

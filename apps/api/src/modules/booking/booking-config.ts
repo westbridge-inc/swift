@@ -44,8 +44,43 @@ export function overlappingWindowsMessage([a, b]: [BookingWindow, BookingWindow]
   return `Two opening times on ${DAY_NAMES[a.dayOfWeek] ?? 'one day'} overlap (${a.start}–${a.end} and ${b.start}–${b.end}). Join them into one, or change one so they do not overlap.`;
 }
 
-/** Booking settings an older app does not send: kept from the stored config when absent. */
-export const BOOKING_CONFIG_KEPT_FIELDS = ['bufferMinutes', 'minNoticeMinutes'] as const;
+/** Booking settings an older app does not send: kept from the stored config when absent.
+ *  [BOOK-S3] "Confirm bookings automatically" (instantBooking) too: no app before S5a sends it. */
+export const BOOKING_CONFIG_KEPT_FIELDS = ['bufferMinutes', 'minNoticeMinutes', 'instantBooking'] as const;
+
+/** [BOOK-S3] The refusal of "Confirm bookings automatically" while INSTANT_BOOKING is off. */
+export const INSTANT_BOOKING_OFF_MESSAGE = 'Confirming bookings automatically is not available yet. Bookings wait for you to accept them.';
+
+/**
+ * [BOOK-S3 · owner A4/C2] The instant-booking settings of a listing save.
+ *  - Switch OFF: no listing can be set to confirm bookings automatically. A
+ *    save asking for it is refused (null); a save sending `false` stores
+ *    nothing for it (the listing stays as it is).
+ *  - Switch ON: a listing becoming bookable now (nothing stored yet) starts
+ *    as confirmed automatically, with two hours' minimum notice, for each of
+ *    the two the save does not name. A listing that is already bookable keeps
+ *    what it stores (mergeBookingConfig).
+ */
+export function instantBookingSettingsForSave(
+  incoming: Record<string, unknown>,
+  stored: unknown,
+  switchOn: boolean,
+  defaults: Readonly<Record<string, unknown>>,
+): Record<string, unknown> | null {
+  const out: Record<string, unknown> = { ...incoming };
+  if (!switchOn) {
+    if (out['instantBooking'] === true) return null;
+    delete out['instantBooking'];
+    return out;
+  }
+  const alreadyBookable = !!stored && typeof stored === 'object' && !Array.isArray(stored);
+  if (!alreadyBookable) {
+    for (const [field, value] of Object.entries(defaults)) {
+      if (out[field] === undefined) out[field] = value;
+    }
+  }
+  return out;
+}
 
 /** The config to store for a save: the incoming one, plus every kept field the
  *  save did not mention, taken from what is stored. */
