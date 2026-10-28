@@ -11,6 +11,7 @@
  * owner's documents — nothing here caches a licence.
  */
 import type { Prisma, PrismaClient, DiscoveryCategoryKind, GateEnforcement } from '@prisma/client';
+import { validExpiryOr } from './document-validity';
 import { AppError } from '../../utils/errors';
 import { FOOD_HANDLER_CERT_DOC_TYPE } from './doc-registry';
 import { foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
@@ -43,7 +44,7 @@ export function gateApplies(gate: { categorySlug: string | null; categoryKind: D
 /** VALID = approved and unexpired, held by the vendor's owner. The image may be purged; the record is what counts. */
 export async function holdsValidDocument(prisma: Db, ownerUserId: string, legacyCode: string, now = new Date()): Promise<boolean> {
   const doc = await prisma.verificationDocument.findFirst({
-    where: { userId: ownerUserId, docType: legacyCode, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    where: { userId: ownerUserId, docType: legacyCode, status: 'APPROVED', OR: validExpiryOr('expiresAt', now) },
     select: { id: true },
   });
   return doc !== null;

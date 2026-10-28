@@ -1,4 +1,5 @@
 import { Prisma, type VehicleType } from '@prisma/client';
+import { documentLapsesAt } from './document-validity';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { needsHirePlate } from './hire-plate';
@@ -43,7 +44,8 @@ async function currentVehicle(db: EvidenceDb, userId: string, countryCode: strin
 }
 
 function expiry(row: EvidenceRow): number {
-  return Math.min(row.expiresAt?.getTime() ?? Infinity, row.retentionExpiresAt?.getTime() ?? Infinity);
+  // [FOLLOWUPS ruling] a calendar-day expiry counts through the end of that Guyana day (document-validity.ts)
+  return Math.min(row.expiresAt ? documentLapsesAt(row.expiresAt).getTime() : Infinity, row.retentionExpiresAt?.getTime() ?? Infinity);
 }
 
 /** Preview or locked read: the caller chooses the operating profile explicitly. */

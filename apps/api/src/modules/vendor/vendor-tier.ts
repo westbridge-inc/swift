@@ -17,6 +17,7 @@
  * written to bound.
  */
 import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
+import { validExpiryOr } from '../verification/document-validity';
 import type { Prisma, PrismaClient, Vendor, VendorTier } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import type { CountryConfigService } from '../country/country-config.service';
@@ -118,7 +119,7 @@ export function assertPromotable(vendor: Pick<Vendor, 'name' | 'tier'>): void {
 /** THE definition of "registered": a VALID, unexpired registration record for the owner. One reader for promotion and for the declaration route. */
 export async function validRegistrationRecord(db: Db, ownerUserId: string, now = new Date()): Promise<{ id: string; docType: string } | null> {
   return db.documentRecord.findFirst({
-    where: { accountId: ownerUserId, docType: { in: [...REGISTRATION_DOC_TYPES] }, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+    where: { accountId: ownerUserId, docType: { in: [...REGISTRATION_DOC_TYPES] }, status: 'VALID', OR: validExpiryOr('expiresOn', now) },
     select: { id: true, docType: true },
   });
 }
