@@ -857,6 +857,13 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
       changes: { outcomes: [{ documentId: doc, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }] }, createdAt: new Date(now.getTime() - 60_000) } }));
     // the mark never jumped past it: it stays at least the commit margin behind the database's clock
     expect(await latestMark()).toBeLessThanOrEqual(now.getTime() - 9 * 60_000);
+    // and the app's clock does not move it: with the app an hour fast, a run still marks by the database's clock
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 3_600_000));
+    try {
+      await system(() => service.retryDelayedErasures());
+    } finally { vi.useRealTimers(); }
+    expect(await latestMark()).toBeLessThanOrEqual(now.getTime() - 9 * 60_000 + 120_000);
     await system(() => service.retryDelayedErasures());
     expect((await docRow(doc)).purgedAt).not.toBeNull();
   });
@@ -866,9 +873,20 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const marks = async () => (await system(() => app.prisma.auditLog.findMany({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'asc' } })))
       .map((r) => new Date((r.changes as { since: string }).since).getTime());
     const before = await marks();
-    await Promise.all([system(() => service.retryDelayedErasures()), system(() => service.retryDelayedErasures())]);
+    // one run at a time: of two runs started together, only one does the work
+    const work = vi.spyOn(service as unknown as { finishDelayedSince: (...a: unknown[]) => Promise<unknown> }, 'finishDelayedSince');
+    try {
+      await Promise.all([system(() => service.retryDelayedErasures()), system(() => service.retryDelayedErasures())]);
+      expect(work).toHaveBeenCalledTimes(1);
+    } finally { work.mockRestore(); }
     const after = await marks();
     for (let i = Math.max(1, before.length); i < after.length; i += 1) expect(after[i]!, `mark ${i}`).toBeGreaterThanOrEqual(after[i - 1]!);
-    expect(after.length - before.length).toBeLessThanOrEqual(2);
+    // a mark ahead of what a run would compute is never moved backwards by it
+    const [{ now }] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
+    const ahead = new Date(now.getTime() - 60_000);
+    await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: ahead.toISOString() } } }));
+    await system(() => service.retryDelayedErasures());
+    const last = (await marks()).at(-1)!;
+    expect(last).toBeGreaterThanOrEqual(ahead.getTime());
   });
 });
