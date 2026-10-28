@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, type VendorActivationChecklist } from '@/lib/api';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
 import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
 import type { ProhibitedClass } from '@/lib/api';
@@ -15,6 +15,7 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
+import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 import { billDateLabel } from '@/lib/bill-date';
 import { gyDate } from '@/lib/dates';
@@ -142,6 +143,8 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     void qc.invalidateQueries({ queryKey: ['vendor-checklist', id] });
     void qc.invalidateQueries({ queryKey: ['vendors'] });
   };
+  // [FOLLOWUPS · follows O-1] The owner's and the store's numbers are masked; "Show number" is the audited read, for this page view only.
+  const { revealed, revealFor } = usePhoneReveal(async (request) => show(await dialog.run(request)));
   /** Whatever the server said, it stays on the page — and the record is re-read. */
   const show = (outcome: Outcome | null) => {
     if (!outcome) return;
@@ -374,7 +377,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             {owner ? (
               <dl className="mc-rows">
                 <Row label="Name">{ownerName ? <Link href={`/users/${owner.id}`}>{ownerName}</Link> : null}</Row>
-                <Row label="Phone">{owner.phone}</Row>
+                <Row label="Phone">{owner.phone ? <PhoneReveal phone={owner.phone} revealed={revealed[`owner:${owner.id}`]} onReveal={revealFor(`owner:${owner.id}`, `Show the owner's full number for ${v.name}?`, "The owner's number is shown.", (reason) => revealVendorPartyPhone(id, 'owner', reason))} /> : null}</Row>
                 <Row label="Email">{owner.email}</Row>
                 <Row label="Account">{owner.status ? <StatusBadge group="UserStatus" value={owner.status} /> : null}</Row>
               </dl>
@@ -402,7 +405,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             <dl className="mc-rows">
               <Row label="City">{v.city}</Row>
               <Row label="Address">{v.addressLine1}</Row>
-              <Row label="Phone">{v.phone}</Row>
+              <Row label="Phone">{v.phone ? <PhoneReveal phone={v.phone} revealed={revealed[`store:${v.id}`]} onReveal={revealFor(`store:${v.id}`, `Show the store's full number for ${v.name}?`, "The store's number is shown.", (reason) => revealVendorPartyPhone(id, 'store', reason))} /> : null}</Row>
               <Row label="Rating"><span className="mc-numbers">{ratingText(v.averageRating, v.totalRatings)}</span></Row>
               <Row label="Registration">{v.tier ? label('VendorTier', v.tier) : null}</Row>
               <Row label="Menu items"><span className="mc-numbers">{v._count?.items ?? 0}</span></Row>
