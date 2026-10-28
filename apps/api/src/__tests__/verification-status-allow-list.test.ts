@@ -148,7 +148,7 @@ describe('[SEC-PII] GET /verification/status returns only what the applicant may
   it('a withdrawn document reads a neutral line; the reviewer\'s reason stays with staff', async () => {
     const revoked = (await byId()).get(docs['revoked']!)!;
     expect(revoked.reviewNote).toBe('Withdrawn by our team');
-    expect(revoked.status).toBe('REJECTED');
+    expect(revoked['status']).toBe('REJECTED');
   });
 
   it('the fields the phone (builds 9-12) and the web portal read are all still there', async () => {

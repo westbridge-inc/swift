@@ -387,6 +387,44 @@ export const ACTOR_FACING_CATEGORY: Record<RecordedRejectionReasonCode, string> 
 export const FRAUD_GENERIC_TEXT = "We're unable to verify this document. If you think this is a mistake, ask for a review in the app and a person will look at it.";
 /** [DOC-1 §24 · P24] Reason codes of the fraud class: suspicion, never an automatic reject — SECOND_REVIEW first. */
 export const FRAUD_CLASS_CODES: ReadonlySet<RejectionReasonCode> = new Set<RejectionReasonCode>(['SUSPECTED_TAMPERING', 'DUPLICATE', 'FACE_MISMATCH']);
+/**
+ * [SEC-PII · security scan 28 Oct 2026] THE APPLICANT'S VIEW OF ONE DOCUMENT.
+ *
+ * GET /verification/status returned each document row whole: the reviewer's id, the legal-hold id, the
+ * provider reference, the stored file pointer, the policy facts the reviewer typed, and the raw review note,
+ * which for a confirmed fraud-class rejection names the reason code and carries the second reviewer's own
+ * words. The applicant now gets an explicit allow-list, and `reviewNote` (the key every app build reads as
+ * "the reason") carries only the reason meant for them:
+ *   - a fraud-class rejection: FRAUD_GENERIC_TEXT alone (never tell a fraudster which signal caught them);
+ *   - a withdrawn (revoked) document: a neutral line (the reviewer's reason is the staff record);
+ *   - any other coded note "[CODE] text": the text, without the internal code;
+ *   - anything else: as stored (system lines, an engine's generic line, a reviewer's plain reason).
+ * The phone (builds 9-12) and the web portal read docType, status, expiresAt, createdAt, replaced,
+ * reviewNote and id: all kept.
+ */
+export const APPLICANT_DOCUMENT_FIELDS = ['id', 'docType', 'role', 'status', 'state', 'expiresAt', 'createdAt'] as const;
+export const WITHDRAWN_BY_TEAM_TEXT = 'Withdrawn by our team';
+
+/** The reason an applicant is shown for one document, from its stored note. */
+export function applicantReason(document: { state?: string | null; reviewNote?: string | null }): string | null {
+  const note = document.reviewNote ?? null;
+  if (document.state === 'REVOKED' || note?.startsWith('REVOKED:')) return WITHDRAWN_BY_TEAM_TEXT;
+  if (!note) return note;
+  const coded = /^\[([A-Z_]+)\]\s*/.exec(note);
+  if (!coded) return note;
+  if (FRAUD_CLASS_CODES.has(coded[1] as RejectionReasonCode)) return FRAUD_GENERIC_TEXT;
+  return note.slice(coded[0].length);
+}
+
+/** One document as the applicant sees it: the allow-listed fields, `replaced` when set, and the applicant's reason. */
+export function applicantDocumentView<D extends { [K in (typeof APPLICANT_DOCUMENT_FIELDS)[number]]: unknown } & { reviewNote?: string | null; replaced?: boolean }>(document: D) {
+  const view: Record<string, unknown> = {};
+  for (const key of APPLICANT_DOCUMENT_FIELDS) view[key] = document[key];
+  if (document.replaced) view['replaced'] = true;
+  view['reviewNote'] = applicantReason(document as { state?: string | null; reviewNote?: string | null });
+  return view as { [K in (typeof APPLICANT_DOCUMENT_FIELDS)[number]]: D[K] } & { replaced?: true; reviewNote: string | null };
+}
+
 /** [DOC-1 §24 · DOC-INV-32] A fraud hold is reviewed within 90 days (ruling; the spec sets no figure). */
 export const FRAUD_HOLD_REVIEW_DAYS = 90;
 export const FRAUD_HOLD_PRIORITY = 20;
@@ -2128,7 +2166,7 @@ export class VerificationService {
       // the state: once the customer erases a withdrawn ID (or retention purges it) the row is
       // PURGED but still carries the reviewer's words, which may name another account.
       .map((d) => (d.docType === IDENTITY_DOC_TYPE && (d.state === 'REVOKED' || d.reviewNote?.startsWith('REVOKED:'))
-        ? { ...d, reviewNote: 'Withdrawn by our team' }
+        ? { ...d, reviewNote: WITHDRAWN_BY_TEAM_TEXT }
         : d));
 
     const approved = new Set(
@@ -2156,7 +2194,8 @@ export class VerificationService {
       checklist,
       // [VERIFY-DOCS] Documents this person MAY add (never in `missing`, never a gate).
       optional,
-      documents,
+      // [SEC-PII] Each document as the applicant may see it (an allow-list), never the stored row.
+      documents: documents.map(applicantDocumentView),
       missing,
       vehicleType,
       // The gate, never the display: a home-visit owner's pending clearance never darkens the store.
