@@ -840,6 +840,14 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
 
   it('[COORD 16:35Z race] a request written with an earlier time but committed after a run read still gets finished on the next run', async () => {
     const latestMark = async () => new Date(((await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' } }))).changes as { since: string }).since).getTime();
+    // a clean slate: the earlier tests' requests no longer wait (a newer answer closes each), and an earlier test set
+    // the mark ahead by hand (a deliberate fixture): start this one from a day back
+    const earlier = await system(() => app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true, userId: true } }));
+    for (const userId of new Set(earlier.map((d) => d.userId))) {
+      await system(() => app.prisma.auditLog.create({ data: { userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,
+        changes: { outcomes: earlier.filter((d) => d.userId === userId).map((d) => ({ documentId: d.id, outcome: 'REFUSED', ground: 'AML_RECORD' })) } } }));
+    }
+    await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: new Date(Date.now() - 86_400_000).toISOString() } } }));
     await system(() => service.retryDelayedErasures());
     const [{ now }] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
     // a request whose row carries a time from just before the run started, committed only now (after its read)
