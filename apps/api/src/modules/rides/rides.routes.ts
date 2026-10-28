@@ -468,9 +468,9 @@ export async function ridesRoutes(app: FastifyInstance) {
 
   /** GET /presence — the "map is alive" read (rides spec 5.1/6.2): up to 12
    *  COARSE positions of free online drivers near a point. Privacy is the
-   *  design: server-side ~100m deterministic jitter (stable per driver per
-   *  5-min bucket so cars don't dance between refetches), no identities, no
-   *  bearings, hailable (online + available) cars only. Zero rows ⇒ empty
+   *  design: each position is snapped to the shared coarse grid (board-privacy
+   *  coarsePoint; no per-driver component, stable between refetches), no
+   *  identities, no bearings, hailable (online + available) cars only. Zero rows ⇒ empty
    *  array — the client renders nothing rather than faking supply (0.8). */
   app.get('/presence', auth, async (request) => {
     const qq = request.query as Record<string, unknown>;
