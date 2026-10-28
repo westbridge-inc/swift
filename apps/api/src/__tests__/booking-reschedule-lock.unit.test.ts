@@ -8,7 +8,10 @@ import { BookingService, isTransactionConflict } from '../modules/booking/bookin
 //
 // The canonical lock order is Order → Booking: the cancellation, the
 // acceptance and every order transition lock the order row, then write its
-// bookings. The reschedule used to write its bookings first and the order
+// bookings. [BOOK-S1] Between the two sits the business's time lock: a
+// reschedule waits on the order row, then on the business's advisory lock,
+// frees its old slot, judges the new one against every live booking of the
+// business, and only then writes it. The reschedule used to write its bookings first and the order
 // last — the opposite order — so a reschedule and a cancellation of the same
 // order could deadlock, and the reschedule mapped only P2002, so the lost race
 // surfaced as a 500. appointment-times-journey.test.ts plays the interleaving
@@ -33,9 +36,17 @@ function harness(opts: { orderId?: string | null; transaction?: () => Promise<un
       statements.push({ op: `$queryRaw ${strings.join('?').replace(/\s+/g, ' ').trim()}`, values });
       return [];
     },
+    $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      statements.push({ op: `$executeRaw ${strings.join('?').replace(/\s+/g, ' ').trim()}`, values });
+      return 1;
+    },
     booking: {
       create: async (args: { data: Record<string, unknown> }) => { statements.push({ op: 'booking.create' }); return { id: 'booking-2', ...args.data }; },
       updateMany: async () => { statements.push({ op: 'booking.updateMany' }); return { count: 1 }; },
+      findMany: async () => { statements.push({ op: 'booking.findMany' }); return []; },
+    },
+    vendor: {
+      findUnique: async () => { statements.push({ op: 'vendor.findUnique' }); return { bookingCapacity: 1 }; },
     },
     order: {
       findUniqueOrThrow: async () => { statements.push({ op: 'order.findUniqueOrThrow' }); return { status: 'ACCEPTED' }; },
@@ -46,12 +57,13 @@ function harness(opts: { orderId?: string | null; transaction?: () => Promise<un
     booking: { findUnique: async () => ({ ...BOOKING, orderId: opts.orderId === undefined ? ORDER_ID : opts.orderId }) },
     $transaction: opts.transaction ?? (async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
   } as unknown as PrismaClient;
-  vi.spyOn(BookingService.prototype, 'validateSlot').mockResolvedValue({ durationMinutes: 30, slots: [] });
+  vi.spyOn(BookingService.prototype as unknown as { validatedSlot: () => Promise<unknown> }, 'validatedSlot')
+    .mockResolvedValue({ config: { durationMinutes: 30, slots: [] }, vendorId: 'vendor-1' });
   return { svc: new BookingService(prisma), statements };
 }
 
 describe('BookingService.rescheduleBooking — Order → Booking, like every other writer', () => {
-  it('locks the order row before it touches a booking, then moves the booking and the order', async () => {
+  it('locks the order row before it touches a booking, then the business, then moves the booking and the order', async () => {
     const h = harness();
     const res = await h.svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' });
     expect(res.moved).toBe(true);
@@ -59,17 +71,25 @@ describe('BookingService.rescheduleBooking — Order → Booking, like every oth
       '$queryRaw SELECT id FROM "orders" WHERE id = ? FOR UPDATE',
       // [L09 · M018] the parent's state is read under its own lock
       'order.findUniqueOrThrow',
-      'booking.create',
+      // [BOOK-S1] the business's time, one writer at a time
+      '$executeRaw SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
       'booking.updateMany',
+      // the one overlap rule: every live booking of the business, and its capacity
+      'booking.findMany',
+      'vendor.findUnique',
+      'booking.create',
       'order.update',
     ]);
     expect(h.statements[0]!.values).toEqual([ORDER_ID]);
+    expect(h.statements[2]!.values).toEqual(['booking-business:vendor-1']);
   });
 
   it('control — a booking with no order has no order row to lock', async () => {
     const h = harness({ orderId: null });
     await h.svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' });
-    expect(h.statements.map((s) => s.op)).toEqual(['booking.create', 'booking.updateMany']);
+    expect(h.statements.map((s) => s.op)).toEqual([
+      '$executeRaw SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', 'booking.updateMany', 'booking.findMany', 'vendor.findUnique', 'booking.create',
+    ]);
   });
 });
 

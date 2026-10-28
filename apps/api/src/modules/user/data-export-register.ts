@@ -172,7 +172,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'bookings', model: 'Booking', by: ['customerId'], key: 'id',
+    // [BOOK-S1] Whether the business took one booking at a time when it was made is bookkeeping for the database's overlap rule.
+    category: 'bookings', model: 'Booking', by: ['customerId'], key: 'id', omit: { exclusive: 'SYSTEM' },
     fields: ['id', 'itemId', 'customerId', 'orderId', 'slotStart', 'slotEnd', 'status', 'createdAt'],
   },
   {
@@ -350,7 +351,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     },
     fields: [
       'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
-      'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders',
+      'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders', 'bookingCapacity',
       'deliveryRadius', 'minOrderAmount', 'estimatedPrepTime', 'cuisineTypes', 'tags', 'refundRule', 'vatRegistrationNumber', 'qrSlug',
       // [STORE-VAT · owner O-5] The store's own VAT record, as its owner sees it on the VAT screen (GET /vendor/vat): its
       // answer and pricing choice, the certificate it sent, what a person approved (number, registered name, effective

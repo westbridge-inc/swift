@@ -32,7 +32,9 @@ import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, mmgD
 import { NotificationService } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
-import { fmtSlotTime } from '../booking/availability';
+import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES } from '../booking/availability';
+import { mergeBookingConfig, overlappingWindows, overlappingWindowsMessage } from '../booking/booking-config';
+import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -132,6 +134,9 @@ const updateVendorProfileSchema = z.object({
   // FUL-007: kitchen-capacity cap. Positive int caps concurrent in-flight orders;
   // null clears the cap (unlimited intake).
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
+  // [BOOK-S1 · COORD C1(a)] How many appointments the business serves at once, across its listings
+  // (1 = one at a time, the default). Optional: an older app never sends it and the store keeps its value.
+  bookingCapacity: z.number().int().min(1).max(MAX_BOOKING_CAPACITY).optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
   // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number (+592 mobile); '' / null = stop taking MMG.
@@ -208,6 +213,9 @@ const optionGroupInputSchema = z.object({
 // SERVICE listings carry a bookingConfig: how long an appointment is, the weekly
 // availability windows, and WHERE it happens — AT_BUSINESS (customer comes in),
 // MOBILE (provider travels to the customer), or BOTH. serviceRadiusKm caps travel.
+// [BOOK-S1] Windows on one day may not overlap; the gap after each booking and
+// the minimum notice are the business's to set (an older app's save keeps them:
+// mergeBookingConfig on update).
 const bookingConfigSchema = z.object({
   durationMinutes: z.number().int().min(5).max(600),
   slots: z
@@ -221,6 +229,11 @@ const bookingConfigSchema = z.object({
     .max(50),
   serviceMode: z.enum(['AT_BUSINESS', 'MOBILE', 'BOTH']).optional(),
   serviceRadiusKm: z.number().min(0).max(100).optional(),
+  bufferMinutes: z.number().int().min(0).max(MAX_BUFFER_MINUTES).optional(),
+  minNoticeMinutes: z.number().int().min(0).max(MAX_MIN_NOTICE_MINUTES).optional(),
+}).superRefine((config, ctx) => {
+  const pair = overlappingWindows(config.slots);
+  if (pair) ctx.addIssue({ code: 'custom', path: ['slots'], message: overlappingWindowsMessage(pair) });
 });
 
 const createItemSchema = z.object({
@@ -1836,6 +1849,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
           ...(body.requirePickupCode !== undefined && { requirePickupCode: body.requirePickupCode }),
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
+          ...(body.bookingCapacity !== undefined && { bookingCapacity: body.bookingCapacity }),
           ...(publicPhone !== undefined && { publicPhone }),
           ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
           ...(refundRule !== undefined && { refundRule }),
@@ -4036,7 +4050,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.allergens !== undefined && { allergens: body.allergens }),
           ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
           ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
-          ...(body.bookingConfig !== undefined && { bookingConfig: body.bookingConfig as object }),
+          // [BOOK-S1] A save that does not mention the gap or the notice keeps the stored ones.
+          ...(body.bookingConfig !== undefined && { bookingConfig: mergeBookingConfig(existing.bookingConfig, body.bookingConfig) as object }),
         },
         include: itemInclude,
       });
@@ -4358,7 +4373,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? isDateOnly(to) ? startOfGuyanaDay(to) : z.coerce.date().parse(to)
       : startOfGuyanaDay(endKey);
     const bookings = await app.prisma.booking.findMany({
-      where: { item: { vendorId }, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
+      where: { vendorId, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
       select: {
         id: true, customerId: true, orderId: true, slotStart: true, slotEnd: true, status: true,
         item: { select: { name: true, basePrice: true } },

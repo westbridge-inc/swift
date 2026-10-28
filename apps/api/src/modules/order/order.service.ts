@@ -2145,8 +2145,8 @@ export class OrderService {
     // ONE-SLOT-ONE-PERSON (scheduling spec 2.3): every order death frees its
     // appointment slot — found live: vendor reject and the no-response
     // auto-cancel left bookings CONFIRMED forever, permanently blocking the
-    // provider's chair. The partial unique ignores CANCELLED rows, so the
-    // slot is instantly sellable again.
+    // provider's chair. No booking rule counts a CANCELLED row [BOOK-S1], so
+    // the slot is instantly sellable again.
     await this.prisma.booking.updateMany({
       where: { orderId: order.id, status: { not: 'CANCELLED' } },
       data: { status: 'CANCELLED' },

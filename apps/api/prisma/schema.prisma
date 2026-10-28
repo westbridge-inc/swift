@@ -462,6 +462,7 @@ model Tenant {
   reviewFixtures    ReviewFixture[]
   items             Item[]
   categories        Category[]
+  bookings          Booking[]
   // [DB-05 EXPAND] formerly PENDING_EXPAND
   returnRequests     ReturnRequest[]
   contentReports     ContentReport[]
@@ -1532,6 +1533,12 @@ model Vendor {
   /// the vendor already holds this many in-flight (still-in-kitchen) orders —
   /// server-computed so it can't be gamed. Null = unlimited (current behavior).
   maxConcurrentOrders     Int?
+  /// [BOOK-S1 · COORD C1(a)] How many appointments the business serves at once, across all its
+  /// listings. 1 (the default) = one at a time: the database refuses an overlap
+  /// (bookings_vendor_one_at_a_time). Between 1 and 20 (vendors_booking_capacity_check).
+  bookingCapacity         Int                      @default(1)
+  /// [BOOK-S1] Every booking that takes this business's time, whichever listing it was made on.
+  bookings                Booking[]
   deliveryRadius          Float                    @default(10.0)
   minOrderAmount          Decimal                  @default(0) @db.Decimal(10, 2)
   estimatedPrepTime       Int                      @default(30)
@@ -1881,16 +1888,29 @@ model Booking {
   id         String        @id @default(cuid())
   itemId     String
   item       Item          @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  /// [BOOK-S1] The business whose time this booking takes: the resource, not the listing.
+  /// Always the listing's own business (bookings_vendor_matches_item, a DB trigger).
+  vendorId   String
+  vendor     Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// [BOOK-S1 · STA-1 §4 lineage] The business's tenant, held equal to it by
+  /// bookings_tenant_matches_vendor (a DB trigger); walled on the row itself.
+  tenantId   String        @default("swift-default")
+  tenant     Tenant        @relation(fields: [tenantId], references: [id])
   customerId String
   /// Wired to the order at acceptance
   orderId    String?
   slotStart  DateTime
   slotEnd    DateTime
   status     BookingStatus @default(RESERVED)
+  /// [BOOK-S1] Made while the business took one booking at a time (capacity 1): no other
+  /// such live booking of the business may overlap it (bookings_vendor_one_at_a_time).
+  exclusive  Boolean       @default(true)
   createdAt  DateTime      @default(now())
 
   @@index([itemId, slotStart])
+  @@index([vendorId, slotStart])
   @@index([customerId])
+  @@index([tenantId])
   @@map("bookings")
 }
 
