@@ -836,4 +836,30 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     await system(() => service.retryDelayedErasures());
     expect((await docRow(waitingDoc)).purgedAt).not.toBeNull();
   });
+
+  it('[COORD 16:35Z race] a request written with an earlier time but committed after a run read still gets finished on the next run', async () => {
+    const latestMark = async () => new Date(((await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' } }))).changes as { since: string }).since).getTime();
+    await system(() => service.retryDelayedErasures());
+    const [{ now }] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
+    // a request whose row carries a time from just before the run started, committed only now (after its read)
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await system(() => app.prisma.auditLog.create({ data: { userId: me, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: me,
+      changes: { outcomes: [{ documentId: doc, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }] }, createdAt: new Date(now.getTime() - 60_000) } }));
+    // the mark never jumped past it: it stays at least the commit margin behind the database's clock
+    expect(await latestMark()).toBeLessThanOrEqual(now.getTime() - 9 * 60_000);
+    await system(() => service.retryDelayedErasures());
+    expect((await docRow(doc)).purgedAt).not.toBeNull();
+  });
+
+  it('[COORD 16:35Z] the mark is monotonic: a run never moves it backwards, and two runs never overlap', async () => {
+    await system(() => service.retryDelayedErasures());
+    const marks = async () => (await system(() => app.prisma.auditLog.findMany({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'asc' } })))
+      .map((r) => new Date((r.changes as { since: string }).since).getTime());
+    const before = await marks();
+    await Promise.all([system(() => service.retryDelayedErasures()), system(() => service.retryDelayedErasures())]);
+    const after = await marks();
+    for (let i = Math.max(1, before.length); i < after.length; i += 1) expect(after[i]!, `mark ${i}`).toBeGreaterThanOrEqual(after[i - 1]!);
+    expect(after.length - before.length).toBeLessThanOrEqual(2);
+  });
 });
