@@ -39,7 +39,9 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
-import { BookingService, type BookingConfig } from '../booking/booking.service';
+import { BookingService, LIVE_APPOINTMENT_ORDER_STATUSES, type BookingConfig } from '../booking/booking.service';
+import { instantBookingEnabled, listingConfirmsAutomatically } from '../booking/instant-booking';
+import { customerRescheduleVerdict } from '../booking/reschedule-policy';
 import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import {
@@ -773,6 +775,28 @@ function enrichVendor<T extends { latitude: number; longitude: number; estimated
 async function publishedStorePhoneOf(prisma: FastifyInstance['prisma'], vendorId: string): Promise<string | null> {
   const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { status: true, publicPhone: true } });
   return vendor ? publishedStorePhone(vendor) : null;
+}
+
+/** [BOOK-S6a · owner B2] The customer's live booking behind an appointment order (RESERVED or
+ *  CONFIRMED), with whether they may move it now: the move route's own verdict on its own
+ *  booking. Null when the order holds no live booking (a request whose time is taken only at
+ *  acceptance, a cancelled or finished one). */
+async function customerAppointmentBooking(prisma: FastifyInstance['prisma'], orderId: string, orderStatus: string, now: Date) {
+  const booking = await prisma.booking.findFirst({
+    where: { orderId, status: { in: ['RESERVED', 'CONFIRMED'] } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, itemId: true, slotStart: true },
+  });
+  if (!booking) return null;
+  const verdict = LIVE_APPOINTMENT_ORDER_STATUSES.has(orderStatus)
+    ? customerRescheduleVerdict(booking.slotStart, now)
+    : { allowed: false, message: null };
+  return {
+    id: booking.id,
+    itemId: booking.itemId,
+    slotStart: booking.slotStart.toISOString(),
+    reschedule: { allowed: verdict.allowed, message: verdict.message },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2016,6 +2040,10 @@ export async function customerRoutes(app: FastifyInstance) {
         bookableWeekdays,
         serviceMode: config.serviceMode ?? 'AT_BUSINESS',
         serviceRadiusKm: config.serviceRadiusKm ?? null,
+        // [BOOK-S6a · owner A3/A4] With INSTANT_BOOKING on: whether a cash booking of this listing is
+        // confirmed at checkout (the business chose "Confirm bookings automatically"). The phone's
+        // "Instant confirmation" badge reads only this. Switch off: not sent (the answer is today's).
+        ...(instantBookingEnabled() ? { instantConfirmation: listingConfirmsAutomatically(item.bookingConfig) } : {}),
       },
     };
   });
@@ -2906,6 +2934,13 @@ export async function customerRoutes(app: FastifyInstance) {
     // Timeline — [O-2 · REVIEW-F S3-2] the customer's projection (no store-tap row, no position evidence).
     const timeline = customerTimeline(order.statusHistory);
 
+    // [BOOK-S6a · owner B2] With INSTANT_BOOKING on, the live booking behind an appointment and
+    // whether the customer may move it now — the same verdict the move itself applies
+    // (booking/reschedule-policy.ts). Switch off: not sent (the answer is today's).
+    const appointmentBooking = instantBookingEnabled() && order.fulfillment === 'APPOINTMENT'
+      ? await customerAppointmentBooking(app.prisma, order.id, order.status, previewNow)
+      : undefined;
+
     return {
       success: true,
       data: {
@@ -2958,6 +2993,7 @@ export async function customerRoutes(app: FastifyInstance) {
         mmgClaim: mmgClaimView(order),
         fulfillment: order.fulfillment,
         appointmentSlot: order.appointmentSlot,
+        ...(appointmentBooking !== undefined ? { appointmentBooking } : {}),
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.

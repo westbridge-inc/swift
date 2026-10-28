@@ -9,6 +9,8 @@ import { isBookingExclusionViolation } from './one-at-a-time';
 import type { BookingLimits } from './booking-limits';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
 import { emitToStoreRoom } from '../order/order-room-emission.service';
+import { instantBookingEnabled } from './instant-booking';
+import { customerRescheduleVerdict } from './reschedule-policy';
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
 export interface BookingConfig {
@@ -87,8 +89,9 @@ function bookingLimitReached(message: string): AppError {
   return new AppError(409, 'BOOKING_LIMIT_REACHED', message);
 }
 
-/** Parent order states in which an appointment can still be moved. */
-const LIVE_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'ACCEPTED']);
+/** Parent order states in which an appointment can still be moved. [BOOK-S6a] Exported for the
+ *  customer order screen's reschedule preview, so it offers a move exactly where this file allows one. */
+export const LIVE_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'ACCEPTED']);
 /** Parent order states that mean the appointment happened. */
 const FINISHED_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['COMPLETED', 'DELIVERED']);
 
@@ -343,6 +346,13 @@ export class BookingService {
       throw new AppError(400, 'NOT_RESCHEDULABLE', `This booking is ${booking.status.toLowerCase()} and cannot be moved`);
     }
     if (booking.slotStart.getTime() === newSlotStart.getTime()) return { booking, moved: false as const };
+    // [BOOK-S6a · owner B2] With INSTANT_BOOKING on, the CUSTOMER moves a booking in the app only
+    // until two hours before it starts (the order screen's preview reads this same verdict). The
+    // business may move it at any time. Switch off: as before.
+    if (actor.customerId && !actor.vendorId && instantBookingEnabled()) {
+      const verdict = customerRescheduleVerdict(booking.slotStart, new Date());
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+    }
 
     const { config, vendorId } = await this.validatedSlot(booking.itemId, newSlotStart);
     const slotEnd = new Date(newSlotStart.getTime() + config.durationMinutes * 60_000);
