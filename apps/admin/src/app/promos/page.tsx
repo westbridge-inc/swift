@@ -6,22 +6,24 @@ import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/l
 import { Modal } from '@/components/Modal';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
-import { gyCalendarDay, gyDate } from '@/lib/dates';
+import { gyCalendarDay, gyDate, gyTodayYmd } from '@/lib/dates';
 
-const EMPTY: CreatePromoInput = {
+/** A blank promo, running from today in Guyana for 30 days (the server reads a bare day as a Guyana day). */
+const emptyPromo = (now = new Date()): CreatePromoInput => ({
   code: '',
   description: '',
   discountType: 'PERCENTAGE',
   discountValue: 10,
-  validFrom: new Date().toISOString().slice(0, 10),
-  validUntil: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10),
-};
+  validFrom: gyTodayYmd(now),
+  validUntil: gyTodayYmd(now, 30),
+});
 
 export default function PromosPage() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error: readError, refetch, isFetching } = useQuery({ queryKey: ['promos'], queryFn: fetchPromos });
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<CreatePromoInput>(EMPTY);
+  const [blank, setBlank] = useState<CreatePromoInput>(() => emptyPromo());
+  const [form, setForm] = useState<CreatePromoInput>(blank);
 
   // [U62] The form is the shared dialog (focus kept inside, Escape and a click
   // outside close it) and, once anything is typed, only Cancel closes it, so a
@@ -30,9 +32,11 @@ export default function PromosPage() {
   // the request once, and comes back if the operator cancels or is refused.
   const actions = useActionRunner(() => {
     void qc.invalidateQueries({ queryKey: ['promos'] });
-    setForm(EMPTY);
+    const next = emptyPromo();
+    setBlank(next);
+    setForm(next);
   });
-  const dirty = JSON.stringify(form) !== JSON.stringify(EMPTY);
+  const dirty = JSON.stringify(form) !== JSON.stringify(blank);
   const submit = async () => {
     const body: CreatePromoInput = {
       ...form,

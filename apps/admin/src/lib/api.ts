@@ -187,11 +187,15 @@ export async function verifyOtpLogin(phone: string, code: string) {
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
   const data = json.data;
   // [A-01] a browser sign-in comes back as a cookie session — never as tokens in the body
+  // [ADMIN-AUDIT S4-3] A refusal after the code was accepted ends the session the server just issued (its HttpOnly
+  // cookies would otherwise stay live in this browser): signed out first, then the words.
   if (data.isNewUser || data.session !== 'cookie') {
+    if (data.session === 'cookie') await logout();
     throw new Error('No Swift account is registered to that number.');
   }
   const roles: string[] = data.user?.roles ?? [];
   if (!roles.some((r) => ADMIN_ROLES.includes(r))) {
+    await logout();
     throw new Error('This account does not have admin access.');
   }
   // [A-01] the session arrived as HttpOnly cookies; there is nothing to store

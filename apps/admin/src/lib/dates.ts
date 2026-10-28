@@ -50,3 +50,13 @@ export const gyLongDate = (value: DateInput): string => { const d = instant(valu
  *  UTC midnight and printed in UTC, so the day printed is the day sent. Anything else is an em-dash. */
 export const gyCalendarDay = (ymd: unknown): string =>
   typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? CALENDAR_DAY.format(new Date(`${ymd}T00:00:00Z`)) : '—';
+
+const YMD_PARTS = fmt({ year: 'numeric', month: '2-digit', day: '2-digit' });
+/** [REVIEW-F #2155 S4-b] Today in Guyana, `plusDays` on, as a date input's value ("2026-10-27"). Cut from the UTC
+ *  clock (toISOString().slice(0, 10)) it is already tomorrow from 20:00 Guyana time. Guyana keeps UTC-4 all year,
+ *  so whole days added to the moment land on whole Guyana days. */
+export const gyTodayYmd = (now: Date = new Date(), plusDays = 0): string => {
+  const parts = YMD_PARTS.formatToParts(new Date(now.getTime() + plusDays * 86_400_000));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+};
