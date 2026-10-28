@@ -65,6 +65,9 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+// [SEC-PII · #2170 S3-2] the five more masked reads (own lines, away from the shared person-contact import)
+import { maskPhone } from '../auth/step-up';
+import { maskOwnPhone } from './person-contact';
 import { consoleRoleOf } from '../auth/console-role';
 import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
 import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
@@ -99,9 +102,6 @@ import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugi
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
 import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
-// [SEC-PII · #2170 S3-2] the five more masked reads (their own line: the line above is shared with other open changes)
-import { maskOwnPhone } from './person-contact';
-import { maskPhone } from '../auth/step-up';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
