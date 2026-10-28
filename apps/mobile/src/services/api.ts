@@ -478,6 +478,10 @@ export const customerApi = {
       ...config,
       params: { ...config?.params, date },
     }),
+  // [BOOK-S6a · owner B2] Move my appointment to another free time of the same service. The server
+  // judges the time and the two-hour cut-off; the app shows its answer.
+  rescheduleBooking: (bookingId: string, newSlotStart: string) =>
+    api.post(`/customer/bookings/${bookingId}/reschedule`, { newSlotStart }),
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),

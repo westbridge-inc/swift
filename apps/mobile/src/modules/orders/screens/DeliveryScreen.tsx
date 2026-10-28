@@ -43,6 +43,8 @@ import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgCla
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 import { isTaxiOrder } from '../../../lib/orderTrackRoute';
 import { pickupWords } from '../pickup-words';
+import { BookingRescheduleCard } from '../BookingRescheduleCard';
+import { appointmentBookingView } from '../../../lib/appointmentBooking';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -736,6 +738,8 @@ export function DeliveryScreen() {
   // identity card stays, exactly as it does on a delivered order.
   const returned = o.status === 'RETURNED';
   const terminal = cancelled || failed || complete || returned;
+  // [BOOK-S6a · owner B2] The live booking the server projected (null from an older server or the switch off).
+  const bookingView = o.fulfillment === 'APPOINTMENT' && !terminal ? appointmentBookingView(o) : null;
   const verticalTint = o.orderType === 'COURIER'
     ? SEND_TINT
     : o.fulfillment === 'APPOINTMENT' ? SERVICES_TINT : ORDER_TINT;
@@ -1036,6 +1040,8 @@ export function DeliveryScreen() {
               <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
             </View>
           ) : null}
+          {/* [BOOK-S6a · owner B2] Change time: only what the server projected (an older server sends nothing). */}
+          {bookingView ? <BookingRescheduleCard key={bookingView.bookingId} orderId={orderId} booking={bookingView} /> : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
