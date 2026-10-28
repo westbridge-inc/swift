@@ -1660,7 +1660,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // 180 days is an admin task; a freed document's delayed erasure is finished as the person asked, and the
           // catch-all finishes any delayed request whose documents are unheld (a person's release, a failed run).
           // (A closed account has no written path left: its email is erased with it. Follow-up logged, COORD 10:24Z.)
-          notifyPerson: (userId, revisitBy) => verification.notifyRenewalIfDelayed(userId, revisitBy),
+          notifyPerson: (userId, revisitBy, holdId) => verification.notifyRenewalIfDelayed(userId, revisitBy, holdId),
           escalate: async (hold) => { await notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
             tenantId: await tenantOfUser(ctx.prisma, hold.subjectUserId),
             title: 'A document hold needs a decision',

@@ -203,7 +203,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const notified: Array<{ userId: string; revisitBy: Date }> = [];
     const escalated: string[] = [];
     const deps = {
-      notifyPerson: async (userId: string, revisitBy: Date) => { notified.push({ userId, revisitBy }); await service.notifyRenewalIfDelayed(userId, revisitBy); },
+      notifyPerson: async (userId: string, revisitBy: Date, holdId: string) => { notified.push({ userId, revisitBy }); await service.notifyRenewalIfDelayed(userId, revisitBy, holdId); },
       escalate: async (h: { id: string }) => { escalated.push(h.id); },
     };
     const at91 = new Date(Date.now() + 91 * DAY);
@@ -329,8 +329,11 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const day = reviewBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
     expect(result.message).toBe(`Account closed. 1 document kept for a check until at least ${day}, then deleted.`);
     expect(result.message.length).toBeLessThanOrEqual(90);
-    // the longest date (a nine-letter month, two-digit day) still fits the 90-character, two-line toast
-    expect(`Account closed. 1 document kept for a check until at least 30 September 2027, then deleted.`.length).toBeLessThanOrEqual(90);
+    // [COORD 10:44Z] the date always sits inside the two-line toast: with the longest date (two-digit day, September)
+    // and a two-digit count it still ends by character 80; the whole line stays at 93 or under in that worst case
+    const worst = accountClosedKeptWords(new Date('2027-09-30T15:00:00Z'), 12);
+    expect(worst.indexOf('30 September 2027') + '30 September 2027'.length).toBeLessThanOrEqual(80);
+    expect(worst.length).toBeLessThanOrEqual(93);
     expect(result.message).not.toMatch(/fraud|tamper|legal hold/i);
     expect((await docRow(doc)).purgedAt).toBeNull();
     // the review ends (any way): the sweep releases the hold, and the existing retry (the reaper on the deferred clock) erases it
@@ -520,7 +523,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const doc = (await submit(me)).id;
     await suspect(doc); // second review opens; the person never asks to erase anything
     await system(() => sweepInvestigationHolds(app.prisma, new Date(Date.now() + 91 * DAY), undefined, {
-      notifyPerson: async (userId: string, revisitBy: Date) => { await service.notifyRenewalIfDelayed(userId, revisitBy); },
+      notifyPerson: async (userId: string, revisitBy: Date, holdId: string) => { await service.notifyRenewalIfDelayed(userId, revisitBy, holdId); },
     }));
     const inbox = await system(() => app.prisma.notification.findMany({ where: { userId: me } }));
     expect(inbox.map((n) => n.title)).not.toContain('Your deletion request is delayed');
@@ -576,7 +579,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     await erase(me, [doc]);
     const before = await system(() => app.prisma.notification.count({ where: { userId: me, title: 'Your deletion request is delayed' } }));
     await system(() => sweepInvestigationHolds(app.prisma, new Date(Date.now() + 91 * DAY), undefined, {
-      notifyPerson: async (userId: string, revisitBy: Date) => { await service.notifyRenewalIfDelayed(userId, revisitBy); },
+      notifyPerson: async (userId: string, revisitBy: Date, holdId: string) => { await service.notifyRenewalIfDelayed(userId, revisitBy, holdId); },
     }));
     const hold = (await systemHoldOf(me))!;
     const day = hold.reviewBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });

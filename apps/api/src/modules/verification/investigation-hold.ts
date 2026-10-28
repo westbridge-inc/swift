@@ -46,7 +46,7 @@ const PAGE = 200;
 /** What the sweep needs from outside: telling the person, telling the admins, and finishing a delayed erasure. */
 export interface InvestigationHoldDeps {
   /** A person whose erasure this hold delays is told the new date (inbox). Never a person who asked for nothing. */
-  notifyPerson?: (userId: string, revisitBy: Date) => Promise<void>;
+  notifyPerson?: (userId: string, revisitBy: Date, holdId: string) => Promise<void>;
   /** A hold renewed past INVESTIGATION_HOLD_ESCALATE_DAYS: an admin task, for a person to decide. */
   escalate?: (hold: { id: string; subjectUserId: string; reason: string; placedAt: Date }) => Promise<void>;
   /** Documents a release freed (no other open investigation needs them): finish any erasure their person asked for. */
@@ -81,13 +81,14 @@ export function erasureDelayedWords(revisitBy: Date, othersDone = false, documen
 /** [REVIEW-F S4-4 · COORD] The close of a delayed request: told once its documents are deleted. */
 export function erasureCompletedWords(documents: number): { title: string; body: string } {
   return documents === 1
-    ? { title: 'Your document has been deleted', body: 'The review has ended, and we deleted the document you asked us to delete.' }
-    : { title: 'Your documents have been deleted', body: 'The review has ended, and we deleted the documents you asked us to delete.' };
+    ? { title: 'Your document has been deleted', body: 'We have now deleted the document you asked us to delete.' }
+    : { title: 'Your documents have been deleted', body: 'We have now deleted the documents you asked us to delete.' };
 }
 
-/** [REVIEW-F S3-2 · COORD] The account-deletion answer is a two-line toast: the date first, about 80 characters. */
+/** [REVIEW-F S3-2 · COORD 10:44Z] The account-deletion answer is a two-line toast (90 characters at most, the date
+ *  inside it). 'At least': a renewal can move the date, so it is never promised as firm. Counts every kept document. */
 export function accountClosedKeptWords(revisitBy: Date, documents: number): string {
-  return `Account closed. ${documents === 1 ? '1 document' : `${documents} documents`} kept until ${guyanaDay(revisitBy)} for a check, then deleted.`;
+  return `Account closed. ${documents === 1 ? '1 document' : `${documents} documents`} kept for a check until at least ${guyanaDay(revisitBy)}, then deleted.`;
 }
 
 /** How many of the person's documents the system's investigation holds keep, and the latest of their review dates. */
@@ -235,7 +236,7 @@ export async function sweepInvestigationHolds(prisma: PrismaClient, now = new Da
         }
       });
       const to = renewedTo as Date | null;
-      if (to && deps.notifyPerson) await deps.notifyPerson(hold.subjectUserId, to).catch(() => undefined);
+      if (to && deps.notifyPerson) await deps.notifyPerson(hold.subjectUserId, to, hold.id).catch(() => undefined);
       if (escalate && deps.escalate) await deps.escalate(hold).catch(() => undefined);
       if (freed.length > 0 && deps.onFreed) await deps.onFreed(hold.subjectUserId, freed).catch(() => undefined);
     }

@@ -591,7 +591,7 @@ export class AccountService {
       },
     });
 
-    const { revisitBy, documents: keptForReview } = deferred.count > 0 ? await investigationHoldSummary(prisma, userId) : { revisitBy: null, documents: 0 };
+    const { revisitBy } = deferred.count > 0 ? await investigationHoldSummary(prisma, userId) : { revisitBy: null };
     // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
     const heldUploads = uploads.held + liveness.held;
     if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
@@ -600,7 +600,7 @@ export class AccountService {
         pendingDocuments, pendingAvatarObjects, pendingUploads,
         // [SEC-PII · Privacy §6] Delayed by an open review: why (generically) and when, in the words the app shows.
         message: revisitBy
-          ? accountClosedKeptWords(revisitBy, keptForReview)
+          ? accountClosedKeptWords(revisitBy, deferred.count) // [COORD 10:44Z] every kept document, a person's holds too
           : 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }

@@ -2066,12 +2066,13 @@ export class VerificationService {
     return [...latest].filter(([, o]) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD').map(([id]) => id);
   }
 
-  /** [REVIEW-G S3-2 · COORD 10:20Z] A renewal tells ONLY a person with a delayed request for documents a system hold
-   *  keeps; a subject who asked for nothing is told nothing (no false words, no tip-off). */
-  async notifyRenewalIfDelayed(userId: string, revisitBy: Date): Promise<void> {
+  /** [REVIEW-G S3-2 · COORD 10:20Z] A renewal tells ONLY a person with a delayed request for documents THAT renewed
+   *  hold keeps [REVIEW-M MN4: never a date from an unrelated hold]; a subject who asked for nothing is told nothing
+   *  (no false words, no tip-off). */
+  async notifyRenewalIfDelayed(userId: string, revisitBy: Date, holdId: string): Promise<void> {
     const delayed = await this.delayedRequestDocs(userId);
     if (delayed.length === 0) return;
-    const held = await this.prisma.verificationDocument.count({ where: { id: { in: delayed }, userId, purgedAt: null, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } } });
+    const held = await this.prisma.verificationDocument.count({ where: { id: { in: delayed }, userId, purgedAt: null, legalHoldId: holdId, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } } });
     if (held === 0) return;
     await this.notifyErasureDelayed(userId, revisitBy, false, held);
   }
