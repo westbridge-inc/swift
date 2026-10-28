@@ -144,7 +144,10 @@ export function shapeCheckoutAnswer(input: {
     paymentAction: input.paymentAction,
     message: input.orders.length > 1
       ? `${input.orders.length} orders placed — each vendor will confirm shortly.`
-      : scheduled
+      // [BOOK-S3] A booking the business's listing confirmed at checkout: never "will confirm".
+      : input.orders[0]?.fulfillment === 'APPOINTMENT' && input.orders[0]?.status === 'ACCEPTED'
+        ? `Booking confirmed with ${input.orders[0]?.vendor?.name}.`
+        : scheduled
         ? `Order scheduled! ${input.orders[0]?.vendor?.name} will prepare it at the right time.`
         : `Order placed! ${input.orders[0]?.vendor?.name} will confirm shortly.`,
   };
