@@ -510,7 +510,7 @@ if args[:1] == ["compose"]:
 if args[:1] in (["container"], ["volume"]) and "inspect" in args: sys.exit(1)
 if args[:1] == ["volume"]: note("INSTANCE volume " + " ".join(args[1:])); sys.exit(0)
 if args[:1] == ["run"]: note("INSTANCE run " + " ".join(args[1:])); print("ctr"); sys.exit(0)
-if args[:1] == ["rm"]: note("INSTANCE rm " + " ".join(args[1:])); sys.exit(0)
+if args[:1] == ["rm"]: note("INSTANCE rm " + " ".join(args[1:])); sys.exit(5 if os.environ.get("RM_FAIL") else 0)
 if args[:1] == ["logs"]: print("PostgreSQL init process complete; ready for start up."); sys.exit(0)
 if args[:1] == ["exec"]:
     rest = [a for a in args[1:] if a != "-i"]
@@ -528,7 +528,10 @@ if args[:1] == ["exec"]:
             print("4000; 3079 16385 EXTENSION - postgis "); print("4001; 0 0 COMMENT - EXTENSION postgis "); print("4002; 1259 16400 TABLE public users swift")
             sys.exit(0)
         if "-f" in cmd: sys.exit(0)
-        note(f"INSTANCE {ctr} pg_restore as={user} {' '.join(cmd)}"); sys.exit(0)
+        note(f"INSTANCE {ctr} pg_restore as={user} {' '.join(cmd)}")
+        if os.environ.get("RESTORE_HANGS"):
+            import time; time.sleep(60)
+        sys.exit(0)
     note(f"INSTANCE {ctr} psql as={user} {(' '.join(cmd[-2:]) + ' ' + fed).replace(chr(10), ' ')[:600]}")
     if "rolsuper FROM pg_roles WHERE rolname = current_user" in text:
         print(os.environ.get("RESTORE_LOGIN_SUPER", "f"))
@@ -708,6 +711,34 @@ class TheThrowawayInstanceIsThrownAway(unittest.TestCase):
         self.assertIn("removed with its volume", r.stdout)
         restore_ok = r.stdout.index("RESTORE OK")
         self.assertLess(restore_ok, r.stdout.index("removed with its volume"))
+
+    def test_a_removal_that_fails_is_a_failed_run_never_a_quiet_success(self):
+        sign(self.key, self.dump)
+        r = self.restore(RM_FAIL="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("removing the scratch instance swift-restore-swift_restore_sig FAILED", r.stderr)
+        self.assertNotIn("was removed with its volume", r.stdout)
+
+    def test_an_interrupted_restore_still_removes_the_copy(self):
+        import signal, time
+        sign(self.key, self.dump)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("BACKUP_", "AWS_", "POSTGRES_"))}
+        env.update({"PATH": f"{self.bin}:{os.environ['PATH']}", "CALL_LOG": str(self.log),
+                    "BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.allowed), "RESTORE_HANGS": "1"})
+        proc = subprocess.Popen(["bash", str(self.deploy / "restore.sh"), "--project", "swift", str(self.dump), "swift_restore_sig"],
+                                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline and not any(" pg_restore " in c for c in self.calls()):
+                time.sleep(0.2)
+            self.assertTrue(any(" pg_restore " in c for c in self.calls()), self.calls())
+            os.killpg(proc.pid, signal.SIGINT)
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(self.removed(), self.calls())
 
     def test_keep_for_inspection_keeps_it_and_says_how_and_by_when_to_remove_it(self):
         sign(self.key, self.dump)
@@ -1069,8 +1100,8 @@ esac
 
     def test_a_left_volume_is_listed_and_fails_past_a_day(self):
         out = self.doctor(volumes="swift-restore-swift_restore_x", ages="2020-01-01T00:00:00Z")
-        self.assertIn("FAIL", out)
-        self.assertIn("swift-restore-swift_restore_x", out)
+        line = next(l.strip() for l in out.splitlines() if "swift-restore-swift_restore_x" in l)
+        self.assertTrue(line.startswith("FAIL"), line)
         self.assertIn("docker volume rm swift-restore-swift_restore_x", out)
         fresh = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         out = self.doctor(volumes="swift-restore-swift_restore_x", ages=fresh)

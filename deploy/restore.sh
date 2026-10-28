@@ -248,6 +248,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+# An interrupted restore (Ctrl-C, a stopped unit) still runs the EXIT cleanup above.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_DIR"; }; }
 
 # [item 196] Only the restore login (and the instance's superuser) may connect to the
