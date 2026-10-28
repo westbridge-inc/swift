@@ -81,6 +81,7 @@ import {
   type CartPaymentSelection,
 } from '../cartPayment';
 import { touchTarget } from '../../../kit/touch-target';
+import { bookingSummaryNote, checkoutButtonLabel, mmgBookingWaitsNote, placedBookingOutcome, placedPopupTitle, type PlacedBookingOutcome } from '../../../lib/appointmentBooking';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -225,6 +226,9 @@ export function CartScreen() {
   const [placedMmgPayTo, setPlacedMmgPayTo] = useState<'STORE_NUMBER' | undefined>(undefined);
   // The cart empties after placement — remember it was a booking for the popup.
   const [placedAppt, setPlacedAppt] = useState(false);
+  // [BOOK-S6a · REVIEW-F S3-1 on #2193] What the checkout ANSWER says the booking is: confirmed
+  // (the order came back ACCEPTED) or a request. Never the app's guess.
+  const [placedBooking, setPlacedBooking] = useState<PlacedBookingOutcome | null>(null);
   // The chevron only renders when there is somewhere to go: Cart is a tab, so
   // this is true exactly when the tab navigator (or a stack above it) can pop.
   // A dead back control on a money screen is worse than none.
@@ -384,6 +388,13 @@ export function CartScreen() {
     if (Number(c?.tipAmount) > 0) setTip.mutate(0);
   };
   const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
+  // [BOOK-S6a · owner A3/A4] "Book now" only for bookings the server said are confirmed at once,
+  // paid cash at the appointment; everything else is a request the business confirms.
+  const bookingButton = {
+    appointmentOnly: apptOnly,
+    everyBookingInstant: bookingItems.length > 0 && bookingItems.every((i) => appointments[i.itemId]?.instant === true),
+    payingCash: effectivePaySelection.method === 'CASH',
+  };
   // PU-01 law (caught by the certification pass): a pickup order is collected
   // at the counter — it must NEVER demand a delivery address. Address is for
   // delivery carts and home-visit bookings only.
@@ -430,6 +441,7 @@ export function CartScreen() {
           setPlacedOrderId(first?.id ?? null);
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
           setPlacedAppt(apptPayload.length > 0);
+          setPlacedBooking(placedBookingOutcome(data));
           setPlacedSubmittedMethod(submittedMethod);
           setPlacedPaymentAction(paymentAction);
           setPlacedMmgPayTo(submittedMmgPayTo);
@@ -1051,7 +1063,7 @@ export function CartScreen() {
                   ) : null,
                 )}
                 <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                  Your time is confirmed when the business accepts the booking.
+                  {bookingSummaryNote(bookingButton)}
                 </T>
               </View>
             ) : pickup ? (
@@ -1120,7 +1132,7 @@ export function CartScreen() {
               on paper, so the only thing wearing the brand is the thing you
               press to spend money. `xl` is the kit's moment tier (64). */}
           <PillButton
-            label={apptOnly ? 'Book now' : pickup ? 'Place pickup order' : 'Place order'}
+            label={checkoutButtonLabel({ ...bookingButton, pickup })}
             // NEVER pass the handler bare: Pressable calls onPress(event) and the
             // cyclical press event would spread into onOrder's `extra` payload,
             // killing JSON serialization — no request ever left the phone
@@ -1133,6 +1145,11 @@ export function CartScreen() {
             disabled={!quoteSettled || !c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
             style={{ marginTop: space.xl }}
           />
+          {mmgBookingWaitsNote(bookingButton) ? (
+            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+              {mmgBookingWaitsNote(bookingButton)}
+            </T>
+          ) : null}
           {needsAddress && !c.deliveryAddress ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
               {homeVisit ? 'Add your address — the business travels to you.' : 'Add a delivery address to place the order.'}
@@ -1205,11 +1222,12 @@ export function CartScreen() {
             that is still in flight. */}
         <LockInDisc />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {placedAppt ? 'Booking requested' : 'Your order is placed'}
+          {placedPopupTitle({ appointment: placedAppt, outcome: placedBooking })}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {placedOrderConfirmationCopy({
             appointment: placedAppt,
+            appointmentConfirmed: placedBooking === 'confirmed',
             pickup: placedPickup,
             held: placedHeld,
             submittedMethod: placedSubmittedMethod,

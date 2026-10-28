@@ -156,3 +156,18 @@ describe('[PAYMENT-SIMPLIFY] MMG to the store number', () => {
       .toBe('When the business accepts, your order screen shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.');
   });
 });
+
+// [BOOK-S6a] A booking the checkout answer came back ACCEPTED for is confirmed now, not "when the business accepts".
+describe('[BOOK-S6a] the booking confirmation copy follows the answer', () => {
+  const base = { appointment: true, pickup: false, held: false, submittedMethod: 'CASH' as const, paymentAction: null };
+  it('confirmed', () => {
+    const copy = placedOrderConfirmationCopy({ ...base, appointmentConfirmed: true });
+    expect(copy).toBe('Your time is confirmed — pay cash directly to the business when the service is done.');
+    expect(copy).not.toContain('accepts');
+  });
+  it('a request, or no answer about it, keeps the request words', () => {
+    for (const appointmentConfirmed of [false, undefined]) {
+      expect(placedOrderConfirmationCopy({ ...base, appointmentConfirmed })).toBe('Your time is confirmed when the business accepts — pay cash directly to them when the service is done.');
+    }
+  });
+});
