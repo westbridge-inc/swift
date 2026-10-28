@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   useStateCall: 0,
   selectedSlot: null as string | null,
   setSelectedSlot: vi.fn(),
+  addToCart: vi.fn(),
+  setAppointment: vi.fn(),
 }));
 
 vi.mock('react', async (original) => {
@@ -59,14 +61,14 @@ vi.mock('../../../hooks/customer', () => ({
       }] }],
     },
   }),
-  useAddToCart: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useAddToCart: () => ({ mutate: mocks.addToCart, isPending: false, isError: false }),
   useItemSlots: () => ({ ...mocks.slots, refetch: mocks.refetchSlots }),
 }));
 vi.mock('../../../stores/authStore', () => ({
   useAuthStore: () => ({ isAuthenticated: true, promptLogin: vi.fn() }),
 }));
 vi.mock('../../../stores/bookingStore', () => ({
-  useBookingStore: (select: (state: unknown) => unknown) => select({ setAppointment: vi.fn() }),
+  useBookingStore: (select: (state: unknown) => unknown) => select({ setAppointment: mocks.setAppointment }),
 }));
 vi.mock('../../../lib/images', () => ({ itemPhoto: () => null, HERO_PHOTO_WIDTH: 1280 }));
 vi.mock('../../../lib/money', () => ({ money: (amount: number) => `$${amount}` }));
@@ -90,6 +92,7 @@ function collect(node: any, text: string[] = [], chips: any[] = []): { text: str
   }
   if (node.type === 'Chip') chips.push(node.props);
   if ((node.type === 'PillButton' || node.type === 'TonePill') && typeof node.props?.label === 'string') text.push(node.props.label);
+  if (node.type === 'PillButton') chips.push(node.props);
   collect(node.props?.children, text, chips);
   return { text, chips };
 }
@@ -207,5 +210,26 @@ describe('[BOOK-S6a] the "Instant confirmation" badge', () => {
       mocks.slots = { ...mocks.slots, data };
       expect(render().text.join(' ')).not.toMatch(/instant/i);
     }
+  });
+});
+
+// [BOOK-S6a] The server's word travels with the picked slot to the cart (its button's words), and only it.
+describe('[BOOK-S6a] the picked slot remembers what the slots answer said', () => {
+  const pick = (instantConfirmation?: unknown) => {
+    mocks.selectedSlot = '2026-09-24T13:00:00.000Z';
+    mocks.slots = { ...mocks.slots, data: { slots: [mocks.selectedSlot], bookableWeekdays: [4], ...(instantConfirmation !== undefined ? { instantConfirmation } : {}) } };
+    mocks.addToCart.mockImplementation((_body: unknown, opts: { onSuccess: () => void }) => opts.onSuccess());
+    const book = render().chips.find((p) => typeof p.label === 'string' && p.label.startsWith('Book 9:00 AM'));
+    expect(book).toBeDefined();
+    book.onPress();
+    return mocks.setAppointment.mock.calls[0]![1];
+  };
+  it('instantConfirmation true: the cart line is marked instant', () => {
+    expect(pick(true)).toEqual({ slotStart: '2026-09-24T13:00:00.000Z', instant: true });
+  });
+  it('no field or false: not marked (a request)', () => {
+    expect(pick()).toEqual({ slotStart: '2026-09-24T13:00:00.000Z' });
+    mocks.setAppointment.mockClear(); mocks.useStateCall = 0;
+    expect(pick(false)).toEqual({ slotStart: '2026-09-24T13:00:00.000Z' });
   });
 });

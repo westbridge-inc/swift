@@ -322,6 +322,18 @@ describe('[BOOK-S6a · owner B2] switch ON — the order screen projects the boo
     expect((await detail(a, order.id)).appointmentBooking).toBeNull();
   });
 
+  it('a finished appointment whose booking was left live: not offered, and the move refuses it too', async () => {
+    on();
+    const a = await customer('Zed');
+    const order = await booked(a, shop.instantId, nextSlot());
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'COMPLETED' } });
+    const view = (await detail(a, order.id)).appointmentBooking!;
+    expect(view.reschedule).toEqual({ allowed: false, message: null });
+    const res = await customerMove(a, view.id, nextSlot());
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('NOT_RESCHEDULABLE');
+  });
+
   it('another customer never sees or moves it (the order and the booking stay the customer\'s own)', async () => {
     on();
     const a = await customer('Xan');
