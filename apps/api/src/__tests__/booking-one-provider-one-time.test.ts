@@ -162,7 +162,8 @@ describe('one business, one time — across its listings', () => {
     const a = await customer();
     const first = await svc.reserveSlot(haircut.id, a.userId, at(10));
     await expect(svc.reserveSlot(beard.id, (await customer()).userId, at(10, 30))).rejects.toMatchObject({ code: 'SLOT_TAKEN' });
-    await svc.cancelBooking(first.id, a.userId);
+    // [BOOK-S2] A bare booking has no order to cancel through (the dead BookingService.cancelBooking is gone): the row is cancelled as the coupling seam would.
+    await app.prisma.booking.update({ where: { id: first.id }, data: { status: 'CANCELLED' } });
     await expect(svc.reserveSlot(beard.id, (await customer()).userId, at(10, 30))).resolves.toMatchObject({ status: 'RESERVED' });
   });
 

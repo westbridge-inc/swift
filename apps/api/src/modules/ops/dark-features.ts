@@ -210,6 +210,17 @@ export const DARK_FEATURES: DarkFeature[] = [
       "The website's Taxi page shows real fare estimates and says 'Book a taxi in the Swift app'; a ride request from a browser session is refused (TAXI_MOBILE_APP_REQUIRED) and the ride page points to the app for the safety PIN and SOS. Phone booking is unchanged. Kept OFF until web booking passes the app's safety bar and a staging run, then the owner decides (16 Oct 2026).",
     impact: 'safety',
   },
+  {
+    key: 'instant_booking',
+    setting: 'INSTANT_BOOKING',
+    source: 'env',
+    // The code ignores surrounding blanks (booking/instant-booking.ts): ' 1' is ON there, so it is ON here.
+    enabledWhenPattern: /^1$/,
+    title: 'Appointment slot taken when the customer books',
+    whileOff:
+      "Booking an appointment is a request, as before: the customer's time is taken only when the business accepts, so two customers can wait on the same free time and the business's accept decides (the other is told the time was taken). Kept OFF until the instant-booking track passes CI, a real-Postgres race run and a staging run, then the owner decides (28 Oct 2026, B4).",
+    impact: 'product',
+  },
   // ── [row 331 · CONFIG-GUARDS] the kill switches. Each is unset (or 0) in
   // normal running; set to 1 it switches its capability off. The census in
   // dark-features.test.ts fails on any *_KILL the API reads that is not here.

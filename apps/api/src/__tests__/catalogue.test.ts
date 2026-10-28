@@ -325,7 +325,8 @@ describe('Bookings — double-booking is impossible at the data layer', () => {
     const winner = await app.prisma.booking.findFirstOrThrow({
       where: { itemId: serviceItemId, slotStart: slot, status: 'RESERVED' },
     });
-    await booking.cancelBooking(winner.id, winner.customerId);
+    // [BOOK-S2] A bare booking has no order to cancel through (the dead BookingService.cancelBooking is gone): the row is cancelled as the coupling seam would.
+    await app.prisma.booking.update({ where: { id: winner.id }, data: { status: 'CANCELLED' } });
 
     const next = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rebooked = await booking.reserveSlot(serviceItemId, next.userId, slot);
@@ -536,7 +537,7 @@ describe('deleting a menu item archives its order and booking references', () =>
     const held = await app.prisma.booking.create({ data: { itemId: item.id, vendorId, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
     expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
     expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: item.id, status: 'RESERVED' });
-    await booking.cancelBooking(held.id, customerId);
+    await app.prisma.booking.update({ where: { id: held.id }, data: { status: 'CANCELLED' } }); // [BOOK-S2] as the coupling seam would
     expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
   });
 });
@@ -584,7 +585,7 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
     }
     expect((await app.prisma.item.findUnique({ where: { id: dish.id }, include: { optionGroups: { include: { options: true } } } }))?.optionGroups[0]?.options).toHaveLength(1);
     expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: service.id, status: 'RESERVED' });
-    await booking.cancelBooking(held.id, customerId);
+    await app.prisma.booking.update({ where: { id: held.id }, data: { status: 'CANCELLED' } }); // [BOOK-S2] as the coupling seam would
     expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
   });
 
