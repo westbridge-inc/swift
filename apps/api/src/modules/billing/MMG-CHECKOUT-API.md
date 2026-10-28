@@ -341,6 +341,8 @@ The official merchant page says MMG posts an encrypted TOKEN to the configured R
 
 The planned `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers. Its authentication and server-to-server behavior must be confirmed with MMG before enabling it (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
 
+Both `/return` and `/notify` read the reply from its `token` field only (any case) and open it once. MMG's docs say MMG posts the encrypted token to the Response URL but do not name the field, and they do not describe Notify at all. If MMG documents a different Notify field, that field is added and nothing else. Each door also has one ceiling shared by every source, set above its per-source ceiling.
+
 **Registered with MMG (5 Oct 2026):** MMG has registered Swift's UAT Notify URL, `https://api-staging.swiftgy.com/api/v1/billing/mmg-checkout/notify` (this route). A notify is a pointer only: it is written down and prompts Swift's own lookup with MMG; it never credits anything by itself. Its authentication remains unconfirmed (U3).
 
 Both public routes are rate-limited per source address and size-capped: `/return` takes 120 calls a minute and a body of up to 96 KB (the 16 values of 4096 characters the page forwards, as JSON); `/notify` takes 60 a minute and 16 KB. Over the limit is `429`, over the cap is `413`, and a `/return` body that is not `{ outcome, params }` within those bounds is `400`. Neither credits anything by itself: they only prompt the server to check with MMG. With `MMG_CHECKOUT_ENABLED` off, a body within those bounds is answered neutrally (`UNKNOWN`, `200`) and nothing is written down; a malformed `/return` body is still `400`.

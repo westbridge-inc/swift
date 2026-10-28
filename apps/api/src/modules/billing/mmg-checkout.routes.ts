@@ -1,4 +1,5 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type {} from '@fastify/rate-limit';
 import type { MmgCheckoutIntent, Prisma, PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
@@ -69,6 +70,19 @@ export const MMG_CHECKOUT_START_RATE = { max: 20, timeWindow: '1 minute' } as co
 /** Per source: the web server forwards every partner's return from ONE address, so this is generous and still a ceiling. */
 export const MMG_CHECKOUT_RETURN_RATE = { max: 120, timeWindow: '1 minute' } as const;
 export const MMG_CHECKOUT_NOTIFY_RATE = { max: 60, timeWindow: '1 minute' } as const;
+/** [SEC-DOS F8] ONE ceiling per public door, shared by every source (and, in
+ *  production, by every API instance: the limiter's Redis store). Each reply
+ *  opened costs a private-key operation on the event loop, so how many arrive
+ *  from everyone together is bounded too, not only how many from one address.
+ *  It sits above each door's per-source ceiling, so the web server (which
+ *  forwards every partner's return from one address) and MMG's own server keep
+ *  their whole allowance, and a source refused by its own ceiling never uses
+ *  it up. A reply refused here is never lost money: the payment is MMG's, the
+ *  Pay button stays hidden while the checkout is being confirmed, and a
+ *  checkout that never heard back is checked against MMG's own records
+ *  (mmg-expired-hold-check.ts). */
+export const MMG_CHECKOUT_RETURN_GLOBAL_RATE = { max: 240, timeWindow: '1 minute' } as const;
+export const MMG_CHECKOUT_NOTIFY_GLOBAL_RATE = { max: 120, timeWindow: '1 minute' } as const;
 /** 16 values of 4096 characters as JSON, with room for the envelope. */
 export const MMG_CHECKOUT_RETURN_BODY_LIMIT = 96 * 1024;
 /** The contract: JSON or a form of up to 16 KB. */
@@ -81,6 +95,29 @@ const rateLimited = {
   errorResponseBuilder: (_request: FastifyRequest, context: { ttl: number }) =>
     new AppError(429, 'RATE_LIMITED', 'Too many attempts. Wait a minute and try again.', { retryAfterSeconds: Math.max(1, Math.ceil(context.ttl / 1000)) }),
 };
+
+/**
+ * [SEC-DOS F8] A door's ceiling shared by every source. It runs after the
+ * per-source limiter (that one is an onRequest hook; this is preParsing), so a
+ * request its own source's ceiling refused is never counted here. An app with
+ * no limiter registered (none in this server) has no shared ceiling either.
+ */
+function sharedCeiling(app: FastifyInstance, door: 'return' | 'notify', rate: { max: number; timeWindow: string }) {
+  const check = app.hasDecorator('createRateLimit')
+    ? app.createRateLimit({ max: rate.max, timeWindow: rate.timeWindow, keyGenerator: () => `mmg-checkout-${door}:every-source` })
+    : null;
+  return async (_request: FastifyRequest, reply: FastifyReply, payload: unknown) => {
+    if (check) {
+      const verdict = await check(_request);
+      if (!verdict.isAllowed && verdict.isExceeded) {
+        const retryAfterSeconds = Math.max(1, verdict.ttlInSeconds);
+        reply.header('retry-after', retryAfterSeconds);
+        throw new AppError(429, 'RATE_LIMITED', 'Too many attempts. Wait a minute and try again.', { retryAfterSeconds });
+      }
+    }
+    return payload;
+  };
+}
 
 /** [Sol · #1404] The public doors are limited per SOURCE: the proxy-resolved
  *  address (Fastify's trustProxy, never a raw X-Forwarded-For), the same
@@ -355,7 +392,7 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
   /** The web return page forwards MMG's reply, from either registered URL, with the path as `outcome`. */
-  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, preParsing: sharedCeiling(app, 'return', MMG_CHECKOUT_RETURN_GLOBAL_RATE), config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request) => {
     const body = returnBody.parse(request.body ?? {});
     if (!mmgCheckoutEnabled()) return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     if (ambiguousToken(body.params)) {
@@ -367,7 +404,7 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   });
 
   /** MMG's own servers, if MMG calls one: JSON or a form, always 200, never a word about any account. */
-  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, preParsing: sharedCeiling(app, 'notify', MMG_CHECKOUT_NOTIFY_GLOBAL_RATE), config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request) => {
     if (mmgCheckoutEnabled()) {
       const params = notifyParams(request.body, request.query);
       if (ambiguousToken(params)) {
@@ -405,13 +442,15 @@ async function observeReply(
   } catch {
     provider = null;
   }
+  // [SEC-DOS F8] Opened ONCE, here, from the token field only; the service is
+  // handed the opened reply and never opens it again.
   const reply = provider && provider.driver !== 'disabled' ? openReply(provider, input.params) : null;
   const code = reply ? resultCodeOf(reply) : null;
   if (reply && replyCodeClass(code) === 'ALERT') {
     await alertOnRefusedRequest(app, runtime, { source: input.source, outcome: input.outcome, reply, code: code as string });
     return 'UNKNOWN';
   }
-  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params });
+  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params, opened: { reply } });
 }
 
 /** [I9] Written down first, under the checkout's own tenant when the reply names one of ours; then the page. */

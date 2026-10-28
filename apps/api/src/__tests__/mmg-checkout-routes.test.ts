@@ -1439,8 +1439,8 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
 // ONCE per request (the route hands the opened reply to the service, which
 // never opens it again), and only from the reply's own field: `token` (the
 // MMG demo's `?token=`, the address-path `token=` the web page forwards as
-// params.token, the 4 Oct notify form). Notify keeps trying every value only
-// when no `token` field is present at all (its transport is unconfirmed, U3).
+// params.token, the 4 Oct notify form), on both doors: MMG's docs do not
+// describe Notify, so it reads the same field and nothing else (COORD, 28 Oct).
 // Each door also has ONE ceiling shared by every source, on top of the
 // per-source one. Nothing here changes what credits: still only MMG's lookup.
 // ---------------------------------------------------------------------------
@@ -1499,13 +1499,13 @@ describe('[SEC-DOS F8] a reply is opened once, from its token field, under a cei
     expect((await observationsOf(ref)).filter((o) => o.source === 'RETURN')).toHaveLength(1);
   });
 
-  it('the notify door opens its token field once; without one, each value at most once', async () => {
+  it('the notify door opens its token field once, and never a value outside it', async () => {
     let calls = countingProvider();
     expect((await notify({ ...garbageFields(15), token: garbage() })).json()).toEqual({ success: true });
     expect(calls.n).toBe(1);
     calls = countingProvider();
     expect((await notify(garbageFields(16))).json()).toEqual({ success: true });
-    expect(calls.n).toBeLessThanOrEqual(16);
+    expect(calls.n).toBe(0);
   });
 
   it('each door has one ceiling shared by every source; a source over its own ceiling does not use it up', async () => {
