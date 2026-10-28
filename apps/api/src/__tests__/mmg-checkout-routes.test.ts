@@ -15,6 +15,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { rateLimitKey } from '../utils/rate-limit-key';
+import { asFastifyTrustProxy } from '../config/trust-proxy';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
@@ -276,8 +277,8 @@ const toldOf = (userId: string, status: string) => app.prisma.notification.findM
 const alertsOf = (alert: string) => app.prisma.notification.findMany({ where: { userId: superAdminId, data: { path: ['alert'], equals: alert } }, orderBy: { createdAt: 'asc' } });
 const observationsOf = (intentId: string) => app.prisma.mmgCheckoutObservation.findMany({ where: { intentId }, orderBy: { createdAt: 'asc' } });
 
-async function buildApp(): Promise<FastifyInstance> {
-  const server = Fastify({ logger: false });
+async function buildApp(options: { trustProxy?: ReturnType<typeof asFastifyTrustProxy> } = {}): Promise<FastifyInstance> {
+  const server = Fastify({ logger: false, ...options });
   registerErrorHandler(server);
   registerEmptyJsonBodyParser(server);
   await server.register(rateLimit, { max: 1000, timeWindow: '1 minute', keyGenerator: rateLimitKey((token) => server.jwt.verify(token)) });
@@ -1510,38 +1511,61 @@ describe('[SEC-DOS F8] a reply is opened once, from its token field, and the pri
     expect(calls.n).toBe(0);
   });
 
-  it('a flood of junk from a few sources never starves the event loop, and a genuine return still completes', async () => {
-    const p = await makeStore({ balance: 600 });
-    const { ref, row } = await started(p);
-    const txn = tx('FLOOD0');
-    approved(row, txn, 1500, echoOf(row));
-    const genuine = officialReply(row, '0', txn);
-    // Every private-key open costs 15 ms of the loop here, as a slow server would pay for it.
-    const calls = countingProvider(15);
-    const loop = monitorEventLoopDelay({ resolution: 5 });
-    loop.enable();
-    const junk = (ip: string) => app.inject({
-      method: 'POST', url: RETURN_URL, remoteAddress: ip, headers: { 'content-type': 'application/json' },
-      payload: { outcome: 'success', params: { ...garbageFields(15), token: garbage() } },
-    });
-    const flood = ['10.80.0.1', '10.80.0.2', '10.80.0.3'].flatMap((ip) => Array.from({ length: 12 }, () => junk(ip)));
-    const real = app.inject({ method: 'POST', url: RETURN_URL, remoteAddress: '10.81.0.1', headers: { 'content-type': 'application/json' }, payload: { outcome: 'success', params: { token: genuine } } });
-    const [answers, mine] = await Promise.all([Promise.all(flood), real]);
-    loop.disable();
-    expect(mine.statusCode).toBe(200);
-    expect(mine.json().data.state).toBe('CONFIRMED');
-    expect(await creditsOf(p.subId)).toBe(1);
-    expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
-    // Junk is answered UNKNOWN, or refused as retryable once its sources' share of the wait is full.
-    for (const a of answers) {
-      if (a.statusCode === 200) expect(a.json().data.state).toBe('UNKNOWN');
-      else {
-        expect(a.statusCode).toBe(503);
-        expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN', details: { retryAfterSeconds: expect.any(Number) } } });
+  it('a junk flood from many sources through the one forwarding web server never starves the event loop, and a genuine return still completes', async () => {
+    // As production runs it: the web page forwards each partner's own address
+    // from the private network, and the API resolves request.ip through TRUST_PROXY.
+    const forwarded = await buildApp({ trustProxy: asFastifyTrustProxy('loopback, 172.16.0.0/12') });
+    try {
+      const p = await makeStore({ balance: 600 });
+      const { ref, row } = await started(p);
+      const txn = tx('FLOOD0');
+      approved(row, txn, 1500, echoOf(row));
+      const genuine = officialReply(row, '0', txn);
+      // Every private-key open costs 10 ms of the loop here, as a slow server would pay for it.
+      const calls = countingProvider(10);
+      const WEB = '172.20.0.5';
+      const viaWeb = (client: string, params: Record<string, unknown>) => forwarded.inject({
+        method: 'POST', url: RETURN_URL, remoteAddress: WEB,
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': client }, payload: { outcome: 'success', params },
+      });
+      const loop = monitorEventLoopDelay({ resolution: 5 });
+      loop.enable();
+      const flood = Array.from({ length: 10 }, (_, c) => `203.0.113.${c + 1}`)
+        .flatMap((client) => Array.from({ length: 8 }, () => viaWeb(client, { ...garbageFields(15), token: garbage() })));
+      const real = viaWeb('198.51.100.7', { token: genuine });
+      const [answers, mine] = await Promise.all([Promise.all(flood), real]);
+      loop.disable();
+      expect(mine.statusCode, mine.body).toBe(200);
+      expect(mine.json().data.state).toBe('CONFIRMED');
+      expect(await creditsOf(p.subId)).toBe(1);
+      expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
+      // Junk is answered UNKNOWN, or refused as retryable once its sources' share of the wait is full.
+      let refused = 0;
+      for (const a of answers) {
+        if (a.statusCode === 200) expect(a.json().data.state).toBe('UNKNOWN');
+        else {
+          refused += 1;
+          expect(a.statusCode).toBe(503);
+          expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN', details: { retryAfterSeconds: expect.any(Number) } } });
+          expect(Number(a.headers['retry-after'])).toBeGreaterThan(0);
+        }
       }
+      expect(refused).toBeGreaterThan(0);
+      // At most one open per request, and the loop was never blocked for much more than one of them.
+      expect(calls.n).toBeLessThanOrEqual(flood.length + 1);
+      expect(loop.max / 1e6).toBeLessThan(120);
+    } finally {
+      await forwarded.close();
     }
-    // At most one open per request, and the loop was never blocked for much more than one of them.
-    expect(calls.n).toBeLessThanOrEqual(flood.length + 1);
-    expect(loop.max / 1e6).toBeLessThan(120);
+  });
+
+  it('a busy notify is answered as retryable, never dropped as a 200', async () => {
+    countingProvider(30);
+    const flood = Array.from({ length: 30 }, () => app.inject({ method: 'POST', url: NOTIFY_URL, remoteAddress: '10.90.0.1', headers: { 'content-type': 'application/json' }, payload: { token: garbage() } }));
+    const answers = await Promise.all(flood);
+    const busy = answers.filter((a) => a.statusCode === 503);
+    expect(busy.length).toBeGreaterThan(0);
+    for (const a of busy) expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN' } });
+    for (const a of answers.filter((x) => x.statusCode !== 503)) expect(a.json()).toEqual({ success: true });
   });
 });

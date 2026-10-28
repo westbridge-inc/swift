@@ -74,7 +74,7 @@ export const MMG_CHECKOUT_NOTIFY_RATE = { max: 60, timeWindow: '1 minute' } as c
 export const MMG_CHECKOUT_RETURN_BODY_LIMIT = 96 * 1024;
 /** The contract: JSON or a form of up to 16 KB. */
 export const MMG_CHECKOUT_NOTIFY_BODY_LIMIT = 16 * 1024;
-/** [SEC-DOS F8] How long the return page is told to wait when too many replies are waiting to be opened. */
+/** [SEC-DOS F8] How long a sender (the return page, MMG's notify) is told to wait when too many replies are waiting to be opened. */
 export const RETURN_BUSY_RETRY_SECONDS = 1;
 /** Everything the return page may render (its `words`); the API never answers more. */
 export const RETURN_STATES = ['CONFIRMED', 'CONFIRMING', 'NOT_PAID', 'UNKNOWN'] as const satisfies readonly ReturnState[];
@@ -377,22 +377,29 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
     }
   });
 
-  /** MMG's own servers, if MMG calls one: JSON or a form, always 200, never a word about any account. */
-  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  /** MMG's own servers, if MMG calls one: JSON or a form, 200 and never a word about any account; a
+   *  503 TRY_AGAIN only when too many replies wait to be opened, so the sender redelivers it. */
+  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request, reply) => {
     if (mmgCheckoutEnabled()) {
       const params = notifyParams(request.body, request.query);
       if (ambiguousToken(params)) {
         log().warn({ source: 'NOTIFY' }, '[MMG checkout] a reply token arrived more than once; ignored');
         return { success: true };
       }
+      let busy = false;
       await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params, from: request.ip }).catch((err) => {
         if (err instanceof ReplyGateBusyError) {
-          mmgCheckoutEventsCounter.labels('reply_busy').inc();
-          log().warn({ source: 'NOTIFY' }, '[MMG checkout] too many replies waiting; this notify was not opened');
+          busy = true;
           return;
         }
         log().error({ err }, '[MMG checkout] a notify could not be processed; the poll will look again');
       });
+      if (busy) {
+        // [SEC-DOS F8] Never dropped silently: retryable, and says nothing about the payment.
+        mmgCheckoutEventsCounter.labels('reply_busy').inc();
+        reply.header('retry-after', RETURN_BUSY_RETRY_SECONDS);
+        throw new AppError(503, 'TRY_AGAIN', 'Too many payment replies are being checked right now. Try again in a moment.', { retryAfterSeconds: RETURN_BUSY_RETRY_SECONDS });
+      }
     }
     return { success: true };
   });

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { ReplyDecryptGate, ReplyGateBusyError, plausibleReplyToken } from './mmg-reply-gate';
+import { openReply } from './mmg-checkout-reply';
+import type { MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 
 // [SEC-DOS F8] The reply gate bounds the private-key work behind the public
 // MMG doors: one operation at a time, the event loop's turn before each, a
@@ -57,11 +59,22 @@ describe('ReplyDecryptGate', () => {
     expect(await Promise.all([first, ...queued])).toEqual([1, 2, 3]);
   });
 
-  it('bounds the wait in all', async () => {
-    const gate = new ReplyDecryptGate({ maxWaiting: 3, maxWaitingPerSource: 10 });
+  it('bounds the wait in all: the shared lane, then the reserved places', async () => {
+    const gate = new ReplyDecryptGate({ maxWaiting: 3, maxWaitingPerSource: 10, reservedWaiting: 1 });
     const admitted = [gate.run('s0', () => 0), gate.run('s1', () => 1), gate.run('s2', () => 2), gate.run('s3', () => 3)];
-    await expect(gate.run('s4', () => 4)).rejects.toBeInstanceOf(ReplyGateBusyError);
-    expect(await Promise.all(admitted)).toEqual([0, 1, 2, 3]);
+    admitted.push(gate.run('s4', () => 4)); // the one reserved place
+    await expect(gate.run('s5', () => 5)).rejects.toBeInstanceOf(ReplyGateBusyError);
+    expect(await Promise.all(admitted)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('the reserved places take only a source\'s FIRST waiting reply: a flooding source never reaches them', async () => {
+    const gate = new ReplyDecryptGate({ maxWaiting: 2, maxWaitingPerSource: 4, reservedWaiting: 2 });
+    const junk = [gate.run('junk', () => 'j0'), gate.run('junk', () => 'j1'), gate.run('junk', () => 'j2')]; // running + shared lane full
+    await expect(gate.run('junk', () => 'j3')).rejects.toBeInstanceOf(ReplyGateBusyError);
+    const genuine = gate.run('partner', () => 'mine');
+    await expect(gate.run('partner', () => 'again')).rejects.toBeInstanceOf(ReplyGateBusyError);
+    expect(await genuine).toBe('mine');
+    expect(await Promise.all(junk)).toEqual(['j0', 'j1', 'j2']);
   });
 
   it('a reply that waits too long is refused as busy, and the gate keeps working', async () => {
@@ -74,5 +87,43 @@ describe('ReplyDecryptGate', () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(await gate.run('c', () => 'after')).toBe('after');
     expect(gate.waitingCount).toBe(0);
+  });
+});
+
+describe('openReply: every private-key open goes through the gate, after the cheap check', () => {
+  /** A provider that opens any value to a fixed reply, counting opens; and a gate that records each admission. */
+  function harness(busy = false) {
+    const opened: string[] = [];
+    const provider = { driver: 'sandbox', decryptCheckoutResult: (token: string) => { opened.push(token); return { ResultCode: '0' }; } } as unknown as MmgCheckoutProvider;
+    const admitted: string[] = [];
+    const gate = new ReplyDecryptGate();
+    const run = gate.run.bind(gate);
+    gate.run = (async (source: string, work: () => unknown) => {
+      if (busy) throw new ReplyGateBusyError();
+      admitted.push(source);
+      return run(source, work);
+    }) as typeof gate.run;
+    return { provider, gate, opened, admitted };
+  }
+
+  it('opens the token field under the gate, named by its source', async () => {
+    const h = harness();
+    expect(await openReply(h.provider, { token: block(512), other: block(512) }, 'RETURN:10.0.0.1', h.gate)).toEqual({ ResultCode: '0' });
+    expect(h.admitted).toEqual(['RETURN:10.0.0.1']);
+    expect(h.opened).toHaveLength(1);
+  });
+
+  it('a value that cannot be one RSA block never waits for the gate and is never opened', async () => {
+    const h = harness();
+    expect(await openReply(h.provider, { token: 'garbage' }, 'RETURN:10.0.0.1', h.gate)).toBeNull();
+    expect(await openReply(h.provider, { token: block(128) }, 'RETURN:10.0.0.1', h.gate)).toBeNull();
+    expect(h.admitted).toEqual([]);
+    expect(h.opened).toEqual([]);
+  });
+
+  it('a busy gate is answered as busy, never as "no reply"', async () => {
+    const h = harness(true);
+    await expect(openReply(h.provider, { token: block(512) }, 'RETURN:10.0.0.1', h.gate)).rejects.toBeInstanceOf(ReplyGateBusyError);
+    expect(h.opened).toEqual([]);
   });
 });
