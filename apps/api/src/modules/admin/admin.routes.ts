@@ -98,7 +98,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
-import { CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
+import { CUSTODY_CONTACT_PARTIES, exactContactSearch, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -1250,6 +1250,8 @@ export async function adminRoutes(app: FastifyInstance) {
     // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
     const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
+    // [SEC-PII · COORD] Without user.contact.read, the number and the email match only the exact full value.
+    const contactSearch = holdsPersonContact(request, 'user');
     const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
@@ -1257,8 +1259,9 @@ export async function adminRoutes(app: FastifyInstance) {
         OR: [
           { firstName: { contains: search, mode: 'insensitive' } },
           { lastName: { contains: search, mode: 'insensitive' } },
-          { phone: { contains: search } },
-          { email: { contains: search, mode: 'insensitive' } },
+          ...(contactSearch
+            ? [{ phone: { contains: search } }, { email: { contains: search, mode: 'insensitive' } }]
+            : exactContactSearch(search, { email: true })),
         ],
       }),
     };
@@ -1290,7 +1293,7 @@ export async function adminRoutes(app: FastifyInstance) {
     ]);
 
     // [SEC-PII] Numbers and emails masked unless the live grant holds user.contact.read (search above still matches the full number).
-    const rows = holdsPersonContact(request, 'user') ? users : users.map(maskUserListRow);
+    const rows = contactSearch ? users : users.map(maskUserListRow);
     const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
@@ -2013,6 +2016,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
     const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
+    // [SEC-PII · COORD] Without mover.contact.read, the number matches only the exact full value.
+    const contactSearch = holdsPersonContact(request, 'mover');
     const base: any = {
       user: {
         tenantId,
@@ -2020,7 +2025,7 @@ export async function adminRoutes(app: FastifyInstance) {
           OR: [
             { firstName: { contains: search, mode: 'insensitive' } },
             { lastName: { contains: search, mode: 'insensitive' } },
-            { phone: { contains: search } },
+            ...(contactSearch ? [{ phone: { contains: search } }] : exactContactSearch(search, { email: false })),
           ],
         }),
       },
@@ -2050,7 +2055,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
     // [SEC-PII] The mover's number masked unless the live grant holds mover.contact.read (search still matches the full number).
-    const rows = holdsPersonContact(request, 'mover') ? withLive : withLive.map(maskMoverListRow);
+    const rows = contactSearch ? withLive : withLive.map(maskMoverListRow);
     const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
@@ -2218,6 +2223,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status, search } = moverFilterQuerySchema.parse(request.query);
     const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
+    // [SEC-PII · COORD] Without mover.contact.read, the number matches only the exact full value.
+    const contactSearch = holdsPersonContact(request, 'mover');
     const base: any = {
       user: {
         tenantId,
@@ -2225,7 +2232,7 @@ export async function adminRoutes(app: FastifyInstance) {
           OR: [
             { firstName: { contains: search, mode: 'insensitive' } },
             { lastName: { contains: search, mode: 'insensitive' } },
-            { phone: { contains: search } },
+            ...(contactSearch ? [{ phone: { contains: search } }] : exactContactSearch(search, { email: false })),
           ],
         }),
       },
@@ -2254,7 +2261,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
     // [SEC-PII] The mover's number masked unless the live grant holds mover.contact.read (search still matches the full number).
-    const rows = holdsPersonContact(request, 'mover') ? withLive : withLive.map(maskMoverListRow);
+    const rows = contactSearch ? withLive : withLive.map(maskMoverListRow);
     const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
@@ -2747,6 +2754,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/search', { preHandler: [adminGuard] }, async (request) => {
     const { q } = globalSearchQuerySchema.parse(request.query);
     const contains = { contains: q, mode: 'insensitive' as const };
+    // [SEC-PII · COORD] Without user.contact.read, a person's number and email match only the exact full value.
+    const contactSearch = holdsPersonContact(request, 'user');
 
     const [orders, users, vendors] = await Promise.all([
       app.prisma.order.findMany({
@@ -2757,7 +2766,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       app.prisma.user.findMany({
         where: {
-          OR: [{ phone: contains }, { firstName: contains }, { lastName: contains }, { email: contains }],
+          OR: contactSearch
+            ? [{ phone: contains }, { firstName: contains }, { lastName: contains }, { email: contains }]
+            : [{ firstName: contains }, { lastName: contains }, ...exactContactSearch(q, { email: true })],
         },
         select: { id: true, firstName: true, lastName: true, phone: true, roles: true, status: true },
         take: 5,
@@ -2774,7 +2785,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         orders: orders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
         // [SEC-PII] The people found, as GET /users lists them: masked unless the live grant holds user.contact.read.
-        users: holdsPersonContact(request, 'user') ? users : users.map(maskUserListRow),
+        users: contactSearch ? users : users.map(maskUserListRow),
         vendors,
       },
     };

@@ -119,6 +119,29 @@ export function holdsPersonContact(request: unknown, kind: PersonContactKind): b
   return holdsCapability(held, PERSON_CONTACT_CAPABILITIES[kind]);
 }
 
+/**
+ * [SEC-PII · COORD] The number and email clauses of a person search for a caller WITHOUT the contact
+ * capability. A substring match over a number or an address is an oracle: from which rows come back, a
+ * caller who sees only the masked row recovers the number digit by digit. So they match only the EXACT
+ * full value: the number in its stored form (E.164; spaces, dashes and a missing + forgiven; a 7-digit
+ * local number read as +592), the email exactly as typed or lowercased. Plain `in` lists, never a
+ * pattern (no contains, prefix or ILIKE, whose % and _ are wildcards). Names keep substring search.
+ */
+export function exactContactSearch(search: string, opts: { email: boolean }): Array<{ phone: { in: string[] } } | { email: { in: string[] } }> {
+  const raw = search.trim();
+  const clauses: Array<{ phone: { in: string[] } } | { email: { in: string[] } }> = [];
+  if (/^[+\d\s().-]+$/.test(raw)) {
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length >= 7 && digits.length <= 15) {
+      const phones = new Set([`+${digits}`]);
+      if (!raw.startsWith('+') && digits.length === 7) phones.add(`+592${digits}`);
+      clauses.push({ phone: { in: [...phones] } });
+    }
+  }
+  if (opts.email && raw.includes('@')) clauses.push({ email: { in: [...new Set([raw, raw.toLowerCase()])] } });
+  return clauses;
+}
+
 const maskedEmail = (email: string | null | undefined) => (email ? maskEmail(email) : email ?? null);
 type EmailHolder = { email?: string | null } | null | undefined;
 

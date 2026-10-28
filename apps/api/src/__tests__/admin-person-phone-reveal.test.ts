@@ -470,7 +470,7 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
       const body = res.json().data;
       return (Array.isArray(body) ? body : body.users as unknown[]).map((row) => (row as { id: string }).id);
     };
-    const partials = [phones.person.slice(-6), phones.person.slice(0, 8), phones.person.slice(1), emails.person.slice(0, 6), emails.person.split('@')[0]!, '@example.test'];
+    const partials = [phones.person.slice(-6), phones.person.slice(0, 8), phones.person.slice(2, 9), `${phones.person.slice(0, -1)}%`, emails.person.slice(0, 6), `${emails.person.slice(0, 4)}%`, emails.person.replace(/^./, '_'), emails.person.split('@')[0]!, '@example.test'];
     for (const part of partials) {
       expect(await found(`/users?search=${encodeURIComponent(part)}`, tokens['listReaders']!), part).not.toContain(ids.person);
       expect(await found(`/search?q=${encodeURIComponent(part)}`, tokens['listReaders']!), part).not.toContain(ids.person);
