@@ -5,7 +5,7 @@ import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Vibration } from 'react-native';
 import { useMutationState, useQuery, useQueryClient, type QueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
-import { vendorApi, vendorDiscoveryApi } from '../services/api';
+import { customerApi, vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
@@ -1179,6 +1179,8 @@ export interface VendorBooking {
   status: string;
   orderId: string | null;
   customer: { firstName: string } | null;
+  /** [BOOK-S5a] The listing booked (its free times are what a move may pick). An older server omits it. */
+  itemId?: string;
 }
 
 /** The Services SCHEDULE: upcoming appointments (default two-week window) for the
@@ -1213,6 +1215,31 @@ export function useVendorBookingExceptions(enabled = true) {
     staleTime: 30_000,
   });
   return pv ? previewQuery([] as VendorBookingException[]) : q;
+}
+
+/** [BOOK-S5a · owner B2] The free times of a listing on one Guyana day, for "Move" on the Schedule:
+ *  the same answer the customer's picker reads (GET /customer/items/:id/slots), never re-derived here. */
+export function useBookingMoveTimes(itemId: string, date: string) {
+  return useQuery<{ slots?: string[]; bookableWeekdays?: number[] }>({
+    queryKey: ['vendor', 'move-times', itemId, date],
+    queryFn: ({ signal }) => unwrap(customerApi.getItemSlots(itemId, date, { signal, timeout: 8_000 })),
+    enabled: !!itemId && !!date,
+    retry: false,
+  });
+}
+
+/** [BOOK-S5a · owner B2] Move a booking to another free time of the same service. The schedule (and
+ *  the order the booking belongs to) is read again whatever the outcome: a timeout can mean it moved. */
+export function useRescheduleVendorBooking() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: ({ bookingId, newSlotStart }: { bookingId: string; newSlotStart: string }) =>
+      unwrap(vendorApi.rescheduleBooking(bookingId, newSlotStart)),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
+  });
 }
 
 /** Block time — "funeral afternoon in two taps" (scheduling 2.1). */

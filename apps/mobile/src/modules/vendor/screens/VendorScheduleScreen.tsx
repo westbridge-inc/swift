@@ -34,6 +34,7 @@ import { money } from '../../../lib/money';
 import { errorMessage } from '../../../lib/apiError';
 import { touchTarget } from '../../../kit/touch-target';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
+import { MoveBookingSheet, bookingMovable } from '../MoveBookingSheet';
 
 /** [UI-SWEEP, REVIEW-F 07:08Z] A booking's words. This is BookingStatus
  *  (RESERVED, CONFIRMED, COMPLETED, CANCELLED), its own vocabulary, not an
@@ -50,22 +51,30 @@ export function bookingStatusPill(status: string): { label: string; tone: 'succe
   }
 }
 
-function AppointmentCard({ b }: { b: VendorBooking }) {
+function AppointmentCard({ b, onMove }: { b: VendorBooking; onMove?: () => void }) {
   const pill = bookingStatusPill(b.status);
   return (
-    <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
-      <View style={{ alignItems: 'center', minWidth: 60 }}>
-        <T variant="body" weight="bold">{formatAppointmentClock(b.slotStart)}</T>
-        <T variant="caption" tone="muted">{formatAppointmentClock(b.slotEnd)}</T>
+    <Card style={{ marginBottom: space.sm }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+        <View style={{ alignItems: 'center', minWidth: 60 }}>
+          <T variant="body" weight="bold">{formatAppointmentClock(b.slotStart)}</T>
+          <T variant="caption" tone="muted">{formatAppointmentClock(b.slotEnd)}</T>
+        </View>
+        <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: color.border.subtle }} />
+        <View style={{ flex: 1 }}>
+          <T variant="body" weight="semibold" numberOfLines={1}>{b.serviceName}</T>
+          <T variant="caption" tone="muted" numberOfLines={1}>
+            {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
+          </T>
+        </View>
+        <TonePill tone={pill.tone} label={pill.label} />
       </View>
-      <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: color.border.subtle }} />
-      <View style={{ flex: 1 }}>
-        <T variant="body" weight="semibold" numberOfLines={1}>{b.serviceName}</T>
-        <T variant="caption" tone="muted" numberOfLines={1}>
-          {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
-        </T>
-      </View>
-      <TonePill tone={pill.tone} label={pill.label} />
+      {/* [BOOK-S5a · owner B2] Move it to another free time of the same service. */}
+      {onMove ? (
+        <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: space.sm }}>
+          <LinkText label="Move" onPress={onMove} />
+        </View>
+      ) : null}
     </Card>
   );
 }
@@ -91,6 +100,7 @@ export function VendorScheduleScreen({ navigation }: any) {
   const [blockStart, setBlockStart] = useState('13:00');
   const [blockEnd, setBlockEnd] = useState('17:00');
   const [blockReason, setBlockReason] = useState('');
+  const [moving, setMoving] = useState<VendorBooking | null>(null);
 
   const rows: VendorBooking[] = q.data ?? [];
   const exceptions: VendorBookingException[] = exceptionsQ.data ?? [];
@@ -211,10 +221,13 @@ export function VendorScheduleScreen({ navigation }: any) {
               body="Your open hours are visible to customers — reservations land here."
             />
           ) : (
-            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} />)
+            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} />)
           )}
         </ScrollView>
       )}
+
+      {/* Mounted only while a booking is being moved (its free-times read runs only then). */}
+      {moving ? <MoveBookingSheet booking={moving} onClose={() => setMoving(null)} /> : null}
 
       {/* Block time — two taps for a funeral afternoon. */}
       <PopupCard visible={blocking} onClose={() => setBlocking(false)}>
