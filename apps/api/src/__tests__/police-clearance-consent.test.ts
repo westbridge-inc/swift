@@ -330,8 +330,9 @@ describe('[POLICE-CLEARANCE] the Privacy Policy says it (COORD 25 Oct: non-mater
   });
 
   // [EMAIL-HTTPS] Its words stay served (the checks above) under 2026-10-27, the material email-processor bump on top.
-  it('published as 2026-10-25.2 (served now under 2026-10-27), classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-27');
+  // [BOOK-S7] ... and under 2026-10-28 (appointment rules) on top of that.
+  it('published as 2026-10-25.2 (served now under 2026-10-28), classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-28');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-25.2')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-25.2');
   });

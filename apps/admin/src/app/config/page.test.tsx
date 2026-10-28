@@ -101,4 +101,12 @@ describe('Cancellation rule card', () => {
     expect(card.textContent).toContain('then for 1 minute from that acceptance;');
     expect(card.textContent).not.toMatch(/5 minutes/);
   });
+
+  // [BOOK-S7 · owner B1/B2 28 Oct 2026] ... and the appointment rule while INSTANT_BOOKING is on (cancel-policy.ts + reschedule-policy.ts).
+  it('names the appointment cutoff while INSTANT_BOOKING is on', async () => {
+    mockApi(handler);
+    renderWithQuery(<ConfigPage />);
+    const card = await screen.findByText(/a ride, parcel or booking cancels free until a driver, rider or provider accepts it/);
+    expect(card.textContent).toContain("With INSTANT_BOOKING on, a confirmed appointment cancels free until 2 hours before it starts (never less than 1 minute after it was confirmed), and the customer's own move stops 2 hours before it starts.");
+  });
 });

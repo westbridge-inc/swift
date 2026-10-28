@@ -26,6 +26,8 @@ const RULES: Array<{ rule: string; terms: RegExp; answer: RegExp }> = [
   { rule: 'after acceptance: no in-app cancel, contact the business', terms: /can no longer be cancelled in the app: contact the Business/, answer: /can no longer be cancelled in the app or here: contact the business/ },
   // [owner 22 Oct 2026] one minute (was five), as the server's FREE_CANCEL_WINDOW_MIN enforces it.
   { rule: 'rides, parcels, bookings: 1 minute after acceptance', terms: /for one minute after a driver, rider or provider accepts it/, answer: /for 1 minute after a driver, rider or provider accepts/ },
+  // [BOOK-S7 · owner B1 28 Oct 2026] appointments: free until 2 hours before, while instant appointment booking is on.
+  { rule: 'appointments (switch on): free until 2 hours before, never less than 1 minute after confirmation', terms: /While Swift's instant appointment booking is switched on, an appointment the Business has confirmed \(by accepting it, or automatically when you booked it\) can be cancelled free in the app until 2 hours before it starts, and always for at least one minute after it was confirmed/, answer: /While instant appointment booking is switched on, an appointment the business has confirmed can be cancelled free until 2 hours before it starts \(and always for 1 minute after it was confirmed\); after that, contact the business/ },
   { rule: 'a service job: free until booked', terms: /free in the app until the job is booked/, answer: /service job can be cancelled free until it is booked/ },
   { rule: 'still free when nobody was found or it runs very late', terms: /no driver or rider was found for your Order, or when it is running very late/, answer: /no driver or rider was found, or if it is running very late/ },
   { rule: 'never once on its way', terms: /Once your Order is on its way/, answer: /Once it is on its way, it can no longer be cancelled/ },
@@ -73,6 +75,15 @@ describe('the site says what Terms §7 says about cancelling', () => {
     expect(TERMS_S7).toMatch(/for one minute after a driver, rider or provider accepts it/);
     expect(refunds).toContain('can be cancelled free at any time while nobody has accepted them, and for 1 minute after a driver, rider or provider accepts them.');
     expect(refunds).not.toMatch(/(5|five) minutes after a driver/i);
+  });
+
+  // [BOOK-S7 · owner B1/B2 28 Oct 2026] The Refunds page names the appointment rule Terms §7 names, in the same terms.
+  it('the Refunds page names the appointment rule the Terms name: 2 hours before, at least 1 minute, then contact the business', () => {
+    const refunds = readFileSync(join(process.cwd(), 'src', 'app', 'legal', 'refunds', 'page.tsx'), 'utf8').replace(/\s+/g, ' ');
+    expect(TERMS_S7).toMatch(/until 2 hours before it starts, and always for at least one minute after it was confirmed/);
+    expect(refunds).toContain('appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app until 2 hours before it starts, and always for at least 1 minute after it was confirmed.');
+    expect(refunds).toContain('you can also move it to another free time of the same service until 2 hours before it starts. After that, contact the business to change or cancel it.');
+    expect(refunds).not.toMatch(/(5|five) minutes/i);
   });
 
   it('both pages show these words, not copies of their own', () => {

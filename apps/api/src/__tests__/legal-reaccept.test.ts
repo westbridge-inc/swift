@@ -205,6 +205,23 @@ describe('[2026-10-18] a non-material bump asks nobody again', () => {
     }
   });
 
+  // [BOOK-S7 · owner 28 Oct 2026 B1-B3 · 2026-10-28 NON-material PRE-LAUNCH, pending the owner's ruling] Appointment
+  // rules give customers more time and ask no one for more: nobody at 2026-10-27 is asked; anyone below it is asked
+  // exactly as at 2026-10-27. If the owner rules it MATERIAL, this case moves to the material pattern above.
+  it('[2026-10-28 non-material] nobody at 2026-10-27 is asked again; below it, the same summaries as at 2026-10-27', () => {
+    expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-28')).toHaveLength(1);
+    expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-28');
+    expect(materialVersion('2026-10-28')).toBe('2026-10-27');
+    for (const roles of [['CUSTOMER'], ['MOVER', 'CUSTOMER'], ['VENDOR_OWNER', 'CUSTOMER']] as UserRole[][]) {
+      expect(acceptanceStatus({ tosVersion: '2026-10-27', roles }, '2026-10-28')).toMatchObject({ needsAcceptance: false, summary: [] });
+      expect(acceptanceStatus({ tosVersion: '2026-10-28', roles }, '2026-10-28')).toMatchObject({ needsAcceptance: false, summary: [] });
+      for (const tosVersion of [null, '2026-10-17', '2026-10-21', '2026-10-25', '2026-10-25.1', '2026-10-25.2']) {
+        const at27 = acceptanceStatus({ tosVersion, roles }, '2026-10-27');
+        expect({ ...acceptanceStatus({ tosVersion, roles }, '2026-10-28'), currentVersion: at27.currentVersion }, `${tosVersion} ${roles.join('+')}`).toEqual(at27);
+      }
+    }
+  });
+
   it('builds 9-11 are never asked: only GET/POST /auth/legal-acceptance read acceptance, and sign-up stamps the server\'s version', () => {
     const SRC = join(__dirname, '..');
     const files: string[] = [];
@@ -298,11 +315,13 @@ describe('GET/POST /auth/legal-acceptance', () => {
   // the tick, nobody is asked again.
   // [EMAIL-HTTPS · COORD 27 Oct] Now served as 2026-10-27, MATERIAL (Resend delivers the emails): a person at
   // 2026-10-25.1 or 2026-10-25.2 is asked once with the email summary; earlier ones also get what they missed.
-  it('[2026-10-27 material, served] people are asked once, with exactly what changed materially since they accepted', async () => {
+  // [BOOK-S7] Served now as 2026-10-28 (non-material pending the owner): the same people are asked with the same
+  // summaries as at 2026-10-27, and a person at 2026-10-27 is not asked.
+  it('[2026-10-27 material, served under 2026-10-28] people are asked once, with exactly what changed materially since they accepted', async () => {
     const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
     const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
-    expect(LEGAL_VERSION).toBe('2026-10-27');
+    expect(LEGAL_VERSION).toBe('2026-10-28');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-27');
     for (const [accepted, summary] of [
       ['2026-10-17', [...v21, ...v251, ...v27]], ['2026-10-18', [...v21, ...v251, ...v27]], ['2026-10-21', [...v251, ...v27]], ['2026-10-25', [...v251, ...v27]],

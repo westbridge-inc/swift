@@ -88,8 +88,9 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
   // these and is now the newest material version; 2026-10-21 stays material, and stays the newest one below it.
   // [POLICE-CLEARANCE CONSENT] 2026-10-25.2 (non-material) is served on top: the newest material version stays 2026-10-25.1.
   // [EMAIL-HTTPS] 2026-10-27 (material: Resend delivers the emails) is served on top and is now the newest material version.
-  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-27 (material: email)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-27');
+  // [BOOK-S7] 2026-10-28 (non-material pending the owner: appointment rules) is served on top: the newest material version stays 2026-10-27.
+  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-28 (newest material: 2026-10-27, email)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-28');
     expect(materialVersion('2026-10-25')).toBe('2026-10-21');
     expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-27');
