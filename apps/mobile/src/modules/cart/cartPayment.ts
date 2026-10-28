@@ -181,6 +181,8 @@ export function paymentActionForCheckout(
 
 export function placedOrderConfirmationCopy(input: {
   appointment: boolean;
+  /** [BOOK-S6a] The checkout answer came back ACCEPTED: the business's listing confirmed it at once. */
+  appointmentConfirmed?: boolean;
   pickup: boolean;
   held: boolean;
   submittedMethod: 'CASH' | 'MOBILE_MONEY';
@@ -196,6 +198,9 @@ export function placedOrderConfirmationCopy(input: {
       return `Complete payment directly to ${input.paymentAction.recipientName} in MMG. Swift does not hold the money; the business confirms it after receipt.`;
     }
     return 'Your MMG order was placed, but its payment link is unavailable. Do not send money to another link; open the order for the latest payment action.';
+  }
+  if (input.appointment && input.appointmentConfirmed === true) {
+    return 'Your time is confirmed — pay cash directly to the business when the service is done.';
   }
   if (input.appointment) {
     return 'Your time is confirmed when the business accepts — pay cash directly to them when the service is done.';

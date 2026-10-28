@@ -13,6 +13,7 @@ import { HERO_PHOTO_WIDTH, itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { itemVatNote, storefrontVat } from '../../../lib/storeVat';
 import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
+import { listingConfirmsInstantly } from '../../../lib/appointmentBooking';
 import {
   Photo,
   Chip,
@@ -107,6 +108,8 @@ export function MenuItemScreen() {
   const serviceMode: 'AT_BUSINESS' | 'MOBILE' | 'BOTH' = slotsQ.data?.serviceMode ?? 'AT_BUSINESS';
   const bookableWeekdays: number[] | undefined = slotsQ.data?.bookableWeekdays;
   const daySlots: string[] = useMemo(() => slotsQ.data?.slots ?? [], [slotsQ.data]);
+  // [BOOK-S6a · owner A4] Only the server's own answer (switch on + the business's setting) earns the badge.
+  const instantConfirmation = isBooking && listingConfirmsInstantly(slotsQ.data);
 
   // A slot can disappear during the 20-second freshness poll because another
   // customer won it. Never leave a now-unavailable selection armed in the
@@ -182,13 +185,13 @@ export function MenuItemScreen() {
       {
         onSuccess: () => {
           if (isBooking && slot) {
-            setAppointment(itemId, { slotStart: slot, ...(serviceMode === 'BOTH' ? { mode: visitMode } : {}) });
+            setAppointment(itemId, { slotStart: slot, ...(serviceMode === 'BOTH' ? { mode: visitMode } : {}), ...(instantConfirmation ? { instant: true } : {}) });
           }
           setAdded(true);
         },
       },
     );
-  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, trimmedNote, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
+  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, trimmedNote, promptLogin, navigation, addToCart, isBooking, serviceMode, instantConfirmation, setAppointment, route.params?.addAfterSignIn]);
   React.useEffect(() => {
     if (!route.params?.addAfterSignIn || resumedAdd.current || !isAuthenticated || !item || vendor.isLoading || vendor.isError) return;
     if (outOfStock || item.isAvailable === false || requiredUnmet || addToCart.isPending) return;
@@ -403,6 +406,19 @@ export function MenuItemScreen() {
 
           {isBooking ? (
             <>
+              {/* [BOOK-S6a · owner A3/A4] The server says this listing confirms a cash booking at once.
+                  No badge (and no "instant" word) when it does not say so: switch off, an older server,
+                  or a business that confirms each booking itself. */}
+              {instantConfirmation ? (
+                <View style={{ marginTop: space['2xl'], gap: space.xs }}>
+                  <View style={{ flexDirection: 'row' }}>
+                    <TonePill label="Instant confirmation" tone="success" />
+                  </View>
+                  <T variant="caption" tone="muted">
+                    Pay at your appointment and your time is confirmed as soon as you book.
+                  </T>
+                </View>
+              ) : null}
               {/* Where it happens — the business's setting; BOTH lets you pick */}
               <SectionHeader title="Where" style={{ marginTop: space['2xl'] }} />
               {serviceMode === 'BOTH' ? (

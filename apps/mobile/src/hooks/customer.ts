@@ -985,6 +985,18 @@ export function useDecideSubstitution() {
   });
 }
 
+/** [BOOK-S6a · owner B2] Move an appointment to another free time of the same service. The order
+ *  is part of the request (never the render's closure), and it is read again whatever the outcome:
+ *  a timeout can mean the move landed, and a refusal (taken time, cut-off) shows the booking as it is. */
+export function useRescheduleBooking() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ bookingId, newSlotStart }: { orderId: string; bookingId: string; newSlotStart: string }) =>
+      unwrap(customerApi.rescheduleBooking(bookingId, newSlotStart)),
+    onSettled: (_data, _error, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
+  });
+}
+
 /** [ORDER-SPINE S1-6] Tell Swift what happened to a direct-MMG payment. The
  *  order is refetched whatever the outcome — a timeout can mean it landed. */
 export function useClaimMmgPayment() {
