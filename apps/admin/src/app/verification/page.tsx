@@ -15,6 +15,7 @@ import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
 import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 import { label } from '@/lib/labels';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 /** [STORE-VAT] The server's code-level document type for a store's GRA VAT certificate. */
 const VAT_CERTIFICATE_DOC_TYPE = 'vat_registration_certificate';
@@ -342,7 +343,7 @@ export default function VerificationPage() {
             {reviewerHint(selected.docType) ? <p className="rc-reviewer-hint">{reviewerHint(selected.docType)}</p> : null}
             {reviewNote(selected.docType, selected.role) && <p className="rc-muted rc-review-note">{reviewNote(selected.docType, selected.role)}</p>}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
-            <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
+            <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {gyDate(selected.expiresAt)}</span>}</div>
             <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {
               setNotice(withdrawNotice(applicant.name, accountTrustLevel));
               await Promise.all([
@@ -371,7 +372,7 @@ export default function VerificationPage() {
             </div>}
             <section className="rc-history"><h3>History and audit timeline</h3>
               {custody.isLoading ? <p>Loading history…</p> : custody.isError ? <p className="rc-error">History unavailable. <button onClick={() => void custody.refetch()}>Retry history</button></p> : timeline.length ?
-                <ol>{timeline.map((event, i) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time><span>{event.label}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
+                <ol>{timeline.map((event, i) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{gyDateTime(event.at)}</time><span>{event.label}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
             </section>
           </div>
         </div>

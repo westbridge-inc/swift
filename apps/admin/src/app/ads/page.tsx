@@ -17,6 +17,7 @@ import { reasonTooShort } from '@/lib/ask-reason';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { label } from '@/lib/labels';
+import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // Swift Ads has two gates, and until now neither had a human standing at it.
@@ -72,7 +73,7 @@ const CREATIVE_REASON_WORDS: Record<(typeof CREATIVE_REJECT_REASONS)[number], st
 
 const CREATIVE_KIND_WORDS: Record<string, string> = { IMAGE: 'Image', VIDEO: 'Video' };
 
-const shortDate = (iso: string) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+const shortDate = (iso: string) => gyDate(iso);
 
 export default function AdsReviewPage() {
   const queryClient = useQueryClient();

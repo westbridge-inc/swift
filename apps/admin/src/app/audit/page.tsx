@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchAuditLogs } from '@/lib/api';
 import { humanise } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { gyDateTime } from '@/lib/dates';
 
 interface AuditEntry {
   id: string;
@@ -19,7 +20,7 @@ interface AuditEntry {
 /** "PlatformConfig" -> "Platform config". */
 const entityWords = (entity: string) => humanise(entity.replace(/([a-z])([A-Z])/g, '$1_$2'));
 
-const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const when = (iso: string) => gyDateTime(iso);
 
 // [ADMIN-UI] Mission Control: the shell header is the page title; the record is
 // a light list, the action in plain words (the code stays in the row's title).

@@ -5,6 +5,7 @@ import type { ActivationChecklistItem, ActivationItemState } from '@/lib/api';
 import { docLabel } from '@/lib/review-center';
 import { reviewCenterHref } from '@/lib/outcome';
 import type { Tone } from '@/lib/labels';
+import { gyDate } from '@/lib/dates';
 
 /** A document type, in words: the Review Center's names, or the type made readable — never the raw key. */
 export function documentName(docType: string): string {
@@ -23,7 +24,7 @@ const STATE: Record<ActivationItemState, { words: string; tone: Tone }> = {
 };
 
 const day = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : null;
+  iso ? gyDate(iso) : null;
 
 function detail(item: ActivationChecklistItem): string | null {
   if (item.state === 'APPROVED') {

@@ -17,6 +17,7 @@ import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 import { billDateLabel } from '@/lib/bill-date';
+import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-1 pilot] One store, the whole story — and every action
@@ -37,7 +38,7 @@ import { billDateLabel } from '@/lib/bill-date';
 // ---------------------------------------------------------------------------
 
 const when = (iso: string | null | undefined) =>
-  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+  iso ? gyDate(iso) : '—';
 
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
 
@@ -421,7 +422,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                   <>
                     <Row label="Approved VAT reg. no.">{v.vatApprovedNumber}</Row>
                     <Row label="Registered name">{v.vatApprovedName}</Row>
-                    <Row label="Takes effect">{v.vatEffectiveFrom ? String(v.vatEffectiveFrom).slice(0, 10) : null}</Row>
+                    <Row label="Takes effect">{v.vatEffectiveFrom ? gyDate(v.vatEffectiveFrom) : null}</Row>
                   </>
                 ) : null}
                 {v.vatStatus === 'REJECTED' || v.vatStatus === 'REVOKED' ? <Row label="Reason given">{v.vatReviewNote}</Row> : null}

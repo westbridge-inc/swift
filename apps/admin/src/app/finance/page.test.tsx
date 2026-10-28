@@ -90,13 +90,13 @@ describe('daily revenue renders the GUYANA day, not the browser day [DASH-06]', 
     mockApi(financeHandler(noMutation));
     renderWithQuery(<FinancePage />);
 
-    // Derived independently of the component: local midnight on the 23rd has
-    // the same three calendar fields in every zone.
-    const expected = new Date(2026, 7, 23).toLocaleDateString();
+    // The three calendar fields the server sent, in every zone. [ADMIN-AUDIT S3-4] Written day first,
+    // the month in words (lib/dates gyCalendarDay).
+    const expected = '23 Aug 2026';
     expect(await screen.findByText(expected)).toBeTruthy();
 
     // And the day it must never be: the 22nd.
-    expect(screen.queryByText(new Date(2026, 7, 22).toLocaleDateString())).toBeNull();
+    expect(screen.queryByText('22 Aug 2026')).toBeNull();
   });
 
   it('a real zero prints $0 — a MISSING amount prints an em-dash, not $0', async () => {

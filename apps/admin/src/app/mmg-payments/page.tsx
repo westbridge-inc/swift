@@ -20,6 +20,7 @@ import { MutationError } from '@/components/MutationError';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { REASON_MIN } from '@/lib/reason-rules';
 import Link from 'next/link';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 /**
  * [MMG support lookup] Find a partner's MMG weekly-fee payment.
@@ -74,9 +75,9 @@ const PLATFORM_WORDS: Record<string, string> = { ios: 'iPhone app', android: 'An
 const gyd = (amount: number) => `GY$${amount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 /** Guyana time, always: support and partners speak in it. */
 const when = (iso: string | null) => (iso
-  ? new Date(iso).toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  ? gyDateTime(iso)
   : '—');
-const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' }) : '—');
+const day = (iso: string | null) => (iso ? gyDate(iso) : '—');
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : 'Something went wrong.');
 
 /**

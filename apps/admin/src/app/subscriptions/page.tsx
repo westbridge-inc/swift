@@ -11,6 +11,7 @@ import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { billDateLabel } from '@/lib/bill-date';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -34,7 +35,7 @@ function BillingEvents({ id }: { id: string }) {
     <div className="p-3 space-y-1.5">
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
-          <span className="mc-muted w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
+          <span className="mc-muted w-36 shrink-0">{gyDateTime(e.createdAt)}</span>
           <span>{e.type ? label('BillingEventType', e.type) : String(e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
@@ -218,7 +219,7 @@ export default function SubscriptionsPage() {
             ) : (
               rows.map((s: any) => {
                 const h = holder(s);
-                const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? (billDateLabel(s.nextBillingDate) === 'Due since' ? `due since ${new Date(s.nextBillingDate).toLocaleDateString()}` : new Date(s.nextBillingDate).toLocaleDateString()) : '—';
+                const when = s.isTrialActive && s.trialEndDate ? `Free trial until ${gyDate(s.trialEndDate)}` : s.nextBillingDate ? (billDateLabel(s.nextBillingDate) === 'Due since' ? `Due since ${gyDate(s.nextBillingDate)}` : gyDate(s.nextBillingDate)) : '—';
                 const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
                 // [Review S2-1] Every payout record for this set-aside was refused, expired or failed:
                 // record it again; the release stays refused (a payout may have been sent, Q-1527).

@@ -3,6 +3,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { resolveHeldDoorCash } from '@/lib/api';
 import type { useActionRunner } from './useActionRunner';
+import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [L02 · row 34 · review S3-1 of #1542] PARTIAL CASH A RIDER STILL HOLDS.
@@ -27,7 +28,7 @@ export interface HeldDoorCashFacts {
   doorCashReturnResolvedAt?: string | null;
 }
 
-const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const when = (iso: string) => gyDateTime(iso);
 const gyd = (amount: unknown) => `GY$${Number(amount ?? 0).toLocaleString()}`;
 
 export function HeldDoorCash({ order, actions }: { order: HeldDoorCashFacts; actions: ReturnType<typeof useActionRunner> }) {
