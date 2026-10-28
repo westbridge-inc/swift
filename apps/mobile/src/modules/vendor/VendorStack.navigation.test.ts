@@ -348,6 +348,24 @@ describe('DS390 real cold notification router and delayed profile', () => {
       expect(fx.order).toHaveBeenCalledWith('order-B', expect.objectContaining({ userId: 'owner' }), expect.any(String));
     } finally { uninstall(); }
   });
+  // [S4] The store's copy of a store appointment's 24h reminder, exactly as the API sends it: the
+  // booking's order on the order desk of the store that owns it (never the marketplace jobs list).
+  it('a store appointment reminder opens the booking\'s order on the store that owns it', async () => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-B', vendorId: 'store-B' } } });
+    fx.cold = response({ kind: 'appointment_reminder', bookingId: 'booking-B', orderId: 'order-B', audience: 'business' });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      expect(navigation.getCurrentRoute()?.params).toEqual({ orderId: 'order-B' });
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
+    } finally { uninstall(); }
+  });
 });
 
 
@@ -393,6 +411,8 @@ describe('DS390 vendor routing authority boundaries', () => {
     [{ kind: 'mmg_link_change_applied', actor: 'VENDOR' }, 'Account', 'store-A'],
     [{ kind: 'mmg_link_change_cancelled', actor: 'VENDOR' }, 'Account', 'store-A'],
     [{ kind: 'booking_rescheduled', audience: 'business', bookingId: 'booking-A' }, 'Schedule', 'store-A'],
+    // [S4] A store appointment's reminder for a booking with no order on file: the Schedule agenda.
+    [{ kind: 'appointment_reminder', audience: 'business', bookingId: 'booking-A' }, 'Schedule', 'store-A'],
   ] as const)('delivers cold %j after delayed initial selection', async (data, screen, store) => {
     fx.realProfile = true;
     useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });

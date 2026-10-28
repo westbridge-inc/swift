@@ -191,6 +191,38 @@ describe('booking + service-job pushes land on the job [S0]', () => {
   });
 });
 
+describe('[S4] a store appointment reminder opens the booking, for the person it is about', () => {
+  // The STORE appointment's reminder used to be booking_reminder with the
+  // Booking id as refId, and the booking_ prefix opened ServiceJobs: a jobs
+  // list that never shows a store booking, for the customer and the store.
+  // These are the copies the API sends now (services.service.ts).
+  it('the customer opens the booking\'s order screen, the store its order desk — never the jobs list', () => {
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'customer' }))
+      .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'business' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+  });
+
+  it('a booking with no order on file still opens where it is listed: the customer\'s orders, the store\'s Schedule', () => {
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', audience: 'customer' })).toEqual({ screen: 'OrdersHistory' });
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', audience: 'business' })).toEqual({ screen: 'Schedule' });
+  });
+
+  it('an untagged copy cannot say whose it is, so it opens the app normally — never the other side\'s stack', () => {
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1' })).toBeNull();
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1' })).toBeNull();
+  });
+
+  it('is not in the booking_ family: no copy of it ever opens ServiceJobs', () => {
+    for (const audience of ['customer', 'business', undefined]) {
+      for (const orderId of ['o1', undefined]) {
+        const dest = destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', ...(orderId ? { orderId } : {}), ...(audience ? { audience } : {}) });
+        expect(dest?.screen, `${String(audience)} / ${String(orderId)}`).not.toBe('ServiceJobs');
+      }
+    }
+  });
+});
+
 describe('store pushes land on the store’s order desk, never the customer screen', () => {
   it('THE vendor order alert opens that order, with its number when the payload carries one', () => {
     expect(destinationFor({ kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 'SW-1001', status: 'PENDING' }))
@@ -353,7 +385,8 @@ const CENSUS: Case[] = [
   { k: 'booking_started', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider asserted commencement at the agreed time' },
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
-  { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
+  { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both sides of a service JOB, 24h out (a store appointment has its own kind since S4, below)' },
+  { k: 'appointment_reminder', d: { bookingId: 'b1', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [S4] their store appointment is within 24h: the booking\'s own order screen. The store copy (audience business) opens its order desk; both are tabled below' },
   { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28: the business copy is tagged audience, the customer copy opens normally]' },
 
   // ── [PUSH-ROUTING] The weekly fee: every notice about a partner’s subscription opens the fee screen.
@@ -537,6 +570,8 @@ const STORE_KINDS = [
 /** Customer copies of kinds the census lists for someone else, or untagged. */
 const CUSTOMER_COPIES: Record<string, unknown>[] = [
   { kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' },
+  // [S4] A confirmed booking with no order on file (none is created that way today): their orders list.
+  { kind: 'appointment_reminder', bookingId: 'b1', audience: 'customer' },
   { kind: 'verification_rejected', audience: 'customer' },
   { kind: 'verification_approved', docId: 'd1', audience: 'customer' },
   { kind: 'verification_expired', docId: 'd1', audience: 'customer' },
@@ -556,6 +591,9 @@ const STORE_COPIES: Record<string, unknown>[] = [
   ...DOCUMENT_KINDS.map((kind) => ({ kind, docId: 'd1', audience: 'business' })),
   { kind: 'support_update', ticketId: 't1' },
   { kind: 'call_incoming', callOrderId: 'o1', orderType: 'FOOD_DELIVERY', from: 'rider', leg: 2, audience: 'business' },
+  // [S4] The store's copy of the appointment reminder: its order desk; with no order on file, its Schedule.
+  { kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'business' },
+  { kind: 'appointment_reminder', bookingId: 'b1', audience: 'business' },
 ];
 
 /** [payload (+ the app that is open, as `intent`), where it lands]. */

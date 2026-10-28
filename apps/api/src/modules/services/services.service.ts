@@ -29,6 +29,25 @@ export {
   qualificationTypeMatchesTrade,
   type ServiceTradeId,
 } from './service-catalog';
+/** The once-per-booking-per-person key (Notification's per-user dedupe key):
+ * the unique index refuses a second reminder for the same booking to the same
+ * person, even from a retried or overlapping sweep. */
+export function appointmentReminderDedupeKey(bookingId: string): string {
+  return `appointment-reminder:${bookingId}`;
+}
+
+/** A reminder handed to the delivery seam. `audience` and `dedupeKey` ride
+ * into NotificationService.send unchanged (the booking-reminders worker spreads
+ * this object into it). */
+export type BookingReminder = {
+  userId: string;
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+  audience?: 'customer' | 'business';
+  dedupeKey?: string;
+};
+
 /**
  * Booking reminders (master plan §4.3): both sides get ONE nudge in the 24h
  * before a confirmed slot. Covers service jobs (provider-confirmed) and
@@ -37,21 +56,25 @@ export {
  */
 export async function sendBookingReminders(
   prisma: PrismaClient,
-  notify: (n: { userId: string; title: string; body: string; data: Record<string, unknown> }) => Promise<void>,
+  notify: (n: BookingReminder) => Promise<unknown>,
 ): Promise<number> {
   const now = new Date();
   const soon = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   let sent = 0;
 
-  const alreadyReminded = async (userId: string, kind: string, refId: string) => {
+  /** Has this person already had a reminder naming this id, as any of the
+   *  kinds in `sentAs` (each names the id under its own field)? */
+  const alreadyReminded = async (userId: string, sentAs: Array<{ kind: string; idKey: string }>, id: string) => {
     // [item 20] A customer's or provider's reminder, looked up by the reminder job: the named capability under the owner wall.
     const existing = await ownerWallSystem('services:already-reminded', () => prisma.notification.findFirst({
       where: {
         userId,
-        AND: [
-          { data: { path: ['kind'], equals: kind } },
-          { data: { path: ['refId'], equals: refId } },
-        ],
+        OR: sentAs.map(({ kind, idKey }) => ({
+          AND: [
+            { data: { path: ['kind'], equals: kind } },
+            { data: { path: [idKey], equals: id } },
+          ],
+        })),
       },
       select: { id: true },
     }));
@@ -73,7 +96,7 @@ export async function sendBookingReminders(
       [job.customerId, `Your ${job.provider.trade.toLowerCase()} is booked for ${when}. Cash on completion.`],
       [job.provider.userId, `You have a job booked for ${when}. Check the details in your jobs list.`],
     ] as Array<[string, string]>) {
-      if (await alreadyReminded(userId, 'booking_reminder', job.id)) continue;
+      if (await alreadyReminded(userId, [{ kind: 'booking_reminder', idKey: 'refId' }], job.id)) continue;
       await notify({
         userId,
         title: 'Booking tomorrow',
@@ -86,22 +109,37 @@ export async function sendBookingReminders(
 
   // Appointment bookings (goods/services listings with slots): confirmed ones
   // starting within 24h remind the customer and the store owner.
+  // [S4 · BOOK-MEASURE R5] Sent as appointment_reminder, NOT a `booking_`
+  // kind: every phone build (9, 11, 12) routes the whole `booking_` prefix to
+  // ServiceJobs, the marketplace jobs list, which never shows a store booking.
+  // Each copy names the booking's order and whose copy it is, so those same
+  // frozen builds land it through the order branches they already have: the
+  // business on its order desk (audience business + orderId), the customer on
+  // the booking's own order screen (orderId). A booking reminded before this
+  // kind existed (booking_reminder + refId = the booking) is not reminded
+  // again, and one person is reminded once per booking whichever side they are.
   const bookings = await prisma.booking.findMany({
     where: { status: 'CONFIRMED', slotStart: { gt: now, lte: soon } },
     include: { item: { select: { name: true, vendor: { select: { name: true, owner: { select: { userId: true } } } } } } },
   });
   for (const b of bookings) {
     const when = formatGuyanaTime(b.slotStart, { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
-    for (const [userId, body] of [
-      [b.customerId, `${b.item.name} at ${b.item.vendor.name} is booked for ${when}.`],
-      [b.item.vendor.owner.userId, `${b.item.name} appointment coming up ${when}.`],
-    ] as Array<[string, string]>) {
-      if (await alreadyReminded(userId, 'booking_reminder', b.id)) continue;
+    for (const [userId, audience, body] of [
+      [b.customerId, 'customer', `${b.item.name} at ${b.item.vendor.name} is booked for ${when}.`],
+      [b.item.vendor.owner.userId, 'business', `${b.item.name} appointment coming up ${when}.`],
+    ] as Array<[string, 'customer' | 'business', string]>) {
+      // A person who is both sides finds the copy just sent under the same booking and is skipped.
+      if (await alreadyReminded(userId, [
+        { kind: 'appointment_reminder', idKey: 'bookingId' },
+        { kind: 'booking_reminder', idKey: 'refId' },
+      ], b.id)) continue;
       await notify({
         userId,
         title: 'Appointment tomorrow',
         body,
-        data: { kind: 'booking_reminder', refId: b.id },
+        audience,
+        dedupeKey: appointmentReminderDedupeKey(b.id),
+        data: { kind: 'appointment_reminder', bookingId: b.id, ...(b.orderId ? { orderId: b.orderId } : {}) },
       });
       sent += 1;
     }
