@@ -122,7 +122,8 @@ async function assertWithinBookingLimits(
   if (upcoming.length >= limits.total) {
     throw bookingLimitReached(audience === 'customer'
       ? `You already have ${upcoming.length} upcoming bookings. Cancel one, or book again after one is done.`
-      : `This customer already has ${upcoming.length} upcoming bookings, the most one customer can hold. Decline this request, or accept it after one of them is done or cancelled.`);
+      // [REVIEW-F S4 on #2193 · privacy] The business is never told how many bookings the customer holds elsewhere.
+      : 'This customer already has the most upcoming bookings one customer can hold. Decline this request, or accept it after one of them is done or cancelled.');
   }
 }
 

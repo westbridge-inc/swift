@@ -13,6 +13,7 @@ import { OrderService } from '../modules/order/order.service';
 import { INSTANT_CONFIRM_NOTE } from '../modules/booking/instant-booking';
 import { APPOINTMENT_FREE_CANCEL_BEFORE_MIN } from '../modules/order/cancel-policy';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { DARK_FEATURES } from '../modules/ops/dark-features';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
@@ -307,7 +308,7 @@ describe('[BOOK-S3] switch ON — a cash booking of an automatic listing is conf
     const told = await settledNotices(shop.owner.userId, order.id, 1);
     expect(told).toHaveLength(1);
     expect(told[0]!.title).toBe('New booking (confirmed)');
-    expect(told[0]!.body).toMatch(/^S3 Studio Cut, .+ \(booking .+\)\. It is already confirmed: there is nothing to accept\.$/);
+    expect(told[0]!.body).toMatch(/^S3 Studio Cut, .+ \(booking .+\)\. Already confirmed — nothing to accept\.$/);
     // No kind: every phone build opens a business push with an orderId on VendorOrderDetail.
     expect(told[0]!.data).toMatchObject({ orderId: order.id, status: 'ACCEPTED', audience: 'business', instantBooking: true });
     expect(told[0]!.data['kind']).toBeUndefined();
@@ -551,6 +552,22 @@ describe('[BOOK-S3 · REVIEW-G S4-2 on #2192] a request placed while OFF and acc
     expect(await bookingsOf(legacy.id)).toEqual([]);
   });
 
+  it('[F S4 · privacy] over the TOTAL cap: the business is not told how many bookings the customer holds with other businesses', async () => {
+    const [b, c] = [await makeBusiness('Other1'), await makeBusiness('Other2')];
+    const a = await customer('Rex');
+    const legacy = await booked(a, shop.requestId, nextSlot()); // switch OFF: a request, no booking
+    on();
+    for (const itemId of [b.instantId, b.instantId, c.instantId, c.instantId, shop.instantId]) await booked(a, itemId, nextSlot());
+    const res = await call('PUT', `/api/v1/vendor/orders/${legacy.id}/accept`, shop.owner.token, {});
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({
+      code: 'BOOKING_LIMIT_REACHED',
+      message: 'This customer already has the most upcoming bookings one customer can hold. Decline this request, or accept it after one of them is done or cancelled.',
+    });
+    expect(res.json().error.message).not.toMatch(/\d/);
+    expect((await orderRow(legacy.id)).status).toBe('PENDING');
+  });
+
   it('under the cap, the legacy request is accepted and booked (CONFIRMED)', async () => {
     const a = await customer('Pia');
     const legacy = await booked(a, shop.requestId, nextSlot());
@@ -594,6 +611,15 @@ describe('[BOOK-S3 · owner A4/C2] switch ON — a new bookable service starts a
     const saved = await call('PUT', `/api/v1/vendor/items/${id}`, shop.owner.token, { bookingConfig: { ...apiHours, durationMinutes: 30 } });
     expect(saved.statusCode, saved.body).toBe(200);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id } })).bookingConfig).toEqual({ ...apiHours, durationMinutes: 30, instantBooking: false, minNoticeMinutes: 120 });
+  });
+});
+
+describe('[BOOK-S3 · COORD 18:14Z] what must land before the switch goes ON is written on the switch', () => {
+  it('the dark-feature entry names the hair/beauty certificate gate, the phone popup branch, and the Terms wording', () => {
+    const entry = DARK_FEATURES.find((f) => f.setting === 'INSTANT_BOOKING');
+    expect(entry?.whileOff).toContain('hair and beauty');
+    expect(entry?.whileOff).toContain('Booking requested');
+    expect(entry?.whileOff).toContain('Terms');
   });
 });
 

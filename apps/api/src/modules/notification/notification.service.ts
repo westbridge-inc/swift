@@ -927,7 +927,7 @@ export class NotificationService {
         userId,
         type: 'ORDER_UPDATE',
         title: 'New booking (confirmed)',
-        body: `${booking.serviceName}, ${when} (booking ${booking.orderNumber}). It is already confirmed: there is nothing to accept.`,
+        body: `${booking.serviceName}, ${when} (booking ${booking.orderNumber}). Already confirmed — nothing to accept.`,
         audience: 'business',
         data: { orderId: booking.orderId, orderNumber: booking.orderNumber, status: 'ACCEPTED', instantBooking: true },
       });
