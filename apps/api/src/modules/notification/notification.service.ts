@@ -469,10 +469,21 @@ export class NotificationService {
    * re-sent) and a fee demand (its own handoff ledger) all read `false`.
    */
   async sendReach(payload: NotificationPayload): Promise<{ id: string; pushed: boolean }> {
-    return this.sendAndReport(payload, true);
+    const { id, pushed } = await this.sendAndReport(payload, true);
+    return { id, pushed };
   }
 
-  private async sendAndReport(payload: NotificationPayload, requirePush: boolean): Promise<{ id: string; pushed: boolean }> {
+  /**
+   * The same send, saying whether it wrote a NEW notice: false when the
+   * person's dedupe key already holds one (nothing re-sent) or nothing could
+   * be recorded. For a job that counts what it sent, so a suppressed
+   * duplicate is never reported as a reminder sent.
+   */
+  async sendIfNew(payload: NotificationPayload): Promise<boolean> {
+    return (await this.sendAndReport(payload, false)).fresh;
+  }
+
+  private async sendAndReport(payload: NotificationPayload, requirePush: boolean): Promise<{ id: string; pushed: boolean; fresh: boolean }> {
     if (isFeeDemand(payload)) {
       // A fee demand that cannot be recorded for THIS recipient is logged and
       // counted, never thrown into the caller: an admin fan-out must still
@@ -484,9 +495,10 @@ export class NotificationService {
       } catch (err) {
         log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
         notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
-        return { id: '', pushed: false };
+        return { id: '', pushed: false, fresh: false };
       }
-      return { id: await this.deliverFeeDemand(notice.id), pushed: false };
+      const id = await this.deliverFeeDemand(notice.id);
+      return { id, pushed: false, fresh: id !== '' };
     }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
@@ -523,16 +535,16 @@ export class NotificationService {
             where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey! } },
             select: { id: true },
           }));
-          if (existing) return { id: existing.id, pushed: false };
+          if (existing) return { id: existing.id, pushed: false, fresh: false };
         } catch { /* fall through to the failure path below */ }
       }
       log().warn({ err, userId: payload.userId, type: payload.type }, 'notification persist failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'persist' });
-      return { id: '', pushed: false };
+      return { id: '', pushed: false, fresh: false };
     }
 
     const pushed = await this.publishPersisted(notification.id, { requirePush });
-    return { id: notification.id, pushed: requirePush && pushed };
+    return { id: notification.id, pushed: requirePush && pushed, fresh: true };
   }
 
   async deliverFeeDemand(noticeId: string): Promise<string> {

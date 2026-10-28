@@ -355,9 +355,15 @@ describe('the listing\'s booking settings', () => {
     expect(save.statusCode).toBe(200);
     const stored = (await app.prisma.item.findUniqueOrThrow({ where: { id: legacy.id } })).bookingConfig as { slots: unknown[] };
     expect(stored.slots).toEqual([{ dayOfWeek: 1, start: '09:00', end: '12:30' }, { dayOfWeek: 2, start: '09:00', end: '17:00' }]);
-    // A new overlap on that listing is still refused.
+    // [REVIEW-M N1] An editor still holding the pre-join windows sends them again: re-joined, not refused.
+    const again = await putItem(legacy.id, owner.token, { bookingConfig: { durationMinutes: 60, slots: legacySlots, serviceMode: 'AT_BUSINESS' } });
+    expect(again.statusCode, again.body).toBe(200);
+    expect(((await app.prisma.item.findUniqueOrThrow({ where: { id: legacy.id } })).bookingConfig as { slots: unknown[] }).slots)
+      .toEqual([{ dayOfWeek: 1, start: '09:00', end: '12:30' }, { dayOfWeek: 2, start: '09:00', end: '17:00' }]);
+    // A new overlap on that listing is still refused, and the refusal names the window the save adds.
     const added = await putItem(legacy.id, owner.token, { bookingConfig: { durationMinutes: 60, slots: [...legacySlots, { dayOfWeek: 2, start: '16:00', end: '18:00' }] } });
     expect(added.statusCode).toBe(400);
+    expect(added.body).toContain('09:00–17:00 and 16:00–18:00');
   });
 
   it('accepts the gap after each booking and the minimum notice; an older app\'s save (without them) keeps them', async () => {
