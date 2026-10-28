@@ -38,7 +38,9 @@ type Run = (_request: ActionDialogRequest<{ data: { phone: string } }> & { submi
  */
 export function usePhoneReveal(run: Run) {
   const [revealed, setRevealed] = useState<Record<string, string>>({});
-  /** `title` names whose number ("Show Alice's full number?"); `shown` is the answer ("Alice's number is shown."). */
+  /** `key` names the PERSON (`relay:<rider id>`, `owner:<user id>`), never a slot on the page: a page that re-reads
+   *  with someone else in that slot shows the new person masked, never the old person's number [REVIEW-F #2162 S3-1].
+   *  `title` names whose number ("Show Alice's full number?"); `shown` is the answer ("Alice's number is shown."). */
   const revealFor = (key: string, title: string, shown: string, read: (_reason: string) => Promise<{ data: { phone: string } }>) => () => void run({
     title,
     body: <p>Your reason and this read are recorded in the audit log before the number is shown.</p>,

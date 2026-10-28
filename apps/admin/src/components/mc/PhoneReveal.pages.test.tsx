@@ -186,3 +186,31 @@ describe('[FOLLOWUPS] a custody case: the holder and the relay rider', () => {
     expect(await reveal(user, 0)).toBe("Show the holding rider's full number for order SW-77?");
   });
 });
+
+// [REVIEW-F #2162 S3-1, probe P1 lifted] A revealed number belongs to a PERSON, not to a slot on the page. The custody
+// page re-reads the case after every action (the reveal itself included); when the relay rider is someone else in
+// that read, the old relay's full number must not sit next to the new relay's name with "Read recorded".
+describe('[FOLLOWUPS] a revealed number never moves to another person', () => {
+  it('custody: the relay is replaced in the next read; the new relay shows masked, never the old relay\'s full number', async () => {
+    const NEW_RELAY = '+5920600107';
+    let current: unknown = caseDetail;
+    mockApi((request: ApiRequest): ApiReply => {
+      const key = `${request.url.pathname}${request.url.search}`;
+      if (request.method === 'GET' && key === '/api/v1/admin/custody-cases/case-1/party-phone?party=relay') {
+        // Meanwhile ops named another relay rider: the next read of the case says so.
+        current = { ...caseDetail, relayRiderId: 'rider-c', relay: { id: 'rider-c', isOnline: true, user: { firstName: 'Cy', lastName: 'Newrelay', phone: NEW_RELAY } } };
+        return { body: { success: true, data: { party: 'relay', phone: FULL.relay, auditId: 'audit-1' } } };
+      }
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/custody-cases') return { body: { success: true, data: [kase] } };
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/custody-cases/case-1') return { body: { success: true, data: current } };
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user } = renderWithQuery(<CustodyCasesPage />);
+    await user.click(await screen.findByRole('button', { name: /Order SW-77/ }));
+    expect(await reveal(user, 1)).toBe("Show the relay rider's full number for order SW-77?");
+    await waitFor(() => expect(document.body.textContent).toContain('Cy Newrelay'));
+    expect(document.body.textContent).not.toContain(FULL.relay);
+    expect(document.body.textContent).toContain(masked(NEW_RELAY));
+    expect(screen.queryByText('Read recorded in the audit log')).toBeNull();
+  });
+});

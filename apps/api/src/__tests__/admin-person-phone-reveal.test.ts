@@ -133,6 +133,7 @@ afterAll(async () => {
     await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: allEntities() } }, { userId: { in: userIds } }] }, 'test-cleanup:admin-person-phone-reveal');
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'test-cleanup:admin-person-phone-reveal').catch(() => 0);
     await app.prisma.custodyRecoveryCase.deleteMany({ where: { id: { in: [ids.kase, ids.loneCase] } } });
+    await app.prisma.subscription.deleteMany({ where: { OR: [{ riderId: ids.rider }, { driverId: ids.driver }, { vendorId: ids.vendor }] } });
     await app.prisma.order.deleteMany({ where: { id: { in: [ids.order, ids.loneOrder] } } });
     await app.prisma.rider.deleteMany({ where: { id: { in: [ids.rider, ids.relay] } } });
     await app.prisma.driver.deleteMany({ where: { id: ids.driver } });
@@ -261,6 +262,8 @@ describe('[FOLLOWUPS] the audited reveal (the order desk\'s door)', () => {
       expect(row!.userId).toBeTruthy();
       expect(row!.changes).toMatchObject({ reason: REASON, party: door.party, ...door.who });
       expect(JSON.stringify(row)).not.toContain(door.phone);
+      // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+      expect(res.headers['cache-control'], door.url).toBe('no-store');
     }
     expect(await revealRows(allEntities())).toHaveLength(doors().length);
     await system(() => purgeAuditLogs(app.prisma, { entityId: { in: allEntities() } }, 'test-cleanup:admin-person-phone-reveal'));
@@ -282,5 +285,66 @@ describe('[FOLLOWUPS] the audited reveal (the order desk\'s door)', () => {
       expect(page.payload).not.toContain(door.phone);
     }
     expect((await revealRows(allEntities())).filter((r) => r.action === 'REVEAL_PARTY_PHONE')).toHaveLength(0);
+  });
+});
+
+describe('[FOLLOWUPS · REVIEW-M/G #2162 S3-1] no other field on a masked page carries a full number', () => {
+  const DAYS7 = () => new Date(Date.now() + 7 * DAY);
+  const TOKEN = `fixture-card-token-${RUN}`;
+
+  it('a person page: the number each cash strike recorded (theirs, at the door) is masked too', async () => {
+    await system(() => app.prisma.strike.create({ data: { userId: ids.person, reason: 'failed_payment_no_show', phone: phones.person } }));
+    const res = await get(`/users/${ids.person}`, tokens['readers']!);
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).not.toContain(phones.person);
+    expect(res.json().data.strikes[0].phone).toMatch(new RegExp(`•+${tail(phones.person)}$`));
+  });
+
+  it('a rider or driver who pays the weekly fee by MMG from their own phone: the payer number is masked, no card token rides the page', async () => {
+    await system(async () => {
+      await app.prisma.subscription.create({ data: {
+        riderId: ids.rider, type: 'DELIVERY_RIDER', weeklyRate: 1000, currentPeriodStart: new Date(), currentPeriodEnd: DAYS7(), nextBillingDate: DAYS7(),
+        billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: phones.rider, paymentToken: TOKEN,
+      } as never });
+      await app.prisma.subscription.create({ data: {
+        driverId: ids.driver, type: 'TAXI_DRIVER', weeklyRate: 1000, currentPeriodStart: new Date(), currentPeriodEnd: DAYS7(), nextBillingDate: DAYS7(),
+        billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: phones.driver,
+      } as never });
+    });
+    for (const [url, phone] of [[`/riders/${ids.rider}`, phones.rider], [`/drivers/${ids.driver}`, phones.driver]] as const) {
+      const res = await get(url, tokens['readers']!);
+      expect(res.statusCode, url).toBe(200);
+      expect(res.payload, url).not.toContain(phone);
+      expect(res.payload, url).not.toContain(TOKEN);
+      expect(res.json().data.subscription.mmgPayerMsisdn, url).toMatch(new RegExp(`•+${tail(phone)}$`));
+      expect('paymentToken' in res.json().data.subscription, url).toBe(false);
+      // the rest of the subscription the page shows is unchanged
+      expect(res.json().data.subscription.weeklyRate, url).toBeTruthy();
+    }
+  });
+
+  it('a store whose MMG number (live and pending) is its owner\'s phone, and whose fee payer is the store line: all masked', async () => {
+    await system(async () => {
+      await app.prisma.vendor.update({ where: { id: ids.vendor }, data: { mmgNumber: phones.owner, mmgNumberPending: phones.owner } as never });
+      await app.prisma.subscription.create({ data: {
+        vendorId: ids.vendor, type: 'RESTAURANT', weeklyRate: 20000, currentPeriodStart: new Date(), currentPeriodEnd: DAYS7(), nextBillingDate: DAYS7(),
+        billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: phones.store, paymentToken: TOKEN,
+      } as never });
+    });
+    const res = await get(`/vendors/${ids.vendor}`, tokens['readers']!);
+    expect(res.statusCode).toBe(200);
+    for (const phone of [phones.owner, phones.store]) expect(res.payload).not.toContain(phone);
+    expect(res.payload).not.toContain(TOKEN);
+    const data = res.json().data;
+    for (const key of ['mmgNumber', 'mmgNumberPending'] as const) expect(data[key], key).toMatch(new RegExp(`•+${tail(phones.owner)}$`));
+    expect(data.subscription.mmgPayerMsisdn).toMatch(new RegExp(`•+${tail(phones.store)}$`));
+    expect('paymentToken' in data.subscription).toBe(false);
+  });
+
+  it('the order desk\'s own reveal answer is not kept by a cache either', async () => {
+    const res = await get(`/orders/${ids.order}/party-phone?party=customer`, tokens['all']!, REASON);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    await system(() => purgeAuditLogs(app.prisma, { entityId: ids.order }, 'test-cleanup:admin-person-phone-reveal'));
   });
 });

@@ -129,7 +129,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             {u.trustLevel ? <span className="mc-badge mc-tone-info">Trust {u.trustLevel}</span> : null}
           </div>
           <p className="mc-muted mt-1.5">
-            <PhoneReveal phone={u.phone} revealed={revealed['person']} onReveal={revealFor('person', `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealUserPhone(id, reason))} />
+            <PhoneReveal phone={u.phone} revealed={revealed[`person:${u.id}`]} onReveal={revealFor(`person:${u.id}`, `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealUserPhone(id, reason))} />
             {u.phone && u.email ? ' · ' : ''}{u.email}
           </p>
         </div>

@@ -173,7 +173,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
           </div>
           <p className="mc-muted mt-1.5">
             {kindWords}{kindWords && m.user?.phone ? ' · ' : ''}
-            {m.user?.phone ? <PhoneReveal phone={m.user.phone} revealed={revealed['mover']} onReveal={revealFor('mover', `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealMoverPhone(kind, id, reason))} /> : null}
+            {m.user?.phone ? <PhoneReveal phone={m.user.phone} revealed={revealed[`mover:${m.user.id ?? id}`]} onReveal={revealFor(`mover:${m.user.id ?? id}`, `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealMoverPhone(kind, id, reason))} /> : null}
             {kindWords || m.user?.phone ? ' · ' : ''}{`Joined ${when(m.user?.createdAt)}`}
           </p>
         </div>

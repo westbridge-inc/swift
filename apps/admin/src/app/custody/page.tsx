@@ -77,7 +77,7 @@ function CaseDetail({ id }: { id: string }) {
     return (
       <>
         {who}
-        {r.user?.phone ? <>{' · '}<PhoneReveal phone={r.user.phone} revealed={revealed[party]} onReveal={revealFor(party, `Show the ${role}'s full number for order ${k.order?.orderNumber}?`, `The ${role}'s number is shown.`, (reason) => revealCustodyPartyPhone(id, party, reason))} /></> : null}
+        {r.user?.phone ? <>{' · '}<PhoneReveal phone={r.user.phone} revealed={revealed[`${party}:${r.id}`]} onReveal={revealFor(`${party}:${r.id}`, `Show the ${role}'s full number for order ${k.order?.orderNumber}?`, `The ${role}'s number is shown.`, (reason) => revealCustodyPartyPhone(id, party, reason))} /></> : null}
         {r.isOnline ? ' · online' : ' · offline'}
       </>
     );

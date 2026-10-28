@@ -43,10 +43,39 @@ export function maskUserPhone<T extends object | null>(row: T): T {
   return (src.user && 'phone' in src.user ? { ...src, user: { ...src.user, phone: masked(src.user.phone) } } : src) as T;
 }
 
-/** A store's detail: its own line and its owner's number masked. */
+/**
+ * [REVIEW-M/G #2162 S3-1, M S4-1] A fee subscription as a person page carries it: the MMG payer's number (for a mover
+ * paying from their own phone, it IS their number) masked, and the card token never (null while cards are off).
+ */
+export function maskSubscription<T>(sub: T): T {
+  if (!sub || typeof sub !== 'object') return sub;
+  const copy: Record<string, unknown> = { ...(sub as Record<string, unknown>) };
+  delete copy['paymentToken'];
+  if ('mmgPayerMsisdn' in copy) copy['mmgPayerMsisdn'] = masked(copy['mmgPayerMsisdn'] as string | null | undefined);
+  return copy as T;
+}
+
+/** A person's detail: their number, and the number each cash strike recorded (theirs, at the door), masked. */
+export function maskPersonPage<T extends object>(user: T): T {
+  const src = maskOwnPhone(user) as { strikes?: PhoneHolder[] };
+  return (Array.isArray(src.strikes) ? { ...src, strikes: src.strikes.map((strike) => (strike ? maskOwnPhone(strike) : strike)) } : src) as T;
+}
+
+/** A rider's or driver's detail: their number and their fee subscription's payer number masked. */
+export function maskMoverPage<T extends object>(mover: T): T {
+  const src = maskUserPhone(mover) as { subscription?: unknown };
+  return ('subscription' in src ? { ...src, subscription: maskSubscription(src.subscription) } : src) as T;
+}
+
+/** A store's detail: its own line, its owner's number, its MMG number (live and pending) and its fee subscription's
+ *  payer number masked. The public phone customers call stays as published. */
 export function maskVendorPhones<T extends object>(vendor: T): T {
-  const src = maskOwnPhone(vendor) as { owner?: { user?: PhoneHolder } | null };
-  return (src.owner ? { ...src, owner: maskUserPhone(src.owner) } : src) as T;
+  const src = maskOwnPhone(vendor) as Record<string, unknown> & { owner?: { user?: PhoneHolder } | null };
+  const out: Record<string, unknown> = { ...src };
+  if (src.owner) out['owner'] = maskUserPhone(src.owner);
+  for (const key of ['mmgNumber', 'mmgNumberPending'] as const) if (key in src) out[key] = masked(src[key] as string | null | undefined);
+  if ('subscription' in src) out['subscription'] = maskSubscription(src['subscription']);
+  return out as T;
 }
 
 /** A custody case's detail: the holder's and the relay rider's numbers masked. */

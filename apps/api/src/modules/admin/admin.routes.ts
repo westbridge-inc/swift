@@ -98,7 +98,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
-import { CUSTODY_CONTACT_PARTIES, maskCaseRiderPhones, maskOwnPhone, maskUserPhone, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
+import { CUSTODY_CONTACT_PARTIES, maskCaseRiderPhones, maskMoverPage, maskPersonPage, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -1366,17 +1366,19 @@ export async function adminRoutes(app: FastifyInstance) {
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
     // [FOLLOWUPS · follows O-1] The person's number masked; the full one is the audited GET /users/:id/phone.
-    return { success: true, data: maskOwnPhone(sanitizeUser({ ...user, addresses })) };
+    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, addresses })) };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this person's full number (person-contact.ts): a stated reason
   // (x-swift-reason) and an audit row written before the number is returned.
-  app.get('/users/:id/phone', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/users/:id/phone', { preHandler: [adminGuard] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const result = await revealPersonPhone(
       { prisma: app.prisma },
       { target: { page: 'user', id }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
+    // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });
 
@@ -1598,13 +1600,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // [FOLLOWUPS · follows O-1] The audited door to the store's line or its owner's full number (person-contact.ts).
   const vendorContactQuery = z.object({ party: z.enum(VENDOR_CONTACT_PARTIES) });
-  app.get('/vendors/:id/party-phone', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/vendors/:id/party-phone', { preHandler: [adminGuard] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const { party } = vendorContactQuery.parse(request.query);
     const result = await revealPersonPhone(
       { prisma: app.prisma },
       { target: { page: 'vendor', id, party }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
+    // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });
 
@@ -2059,11 +2063,11 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider', id);
 
     // [FOLLOWUPS · follows O-1] The rider's number masked; GET /riders/:id/phone is the audited reveal.
-    return { success: true, data: maskUserPhone(rider) };
+    return { success: true, data: maskMoverPage(rider) };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this rider's full number: the page's own read (id + tenant).
-  app.get('/riders/:id/phone', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/riders/:id/phone', { preHandler: [adminGuard] }, async (request, reply) => {
     const tenantId = getTenantId();
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
@@ -2071,6 +2075,8 @@ export async function adminRoutes(app: FastifyInstance) {
       { prisma: app.prisma },
       { target: { page: 'rider', id, tenantId }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
+    // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });
 
@@ -2259,11 +2265,11 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!driver) throw new NotFoundError('Driver', id);
 
     // [FOLLOWUPS · follows O-1] The driver's number masked; GET /drivers/:id/phone is the audited reveal.
-    return { success: true, data: maskUserPhone(driver) };
+    return { success: true, data: maskMoverPage(driver) };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this driver's full number: the page's own read (id + tenant).
-  app.get('/drivers/:id/phone', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/drivers/:id/phone', { preHandler: [adminGuard] }, async (request, reply) => {
     const tenantId = getTenantId();
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
@@ -2271,6 +2277,8 @@ export async function adminRoutes(app: FastifyInstance) {
       { prisma: app.prisma },
       { target: { page: 'driver', id, tenantId }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
+    // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });
 
@@ -2848,13 +2856,15 @@ export async function adminRoutes(app: FastifyInstance) {
    * returned (modules/admin/order-contact.ts).
    */
   const orderContactQuery = z.object({ party: z.enum(ORDER_CONTACT_PARTIES) });
-  app.get('/orders/:id/party-phone', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/orders/:id/party-phone', { preHandler: [adminGuard] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const { party } = orderContactQuery.parse(request.query);
     const result = await revealOrderPartyPhone(
       { prisma: app.prisma },
       { orderId: id, party, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
+    // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });
 
@@ -3122,13 +3132,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // [FOLLOWUPS · follows O-1] The audited door to the holder's or relay rider's full number (person-contact.ts).
   const custodyContactQuery = z.object({ party: z.enum(CUSTODY_CONTACT_PARTIES) });
-  app.get('/custody-cases/:id/party-phone', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/custody-cases/:id/party-phone', { preHandler: [adminGuard] }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const { party } = custodyContactQuery.parse(request.query);
     const result = await revealPersonPhone(
       { prisma: app.prisma },
       { target: { page: 'custody', id, party }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
+    // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });
 

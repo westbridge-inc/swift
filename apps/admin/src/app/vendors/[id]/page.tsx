@@ -377,7 +377,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             {owner ? (
               <dl className="mc-rows">
                 <Row label="Name">{ownerName ? <Link href={`/users/${owner.id}`}>{ownerName}</Link> : null}</Row>
-                <Row label="Phone">{owner.phone ? <PhoneReveal phone={owner.phone} revealed={revealed['owner']} onReveal={revealFor('owner', `Show the owner's full number for ${v.name}?`, "The owner's number is shown.", (reason) => revealVendorPartyPhone(id, 'owner', reason))} /> : null}</Row>
+                <Row label="Phone">{owner.phone ? <PhoneReveal phone={owner.phone} revealed={revealed[`owner:${owner.id}`]} onReveal={revealFor(`owner:${owner.id}`, `Show the owner's full number for ${v.name}?`, "The owner's number is shown.", (reason) => revealVendorPartyPhone(id, 'owner', reason))} /> : null}</Row>
                 <Row label="Email">{owner.email}</Row>
                 <Row label="Account">{owner.status ? <StatusBadge group="UserStatus" value={owner.status} /> : null}</Row>
               </dl>
@@ -405,7 +405,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             <dl className="mc-rows">
               <Row label="City">{v.city}</Row>
               <Row label="Address">{v.addressLine1}</Row>
-              <Row label="Phone">{v.phone ? <PhoneReveal phone={v.phone} revealed={revealed['store']} onReveal={revealFor('store', `Show the store's full number for ${v.name}?`, "The store's number is shown.", (reason) => revealVendorPartyPhone(id, 'store', reason))} /> : null}</Row>
+              <Row label="Phone">{v.phone ? <PhoneReveal phone={v.phone} revealed={revealed[`store:${v.id}`]} onReveal={revealFor(`store:${v.id}`, `Show the store's full number for ${v.name}?`, "The store's number is shown.", (reason) => revealVendorPartyPhone(id, 'store', reason))} /> : null}</Row>
               <Row label="Rating"><span className="mc-numbers">{ratingText(v.averageRating, v.totalRatings)}</span></Row>
               <Row label="Registration">{v.tier ? label('VendorTier', v.tier) : null}</Row>
               <Row label="Menu items"><span className="mc-numbers">{v._count?.items ?? 0}</span></Row>
