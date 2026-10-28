@@ -19,8 +19,11 @@ import { AccountService } from '../modules/user/account.service';
 // addresses removed, a deletion receipt written. The real deploy/restore.sh
 // restores the OLDER dump into a scratch database with the real pg_restore.
 // The restored copy must show the erasure, quarantined from application logins,
-// and the other person untouched. Only `docker compose exec postgres` is a
-// stand-in: it runs the same command on this host against the same server.
+// and the other person untouched. Only `docker compose exec postgres` (the LIVE
+// side) is a stand-in: it runs the same command on this host against the test
+// server. [SEC-BACKUP F2] The copy itself is restored for real into restore.sh's
+// throwaway instance (a container of the Postgres image, no network) as a login
+// that is not a superuser there, from a dump signed like backup.sh signs it.
 // Every name and value is synthetic.
 // ---------------------------------------------------------------------------
 
@@ -39,6 +42,17 @@ const ID = Math.random().toString(36).slice(2, 10);
 const LIVE = `swift_test_rlive_${ID}`;
 let tmp = '';
 const created: string[] = [];
+// [SEC-BACKUP F2] The real docker CLI (the stand-in on PATH forwards everything but the live side to it).
+const REAL_DOCKER = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf8' }).trim();
+const PG_IMAGE = 'postgis/postgis:16-3.4';
+const instances: string[] = [];
+const instanceOf = (scratch: string) => `swift-restore-${scratch}`;
+/** A query on the scratch copy, inside its throwaway instance (as the instance's own superuser, to inspect it). */
+const inCopy = (scratch: string, sql: string): string =>
+  execFileSync(REAL_DOCKER, ['exec', instanceOf(scratch), 'psql', '-X', '-h', '/var/run/postgresql', '-U', 'swift_restore_admin', '-d', scratch, '-v', 'ON_ERROR_STOP=1', '-qtA', '-c', sql], { encoding: 'utf8' }).trim();
+const instanceExists = (scratch: string) => spawnSync(REAL_DOCKER, ['container', 'inspect', instanceOf(scratch)], { stdio: 'ignore' }).status === 0;
+/** Signed exactly as backup.sh signs a dump: <dump>.sig beside it, verified against ALLOWED. */
+const sign = (file: string) => execFileSync('python3', ['-I', join(DEPLOY, 'backup-signature.py'), 'sign', '--key', join(tmp, 'signing'), '--object', file, '--out', `${file}.sig`, '--created', '20261028T000000Z']);
 let live: PrismaClient;
 const people = { kept: '', closed: '', doc: '', key: '', run: '', field: '' };
 
@@ -54,12 +68,14 @@ function restore(dump: string, opts: { args?: string[]; replaySuffix?: string } 
   created.push(scratch);
   const here = join(tmp, `deploy-${scratch}`);
   mkdirSync(here, { recursive: true });
-  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-offsite-ledger.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-offsite-ledger.sql', 'secret-env.sh', 'backup-signature.py']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, 'restore-replay-erasures.sql'), readFileSync(join(DEPLOY, 'restore-replay-erasures.sql'), 'utf8') + (opts.replaySuffix ?? ''));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${LIVE}\n`);
+  instances.push(instanceOf(scratch));
   const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? []), dump, scratch], {
-    encoding: 'utf8', timeout: 180_000,
-    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: join(tmp, 'calls'), PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
+    encoding: 'utf8', timeout: 240_000,
+    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: join(tmp, 'calls'), PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port,
+      REAL_DOCKER, PG_IMAGE, POSTGRES_USER: PG.user, BACKUP_SIGNING_ALLOWED_SIGNERS: join(tmp, 'allowed_signers') },
   });
   return { ...res, scratch };
 }
@@ -69,14 +85,23 @@ beforeAll(async () => {
   mkdirSync(join(tmp, 'bin'));
   writeFileSync(join(tmp, 'pgpass'), PG.password);
   writeFileSync(join(tmp, 'calls'), '');
+  // The LIVE side (`docker compose ... exec -T postgres <cmd>`) runs <cmd> here against the test
+  // server; `compose ps` finds no live container, so `compose config` names the image; every
+  // other docker call (the throwaway instance) is the real docker.
   shim('docker', [
     'echo "docker $*" >> "$CALL_LOG"',
+    'if [ "$1" != compose ]; then exec "$REAL_DOCKER" "$@"; fi',
+    'for a in "$@"; do case "$a" in exec) break ;; ps) exit 0 ;; config) printf \'{"services":{"postgres":{"image":"%s"}}}\\n\' "$PG_IMAGE"; exit 0 ;; esac; done',
     'while [ $# -gt 0 ] && [ "$1" != postgres ]; do shift; done',
     '[ $# -gt 0 ] || exit 0',
     'shift',
     'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
     'exec "$@"',
   ].join('\n'));
+  // [SEC-BACKUP F2] A backup signing key of the test's own, and the allowed-signers file restores trust.
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'swift-backup-signing', '-f', join(tmp, 'signing')]);
+  const pub = readFileSync(join(tmp, 'signing.pub'), 'utf8').split(' ').slice(0, 2).join(' ');
+  writeFileSync(join(tmp, 'allowed_signers'), `swift-backup namespaces="swift-backup" ${pub}\n`, { mode: 0o644 });
   // The live database: the test database's schema (tables, RLS, triggers,
   // functions), none of its rows.
   created.push(LIVE);
@@ -115,6 +140,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await live?.$disconnect().catch(() => {});
+  for (const name of instances.splice(0)) {
+    spawnSync(REAL_DOCKER, ['rm', '-f', name], { stdio: 'ignore' });
+    spawnSync(REAL_DOCKER, ['volume', 'rm', name], { stdio: 'ignore' });
+  }
   for (const db of created.splice(0)) {
     try { psql('postgres', `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`); } catch { /* best effort */ }
   }
@@ -124,11 +153,16 @@ afterAll(async () => {
 const dump = (name: string) => {
   const file = join(tmp, `${name}.dump`);
   execFileSync('pg_dump', ['-Fc', '-d', LIVE, '-f', file], { env: pgEnv() });
+  sign(file);
   return file;
 };
-const one = (db: string, sql: string) => psql(db, sql);
+/** The live database on the test server; a scratch copy inside its throwaway instance. */
+const one = (db: string, sql: string) => (db === LIVE || db === TEST_DB || db === 'postgres' ? psql(db, sql) : inCopy(db, sql));
+/** Logins other than the restore login and the instance's superuser that can open the copy. */
 const loginRolesThatCanConnect = (db: string) =>
-  one('postgres', `SELECT count(*) FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user AND has_database_privilege(rolname, '${db}', 'CONNECT')`);
+  inCopy(db, `SELECT count(*) FROM pg_roles WHERE rolcanlogin AND rolname NOT IN (current_user, '${PG.user}') AND has_database_privilege(rolname, '${db}', 'CONNECT')`);
+/** The copy's database ACL inside its instance: PUBLIC holds nothing. */
+const copyAcl = (db: string) => inCopy(db, `SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = '${db}'`);
 
 describe('[item 196] a restore replays the live erasure ledger before it reports', { timeout: 300_000 }, () => {
   let before = '';
@@ -164,8 +198,13 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(one(s, `SELECT count(*) FROM addresses WHERE "userId" = '${people.kept}'`)).toBe('1');
     // Quarantined: no application login can connect to the copy.
     expect(loginRolesThatCanConnect(s)).toBe('0');
-    expect(one('postgres', `SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = '${s}'`)).not.toMatch(/(^|[{,])=/);
+    expect(copyAcl(s)).not.toMatch(/(^|[{,])=/);
     expect(r.stdout).toContain('no application login can');
+    // [SEC-BACKUP F2] Never in the live cluster, and restored by a login that is not a superuser.
+    expect(one('postgres', `SELECT count(*) FROM pg_database WHERE datname = '${s}'`)).toBe('0');
+    expect(inCopy(s, `SELECT rolsuper FROM pg_roles WHERE rolname = '${PG.user}'`)).toBe('f');
+    expect(inCopy(s, `SELECT DISTINCT pg_get_userbyid(relowner) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND relname = 'users'`)).toBe(PG.user);
+    expect(r.stdout).toContain(`scratch instance : ${instanceOf(s)} (throwaway, no network`);
   });
 
   it('a fresh dump: the replay changes nothing, so --compare-source still proves the copy equal to its source', () => {
@@ -183,7 +222,7 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(dropped.stderr).toContain('erasure ledger replay failed');
     expect(dropped.stderr).toContain('was dropped');
     expect(dropped.stdout).not.toContain('RESTORE OK');
-    expect(one('postgres', `SELECT count(*) FROM pg_database WHERE datname = '${dropped.scratch}'`)).toBe('0');
+    expect(instanceExists(dropped.scratch)).toBe(false);
     const kept = restore(before, { args: ['--keep-failed'], replaySuffix: '\nSELECT 1 / 0;\n' });
     expect(kept.status).not.toBe(0);
     expect(kept.stdout).not.toContain('RESTORE OK');
@@ -200,7 +239,7 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     // The backup's state, not erasure-complete: the person closed after the backup is still whole here.
     expect(one(r.scratch, `SELECT phone FROM users WHERE id = '${people.closed}'`)).toBe('+15550000002');
     expect(loginRolesThatCanConnect(r.scratch)).toBe('0');
-    expect(one('postgres', `SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = '${r.scratch}'`)).not.toMatch(/(^|[{,])=/);
+    expect(copyAcl(r.scratch)).not.toMatch(/(^|[{,])=/);
   });
 
   it('[off-site ledger] with the live database gone, the shipped erasure ledger makes the copy erasure-complete up to its newest entry', () => {

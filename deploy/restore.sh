@@ -5,7 +5,8 @@
 #
 #   ./deploy/restore.sh [--compare-source] [--allow-unsigned-legacy] <dump-file|s3://backup-bucket/key|-> [new-scratch-db]
 #   ./deploy/restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg > file
-#   ./deploy/restore.sh --fetch-signature s3://backup-bucket/key.dump.gpg > file
+#   ./deploy/restore.sh --fetch-signature s3://backup-bucket/key.dump.gpg > file   (verified; or the
+#                       line "swift-backup-signature none" when the object has no signature)
 #   ... --signature-b64 <bundle> --signed-object <name> -     (the drill's plain dump on stdin)
 #
 # [SEC-BACKUP F2] SIGNED DUMPS ONLY. backup.sh signs every dump on the host
@@ -361,7 +362,6 @@ fi
 if [ "$ALLOW_UNSIGNED" = 1 ]; then
   echo "WARNING: --allow-unsigned-legacy: a dump WITHOUT a signature will be restored. Use it only for a dump made before backups were signed: an unsigned dump could have been planted by anyone who could write to the backup bucket. A signature that is present must still verify." >&2
 fi
-. "$HERE/secret-env.sh"
 ALLOWED_SIGNERS="${BACKUP_SIGNING_ALLOWED_SIGNERS:-$(env_value BACKUP_SIGNING_ALLOWED_SIGNERS)}"
 ALLOWED_SIGNERS="${ALLOWED_SIGNERS:-/etc/swift/backup-allowed-signers}"
 # verify_signature SIG NAME [--object FILE] [--plain FILE] [--print]: refuse unless SIG is a valid
@@ -403,6 +403,7 @@ if [[ "$SOURCE" == s3://* ]]; then
     if [ -z "${!name:-}" ]; then export "$name=$(env_value "$name")"; fi
   done
   # [SEC-BACKUP F1] The backup bucket's own key pair (the API's only as a loud fallback).
+  . "$HERE/secret-env.sh"
   load_backup_storage_keys || exit 1
   [ -n "${BACKUP_BUCKET:-}" ] || die "BACKUP_BUCKET is required for off-site restore"
   [[ "$SOURCE" == "s3://$BACKUP_BUCKET/"* ]] || die "off-site source must be in BACKUP_BUCKET"
@@ -420,7 +421,8 @@ if [[ "$SOURCE" == s3://* ]]; then
     else cat "$TMP_DIR/sig.err" >&2; die "could not fetch the signature $SOURCE.sig; nothing was restored"; fi
   fi
   if [ "$FETCH_SIGNATURE" = 1 ]; then
-    [ "$HAVE_SIG" = 1 ] || { echo "restore.sh: $SOURCE has no signature" >&2; exit 5; }
+    # No signature is an answer, not an error: the drill decides (--allow-unsigned-legacy).
+    if [ "$HAVE_SIG" = 0 ]; then echo "swift-backup-signature none"; exit 0; fi
     verify_signature "$SIG" "$(basename "$SOURCE")" --print
     exit 0
   fi

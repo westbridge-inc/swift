@@ -1353,8 +1353,11 @@ describe('[PROD-PATH · #1448 review] billing-cutover.sh: the backfill through a
 // RLS, a policy, a trigger, a function, a grant, a sequence and the swift_qr
 // schema is dumped with the real pg_dump; restore.sh restores it with the real
 // pg_restore into a scratch database and compares the two with its own SQL.
-// Only `docker compose exec postgres` is a stand-in: it runs the same command
-// on this host against the same server.
+// Only `docker compose exec postgres` (the LIVE side) is a stand-in: it runs the
+// same command on this host against the test server. [SEC-BACKUP F2] The scratch
+// copy is restored for real into restore.sh's throwaway instance (a container of
+// the Postgres image, no network) by a login that is not a superuser there, from
+// a dump signed as backup.sh signs it.
 const PGURL = new URL(process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test');
 const PG = { port: PGURL.port || '5432', user: decodeURIComponent(PGURL.username), password: decodeURIComponent(PGURL.password) };
 const pgEnv = () => ({ PATH: process.env['PATH'] ?? '', PGHOST: '127.0.0.1', PGPORT: PG.port, PGUSER: PG.user, PGPASSWORD: PG.password });
@@ -1380,15 +1383,22 @@ INSERT INTO public.platform_config VALUES ('c1', 'fee', '1', '2026-10-05 00:00:0
 INSERT INTO swift_qr.tokens VALUES ('t1', 'v1');
 `;
 const created: string[] = [];
+const REAL_DOCKER = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf8' }).trim();
+const PG_IMAGE = 'postgis/postgis:16-3.4';
+const instances: string[] = [];
 afterEach(() => {
   for (const db of created.splice(0)) {
     try { psql('postgres', `DROP DATABASE IF EXISTS ${db}`); } catch { /* best effort */ }
+  }
+  for (const name of instances.splice(0)) {
+    spawnSync(REAL_DOCKER, ['rm', '-f', name], { stdio: 'ignore' });
+    spawnSync(REAL_DOCKER, ['volume', 'rm', name], { stdio: 'ignore' });
   }
 });
 
 /** Build a source database, dump it for real, change it with `after` (or not),
  *  then run the real restore.sh against it. */
-function drill(after: string | null, opts: { args?: string[]; fixture?: string } = {}) {
+function drill(after: string | null, opts: { args?: string[]; fixture?: string; tamper?: boolean } = {}) {
   const id = Math.random().toString(36).slice(2, 10);
   const source = `swift_test_rcmp_${id}`;
   const scratch = `swift_test_rscr_${id}`;
@@ -1398,25 +1408,37 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
   const here = join(tmp, 'deploy');
   mkdirSync(here, { recursive: true });
   // [#1977] restore.sh replays the erasure ledger with the two SQL files that ship next to it.
-  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql', 'backup-signature.py']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${source}\n`);
   const dump = join(tmp, `${id}.dump`);
   execFileSync('pg_dump', ['-Fc', '-d', source, '-f', dump], { env: pgEnv() });
+  // [SEC-BACKUP F2] Signed as backup.sh signs it, with a key of the test's own.
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'swift-backup-signing', '-f', join(tmp, `${id}.key`)]);
+  const pub = readFileSync(join(tmp, `${id}.key.pub`), 'utf8').split(' ').slice(0, 2).join(' ');
+  writeFileSync(join(tmp, `${id}.allowed`), `swift-backup namespaces="swift-backup" ${pub}\n`, { mode: 0o644 });
+  execFileSync('python3', ['-I', join(DEPLOY, 'backup-signature.py'), 'sign', '--key', join(tmp, `${id}.key`), '--object', dump, '--out', `${dump}.sig`, '--created', '20261028T000000Z']);
+  if (opts.tamper) writeFileSync(dump, Buffer.concat([readFileSync(dump), Buffer.from('\n')]));
   if (after) psql(source, after);
   writeFileSync(join(tmp, 'pgpass'), PG.password);
+  // The LIVE side runs here against the test server; `compose ps` finds no live container, so
+  // `compose config` names the image; every other docker call (the throwaway instance) is real.
   shim('docker', [
     'echo "docker $*" >> "$CALL_LOG"',
+    'if [ "$1" != compose ]; then exec "$REAL_DOCKER" "$@"; fi',
+    'for a in "$@"; do case "$a" in exec) break ;; ps) exit 0 ;; config) printf \'{"services":{"postgres":{"image":"%s"}}}\\n\' "$PG_IMAGE"; exit 0 ;; esac; done',
     'while [ $# -gt 0 ] && [ "$1" != postgres ]; do shift; done',
     '[ $# -gt 0 ] || exit 0',
     'shift',
     'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
     'exec "$@"',
   ].join('\n'));
+  instances.push(`swift-restore-${scratch}`);
   // [#1977] restore.sh never guesses the Compose project; the stand-in docker ignores it.
   const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
     timeout: 120_000,
-    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
+    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port,
+      REAL_DOCKER, PG_IMAGE, POSTGRES_USER: PG.user, BACKUP_SIGNING_ALLOWED_SIGNERS: join(tmp, `${id}.allowed`) },
   });
   return { ...res, source, scratch };
 }
@@ -1455,9 +1477,30 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     expect(r.stdout).not.toContain('RESTORE OK');
   });
 
-  it('a backup heartbeat written after the dump is not a difference', () => {
-    const r = drill(`INSERT INTO public.platform_config VALUES ('hb', 'last_backup_at', '"2026-10-05"', now())`);
+  it.each([['last_backup_at', '"2026-10-05"'], ['last_backup_offsite', 'true'], ['last_backup_signed', 'true'], ['last_backup_storage_key', '"dedicated"']])(
+    'a backup heartbeat written after the dump is not a difference (%s)', (key, value) => {
+      const r = drill(`INSERT INTO public.platform_config VALUES ('hb', '${key}', '${value}', now())`);
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+    });
+
+  it('[SEC-BACKUP F2] restores into a throwaway instance, never the live cluster, as a login that is not a superuser there', () => {
+    const r = drill(null);
     expect(r.status, r.stderr + r.stdout).toBe(0);
+    const instance = `swift-restore-${r.scratch}`;
+    expect(r.stdout).toContain(`scratch instance : ${instance} (throwaway, no network`);
+    expect(psql('postgres', `SELECT count(*) FROM pg_database WHERE datname = '${r.scratch}'`).trim()).toBe('0');
+    const inCopy = (sql: string) => execFileSync(REAL_DOCKER, ['exec', instance, 'psql', '-X', '-h', '/var/run/postgresql', '-U', 'swift_restore_admin', '-d', r.scratch, '-qtA', '-c', sql], { encoding: 'utf8' }).trim();
+    expect(inCopy(`SELECT rolsuper FROM pg_roles WHERE rolname = '${PG.user}'`)).toBe('f');
+    expect(inCopy(`SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.users'::regclass`)).toBe(PG.user);
+    expect(execFileSync(REAL_DOCKER, ['inspect', '--format', '{{.HostConfig.NetworkMode}}', instance], { encoding: 'utf8' }).trim()).toBe('none');
+  });
+
+  it('[SEC-BACKUP F2] refuses a dump whose bytes differ from what was signed, before any instance exists', () => {
+    const r = drill(null, { tamper: true });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('REFUSED');
+    expect(r.stdout).not.toContain('scratch instance');
+    expect(spawnSync(REAL_DOCKER, ['container', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
   });
 
   it('fails when the source has no tables to compare', () => {

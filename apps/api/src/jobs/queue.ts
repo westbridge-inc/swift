@@ -1433,6 +1433,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { NotificationService } = await import('../modules/notification/notification.service');
         const { result } = await pageBackupFreshness({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         ctx.log.info({ ...result }, 'backup freshness checked');
+        // [SEC-BACKUP] Shared API storage key or an unsigned dump: a weekly platform page until fixed.
+        const { pageBackupPosture } = await import('../modules/ops/backup-freshness');
+        const posture = await pageBackupPosture({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (posture.result.weak) ctx.log.warn({ ...posture.result }, 'backup posture is weak');
         return;
       }
       if (job.name === 'erasure-ledger-watch') {

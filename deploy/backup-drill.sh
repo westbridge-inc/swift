@@ -4,7 +4,16 @@
 # 13 Oct), so they cannot decrypt a backup; this script is the only way one is
 # restored:
 #
-#   ./deploy/backup-drill.sh <user@host> <ssh-key-file> s3://<bucket>/<prefix>/swift-<stamp>.dump.gpg [scratch-db]
+#   ./deploy/backup-drill.sh [--allow-unsigned-legacy] <user@host> <ssh-key-file> s3://<bucket>/<prefix>/swift-<stamp>.dump.gpg [scratch-db]
+#
+#   0. [SEC-BACKUP F2] the host fetches the object's signature (<object>.sig)
+#      and verifies it against its own trusted backup signing keys; the drill
+#      carries that verified bundle to the restore, which checks the decrypted
+#      dump against the digest signed with it. A dump with no signature (made
+#      before signing existed) is drilled only with --allow-unsigned-legacy,
+#      loudly; a signature that fails is refused whatever the flags. The host
+#      reads the bucket with the backup bucket's own key from its backup store
+#      (or, until the owner stores one, the API's key, with a warning);
 #
 #   1. asks, at hidden prompts, for the owner's backup PRIVATE key (paste the
 #      armored block from the password manager, or type it from the printed
@@ -31,6 +40,8 @@ umask 077
 export HISTFILE=/dev/null
 
 die() { echo "backup-drill: $*" >&2; exit 1; }
+ALLOW_UNSIGNED=0
+if [ "${1:-}" = --allow-unsigned-legacy ]; then ALLOW_UNSIGNED=1; shift; fi
 TARGET="${1:-}"
 SSH_KEY="${2:-}"
 OBJECT="${3:-}"
@@ -100,17 +111,43 @@ only_encrypted_to_this_key() {
   exec cat
 }
 
-REMOTE_FETCH="sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-deploy --gid=swift-deploy \
+# [SEC-BACKUP F1] The transient unit on the host loads the backup bucket's own key pair from the
+# backup store when the host has one (names only are asked), and only otherwise the API's pair,
+# with a warning: never both.
+LEGACY_ARG=""
+[ "$ALLOW_UNSIGNED" = 0 ] || LEGACY_ARG="--allow-unsigned-legacy"
+PICK_KEYS="if sudo -n swift-secrets backup list 2>/dev/null | grep -qx BACKUP_AWS_SECRET_ACCESS_KEY; then \
+K='-p LoadCredentialEncrypted=BACKUP_AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_ACCESS_KEY_ID.cred \
+-p LoadCredentialEncrypted=BACKUP_AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_SECRET_ACCESS_KEY.cred \
+-p LoadCredentialEncrypted=BACKUP_KEY_SOURCE:/etc/credstore.encrypted/swift-backup/BACKUP_KEY_SOURCE.cred'; \
+else echo 'WARNING: this host has no backup key pair: the drill reads the bucket with the API storage key' >&2; \
+K='-p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
+-p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred'; fi; "
+UNIT="sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-deploy --gid=swift-deploy \
 -p SupplementaryGroups=docker -p WorkingDirectory=$REMOTE_DIR \
--p 'UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE' \
--p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
--p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
-$REMOTE_DIR/deploy/restore.sh --fetch-encrypted '$OBJECT'"
-REMOTE_RESTORE="cd $REMOTE_DIR && ./deploy/restore.sh --project '$PROJECT' --compare-source - '$SCRATCH'"
+-p 'UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE BACKUP_AWS_ACCESS_KEY_ID_FILE BACKUP_AWS_SECRET_ACCESS_KEY_FILE BACKUP_KEY_SOURCE_FILE' \
+\$K"
+REMOTE_SIGNATURE="$PICK_KEYS$UNIT $REMOTE_DIR/deploy/restore.sh --fetch-signature '$OBJECT'"
+REMOTE_FETCH="$PICK_KEYS$UNIT $REMOTE_DIR/deploy/restore.sh $LEGACY_ARG --fetch-encrypted '$OBJECT'"
 SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes "$TARGET")
 # The fetch never reads this terminal (-n): only the restore reads, from the pipe.
 SSH_FETCH=(ssh -n -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes "$TARGET")
 
+# [SEC-BACKUP F2] The signature, verified by the host before anything is fetched or decrypted.
+SIGNATURE_BUNDLE="$("${SSH_FETCH[@]}" "$REMOTE_SIGNATURE")" ||
+  die "the host refused the object's signature or could not read it (above): this object is not proven to be a Swift backup; nothing was decrypted or restored"
+if [ "$SIGNATURE_BUNDLE" = "swift-backup-signature none" ]; then
+  [ "$ALLOW_UNSIGNED" = 1 ] ||
+    die "the object has NO signature: Swift backups are signed, and an unsigned one could have been planted by anyone who can write to the backup bucket. For a dump made before signing existed, rerun with --allow-unsigned-legacy (first argument)"
+  echo "WARNING: DRILLING AN UNSIGNED BACKUP (--allow-unsigned-legacy): its origin is NOT proven." >&2
+  REMOTE_RESTORE="cd $REMOTE_DIR && ./deploy/restore.sh --project '$PROJECT' --allow-unsigned-legacy --compare-source - '$SCRATCH'"
+else
+  [[ "$SIGNATURE_BUNDLE" == "swift-backup-signature 1"* ]] || die "the host sent something that is not a backup signature; nothing was restored"
+  SIGNATURE_B64="$(printf '%s\n' "$SIGNATURE_BUNDLE" | base64 | tr -d '\n')"
+  [[ "$SIGNATURE_B64" =~ ^[A-Za-z0-9+/=]{1,16384}$ ]] || die "the signature could not be carried to the restore"
+  REMOTE_RESTORE="cd $REMOTE_DIR && ./deploy/restore.sh --project '$PROJECT' --signature-b64 '$SIGNATURE_B64' --signed-object '${OBJECT##*/}' --compare-source - '$SCRATCH'"
+  echo "signature: verified by the host (signed by its trusted backup signing key)" >&2
+fi
 echo "drill: $OBJECT → scratch database $SCRATCH on $TARGET (decrypted here, on the way through)" >&2
 set +e
 "${SSH_FETCH[@]}" "$REMOTE_FETCH" |

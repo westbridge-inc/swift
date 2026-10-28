@@ -203,6 +203,19 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   else
     ok "last verified backup: $HB"
   fi
+  # [SEC-BACKUP] Whose key the last backup used, and whether it was signed (backup.sh heartbeat).
+  BK=$(db_query "SELECT value FROM platform_config WHERE key='last_backup_storage_key';" 2>/dev/null | tr -d '"' || true)
+  BS=$(db_query "SELECT value FROM platform_config WHERE key='last_backup_signed';" 2>/dev/null | tr -d '"' || true)
+  if [ "$BK" = shared ]; then
+    warn "backups still share the API's storage key: whoever holds the API's key can read, overwrite or delete every off-site backup (owner sheet BACKUP-KEY-SETUP: deploy/owner/swift-backup-key.command)"
+  elif [ "$BK" = dedicated ]; then
+    ok "backups use the backup bucket's own storage key"
+  fi
+  if [ "$BS" = false ]; then
+    warn "the last backup was NOT signed: restores refuse it without --allow-unsigned-legacy (sudo swift-secrets backup init; install the current swift-backup.service)"
+  elif [ "$BS" = true ]; then
+    ok "the last backup was signed and verifies against the host's backup signing key"
+  fi
   # [D-3] A backup is a belief until it has been restored, with a stopwatch.
   # restore.sh records each rehearsal; this is where the number gets read.
   RH=$(db_query \
@@ -226,6 +239,18 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
     else
       ok "every erasure older than 10 minutes has reached the off-site ledger"
     fi
+  fi
+fi
+
+# [SEC-BACKUP] The backup units need the store command that knows the backup store; a scratch
+# restore instance left running holds a full copy of personal data.
+if [ -x /usr/local/sbin/swift-secrets ] && ! cmp -s /usr/local/sbin/swift-secrets "$HERE/swift-secrets"; then
+  warn "the installed /usr/local/sbin/swift-secrets differs from deploy/swift-secrets: install the current one (PILOT-RUNBOOK §2) before the current backup units"
+fi
+if command -v docker >/dev/null 2>&1; then
+  LEFT=$(bounded docker ps -a --filter label=swift.restore=1 --format '{{.Names}}' 2>/dev/null | tr '\n' ' ' || true)
+  if [ -n "${LEFT// /}" ]; then
+    warn "scratch restore instance(s) still present (each holds a full copy of the database): $LEFT; remove each when the drill is reviewed: docker rm -f NAME && docker volume rm NAME"
   fi
 fi
 
