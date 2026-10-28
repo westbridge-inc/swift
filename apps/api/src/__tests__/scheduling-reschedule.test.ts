@@ -152,7 +152,10 @@ describe('reschedule — both directions, notified', () => {
     // [E28] the vendor-owner recipient is tagged as the business surface, so
     // a tap opens their Schedule agenda — the customer-side copy is tagged
     // separately and must never aim at that vendor-only screen.
-    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'business' });
+    // [BOOK-FU2] appointment_moved (outside the booking_ family), naming the NEW booking row, once per move per
+    // person. These bookings have no order; with one, the notice carries it (appointment-times-journey).
+    expect(note?.data).toEqual({ kind: 'appointment_moved', bookingId: moved.id, audience: 'business' });
+    expect(note?.dedupeKey).toBe(`appointment-moved:${moved.id}`);
   });
 
   it('vendor moves it too — same law, customer notified; foreign vendor probes 404', async () => {
@@ -183,7 +186,8 @@ describe('reschedule — both directions, notified', () => {
     expect(note?.title).toBe('Your appointment moved');
     // [E28] the customer recipient is tagged as the customer surface; the
     // router opens the app normally for it instead of a dead Schedule tap.
-    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'customer' });
+    expect(note?.data).toEqual({ kind: 'appointment_moved', bookingId: moved.id, audience: 'customer' });
+    expect(note?.dedupeKey).toBe(`appointment-moved:${moved.id}`);
 
     // [E28] The inbox row routes on exactly what GET /customer/notifications
     // serves, so the endpoint must hand back the payload, audience included.
@@ -193,7 +197,7 @@ describe('reschedule — both directions, notified', () => {
     });
     expect(inbox.statusCode).toBe(200);
     const listed = (inbox.json().data as Array<{ id: string; data: unknown }>).find((n) => n.id === note?.id);
-    expect(listed?.data).toEqual({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'customer' });
+    expect(listed?.data).toEqual({ kind: 'appointment_moved', bookingId: moved.id, audience: 'customer' });
   });
 
   it('same-slot reschedule is a calm no-op; dead bookings refuse to move', async () => {
