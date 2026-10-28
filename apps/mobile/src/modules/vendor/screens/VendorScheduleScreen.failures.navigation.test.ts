@@ -23,6 +23,8 @@ const fx = vi.hoisted(() => ({
   create: vi.fn(),
   remove: vi.fn(),
   menu: vi.fn(),
+  moveTimes: vi.fn(),
+  move: vi.fn(),
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 
@@ -74,11 +76,14 @@ vi.mock('../../../hooks/vendorops', async () => {
     useCreateBookingException: () => { const qc = useQueryClient(); return useMutation({ mutationFn: (v: unknown) => fx.create(v), onSuccess: after(qc) }); },
     useDeleteBookingException: () => { const qc = useQueryClient(); return useMutation({ mutationFn: (id: string) => fx.remove(id), onSuccess: after(qc) }); },
     useVendorMenu: () => useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => fx.menu() }),
+    // [BOOK-S5a] "Move": the listing's free times and the business's move.
+    useBookingMoveTimes: (itemId: string, date: string) => useQuery({ queryKey: ['vendor', 'move-times', itemId, date], queryFn: () => fx.moveTimes(itemId, date) }),
+    useRescheduleVendorBooking: () => { const qc = useQueryClient(); return useMutation({ mutationFn: (v: unknown) => fx.move(v), onSettled: after(qc) }); },
   };
 });
 
 import { VendorScheduleScreen } from './VendorScheduleScreen';
-import { appointmentDayKey } from '../../../lib/appointmentTime';
+import { appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
 
 const refusal = (message: string) => Object.assign(new Error('Request failed'), { response: { data: { error: { message } } } });
 
@@ -211,5 +216,52 @@ describe('[UI-SWEEP, REVIEW-F 07:08Z] the store Schedule names what it shows', (
     expect(text()).toContain('One listing blocked · all day');
     expect(text()).not.toContain('Blocked · all day');
     expect(button('Remove block, one listing, all day')).toBeDefined();
+  });
+});
+
+// [BOOK-S5a · owner B2] "Move" on a live booking that has not started, whose listing the server named.
+describe('[BOOK-S5a] Move a booking from the Schedule', () => {
+  const soon = new Date(Date.now() + 2 * 60_000);
+  const later = new Date(soon.getTime() + 60 * 60_000);
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 'b-1', serviceName: 'Cut', price: 2000, slotStart: soon.toISOString(), slotEnd: later.toISOString(),
+    status: 'CONFIRMED', orderId: 'o-1', customer: { firstName: 'Ada' }, itemId: 'item-1', ...over,
+  });
+  async function showBookingDay() {
+    const key = appointmentDayKey(soon);
+    if (key !== appointmentDayKey(new Date())) { await act(async () => { button(formatAppointmentDay(key))!.click(); }); await settle(); }
+  }
+
+  it('a confirmed booking ahead: Move opens the listing\'s free times and moves it there', async () => {
+    fx.bookings.mockResolvedValue([row()]);
+    fx.moveTimes.mockResolvedValue({ slots: [later.toISOString()], bookableWeekdays: [0, 1, 2, 3, 4, 5, 6] });
+    fx.move.mockResolvedValue({ id: 'b-2' });
+    await render();
+    await showBookingDay();
+    expect(text()).toContain('Cut');
+    await act(async () => { button('Move')!.click(); });
+    await settle();
+    expect(fx.moveTimes.mock.calls[0]![0]).toBe('item-1');
+    const dialog = host.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Move this booking');
+    if (appointmentDayKey(later) !== appointmentDayKey(new Date())) {
+      await act(async () => { [...dialog.querySelectorAll('button')].find((b) => b.textContent === formatAppointmentDay(appointmentDayKey(later)))!.click(); });
+      await settle();
+    }
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent === formatAppointmentClock(later))!.click(); });
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent?.startsWith('Move to '))!.click(); });
+    await settle();
+    expect(fx.move).toHaveBeenCalledExactlyOnceWith({ bookingId: 'b-1', newSlotStart: later.toISOString() });
+    expect(host.querySelector('[role="dialog"]'), 'a moved booking closes the popup').toBeNull();
+  });
+
+  it('no Move on a completed booking, nor when the server names no listing (an older server)', async () => {
+    fx.bookings.mockResolvedValue([row({ status: 'COMPLETED' }), row({ id: 'b-3', itemId: undefined, serviceName: 'Shave' })]);
+    await render();
+    await showBookingDay();
+    expect(text()).toContain('Cut');
+    expect(text()).toContain('Shave');
+    expect(button('Move')).toBeUndefined();
+    expect(fx.moveTimes).not.toHaveBeenCalled();
   });
 });

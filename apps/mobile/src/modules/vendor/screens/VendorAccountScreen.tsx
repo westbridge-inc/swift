@@ -29,6 +29,7 @@ import { MmgNumberCard } from '../../../components/MmgNumberCard';
 import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
+import { BookingCapacityCard, storedBookingCapacity } from '../../../components/BookingCapacityCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { StoreVatSection } from '../StoreVatSection';
@@ -165,6 +166,21 @@ export function VendorAccountScreen() {
     ),
   });
 
+  // [BOOK-S5a · owner C1] A Services business's "how many bookings at once"; the server's refusal in its words.
+  const [capacityError, setCapacityError] = useState<string | null>(null);
+  const saveCapacity = useVendorMutation({
+    mutationFn: (bookingCapacity: number) => vendorApi.updateProfile({ bookingCapacity }),
+    onMutate: () => setCapacityError(null),
+    onSuccess: () => {
+      setCapacityError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setCapacityError(
+      e?.response?.data?.error?.message ?? 'That could not be saved. Check your connection and try again.',
+    ),
+  });
+  const bookingCapacity = store?.vendorType === 'SERVICE' ? storedBookingCapacity(store) : null;
+
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
     // [WR-007] Seed the editor ONLY from a successful read. A failed fetch
@@ -281,6 +297,16 @@ export function VendorAccountScreen() {
             saving={saveRefundRule.isPending}
             error={refundRuleError}
             onSave={(rule) => saveRefundRule.mutate(rule)}
+          />
+        ) : null}
+
+        {/* [BOOK-S5a] Services only, and only when the server sends the setting (an older server does not). */}
+        {isManager && bookingCapacity != null ? (
+          <BookingCapacityCard
+            value={bookingCapacity}
+            saving={saveCapacity.isPending}
+            error={capacityError}
+            onSave={(n) => saveCapacity.mutate(n)}
           />
         ) : null}
 
