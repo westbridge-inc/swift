@@ -131,4 +131,23 @@ describe('[SEC-PII] legal hold release and placement are recused like every docu
     const ok = await place(ids.other, ids.subject);
     expect(ok.statusCode, ok.payload).toBe(201);
   });
+
+  it('an identity record awaiting review never stops a hold being placed (it preserves evidence); a release then waits for the review', async () => {
+    const flagged = await account(['RIDER', 'CUSTOMER'], false);
+    await doc(flagged);
+    const cluster = await system(() => app.prisma.identityCluster.create({ data: {
+      authorityReviewRequired: true, members: { create: [{ accountId: flagged, linkedVia: [] }] },
+    } }));
+    try {
+      const placed = await place(ids.other, flagged);
+      expect(placed.statusCode, placed.payload).toBe(201);
+      const holdId = placed.json().data.hold.id as string;
+      const res = await release(ids.other, holdId);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
+      expect((await holdRow(holdId)).releasedAt).toBeNull();
+    } finally {
+      await system(async () => { await app.prisma.identityClusterMember.deleteMany({ where: { clusterId: cluster.id } }); await app.prisma.identityCluster.deleteMany({ where: { id: cluster.id } }); });
+    }
+  });
 });

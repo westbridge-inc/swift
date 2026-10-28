@@ -17,7 +17,19 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { isUuid } from '../../utils/uuid';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { docLegalHoldGauge } from '../../plugins/observability';
-import { assertNotRecused } from './recusal';
+import { assertNotRecused, recusedError } from './recusal';
+import { identityAuthority } from '../integrity/identity-review';
+
+/**
+ * [SEC-PII] Placing a hold PRESERVES evidence, so an identity record still awaiting review never stops it (a release
+ * does stop: it makes evidence erasable). The person placing it is still never the subject, nor a known member of
+ * the subject's identity group (read without the review gate: the members recorded so far).
+ */
+async function assertNotRecusedToPlace(tx: Prisma.TransactionClient, placedBy: string, subjectUserId: string): Promise<void> {
+  if (placedBy === subjectUserId) throw recusedError();
+  const [placer, subject] = await Promise.all([identityAuthority(tx, placedBy), identityAuthority(tx, subjectUserId)]);
+  if (placer.memberIds.includes(subjectUserId) || subject.memberIds.includes(placedBy)) throw recusedError();
+}
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -60,7 +72,7 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
     if (!locked[0]) throw new NotFoundError('User', input.subjectUserId);
     // [SEC-PII · money/trust scan 28 Oct 2026] Recused like every document decision (DOC-1 §8.6): the person
     // placing a hold is never its subject nor in the subject's identity cluster.
-    await assertNotRecused(tx, input.placedBy, input.subjectUserId);
+    await assertNotRecusedToPlace(tx, input.placedBy, input.subjectUserId);
     const candidates = await tx.verificationDocument.findMany({
       where: {
         userId: input.subjectUserId, purgedAt: null, legalHoldId: null,
