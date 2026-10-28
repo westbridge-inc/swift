@@ -10,6 +10,7 @@ import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Crypto from 'expo-crypto';
 import {
+  BrandSwitch,
   Card,
   Chip,
   ConfirmDialog,
@@ -55,6 +56,10 @@ import { vatClassChoices, type VatClass } from '../../../lib/storeVat';
 import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
+import {
+  BUFFER_CHOICES, NOTICE_CHOICES, choicesWith, instantBookingAvailable, minutesLabel, nextWindow, openingBookingSettings,
+  slotsFromWeekHours, weekHoursFromSlots, weekHoursProblem, type WeekHours,
+} from '../../../lib/bookingHours';
 
 /** [TAP-AUDIT] An option group (with its choices) written on a NEW item, before its first save: kept on the phone and
  *  sent with the item in the one create request (POST /vendor/items takes `optionGroups`), so a store adds an item
@@ -437,12 +442,23 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const [vatClass, setVatClass] = useState<VatClass>((existing?.vatClass as VatClass | undefined) ?? 'STANDARD');
   const existingBooking = (existing?.bookingConfig ?? {}) as any;
   const [duration, setDuration] = useState<number>(existingBooking.durationMinutes ?? 30);
-  const [days, setDays] = useState<number[]>(() => {
-    const ds: number[] = (existingBooking.slots ?? []).map((s: any) => s.dayOfWeek);
-    return ds.length ? Array.from(new Set(ds)) : [1, 2, 3, 4, 5];
-  });
-  const [startTime, setStartTime] = useState<string>(existingBooking.slots?.[0]?.start ?? '09:00');
-  const [endTime, setEndTime] = useState<string>(existingBooking.slots?.[0]?.end ?? '17:00');
+  // [BOOK-S5a] Hours per day, more than one window a day (a break is the gap between two). Every
+  // stored window is kept: the old editor put the first window's times on every day when it saved.
+  const [week, setWeek] = useState<WeekHours>(() => weekHoursFromSlots(existingBooking.slots));
+  // [BOOK-S5a · owner A4/C2] The gap after each booking, the minimum notice and "Confirm bookings
+  // automatically". null = not touched: the opening value follows the server (the switch's word on
+  // the profile can arrive after the editor opens).
+  const instantAvailable = isService && instantBookingAvailable(store);
+  const opening = openingBookingSettings(existing?.bookingConfig ?? null, instantAvailable);
+  const [instantTouched, setInstant] = useState<boolean | null>(null);
+  const [bufferTouched, setBuffer] = useState<number | null>(null);
+  const [noticeTouched, setNotice] = useState<number | null>(null);
+  const instant = instantTouched ?? opening.instantBooking;
+  const buffer = bufferTouched ?? opening.bufferMinutes;
+  const notice = noticeTouched ?? opening.minNoticeMinutes;
+  const hoursProblem = isService ? weekHoursProblem(week) : null;
+  const setDayWindows = (day: number, update: (windows: WeekHours[number]) => WeekHours[number]) =>
+    setWeek((w) => w.map((windows, d) => (d === day ? update(windows) : windows)));
   const [mode, setMode] = useState<'AT_BUSINESS' | 'MOBILE' | 'BOTH'>(existingBooking.serviceMode ?? 'AT_BUSINESS');
   const [radiusKm, setRadiusKm] = useState<string>(existingBooking.serviceRadiusKm != null ? String(existingBooking.serviceRadiusKm) : '5');
 
@@ -455,7 +471,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const [draftGroups, setDraftGroups] = useState<DraftOptionGroup[]>([]);
   const formNow = JSON.stringify([
     name, price, description, categoryId, available, popular, sku, unit, bulk, stock, lowStock,
-    duration, [...days].sort((a, b) => a - b), startTime, endTime, mode, radiusKm,
+    duration, week, instantTouched, bufferTouched, noticeTouched, mode, radiusKm,
     draftGroups.map((g) => [g.name, g.isRequired, g.maxSelect, g.options.map((o) => [o.name, o.additionalPrice])]),
   ]);
   const [formAtOpen] = useState(formNow);
@@ -470,7 +486,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
   const priceNum = Number(price);
   const valid =
-    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || days.length > 0);
+    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || hoursProblem == null);
   const busy = save.isPending || uploadImage.isPending;
   // [IMAGES-E2E PR4] Only a photo Swift keeps is drawn (an outside address is not shown to customers either).
   const previewUri = localPhoto?.uri ?? (isKeptPhoto(existing?.imageUrl) ? storePhotoUrl(existing?.imageUrl, HERO_PHOTO_WIDTH) : null) ?? undefined;
@@ -516,8 +532,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
     const bookingConfig = isService
       ? {
           durationMinutes: duration,
-          slots: days.map((d) => ({ dayOfWeek: d, start: startTime, end: endTime })),
+          slots: slotsFromWeekHours(week),
           serviceMode: mode,
+          bufferMinutes: buffer,
+          minNoticeMinutes: notice,
+          // [BOOK-S5a] Sent only while the server says it can be chosen; otherwise the listing keeps what it stores.
+          ...(instantAvailable ? { instantBooking: instant } : {}),
           ...(mode !== 'AT_BUSINESS' ? { serviceRadiusKm: Number(radiusKm) || 0 } : {}),
         }
       : undefined;
@@ -640,31 +660,97 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               ))}
             </View>
 
+            {/* [BOOK-S5a] Hours per day. A day with no hours is closed; a break is the gap between two windows. */}
             <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
-              Available days
+              Hours each day
             </T>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
-              {DAY_LABELS.map((d, i) => (
-                <Chip
-                  key={i}
-                  label={d}
-                  selected={days.includes(i)}
-                  onPress={() => setDays((p) => (p.includes(i) ? p.filter((x) => x !== i) : [...p, i]))}
-                  style={{ height: 36, paddingHorizontal: space.md }}
-                />
-              ))}
+            <View style={{ gap: space.sm, marginBottom: space.lg }}>
+              {DAY_LABELS.map((label, d) => {
+                const windows = week[d] ?? [];
+                const open = windows.length > 0;
+                return (
+                  <View key={label} style={{ gap: space.xs }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                      <Chip
+                        label={open ? label : `${label} · closed`}
+                        selected={open}
+                        onPress={() => setDayWindows(d, (w) => (w.length > 0 ? [] : [nextWindow([])]))}
+                        style={{ height: 36, paddingHorizontal: space.md, minWidth: 64 }}
+                      />
+                      {open ? (
+                        <LinkText label="Add hours" onPress={() => setDayWindows(d, (w) => [...w, nextWindow(w)])} />
+                      ) : null}
+                    </View>
+                    {windows.map((w, i) => (
+                      <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                        <InlineInput
+                          style={{ flex: 1 }}
+                          value={w.start}
+                          onChangeText={(t) => setDayWindows(d, (ws) => ws.map((x, j) => (j === i ? { ...x, start: t } : x)))}
+                          placeholder="09:00"
+                          center
+                        />
+                        <T variant="label" tone="muted">to</T>
+                        <InlineInput
+                          style={{ flex: 1 }}
+                          value={w.end}
+                          onChangeText={(t) => setDayWindows(d, (ws) => ws.map((x, j) => (j === i ? { ...x, end: t } : x)))}
+                          placeholder="17:00"
+                          center
+                        />
+                        <Pressable
+                          onPress={() => setDayWindows(d, (ws) => ws.filter((_, j) => j !== i))}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Remove ${label} ${w.start}–${w.end}`}
+                        >
+                          <Feather name="x" size={18} color={color.text.muted} />
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })}
+              {hoursProblem ? (
+                <T variant="caption" tone="error">{hoursProblem}</T>
+              ) : null}
             </View>
 
             <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
-              Hours
+              Gap after each booking
             </T>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
-              <InlineInput style={{ flex: 1 }} value={startTime} onChangeText={setStartTime} placeholder="09:00" center />
-              <T variant="label" tone="muted">
-                to
-              </T>
-              <InlineInput style={{ flex: 1 }} value={endTime} onChangeText={setEndTime} placeholder="17:00" center />
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
+              {choicesWith(BUFFER_CHOICES, buffer).map((m) => (
+                <Chip key={m} label={minutesLabel(m)} selected={buffer === m} onPress={() => setBuffer(m)} style={{ height: 36, paddingHorizontal: space.md }} />
+              ))}
             </View>
+
+            <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.xs }}>
+              Minimum notice
+            </T>
+            <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
+              How soon before a time a customer can still book it.
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
+              {choicesWith(NOTICE_CHOICES, notice).map((m) => (
+                <Chip key={m} label={minutesLabel(m)} selected={notice === m} onPress={() => setNotice(m)} style={{ height: 36, paddingHorizontal: space.md }} />
+              ))}
+            </View>
+
+            {/* [BOOK-S5a · owner A3/A4] Shown only while the server says it can be chosen. */}
+            {instantAvailable ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
+                <View style={{ flex: 1 }}>
+                  <T variant="label" weight="semibold">Confirm bookings automatically</T>
+                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                    {instant
+                      ? 'Bookings paid in cash at the appointment are confirmed as soon as the customer books. MMG bookings still wait for you to accept.'
+                      : 'Every booking waits for you to accept it.'}
+                  </T>
+                </View>
+                <BrandSwitch value={instant} onChange={setInstant} label="Confirm bookings automatically" />
+              </View>
+            ) : null}
 
             <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
               Where does it happen?
@@ -793,8 +879,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                   ? 'Set a price'
                   : !categoryId
                     ? 'Pick a category'
-                    : isService && days.length === 0
-                      ? 'Pick available days'
+                    : isService && hoursProblem
+                      ? 'Fix the hours'
                       : existing
                         ? 'Save changes'
                         : 'Add item'

@@ -1320,6 +1320,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       // [GUARDRAILS §8 · owner 14 Oct, store names] Why customers can't see the store: its own words wait for Swift.
       storeCheck: partnerStoreView(storeCheckOf(vendor)),
       nameReviewApprovedHash: undefined,
+      // [BOOK-S5a · owner A4] A Services business may choose "Confirm bookings automatically" only
+      // while INSTANT_BOOKING is on; the partner app shows the setting only on this word. Switch
+      // off: not sent (the answer is today's).
+      ...(vendor.vendorType === 'SERVICE' && instantBookingEnabled() ? { instantBookingAvailable: true } : {}),
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
@@ -4451,7 +4455,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const bookings = await app.prisma.booking.findMany({
       where: { vendorId, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
       select: {
-        id: true, customerId: true, orderId: true, slotStart: true, slotEnd: true, status: true,
+        id: true, customerId: true, orderId: true, slotStart: true, slotEnd: true, status: true, itemId: true,
         item: { select: { name: true, basePrice: true } },
       },
       orderBy: { slotStart: 'asc' },
@@ -4472,6 +4476,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         slotEnd: b.slotEnd,
         status: b.status,
         orderId: b.orderId,
+        // [BOOK-S5a · owner B2] The listing booked: the partner app's "Move" offers its free times.
+        itemId: b.itemId,
         customer: byId.has(b.customerId) ? { firstName: byId.get(b.customerId)!.firstName } : null,
       })),
     };

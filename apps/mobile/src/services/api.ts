@@ -1425,6 +1425,8 @@ export const vendorApi = {
     api.get('/vendor/sales-statement', capturedAuthConfig(session, { params: { link: 1 } })),
   hours: () => api.get('/vendor/hours'),
   bookings: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings', { params }),
+  // [BOOK-S5a · owner B2] The business moves a booking to another free time of the same service.
+  rescheduleBooking: (bookingId: string, newSlotStart: string) => api.post(`/vendor/bookings/${bookingId}/reschedule`, { newSlotStart }),
   // Block time (scheduling 2.1): one-off exceptions — full day or a window.
   bookingExceptions: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings/exceptions', { params }),
   createBookingException: (data: { date: string; start?: string; end?: string; reason?: string; itemId?: string }) =>
@@ -1433,7 +1435,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number; bookingCapacity?: number }) =>
     api.put('/vendor/profile', data),
   // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
   // redraws it without location or camera data, and serves it to customers), or taken down.
