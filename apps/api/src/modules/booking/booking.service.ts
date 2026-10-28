@@ -6,7 +6,6 @@ import {
   type BusyInterval, MAX_BUFFER_MINUTES, bufferOf, busyIntervalOf, candidateInterval, hasRoom,
 } from './availability';
 import { isBookingExclusionViolation } from './one-at-a-time';
-import { syncOrderBookings } from './order-coupling';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
 import { emitToStoreRoom } from '../order/order-room-emission.service';
 
@@ -98,10 +97,11 @@ export class BookingService {
     return (await this.validatedSlot(itemId, requestedSlotStart)).config;
   }
 
-  /** validateSlot, with the business the listing belongs to. */
-  private async validatedSlot(itemId: string, requestedSlotStart: Date): Promise<{ config: BookingConfig; vendorId: string }> {
+  /** validateSlot, with the business the listing belongs to. Reads on `db`
+   *  (a caller's transaction, or the root client). */
+  private async validatedSlot(itemId: string, requestedSlotStart: Date, db: BookingDb = this.prisma): Promise<{ config: BookingConfig; vendorId: string }> {
     const slotStart = canonicalSlotStart(requestedSlotStart);
-    const item = await this.prisma.item.findUnique({
+    const item = await db.item.findUnique({
       where: { id: itemId },
       select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
     });
@@ -125,7 +125,7 @@ export class BookingService {
       throw new AppError(400, 'SLOT_TOO_SOON', 'That time is too soon to book — pick a later slot');
     }
 
-    const exceptions = await this.exceptionsFor(item.vendorId, slotStart);
+    const exceptions = await this.exceptionsFor(item.vendorId, slotStart, db);
     const local = guyanaWallClockParts(slotStart);
     const minutesIntoDay = local.hour * 60 + local.minute;
     if (slotBlocked(minutesIntoDay, config.durationMinutes, itemId, exceptions)) {
@@ -171,10 +171,10 @@ export class BookingService {
   }
 
   /** The vendor's exception windows for the slot's Guyana calendar date. */
-  async exceptionsFor(vendorId: string, onDate: Date): Promise<ExceptionWindow[]> {
+  async exceptionsFor(vendorId: string, onDate: Date, db: BookingDb = this.prisma): Promise<ExceptionWindow[]> {
     const local = guyanaWallClockParts(onDate);
     const day = new Date(Date.UTC(local.year, local.month - 1, local.day));
-    return this.prisma.bookingException.findMany({
+    return db.bookingException.findMany({
       where: { vendorId, date: day },
       select: { itemId: true, start: true, end: true },
     });
@@ -184,8 +184,9 @@ export class BookingService {
    * Reserve a slot. Throws 409 SLOT_TAKEN when someone else got there first.
    * With an orderId (vendor acceptance), the booking is CONFIRMED directly.
    * [BOOK-S2] An order that already holds its slot (taken at checkout while
-   * INSTANT_BOOKING was on) is not reserved twice: its RESERVED booking is
-   * confirmed through the one coupling seam and returned.
+   * INSTANT_BOOKING was on) is not reserved twice: its booking is returned as
+   * it is. The acceptance's own transition confirmed it, earlier in this same
+   * commit, through the one coupling seam (booking/order-coupling.ts).
    */
   /** [REPORT-007-v4 F-05] Accepts a transaction client so appointment
    *  acceptance can reserve its slot INSIDE the canonical Order-lock commit —
@@ -206,10 +207,7 @@ export class BookingService {
     const write = async (tx: Prisma.TransactionClient) => {
       if (orderId) {
         const held = await tx.booking.findFirst({ where: { orderId, status: { in: ['RESERVED', 'CONFIRMED'] } } });
-        if (held) {
-          await syncOrderBookings(tx, orderId, 'CONFIRM');
-          return tx.booking.findUniqueOrThrow({ where: { id: held.id } });
-        }
+        if (held) return held;
       }
       return this.writeBooking(tx, { itemId, vendorId, customerId, slotStart, config, orderId, status: orderId ? 'CONFIRMED' : 'RESERVED' });
     };
@@ -236,7 +234,8 @@ export class BookingService {
     input: { itemId: string; customerId: string; slotStart: Date; orderId: string },
   ) {
     const slotStart = canonicalSlotStart(input.slotStart);
-    const { config, vendorId } = await this.validatedSlot(input.itemId, slotStart);
+    // On the checkout's own transaction: no second connection while it holds the locks.
+    const { config, vendorId } = await this.validatedSlot(input.itemId, slotStart, tx);
     try {
       return await this.writeBooking(tx, { ...input, vendorId, slotStart, config, status: 'RESERVED' });
     } catch (error) {

@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { BookingService } from '../modules/booking/booking.service';
+import { BookingService, lockBusinessTime } from '../modules/booking/booking.service';
 import { instantBookingEnabled } from '../modules/booking/instant-booking';
 import { autoCancelUnresponsiveOrder } from '../jobs/queue';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -128,6 +128,18 @@ function shapeOf(value: unknown): unknown {
     return Object.fromEntries(Object.keys(value as object).sort().map((k) => [k, shapeOf((value as Record<string, unknown>)[k])]));
   }
   return typeof value;
+}
+
+/** Wait until some backend is blocked by the transaction running on `pid`. */
+async function waitUntilBlockedBy(pid: number, ms = 10_000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const [row] = await app.prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
+    if ((row?.n ?? 0) > 0) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for a request to queue behind backend ${pid}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 const on = () => vi.stubEnv('INSTANT_BOOKING', '1');
@@ -301,6 +313,38 @@ describe('[BOOK-S2] switch ON — the slot is taken when the customer books', ()
     expect(await ordersOf(a)).toBe(0);
     expect(await app.prisma.cart.count({ where: { customerId: a.userId, items: { some: {} } } })).toBe(1); // the cart is kept to pick another time
     expect(await liveAt(slot)).toBe(1);
+  });
+
+  it('lock order: checkout waits for the business\'s time lock BEFORE it locks the vendor row, as the "how many at once" write does (no deadlock between them)', async () => {
+    on();
+    const slot = nextSlot();
+    const a = await customer('Wes');
+    expect((await call('DELETE', '/api/v1/customer/cart', a.token)).statusCode).toBe(200);
+    expect((await call('POST', '/api/v1/customer/cart/items', a.token, { vendorId, itemId: cutId, quantity: 1 })).statusCode).toBe(201);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let pid = 0;
+    const holder = app.prisma.$transaction(async (tx) => {
+      pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+      await lockBusinessTime(tx, vendorId);
+      await gate;
+    }, { timeout: 20_000 });
+    while (pid === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    const placing = call('POST', '/api/v1/customer/checkout', a.token, {
+      paymentMethod: 'CASH', appointments: [{ itemId: cutId, slotStart: slot.toISOString() }],
+    });
+    let vendorRowFree: boolean;
+    try {
+      await waitUntilBlockedBy(pid);
+      // The checkout is queued on the time lock; the vendor row must still be free.
+      vendorRowFree = await app.prisma.$queryRaw`SELECT id FROM "vendors" WHERE id = ${vendorId} FOR UPDATE NOWAIT`.then(() => true, () => false);
+    } finally {
+      release();
+      await holder;
+    }
+    const res = await placing;
+    expect(vendorRowFree).toBe(true);
+    expect(res.statusCode, res.body).toBe(200);
   });
 
   for (const [path, payment] of [

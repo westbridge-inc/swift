@@ -15,8 +15,10 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 // booking is a record, and stays one.
 //
 // Callers: the canonical order transition (order.service.ts
-// stageCanonicalOrderTransition), the customer's own cancel (cancelOrder), and
-// an acceptance reservation (BookingService.reserveSlot with an order).
+// stageCanonicalOrderTransition: accept, complete, reject, auto-cancel, admin
+// and ops cancels, the unpaid-MMG expiry), the customer's own cancel
+// (cancelOrder) and the legacy no-response cleanup
+// (applyCancellationSideEffects).
 // ---------------------------------------------------------------------------
 
 export type OrderBookingChange = 'CONFIRM' | 'COMPLETE' | 'FREE';
