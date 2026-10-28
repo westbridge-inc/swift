@@ -321,10 +321,13 @@ describe('the selected operating profile owns its vehicle proof', () => {
   it('uses the Rider plate when the account also retains a different Driver profile', async () => {
     const mover = await fixture();
     const own = await subjectFor(mover, 'A');
+    // [SEC-TRUST F9] The registrant's link counts on a paper of its own a person approved (and is approved by it).
     await app.prisma.verificationDocument.create({ data: {
       userId: mover.userId, subjectId: own.subjectId, role: 'MOVER', docType: 'vehicle_insurance',
       status: 'APPROVED', expiresAt: new Date(Date.now() + DAY), fileUrl: 'storage://synthetic/rider-current',
+      reviewedBy: 'synthetic-reviewer', reviewedAt: new Date(),
     } });
+    await app.prisma.subjectLink.updateMany({ where: { accountId: mover.userId, subjectId: own.subjectId, validTo: null }, data: { approvedAt: new Date() } });
     await app.prisma.driver.create({ data: {
       userId: mover.userId, vehicleType: 'CAR', vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleColor: 'Blue',
       vehicleYear: 2020, licensePlate: `OTHER${nanoid(8)}`, driverLicenseUrl: '', vehicleInsuranceUrl: '',
