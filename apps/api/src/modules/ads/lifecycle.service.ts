@@ -95,7 +95,9 @@ export class AdsLifecycleService {
     }
     // [SEC-TRUST F6 follow-up] A campaign paused before its booked week began (a suspension pauses SCHEDULED
     // campaigns too) resumes to SCHEDULED, and week_start takes it LIVE when its week arrives — never early.
-    const to: AdCampaignStatus = event === 'resume' && before.startWeek.getTime() > mondayOf(new Date()).getTime() ? 'SCHEDULED' : rule.to;
+    let to: AdCampaignStatus = event === 'resume' && before.startWeek.getTime() > mondayOf(new Date()).getTime() ? 'SCHEDULED' : rule.to;
+    let statusReason: string | null = reason ?? null;
+    let heldForSuspension = false;
     // ONE generation: the status CAS, the audit row and whatever the caller
     // stages within (the refund obligation) commit together — never a killed
     // campaign whose money obligation vanished on the way.
@@ -107,22 +109,36 @@ export class AdsLifecycleService {
           throw new AppError(409, 'CAMPAIGN_PAUSED_BY_SWIFT', 'Swift paused this campaign. Contact support.');
         }
       }
+      // [SEC-TRUST F6 · REVIEW-M S3-1] Any other move that would put the campaign on schedule or live (creatives
+      // approved, its week starting) reads the advertiser under the same share lock: an advertiser that is not
+      // APPROVED has its campaign land PAUSED under Swift's suspension mark instead — never "live" while it
+      // cannot serve — so week_end, an admin kill and the refunds treat it as the suspension's pause, and
+      // reinstatement hands it back to the advertiser to resume. No "You're scheduled/live" notice is sent.
+      if (!opts.byAdvertiser && (to === 'SCHEDULED' || to === 'LIVE')) {
+        const [advertiser] = await tx.$queryRaw<Array<{ status: string; statusReason: string | null }>>`
+          SELECT "status"::text AS "status", "statusReason" FROM "advertisers" WHERE "id" = ${before.advertiserId} FOR SHARE`;
+        if (advertiser?.status !== 'APPROVED') {
+          to = 'PAUSED';
+          statusReason = `${SUSPENSION_PAUSE_PREFIX}${advertiser?.statusReason ?? 'account not active'}`;
+          heldForSuspension = true;
+        }
+      }
       const moved = await tx.adCampaign.updateMany({
         where: { id: campaignId, status: before.status },
-        data: { status: to, statusReason: reason ?? null },
+        data: { status: to, statusReason },
       });
       if (moved.count === 0) throw new AppError(409, 'CAMPAIGN_TRANSITION_RACE', 'The campaign changed underneath this action — retry.');
       await tx.adsAuditLog.create({
         data: {
           tenantId: before.tenantId, actorUserId: actor, action: `CAMPAIGN_${event.toUpperCase()}`,
           entityType: 'AdCampaign', entityId: campaignId,
-          before: { status: before.status } as never, after: { status: to } as never, reason: reason ?? null,
+          before: { status: before.status } as never, after: { status: to } as never, reason: statusReason,
         },
       });
       if (opts.within) await opts.within(tx, { before, to });
     });
 
-    const notice = to === 'SCHEDULED' && event === 'resume' ? RESUMED_BEFORE_START : NOTICE[event];
+    const notice = heldForSuspension ? undefined : to === 'SCHEDULED' && event === 'resume' ? RESUMED_BEFORE_START : NOTICE[event];
     if (notice) await this.notifyOwners(before.advertiserId, notice.title, notice.body, notice.kind, campaignId).catch(() => {});
     if (event === 'kill') {
       await notifyAdmins(this.prisma, this.notifications, {

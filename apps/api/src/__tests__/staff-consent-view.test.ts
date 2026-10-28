@@ -124,4 +124,18 @@ describe('[SEC-TRUST F15] a member added without consent is not shown in full', 
     await settle();
     expect(await memberOf(owner.vendorId, person.userId)).toBeNull();
   });
+
+  it('switch off: changing a member\u2019s role (PUT /staff/:id) does not reveal the last name or photo either', async () => {
+    const owner = await makeOwnerWithStore();
+    const person = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    expect((await add(owner.token, person.phone)).statusCode).toBe(200);
+    const row = await memberOf(owner.vendorId, person.userId);
+    const res = await app.inject({
+      method: 'PUT', url: `/api/v1/vendor/staff/${row!.id}`, payload: { role: 'MANAGER' },
+      headers: { authorization: `Bearer ${owner.token}`, 'content-type': 'application/json' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.role).toBe('MANAGER');
+    expect(res.json().data.user).toMatchObject({ id: person.userId, firstName: 'Team', phone: person.phone, lastName: null, avatar: null });
+  });
 });

@@ -12,6 +12,7 @@ import { AdvertiserService } from '../modules/ads/advertiser.service';
 import { AdServingService } from '../modules/ads/serving.service';
 import { CreativeService } from '../modules/ads/creative.service';
 import { mondayOf } from '../modules/ads/ads-weeks';
+import { AdsCronService } from '../modules/ads/cron.service';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +28,8 @@ let app: FastifyInstance;
 const raw = testPrismaClient();
 const userIds: string[] = [];
 const advertiserIds: string[] = [];
-const WEEK_FUTURE = new Date('2026-11-02T00:00:00Z');
+// A booked week two weeks from now, computed from the clock (never a fixed date that a calendar overtakes).
+const WEEK_FUTURE = new Date(mondayOf(new Date(), 'America/Guyana').getTime() + 14 * 86_400_000);
 
 type Actor = { userId: string; token: string };
 async function makeUser(): Promise<Actor> {
@@ -51,7 +53,7 @@ async function advertiser(status: 'APPROVED' | 'SUSPENDED' = 'APPROVED') {
   await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: owner.userId, role: 'OWNER', acceptedAt: new Date() } });
   return a.id;
 }
-async function campaign(advertiserId: string, status: 'DRAFT' | 'LIVE' | 'PAUSED', week = WEEK_FUTURE, statusReason: string | null = null) {
+async function campaign(advertiserId: string, status: 'DRAFT' | 'LIVE' | 'PAUSED' | 'PENDING_REVIEW', week = WEEK_FUTURE, statusReason: string | null = null) {
   const p = await app.prisma.adPlacement.create({ data: { key: `f6-${nanoid(6)}`, name: 'P', tier: 3, mediaKind: 'IMAGE', weeklyPrice: 7000, slotsPerWeek: 6 } });
   const c = await app.prisma.adCampaign.create({ data: { advertiserId, placementId: p.id, name: `F6 ${nanoid(4)}`, cities: ['*'], startWeek: week, endWeek: week, status, statusReason, totalAmount: 7000 } });
   if (status !== 'DRAFT') await app.prisma.adBooking.create({ data: { campaignId: c.id, placementId: p.id, city: '*', weekStart: week, amount: 7000, status: 'CONFIRMED' } });
@@ -154,5 +156,47 @@ describe('[SEC-TRUST F6] a suspended advertiser cannot undo Swift’s suspension
     const served = await new AdServingService(app.prisma).serve({ tenantId: 'swift-default', city: 'Georgetown', sessionId: nanoid(8), userId: null, keys: [placementKey] });
     const ids = (served.placements[placementKey]?.items ?? []).map((item) => (item as { campaignId?: string }).campaignId);
     expect(ids).not.toContain(campaignId);
+  });
+
+  it('a paid campaign whose creatives are approved after the suspension, and whose week then starts, lands PAUSED under Swift\u2019s mark: never live, no \u201cyou\u2019re live\u201d, and the advertiser gets it back on reinstatement', async () => {
+    const id = await advertiser('APPROVED');
+    const week = mondayOf(new Date(), 'America/Guyana');
+    const { campaignId, placementKey } = await campaign(id, 'PENDING_REVIEW', week);
+    const creative = await app.prisma.adCreative.create({ data: { campaignId, kind: 'IMAGE', fileUrl: 'storage://f6/held.png', status: 'PENDING', transcodeStatus: 'READY' } });
+    await service().suspend(id, adminId, 'Policy review.');
+    expect(await statusOf(campaignId)).toBe('PENDING_REVIEW');
+
+    await new CreativeService(app.prisma, app.io).approve(creative.id, adminId);
+    await new AdsCronService(app.prisma, app.io).activateScheduled(new Date(), { campaignIds: [campaignId] });
+    const row = await raw.adCampaign.findUniqueOrThrow({ where: { id: campaignId } });
+    expect(row.status).toBe('PAUSED');
+    expect(row.statusReason?.startsWith('Advertiser suspended: ')).toBe(true);
+    const titles = (await raw.notification.findMany({ where: { userId: owner.userId, data: { path: ['campaignId'], equals: campaignId } }, select: { title: true } })).map((n) => n.title);
+    expect(titles).not.toContain('You\u2019re live');
+    expect(titles).not.toContain("You're live");
+    expect(titles).not.toContain("You're scheduled");
+    AdServingService.invalidateTenant('swift-default');
+    const served = await new AdServingService(app.prisma).serve({ tenantId: 'swift-default', city: 'Georgetown', sessionId: nanoid(8), userId: null, keys: [placementKey] });
+    expect((served.placements[placementKey]?.items ?? []).map((item) => (item as { campaignId?: string }).campaignId)).not.toContain(campaignId);
+
+    await service().reinstate(id, adminId);
+    const resumed = await call(`/api/v1/ads/campaigns/${campaignId}/resume`, owner);
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(await statusOf(campaignId)).toBe('LIVE');
+  });
+
+  it('suspending an advertiser removes its live campaign from a pool that was already cached', async () => {
+    const id = await advertiser('APPROVED');
+    const week = mondayOf(new Date(), 'America/Guyana');
+    const { campaignId, placementKey } = await campaign(id, 'LIVE', week);
+    await app.prisma.adCreative.create({ data: { campaignId, kind: 'IMAGE', fileUrl: 'storage://f6/cached.png', status: 'APPROVED', transcodeStatus: 'READY' } });
+    AdServingService.invalidateTenant('swift-default');
+    const serve = async () => {
+      const served = await new AdServingService(app.prisma).serve({ tenantId: 'swift-default', city: 'Georgetown', sessionId: nanoid(8), userId: null, keys: [placementKey] });
+      return (served.placements[placementKey]?.items ?? []).map((item) => (item as { campaignId?: string }).campaignId);
+    };
+    expect(await serve()).toContain(campaignId);
+    await service().suspend(id, adminId, 'Policy review.');
+    expect(await serve()).not.toContain(campaignId);
   });
 });

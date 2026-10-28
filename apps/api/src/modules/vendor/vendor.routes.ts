@@ -588,6 +588,20 @@ async function requireVendor(
   return access;
 }
 
+/**
+ * [SEC-TRUST F15] What the owner sees of a team member, on EVERY route that returns one (GET /staff,
+ * PUT /staff/:id). While staff invites need no acceptance (STAFF_INVITE_ACCEPT off), a member was added
+ * without saying yes: the owner sees the first name and the number they typed, never the last name or the
+ * photo. The fields stay in the answer (null), so every app build reads the same shape.
+ */
+function staffMemberUserSelect() {
+  const consented = staffInviteAcceptEnabled();
+  return { id: true, firstName: true, lastName: consented, phone: true, avatar: consented } as const;
+}
+function shownStaffMember<M extends { user: { lastName?: string | null; avatar?: string | null } }>(member: M) {
+  return staffInviteAcceptEnabled() ? member : { ...member, user: { ...member.user, lastName: null, avatar: null } };
+}
+
 /** Acknowledge the persistent order alert — read = acknowledged = silence. */
 async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: string) {
   await app.prisma.notification.updateMany({
@@ -1019,19 +1033,12 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /staff — members of the selected store, with their user identity. */
   app.get('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
-    // [SEC-TRUST F15] While staff invites need no acceptance (STAFF_INVITE_ACCEPT off), a member was added
-    // without saying yes: the owner sees the first name and the number they typed, never the last name or
-    // the photo. The fields stay in the answer (null), so every app build reads the same shape.
-    const consented = staffInviteAcceptEnabled();
     const staff = await app.prisma.vendorStaff.findMany({
       where: { vendorId },
       orderBy: { createdAt: 'asc' },
-      include: { user: { select: { id: true, firstName: true, lastName: consented, phone: true, avatar: consented } } },
+      include: { user: { select: staffMemberUserSelect() } },
     });
-    return {
-      success: true,
-      data: consented ? staff : staff.map((member) => ({ ...member, user: { ...member.user, lastName: null, avatar: null } })),
-    };
+    return { success: true, data: staff.map(shownStaffMember) };
   });
 
   /** POST /staff — invite a Swift account to the team by phone. [Row 55]
@@ -1128,9 +1135,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const member = await app.prisma.vendorStaff.update({
       where: { id: request.params.id },
       data: { role: body.role },
-      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+      include: { user: { select: staffMemberUserSelect() } },
     });
-    return { success: true, data: member };
+    return { success: true, data: shownStaffMember(member) };
   });
 
   /** DELETE /staff/:id — remove a member (their access ends immediately). */

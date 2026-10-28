@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Redis from 'ioredis';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
-import { armReviewCode, hashReviewCode, REVIEW_CODE_MAX_ATTEMPTS, verifyReviewCode } from '../modules/review/credentials';
-import { hasStepUp, reviewStepUpKey, verifyStepUp } from '../modules/auth/step-up';
+import { armReviewCode, hashReviewCode, REVIEW_CODE_LOCKOUT, REVIEW_CODE_MAX_ATTEMPTS, verifyReviewCode } from '../modules/review/credentials';
+import { hasStepUp, reviewStepUpKey, reviewStepUpTriesKey, verifyStepUp } from '../modules/auth/step-up';
 
 // ---------------------------------------------------------------------------
 // [SEC-TRUST F12] The store-review code's five attempts are counted BEFORE a
@@ -44,6 +44,10 @@ describe('[SEC-TRUST F12] review sign-in code', () => {
     const cred = credential();
     await armReviewCode(redis, identifier, cred.id);
     expect((await verifyReviewCode(redis, identifier, '000000', cred)).valid).toBe(false);
+    // The counted failure expires on its own (it never becomes a permanent lock).
+    const ttl = await redis.ttl(`review_otp_fail:${identifier}`);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(REVIEW_CODE_LOCKOUT);
     expect(await verifyReviewCode(redis, identifier, CODE, cred)).toEqual({ valid: true });
     expect((await verifyReviewCode(redis, identifier, CODE, cred)).valid).toBe(false);
   });
@@ -74,5 +78,18 @@ describe('[SEC-TRUST F12] review step-up code', () => {
     expect(outcomes.at(-1)).toBe('refused');
     expect(await hasStepUp(redis, who.sessionId)).toBe(false);
     await redis.del(reviewStepUpKey(userId), `stepup:review-tries:${userId}`, `stepup:fail:${userId}`, `stepup:lock:${userId}`);
+  });
+
+  it('a successful review step-up gives the attempts back (five step-ups in a row never lock the reviewer)', async () => {
+    const userId = `user-${nanoid(8)}`;
+    const cred = credential();
+    const app = fakeApp(userId, cred);
+    const who = { userId, sessionId: `s-${nanoid(6)}` };
+    for (let i = 0; i < REVIEW_CODE_MAX_ATTEMPTS + 2; i += 1) {
+      await redis.set(reviewStepUpKey(userId), `generation-${i}`, 'EX', 300);
+      await expect(verifyStepUp(app, who, CODE)).resolves.toBeTruthy();
+      expect(await redis.exists(reviewStepUpTriesKey(userId))).toBe(0);
+    }
+    await redis.del(reviewStepUpKey(userId), `stepup:fail:${userId}`, `stepup:lock:${userId}`, `stepup:ok:${who.sessionId}`);
   });
 });
