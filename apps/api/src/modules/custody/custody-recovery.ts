@@ -550,7 +550,9 @@ export async function caseDetail(prisma: PrismaClient, caseId: string) {
   const riderIds = [kase.holderRiderId, kase.relayRiderId].filter((x): x is string => !!x);
   const riders = await prisma.rider.findMany({
     where: { id: { in: riderIds } },
-    select: { id: true, currentLat: true, currentLng: true, lastLocationUpdate: true, isOnline: true, user: { select: { firstName: true, lastName: true, phone: true } } },
+    // [FOLLOWUPS · COORD privacy ruling 28 Oct] Who holds the goods and whether they are online: the console's custody
+    // page shows nothing more (it never drew the riders' live position), so the live position is not sent at all.
+    select: { id: true, isOnline: true, user: { select: { firstName: true, lastName: true, phone: true } } },
   });
   const trail = await prisma.auditLog.findMany({
     where: { entity: CUSTODY_CASE_ENTITY, entityId: caseId },
