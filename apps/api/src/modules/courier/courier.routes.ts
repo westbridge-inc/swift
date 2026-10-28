@@ -33,6 +33,7 @@ import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '..
 import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 import { POSTAL_REFUSAL, postalItem } from './postal-items';
 import { withCounterpartPhones } from '../calls/counterpart-phone';
+import { courierRiderAnswer } from './courier-rider-answer';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -592,7 +593,8 @@ export default async function courierRoutes(app: FastifyInstance) {
           } });
         },
       });
-    return { success: true, data: updated };
+    // [F20] The rider's answer follows the O-1 counterpart-phone rule (courier-rider-answer.ts).
+    return { success: true, data: courierRiderAnswer(request, updated) };
   });
 
   /** POST /order/:id/proof-photo — the assigned rider uploads the delivery photo
@@ -690,7 +692,7 @@ export default async function courierRoutes(app: FastifyInstance) {
           data: { orderId: id, status: 'DELIVERED' },
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
       }
-      return { success: true, data: { ...result.order, claim: result.claim ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags } : null } };
+      return { success: true, data: { ...courierRiderAnswer(request, result.order), claim: result.claim ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags } : null } };
     }
     // Proof metadata, DELIVERED, rider release/count, float, earnings, and the
     // immutable log commit atomically. A retry after any pre-commit failure
@@ -725,7 +727,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       data: { orderId: id, status: 'DELIVERED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
 
-    return { success: true, data: { ...updated, totalDeliveries: updated.rider?.totalDeliveries ?? null } };
+    return { success: true, data: { ...courierRiderAnswer(request, updated), totalDeliveries: updated.rider?.totalDeliveries ?? null } };
   });
 
   /** [E17] POST /order/:id/return — the assigned mover (or support on their
@@ -790,7 +792,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier return socket publication failed after commit');
     }
-    return { success: true, data: updated };
+    return { success: true, data: courierRiderAnswer(request, updated) };
   });
 
   /** [E17] POST /order/:id/return-proof — the return photo (magic-byte checked,
@@ -882,6 +884,6 @@ export default async function courierRoutes(app: FastifyInstance) {
       body: 'The parcel was returned to you — return proof captured.',
       data: { orderId: id, status: 'RETURNED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof notification failed after commit'));
-    return { success: true, data: updated };
+    return { success: true, data: courierRiderAnswer(request, updated) };
   });
 }
