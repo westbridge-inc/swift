@@ -6,7 +6,7 @@ import {
   SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
   SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
 } from '@swift/types';
-import { beginRequestTenantContext, prismaPlugin, runWithTenant, runWithoutTenant } from '../plugins/prisma';
+import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
