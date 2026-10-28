@@ -160,3 +160,42 @@ describe('[MC-PR3] stores, riders, drivers and orders lists', () => {
     await waitFor(() => expect(Object.fromEntries(lastQuery(fetchMock, '/api/v1/admin/orders'))).toEqual({ page: '1', limit: '25', type: 'TAXI', search: 'SW-1', excludeFixtures: 'true' }));
   });
 });
+
+// ---------------------------------------------------------------------------
+// [SEC-PII · security scan 28 Oct 2026] The server now masks the numbers and
+// emails on these lists unless the admin may see contact details. The pages
+// must read the server's masked values as they read full ones: the last four
+// digits, the masked email, nothing broken.
+// ---------------------------------------------------------------------------
+describe('[SEC-PII] the lists show the server\'s masked numbers and emails', () => {
+  it('people: a masked number and a masked email are shown as they come, the row still works', async () => {
+    mockApi(() => ({ body: { success: true, data: [{ ...people[0], phone: '+592•••••3456', email: 'r•••@example.gy' }], meta: meta(1, 1) } }));
+    renderWithQuery(<UsersPage />);
+    const table = await screen.findByRole('table', { name: 'People' });
+    expect(within(table).getByText('••• ••• 3456')).toBeTruthy();
+    expect(table.textContent).toContain('r•••@example.gy');
+    expect(within(table).getByText('Business owner')).toBeTruthy();
+    expect(within(table).getByRole('button', { name: 'Suspend Real Person…' })).toBeTruthy();
+  });
+
+  it.each([['Riders', RidersPage], ['Drivers', DriversPage]] as const)('%s: a masked number shows its last four digits', async (name, Page) => {
+    mockApi(() => ({ body: { success: true, data: [{
+      id: 'm1', riderType: 'BOTH', isOnline: false, documentsVerified: true, rideClass: 'ECONOMY', averageRating: null, totalRatings: 0, totalTrips: 0,
+      user: { firstName: 'Mover', lastName: 'Masked', phone: '+592•••••4433' },
+    }], meta: meta(1, 1) } }));
+    renderWithQuery(<Page />);
+    const table = await screen.findByRole('table', { name });
+    expect(within(table).getByText('••• ••• 4433')).toBeTruthy();
+    expect(table.textContent).toContain('Mover Masked');
+  });
+
+  it('stores: a row whose owner number and emails are masked still lists the store', async () => {
+    mockApi(() => ({ body: { success: true, data: [{
+      id: 'v1', name: 'Masked Counter', slug: 'masked-counter', vendorType: 'RESTAURANT', status: 'ACTIVE', city: 'Georgetown', phone: '+592•••••1111', email: 'm•••@example.gy',
+      owner: { user: { id: 'u9', firstName: 'Owner', lastName: 'Masked', phone: '+592•••••2222' } }, subscription: null, _count: { orders: 0 },
+    }], meta: meta(1, 1) } }));
+    renderWithQuery(<VendorsPage />);
+    const table = await screen.findByRole('table', { name: 'Stores' });
+    expect(table.textContent).toContain('Masked Counter');
+  });
+});

@@ -98,7 +98,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
-import { CUSTODY_CONTACT_PARTIES, maskCaseRiderPhones, maskMoverPage, maskPersonPage, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
+import { CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -1289,7 +1289,9 @@ export async function adminRoutes(app: FastifyInstance) {
       hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    const result = paginatedResponse(users, total, { page, limit, skip });
+    // [SEC-PII] Numbers and emails masked unless the live grant holds user.contact.read (search above still matches the full number).
+    const rows = holdsPersonContact(request, 'user') ? users : users.map(maskUserListRow);
+    const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
@@ -1532,11 +1534,14 @@ export async function adminRoutes(app: FastifyInstance) {
       hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    const result = paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip });
+    // [SEC-PII] The store's and its owner's numbers and emails masked unless the live grant holds vendor.contact.read.
+    const contact = holdsPersonContact(request, 'vendor');
+    const rows = vendors.map((v) => ({ ...(contact ? v : maskVendorListRow(v)), vatRegistrationNumber: undefined }));
+    const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
-  app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
+  app.get('/vendors/pending', { preHandler: [adminGuard] }, async (request) => {
     const vendors = await app.prisma.vendor.findMany({
       where: { status: 'PENDING_APPROVAL' },
       include: {
@@ -1544,7 +1549,9 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { success: true, data: vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })) };
+    // [SEC-PII] As GET /vendors: masked unless the live grant holds vendor.contact.read.
+    const contact = holdsPersonContact(request, 'vendor');
+    return { success: true, data: vendors.map((v) => ({ ...(contact ? v : maskVendorListRow(v)), vatRegistrationNumber: undefined })) };
   });
 
   /** One business, whole story: profile, owner, sibling stores, subscription,
@@ -2042,7 +2049,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
-    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    // [SEC-PII] The mover's number masked unless the live grant holds mover.contact.read (search still matches the full number).
+    const rows = holdsPersonContact(request, 'mover') ? withLive : withLive.map(maskMoverListRow);
+    const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
@@ -2244,7 +2253,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
-    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    // [SEC-PII] The mover's number masked unless the live grant holds mover.contact.read (search still matches the full number).
+    const rows = holdsPersonContact(request, 'mover') ? withLive : withLive.map(maskMoverListRow);
+    const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
@@ -2762,7 +2773,8 @@ export async function adminRoutes(app: FastifyInstance) {
       success: true,
       data: {
         orders: orders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
-        users,
+        // [SEC-PII] The people found, as GET /users lists them: masked unless the live grant holds user.contact.read.
+        users: holdsPersonContact(request, 'user') ? users : users.map(maskUserListRow),
         vendors,
       },
     };

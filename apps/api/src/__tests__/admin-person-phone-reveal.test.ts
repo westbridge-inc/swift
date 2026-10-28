@@ -12,6 +12,7 @@ import { testPhone } from './helpers/fixture-ids';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { ADMIN_ROUTE_AUTHORITY, SUPPORT_OPERATOR_CAPABILITIES } from '../modules/admin/admin-authority';
+import { holdsPersonContact, PERSON_CONTACT_CAPABILITIES } from '../modules/admin/person-contact';
 
 // ---------------------------------------------------------------------------
 // [FOLLOWUPS · COORD ruling 28 Oct 2026, owner delegated; follows O-1] The
@@ -431,12 +432,13 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
     expect(riders.find((r) => r.id === ids.rider)!.user.firstName).toBe('Contact');
     const drivers = (await read('drivers', tokens['listReaders']!)).json().data as Array<{ id: string; user: { phone: string } }>;
     expect(drivers.find((d) => d.id === ids.driver)!.user.phone).toMatch(new RegExp(`•+${tail(phones.driver)}$`));
-    const vendors = (await read('vendors', tokens['listReaders']!)).json().data as Array<Record<string, any>>;
+    type StoreRow = { id: string; name: string; phone: string; email: string | null; mmgNumber: string | null; owner: { user: { phone: string; email?: string | null } } };
+    const vendors = (await read('vendors', tokens['listReaders']!)).json().data as StoreRow[];
     const store = vendors.find((v) => v.id === ids.vendor)!;
     expect(store.phone).toMatch(new RegExp(`•+${tail(phones.store)}$`));
     expect(store.owner.user.phone).toMatch(new RegExp(`•+${tail(phones.owner)}$`));
     expect(store.name).toBe('Contact Counter');
-    const pending = ((await read('vendorsPending', tokens['listReaders']!)).json().data as Array<Record<string, any>>).find((v) => v.id === ids.pendingVendor)!;
+    const pending = ((await read('vendorsPending', tokens['listReaders']!)).json().data as StoreRow[]).find((v) => v.id === ids.pendingVendor)!;
     expect(pending.phone).toMatch(new RegExp(`•+${tail(phones.pendingStore)}$`));
     expect(pending.email).toBe('f•••@example.test');
     expect(pending.mmgNumber).toMatch(new RegExp(`•+${tail(phones.pendingOwner)}$`));
@@ -489,6 +491,24 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
       expect(res.statusCode, key).toBe(200);
       for (const value of contactsOf[key]()) expect(res.payload, `${key} ${value}`).toContain(value);
     }
+  });
+
+  it('the list check is the reveal doors\' own capability, read from this request\'s live grant, and never fails open', () => {
+    expect(PERSON_CONTACT_CAPABILITIES).toEqual({
+      user: ADMIN_ROUTE_AUTHORITY['GET /users/:id/phone']!.capability,
+      mover: ADMIN_ROUTE_AUTHORITY['GET /riders/:id/phone']!.capability,
+      vendor: ADMIN_ROUTE_AUTHORITY['GET /vendors/:id/party-phone']!.capability,
+    });
+    expect(ADMIN_ROUTE_AUTHORITY['GET /drivers/:id/phone']!.capability).toBe(PERSON_CONTACT_CAPABILITIES.mover);
+    // No grant read for this request (the capability hook did not run): masked, even for an ADMIN.
+    expect(holdsPersonContact({ user: { role: 'ADMIN' } }, 'user')).toBe(false);
+    expect(holdsPersonContact(null, 'user')).toBe(false);
+    // No Admin row: the role's container, as the route decision itself uses.
+    expect(holdsPersonContact({ user: { role: 'ADMIN' }, adminPermissions: null }, 'user')).toBe(true);
+    expect(holdsPersonContact({ user: { role: 'CUSTOMER' }, adminPermissions: null }, 'user')).toBe(false);
+    expect(holdsPersonContact({ user: { role: 'ADMIN' }, adminPermissions: [...SUPPORT_OPERATOR_CAPABILITIES] }, 'user')).toBe(false);
+    expect(holdsPersonContact({ user: { role: 'ADMIN' }, adminPermissions: ['user.*'] }, 'user')).toBe(true);
+    expect(holdsPersonContact({ user: { role: 'ADMIN' }, adminPermissions: ['user.*'] }, 'mover')).toBe(false);
   });
 
   it('the grant is read live: taking user.contact.read away masks the very next list read, same token', async () => {

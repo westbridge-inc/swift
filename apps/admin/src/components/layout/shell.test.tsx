@@ -89,6 +89,17 @@ describe('[MC shell] ⌘K search', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  // [SEC-PII] The server now masks the people it finds unless the admin may see contact details.
+  it('a person the server sends masked reads the same: the last four digits, never a broken row', async () => {
+    mockApi(() => ({ body: { success: true, data: { ...results, users: [{ ...results.users[0]!, phone: '+592•••••1234' }] } } }));
+    const { user } = renderWithQuery(<SearchLauncher />);
+    await user.keyboard('{Meta>}k{/Meta}');
+    await user.type(screen.getByRole('combobox', { name: 'Search everything' }), 'tes');
+    const list = screen.getByRole('listbox', { name: 'Results' });
+    await waitFor(() => expect(within(list).getByText('••• ••• 1234 · Business owner · Active')).toBeTruthy());
+    expect(within(list).getByText('Test Person')).toBeTruthy();
+  });
+
   it('a screen can be reached by what it is for', async () => {
     mockApi(() => ({ body: { success: true, data: { orders: [], users: [], vendors: [] } } }));
     const { user } = renderWithQuery(<SearchLauncher />);
