@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import {
-  INVESTIGATION_HOLD_PLACER, INVESTIGATION_HOLD_REASON, investigationOpen, liveChainMembers, openInvestigationSuccessor, reasonOf, type InvestigationKey,
+  INVESTIGATION_HOLD_PLACER, INVESTIGATION_HOLD_REASON, investigationOpen, liveChainMembers, openIdentityReviewGroups, openInvestigationSuccessor, reasonOf,
+  releasedByPerson, type InvestigationKey,
 } from './investigation-hold-core';
 
 // ---------------------------------------------------------------------------
@@ -19,11 +20,15 @@ import {
 //
 // Precedence (each document carries ONE legalHoldId):
 //   - a person's hold always wins: the system never stamps a document a person's hold keeps, and a person's hold takes
-//     over documents a system hold keeps (that is also how a person renews it; the system never renews);
+//     over documents a system hold keeps (a person may also release a system hold: the system never places that
+//     investigation's hold for that person again);
 //   - the system releases ONLY its own holds (placedBy = INVESTIGATION_HOLD_PLACER, reason INVESTIGATION_OPEN), only
-//     when that hold's own investigation has closed or its review date (INVESTIGATION_HOLD_DAYS) has passed, and
-//     without the human release check (recusal / identity review): a pending identity review never keeps a
-//     document past the investigation that held it. Every other release keeps the strict human check;
+//     when that hold's own investigation has closed, without the human release check (recusal / identity review): a
+//     pending identity review never keeps a document past the investigation that held it. Every other release keeps
+//     the strict human check. [COORD renewal ruling] At its review date (INVESTIGATION_HOLD_DAYS) a hold whose
+//     investigation is genuinely still open is RENEWED (same hold, +90 days, audited 'investigation still open,
+//     renewed by system', the person told the new date); past INVESTIGATION_HOLD_ESCALATE_DAYS in all it becomes an
+//     admin task for a person to decide, and the system keeps renewing until one does;
 //   - on release, only documents still stamped with THAT hold move: to another open system hold of the same person
 //     if there is one (its investigation still needs them), otherwise they are unstamped and the existing retry
 //     erasure (the reaper on a deferred clock, the person's request) takes them as before.
@@ -33,7 +38,20 @@ import {
 
 export { INVESTIGATION_HOLD_PLACER, INVESTIGATION_HOLD_REASON, type InvestigationKey };
 export const INVESTIGATION_HOLD_DAYS = 90;
+/** [COORD renewal ruling] After this long in all, a hold the system keeps renewing goes to a person to decide. */
+export const INVESTIGATION_HOLD_ESCALATE_DAYS = 180;
+export const RENEWED_BY_SYSTEM = 'investigation still open, renewed by system';
 const PAGE = 200;
+
+/** What the sweep needs from outside: telling the person, telling the admins, and finishing a delayed erasure. */
+export interface InvestigationHoldDeps {
+  /** The person is told the new date (inbox). Skipped for a closed account (its next erasure answer carries the date). */
+  notifyPerson?: (userId: string, revisitBy: Date) => Promise<void>;
+  /** A hold renewed past INVESTIGATION_HOLD_ESCALATE_DAYS: an admin task, for a person to decide. */
+  escalate?: (hold: { id: string; subjectUserId: string; reason: string; placedAt: Date }) => Promise<void>;
+  /** Documents a release freed (no other open investigation needs them): finish any erasure their person asked for. */
+  onFreed?: (userId: string, documentIds: string[]) => Promise<void>;
+}
 const DAY_MS = 86_400_000;
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -43,11 +61,12 @@ const lockPerson = (tx: Prisma.TransactionClient, userId: string) =>
 
 /** [Privacy §6] "If we cannot act on a deletion request straight away, we tell you why and when, in writing."
  *  The reason is generic (a review), never the review's kind or any fraud detail; the date is the hold's review date. */
-export function erasureDelayedWords(revisitBy: Date): { title: string; body: string } {
+export function erasureDelayedWords(revisitBy: Date, othersDone = false): { title: string; body: string } {
   const day = revisitBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
+  // [REVIEW-G S3-4] "Everything else ... has been deleted" only when it is true.
   return {
     title: 'Your deletion request is delayed',
-    body: `Some of your documents are part of a review that is still open, so we cannot delete them yet. We will look at your request again by ${day}. Everything else you asked us to delete has been deleted.`,
+    body: `Some of your documents are part of a review that is still open, so we cannot delete them yet. We will look at your request again by ${day}.${othersDone ? ' Everything else you asked us to delete has been deleted.' : ''}`,
   };
 }
 
@@ -63,87 +82,132 @@ export async function investigationHoldRevisitBy(db: Db, userId: string): Promis
 
 /** An investigation of this person opened: its own system hold, stamping only documents no hold keeps. Idempotent
  *  per investigation. Inside the caller's transaction, under the person's row lock (the purge's lock). */
-export async function placeInvestigationHold(tx: Prisma.TransactionClient, subjectUserId: string, key: InvestigationKey, now = new Date()): Promise<string> {
+export async function placeInvestigationHold(tx: Prisma.TransactionClient, subjectUserId: string, key: InvestigationKey, now = new Date()): Promise<string | null> {
   await lockPerson(tx, subjectUserId);
   const reason = reasonOf(key);
-  const existing = await tx.docLegalHold.findFirst({ where: { subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, reason, releasedAt: null }, select: { id: true } });
-  if (existing) return existing.id;
+  const existing = await tx.docLegalHold.findFirst({ where: { subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, reason, releasedAt: null }, select: { id: true, reviewBy: true } });
+  // [REVIEW-M S3-1 · COORD] An existing hold still takes the person's documents that arrived since (audited refresh).
+  if (existing) {
+    const refreshed = await stampUnheld(tx, subjectUserId, key, existing.id);
+    if (refreshed > 0) {
+      await tx.auditLog.create({ data: { userId: null, action: 'REFRESH_INVESTIGATION_HOLD', entity: 'DocLegalHold', entityId: existing.id, changes: { subjectUserId, investigation: key.kind, documents: refreshed } } });
+    }
+    return existing.id;
+  }
+  // [REVIEW-G S3-2] A person released this investigation's hold for this subject: a human decided; never placed again.
+  if (await releasedByPerson(tx, subjectUserId, key)) return null;
   const hold = await tx.docLegalHold.create({ data: {
     subjectUserId, reason, ownerId: INVESTIGATION_HOLD_PLACER, placedBy: INVESTIGATION_HOLD_PLACER, placedAt: now,
     reviewBy: new Date(now.getTime() + INVESTIGATION_HOLD_DAYS * DAY_MS),
   } });
-  // [Row 243] Bytes a purge already shredded are never claimed by a hold (the same rule as placeDocLegalHoldIn).
-  // A second review holds the suspected document (the evidence); an identity review, every document of the member.
-  const only = key.kind === 'second-review' ? { id: key.documentId } : {};
-  const candidates = await tx.verificationDocument.findMany({ where: { userId: subjectUserId, purgedAt: null, legalHoldId: null, ...only }, select: { id: true, fileUrl: true } });
-  const keys = candidates.map((d) => d.fileUrl).filter((k) => k !== '');
-  const shredded = new Set(keys.length === 0 ? [] : (await tx.encryptedObject.findMany({ where: { fileKey: { in: keys }, shreddedAt: { not: null } }, select: { fileKey: true } })).map((o) => o.fileKey));
-  const stamped = await tx.verificationDocument.updateMany({
-    where: { id: { in: candidates.filter((d) => !shredded.has(d.fileUrl)).map((d) => d.id) }, purgedAt: null, legalHoldId: null },
-    data: { legalHoldId: hold.id },
-  });
+  const stamped = await stampUnheld(tx, subjectUserId, key, hold.id);
   await tx.auditLog.create({ data: {
     userId: null, action: 'PLACE_INVESTIGATION_HOLD', entity: 'DocLegalHold', entityId: hold.id,
-    changes: { subjectUserId, investigation: key.kind, documents: stamped.count, reviewBy: hold.reviewBy.toISOString() },
+    changes: { subjectUserId, investigation: key.kind, documents: stamped, reviewBy: hold.reviewBy.toISOString() },
   } });
   return hold.id;
 }
 
+/** Stamp the person's documents no hold keeps onto this investigation's hold. A second review holds the suspected
+ *  document (the evidence); an identity review, every document of the member. [Row 243] Bytes a purge already
+ *  shredded are never claimed (the same rule as placeDocLegalHoldIn). The caller holds the person's lock. */
+async function stampUnheld(tx: Prisma.TransactionClient, subjectUserId: string, key: InvestigationKey, holdId: string): Promise<number> {
+  const only = key.kind === 'second-review' ? { id: key.documentId } : {};
+  const candidates = await tx.verificationDocument.findMany({ where: { userId: subjectUserId, purgedAt: null, legalHoldId: null, ...only }, select: { id: true, fileUrl: true } });
+  if (candidates.length === 0) return 0;
+  const keys = candidates.map((d) => d.fileUrl).filter((k) => k !== '');
+  const shredded = new Set(keys.length === 0 ? [] : (await tx.encryptedObject.findMany({ where: { fileKey: { in: keys }, shreddedAt: { not: null } }, select: { fileKey: true } })).map((o) => o.fileKey));
+  const stamped = await tx.verificationDocument.updateMany({
+    where: { id: { in: candidates.filter((d) => !shredded.has(d.fileUrl)).map((d) => d.id) }, purgedAt: null, legalHoldId: null },
+    data: { legalHoldId: holdId },
+  });
+  return stamped.count;
+}
+
+/** [REVIEW-G S3-3] Where the backstop would keep a person's documents with no hold (an open identity review the
+ *  sweep has not reached them for yet), place that review's hold now, so the person gets a real hold, its date and
+ *  the written why/when. Called before an erasure. */
+export async function holdForOpenIdentityReviews(prisma: PrismaClient, userId: string, now = new Date()): Promise<number> {
+  const groups = await openIdentityReviewGroups(prisma, userId);
+  for (const clusterId of groups) await prisma.$transaction((tx) => placeInvestigationHold(tx, userId, { kind: 'identity-review', clusterId }, now));
+  return groups.length;
+}
+
 /** The system releases ONE of its own holds (never a person's), audited; its documents move to another open system
  *  hold of the person, or are unstamped. No human release check: this path is the system's alone. */
-async function releaseSystemHold(tx: Prisma.TransactionClient, hold: { id: string; subjectUserId: string }, why: string, now: Date): Promise<void> {
+async function releaseSystemHold(tx: Prisma.TransactionClient, hold: { id: string; subjectUserId: string }, why: string, now: Date): Promise<string[]> {
   await lockPerson(tx, hold.subjectUserId);
   const won = await tx.docLegalHold.updateMany({
     where: { id: hold.id, placedBy: INVESTIGATION_HOLD_PLACER, reason: { startsWith: `${INVESTIGATION_HOLD_REASON} ` }, releasedAt: null },
     data: { releasedAt: now, releasedBy: INVESTIGATION_HOLD_PLACER, releaseReason: why },
   });
-  if (won.count !== 1) return;
+  if (won.count !== 1) return [];
   const successor = await openInvestigationSuccessor(tx, hold.subjectUserId, now, hold.id);
+  const kept = await tx.verificationDocument.findMany({ where: { legalHoldId: hold.id }, select: { id: true } });
   const moved = await tx.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: successor } });
   await tx.auditLog.create({ data: {
     userId: null, action: 'RELEASE_INVESTIGATION_HOLD', entity: 'DocLegalHold', entityId: hold.id,
     changes: { subjectUserId: hold.subjectUserId, reason: why, documents: moved.count, ...(successor ? { keptBy: successor } : {}) },
   } });
+  return successor ? [] : kept.map((d) => d.id);
 }
 
 /** A decision that may have closed an investigation of this person: release each of their system holds whose own
  *  investigation is closed. Inside the decision's transaction. */
-export async function releaseClosedInvestigationHolds(tx: Prisma.TransactionClient, subjectUserId: string, now = new Date()): Promise<number> {
+export async function releaseClosedInvestigationHolds(tx: Prisma.TransactionClient, subjectUserId: string, now = new Date()): Promise<string[]> {
   const holds = await tx.docLegalHold.findMany({ where: { subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null }, orderBy: { placedAt: 'asc' }, select: { id: true, subjectUserId: true, reason: true } });
-  let released = 0;
+  const freed: string[] = [];
   for (const hold of holds) {
     if (await investigationOpen(tx, hold.reason)) continue;
-    await releaseSystemHold(tx, hold, 'investigation closed', now);
-    released += 1;
+    freed.push(...await releaseSystemHold(tx, hold, 'investigation closed', now));
   }
-  return released;
+  return freed;
 }
 
 /** Daily: every active system hold is examined (paged by id, never only the oldest few): it ends when its own
- *  investigation has closed, or when its review date has passed (the system never renews it: a person does, by
- *  placing their own hold). Then every open identity review holds every member of its LIVE chain (the backfill for
+ *  investigation has closed; at its review date with the investigation still open it is renewed (see the header). Then every open identity review holds every member of its LIVE chain (the backfill for
  *  reviews opened before this rule, and the refresh for members who joined or groups merged in since). */
-export async function sweepInvestigationHolds(prisma: PrismaClient, now = new Date(), page = PAGE): Promise<{ closed: number; expired: number; examined: number; held: number }> {
-  const out = { closed: 0, expired: 0, examined: 0, held: 0 };
+export async function sweepInvestigationHolds(prisma: PrismaClient, now = new Date(), page = PAGE, deps: InvestigationHoldDeps = {}): Promise<{ closed: number; renewed: number; escalated: number; examined: number; held: number }> {
+  const out = { closed: 0, renewed: 0, escalated: 0, examined: 0, held: 0 };
   let cursor: string | undefined;
   for (;;) {
     const holds = await prisma.docLegalHold.findMany({
       where: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
-      orderBy: { id: 'asc' }, take: page, select: { id: true, subjectUserId: true, reason: true, reviewBy: true },
+      orderBy: { id: 'asc' }, take: page, select: { id: true, subjectUserId: true, reason: true, reviewBy: true, placedAt: true },
     });
     if (holds.length === 0) break;
     cursor = holds[holds.length - 1]!.id;
     for (const hold of holds) {
       out.examined += 1;
+      let freed: string[] = [];
+      let renewedTo: Date | null = null;
+      let escalate = false;
       await prisma.$transaction(async (tx) => {
-        if (hold.reviewBy.getTime() <= now.getTime()) {
-          await releaseSystemHold(tx, hold, 'review date passed; not renewed by a person', now);
-          out.expired += 1;
-        } else if (!(await investigationOpen(tx, hold.reason))) {
-          await releaseSystemHold(tx, hold, 'investigation closed', now);
+        if (!(await investigationOpen(tx, hold.reason))) {
+          freed = await releaseSystemHold(tx, hold, 'investigation closed', now);
           out.closed += 1;
+        } else if (hold.reviewBy.getTime() <= now.getTime()) {
+          // [COORD renewal ruling] Still open at its date: an explicit RENEW of the same hold (never release-then-replace).
+          renewedTo = new Date(now.getTime() + INVESTIGATION_HOLD_DAYS * DAY_MS);
+          const won = await tx.docLegalHold.updateMany({ where: { id: hold.id, releasedAt: null, reviewBy: hold.reviewBy }, data: { reviewBy: renewedTo } });
+          if (won.count !== 1) { renewedTo = null; return; }
+          await tx.auditLog.create({ data: { userId: null, action: 'RENEW_INVESTIGATION_HOLD', entity: 'DocLegalHold', entityId: hold.id,
+            changes: { subjectUserId: hold.subjectUserId, reason: RENEWED_BY_SYSTEM, from: hold.reviewBy.toISOString(), to: renewedTo.toISOString() } } });
+          out.renewed += 1;
+          // At 180 days in all, a person decides (once): an admin task; the system keeps renewing until then.
+          if (now.getTime() - hold.placedAt.getTime() >= INVESTIGATION_HOLD_ESCALATE_DAYS * DAY_MS
+              && await tx.auditLog.count({ where: { action: 'ESCALATE_INVESTIGATION_HOLD', entityId: hold.id } }) === 0) {
+            await tx.auditLog.create({ data: { userId: null, action: 'ESCALATE_INVESTIGATION_HOLD', entity: 'DocLegalHold', entityId: hold.id,
+              changes: { subjectUserId: hold.subjectUserId, heldSince: hold.placedAt.toISOString(), reason: 'renewed past 180 days: a person decides' } } });
+            escalate = true;
+            out.escalated += 1;
+          }
         }
       });
+      const to = renewedTo as Date | null;
+      if (to && deps.notifyPerson) await deps.notifyPerson(hold.subjectUserId, to).catch(() => undefined);
+      if (escalate && deps.escalate) await deps.escalate(hold).catch(() => undefined);
+      if (freed.length > 0 && deps.onFreed) await deps.onFreed(hold.subjectUserId, freed).catch(() => undefined);
     }
     if (holds.length < page) break;
   }

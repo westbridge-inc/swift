@@ -47,10 +47,29 @@ export async function liveChainMembers(db: Db, rootClusterId: string): Promise<s
   return members.map((m) => m.accountId);
 }
 
-/** The lock-time backstop: is an identity review open on any group of this person's LIVE chain? */
-export async function identityReviewOpenFor(db: Db, userId: string): Promise<boolean> {
+/** A PERSON released this investigation's system hold for this subject: a human decided, so the system neither
+ *  places it again nor keeps the documents by the backstop for that investigation. */
+export async function releasedByPerson(db: Db, subjectUserId: string, key: InvestigationKey): Promise<boolean> {
+  return await db.docLegalHold.count({ where: {
+    subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, reason: reasonOf(key), releasedAt: { not: null }, NOT: { releasedBy: INVESTIGATION_HOLD_PLACER },
+  } }) > 0;
+}
+
+/** The groups of this person's LIVE chain with an OPEN identity review that still keeps them (no person released it). */
+export async function openIdentityReviewGroups(db: Db, userId: string): Promise<string[]> {
   const chain = await clusterChainUp(db, userId);
-  return chain.length > 0 && await db.identityReviewCase.count({ where: { clusterId: { in: chain }, status: 'OPEN' } }) > 0;
+  if (chain.length === 0) return [];
+  const open = await db.identityReviewCase.findMany({ where: { clusterId: { in: chain }, status: 'OPEN' }, select: { clusterId: true } });
+  const groups: string[] = [];
+  for (const clusterId of [...new Set(open.map((r) => r.clusterId))]) {
+    if (!(await releasedByPerson(db, userId, { kind: 'identity-review', clusterId }))) groups.push(clusterId);
+  }
+  return groups;
+}
+
+/** The lock-time backstop: is an identity review open on any group of this person's LIVE chain (and not released by a person)? */
+export async function identityReviewOpenFor(db: Db, userId: string): Promise<boolean> {
+  return (await openIdentityReviewGroups(db, userId)).length > 0;
 }
 
 /** Is THIS investigation still open? (An unreadable key reads as closed: the hold then ends by its date at the latest.) */

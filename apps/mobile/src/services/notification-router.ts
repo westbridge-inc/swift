@@ -107,8 +107,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // Trusted status earned: no screen shows the trust tier; the notice is the
   // whole message. A review of theirs was removed: the payload names no rating
   // and no store. The person a trip was shared with: the trip ended, and they
-  // own no order. Each opens HOME on purpose (census reasons).
-  if (kind === 'trust_l3' || kind === 'rating_removed' || kind === 'trip_share_ended') return { screen: HOME_SCREEN };
+  // own no order. [SEC-PII] A deletion request waiting for a review: the notice says why and when, and is the whole
+  // message. Each opens HOME on purpose (census reasons). (Builds 9-12 open the app normally for erasure_delayed.)
+  if (kind === 'trust_l3' || kind === 'rating_removed' || kind === 'trip_share_ended' || kind === 'erasure_delayed') return { screen: HOME_SCREEN };
 
   // [Row 55] A store team invite is answered on the inbox, where its Accept /
   // Decline card sits (the invitee joins only by accepting there).

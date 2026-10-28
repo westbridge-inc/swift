@@ -20,7 +20,7 @@ import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
-import { investigationHoldRevisitBy } from '../verification/investigation-hold';
+import { holdForOpenIdentityReviews, investigationHoldRevisitBy } from '../verification/investigation-hold';
 import { identityReviewOpenFor } from '../verification/investigation-hold-core';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
@@ -352,6 +352,9 @@ export class AccountService {
     // erasure: it stays, due for purge the moment the hold is released (its
     // retention clock is set to now), and the deferral is written to the audit
     // trail — erasure deferred by a legal obligation is recorded, never silent.
+    // [REVIEW-G S3-3] An identity review open on the person's live group, not yet holding them: its hold first, so
+    // what is kept is a real hold with a date (and the closing message can say when).
+    await holdForOpenIdentityReviews(prisma, userId);
     const deferred = await prisma.verificationDocument.updateMany({
       where: { userId, purgedAt: null, legalHoldId: { not: null } },
       data: { retentionExpiresAt: new Date() },

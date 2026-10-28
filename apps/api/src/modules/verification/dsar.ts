@@ -25,7 +25,7 @@ import { unpackAndDecrypt } from './extraction-ledger';
 import { isRetiredPlaceholder, POLICE_CLEARANCE_DOC_TYPE, registryCode, RETIRED_FIELDS } from './doc-registry';
 import { notifyAdmins, tenantOfUser, type NotificationService } from '../notification/notification.service';
 import { REVIEW_SLA_HOURS, type VerificationService } from './verification.service';
-import { erasureDelayedWords, INVESTIGATION_HOLD_PLACER, investigationHoldRevisitBy } from './investigation-hold';
+import { erasureDelayedWords, holdForOpenIdentityReviews, INVESTIGATION_HOLD_PLACER, investigationHoldRevisitBy } from './investigation-hold';
 
 export const DSAR_EXPORT_REASON = 'SUBJECT_ACCESS';
 export const RECTIFICATION_PRIORITY = 50;
@@ -108,6 +108,9 @@ async function relationshipIsLive(prisma: PrismaClient, userId: string): Promise
 export async function eraseDocumentsFor(prisma: PrismaClient, service: VerificationService, userId: string, documentIds?: string[]): Promise<EraseOutcome[]> {
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true, tenantId: true } });
   if (!user) throw new NotFoundError('User', userId);
+  // [REVIEW-G S3-3] An identity review open on the person's live group, not yet holding them: its hold first, so the
+  // refusal is a real hold with its date and the written why and when (never a hold-less keep).
+  await holdForOpenIdentityReviews(prisma, userId);
   const docs = await prisma.verificationDocument.findMany({
     where: { userId, ...(documentIds && documentIds.length > 0 ? { id: { in: documentIds } } : {}) },
     orderBy: { createdAt: 'asc' },
@@ -141,9 +144,10 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
     const heldBySystem = new Set((await prisma.verificationDocument.findMany({
       where: { userId, id: { in: outcomes.map((o) => o.documentId) }, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } }, select: { id: true },
     })).map((d) => d.id));
-    const words = erasureDelayedWords(revisitBy);
+    const othersDone = outcomes.every((o) => heldBySystem.has(o.documentId) || o.outcome === 'DESTROYED' || o.outcome === 'ALREADY_DESTROYED');
+    const words = erasureDelayedWords(revisitBy, othersDone);
     for (const o of outcomes) if (heldBySystem.has(o.documentId)) Object.assign(o, { message: words.body, revisitBy });
-    await service.notifyErasureDelayed(userId, revisitBy);
+    await service.notifyErasureDelayed(userId, revisitBy, othersDone);
   }
   await prisma.auditLog.create({ data: {
     userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,

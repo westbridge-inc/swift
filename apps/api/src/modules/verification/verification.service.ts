@@ -1577,6 +1577,8 @@ export class VerificationService {
     await assertNotRecused(this.prisma, review.reviewerId, candidate.userId);
     await this.reviewObserver?.afterPendingRead?.({ docId, userId: candidate.userId, requestedStatus });
 
+    // [SEC-PII] Documents the closed investigation freed: a delayed erasure their person asked for is finished after commit.
+    let freedByDecision: string[] = [];
     const outcome = await this.projectionTransaction(async (tx) => {
       await assertNotRecused(tx, review.reviewerId, candidate.userId);
       const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
@@ -1650,7 +1652,7 @@ export class VerificationService {
         await this.confirmFraudIn(tx, { docId, subjectUserId: candidate.userId, tenantId: open.tenantId, caseId: open.id, reviewerId: review.reviewerId, reasonCode: review.fraud.reasonCode, now });
       }
       // [SEC-PII · COORD ruling] The decision closed this case: the system hold of this (and any other closed) investigation ends.
-      await releaseClosedInvestigationHolds(tx, candidate.userId, now);
+      freedByDecision = await releaseClosedInvestigationHolds(tx, candidate.userId, now);
 
       if (approve) {
         // [DOC-1 P5-1] T17 commit(): the APPROVE decision above is the provenance the
@@ -1718,6 +1720,7 @@ export class VerificationService {
       if (within) await within(tx, updated);
       return { kind: 'UPDATED' as const, document: updated };
     });
+    if (freedByDecision.length > 0) await this.completeDeferredErasures(candidate.userId, freedByDecision).catch((err) => log().error({ err, docId }, '[SEC-PII] a delayed erasure could not be finished; the next sweep retries'));
     if (outcome.kind === 'REPLACED') {
       throw new AppError(409, DOCUMENT_REPLACED, 'The applicant replaced this document with a newer copy. Open the newer copy in the queue.');
     }
@@ -2034,10 +2037,33 @@ export class VerificationService {
     return [...new Set(lists.flat())];
   }
 
-  /** [SEC-PII · Privacy §6] A person's deletion request delayed by an open review: told why (generically) and when, in writing. */
-  async notifyErasureDelayed(userId: string, revisitBy: Date): Promise<void> {
-    await this.notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', ...erasureDelayedWords(revisitBy), audience: 'customer', data: { kind: 'erasure_delayed', revisitBy: revisitBy.toISOString() } } as never);
+  /** [SEC-PII · Privacy §6] A person's deletion request delayed by an open review: told why (generically) and when, in
+   *  writing. [REVIEW-G S4-2] Once a day for the same words (a new date is new words); never to a closed account. */
+  async notifyErasureDelayed(userId: string, revisitBy: Date, othersDone = false): Promise<void> {
+    const words = erasureDelayedWords(revisitBy, othersDone);
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    if (!user || user.phone === `deleted:${userId}`) return;
+    const recent = await this.prisma.notification.count({ where: { userId, title: words.title, body: words.body, createdAt: { gt: new Date(Date.now() - 86_400_000) } } });
+    if (recent > 0) return;
+    await this.notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', ...words, audience: 'customer', data: { kind: 'erasure_delayed', revisitBy: revisitBy.toISOString() } } as never);
   }
+
+  /** [REVIEW-G S3-1 · Privacy §6] The promise kept: documents an investigation hold freed, whose person asked for their
+   *  erasure while it held them (a refused document-erasure request on the record), are erased now, as asked (bytes,
+   *  key and extracted values), with the purge's own checks. Account deletion has its own standing retry. */
+  async completeDeferredErasures(userId: string, documentIds: string[]): Promise<number> {
+    const asked = await this.prisma.auditLog.findMany({ where: { userId, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'desc' }, take: 200, select: { changes: true } });
+    // Only a request the hold delayed (refused on the hold ground); the request is then run again, as the person made
+    // it: the same rules (an AML record or a live licence still refuses), the same destruction, its own record.
+    const delayed = new Set(asked.flatMap((row) => ((row.changes as { outcomes?: Array<{ documentId?: string; outcome?: string; ground?: string | null }> } | null)?.outcomes ?? [])
+      .filter((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD' && typeof o.documentId === 'string').map((o) => o.documentId!)));
+    const due = documentIds.filter((id) => delayed.has(id));
+    if (due.length === 0) return 0;
+    const { eraseDocumentsFor } = await import('./dsar');
+    const outcomes = await eraseDocumentsFor(this.prisma, this, userId, due);
+    return outcomes.filter((o) => o.outcome === 'DESTROYED').length;
+  }
+
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
     // [PERF C2] A mover's app shows a spinner until this answers (MoverRoot gates Home on it), so

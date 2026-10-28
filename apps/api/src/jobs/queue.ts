@@ -1654,7 +1654,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // [SEC-PII · COORD ruling] The system's investigation holds end with their investigation or their review date
         // (never renewed by the system); run first, so the overdue alarm below is about people's holds.
         const { sweepInvestigationHolds } = await import('../modules/verification/investigation-hold');
-        await sweepInvestigationHolds(ctx.prisma);
+        const { tenantOfUser } = await import('../modules/notification/notification.service');
+        await sweepInvestigationHolds(ctx.prisma, new Date(), undefined, {
+          // the person is told the renewed date; a hold renewed past 180 days is an admin task; a freed document's
+          // delayed erasure is finished as the person asked
+          notifyPerson: (userId, revisitBy) => verification.notifyErasureDelayed(userId, revisitBy),
+          escalate: async (hold) => { await notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+            tenantId: await tenantOfUser(ctx.prisma, hold.subjectUserId),
+            title: 'A document hold needs a decision',
+            body: 'A review has kept a person\'s documents for over 180 days. Decide whether to keep holding them or release them.',
+            data: { kind: 'verification_legal_hold_overdue', overdue: 1, holdIds: [hold.id] },
+          }); },
+          onFreed: async (userId, documentIds) => { await verification.completeDeferredErasures(userId, documentIds); },
+        });
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
         const { alertOverdueDocLegalHolds } = await import('../modules/verification/legal-hold');
         await alertOverdueDocLegalHolds(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
