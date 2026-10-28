@@ -147,6 +147,21 @@ describe('[SEC-TRUST F9] the vehicle registrant is reviewed like every other ass
     expect((await vehicleEvidence(first)).map((row) => row.docType)).toEqual(['vehicle_registration']);
   });
 
+  it('a rejection closes the pending link while another paper waits; a person approving that paper opens an approved link', async () => {
+    const first = await driverOn(plate());
+    const registration = await submit(first);
+    const vehicle = await subjectOf(registration.id);
+    const insurance = await runWithTenant('swift-default', async () =>
+      service.submitDocument(first, 'MOVER', 'vehicle_insurance', await ownedVerificationFixture(app.prisma, first), 'v1'));
+    expect(await subjectOf(insurance.id)).toBe(vehicle);
+    await reject(insurance.id);
+    expect(await openLinks(first, vehicle)).toEqual([]);
+    await approve(registration.id);
+    const links = await openLinks(first, vehicle);
+    expect(links).toHaveLength(1);
+    expect(links[0]!.approvedAt).not.toBeNull();
+  });
+
   it('a registrant approved before this rule counts another account’s approved papers only once a person has approved a paper of its own (go-online gate)', async () => {
     const checklist = await countryConfig.getMoverChecklist('GY', 'CAR');
     const vehicleTypes = checklist.filter((t) => BUCKET_OF[t] === 'VEHICLE');
@@ -171,8 +186,8 @@ describe('[SEC-TRUST F9] the vehicle registrant is reviewed like every other ass
     expect((await gate()).allowed).toBe(false);
     expect((await vehicleEvidence(first)).filter((row) => row.userId === owner)).toEqual([]);
 
-    // A paper of its own that only an engine approved is not a person's check.
-    await approvedPaper(first, 'vehicle_registration', 'kyc:auto', vehicle);
+    // Papers of its own that only an engine approved are not a person's check.
+    for (const t of vehicleTypes) await approvedPaper(first, t, 'kyc:auto', vehicle);
     expect((await gate()).allowed).toBe(false);
 
     // A paper of its own that a person approved: the vehicle's papers count for it.
