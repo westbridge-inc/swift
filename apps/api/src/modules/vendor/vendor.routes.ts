@@ -1019,12 +1019,19 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /staff — members of the selected store, with their user identity. */
   app.get('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
+    // [SEC-TRUST F15] While staff invites need no acceptance (STAFF_INVITE_ACCEPT off), a member was added
+    // without saying yes: the owner sees the first name and the number they typed, never the last name or
+    // the photo. The fields stay in the answer (null), so every app build reads the same shape.
+    const consented = staffInviteAcceptEnabled();
     const staff = await app.prisma.vendorStaff.findMany({
       where: { vendorId },
       orderBy: { createdAt: 'asc' },
-      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+      include: { user: { select: { id: true, firstName: true, lastName: consented, phone: true, avatar: consented } } },
     });
-    return { success: true, data: staff };
+    return {
+      success: true,
+      data: consented ? staff : staff.map((member) => ({ ...member, user: { ...member.user, lastName: null, avatar: null } })),
+    };
   });
 
   /** POST /staff — invite a Swift account to the team by phone. [Row 55]
@@ -1034,6 +1041,11 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  app build without the Accept card) it is added at once, as before. */
   app.post('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
+    // [SEC-TRUST F15] A team is added to a store Swift has approved (ACTIVE), never to one still waiting.
+    const store = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { status: true } });
+    if (store?.status !== 'ACTIVE') {
+      throw new AppError(403, 'STORE_NOT_APPROVED', 'You can add team members once your store is approved and open.');
+    }
     await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
     const body = addStaffSchema.parse(request.body);
     // [Row 55] A daily allowance per owner account, spent BEFORE the number is

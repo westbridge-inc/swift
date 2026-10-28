@@ -672,6 +672,28 @@ export class AuthService {
   /** [MASTER-056] Count a wrong password. A store failure is logged, never a
    *  different answer. When the account-wide ceiling trips, the account holder
    *  gets ONE in-app notice for that pause (no text: that would be a spam lever). */
+  /**
+   * [SEC-TRUST F13] An unknown account, or one without a password, does the same database work a wrong
+   * password does: one transaction that takes the User row lock (on the account when there is one, on
+   * nothing otherwise) and makes the failure write, which here touches no row. The time a refusal takes
+   * then says nothing about whether the account has a password. A failure is swallowed: the answer is the
+   * same refusal either way.
+   */
+  private async mirrorPasswordFailureWork(userId: string | null): Promise<void> {
+    await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await tx.$queryRaw`
+        SELECT "passwordHash", "failedLoginAttempts", "lockedUntil", "roles", "activeRole", "status"
+        FROM "users"
+        WHERE "id" = ${userId ?? NO_ACCOUNT_ID}
+        FOR UPDATE
+      `;
+      await tx.user.updateMany({ where: { id: NO_ACCOUNT_ID, passwordHash: { not: null } }, data: { failedLoginAttempts: { increment: 1 } } });
+    }).catch((error: unknown) => {
+      this.app.log.warn({ err: error }, '[auth] mirrored password failure work did not complete');
+    });
+  }
+
   private async countPasswordFailure(subject: string, source: string, userId: string | null): Promise<void> {
     let outcome: { accountLocked: boolean };
     try {
@@ -780,6 +802,7 @@ export class AuthService {
     });
     if (locked) throw invalid;
     if (!user || !user.passwordHash) {
+      await this.mirrorPasswordFailureWork(user?.id ?? null);
       await this.countPasswordFailure(subject, source, null);
       throw invalid;
     }

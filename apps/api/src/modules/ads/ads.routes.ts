@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from '../../lib/zod';
-import { AdvertiserService, assertCapabilityWithin } from './advertiser.service';
+import { AdvertiserService, assertAdvertiserApprovedWithin, assertCapabilityWithin } from './advertiser.service';
 import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
 import { AdCheckoutService } from './checkout.service';
 import { CreativeService } from './creative.service';
@@ -159,7 +159,10 @@ export async function adsRoutes(app: FastifyInstance) {
     // transaction as the hold: a downgrade that won the race is obeyed.
     const result = await booking.reserveAndHold(campaign.id, {
       reservationMinutes: settings?.reservationMinutes ?? 20,
-      within: (tx) => assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance'),
+      within: async (tx) => {
+        await assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance');
+        await assertAdvertiserApprovedWithin(tx, campaign.advertiserId);
+      },
     });
     return { success: true, data: result };
   });
@@ -176,7 +179,10 @@ export async function adsRoutes(app: FastifyInstance) {
     await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'finance');
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId } });
     const { invoice, reservedUntil } = await checkout.checkout(request.params.id, provider, settings?.reservationMinutes ?? 20, {
-      authorize: (tx) => assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance'),
+      authorize: async (tx) => {
+        await assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance');
+        await assertAdvertiserApprovedWithin(tx, campaign.advertiserId);
+      },
     });
     return {
       success: true,
@@ -219,7 +225,7 @@ export async function adsRoutes(app: FastifyInstance) {
       const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
       if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
       await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'campaign');
-      const updated = await lifecycle.transition(request.params.id, event, request.user.userId);
+      const updated = await lifecycle.transition(request.params.id, event, request.user.userId, undefined, { byAdvertiser: true });
       return { success: true, data: { id: updated.id, status: updated.status } };
     };
   // ── Serving + events (spec §11/§12) — PUBLIC by design (anonymous allowed);
@@ -390,6 +396,7 @@ export async function adsRoutes(app: FastifyInstance) {
     // cancel; execution follows, and the worker retries it if that fails.
     let staged: { intentId: string } | null = null;
     const updated = await lifecycle.transition(request.params.id, 'cancel', request.user.userId, undefined, {
+      byAdvertiser: true,
       within: async (tx) => {
         // [MASTER-064] Re-checked under lock inside the cancel's transaction.
         await assertCapabilityWithin(tx, campaign.advertiserId, request.user.userId, 'finance');

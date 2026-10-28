@@ -147,6 +147,8 @@ export const ALGO_DEFAULTS = {
    */
   'velocity.limits': {
     'promo.validate': { max: 10, perSeconds: 600, clusterMax: 30 },
+    // [SEC-TRUST F16] a referral code is redeemed once per person: a few tries an hour is generous
+    'referral.redeem': { max: 10, perSeconds: 3_600, clusterMax: 30 },
     'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
     // [R048-007] the money surfaces: a pay link is changed a handful of times a day at most,
     // and these fail CLOSED when the control is unavailable (integrity/velocity.ts)

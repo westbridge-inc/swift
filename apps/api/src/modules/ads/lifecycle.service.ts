@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import { assertAdvertiserApprovedWithin, SUSPENSION_PAUSE_PREFIX } from './advertiser.service';
 
 // Campaign lifecycle (ads-platform spec §6.1). ONE transition function owns
 // every campaign status change downstream of payment — it validates the table,
@@ -73,6 +74,9 @@ export class AdsLifecycleService {
        *  status moved: the refund obligation is staged in the same database
        *  generation as the terminal state, or neither happens. */
       within?: (tx: Prisma.TransactionClient, moved: { before: AdCampaign; to: AdCampaignStatus }) => Promise<void>;
+      /** [SEC-TRUST F6] The advertiser itself asked (pause, resume, cancel): its account must be APPROVED,
+       *  read under lock in this transaction, and a pause Swift's suspension made is not its to lift. */
+      byAdvertiser?: true;
     } = {},
   ): Promise<AdCampaign> {
     const rule = TABLE[event];
@@ -89,6 +93,13 @@ export class AdsLifecycleService {
     // stages within (the refund obligation) commit together — never a killed
     // campaign whose money obligation vanished on the way.
     await this.prisma.$transaction(async (tx) => {
+      if (opts.byAdvertiser) {
+        await assertAdvertiserApprovedWithin(tx, before.advertiserId);
+        const current = await tx.adCampaign.findUnique({ where: { id: campaignId }, select: { statusReason: true } });
+        if (event === 'resume' && current?.statusReason?.startsWith(SUSPENSION_PAUSE_PREFIX)) {
+          throw new AppError(409, 'CAMPAIGN_PAUSED_BY_SWIFT', 'Swift paused this campaign. Contact support.');
+        }
+      }
       const moved = await tx.adCampaign.updateMany({
         where: { id: campaignId, status: before.status },
         data: { status: rule.to, statusReason: reason ?? null },
