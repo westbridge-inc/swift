@@ -45,6 +45,12 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
+/** [SEC-PII] The exact erasure marker this file writes in place of an erased account's number. Exported so other code
+ *  can RECOGNISE an erased account without spelling the marker (erasure-trigger-exceptions pins the one writer). */
+export function erasedPhoneMarker(userId: string): string {
+  return `deleted:${userId}`;
+}
+
 export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 /** The server-written record that a closure request was confirmed in the app
  *  (behind the deletion step-up). Anyone can type the subject into a support

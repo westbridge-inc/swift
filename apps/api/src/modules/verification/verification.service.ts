@@ -2050,8 +2050,10 @@ export class VerificationService {
   }
 
   private async openAccount(userId: string): Promise<boolean> {
-    // An erased account carries the exact erasure marker in place of its number (read as a filter, never selected).
-    return (await this.prisma.user.count({ where: { id: userId, NOT: { phone: `deleted:${userId}` } } })) > 0;
+    // An erased account carries the exact erasure marker in place of its number (read as a filter, never selected); the
+    // marker is account.service's own (loaded at call time: no import cycle). Fail-closed: no row = not open.
+    const { erasedPhoneMarker } = await import('../user/account.service');
+    return (await this.prisma.user.count({ where: { id: userId, NOT: { phone: erasedPhoneMarker(userId) } } })) > 0;
   }
 
   /** The person's documents whose LATEST erasure answer was the hold refusal: a request the hold delayed and nothing has
