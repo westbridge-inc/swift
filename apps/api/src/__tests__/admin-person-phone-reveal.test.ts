@@ -41,8 +41,10 @@ const tail = (phone: string) => phone.slice(-4);
 
 let app: FastifyInstance;
 const userIds: string[] = [];
-const phones = { person: testPhone(), owner: testPhone(), store: testPhone(), rider: testPhone(), relay: testPhone(), driver: testPhone(), customer: testPhone() };
-const ids = { person: '', ownerUser: '', vendorOwner: '', vendor: '', riderUser: '', rider: '', relayUser: '', relay: '', driverUser: '', driver: '', order: '', loneOrder: '', kase: '', loneCase: '' };
+const phones = { person: testPhone(), owner: testPhone(), store: testPhone(), rider: testPhone(), relay: testPhone(), driver: testPhone(), customer: testPhone(), pendingOwner: testPhone(), pendingStore: testPhone() };
+// [SEC-PII] The addresses the person lists must not print in full without the contact capability.
+const emails = { person: `fu-${RUN.toLowerCase()}@example.test`, pendingOwner: `fu-owner-${RUN.toLowerCase()}@example.test`, pendingStore: `fu-store-${RUN.toLowerCase()}@example.test` };
+const ids = { person: '', ownerUser: '', vendorOwner: '', vendor: '', pendingOwnerUser: '', pendingVendorOwner: '', pendingVendor: '', riderUser: '', rider: '', relayUser: '', relay: '', driverUser: '', driver: '', order: '', loneOrder: '', kase: '', loneCase: '' };
 const tokens: Record<string, string> = {};
 
 async function person(phone: string, roles: string[], extra: Record<string, unknown> = {}) {
@@ -88,7 +90,7 @@ beforeAll(async () => {
   await app.ready();
   await system(() => app.prisma.tenant.create({ data: { id: OTHER_TENANT, name: `FU other ${RUN}`, slug: OTHER_TENANT, isActive: true } }));
 
-  ids.person = (await person(phones.person, ['CUSTOMER'], { email: `fu-${RUN.toLowerCase()}@example.test` })).id;
+  ids.person = (await person(phones.person, ['CUSTOMER'], { email: emails.person })).id;
   const customer = await person(phones.customer, ['CUSTOMER']);
   ids.ownerUser = (await person(phones.owner, ['VENDOR_OWNER', 'CUSTOMER'])).id;
   ids.vendorOwner = (await system(() => app.prisma.vendorOwner.create({ data: { userId: ids.ownerUser } }))).id;
@@ -96,6 +98,15 @@ beforeAll(async () => {
     ownerId: ids.vendorOwner, name: 'Contact Counter', slug: `fu-contact-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT',
     phone: phones.store, addressLine1: '1 Counter St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.801, longitude: -58.156,
     status: 'ACTIVE', isVerified: true, acceptingOrders: true, isCurrentlyOpen: true,
+  } as never }))).id;
+  // [SEC-PII] A store waiting for approval: its owner has an email, the store has its own line, email and MMG number.
+  ids.pendingOwnerUser = (await person(phones.pendingOwner, ['VENDOR_OWNER', 'CUSTOMER'], { email: emails.pendingOwner })).id;
+  ids.pendingVendorOwner = (await system(() => app.prisma.vendorOwner.create({ data: { userId: ids.pendingOwnerUser } }))).id;
+  ids.pendingVendor = (await system(() => app.prisma.vendor.create({ data: {
+    ownerId: ids.pendingVendorOwner, name: 'Contact Pending', slug: `fu-pending-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT',
+    phone: phones.pendingStore, email: emails.pendingStore, mmgNumber: phones.pendingOwner, mmgNumberPending: phones.pendingOwner,
+    addressLine1: '2 Counter St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.801, longitude: -58.156,
+    status: 'PENDING_APPROVAL',
   } as never }))).id;
   ids.riderUser = (await person(phones.rider, ['RIDER'])).id;
   ids.rider = (await system(() => app.prisma.rider.create({ data: { userId: ids.riderUser, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } as never }))).id;
@@ -126,6 +137,11 @@ beforeAll(async () => {
   await adminWith('userContact', ['user.read', 'user.contact.read']);
   await adminWith('wildcards', ['vendor.*', 'mover.*', 'custody.*']);
   await adminWith('otherTenant', ['*'], OTHER_TENANT);
+  // [SEC-PII] Narrowed grants for the person LISTS.
+  await adminWith('listReaders', ['user.read', 'vendor.read', 'mover.read', 'search.read']);
+  await adminWith('userContactPlus', ['user.read', 'user.contact.read', 'vendor.read', 'mover.read', 'search.read']);
+  await adminWith('moverContact', ['mover.read', 'mover.contact.read']);
+  await adminWith('liveRevoke', ['user.read', 'user.contact.read', 'search.read']);
 });
 
 afterAll(async () => {
@@ -137,8 +153,8 @@ afterAll(async () => {
     await app.prisma.order.deleteMany({ where: { id: { in: [ids.order, ids.loneOrder] } } });
     await app.prisma.rider.deleteMany({ where: { id: { in: [ids.rider, ids.relay] } } });
     await app.prisma.driver.deleteMany({ where: { id: ids.driver } });
-    await app.prisma.vendor.deleteMany({ where: { id: ids.vendor } });
-    await app.prisma.vendorOwner.deleteMany({ where: { id: ids.vendorOwner } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: [ids.vendor, ids.pendingVendor] } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: [ids.vendorOwner, ids.pendingVendorOwner] } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -346,5 +362,146 @@ describe('[FOLLOWUPS · REVIEW-M/G #2162 S3-1] no other field on a masked page c
     expect(res.statusCode).toBe(200);
     expect(res.headers['cache-control']).toBe('no-store');
     await system(() => purgeAuditLogs(app.prisma, { entityId: ids.order }, 'test-cleanup:admin-person-phone-reveal'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SEC-PII · security scan 28 Oct 2026] THE PERSON LISTS follow the pages.
+//
+// The pages above mask; the lists that lead to them printed every row's full
+// number (and email) to any grant that could open the list: GET /users,
+// /search (its people), /riders, /drivers, /vendors and /vendors/pending. A
+// grant without the contact capability got, in bulk, what the audited door
+// refuses it one person at a time. Each list now masks every row's numbers and
+// emails unless the caller's LIVE grant (re-read on every request) holds the
+// matching contact capability: user.contact.read for people, mover.contact.read
+// for riders and drivers, vendor.contact.read for stores and their owners.
+// Searching by the full number still works server-side.
+// ---------------------------------------------------------------------------
+describe('[SEC-PII] the person lists mask numbers and emails unless the grant holds the contact capability', () => {
+  const allPhones = () => Object.values(phones);
+  const allEmails = () => Object.values(emails);
+  const lists = () => ({
+    users: `/users?search=P${RUN}`,
+    search: `/search?q=P${RUN}`,
+    riders: `/riders?search=P${RUN}`,
+    drivers: `/drivers?search=P${RUN}`,
+    vendors: `/vendors?search=${RUN.toLowerCase()}`,
+    vendorsPending: '/vendors/pending',
+  });
+  type ListKey = keyof ReturnType<typeof lists>;
+  /** The phones and emails each list could carry (its own people), so "full" means exactly those. */
+  const contactsOf: Record<ListKey, () => string[]> = {
+    users: () => [phones.person, phones.owner, phones.rider, phones.relay, phones.driver, phones.customer, phones.pendingOwner, emails.person, emails.pendingOwner],
+    search: () => [], // checked per row below (the search takes 5 people, whichever)
+    riders: () => [phones.rider, phones.relay],
+    drivers: () => [phones.driver],
+    vendors: () => [phones.owner, phones.store, phones.pendingOwner, phones.pendingStore, emails.pendingStore],
+    vendorsPending: () => [phones.pendingOwner, phones.pendingStore, emails.pendingOwner, emails.pendingStore],
+  };
+  const read = async (key: ListKey, token: string) => {
+    const res = await get(lists()[key], token);
+    return res;
+  };
+  const leaks = (payload: string) => [...allPhones(), ...allEmails()].filter((value) => payload.includes(value));
+
+  it('SUPPORT (user.read, no contact capability): every person list it can open shows no full number or email; the rest is refused', async () => {
+    const users = await read('users', tokens['support']!);
+    expect(users.statusCode).toBe(200);
+    expect(leaks(users.payload)).toEqual([]);
+    const row = (users.json().data as Array<{ id: string; phone: string; email: string | null; firstName: string }>).find((u) => u.id === ids.person)!;
+    expect(row.phone).toMatch(new RegExp(`•+${tail(phones.person)}$`));
+    expect(row.email).toBe(`f•••@example.test`);
+    expect(row.firstName).toBe('Contact');
+    for (const key of ['search', 'riders', 'drivers', 'vendors', 'vendorsPending'] as const) {
+      const res = await read(key, tokens['support']!);
+      expect([200, 403], key).toContain(res.statusCode);
+      expect(leaks(res.payload), key).toEqual([]);
+    }
+  });
+
+  it('a grant that opens every list but holds no contact capability: every row masked, the lists otherwise unchanged', async () => {
+    for (const key of Object.keys(lists()) as ListKey[]) {
+      const res = await read(key, tokens['listReaders']!);
+      expect(res.statusCode, key).toBe(200);
+      expect(leaks(res.payload), key).toEqual([]);
+    }
+    const riders = (await read('riders', tokens['listReaders']!)).json().data as Array<{ id: string; user: { phone: string; firstName: string } }>;
+    expect(riders.find((r) => r.id === ids.rider)!.user.phone).toMatch(new RegExp(`•+${tail(phones.rider)}$`));
+    expect(riders.find((r) => r.id === ids.rider)!.user.firstName).toBe('Contact');
+    const drivers = (await read('drivers', tokens['listReaders']!)).json().data as Array<{ id: string; user: { phone: string } }>;
+    expect(drivers.find((d) => d.id === ids.driver)!.user.phone).toMatch(new RegExp(`•+${tail(phones.driver)}$`));
+    const vendors = (await read('vendors', tokens['listReaders']!)).json().data as Array<Record<string, any>>;
+    const store = vendors.find((v) => v.id === ids.vendor)!;
+    expect(store.phone).toMatch(new RegExp(`•+${tail(phones.store)}$`));
+    expect(store.owner.user.phone).toMatch(new RegExp(`•+${tail(phones.owner)}$`));
+    expect(store.name).toBe('Contact Counter');
+    const pending = ((await read('vendorsPending', tokens['listReaders']!)).json().data as Array<Record<string, any>>).find((v) => v.id === ids.pendingVendor)!;
+    expect(pending.phone).toMatch(new RegExp(`•+${tail(phones.pendingStore)}$`));
+    expect(pending.email).toBe('f•••@example.test');
+    expect(pending.mmgNumber).toMatch(new RegExp(`•+${tail(phones.pendingOwner)}$`));
+    expect(pending.owner.user.phone).toMatch(new RegExp(`•+${tail(phones.pendingOwner)}$`));
+    expect(pending.owner.user.email).toBe('f•••@example.test');
+    expect(pending.name).toBe('Contact Pending');
+    const people = (await read('search', tokens['listReaders']!)).json().data.users as Array<{ phone: string }>;
+    expect(people.length).toBeGreaterThan(0);
+    for (const person of people) expect(person.phone).toMatch(/•/);
+  });
+
+  it('the server still finds a person by their full number; the answer is masked', async () => {
+    const res = await get(`/users?search=${encodeURIComponent(phones.person)}`, tokens['listReaders']!);
+    expect(res.statusCode).toBe(200);
+    expect((res.json().data as Array<{ id: string }>).map((u) => u.id)).toContain(ids.person);
+    expect(res.payload).not.toContain(phones.person);
+    const riders = await get(`/riders?search=${encodeURIComponent(phones.rider)}`, tokens['listReaders']!);
+    expect((riders.json().data as Array<{ id: string }>).map((r) => r.id)).toEqual([ids.rider]);
+    expect(riders.payload).not.toContain(phones.rider);
+  });
+
+  it('each contact capability unmasks only its own lists: user.contact.read shows people, never movers or stores', async () => {
+    const users = await read('users', tokens['userContactPlus']!);
+    for (const value of contactsOf.users()) expect(users.payload, value).toContain(value);
+    const people = (await read('search', tokens['userContactPlus']!)).json().data.users as Array<{ phone: string }>;
+    for (const person of people) expect(person.phone).not.toMatch(/•/);
+    for (const key of ['riders', 'drivers', 'vendors', 'vendorsPending'] as const) {
+      const res = await read(key, tokens['userContactPlus']!);
+      expect(res.statusCode, key).toBe(200);
+      expect(leaks(res.payload), key).toEqual([]);
+    }
+  });
+
+  it('mover.contact.read shows riders and drivers in full; vendor.* (holds vendor.contact.read) shows stores and owners in full', async () => {
+    for (const key of ['riders', 'drivers'] as const) {
+      const res = await read(key, tokens['moverContact']!);
+      expect(res.statusCode, key).toBe(200);
+      for (const value of contactsOf[key]()) expect(res.payload, value).toContain(value);
+    }
+    for (const key of ['vendors', 'vendorsPending'] as const) {
+      const res = await read(key, tokens['wildcards']!);
+      expect(res.statusCode, key).toBe(200);
+      for (const value of contactsOf[key]()) expect(res.payload, `${key} ${value}`).toContain(value);
+    }
+  });
+
+  it('the full grant (*) keeps the lists as they were', async () => {
+    for (const key of ['users', 'riders', 'drivers', 'vendors', 'vendorsPending'] as const) {
+      const res = await read(key, tokens['all']!);
+      expect(res.statusCode, key).toBe(200);
+      for (const value of contactsOf[key]()) expect(res.payload, `${key} ${value}`).toContain(value);
+    }
+  });
+
+  it('the grant is read live: taking user.contact.read away masks the very next list read, same token', async () => {
+    const before = await read('users', tokens['liveRevoke']!);
+    expect(before.payload).toContain(phones.person);
+    const admin = (await system(() => app.prisma.user.findMany({ where: { lastName: `P${RUN}`, admin: { permissions: { has: 'user.contact.read' } } }, select: { id: true, admin: { select: { permissions: true } } } })))
+      .find((u) => u.admin!.permissions.length === 3)!;
+    await system(() => app.prisma.admin.update({ where: { userId: admin.id }, data: { permissions: ['user.read', 'search.read'] } }));
+    const after = await read('users', tokens['liveRevoke']!);
+    expect(after.statusCode).toBe(200);
+    expect(leaks(after.payload)).toEqual([]);
+    const search = await read('search', tokens['liveRevoke']!);
+    expect(leaks(search.payload)).toEqual([]);
+    for (const person of search.json().data.users as Array<{ phone: string }>) expect(person.phone).toMatch(/•/);
   });
 });
