@@ -380,7 +380,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /notifications/broadcast': c('C5', 'platform.broadcast'),
 
   // ── Subscriptions ───────────────────────────────────────────────────────
-  'GET /subscriptions': c('C0', 'subscription.read'),
+  // [SEC-PII · security scan 28 Oct 2026] Movers' names (and masked numbers) on every row: a logged sensitive read.
+  'GET /subscriptions': c('C1', 'subscription.read'),
   'GET /subscriptions/:id/billing-events': c('C0', 'subscription.read'),
   'PUT /subscriptions/:id/waive-fee': c('C4', 'subscription.waive', E.subscription),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),

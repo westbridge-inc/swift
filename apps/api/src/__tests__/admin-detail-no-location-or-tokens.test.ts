@@ -27,7 +27,7 @@ const DAY = 86_400_000;
 let app: FastifyInstance;
 let token = '';
 const userIds: string[] = [];
-const ids = { rider: '', relay: '', order: '', kase: '', customer: '', subscription: '' };
+const ids = { rider: '', relay: '', order: '', kase: '', customer: '', subscription: '', driver: '', driverSubscription: '' };
 const LAT = 6.80123;
 const LNG = -58.15987;
 const DEVICE_TOKEN = `ExponentPushToken[fixture-${RUN}]`;
@@ -69,7 +69,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await system(async () => {
-    await app.prisma.subscription.deleteMany({ where: { riderId: { in: [ids.rider, ids.relay] } } });
+    await app.prisma.subscription.deleteMany({ where: { OR: [{ riderId: { in: [ids.rider, ids.relay] } }, { driverId: ids.driver || 'none' }] } });
+    if (ids.driver) await app.prisma.driver.deleteMany({ where: { id: ids.driver } });
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-detail-no-location').catch(() => 0);
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'test-cleanup:admin-detail-no-location').catch(() => 0);
     await app.prisma.custodyRecoveryCase.deleteMany({ where: { id: ids.kase } });
@@ -140,11 +141,34 @@ describe('[SEC-PII] the subscriptions list carries no live position, no full num
     expect(row).toMatchObject({ status: expect.any(String), type: 'DELIVERY_RIDER', weeklyRate: 1000 });
   });
 
+  it('a driver\'s subscription row: the same', async () => {
+    const userId = await person(['DRIVER']);
+    const phone = (await system(() => app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } })))!.phone;
+    ids.driver = (await system(() => app.prisma.driver.create({ data: {
+      userId, vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', vehicleYear: 2015, licensePlate: `PDN ${RUN.slice(0, 4)}`,
+      driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', currentLat: LAT, currentLng: LNG, lastLocationUpdate: new Date(),
+    } as never }))).id;
+    const week = new Date(Date.now() + 7 * DAY);
+    ids.driverSubscription = (await system(() => app.prisma.subscription.create({ data: {
+      driverId: ids.driver, type: 'TAXI_DRIVER', weeklyRate: 1000, currentPeriodStart: new Date(), currentPeriodEnd: week, nextBillingDate: week,
+      billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: phone, paymentToken: TOKEN,
+    } as never }))).id;
+    const res = await get('/subscriptions?type=TAXI_DRIVER&limit=100');
+    expect(res.statusCode).toBe(200);
+    const row = (res.json().data as Array<Record<string, any>>).find((s) => s['id'] === ids.driverSubscription)!;
+    for (const value of [phone, TOKEN, String(LAT), String(LNG)]) expect(res.payload, value).not.toContain(value);
+    expect(Object.keys(row['driver']).sort()).toEqual(['id', 'user']);
+    expect(row['driver']['user']['phone']).toMatch(new RegExp(`•+${phone.slice(-4)}$`));
+    expect(row['mmgPayerMsisdn']).toMatch(new RegExp(`•+${phone.slice(-4)}$`));
+  });
+
   it('the list is a sensitive read: classified C1, and each read leaves its access row', async () => {
     expect(ADMIN_ROUTE_AUTHORITY['GET /subscriptions']).toMatchObject({ cls: 'C1', capability: 'subscription.read' });
-    const before = await system(() => app.prisma.sensitiveReadLog.count({ where: { actorUserId: { in: userIds }, action: 'GET /subscriptions' } }));
+    const reads = () => system(() => app.prisma.sensitiveReadLog.count({ where: { actorUserId: { in: userIds }, action: 'GET /subscriptions' } }));
+    // The access row is written as the response completes (onResponse): wait for the earlier read's row to settle.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const before = await reads();
     expect((await get('/subscriptions?limit=5')).statusCode).toBe(200);
-    const after = await system(() => app.prisma.sensitiveReadLog.count({ where: { actorUserId: { in: userIds }, action: 'GET /subscriptions' } }));
-    expect(after).toBe(before + 1);
+    await expect.poll(reads, { timeout: 3000 }).toBe(before + 1);
   });
 });
