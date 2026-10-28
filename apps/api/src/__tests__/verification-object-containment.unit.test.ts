@@ -198,6 +198,8 @@ function harness() {
   // and an unclaimed upload is kept while the person is under a legal hold (none here).
   db.livenessCheck.findMany = vi.fn(async () => []);
   db.docLegalHold = { count: vi.fn(async () => 0), findFirst: vi.fn(async () => null) };
+  // [SEC-PII] Erasure's lock-time backstop reads the person's identity group (none in this harness).
+  db.identityClusterMember.findUnique = vi.fn(async () => null);
   // [erasure covers every person table] The owed rows, cards, profiles, case text and safety records the
   // erasure now covers (erasure-coverage.ts): none exist for these subjects.
   for (const name of ['notification', 'moneySurfaceCommand', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin', 'cardSession', 'sosRetrigger', 'evidenceItem']) {

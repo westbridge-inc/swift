@@ -20,6 +20,8 @@ import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { accountClosedKeptWords, holdForOpenIdentityReviews, investigationHoldSummary } from '../verification/investigation-hold';
+import { identityReviewOpenFor } from '../verification/investigation-hold-core';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -42,6 +44,12 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 // finish (or be cancelled) before the customer can erase themselves.
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
+
+/** [SEC-PII] The exact erasure marker this file writes in place of an erased account's number. Exported so other code
+ *  can RECOGNISE an erased account without spelling the marker (erasure-trigger-exceptions pins the one writer). */
+export function erasedPhoneMarker(userId: string): string {
+  return `deleted:${userId}`;
+}
 
 export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 /** The server-written record that a closure request was confirmed in the app
@@ -350,6 +358,9 @@ export class AccountService {
     // erasure: it stays, due for purge the moment the hold is released (its
     // retention clock is set to now), and the deferral is written to the audit
     // trail — erasure deferred by a legal obligation is recorded, never silent.
+    // [REVIEW-G S3-3] An identity review open on the person's live group, not yet holding them: its hold first, so
+    // what is kept is a real hold with a date (and the closing message can say when).
+    await holdForOpenIdentityReviews(prisma, userId);
     const deferred = await prisma.verificationDocument.updateMany({
       where: { userId, purgedAt: null, legalHoldId: { not: null } },
       data: { retentionExpiresAt: new Date() },
@@ -400,6 +411,8 @@ export class AccountService {
           SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
         `;
         if (person.length !== 1) return false;
+        // [SEC-PII · COORD] Backstop: an identity review open on the person's live group chain keeps the record.
+        if (await identityReviewOpenFor(tx, userId)) return false;
         const close = await tx.verificationDocument.updateMany({
           where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
         });
@@ -584,13 +597,17 @@ export class AccountService {
       },
     });
 
+    const { revisitBy } = deferred.count > 0 ? await investigationHoldSummary(prisma, userId) : { revisitBy: null };
     // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
     const heldUploads = uploads.held + liveness.held;
     if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
         deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
         pendingDocuments, pendingAvatarObjects, pendingUploads,
-        message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
+        // [SEC-PII · Privacy §6] Delayed by an open review: why (generically) and when, in the words the app shows.
+        message: revisitBy
+          ? accountClosedKeptWords(revisitBy, deferred.count) // [COORD 10:44Z] every kept document, a person's holds too
+          : 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }
 

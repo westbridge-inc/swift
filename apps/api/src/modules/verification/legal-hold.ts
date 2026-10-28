@@ -19,6 +19,7 @@ import { notifyAdmins, type NotificationService } from '../notification/notifica
 import { docLegalHoldGauge } from '../../plugins/observability';
 import { assertNotRecused, recusedError } from './recusal';
 import { identityAuthority } from '../integrity/identity-review';
+import { INVESTIGATION_HOLD_PLACER, openInvestigationSuccessor } from './investigation-hold-core';
 
 /**
  * [SEC-PII] Placing a hold PRESERVES evidence, so an identity record still awaiting review never stops it (a release
@@ -55,6 +56,9 @@ export function reviewByWindow(now = new Date()): { min: Date; max: Date } {
   };
 }
 
+/** [SEC-PII] The system's own placer for a hold an open investigation places (investigation-hold.ts). */
+export { INVESTIGATION_HOLD_PLACER };
+
 export async function placeDocLegalHold(prisma: PrismaClient, input: PlaceDocLegalHoldInput, now = new Date()) {
   const window = reviewByWindow(now);
   if (!(input.reviewBy >= window.min && input.reviewBy <= window.max)) {
@@ -73,9 +77,14 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
     // [SEC-PII · money/trust scan 28 Oct 2026] Recused like every document decision (DOC-1 §8.6): the person
     // placing a hold is never its subject nor in the subject's identity cluster.
     await assertNotRecusedToPlace(tx, input.placedBy, input.subjectUserId);
+    // [SEC-PII] A person's hold takes over the documents the system's investigation holds keep (the system never
+    // renews its holds; a person renews one this way). A person's hold always wins (investigation-hold.ts).
+    const systemHolds = input.placedBy === INVESTIGATION_HOLD_PLACER ? []
+      : (await tx.docLegalHold.findMany({ where: { subjectUserId: input.subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null }, select: { id: true } })).map((h) => h.id);
+    const unheldOrSystem = [{ legalHoldId: null }, ...(systemHolds.length > 0 ? [{ legalHoldId: { in: systemHolds } }] : [])];
     const candidates = await tx.verificationDocument.findMany({
       where: {
-        userId: input.subjectUserId, purgedAt: null, legalHoldId: null,
+        userId: input.subjectUserId, purgedAt: null, OR: unheldOrSystem,
         ...(input.documentIds && input.documentIds.length > 0 ? { id: { in: input.documentIds } } : {}),
       },
       select: { id: true, fileUrl: true },
@@ -95,9 +104,10 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
       placedBy: input.placedBy, placedAt: now, incidentCaseId: input.incidentCaseId ?? null,
     } });
     const stamped = await tx.verificationDocument.updateMany({
-      where: { id: { in: holdable.map((d) => d.id) }, purgedAt: null, legalHoldId: null },
+      where: { id: { in: holdable.map((d) => d.id) }, purgedAt: null, OR: unheldOrSystem },
       data: { legalHoldId: hold.id },
     });
+    // (A system hold whose documents a person's hold took stays open, empty, until its own investigation ends.)
     return { hold, documents: stamped.count };
   }
 }
@@ -117,8 +127,11 @@ export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId:
       where: { id: hold.id },
       data: { releasedAt: now, releasedBy: input.releasedBy, releaseReason: input.reason },
     });
-    const unstamped = await tx.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: null } });
-    return { hold: released, documents: unstamped.count };
+    // [SEC-PII] A person's hold ends, but an investigation of the subject that is still open keeps their documents:
+    // they move to its system hold (the same successor rule the system's own release uses), else they are unstamped.
+    const successor = await openInvestigationSuccessor(tx, hold.subjectUserId, now);
+    const unstamped = await tx.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: successor } });
+    return { hold: released, documents: unstamped.count, ...(successor ? { keptBy: successor } : {}) };
   });
 }
 

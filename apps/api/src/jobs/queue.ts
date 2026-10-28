@@ -1651,6 +1651,25 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await verification.hireLicenceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
+        // [SEC-PII · COORD ruling] The system's investigation holds end with their investigation or their review date
+        // (never renewed by the system); run first, so the overdue alarm below is about people's holds.
+        const { sweepInvestigationHolds } = await import('../modules/verification/investigation-hold');
+        const { tenantOfUser } = await import('../modules/notification/notification.service');
+        await sweepInvestigationHolds(ctx.prisma, new Date(), undefined, {
+          // a person whose erasure the hold delays is told the renewed date (nobody else is); a hold renewed past
+          // 180 days is an admin task; a freed document's delayed erasure is finished as the person asked, and the
+          // catch-all finishes any delayed request whose documents are unheld (a person's release, a failed run).
+          // (A closed account has no written path left: its email is erased with it. Follow-up logged, COORD 10:24Z.)
+          notifyPerson: (userId, revisitBy, holdId) => verification.notifyRenewalIfDelayed(userId, revisitBy, holdId),
+          escalate: async (hold) => { await notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+            tenantId: await tenantOfUser(ctx.prisma, hold.subjectUserId),
+            title: 'A document hold needs a decision',
+            body: 'A review has kept a person\'s documents for over 180 days. Decide whether to keep holding them or release them.',
+            data: { kind: 'verification_legal_hold_overdue', overdue: 1, holdIds: [hold.id] },
+          }); },
+          onFreed: async (userId, documentIds) => { await verification.completeDeferredErasures(userId, documentIds); },
+          retryDelayedErasures: () => verification.retryDelayedErasures(),
+        });
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
         const { alertOverdueDocLegalHolds } = await import('../modules/verification/legal-hold');
         await alertOverdueDocLegalHolds(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));

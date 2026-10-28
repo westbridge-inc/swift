@@ -109,6 +109,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_application_abandoned', 'verification_forced_offline', 'verification_vehicle_lapsed',
     'verification_l2', 'trust_l3', 'compliance_review_failed',
+    // [SEC-PII] A person's own deletion request: delayed by an open review (why and when), then done. Informational,
+    // standard like the other account notices; never a loud class.
+    'erasure_delayed', 'erasure_completed',
     // Account security: the password changed and other devices were signed out;
     // password sign-in paused after many wrong attempts
     'password_changed', 'password_sign_in_paused',

@@ -501,6 +501,8 @@ const CENSUS: Case[] = [
   { k: 'verification_sla_breach', d: { slaHours: 24 }, to: null, why: 'admins' },
   { k: 'audit_chain_broken', d: { breakAt: '12', reason: 'HASH' }, to: null, why: 'admins — the tamper-evident audit chain failed verification (DOC-1 §20.1)' },
   { k: 'audit_chain_anchor', d: { headSeq: '12', headHash: 'ab', verified: true }, to: null, why: 'admins — the daily audit-chain head to keep outside Swift' },
+  { k: 'erasure_delayed', d: { revisitBy: '2027-01-27T00:00:00.000Z' }, to: HOME, why: 'HOME: the person — [SEC-PII · Privacy s6] their deletion request waits for a review; the notice says why and when and is the whole message (builds 9-12, which do not know the kind, open the app normally: never a crash)' },
+  { k: 'erasure_completed', to: HOME, why: 'HOME: the person — [SEC-PII · Privacy s6] the delayed deletion is done; the notice is the whole message (builds 9-12 open the app normally for a kind they do not know)' },
   { k: 'verification_legal_hold_overdue', d: { overdue: 1, holdIds: ['h1'] }, to: null, why: 'admins — a document legal hold past its review date (DOC-1 §9.4)' },
   { k: 'integrity_appeal', d: { enforcementId: 'e1' }, to: null, why: 'admins' },
   { k: 'dup_doc', d: { sha256: 'x' }, to: null, why: 'admins' },
