@@ -236,10 +236,12 @@ describe('[F20 · launch default] CALL_RELAY off: the answer is exactly what it 
 });
 
 describe('[F20] the answer shape, on a full row as the cash rail\'s lost-answer retry reads it', () => {
+  const ROW_RECIPIENT = testPhone();
+  const ROW_SENDER = testPhone();
   const fullRow = () => ({
-    id: 'o1', status: 'DELIVERED', courierRecipientPhone: '+5920600001', ridePin: '246813', pickupCode: '975310',
+    id: 'o1', status: 'DELIVERED', courierRecipientPhone: ROW_RECIPIENT, ridePin: '246813', pickupCode: '975310',
     pickupCodeAttempts: 1, mmgNumberSnapshot: '+5926000000', mmgPayUrlSnapshot: 'https://pay.test/x',
-    customer: { id: 'c1', phone: '+5920600002', countryCode: 'GY', trustLevel: 'L2', createdAt: new Date(0) },
+    customer: { id: 'c1', phone: ROW_SENDER, countryCode: 'GY', trustLevel: 'L2', createdAt: new Date(0) },
   });
 
   it('never carries a handover code, the MMG snapshot, or the sender\'s account facts, bridge on or off', () => {
@@ -249,13 +251,13 @@ describe('[F20] the answer shape, on a full row as the cash rail\'s lost-answer 
       for (const key of ['ridePin', 'pickupCode', 'pickupCodeAttempts', 'mmgNumberSnapshot', 'mmgPayUrlSnapshot', 'trustLevel', 'countryCode', 'createdAt']) {
         expect(body.includes(`"${key}"`), `${key} (relay ${relayOn ? 'on' : 'off'})`).toBe(false);
       }
-      expect(body.includes('+5920600002'), `sender phone (relay ${relayOn ? 'on' : 'off'})`).toBe(false);
+      expect(body.includes(ROW_SENDER), `sender phone (relay ${relayOn ? 'on' : 'off'})`).toBe(false);
       expect(JSON.parse(body).customer).toEqual({ id: 'c1', firstName: null });
     }
   });
 
   it('the recipient number follows the O-1 rule: kept with the bridge off, gone for a bridge-aware client with it on', () => {
-    expect(courierRiderAnswer({ headers: BRIDGE }, fullRow()).courierRecipientPhone).toBe('+5920600001');
+    expect(courierRiderAnswer({ headers: BRIDGE }, fullRow()).courierRecipientPhone).toBe(ROW_RECIPIENT);
     process.env['CALL_RELAY'] = '1';
     expect(courierRiderAnswer({ headers: BRIDGE }, fullRow()).courierRecipientPhone).toBeNull();
   });
