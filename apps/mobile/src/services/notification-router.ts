@@ -233,6 +233,25 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
     return audience === 'customer' ? { screen: 'OrdersHistory' } : null;
   }
 
+  // [S4 · BOOK-MEASURE R5] A STORE appointment's 24h reminder. It used to be
+  // sent as booking_reminder with the Booking id as refId, and the booking_
+  // prefix below opened ServiceJobs, the marketplace jobs list, which never
+  // shows a store booking. It now has its own kind, outside that prefix on
+  // purpose: builds 9, 11 and 12 send the whole prefix to ServiceJobs, while
+  // this kind reaches their order branches instead (business + orderId → the
+  // order desk, orderId → the booking's order screen), exactly as here. The API
+  // tags both copies. business = the store: the booking's order on its order
+  // desk, where it is completed or cancelled; a booking with no order on file
+  // opens the Schedule agenda, which lists it. customer = the person booked:
+  // the booking's order screen (Delivery renders an appointment's status); with
+  // no order on file, their orders list. An untagged copy cannot say whose it
+  // is, so it opens the app normally rather than guess a stack.
+  if (kind === 'appointment_reminder') {
+    if (audience === 'business') return orderId ? { screen: 'VendorOrderDetail', params: { orderId } } : { screen: 'Schedule' };
+    if (audience === 'customer') return orderId ? { screen: 'Delivery', params: { orderId } } : { screen: 'OrdersHistory' };
+    return null;
+  }
+
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
   // booking_* kind is a service JOB event carrying jobId/refId and no orderId
   // (quoted · to_confirm · confirmed · slot_declined · started · reminder
@@ -246,9 +265,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // enumerating it is how three kinds went unrouted in the first place.
   // No params: ServiceJobsScreen takes none — it lists every job — so a jobId
   // here would be an invented route param a screen never reads. A per-job deep
-  // screen does not exist yet, and a booking_reminder whose refId is a vendor
-  // APPOINTMENT rather than a service job lands on the same list without its
-  // row [both reported, neither invented].
+  // screen does not exist yet [reported, not invented]. booking_reminder is a
+  // service job's reminder only: a store appointment's is appointment_reminder
+  // (above) since S4. An inbox row sent before S4 still carries booking_reminder
+  // with a Booking id and still opens this list; its refId cannot say which.
   if (kind.startsWith('booking_')) return { screen: 'ServiceJobs' };
 
   // [E12 §7.2] The identity-check prompts land ON the selfie screen — a timed

@@ -13,6 +13,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { sendBookingReminders } from '../modules/services/services.service';
+import { NotificationService } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder } from '../jobs/queue';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
@@ -329,11 +330,59 @@ describe('Q12 · B1 — a 10:00 Guyana slot is stored as 14:00Z and returned ide
     expect((await accept(order.id)).statusCode).toBe(200);
     const bookingId = (await bookingOf(order.id)).id;
 
-    const sent: Array<{ userId: string; body: string; data: Record<string, unknown> }> = [];
+    const sent: Array<{ userId: string; title: string; body: string; data: Record<string, unknown> }> = [];
     await sendBookingReminders(app.prisma, async (n) => { sent.push(n); });
-    const mine = sent.filter((n) => n.data['refId'] === bookingId);
+    const mine = sent.filter((n) => n.data['bookingId'] === bookingId);
+    // [REVIEW-F S3-1] The title names the slot's Guyana day against the sweep's (UTC−4, read as UTC fields).
+    const sweepLocal = new Date(Date.now() - 4 * 60 * MINUTE);
+    const sameDay = sweepLocal.toISOString().slice(0, 10) === localClock.toISOString().slice(0, 10);
+    expect(mine.map((n) => n.title)).toEqual([sameDay ? 'Appointment today' : 'Appointment tomorrow', sameDay ? 'Appointment today' : 'Appointment tomorrow']);
     expect(mine.find((n) => n.userId === customer.userId)?.body).toBe(`Q12 Cut at Q12 Barber is booked for ${expectedWhen}.`);
-    expect(mine.find((n) => n.userId === provider.userId)?.body).toBe(`Q12 Cut appointment coming up ${expectedWhen}.`);
+    const [expectedDay, ...expectedTime] = expectedWhen.split(' ');
+    expect(mine.find((n) => n.userId === provider.userId)?.body).toBe(`Q12 Cut appointment on ${expectedDay} at ${expectedTime.join(' ')}.`);
+  });
+
+  // [S4 · BOOK-MEASURE R5] Composed exactly as the booking-reminders worker
+  // composes it (jobs/queue.ts: each reminder spread into NotificationService.send
+  // as ORDER_UPDATE), against real Postgres. The inbox rows are what both the
+  // push tap and the inbox row tap route on.
+  it('[S4] each side gets ONE inbox row naming the booking\'s order and whose copy it is, even from two overlapping sweeps', async () => {
+    // ~8 h out: inside the reminder window, clear of the 3 h (above) and 5 h (B6) slots this file books.
+    const soon = new Date(Math.ceil((Date.now() + 8 * 60 * MINUTE) / (30 * MINUTE)) * 30 * MINUTE);
+    const customer = await makeUser('Rae', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, soon);
+    expect((await accept(order.id)).statusCode).toBe(200);
+    const bookingId = (await bookingOf(order.id)).id;
+    const notifications = new NotificationService(app.prisma, app.io);
+    const parties = new Set([customer.userId, provider.userId]);
+    const namesThisBooking = (data: Record<string, unknown>) => data['bookingId'] === bookingId || data['refId'] === bookingId;
+    // Two sweeps that both pass the "already reminded?" read before either
+    // delivers — as two overlapping runs of the job would.
+    let looked = 0;
+    let release!: () => void;
+    const bothLooked = new Promise<void>((resolve) => { release = resolve; });
+    const tick = () => sendBookingReminders(app.prisma, async (n) => {
+      if (!parties.has(n.userId) || !namesThisBooking(n.data)) return;
+      if (n.userId === customer.userId) {
+        looked += 1;
+        if (looked === 2) release();
+        await Promise.race([bothLooked, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+      }
+      await notifications.send({ ...n, type: 'ORDER_UPDATE' });
+    });
+    await Promise.all([tick(), tick()]);
+    await tick(); // and a later sweep
+
+    const rows = (await app.prisma.notification.findMany({
+      where: { userId: { in: [...parties] }, title: { in: ['Appointment today', 'Appointment tomorrow'] } },
+      select: { userId: true, data: true },
+    })).filter((row) => namesThisBooking(row.data as Record<string, unknown>));
+    expect(rows.filter((row) => row.userId === customer.userId).map((row) => row.data)).toEqual([
+      { kind: 'appointment_reminder', bookingId, orderId: order.id, audience: 'customer' },
+    ]);
+    expect(rows.filter((row) => row.userId === provider.userId).map((row) => row.data)).toEqual([
+      { kind: 'appointment_reminder', bookingId, orderId: order.id, audience: 'business' },
+    ]);
   });
 });
 
