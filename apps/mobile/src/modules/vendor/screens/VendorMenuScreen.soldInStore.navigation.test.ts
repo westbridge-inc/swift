@@ -20,6 +20,8 @@ const fx = vi.hoisted(() => ({
   qc: null as unknown as import('@tanstack/react-query').QueryClient,
   sent: [] as Pending[],
   keys: 0,
+  session: 1,
+  store: 'store-a',
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 const answerOf = (stock: number) => ({ data: { success: true, data: { stockQuantity: stock, isAvailable: stock > 0, replayed: false } } });
@@ -71,7 +73,7 @@ vi.mock('../../../services/api', () => ({
   vendorDiscoveryApi: {},
 }));
 vi.mock('../../../stores/authStore', () => ({
-  useAuthStore: (selector: (s: unknown) => unknown) => selector({ sessionGeneration: 1 }),
+  useAuthStore: (selector: (s: unknown) => unknown) => selector({ sessionGeneration: fx.session }),
   newCommandKey: () => `tap-key-${++fx.keys}`,
   getAuthSessionSnapshot: () => null, requireAuthSessionForPrincipal: () => null, requireAuthSessionSnapshot: () => null,
 }));
@@ -89,7 +91,7 @@ vi.mock('../../../lib/vendorPreviewData', () => ({
   vendorPreviewDataset: () => null, vendorPreviewSubscription: () => null, previewQuery: vi.fn(), previewMutation: vi.fn(), VENDOR_PREVIEW_MARKET: {},
 }));
 vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), getSocket: () => ({ connected: false, on: vi.fn(), off: vi.fn(), emit: vi.fn() }) }));
-vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: Object.assign(() => ({}), { getState: () => ({ selectedStoreId: 'store-a', storeGeneration: 1 }) }) }));
+vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: Object.assign(() => ({}), { getState: () => ({ selectedStoreId: fx.store, storeGeneration: 1 }) }) }));
 
 import { MenuItemRow } from './VendorMenuScreen';
 import { soldInStore } from '../../../hooks/useSoldInStore';
@@ -117,6 +119,8 @@ beforeEach(async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   fx.sent = [];
   fx.keys = 0;
+  fx.session = 1;
+  fx.store = 'store-a';
   fx.qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
   fx.qc.setQueryData(MENU, [{ id: 'shelf', name: 'Shelf', items: items() }]);
   soldInStore.reset();
@@ -216,13 +220,13 @@ describe('[IN-STORE-SALE] "Sold in store −1" on the phone menu list', () => {
     await act(async () => { vi.advanceTimersByTime(30_000); });
     await settle();
     expect(fx.sent).toHaveLength(1);
-    expect(rowText('rice')).toContain(SOLD_IN_STORE.notSent(1));
+    expect(rowText('rice')).toContain(SOLD_IN_STORE.notSent(1, 0));
     expect(rowText('rice')).toContain('4 in stock');
     await press(buttonIn('rice', SOLD_IN_STORE.tryAgain));
     expect(fx.sent.map((s) => s.key)).toEqual(['tap-key-1', 'tap-key-1']);
     fx.sent[1]!.resolve(4);
     await settle();
-    expect(rowText('rice')).not.toContain(SOLD_IN_STORE.notSent(1));
+    expect(rowText('rice')).not.toContain(SOLD_IN_STORE.notSent(1, 0));
     expect(menuStock('rice')).toBe(4);
   });
 
@@ -233,5 +237,30 @@ describe('[IN-STORE-SALE] "Sold in store −1" on the phone menu list', () => {
     await press(sellButton('oil'));
     expect(fx.sent.filter((s) => s.itemId === 'oil')).toHaveLength(1); // only the first is out; none added by the 4th press
     expect(soldInStore.view('oil').unsent).toBe(3);
+  });
+
+  it('another person signs in: the last person\'s waiting taps are dropped, never sent under the new session', async () => {
+    await press(sellButton('rice'));
+    await press(sellButton('rice'));
+    expect(fx.sent).toHaveLength(1);
+    fx.session = 2;
+    await act(async () => { fx.qc.setQueryData(MENU, (m: any) => [...m]); }); // the screen draws again for the new person
+    await settle();
+    fx.sent[0]!.resolve(4);
+    await settle();
+    expect(fx.sent, 'the waiting tap is not sent for the new person').toHaveLength(1);
+    expect(soldInStore.view('rice')).toMatchObject({ pending: 0, unsent: 0 });
+  });
+
+  it('a store switch with a tap waiting parks it (never sent under the other store); Try again back in the store sends it', async () => {
+    await press(sellButton('rice'));
+    await press(sellButton('rice'));
+    fx.store = 'store-b';
+    fx.sent[0]!.resolve(4);
+    await settle();
+    expect(fx.sent).toHaveLength(1);
+    fx.store = 'store-a';
+    await press(buttonIn('rice', SOLD_IN_STORE.tryAgain));
+    expect(fx.sent.map((x) => x.key)).toEqual(['tap-key-1', 'tap-key-2']);
   });
 });

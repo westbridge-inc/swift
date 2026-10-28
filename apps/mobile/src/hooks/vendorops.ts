@@ -882,6 +882,8 @@ export function useSoldInStoreSender(): { tap: (_itemId: string) => void; undo: 
   soldInStore.setSender({
     newKey: () => newCommandKey(),
     send: (itemId, op) => sale.mutateAsync({ itemId, op }),
+    // [REVIEW-F #2157 S4-5] Taps made in one store are never sent while another is open (they wait for Try again there).
+    canSend: (scope) => (scope as MenuScope | undefined)?.storeId === useStoreSwitcher.getState().selectedStoreId,
     answered: (itemId, answer, scope) => answerIntoMenu(qc, scope as MenuScope, (menu) => menuWithItemFields(menu, itemId, saleFields(answer))),
     reread: () => rereadMenuSoon(qc),
     classify: phoneSaleFailure,

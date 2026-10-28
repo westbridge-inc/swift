@@ -2722,6 +2722,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const IN_STORE_SALE_NONE_LEFT = "You have 0 of this left on Swift. Update the stock if that's wrong.";
   const IN_STORE_SALE_UNTRACKED = "Stock isn't counted for this item. Add a stock number to track it.";
   const IN_STORE_SALE_NO_SALE = "That sale isn't on Swift, so there's nothing to undo.";
+  const IN_STORE_SALE_NOT_YOURS = 'Only the person who recorded this sale can undo it. Use Adjust stock to correct the count.';
   /** A tap's key: required, and from a plain alphabet, so it can never collide with the `undo:` receipts below. */
   const saleTapKey = (raw: unknown): string => {
     if (typeof raw !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(raw)) {
@@ -2729,9 +2730,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     return raw;
   };
-  /** The caller's tracked, live item — the same lookup and refusals as the stock adjust route. */
-  const saleItem = async (request: { user: { userId: string }; params: IdParam; headers: Record<string, string | string[] | undefined> }) => {
-    const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+  /** The caller's tracked, live item — the same lookup and refusals as the stock adjust route. The store check
+   *  (resolveVendor) runs FIRST, before the key or the body is read, exactly as on /adjust: a token that is not a
+   *  store's is refused before anything else answers. */
+  const saleAccess = (request: { user: { userId: string }; headers: Record<string, string | string[] | undefined> }) =>
+    resolveVendor(app, request.user.userId, selectedVendorId(request));
+  const saleItem = async (access: VendorAccess, request: { params: IdParam }) => {
     const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds }, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.id);
     if (item.stockQuantity == null) throw new AppError(400, 'UNTRACKED', IN_STORE_SALE_UNTRACKED);
@@ -2753,8 +2757,9 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/:id/in-store-sale — one sold in person (-1). Idempotency-Key required: one key = one tap. */
   app.post<{ Params: IdParam }>('/items/:id/in-store-sale', auth, async (request) => {
+    const access = await saleAccess(request);
     const commandKey = saleTapKey(request.headers['idempotency-key']);
-    const item = await saleItem(request);
+    const item = await saleItem(access, request);
     const userId = request.user.userId;
     // Read BEFORE moving: a retry of a sale that took the last one answers with its receipt, never "0 left".
     const prior = await saleReceipt(item.id, commandKey, -1, userId);
@@ -2768,25 +2773,25 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (!moved.applied) throw new AppError(400, 'UNTRACKED', IN_STORE_SALE_UNTRACKED);
       const after = await tx.item.findUniqueOrThrow({ where: { id: item.id }, select: { stockQuantity: true, lowStockThreshold: true } });
       const remaining = after.stockQuantity ?? 0;
-      // Hidden at 0 exactly as a checkout sale hides it. The receipt carries the same instant, so an Undo can tell
-      // whether the hide is still THIS sale's (and only then shows the item again).
-      const at = new Date();
-      await tx.item.updateMany({ where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true }, data: { isAvailable: false, autoHiddenAt: at } });
+      // Hidden at 0 exactly as a checkout sale hides it.
+      await tx.item.updateMany({ where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true }, data: { isAvailable: false, autoHiddenAt: new Date() } });
       // The owner is alerted as a checkout alerts: at 0, or on the crossing edge of the low-stock level (once).
       if (remaining <= 0) event = { itemId: item.id, name: item.name, remaining: 0, kind: 'out' };
       else if (after.lowStockThreshold !== null && remaining <= after.lowStockThreshold && remaining + 1 > after.lowStockThreshold) {
         event = { itemId: item.id, name: item.name, remaining, kind: 'low' };
       }
       return tx.stockAdjustment.create({
-        data: { itemId: item.id, delta: -1, reason: 'IN_STORE_SALE', note: null, createdBy: userId, commandKey, movementId: moved.movementId, createdAt: at },
+        data: { itemId: item.id, delta: -1, reason: 'IN_STORE_SALE', note: null, createdBy: userId, commandKey, movementId: moved.movementId },
       });
     }).catch(async (err) => {
-      if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') throw new AppError(409, 'NONE_LEFT', IN_STORE_SALE_NONE_LEFT);
       // The same tap sent twice at once: the first committed, this one rolled back whole and answers with its receipt.
-      if ((err as { code?: unknown }).code === 'P2002') {
+      // Looked for FIRST: on the last one, the copy that lost finds 0 left, yet its tap did happen. [REVIEW-M/G #2157 S4-1]
+      const insufficient = err instanceof AppError && err.code === 'INSUFFICIENT_STOCK';
+      if (insufficient || (err as { code?: unknown }).code === 'P2002') {
         const winner = await saleReceipt(item.id, commandKey, -1, userId);
         if (winner) { replayed = true; return winner; }
       }
+      if (insufficient) throw new AppError(409, 'NONE_LEFT', IN_STORE_SALE_NONE_LEFT);
       throw err;
     });
     if (replayed) return saleAnswer(item.id, receipt, true);
@@ -2804,16 +2809,19 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/:id/in-store-sale/undo { saleKey } — puts back the one that tap took: a NEW +1 ledger row (the
    *  ledger is append-only), once per sale whatever the retries (its receipt key is derived from the sale's). Only
-   *  the person who recorded the sale. Shows the item again only if the auto-hide is still that sale's own. */
+   *  the person who recorded the sale. Shows the item again as a restock does (only an auto-hidden one). */
   app.post<{ Params: IdParam }>('/items/:id/in-store-sale/undo', auth, async (request) => {
+    const access = await saleAccess(request);
     const { saleKey } = z.object({ saleKey: z.string() }).parse(request.body);
     const key = saleTapKey(saleKey);
-    const item = await saleItem(request);
+    const item = await saleItem(access, request);
     const userId = request.user.userId;
     const sale = await app.prisma.stockAdjustment.findUnique({ where: { itemId_commandKey: { itemId: item.id, commandKey: key } } });
-    if (!sale || sale.reason !== 'IN_STORE_SALE' || sale.delta !== -1 || sale.createdBy !== userId) {
+    if (!sale || sale.reason !== 'IN_STORE_SALE' || sale.delta !== -1) {
       throw new AppError(404, 'SALE_NOT_FOUND', IN_STORE_SALE_NO_SALE);
     }
+    // [REVIEW-G #2157 S4-2] Another member's sale (of this store's own item) is named for what it is.
+    if (sale.createdBy !== userId) throw new AppError(403, 'SALE_NOT_YOURS', IN_STORE_SALE_NOT_YOURS);
     const commandKey = `undo:${key}`;
     const prior = await saleReceipt(item.id, commandKey, 1, userId);
     if (prior) return saleAnswer(item.id, prior, true);
@@ -2822,10 +2830,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     const receipt = await app.prisma.$transaction(async (tx) => {
       const moved = await applyStockMovement(tx, { itemId: item.id, delta: 1, reason: 'IN_STORE_SALE', actorId: userId, note: `Undo of in-store sale ${sale.movementId ?? sale.id}` });
       if (!moved.applied) throw new AppError(400, 'UNTRACKED', IN_STORE_SALE_UNTRACKED);
-      // Under the item's row lock: the hide is this sale's only while autoHiddenAt is still the sale's own instant.
-      // Then the shared restock rule decides (never a banned item, never one the store hid by hand).
-      const [row] = await tx.$queryRaw<Array<{ autoHiddenAt: Date | null }>>`SELECT "autoHiddenAt" FROM "items" WHERE id = ${item.id} FOR UPDATE`;
-      if (row?.autoHiddenAt && row.autoHiddenAt.getTime() === sale.createdAt.getTime()) await unhideRestocked(tx, item.id);
+      // [Owner ruling via COORD 28 Oct · REVIEW-F S4-8] The one back on the shelf shows the item again exactly as any
+      // restock does: only an item the stock engine hid (autoHiddenAt set) and now above 0 — never one the store hid by
+      // hand, never one Swift does not allow (the shared rule, judged under the item's row lock).
+      await unhideRestocked(tx, item.id);
       return tx.stockAdjustment.create({
         data: { itemId: item.id, delta: 1, reason: 'IN_STORE_SALE', note: 'Undo of an in-store sale', createdBy: userId, commandKey, movementId: moved.movementId },
       });

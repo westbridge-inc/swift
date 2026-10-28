@@ -68,6 +68,8 @@ async function makeItem(stock: number | null, extra: { lowStockThreshold?: numbe
     },
   });
 }
+/** What the two routes answer with. */
+type SaleBody = { movementId?: string | null; stockQuantity?: number | null; isAvailable?: boolean; replayed?: boolean };
 /** Over the socket, as the app sends it. */
 async function call(path: string, who: keyof typeof tokens, init: { key?: string; body?: unknown } = {}) {
   const res = await fetch(`${base}/api/v1/vendor${path}`, {
@@ -75,7 +77,7 @@ async function call(path: string, who: keyof typeof tokens, init: { key?: string
     headers: { 'content-type': 'application/json', authorization: `Bearer ${tokens[who]}`, ...(init.key ? { 'idempotency-key': init.key } : {}) },
     body: JSON.stringify(init.body ?? {}),
   });
-  return { status: res.status, json: (await res.json()) as { data?: Record<string, unknown>; error?: { code?: string; message?: string } } };
+  return { status: res.status, json: (await res.json()) as { data?: SaleBody; error?: { code?: string; message?: string } } };
 }
 const sell = (itemId: string, key: string, who: keyof typeof tokens = 'owner') => call(`/items/${itemId}/in-store-sale`, who, { key });
 const undo = (itemId: string, saleKey: string, who: keyof typeof tokens = 'owner') => call(`/items/${itemId}/in-store-sale/undo`, who, { body: { saleKey } });
@@ -141,10 +143,10 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
     const ledger = await ledgerOf(item.id);
     expect(ledger.map((m) => ({ delta: m.delta, balanceAfter: m.balanceAfter, reason: m.reason, actorId: m.actorId, orderId: m.orderId })))
       .toEqual([{ delta: -1, balanceAfter: 4, reason: 'IN_STORE_SALE', actorId: ownerUserId, orderId: null }]);
-    expect(res.json.data?.movementId).toBe(ledger[0].id);
+    expect(res.json.data?.movementId).toBe(ledger[0]!.id);
     const receipts = await receiptsOf(item.id);
     expect(receipts.map((r) => ({ delta: r.delta, reason: r.reason, commandKey: r.commandKey, movementId: r.movementId })))
-      .toEqual([{ delta: -1, reason: 'IN_STORE_SALE', commandKey: key, movementId: ledger[0].id }]);
+      .toEqual([{ delta: -1, reason: 'IN_STORE_SALE', commandKey: key, movementId: ledger[0]!.id }]);
   });
 
   it('a retry of the SAME tap (a lost answer, a double submit at once) takes one, never two', async () => {
@@ -162,6 +164,18 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
     expect((await itemOf(item.id)).stockQuantity).toBe(2);
     expect(await ledgerOf(item.id)).toHaveLength(3);
     expect(await receiptsOf(item.id)).toHaveLength(3);
+  });
+
+  it('the same tap sent twice at once on the LAST one: one sale, and both answers say it happened (never "0 left")', async () => {
+    for (let i = 0; i < 4; i += 1) {
+      const item = await makeItem(1);
+      const key = tapKey();
+      const [a, b] = await Promise.all([sell(item.id, key), sell(item.id, key)]);
+      expect([a.status, b.status, a.json.error?.code, b.json.error?.code]).toEqual([200, 200, undefined, undefined]);
+      expect((await itemOf(item.id)).stockQuantity).toBe(0);
+      expect(await receiptsOf(item.id)).toHaveLength(1);
+      expect(await ledgerOf(item.id)).toHaveLength(1);
+    }
   });
 
   it('two separate taps take two', async () => {
@@ -231,10 +245,10 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
     expect(await itemOf(item.id)).toMatchObject({ stockQuantity: 1, isAvailable: true, autoHiddenAt: null });
     const ledger = await ledgerOf(item.id);
     expect(ledger).toHaveLength(2);
-    expect(ledger[0]).toEqual(before[0]); // the sale's row is untouched
-    expect({ delta: ledger[1].delta, balanceAfter: ledger[1].balanceAfter, reason: ledger[1].reason, actorId: ledger[1].actorId })
+    expect(ledger[0]!).toEqual(before[0]!); // the sale's row is untouched
+    expect({ delta: ledger[1]!.delta, balanceAfter: ledger[1]!.balanceAfter, reason: ledger[1]!.reason, actorId: ledger[1]!.actorId })
       .toEqual({ delta: 1, balanceAfter: 1, reason: 'IN_STORE_SALE', actorId: ownerUserId });
-    expect(ledger[1].note).toContain(before[0].id);
+    expect(ledger[1]!.note).toContain(before[0]!.id);
 
     // A retry of the Undo (or a second Undo of the same sale) puts nothing more back.
     const again = await undo(item.id, key);
@@ -250,23 +264,27 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
     expect(rows.at(-1)!.balanceAfter).toBe((await itemOf(item.id)).stockQuantity);
   });
 
-  it('Undo never shows an item the store hid by hand, nor one a different event hid', async () => {
+  it('Undo shows an auto-hidden item again as a restock does, whoever hid it; never one the store hid by hand', async () => {
     // Hidden by hand before the sale: it stays hidden after the Undo.
     const byHand = await makeItem(1, { isAvailable: false });
     const k1 = tapKey();
     expect((await sell(byHand.id, k1)).status).toBe(200);
     expect((await undo(byHand.id, k1)).json.data).toMatchObject({ stockQuantity: 1, isAvailable: false });
 
-    // Two taps: the second emptied the shelf and hid it. Undoing the FIRST leaves the second's hide in place.
+    // [Owner ruling · REVIEW-F S4-8] In-store sale 2 -> 1, then something else empties the shelf and hides it (here a
+    // damaged one through Adjust stock, as an app order would): the Undo puts 1 back and customers can buy it again,
+    // never "sold out" next to "1 in stock".
     const two = await makeItem(2);
-    const first = tapKey();
-    const second = tapKey();
-    await sell(two.id, first);
-    await sell(two.id, second);
-    expect((await itemOf(two.id)).isAvailable).toBe(false);
-    expect((await undo(two.id, first)).json.data).toMatchObject({ stockQuantity: 1, isAvailable: false });
-    // Undoing the one that hid it shows it again.
-    expect((await undo(two.id, second)).json.data).toMatchObject({ stockQuantity: 2, isAvailable: true });
+    const k2 = tapKey();
+    await sell(two.id, k2);
+    const damaged = await fetch(`${base}/api/v1/vendor/items/${two.id}/adjust`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${tokens.owner}`, 'idempotency-key': tapKey() },
+      body: JSON.stringify({ delta: -1, reason: 'DAMAGED' }),
+    });
+    expect(damaged.status).toBe(200);
+    expect(await itemOf(two.id)).toMatchObject({ stockQuantity: 0, isAvailable: false });
+    expect((await undo(two.id, k2)).json.data).toMatchObject({ stockQuantity: 1, isAvailable: true });
+    expect((await itemOf(two.id)).autoHiddenAt).toBeNull();
   });
 
   it('an item whose stock is not counted is refused in plain words, and nothing is written', async () => {
@@ -286,6 +304,9 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
       expect(res.status).toBe(404);
     }
     expect((await sell(item.id, tapKey(), 'customer')).status).toBe(403);
+    // The store check answers first, as on Adjust stock: no key and no body still get the refusal, not a 400.
+    expect((await call(`/items/${item.id}/in-store-sale`, 'customer')).status).toBe(403);
+    expect((await call(`/items/${item.id}/in-store-sale/undo`, 'customer')).status).toBe(403);
     expect((await itemOf(item.id)).stockQuantity).toBe(5);
     expect(await ledgerOf(item.id)).toHaveLength(0);
 
@@ -293,8 +314,17 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
     const byStaff = await sell(item.id, staffKey, 'staff');
     expect(byStaff.status).toBe(200);
     expect(byStaff.json.data?.stockQuantity).toBe(4);
-    // Nobody else can undo it, not even the owner: only the person who recorded the sale.
-    for (const who of ['owner', 'otherOwner'] as const) expect((await undo(item.id, staffKey, who)).status).toBe(404);
+    // Nobody else can undo it, not even the owner: only the person who recorded the sale (the store's owner is told
+    // so in words; another store does not learn the item exists).
+    const byOwner = await undo(item.id, staffKey, 'owner');
+    expect(byOwner.status).toBe(403);
+    expect(byOwner.json.error).toMatchObject({ code: 'SALE_NOT_YOURS', message: 'Only the person who recorded this sale can undo it. Use Adjust stock to correct the count.' });
+    expect((await undo(item.id, staffKey, 'otherOwner')).status).toBe(404);
+    // [REVIEW-M #2157 S4-2] Another member re-sending the staff tap's key is refused, never answered with that receipt.
+    const reusedByOwner = await sell(item.id, staffKey, 'owner');
+    expect(reusedByOwner.status).toBe(409);
+    expect(reusedByOwner.json.error?.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect((await itemOf(item.id)).stockQuantity).toBe(4);
     expect((await undo(item.id, staffKey, 'staff')).status).toBe(200);
     expect((await itemOf(item.id)).stockQuantity).toBe(5);
   });
@@ -330,6 +360,14 @@ describe('[IN-STORE-SALE] one tap takes one sold-in-person item off the Swift st
     expect(reused.status).toBe(409);
     expect(reused.json.error?.code).toBe('IDEMPOTENCY_KEY_REUSED');
     expect((await itemOf(item.id)).stockQuantity).toBe(7);
+    // [REVIEW-M #2157 S4-2] Even an Adjust stock of -1 (same size as a sale) is not taken for this tap's receipt.
+    const minusKey = tapKey();
+    await fetch(`${base}/api/v1/vendor/items/${item.id}/adjust`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${tokens.owner}`, 'idempotency-key': minusKey },
+      body: JSON.stringify({ delta: -1, reason: 'MANUAL' }),
+    });
+    expect((await sell(item.id, minusKey)).json.error?.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect((await itemOf(item.id)).stockQuantity).toBe(6);
   });
 
   it('the stock adjust route (builds 9-12) still takes exactly its five reasons: IN_STORE_SALE is not one of them', async () => {

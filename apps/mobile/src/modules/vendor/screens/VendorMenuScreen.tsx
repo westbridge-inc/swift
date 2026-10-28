@@ -288,7 +288,7 @@ export function SoldInStoreControls({ itemId, shown }: { itemId: string; shown: 
       {sale.stalled ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <T variant="caption" tone="error" style={{ flex: 1 }}>
-            {SOLD_IN_STORE.notSent(sale.unsent)}
+            {SOLD_IN_STORE.notSent(sale.unsentSales, sale.unsentUndos)}
           </T>
           <PillButton label={SOLD_IN_STORE.tryAgain} variant="outline" size="sm" onPress={() => taps.retry(itemId)} />
         </View>

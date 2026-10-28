@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SOLD_IN_STORE, SOLD_UNDO_MS, createSoldInStore, type SaleAnswer, type SaleOp, type SaleSender } from './inStoreSale';
+import { phoneSaleFailure } from '../hooks/useSoldInStore';
 
 // ---------------------------------------------------------------------------
 // [IN-STORE-SALE] The line of "Sold in store −1" taps, shared by the phone and the website (pure, no network).
@@ -16,6 +17,8 @@ let keys: number;
 const NO_ANSWER = new Error('offline');
 const refusal = (words: string) => Object.assign(new Error('409'), { words });
 
+const senders = new WeakMap<object, SaleSender>();
+const senderOf = (e: object) => senders.get(e)!;
 function engine() {
   const e = createSoldInStore();
   const sender: SaleSender = {
@@ -26,6 +29,7 @@ function engine() {
     classify: (error) => ((error as { words?: string }).words ? { refused: (error as { words: string }).words } : 'noAnswer'),
   };
   e.setSender(sender);
+  senders.set(e, sender);
   return e;
 }
 const flush = async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); };
@@ -102,7 +106,7 @@ describe('[IN-STORE-SALE] Sold in store taps', () => {
     expect(calls).toHaveLength(1);
     expect(e.view('rice')).toMatchObject({ stalled: true, unsent: 2, pending: -2 });
     expect(e.shown('rice', 5)).toBe(3);
-    expect(SOLD_IN_STORE.notSent(e.view('rice').unsent)).toBe('2 sales haven’t reached Swift yet.');
+    expect(SOLD_IN_STORE.notSent(e.view('rice').unsentSales, e.view('rice').unsentUndos)).toBe("Swift hasn't confirmed 2 sales yet.");
     e.retry('rice');
     expect(calls.map((c) => c.op)).toEqual([{ kind: 'sale', key: 'tap-1' }, { kind: 'sale', key: 'tap-1' }]);
     answer(calls[1]!, 4);
@@ -213,5 +217,86 @@ describe('[IN-STORE-SALE] Sold in store taps', () => {
     expect(e.viewKey('rice')).toBe(before);
     e.tap('rice');
     expect(e.viewKey('rice')).not.toBe(before);
+  });
+});
+
+// [REVIEW-F #2157] The reviewer's probes, lifted (P1-P6), and the store-switch park (S4-5).
+describe('[IN-STORE-SALE · REVIEW-F #2157] the line under stress', () => {
+  it('P1 an answer the row never drew, then a fresher list (another sale meanwhile): the row shows the list, not the old answer', async () => {
+    const e = engine();
+    expect(e.shown('rice', 5)).toBe(5);
+    e.tap('rice');
+    answer(calls[0]!, 4);
+    await flush();
+    expect(e.shown('rice', 3)).toBe(3);
+  });
+
+  it('P2 a refusal on the 3rd tap keeps Undo for the 2 taps that DID land', async () => {
+    const e = engine();
+    e.tap('oil'); e.tap('oil'); e.tap('oil');
+    answer(calls[0]!, 1); await flush();
+    answer(calls[1]!, 0); await flush();
+    fail(calls[2]!, refusal(SOLD_IN_STORE.noneLeft)); await flush();
+    expect(e.view('oil').notice).toBe(SOLD_IN_STORE.noneLeft);
+    expect(e.view('oil').sold).toBe(2);
+    e.undo('oil');
+    expect(calls[3]!.op).toEqual({ kind: 'undo', saleKey: 'tap-2' });
+  });
+
+  it('P3 one sale and its Undo waiting for Try again are named as that, never "2 sales"; words never claim it did not land', async () => {
+    const e = engine();
+    e.tap('rice');
+    fail(calls[0]!, NO_ANSWER); await flush();
+    expect(SOLD_IN_STORE.notSent(e.view('rice').unsentSales, e.view('rice').unsentUndos)).toBe("Swift hasn't confirmed this sale yet.");
+    e.undo('rice');
+    const v = e.view('rice');
+    expect(v.stalled).toBe(true);
+    expect(SOLD_IN_STORE.notSent(v.unsentSales, v.unsentUndos)).toBe("Swift hasn't confirmed this sale or its Undo yet.");
+    expect(SOLD_IN_STORE.notSent(0, 1)).toBe("Swift hasn't confirmed the Undo yet.");
+  });
+
+  it('P4 after reset (another person signed in) the last person\'s waiting tap is never sent, and the old answer is not written', async () => {
+    const e = engine();
+    e.tap('rice'); e.tap('rice');
+    e.reset();
+    const later: string[] = [];
+    e.setSender({ newKey: () => 'b-key', send: async () => { later.push('sent'); return null; }, answered: () => { later.push('answered'); }, reread: () => undefined, classify: () => 'noAnswer' });
+    answer(calls[0]!, 4); await flush();
+    expect(later).toEqual([]);
+    expect(answered).toEqual([]);
+    expect(e.view('rice')).toMatchObject({ pending: 0, unsent: 0 });
+  });
+
+  it('P5 a new tap while stalled sends nothing by itself', async () => {
+    const e = engine();
+    e.tap('rice');
+    fail(calls[0]!, NO_ANSWER); await flush();
+    e.tap('rice'); await flush();
+    expect(calls).toHaveLength(1);
+    expect(e.view('rice')).toMatchObject({ stalled: true, unsent: 2, pending: -2 });
+  });
+
+  it('P6 a server error (5xx) or no response is "no answer" on the phone, never a refusal that drops the taps', () => {
+    expect(phoneSaleFailure({ response: { status: 500, data: { error: { message: 'Internal' } } } })).toBe('noAnswer');
+    expect(phoneSaleFailure({ response: { status: 503 } })).toBe('noAnswer');
+    expect(phoneSaleFailure(new Error('Network Error'))).toBe('noAnswer');
+    expect(phoneSaleFailure({ response: { status: 409, data: { error: { message: SOLD_IN_STORE.noneLeft } } } })).toEqual({ refused: SOLD_IN_STORE.noneLeft });
+  });
+
+  it('S4-5 a tap made in store A is never sent while store B is open: parked, then sent with Try again back in A', async () => {
+    const e = engine();
+    let open = 'store-a';
+    e.setSender({ ...senderOf(e), canSend: (scope) => scope === open });
+    e.tap('rice', 'store-a');
+    e.tap('rice', 'store-a');
+    open = 'store-b';
+    answer(calls[0]!, 4); await flush();
+    expect(calls).toHaveLength(1);
+    expect(e.view('rice')).toMatchObject({ stalled: true, unsent: 1 });
+    e.retry('rice'); await flush();
+    expect(calls).toHaveLength(1); // still another store: still parked
+    open = 'store-a';
+    e.retry('rice'); await flush();
+    expect(calls.map((c) => c.op)).toEqual([{ kind: 'sale', key: 'tap-1' }, { kind: 'sale', key: 'tap-2' }]);
   });
 });

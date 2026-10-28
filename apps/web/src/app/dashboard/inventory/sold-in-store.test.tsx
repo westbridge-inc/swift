@@ -13,7 +13,8 @@ const drawn = vi.hoisted(() => ({ rows: 0 }));
 vi.mock('@/components/glyphs', () => ({ Pictogram: () => { drawn.rows += 1; return null; } }));
 
 import InventoryPage from './page';
-import { soldInStore } from './sold-in-store';
+import { soldInStore, webSaleFailure } from './sold-in-store';
+import { ApiRequestError } from '@/lib/auth';
 import { SOLD_IN_STORE, SOLD_UNDO_MS } from '../../../../../mobile/src/lib/inStoreSale';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 import { storeKey } from '@/lib/store-scope';
@@ -143,7 +144,7 @@ describe('[IN-STORE-SALE] "Sold in store −1" on the Products page', () => {
     await tapSell('Rice');
     await waitFor(() => expect(sent).toHaveLength(1));
     sent[0]!.drop();
-    await waitFor(() => expect(within(row('Rice')).getByRole('alert').textContent).toContain(SOLD_IN_STORE.notSent(1)));
+    await waitFor(() => expect(within(row('Rice')).getByRole('alert').textContent).toContain(SOLD_IN_STORE.notSent(1, 0)));
     expect(stockButton('Rice').textContent).toBe('4 in stock · Adjust stock');
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(sent).toHaveLength(1);
@@ -159,5 +160,34 @@ describe('[IN-STORE-SALE] "Sold in store −1" on the Products page', () => {
     for (let i = 0; i < 3; i += 1) await tapSell('Oil');
     expect(stockButton('Oil').textContent).toBe('0 in stock · Adjust stock');
     expect((await sellButton('Oil')).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('[REVIEW-F S4-7] the Low stock label moves at the tap with the count, as the app', async () => {
+    items = items.map((i) => (i.id === 'oil' ? { ...i, stockQuantity: 6, lowStockThreshold: 5 } : i));
+    renderWithQuery(<InventoryPage />);
+    await sellButton('Oil');
+    expect(within(row('Oil')).queryByText('Low stock')).toBeNull();
+    await tapSell('Oil');
+    expect(stockButton('Oil').textContent).toBe('5 in stock · Adjust stock');
+    expect(within(row('Oil')).getByText('Low stock'), 'at the tap, before the answer').toBeTruthy();
+  });
+
+  it('[REVIEW-F P7/P8] a server error, no answer, or the page\'s own "account or store changed" (it may have landed) is no answer; only the server\'s 4xx is a refusal', () => {
+    expect(webSaleFailure(new ApiRequestError('Internal', 500, 'INTERNAL'))).toBe('noAnswer');
+    expect(webSaleFailure(new ApiRequestError('Swift can’t be reached right now.', 503, 'UNREACHABLE'))).toBe('noAnswer');
+    expect(webSaleFailure(new TypeError('Failed to fetch'))).toBe('noAnswer');
+    expect(webSaleFailure(new ApiRequestError('The signed-in account or selected store changed while this request was running. Try again.', 409, 'SESSION_CHANGED'))).toBe('noAnswer');
+    expect(webSaleFailure(new ApiRequestError(SOLD_IN_STORE.noneLeft, 409, 'NONE_LEFT'))).toEqual({ refused: SOLD_IN_STORE.noneLeft });
+  });
+
+  it('[REVIEW-F S4-4] a sale whose answer the page could not use is kept, and Try again resends the SAME key (never a second sale)', async () => {
+    renderWithQuery(<InventoryPage />);
+    await tapSell('Rice');
+    await waitFor(() => expect(sent).toHaveLength(1));
+    sent[0]!.reply(409, { success: false, error: { code: 'SESSION_CHANGED', message: 'The signed-in account changed.' } });
+    await waitFor(() => expect(within(row('Rice')).getByRole('alert').textContent).toContain(SOLD_IN_STORE.notSent(1, 0)));
+    await act(async () => { fireEvent.click(within(row('Rice')).getByRole('button', { name: SOLD_IN_STORE.tryAgain })); });
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]!.key).toBe(sent[0]!.key);
   });
 });

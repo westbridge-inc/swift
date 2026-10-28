@@ -78,8 +78,12 @@ function RowTool({ tool, item, onSave = () => undefined, onDone }: { tool: 'pric
 function RowStock({ item, onAdjust }: { item: CatalogItem; onAdjust: () => void }) {
   const tools = menuTools.usePart(true);
   const storeId = useStoreId();
-  return tools ? <tools.SaleStock item={item} storeId={storeId} onAdjust={onAdjust} />
-    : <button onClick={onAdjust} className="sw-link-btn min-h-8">{item.stockQuantity} in stock · Adjust stock</button>;
+  if (tools) return <tools.SaleStock item={item} storeId={storeId} onAdjust={onAdjust} />;
+  const low = item.stockQuantity != null && item.stockQuantity <= (item.lowStockThreshold ?? 5);
+  return <>
+    {low && <span className="font-semibold text-amber-700">Low stock</span>}
+    <button onClick={onAdjust} className="sw-link-btn min-h-8">{item.stockQuantity} in stock · Adjust stock</button>
+  </>;
 }
 
 /**
@@ -109,7 +113,6 @@ const ItemRow = memo(function ItemRow({ item: i, pending, pricePending, manager,
   vatPending: boolean;
   onVatClass: (_id: string, _vatClass: VatClass) => void;
 }) {
-  const low = i.stockQuantity != null && i.stockQuantity <= (i.lowStockThreshold ?? 5);
   // The item's own photo, as the app shows it (a 96 px copy through the store-photo route); none = the placeholder.
   return <article aria-label={i.name} className="border-b border-[var(--swift-border)] py-5" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 120px' }}>
     <div className="flex items-center gap-3">
@@ -128,7 +131,6 @@ const ItemRow = memo(function ItemRow({ item: i, pending, pricePending, manager,
     </div>
     <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px] text-[var(--swift-muted)]">
       {!i.isAvailable && <span>Sold out</span>}
-      {low && <span className="font-semibold text-amber-700">Low stock</span>}
       {i.stockQuantity == null ? <span>Stock untracked</span> : <RowStock item={i} onAdjust={() => onAdjust(adjusting ? null : i.id)} />}
       {i.sku && <span>SKU: {i.sku}</span>}
       {vatRate != null && <RowVat item={i} vatRate={vatRate} vatEffective={vatEffective} pending={vatPending} onVatClass={onVatClass} />}

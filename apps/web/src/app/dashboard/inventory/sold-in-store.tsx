@@ -2,7 +2,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { ApiRequestError } from '@/lib/auth';
+import { ApiRequestError, getSelectedStore } from '@/lib/auth';
 import { storeKey } from '@/lib/store-scope';
 import { sellInStore, undoInStoreSale } from '@/lib/stock-adjust';
 import type { CatalogItem } from '@/lib/vendor-api';
@@ -18,9 +18,14 @@ import { SOLD_IN_STORE, createSoldInStore, type SaleAnswer, type SaleFailure } f
 /** The website's ONE line of taps: a tap is never dropped by a row drawing again. */
 export const soldInStore = createSoldInStore();
 
-/** Only a 4xx is the server saying no; no answer, a timeout or a server error may have landed. */
+/** Only a 4xx from the server is a no; no answer, a timeout or a server error may have landed. The page's own
+ *  SESSION_CHANGED (the account or store changed while the request ran: thrown after the server answered, so the sale
+ *  may have landed) is no answer too: Try again then resends the SAME key, which a landed sale answers with its
+ *  receipt, never a second sale. [REVIEW-F #2157 S4-4] */
 export function webSaleFailure(error: unknown): SaleFailure {
-  if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500 && error.code !== 'UNREACHABLE') return { refused: error.message };
+  if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500 && error.code !== 'UNREACHABLE' && error.code !== 'SESSION_CHANGED') {
+    return { refused: error.message };
+  }
   return 'noAnswer';
 }
 
@@ -53,6 +58,8 @@ function useSender(storeId: string | null) {
     },
     reread: () => rereadSoon(queryClient, storeId),
     classify: webSaleFailure,
+    // [REVIEW-F #2157 S4-5] Taps made in one store are never sent while another is open (they wait for Try again there).
+    canSend: (scope) => ((scope as { storeId: string | null } | undefined)?.storeId ?? null) === (getSelectedStore() ?? null),
   });
   return {
     tap: (itemId: string) => {
@@ -72,8 +79,11 @@ export function SaleStock({ item, storeId, onAdjust }: { item: CatalogItem; stor
   useSyncExternalStore(soldInStore.subscribe, () => soldInStore.viewKey(item.id), () => '');
   const sale = soldInStore.view(item.id);
   const shown = soldInStore.shown(item.id, item.stockQuantity ?? 0);
+  // [REVIEW-F #2157 S4-7] As the app: the Low stock label moves at the tap with the count.
+  const low = shown <= (item.lowStockThreshold ?? 5);
   return (
     <>
+      {low && <span className="font-semibold text-amber-700">Low stock</span>}
       <button type="button" onClick={onAdjust} className="sw-link-btn min-h-8">{shown} in stock · Adjust stock</button>
       <button
         type="button"
@@ -92,7 +102,7 @@ export function SaleStock({ item, storeId, onAdjust }: { item: CatalogItem; stor
       )}
       {sale.stalled && (
         <span role="alert" className="text-[var(--swift-red)]">
-          {SOLD_IN_STORE.notSent(sale.unsent)}{' '}
+          {SOLD_IN_STORE.notSent(sale.unsentSales, sale.unsentUndos)}{' '}
           <button type="button" onClick={() => taps.retry(item.id)} className="min-h-8 font-semibold underline">{SOLD_IN_STORE.tryAgain}</button>
         </span>
       )}
