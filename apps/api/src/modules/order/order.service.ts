@@ -50,7 +50,8 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService, lockBusinessTime, lockCustomerBookings } from '../booking/booking.service';
 import { bookingLimitsFor } from '../booking/booking-limits';
-import { instantBookingEnabled } from '../booking/instant-booking';
+import { INSTANT_CONFIRM_CHANGED_BY, INSTANT_CONFIRM_NOTE, INSTANT_CONFIRM_PAYMENT_METHOD, instantBookingEnabled, listingConfirmsAutomatically } from '../booking/instant-booking';
+import { businessCannotConfirmBooking, vendorOperateRefusal, type StoreRoleVerifier } from '../vendor/vendor-operate';
 import { bookingChangeForOrderTransition, syncOrderBookings } from '../booking/order-coupling';
 import { canonicalSlotStart } from '../booking/availability';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
@@ -758,6 +759,8 @@ export class OrderService {
   private notifications: NotificationService;
   private countryConfig: CountryConfigService;
   private booking: BookingService;
+  /** [BOOK-S3] The store-verification read an instant booking's standing acceptance needs (built on first use). */
+  private storeVerifierInstance?: StoreRoleVerifier;
 
   constructor(
     private prisma: PrismaClient,
@@ -1853,6 +1856,36 @@ export class OrderService {
             orderId: order.id,
             limits: bookingLimits,
           });
+          // [BOOK-S3 · owner A3/A4 28 Oct] INSTANT CONFIRM. The business set this
+          // listing to "Confirm bookings automatically" (read on the locked menu
+          // row) and the customer pays cash at the appointment: the business's
+          // standing acceptance is given HERE, in the order's own commit, through
+          // the canonical transition (PENDING -> ACCEPTED; the coupling seam turns
+          // the booking just held RESERVED -> CONFIRMED; its gates — the booking
+          // law, payment-first, a held or banned line — run on the locked row).
+          // It is given only by a business that could accept the booking itself
+          // at this moment: open, not suspended, verified, weekly fee not lapsed
+          // (the one predicate the business's own accept uses). If it cannot, no
+          // order at all: 409, the whole checkout rolls back. An MMG booking stays
+          // "the business confirms" (A3). The home-visit clearance was re-read
+          // above, under the vendor row lock, for every home visit.
+          if (input.paymentMethod === INSTANT_CONFIRM_PAYMENT_METHOD) {
+            const listing = await tx.item.findUniqueOrThrow({ where: { id: plan.orderItems[0]!.itemId }, select: { bookingConfig: true } });
+            if (listingConfirmsAutomatically(listing.bookingConfig)) {
+              if (await vendorOperateRefusal(tx, await this.storeVerifier(), plan.vendor.id, 'NEW')) {
+                throw businessCannotConfirmBooking(plan.vendor.name);
+              }
+              await this.stageCanonicalOrderTransition(tx, {
+                orderId: order.id,
+                target: 'ACCEPTED',
+                allowedFrom: ['PENDING'],
+                changedBy: INSTANT_CONFIRM_CHANGED_BY,
+                note: INSTANT_CONFIRM_NOTE,
+                at: new Date(),
+              });
+              Object.assign(order, await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, acceptedAt: true } }));
+            }
+          }
         }
 
         // A held order is counted at its release, never here [Q12].
@@ -1981,8 +2014,10 @@ export class OrderService {
       // one immutable answer for this idempotency key as a receipt. A crash
       // or a queue outage after this point can delay the tail; it can no
       // longer lose it, and a same-key retry can no longer place twice.
+      // [BOOK-S3] A booking confirmed at checkout is already answered: it arms no
+      // accept-alert ladder and no no-response auto-cancel.
       await persistCheckoutOutboxInTransaction(tx, {
-        orders: created.map((o) => ({
+        orders: created.filter((o) => o.status === 'PENDING').map((o) => ({
           id: o.id,
           tenantId: o.tenantId,
           fulfillment: o.fulfillment,
@@ -2034,12 +2069,27 @@ export class OrderService {
       // order, by its release [Q12].
       try {
         const held = isHeld(order);
+        // [BOOK-S3] A booking confirmed at checkout: the store is TOLD (its board
+        // refreshes on a status change, and the team gets "New booking
+        // (confirmed)"), never rung with a new order to accept.
+        const confirmed = order.status === 'ACCEPTED';
         if (!held && order.vendorId) {
-          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
+          if (confirmed) {
+            await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', { orderId: order.id, status: order.status, timestamp: new Date().toISOString() }, { onlyWhileActive: true });
+          } else {
+            await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
+          }
+        }
+        if (confirmed) {
+          await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', order.id);
         }
         const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
         if (vendorOwner) {
-          if (!held) {
+          if (confirmed && order.appointmentSlot) {
+            await this.notifications.instantBookingForVendor(vendorOwner.userId, {
+              orderId: order.id, orderNumber: order.orderNumber, serviceName: order.items[0]?.name ?? 'A booking', slot: order.appointmentSlot,
+            });
+          } else if (!held) {
             await this.notifications.newOrderForVendor(
               vendorOwner.userId,
               order.orderNumber,
@@ -2080,6 +2130,18 @@ export class OrderService {
     }
 
     return answer;
+  }
+
+  /** [BOOK-S3] The verification service, for the one "may this business work orders" predicate. */
+  private async storeVerifier(): Promise<StoreRoleVerifier> {
+    if (!this.storeVerifierInstance) {
+      const [{ VerificationService }, { getKycProvider }] = await Promise.all([
+        import('../verification/verification.service'),
+        import('../../providers/kyc/kyc-provider'),
+      ]);
+      this.storeVerifierInstance = new VerificationService(this.prisma, this.notifications, getKycProvider());
+    }
+    return this.storeVerifierInstance;
   }
 
   /**
@@ -2174,39 +2236,6 @@ export class OrderService {
   /** Whether cancelling FROM this status should restock (goods still in store). */
   static restocksOnCancel(status: OrderStatus): boolean {
     return OrderService.PRE_PICKUP.includes(status);
-  }
-
-  /**
-   * Legacy cleanup used by the no-response queue after its guarded PENDING
-   * cancellation. Interactive customer/vendor/admin paths use transactional
-   * boundaries below. Call ONLY as the CAS winner so restock and float release
-   * each run exactly once.
-   */
-  async applyCancellationSideEffects(
-    order: { id: string; paymentMethod: string; riderId: string | null; driverId: string | null; subtotalBase: number },
-    opts: { restock: boolean },
-  ): Promise<void> {
-    // Mirrors the cancellation cleanup rules for the legacy queue path.
-    // ONE-SLOT-ONE-PERSON (scheduling spec 2.3): every order death frees its
-    // appointment slot — found live: vendor reject and the no-response
-    // auto-cancel left bookings CONFIRMED forever, permanently blocking the
-    // provider's chair. No booking rule counts a CANCELLED row [BOOK-S1], so
-    // the slot is instantly sellable again.
-    await syncOrderBookings(this.prisma, order.id, 'FREE');
-    if (opts.restock) await this.restockCancelledOrder(order.id);
-    if (order.riderId) {
-      await new FloatService(this.prisma).release(this.prisma, order.riderId, riderFloatForOrder(order));
-      // Through the seam, not a bare null: under stacking this rider may hold
-      // another live leg, and "available" is the count against capacity.
-      const riderId = order.riderId;
-      await this.prisma.$transaction((tx) => settleRiderLegs(tx, riderId, { prisma: this.prisma, excludeOrderId: order.id }));
-    }
-    if (order.driverId) {
-      await this.prisma.driver.updateMany({
-        where: { id: order.driverId, currentRideId: order.id },
-        data: { isAvailable: true, currentRideId: null },
-      });
-    }
   }
 
   /** Free the rider when this order owns the pointer. Legacy cancellation paths

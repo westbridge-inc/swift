@@ -15,10 +15,11 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 // booking is a record, and stays one.
 //
 // Callers: the canonical order transition (order.service.ts
-// stageCanonicalOrderTransition: accept, complete, reject, auto-cancel, admin
-// and ops cancels, the unpaid-MMG expiry), the customer's own cancel
-// (cancelOrder) and the legacy no-response cleanup
-// (applyCancellationSideEffects).
+// stageCanonicalOrderTransition: accept — the business's own, or [BOOK-S3] an
+// instant booking's standing acceptance inside checkout — complete, reject,
+// auto-cancel, admin and ops cancels, the unpaid-MMG expiry) and the
+// customer's own cancel (cancelOrder). [BOOK-S3 · REVIEW-G S4-1 on #2192] The
+// legacy cleanup (applyCancellationSideEffects) had no caller and is deleted.
 // ---------------------------------------------------------------------------
 
 export type OrderBookingChange = 'CONFIRM' | 'COMPLETE' | 'FREE';
