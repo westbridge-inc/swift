@@ -7,13 +7,15 @@
  *  - an image purged under its bucket's policy (`imagePurgedAt`, E2E-DOC-5) changes nothing;
  *  - the account's own records count, and so do the records of every VEHICLE subject the
  *    account holds an OPEN, APPROVED link to (a fleet's insurance serves every assigned
- *    driver) — [High #9 · DS109] a PENDING link (retyped plate) propagates nothing.
+ *    driver) — [High #9 · DS109] a PENDING link (retyped plate) propagates nothing, and
+ *    [SEC-TRUST F9] the registrant's link counts only on a person-approved paper of its own.
  * Used by the verification service (predicate, validity bound, live-operation gate) and
  * by the service-provider projection — one rule, one implementation.
  */
 import type { CoverageClass, Prisma, PrismaClient } from '@prisma/client';
 import { validExpiryOr } from './document-validity';
 import { HIRE_SPLIT_DOC_TYPES } from './hire-permit-grace';
+import { personApprovedOwnVehiclePaper } from './subjects';
 
 export type EvidenceDb = Prisma.TransactionClient | PrismaClient;
 
@@ -39,13 +41,30 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
   return recordEvidenceFor(db, userId, checklist, now);
 }
 
+/**
+ * [SEC-TRUST F9] The vehicle subjects whose evidence counts for this account: every OPEN, APPROVED link —
+ * except that the link of the account that REGISTERED the vehicle counts only while that account holds a
+ * paper of its own for the vehicle that a person approved (not revoked). Naming a plate first proves
+ * nothing, so another account's approved papers never stand in for the registrant's own. Read here, at
+ * evidence time, so it binds every approval path and every link however old (no data is rewritten).
+ * `asOf` also requires the link to have started (the go-online gate's reading).
+ */
+export async function countableVehicleSubjectIds(db: EvidenceDb, userId: string, asOf?: Date): Promise<string[]> {
+  const links = await db.subjectLink.findMany({
+    where: { accountId: userId, validTo: null, approvedAt: { not: null }, ...(asOf ? { validFrom: { lte: asOf } } : {}), subject: { kind: 'VEHICLE' } },
+    select: { subjectId: true, subject: { select: { createdById: true } } },
+  });
+  const countable = new Set<string>();
+  for (const link of links) {
+    if (link.subject.createdById === userId && !(await personApprovedOwnVehiclePaper(db, userId, link.subjectId))) continue;
+    countable.add(link.subjectId);
+  }
+  return [...countable];
+}
+
 /** The records themselves: the evidence rule. */
 export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
-  const vehicles = await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
-    select: { subjectId: true },
-  });
-  const vehicleIds = vehicles.map((v) => v.subjectId);
+  const vehicleIds = await countableVehicleSubjectIds(db, userId);
   const records = await db.documentRecord.findMany({
     where: {
       docType: { in: [...checklist] },

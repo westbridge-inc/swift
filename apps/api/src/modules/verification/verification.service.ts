@@ -7,7 +7,7 @@ import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
-import { approveRegistrantLink, linkedAccountIds, normalizeRegistrationMark, personApprovedOwnVehiclePaper, plateClassOf, resolveSubject, rootSubjectId } from './subjects';
+import { approveRegistrantLink, linkedAccountIds, normalizeRegistrationMark, plateClassOf, resolveSubject, rootSubjectId } from './subjects';
 import { POLICE_CLEARANCE_WITHDRAWN_NOTE } from './police-clearance-consent';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, FOOD_HANDLER_ATTESTATION_TYPE, isNeverAcceptedDocType, OWN_NAME_DOC_TYPE, OWN_NAME_TIER, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -1568,10 +1568,7 @@ export class VerificationService {
     await assertNotRecused(this.prisma, review.reviewerId, candidate.userId);
     await this.reviewObserver?.afterPendingRead?.({ docId, userId: candidate.userId, requestedStatus });
 
-    // [SEC-TRUST F9] Set when this approval sent the vehicle's registrant back for a person's re-check.
-    const recheck: { registrant: { registrantId: string; subjectId: string; tenantId: string } | null } = { registrant: null };
     const outcome = await this.projectionTransaction(async (tx) => {
-      recheck.registrant = null;
       await assertNotRecused(tx, review.reviewerId, candidate.userId);
       const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
         SELECT "id", "phone" FROM "users"
@@ -1671,19 +1668,6 @@ export class VerificationService {
         if (subject?.createdById === updated.userId && vehicle && onPlate) {
           // [SEC-TRUST F9] A person approved the registrant's own paper: this is what approves its link.
           await approveRegistrantLink(tx, updated.userId, updated.subjectId, open.tenantId, now);
-        } else if (subject && subject.createdById !== updated.userId) {
-          // [SEC-TRUST F9] Another account's papers for this vehicle were approved, and every approved link
-          // holder counts them. The registrant's approved link stands only on a paper of its OWN that a person
-          // approved; a link without one (approved before this rule, or never reviewed) goes back to pending
-          // for a person to re-check (approveVehicleAssignment), and the operators are told.
-          const held = await tx.subjectLink.findFirst({
-            where: { accountId: subject.createdById, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: { not: null } },
-            select: { id: true },
-          });
-          if (held && !(await personApprovedOwnVehiclePaper(tx, subject.createdById, updated.subjectId))) {
-            const reopened = await tx.subjectLink.updateMany({ where: { id: held.id, validTo: null, approvedAt: { not: null } }, data: { approvedAt: null } });
-            if (reopened.count === 1) recheck.registrant = { registrantId: subject.createdById, subjectId: updated.subjectId, tenantId: open.tenantId };
-          }
         }
       }
       // [High #9 · DS109] The PENDING vehicle link lifecycle rides the doc decision: rejecting
@@ -1723,7 +1707,6 @@ export class VerificationService {
       if (within) await within(tx, updated);
       return { kind: 'UPDATED' as const, document: updated };
     });
-    if (recheck.registrant) await this.afterRegistrantRecheck(recheck.registrant);
     if (outcome.kind === 'REPLACED') {
       throw new AppError(409, DOCUMENT_REPLACED, 'The applicant replaced this document with a newer copy. Open the newer copy in the queue.');
     }
@@ -2646,25 +2629,6 @@ export class VerificationService {
   ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' | 'insurance' }> {
     const { allowed, reason } = await evaluateMoverDocuments(db, userId, { ...opts, kind: opts.kind ?? 'DRIVER' });
     return { allowed, reason };
-  }
-
-  /**
-   * [SEC-TRUST F9] After commit: the registrant whose link went back to pending stops working with that
-   * vehicle until a person re-checks it, and the operators are told which account and vehicle to look at.
-   * Best-effort: the decision is already committed, and the go-online gate reads the pending link anyway.
-   */
-  private async afterRegistrantRecheck(recheck: { registrantId: string; subjectId: string; tenantId: string }): Promise<void> {
-    try {
-      await this.forceMoverOfflineIfNotLive(recheck.registrantId);
-      await notifyAdmins(this.prisma, this.notifications, {
-        tenantId: recheck.tenantId,
-        title: 'Vehicle registrant to re-check',
-        body: 'Papers from another account were approved for a vehicle whose registrant has no paper of their own approved by a person. Their vehicle assignment is back to pending: check their papers, then approve the assignment or leave it.',
-        data: { kind: 'verification_vehicle_registrant_recheck', userId: recheck.registrantId, subjectId: recheck.subjectId },
-      });
-    } catch (err) {
-      log().error({ err, subjectId: recheck.subjectId }, '[SEC-TRUST F9] registrant re-check follow-up failed');
-    }
   }
 
   /**

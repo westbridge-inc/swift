@@ -2,9 +2,9 @@
  * [SEC-TRUST F9] The account that first names a plate registers the vehicle, but naming a plate proves
  * nothing: its ASSIGNED_DRIVER link starts PENDING and is approved only when a PERSON approves one of that
  * account's OWN papers for the vehicle. A rejected paper (by a person or automatically) closes a link that
- * is still pending. When a person approves ANOTHER account's papers for the vehicle, a registrant whose
- * approved link stands on no person-approved paper of its own goes back to pending for a re-check, and the
- * operators are told; a registrant with one keeps its link.
+ * is still pending. And at evidence time, whatever its link says (one approved before this rule included),
+ * a registrant counts the vehicle's papers only while it holds a non-revoked paper of its own for the
+ * vehicle that a person approved: another account's approved papers never stand in for it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -16,7 +16,8 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
-import { seedDocRegistry } from '../modules/verification/doc-registry';
+import { BUCKET_OF, seedDocRegistry } from '../modules/verification/doc-registry';
+import { CountryConfigService } from '../modules/country/country-config.service';
 import { recordEvidenceFor } from '../modules/verification/evidence';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import { testPhone } from './helpers/fixture-ids';
@@ -24,6 +25,7 @@ import { testPhone } from './helpers/fixture-ids';
 let app: FastifyInstance;
 let service: VerificationService;
 let reviewerId: string;
+let countryConfig: CountryConfigService;
 const users: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'vehicle-registrant-review-test');
 const plate = () => `HB${nanoid(8).replace(/[^a-z0-9]/gi, '0').toUpperCase()}`;
@@ -56,6 +58,12 @@ const subjectOf = async (docId: string) => (await system(() => app.prisma.verifi
 const openLinks = (accountId: string, subjectId: string) => system(() => app.prisma.subjectLink.findMany({
   where: { accountId, subjectId, relation: 'ASSIGNED_DRIVER', validTo: null }, select: { id: true, approvedAt: true },
 }));
+/** An approved paper on file (the decision written as it stands; `approvedBy` = who approved it). */
+const approvedPaper = (userId: string, docType: string, approvedBy: string, subjectId: string | null = null) => system(() => app.prisma.verificationDocument.create({ data: {
+  userId, role: 'MOVER', docType, subjectId, fileUrl: `/uploads/verification/sectrust-f9/${docType}-${nanoid(6)}.enc`, status: 'APPROVED',
+  reviewedBy: approvedBy, reviewedAt: new Date(), expiresAt: new Date(Date.now() + 200 * 86_400_000),
+  ...(docType === 'vehicle_insurance' ? { coverageClass: 'HIRE' as const, hireClassConfirmed: true, plateCrossChecked: true } : {}),
+} }));
 /** The vehicle evidence the go-online gate would count for this account (its own, and its approved links'). */
 const vehicleEvidence = (accountId: string) => system(() => recordEvidenceFor(app.prisma, accountId, ['vehicle_registration'], new Date()));
 
@@ -67,6 +75,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.ready();
   service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  countryConfig = new CountryConfigService(app.prisma);
   await system(() => seedDocRegistry(app.prisma));
   reviewerId = await user('ADMIN');
 });
@@ -138,25 +147,38 @@ describe('[SEC-TRUST F9] the vehicle registrant is reviewed like every other ass
     expect((await vehicleEvidence(first)).map((row) => row.docType)).toEqual(['vehicle_registration']);
   });
 
-  it('another account’s approved papers send a registrant with no person-approved paper of its own back to pending, and the operators are told', async () => {
+  it('a registrant approved before this rule counts another account’s approved papers only once a person has approved a paper of its own (go-online gate)', async () => {
+    const checklist = await countryConfig.getMoverChecklist('GY', 'CAR');
+    const vehicleTypes = checklist.filter((t) => BUCKET_OF[t] === 'VEHICLE');
+    const personalTypes = checklist.filter((t) => BUCKET_OF[t] !== 'VEHICLE');
+    expect(vehicleTypes).toContain('vehicle_insurance');
     const P = plate();
     const first = await driverOn(P);
-    const junk = await submit(first);
-    const vehicle = await subjectOf(junk.id);
-    // The shape an account registered before this rule may carry: an approved link and no paper a person approved.
-    await system(() => app.prisma.subjectLink.updateMany({ where: { accountId: first, subjectId: vehicle, validTo: null }, data: { approvedAt: new Date() } }));
-    await system(() => app.prisma.verificationDocument.update({ where: { id: junk.id }, data: { status: 'REJECTED', reviewedBy: 'kyc:auto', reviewedAt: new Date() } }));
-
+    // The shape an account registered before this rule may carry: the vehicle on its name, an approved
+    // link, and no paper of its own that a person approved.
+    const vehicle = await system(async () => {
+      const subject = await app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: first } });
+      await app.prisma.vehicleProfile.create({ data: { subjectId: subject.id, countryCode: 'GY', registrationMark: P, vehicleKind: 'CAR', registeredById: first } });
+      await app.prisma.subjectLink.create({ data: { accountId: first, subjectId: subject.id, relation: 'ASSIGNED_DRIVER', approvedAt: new Date() } });
+      return subject.id;
+    });
+    for (const t of personalTypes) await approvedPaper(first, t, reviewerId);
+    // Another account's papers for the car, approved by a person.
     const owner = await driverOn(P);
-    const genuine = await submit(owner);
-    await approve(genuine.id);
+    for (const t of vehicleTypes) await approvedPaper(owner, t, reviewerId, vehicle);
 
-    expect((await openLinks(first, vehicle)).map((l) => l.approvedAt)).toEqual([null]);
-    expect(await vehicleEvidence(first)).toEqual([]);
-    const told = await system(() => app.prisma.notification.count({
-      where: { userId: reviewerId, data: { path: ['kind'], equals: 'verification_vehicle_registrant_recheck' } },
-    }));
-    expect(told).toBeGreaterThanOrEqual(1);
+    const gate = () => system(() => service.getLiveOperationStatus(first, { vehicleType: 'CAR' }));
+    expect((await gate()).allowed).toBe(false);
+    expect((await vehicleEvidence(first)).filter((row) => row.userId === owner)).toEqual([]);
+
+    // A paper of its own that only an engine approved is not a person's check.
+    await approvedPaper(first, 'vehicle_registration', 'kyc:auto', vehicle);
+    expect((await gate()).allowed).toBe(false);
+
+    // A paper of its own that a person approved: the vehicle's papers count for it.
+    await approvedPaper(first, 'vehicle_registration', reviewerId, vehicle);
+    expect((await gate()).allowed).toBe(true);
+    expect((await vehicleEvidence(first)).some((row) => row.userId === owner)).toBe(true);
   });
 
   it('a registrant whose own paper a person approved keeps its link when another account’s papers are approved', async () => {
