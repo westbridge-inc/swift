@@ -26,7 +26,7 @@ const baseJob = (updatedAt: Date): ServiceJob => ({
   updatedAt,
 });
 
-function fakeTx(count = 1) {
+function fakeTx(count = 1, blocked = false) {
   const expected = new Date('2026-09-20T13:00:00.000Z');
   const job = baseJob(new Date('2026-09-20T13:00:00.001Z'));
   const tx = {
@@ -37,6 +37,8 @@ function fakeTx(count = 1) {
     auditLog: { create: vi.fn().mockResolvedValue({ id: 'audit-1' }) },
     chatRoom: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     notification: { create: vi.fn().mockResolvedValue({ id: 'notice-1' }) },
+    // [SEC-TRUST F2] The contact-block read every notice to the other party makes (none by default).
+    userBlock: { findFirst: vi.fn().mockResolvedValue(blocked ? { id: 'block-1', blockerId: 'customer-1', blockedId: 'provider-user-1', blockedAt: new Date() } : null) },
   };
   return { tx: tx as unknown as Prisma.TransactionClient, raw: tx, expected, job };
 }
@@ -103,6 +105,20 @@ describe('service-job transition command', () => {
     expect(raw.chatRoom.updateMany).toHaveBeenCalledWith({ where: { id: job.chatRoomId, isActive: true }, data: { isActive: false } });
     expect(raw.notification.create).toHaveBeenCalledOnce();
     expect(result).toEqual({ job, notificationIds: ['notice-1'] });
+  });
+
+  it('[SEC-TRUST F2] across a block the job still moves, but no notice goes to the other party', async () => {
+    const { tx, raw, expected, job } = fakeTx(1, true);
+    const result = await transitionServiceJob(tx, {
+      jobId: job.id, actorUserId: 'provider-user', expectedUpdatedAt: expected, from: 'IN_PROGRESS', to: 'COMPLETED',
+      action: 'SERVICE_JOB_COMPLETED', closeChatRoomId: job.chatRoomId,
+      notices: [{ userId: job.customerId, type: 'ORDER_UPDATE', title: 'Complete', body: 'Done', data: { kind: 'booking_completed', jobId: job.id } }],
+      now: expected,
+    });
+    expect(raw.serviceJob.updateMany).toHaveBeenCalledOnce();
+    expect(raw.userBlock.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ tenantId: job.tenantId, unblockedAt: null }) }));
+    expect(raw.notification.create).not.toHaveBeenCalled();
+    expect(result).toEqual({ job, notificationIds: [] });
   });
 
   it('fails the exact-generation CAS loser before any receipt, notification, or chat mutation', async () => {
