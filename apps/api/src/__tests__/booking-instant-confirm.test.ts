@@ -424,6 +424,26 @@ describe('[BOOK-S3] races', () => {
   });
 });
 
+describe('[BOOK-S3] races (all automatic)', () => {
+  it('PARALLEL, on real PostgreSQL: five instant checkouts for one time — one ACCEPTED + CONFIRMED order, four 409 with no order', async () => {
+    on();
+    const slot = nextSlot();
+    const racers = await Promise.all(Array.from({ length: 5 }, (_, i) => customer(`Dash${i}`)));
+    for (const r of racers) {
+      expect((await call('DELETE', '/api/v1/customer/cart', r.token)).statusCode).toBe(200);
+      expect((await call('POST', '/api/v1/customer/cart/items', r.token, { vendorId: shop.vendorId, itemId: shop.instantId, quantity: 1 })).statusCode).toBe(201);
+    }
+    const results = await Promise.all(racers.map((r) => call('POST', '/api/v1/customer/checkout', r.token, {
+      paymentMethod: 'CASH', appointments: [{ itemId: shop.instantId, slotStart: slot.toISOString() }],
+    })));
+    expect(results.map((r) => r.statusCode).sort(), results.map((r) => r.body).join('\n')).toEqual([200, 409, 409, 409, 409]);
+    const winners = await app.prisma.order.findMany({ where: { customerId: { in: racers.map((r) => r.userId) } } });
+    expect(winners.map((o) => o.status)).toEqual(['ACCEPTED']);
+    expect(await bookingsOf(winners[0]!.id)).toEqual([expect.objectContaining({ status: 'CONFIRMED' })]);
+    expect(await liveAt(shop.vendorId, slot)).toBe(1);
+  });
+});
+
 // ── B1: appointments cancel free until two hours before ────────────────────
 
 /** Move a confirmed booking's time (and its acceptance) relative to now, as the clock would. */
@@ -497,10 +517,9 @@ describe('[BOOK-S3 · owner B1] switch ON — an appointment cancels free until 
   });
 
   it('control, switch OFF: today\'s one-minute window — confirmed 10 minutes ago, 3 hours ahead, refused in today\'s words', async () => {
-    on();
     const a = await customer('Ned');
-    const order = await booked(a, shop.instantId, nextSlot());
-    off();
+    const order = await booked(a, shop.requestId, nextSlot());
+    expect((await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, shop.owner.token, {})).statusCode).toBe(200);
     await placeInTime(order.id, 180, 10);
     const view = await preview(a, order.id);
     expect(view.canCancel).toBe(false);
