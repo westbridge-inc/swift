@@ -239,11 +239,16 @@ async function signMedia(mediaId: string): Promise<string | null> {
 /** When the send-path guard removed a live RIDE PIN from a message, the PIN
  *  is already in someone's hands: re-issue it. The pickup code is a
  *  handover proof held by the vendor side and is not rotated here. Returns
- *  true when a rotation happened. */
-export async function rotateLeakedRidePin(prisma: PrismaClient, orderId: string, leakedText: string, secrets: OrderSecrets): Promise<boolean> {
+ *  true when a rotation happened.
+ *
+ *  [F18] `priorDigits` MUST be the same digits the redaction judged the
+ *  message against: a PIN typed in pieces is redacted on the piece that
+ *  completes it, and the earlier pieces were already delivered, so the
+ *  decision to rotate reads the same joined transcript the redaction read. */
+export async function rotateLeakedRidePin(prisma: PrismaClient, orderId: string, leakedText: string, secrets: OrderSecrets, priorDigits = ''): Promise<boolean> {
   if (!secrets.ridePin) return false;
   // the PIN must have been what was redacted — a pickup-code redaction alone does not rotate the ride PIN
-  const pinOnly = redactOrderSecrets(leakedText, { ridePin: secrets.ridePin });
+  const pinOnly = redactOrderSecrets(leakedText, { ridePin: secrets.ridePin }, priorDigits);
   if (!pinOnly.redacted) return false;
   const r = await prisma.order.updateMany({ where: { id: orderId, ridePin: secrets.ridePin }, data: freshRidePinReset() });
   if (r.count === 1) chatGuardCounter.labels('send', 'ride_pin_rotated').inc();
