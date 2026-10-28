@@ -191,3 +191,28 @@ describe('[IN-STORE-SALE] "Sold in store −1" on the Products page', () => {
     expect(sent[1]!.key).toBe(sent[0]!.key);
   });
 });
+
+// [FOLLOWUPS · REVIEW-F #2157 delta S4-d1, probe P9 lifted] The web half of S4-5: a tap made under store A is never sent once another store is the
+// selected one (another tab switched it: the request would go out under that store's header), not even on Try again.
+describe('[REVIEW-F P9] web: no send under another store', () => {
+  it('P9 a stalled tap is not resent by Try again while another store is selected; back in its store it is (same key)', async () => {
+    renderWithQuery(<InventoryPage />);
+    await tapSell('Rice');
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await act(async () => { sent[0]!.drop(); });
+    await waitFor(() => expect(within(row('Rice')).getByRole('alert').textContent).toContain(SOLD_IN_STORE.notSent(1, 0)));
+    localStorage.setItem('swift_web_store', 'store-b');
+    try {
+      await act(async () => { fireEvent.click(within(row('Rice')).getByRole('button', { name: SOLD_IN_STORE.tryAgain })); });
+      await settle();
+      await new Promise((r) => setTimeout(r, 50));
+      await settle();
+      expect(sent).toHaveLength(1);
+    } finally {
+      localStorage.removeItem('swift_web_store');
+    }
+    await act(async () => { fireEvent.click(within(row('Rice')).getByRole('button', { name: SOLD_IN_STORE.tryAgain })); });
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]!.key).toBe(sent[0]!.key);
+  });
+});
