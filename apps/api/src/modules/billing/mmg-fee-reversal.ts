@@ -11,6 +11,7 @@ import { verifiedCheckoutCredit } from './confirmation-finance';
 import type { BillingService } from './billing.service';
 import { postLedger, returnedNotBookedPostings } from './ledger';
 import { amountMinorOf, decideAfterLookup, returnedWhilePaymentNotFound, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
+import { payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { lookupProof, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS } from './mmg-reversal-proof';
 
 // ---------------------------------------------------------------------------
@@ -887,7 +888,7 @@ export class MmgFeeReversalService {
           },
         }),
       ]);
-      const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
+      const userId = payerUserIdOf(sub);
       if (!userId) return;
       const paidOn = (intent?.confirmedAt ?? intent?.createdAt ?? row.sentAt)
         .toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' });
@@ -898,7 +899,7 @@ export class MmgFeeReversalService {
         title: 'Weekly-fee payment returned',
         // [review S4] MMG returns the money to the account that PAID, which may not be the partner's own.
         body: `Your payment of ${amount} on ${paidOn} was returned to the MMG account it was paid from.`,
-        audience: sub?.vendor ? 'business' : 'earner',
+        audience: payerAudienceOf(sub),
         data: { kind: 'billing_mmg_checkout', subscriptionId: row.subscriptionId, ref: row.checkoutId, status: 'REVERSED', ...(sub?.vendor ? { vendorId: sub.vendor.id } : {}) },
       });
     } catch (err) {

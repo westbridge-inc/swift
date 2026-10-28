@@ -51,6 +51,7 @@ import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
+import { moverUserIdOf, payerAudienceOf, payerOf, payerUserIdOf } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -3615,11 +3616,10 @@ export class BillingService {
           vendor: { select: { owner: { select: { userId: true } } } },
         },
       });
-      const userId = human?.rider?.userId ?? human?.driver?.userId ?? human?.vendor?.owner.userId;
-      if (userId) {
+      const payer = payerOf(human);
+      if (payer) {
         const { captureMmgPayer } = await import('../integrity/capture-hooks');
-        const role = human?.rider ? 'RIDER' : human?.driver ? 'DRIVER' : 'VENDOR';
-        await captureMmgPayer(this.prisma, { userId, role, subscriptionId, payerMsisdn: mmgPayerMsisdn.trim() }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
+        await captureMmgPayer(this.prisma, { userId: payer.userId, role: payer.kind, subscriptionId, payerMsisdn: mmgPayerMsisdn.trim() }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
       }
     }
     // [DS207 F2] A resumed PAUSED plan is charged NOW, through the same
@@ -4037,7 +4037,7 @@ export class BillingService {
         feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}`,
       }).catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
-        tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
+        tenantId: await tenantOfUser(this.prisma, payerUserIdOf(sub)),
         title: 'Dunning — final warning issued',
         body: `Subscription ${sub.id} suspends at ${when} (attempt ${attempts}/${MAX_FAILED_ATTEMPTS}) unless paid; a payment that starts confirming first moves it later. Check its current payment status before contacting the payer.`,
         data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: suspendsAt.toISOString() },
@@ -4240,7 +4240,7 @@ export class BillingService {
         data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' },
       });
     }
-    const moverUserId = sub.rider?.userId ?? sub.driver?.userId;
+    const moverUserId = moverUserIdOf(sub);
     if (moverUserId) {
       await tx.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: false, isAvailable: false } });
       await tx.driver.updateMany({ where: { userId: moverUserId }, data: { isOnline: false, isAvailable: false } });
@@ -5223,14 +5223,14 @@ export class BillingService {
   }
 
   private payerUserId(sub: SubWithRelations): string {
-    const userId = sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
+    const userId = payerUserIdOf(sub);
     if (!userId) throw new AppError(500, 'ORPHAN_SUBSCRIPTION', `Subscription ${sub.id} has no payer`);
     return userId;
   }
 
   /** Billing notices belong to the surface that pays the fee. */
   private payerAudience(sub: SubWithRelations): 'earner' | 'business' {
-    return sub.vendor ? 'business' : 'earner';
+    return payerAudienceOf(sub);
   }
 
   /**

@@ -21,6 +21,7 @@ import {
 } from '../../providers/card/card-provider';
 import { POWERTRANZ_PROVIDER, readCompletion } from '../../providers/card/powertranz-provider';
 import { SIMULATOR_PAGE, SIMULATOR_PROVIDER } from '../../providers/card/simulator-provider';
+import { payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // [PT-1 · AH.10.9.2] The card rail v2 service: hosted sessions and enrolled
@@ -402,7 +403,7 @@ export class CardRailService {
         vendor: { select: { owner: { select: { userId: true } } } },
       },
     });
-    const payer = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
+    const payer = payerUserIdOf(sub);
     if (!sub || payer !== userId) throw new NotFoundError('Subscription', subscriptionId);
     // The user lookup is tenant-scoped under a request: a payer in another
     // tenant is invisible, and so is their subscription.
@@ -1038,7 +1039,7 @@ export class CardRailService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Card payment received — kept for your next weekly fee',
       body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept for your next weekly fee. It did not change your plan.`,
-      audience: sub?.vendorId ? 'business' : 'earner',
+      audience: payerAudienceOf({ vendor: sub?.vendorId }),
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});

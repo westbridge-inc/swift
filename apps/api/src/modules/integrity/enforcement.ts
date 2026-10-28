@@ -1,5 +1,6 @@
 import { lockIdentityAuthority, identityAuthority, IdentityReviewRequiredError } from './identity-review';
 import type { PrismaClient } from '@prisma/client';
+import { subscriptionsPaidBy } from '../subscription/subscription-owner';
 
 // The enforcement ladder's read side (spec Part 4). Rungs 2–3 bite at
 // ACTIVATION, not at signup: a held account's documents are never
@@ -68,11 +69,7 @@ export async function previewTrial(
   const debt = await prisma.subscription.findFirst({
     where: {
       status: { in: ['PAST_DUE', 'SUSPENDED', 'CHURNED'] },
-      OR: [
-        { rider: { userId: { in: memberIds } } },
-        { driver: { userId: { in: memberIds } } },
-        { vendor: { owner: { userId: { in: memberIds } } } },
-      ],
+      ...subscriptionsPaidBy({ in: memberIds }),
     },
     select: { id: true },
   });

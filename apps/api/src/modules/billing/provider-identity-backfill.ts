@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { claimProviderPaymentInTx, ProviderIdentityError } from './provider-identity';
 import { log } from '../../utils/logger';
+import { subscriptionTenantSql } from '../subscription/subscription-owner';
 
 /**
  * [MMG checkout F2] Every channel now claims the one provider identity inside
@@ -52,12 +53,7 @@ export async function providerIdentityBackfillDone(prisma: Pick<PrismaClient, 'p
 const keyOf = (column: Prisma.Sql): Prisma.Sql => Prisma.sql`mmg_txn_canon(${column})`;
 
 /** The payer whose tenant owns a subscription's money (subscriptionTenantInTx). */
-const PAYER = Prisma.sql`
-    LEFT JOIN "riders" r ON r."id" = s."riderId"
-    LEFT JOIN "drivers" d ON d."id" = s."driverId"
-    LEFT JOIN "vendors" v ON v."id" = s."vendorId"
-    LEFT JOIN "vendor_owners" vo ON vo."id" = v."ownerId"
-    JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")`;
+const PAYER = subscriptionTenantSql;
 
 function pushSource(scope: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`

@@ -4,6 +4,7 @@ import { IdentityService } from './identity.service';
 import { normalizePhone, normalizeEmail, normalizePlate } from './normalize';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
+import { payerOf } from '../subscription/subscription-owner';
 
 // Phase 2 (spec Part 12): run the matcher across the EXISTING user base and
 // hand the founder an evidence report of every multi-account cluster BEFORE
@@ -70,10 +71,9 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
     },
   });
   for (const r of rails) {
-    const userId = r.rider?.userId ?? r.driver?.userId ?? r.vendor?.owner.userId;
-    if (!userId || !r.mmgPayerMsisdn) continue;
-    const role = r.rider ? 'RIDER' : r.driver ? 'DRIVER' : 'VENDOR';
-    await captureMmgPayer(prisma, { userId, role, payerMsisdn: r.mmgPayerMsisdn, subscriptionId: r.id, backfill: true });
+    const payer = payerOf(r);
+    if (!payer || !r.mmgPayerMsisdn) continue;
+    await captureMmgPayer(prisma, { userId: payer.userId, role: payer.kind, payerMsisdn: r.mmgPayerMsisdn, subscriptionId: r.id, backfill: true });
     captured += 1;
   }
 

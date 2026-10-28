@@ -13,6 +13,7 @@ import { normalizePhone } from '../../utils/phone';
 import { maskPhone } from '../auth/step-up';
 import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationZoneInUse, firstReplyNaming, paymentHistoryOf, paymentTimeCheckOf, type CreationCheck } from './mmg-checkout.service';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
+import { subscriptionsPaidBy } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] Support finds an MMG weekly-fee payment by any id MMG or
@@ -234,7 +235,7 @@ async function subscriptionsOfPhones(db: PrismaClient, tenantId: string, phones:
   if (users.length === 0) return [];
   const userId = { in: users.map((user) => user.id) };
   const subscriptions = await db.subscription.findMany({
-    where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
+    where: subscriptionsPaidBy(userId),
     select: { id: true },
     take: PHONE_SUBSCRIPTION_CAP,
   });

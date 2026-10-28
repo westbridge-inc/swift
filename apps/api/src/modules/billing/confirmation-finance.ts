@@ -3,6 +3,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
 import { COMPLETION_CLAIM_WAIT_MS } from '../../providers/card/card-provider';
 import type { OnAudit } from '../../lib/audit-writer';
+import { moverUserOf } from '../subscription/subscription-owner';
 
 /** An existing credit, bound to this checkout's exact instruction and owner.
  * A manual PAID checkbox alone never creates or proves a money movement. */
@@ -34,7 +35,7 @@ const partnerSelect = {
   driver: { select: { user: { select: { firstName: true, lastName: true } } } },
 } satisfies Prisma.SubscriptionSelect;
 function partnerLabel(sub: Prisma.SubscriptionGetPayload<{ select: typeof partnerSelect }>) {
-  const user = sub.rider?.user ?? sub.driver?.user;
+  const user = moverUserOf(sub);
   return sub.vendor?.name ?? (user ? [user.firstName, user.lastName].filter(Boolean).join(' ') : null);
 }
 

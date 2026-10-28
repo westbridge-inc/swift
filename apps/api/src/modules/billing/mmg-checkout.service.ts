@@ -29,6 +29,7 @@ import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
+import { payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../providers/mmg/mmg-history';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
@@ -1587,7 +1588,7 @@ export class MmgCheckoutService {
           vendor: { select: { id: true, owner: { select: { userId: true } } } },
         },
       });
-      const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
+      const userId = payerUserIdOf(sub);
       if (!userId) return;
       const amount = formatMoney(Number(intent.amount), 'GYD', { whole: true });
       const copy = status === 'CONFIRMED'
@@ -1599,7 +1600,7 @@ export class MmgCheckoutService {
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         ...copy,
-        audience: sub?.vendor ? 'business' : 'earner',
+        audience: payerAudienceOf(sub),
         // A multi-store owner's app selects vendorId before opening the fee screen.
         data: { kind: 'billing_mmg_checkout', subscriptionId: intent.subscriptionId, ref: intent.id, status, ...(sub?.vendor ? { vendorId: sub.vendor.id } : {}) },
       });
