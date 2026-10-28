@@ -9,6 +9,7 @@ import {
 import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/api';
 import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { documentExpiryDay } from '@/lib/documentExpiry';
 
 // [Owner ruling 11 Oct 2026] plain names and, on a taxi checklist, what each document is.
 const pretty = documentLabel;
@@ -114,7 +115,7 @@ export default function DocumentsPage() {
                   <span className="rounded-full bg-black/5 px-2.5 py-0.5 text-xs font-bold text-[var(--swift-muted)]">Not submitted</span>
                 )}
                 {doc?.expiresAt && (
-                  <span className="text-xs text-[var(--swift-muted)]">expires {new Date(doc.expiresAt).toLocaleDateString()}</span>
+                  <span className="text-xs text-[var(--swift-muted)]">expires {documentExpiryDay(doc.expiresAt)}</span>
                 )}
                 {!locked && (
                   <button

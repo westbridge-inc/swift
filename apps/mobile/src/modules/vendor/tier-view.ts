@@ -1,4 +1,6 @@
 /** [DOC-1 §3.6 · P3-2] The store's tier in the owner's words. Pure. */
+import { documentExpiryDay } from '../../lib/documentExpiry';
+
 export type TierView = {
   tier: 'UNREGISTERED' | 'REGISTERED'; capped: boolean; nearCap: boolean; promotedPlacement: boolean;
   caps: { ordersPerDay: number; grossPerWeek: number; nudgeAtFraction: number };
@@ -19,3 +21,12 @@ export function registrationLine(t: Pick<TierView, 'registration'>): string {
   if (!sub) return 'No business registration on file yet.';
   return sub.status === 'PENDING' ? 'Business registration submitted — under review.' : `Business registration ${sub.status.toLowerCase().replace(/_/g, ' ')}.`;
 }
+
+/** [FOLLOWUPS] The self-declaration line: its status, and the day it is valid to in Guyana (a declaration lasts 365 days
+ *  from signing: a moment, printed as its Guyana day, the same words on every phone). */
+export function declarationLine(t: Pick<TierView, 'declaration'>): string | null {
+  if (!t.declaration) return null;
+  const until = documentExpiryDay(t.declaration.expiresAt);
+  return `Self-declaration ${t.declaration.status.toLowerCase().replace(/_/g, ' ')}${until ? ` · valid to ${until}` : ''}`;
+}
+
