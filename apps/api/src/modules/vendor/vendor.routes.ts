@@ -3601,8 +3601,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // BEFORE exceljs inflates anything. A tiny .xlsx can legally declare a
     // multi-GB sharedStrings.xml; exceljs would try to inflate it and OOM the
     // process before any header validation could refuse it.
+    // [SEC-DOS F3] exceljs gets the guard's rebuilt archive of exactly the bytes it measured, never the upload.
+    let measured: Buffer;
     try {
-      scanXlsxZip(buffer, XLSX_IMPORT_ZIP_BUDGET);
+      measured = scanXlsxZip(buffer, XLSX_IMPORT_ZIP_BUDGET).archive;
     } catch (err) {
       if (err instanceof XlsxZipGuardError) {
         throw new AppError(400, 'BAD_XLSX', `That workbook is not importable: ${err.message}`);
@@ -3613,7 +3615,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const ExcelJS = (await import('exceljs')).default;
     const workbook = new ExcelJS.Workbook();
     try {
-      await workbook.xlsx.load(buffer as unknown as ArrayBuffer);
+      await workbook.xlsx.load(measured as unknown as ArrayBuffer);
     } catch {
       throw new AppError(400, 'BAD_XLSX', 'That file is not a readable Excel workbook (.xlsx)');
     }
