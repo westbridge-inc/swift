@@ -357,7 +357,7 @@ if [ -n "$SIGNATURE_B64$SIGNED_OBJECT" ]; then
   [ "$SOURCE" = - ] || die "--signature-b64 and --signed-object go with the dump on stdin (source -) only; a file or off-site dump is verified from its own .sig"
   [ -n "$SIGNATURE_B64" ] && [ -n "$SIGNED_OBJECT" ] || die "--signature-b64 and --signed-object go together"
   [[ "$SIGNED_OBJECT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]] || die "--signed-object must be the signed object's file name"
-  [[ "$SIGNATURE_B64" =~ ^[A-Za-z0-9+/=]{1,16384}$ ]] || die "--signature-b64 must be the base64 of the signature file"
+  [[ "$SIGNATURE_B64" =~ ^[A-Za-z0-9+/=]+$ ]] && [ "${#SIGNATURE_B64}" -le 24000 ] || die "--signature-b64 must be the base64 of the signature file"
 fi
 if [ "$ALLOW_UNSIGNED" = 1 ]; then
   echo "WARNING: --allow-unsigned-legacy: a dump WITHOUT a signature will be restored. Use it only for a dump made before backups were signed: an unsigned dump could have been planted by anyone who could write to the backup bucket. A signature that is present must still verify." >&2

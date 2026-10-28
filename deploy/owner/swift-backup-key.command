@@ -20,7 +20,12 @@
 #      backup store the app's containers never see. It refuses the API's own
 #      key. The values are never a command-line argument, never written to a
 #      file, never echoed.
-#   3. PROVE: starts one backup now and shows its last lines, so you can see
+#   3. VERSIONING: turns on versioning for the backup bucket (an overwritten
+#      or deleted dump keeps its previous version). DigitalOcean allows this
+#      only through its API and only with a FULL-access key, so it runs with the
+#      API's current key (deploy/backup-versioning.sh): do it BEFORE that key
+#      is narrowed to the uploads bucket.
+#   4. PROVE: starts one backup now and shows its last lines, so you can see
 #      "backups use the backup bucket's own storage key" working.
 #
 # It prints only step names and the server's own status lines. No host name,
@@ -51,7 +56,7 @@ SSH=(ssh -i "$key" -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInte
   die "the server's checkout (/opt/swift) does not have the backup store yet: deploy the code that carries it first"
 
 say ""
-say "Step 1 of 3 — install the backup store and the backup units on the server."
+say "Step 1 of 4 — install the backup store and the backup units on the server."
 if ask "Install now (safe to repeat)?"; then
   "${SSH[@]}" -n "set -e
 sudo -n install -m 0755 -o root -g root /opt/swift/deploy/swift-secrets /usr/local/sbin/swift-secrets
@@ -66,7 +71,7 @@ else
 fi
 
 say ""
-say "Step 2 of 3 — the backup bucket's OWN key (DigitalOcean: Spaces Object Storage > Access Keys,"
+say "Step 2 of 4 — the backup bucket's OWN key (DigitalOcean: Spaces Object Storage > Access Keys,"
 say "             Limited access, only the backup bucket, Read/Write/Delete)."
 if ask "Enter the new key now?"; then
   while :; do
@@ -93,7 +98,21 @@ else
 fi
 
 say ""
-say "Step 3 of 3 — prove it: one backup now (about a minute)."
+say "Step 3 of 4 — versioning for the backup bucket (uses the API's current full-access key, once)."
+if ask "Turn versioning on now (safe to repeat)?"; then
+  "${SSH[@]}" -n "sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-deploy --gid=swift-deploy \
+-p SupplementaryGroups=docker -p WorkingDirectory=/opt/swift \
+-p 'UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE' \
+-p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
+-p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
+/opt/swift/deploy/backup-versioning.sh" </dev/null ||
+    say "versioning is NOT on (see the line above). If the API's key is already limited to the uploads bucket, this step needs a Full access key: owner sheet BACKUP-KEY-SETUP, section Versioning."
+else
+  say "skipped."
+fi
+
+say ""
+say "Step 4 of 4 — prove it: one backup now (about a minute)."
 if ask "Run one backup now?"; then
   "${SSH[@]}" -n "sudo -n systemctl start swift-backup.service; sudo -n journalctl -u swift-backup.service -n 25 --no-pager -o cat" </dev/null ||
     die "the backup did not finish cleanly: read the lines above, then the owner sheet (nothing was lost: the previous backups are untouched)"
