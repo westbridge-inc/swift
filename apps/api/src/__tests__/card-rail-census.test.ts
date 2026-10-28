@@ -61,6 +61,9 @@ describe('[PT-1] sub.paymentToken stays null', () => {
     expect(paymentTokenLines()).toEqual([
       // [#2162 · REVIEW-M S4-1] The admin person pages DROP it from the subscription they send (never read, never
       // written: the console never sees a card token).
+      // [#2178 · SEC-PII F14] The audit snapshot's secret-column list NAMES it so the digest never covers it
+      // (a string in a list: never read, never written).
+      { file: 'modules/admin/audit-change.ts', line: "'passwordHash', 'paymentToken', 'courierTrackingToken', 'stateHash', 'hostedUrl'," },
       { file: 'modules/admin/person-contact.ts', line: "delete copy['paymentToken'];" },
       { file: 'modules/billing/billing.service.ts', line: "if (sub.billingMethod === 'CARD' && sub.paymentToken) {" },
       { file: 'modules/billing/billing.service.ts', line: 'token: sub.paymentToken,' },

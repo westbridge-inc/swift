@@ -46,7 +46,7 @@ const without = (row: Record<string, unknown>, keys: readonly string[]) => Objec
 
 describe('[SEC-PII] the secret-field registry', () => {
   it('names every secret the scan found, and each one is a real column', () => {
-    for (const field of ['transferCode', 'pickupCode', 'ridePin', 'pickupCodeAttempts', 'mmgNumberSnapshot', 'mmgPayUrlSnapshot', 'passwordHash', 'paymentToken']) {
+    for (const field of ['transferCode', 'transferAttempts', 'pickupCode', 'ridePin', 'pickupCodeAttempts', 'mmgNumberSnapshot', 'mmgPayUrlSnapshot', 'passwordHash', 'paymentToken']) {
       expect(SNAPSHOT_SECRET_FIELDS, field).toContain(field);
     }
     const schema = readFileSync(join(__dirname, '../../prisma/schema.prisma'), 'utf8');
@@ -165,7 +165,11 @@ describe('[SEC-PII] the live custody code cannot be recovered from the audit tra
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': TEST_ADMIN_REASON },
     });
     expect(res.statusCode, res.payload).toBe(200);
-    const rows = await system(() => app.prisma.auditLog.findMany({ where: { entityId: ids.kase, userId: adminId } }));
+    // [REVIEW-G #2178 S3-1] The digest row is written by the admin onResponse audit hook, which can finish after
+    // inject resolves: wait for it deterministically (a bounded poll), never an immediate read.
+    const digestRows = () => system(() => app.prisma.auditLog.findMany({ where: { entityId: ids.kase, userId: adminId } }));
+    await expect.poll(async () => (await digestRows()).some((r) => typeof (r.changes as Record<string, unknown> | null)?.['before'] === 'string'), { timeout: 5000, interval: 50 }).toBe(true);
+    const rows = await digestRows();
     const changes = rows.map((r) => r.changes as Record<string, unknown>).find((c) => typeof c['before'] === 'string')!;
     expect(changes, JSON.stringify(rows.map((r) => r.action))).toBeTruthy();
     const digest = changes['before'] as string;

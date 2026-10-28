@@ -84,7 +84,7 @@ export function digestOf(row: unknown): string {
  */
 export const SNAPSHOT_SECRET_FIELDS = [
   // one-use hand-off codes and their guess counters (a counter narrows the code's guess space)
-  'transferCode', 'pickupCode', 'ridePin', 'pickupCodeAttempts', 'ridePinAttempts',
+  'transferCode', 'transferAttempts', 'pickupCode', 'ridePin', 'pickupCodeAttempts', 'ridePinAttempts',
   // what the order showed the customer to pay into (a store's MMG number / pay link at order time)
   'mmgNumberSnapshot', 'mmgPayUrlSnapshot',
   // credentials and bearer values
