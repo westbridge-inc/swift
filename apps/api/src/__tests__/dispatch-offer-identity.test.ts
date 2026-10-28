@@ -806,3 +806,59 @@ describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', ()
     expect(rows.find((r) => r.offerAttemptId === 'lapsed~fv0')!.seenAt).toBeNull();
   });
 });
+
+describe('[F19] an accept naming a card the caller never held restarts nothing', () => {
+  it('a forged attempt id with another delivery generation is explained, never re-dispatched', async () => {
+    await parkAllRiders();
+    const bystander = await makeRider();
+    const caller = await makeRider();
+    const order = await makeOrder();
+    const jobsBefore = scheduled.filter((j) => j.orderId === order.id).length;
+    expect(await app.redis.get(offerKey(order.id))).toBeNull();
+
+    await expect(dispatch.acceptOffer(order.id, caller.userId, undefined, `forged-${nanoid(6)}~fv1`))
+      .rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    // No cascade started: no card installed, no timeout scheduled, nobody offered.
+    expect(await app.redis.get(offerKey(order.id))).toBeNull();
+    expect(await app.redis.get(moverOfferKey(bystander.riderId))).toBeNull();
+    expect(await app.redis.get(moverOfferKey(caller.riderId))).toBeNull();
+    expect(scheduled.filter((j) => j.orderId === order.id).length).toBe(jobsBefore);
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { riderId: true, status: true } });
+    expect(row).toEqual({ riderId: null, status: 'READY_FOR_PICKUP' });
+  });
+
+  it('a forged attempt id never touches the live card of the mover who holds it', async () => {
+    await parkAllRiders();
+    const holder = await makeRider();
+    const order = await makeOrder();
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(holder.riderId);
+    const live = await app.redis.get(offerKey(order.id));
+    const jobsBefore = scheduled.filter((j) => j.orderId === order.id).length;
+    const caller = await makeRider();
+
+    await expect(dispatch.acceptOffer(order.id, caller.userId, undefined, `forged-${nanoid(6)}~fv7`))
+      .rejects.toMatchObject({ statusCode: 409 });
+
+    expect(await app.redis.get(offerKey(order.id))).toBe(live);
+    expect(scheduled.filter((j) => j.orderId === order.id).length).toBe(jobsBefore);
+  });
+
+  it('the holder of a card whose delivery generation moved on still gets the fresh search (own card consumed)', async () => {
+    await parkAllRiders();
+    const holder = await makeRider();
+    const order = await makeOrder();
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(holder.riderId);
+    const attempt = scheduled.filter((j) => j.orderId === order.id).at(-1)!.attemptId!;
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: 1 } });
+    const jobsBefore = scheduled.filter((j) => j.orderId === order.id).length;
+
+    await expect(dispatch.acceptOffer(order.id, holder.userId, undefined, attempt))
+      .rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    // The consumed card left the order unoffered: the current generation is searched again.
+    expect(scheduled.filter((j) => j.orderId === order.id).length).toBeGreaterThan(jobsBefore);
+    expect(scheduled.filter((j) => j.orderId === order.id).at(-1)!.attemptId).toMatch(/~fv1$/);
+  });
+});
+
