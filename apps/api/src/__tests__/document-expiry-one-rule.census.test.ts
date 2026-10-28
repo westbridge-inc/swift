@@ -25,6 +25,8 @@ const NOT_A_DOCUMENT: Record<string, string> = {
 };
 
 const QUERY_IDIOM = /\{\s*expires(At|On):\s*null\s*\},\s*\{\s*expires(At|On):\s*\{\s*(gt|gte)\b|expiresOn:\s*\{\s*(gt|gte|lt|lte)\b/g;
+/** [REVIEW-M #2164 S4-1] The lapsed side too: an expiry compared with lt/lte (the sweep's find and its guarded update). */
+const LAPSED_IDIOM = /expiresAt:\s*\{\s*(lt|lte):\s*(now|new Date\(\))/g;
 const JS_COMPARE = /expires(At|On)\??(\.getTime\(\))?\s*(<|>|<=|>=)\s*(now|new Date\(\)|Date\.now\(\))/g;
 
 /** The server readers of a document's expiry: each must read it through document-validity.ts. */
@@ -45,6 +47,12 @@ describe('[FOLLOWUPS] a document\'s expiry is judged by one rule', () => {
       return (code.match(QUERY_IDIOM) ?? []).map(() => rel);
     }).filter((rel) => !(rel in NOT_A_DOCUMENT));
     expect(hits, 'route these through validExpiryOr / lapsedExpiryAnd (document-validity.ts)').toEqual([]);
+  });
+
+  it('no document module finds or updates "lapsed" documents by comparing the expiry with now (each sweep layer)', () => {
+    const hits = SOURCES.filter(({ rel }) => /^modules\/(verification|vendor)\//.test(rel))
+      .flatMap(({ rel, text }) => (text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '').match(LAPSED_IDIOM) ?? []).map((m) => `${rel}: ${m}`));
+    expect(hits, 'use lapsedExpiryAnd (document-validity.ts)').toEqual([]);
   });
 
   it('no document module compares an expiry with now in JS', () => {
