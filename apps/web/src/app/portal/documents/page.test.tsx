@@ -46,3 +46,22 @@ describe('driver documents page', () => {
     expect(await screen.findByRole('button', { name: 'Upload renewal' })).toBeTruthy();
   });
 });
+
+// [FOLLOWUPS] The expiry printed is the day on the document, whatever zone the browser is in: the keyed "28 Oct"
+// (stored as midnight UTC) never reads as the 27th in Guyana (UTC-4) or anywhere west of UTC.
+describe('[FOLLOWUPS] the expiry is the day on the document', () => {
+  const ZONE = process.env['TZ'];
+  afterEach(() => { process.env['TZ'] = ZONE; });
+  for (const zone of ['America/Guyana', 'Pacific/Honolulu', 'Asia/Tokyo']) {
+    it(`${zone}: "expires 28 Oct 2031"`, async () => {
+      process.env['TZ'] = zone;
+      vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(status([
+        doc('vehicle_insurance', 'APPROVED', { expiresAt: '2031-10-28T00:00:00.000Z' }),
+      ]) as never);
+      renderWithQuery(<DocumentsPage />);
+      expect(await screen.findByText('expires 28 Oct 2031')).toBeTruthy();
+      expect(document.body.textContent).not.toContain('27 Oct');
+    });
+  }
+});
+
