@@ -102,15 +102,70 @@ class UnitsLoadOnlyTheBackupStore(unittest.TestCase):
 
 
 # ── F1: the store ─────────────────────────────────────────────────────────────
+# The pinned AWS CLI as `swift-secrets backup set-keys` runs it to prove a new key's scope:
+# FAKE_KEY_SCOPE=limited (backup bucket only), full (every bucket), none (not even the backup bucket).
+FAKE_SCOPE_DOCKER = r'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open(os.environ["CALL_LOG"], "a") as log:
+    log.write("docker " + " ".join(args) + "\n")
+if args[:1] != ["run"] or "list-objects-v2" not in args:
+    sys.exit(9)
+bucket = args[args.index("--bucket") + 1]
+scope = os.environ.get("FAKE_KEY_SCOPE", "limited")
+key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+with open(os.environ["CALL_LOG"] + ".keys", "a") as keys:
+    keys.write(f"{bucket}:{key}\n")
+allowed = {"limited": {"swift-backups"}, "full": {"swift-backups", "swift-uploads"}, "none": set()}[scope]
+if bucket in allowed:
+    print("{}"); sys.exit(0)
+sys.stderr.write("An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied\n")
+sys.exit(254)
+'''
+
+
 class BackupStore(StoreHarness):
     def setUp(self):
         super().setUp()
         self.backup_store = self.tmp / "credstore-backup"
         self.allowed = self.tmp / "etc-swift" / "backup-allowed-signers"
+        self.deploy_env = self.tmp / "deploy.env"
+        self.deploy_env.write_text("BACKUP_BUCKET=swift-backups\nAWS_S3_BUCKET=swift-uploads\n"
+                                   "AWS_S3_ENDPOINT=https://storage.example.invalid\nAWS_CLI_IMAGE=" + IMAGE + "\n")
+        (self.bin / "docker").write_text(FAKE_SCOPE_DOCKER)
+        (self.bin / "docker").chmod(0o755)
 
     def env(self, **extra):
         return super().env(SWIFT_SECRETS_BACKUP_STORE_DIR=str(self.backup_store),
-                           SWIFT_SECRETS_ALLOWED_SIGNERS=str(self.allowed), **extra)
+                           SWIFT_SECRETS_ALLOWED_SIGNERS=str(self.allowed),
+                           SWIFT_SECRETS_DEPLOY_ENV=str(self.deploy_env), **extra)
+
+    # [SEC-BACKUP · REVIEW-M S4-1] "dedicated" is proven, not a label.
+    def test_set_keys_stores_only_a_key_the_uploads_bucket_refuses_and_the_backup_bucket_accepts(self):
+        self.api_keys()
+        for scope, why in (("full", b"can read the uploads bucket"), ("none", b"cannot read the backup bucket")):
+            with self.subTest(scope=scope):
+                r = self.run_store("backup", "set-keys", stdin=b"BACKUPKEYID01\nbackup-secret\n", FAKE_KEY_SCOPE=scope)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(why, r.stderr)
+                self.assertIn(b"nothing stored", r.stderr)
+                self.assertFalse((self.backup_store / "BACKUP_AWS_ACCESS_KEY_ID.cred").exists())
+        r = self.run_store("backup", "set-keys", stdin=b"BACKUPKEYID01\nbackup-secret\n", FAKE_KEY_SCOPE="limited")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(b"refused on the uploads bucket", r.stdout)
+        tried = Path(str(self.log) + ".keys").read_text().splitlines()
+        self.assertIn("swift-uploads:BACKUPKEYID01", tried)
+        self.assertIn("swift-backups:BACKUPKEYID01", tried)
+        # the secret travels by environment NAME only: never in the docker argv
+        self.assertNotIn("backup-secret", self.calls())
+
+    def test_set_keys_without_the_settings_to_prove_the_scope_stores_nothing(self):
+        self.api_keys()
+        self.deploy_env.write_text("AWS_S3_BUCKET=swift-uploads\n")
+        r = self.run_store("backup", "set-keys", stdin=b"BACKUPKEYID01\nbackup-secret\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(b"BACKUP_BUCKET", r.stderr)
+        self.assertFalse((self.backup_store / "BACKUP_AWS_ACCESS_KEY_ID.cred").exists())
 
     def decrypt(self, store: Path, name: str) -> bytes:
         head, embedded, payload = (store / f"{name}.cred").read_bytes().split(b"\n", 2)
@@ -365,6 +420,34 @@ class BackupScripts(unittest.TestCase):
         self.assertIn("to_jsonb(1 = 1)", self.heartbeat().split("last_backup_signed", 1)[1])
         self.assertIn("signed →", r.stdout)
 
+    # [SEC-BACKUP · REVIEW-M S4-3] uploaded (the data is off-site), paged, AND a failed unit
+    def test_a_signature_that_does_not_verify_here_fails_the_run_after_the_upload(self):
+        self.api_and_backup_pairs()
+        self.credential("BACKUP_SIGNING_KEY", self.key.read_bytes())
+        (self.creds / "BACKUP_SIGNING_KEY").chmod(0o600)
+        _, other_allowed = make_signing_key(self.tmp, "other")
+        r = self.backup(BACKUP_SIGNING_ALLOWED_SIGNERS=str(other_allowed))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does NOT verify", r.stderr)
+        self.assertIn("FATAL", r.stderr)
+        self.assertEqual(len(list((self.bucket / "db").iterdir())), 2)
+        self.assertIn("to_jsonb(0 = 1)", self.heartbeat().split("last_backup_signed", 1)[1])
+        self.assertFalse((self.dumps / ".first-signed-backup").exists())
+
+    # [SEC-BACKUP · REVIEW-G S4-1] the moment signing began, for --allow-unsigned-legacy
+    def test_the_first_signed_backup_records_when_signing_began_and_later_ones_keep_it(self):
+        self.api_and_backup_pairs()
+        self.credential("BACKUP_SIGNING_KEY", self.key.read_bytes())
+        (self.creds / "BACKUP_SIGNING_KEY").chmod(0o600)
+        self.assertEqual(self.backup().returncode, 0)
+        marker = self.dumps / ".first-signed-backup"
+        first = marker.read_text().strip()
+        self.assertRegex(first, r"^\d{8}T\d{6}Z$")
+        import time
+        time.sleep(1.1)
+        self.assertEqual(self.backup().returncode, 0)
+        self.assertEqual(marker.read_text().strip(), first)
+
     def test_the_erasure_ledger_shipper_uses_the_backup_pair_or_warns_on_the_api_pair(self):
         gpg_home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, gpg_home, True)
@@ -422,6 +505,7 @@ if args[:1] == ["compose"]:
     joined = " ".join(args)
     if "to_regclass('public.deletion_receipt')" in joined: print("f")
     elif "deployment_identity" in joined: print("f")
+    elif "posture-snapshot" in joined: print("rows|public.users|1|abc")
     sys.exit(0)
 if args[:1] in (["container"], ["volume"]) and "inspect" in args: sys.exit(1)
 if args[:1] == ["volume"]: note("INSTANCE volume " + " ".join(args[1:])); sys.exit(0)
@@ -450,7 +534,8 @@ if args[:1] == ["exec"]:
         print(os.environ.get("RESTORE_LOGIN_SUPER", "f"))
     elif "pg_depend" in text: print("rel public spatial_ref_sys")
     elif "deployment_identity" in text: print("f")
-    elif "count(*)" in text: print("1")
+    elif "posture-snapshot" in text: print(os.environ.get("COPY_POSTURE", "rows|public.users|1|abc"))
+    elif "count(*)" in text: print("0" if os.environ.get("FAIL") == "sanity" and "users" in text else "1")
     sys.exit(0)
 sys.exit(0)
 '''
@@ -601,6 +686,147 @@ class RestoreRefusesWhatWasNotSigned(unittest.TestCase):
         self.assertIn(b"has NO signature", r.stderr)
 
 
+class TheThrowawayInstanceIsThrownAway(unittest.TestCase):
+    """[SEC-BACKUP · REVIEW-M S3-1] A restored copy holds everyone's data, and only up to the restore:
+    it is removed with its volume after EVERY outcome unless the operator keeps it explicitly."""
+
+    setUp = RestoreRefusesWhatWasNotSigned.setUp
+    restore = RestoreRefusesWhatWasNotSigned.restore
+    calls = RestoreRefusesWhatWasNotSigned.calls
+
+    def removed(self):
+        calls = self.calls()
+        return (any(c.startswith("INSTANCE rm -f swift-restore-swift_restore_sig") for c in calls)
+                and any(c.startswith("INSTANCE volume rm swift-restore-swift_restore_sig") for c in calls))
+
+    def test_a_successful_restore_removes_the_instance_and_its_volume(self):
+        sign(self.key, self.dump)
+        r = self.restore()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RESTORE OK", r.stdout)
+        self.assertTrue(self.removed(), self.calls())
+        self.assertIn("removed with its volume", r.stdout)
+        restore_ok = r.stdout.index("RESTORE OK")
+        self.assertLess(restore_ok, r.stdout.index("removed with its volume"))
+
+    def test_keep_for_inspection_keeps_it_and_says_how_and_by_when_to_remove_it(self):
+        sign(self.key, self.dump)
+        r = self.restore("--keep-for-inspection")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.removed())
+        self.assertIn("docker rm -f swift-restore-swift_restore_sig && docker volume rm swift-restore-swift_restore_sig", r.stdout)
+        self.assertIn("within 24 hours", r.stdout)
+
+    def test_a_failed_comparison_or_sanity_check_removes_it_too(self):
+        sign(self.key, self.dump)
+        for args, extra in ((("--compare-source",), {"COPY_POSTURE": "rows|public.users|2|zzz"}), ((), {"FAIL": "sanity"})):
+            with self.subTest(args=args):
+                self.log.write_text("")
+                r = self.restore(*args, **extra)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("RESTORE OK", r.stdout)
+                self.assertTrue(self.removed(), self.calls())
+                self.assertNotIn("retained", r.stderr)
+
+    def test_a_disaster_recovery_restore_must_say_it_keeps_the_copy_before_anything_starts(self):
+        sign(self.key, self.dump)
+        r = self.restore("--no-live-ledger", "--i-know-live-is-gone")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--keep-for-inspection", r.stderr)
+        self.assertFalse([c for c in self.calls() if c.startswith("INSTANCE")])
+        self.log.write_text("")
+        r = self.restore("--no-live-ledger", "--i-know-live-is-gone", "--keep-for-inspection")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertFalse(self.removed())
+
+
+class TheReadinessDeadlineIsTime(unittest.TestCase):
+    """[SEC-BACKUP · CI 28 Oct] The throwaway instance gets 180 SECONDS to become ready, whatever
+    `sleep` does: a stand-in `sleep` that returns at once made 180 tries last 3 s on the CI runner."""
+
+    setUp = RestoreRefusesWhatWasNotSigned.setUp
+    restore = RestoreRefusesWhatWasNotSigned.restore
+
+    def test_an_instance_that_takes_seconds_is_waited_for_even_when_sleep_returns_at_once(self):
+        sign(self.key, self.dump)
+        (self.bin / "sleep").write_text("#!/bin/sh\nexit 0\n")
+        (self.bin / "sleep").chmod(0o755)
+        # A fast front for the readiness questions (logs, pg_isready): ready only 6 s after `run`.
+        (self.bin / "docker.py").write_text((self.bin / "docker").read_text())
+        (self.bin / "docker.py").chmod(0o755)
+        (self.bin / "docker").write_text(f'''#!/bin/sh
+stamp="{self.tmp}/started"
+case "$1" in
+  run) date +%s > "$stamp" ;;
+  logs|exec)
+    if [ "$1" = logs ] || [ "$3" = pg_isready ]; then
+      now=$(date +%s); start=$(cat "$stamp" 2>/dev/null || echo "$now")
+      [ $((now - start)) -ge 6 ] || {{ [ "$1" = logs ] && echo "initdb running"; exit 2; }}
+    fi ;;
+esac
+exec "{self.bin}/docker.py" "$@"
+''')
+        r = self.restore()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RESTORE OK", r.stdout)
+
+
+class TheLegacyFlagEndsWhereSigningBegan(unittest.TestCase):
+    """[SEC-BACKUP · REVIEW-G S4-1 / REVIEW-M S4-2] --allow-unsigned-legacy accepts only an object the
+    SERVER says was written before the first signed backup: an unsigned object written later (a
+    plant, or a signature deleted from a new dump) is refused even with the flag."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-legacy-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.bucket = self.tmp / "bucket" / "db"
+        self.bucket.mkdir(parents=True)
+        self.log = self.tmp / "calls"
+        self.log.write_text("")
+        (self.bin / "docker").write_text(FAKE_DOCKER.replace(
+            'if "head-object" in args:',
+            'if "head-object" in args and "LastModified" in " ".join(args):\n        print(os.environ["OBJ_LAST_MODIFIED"]); sys.exit(0)\n    if "head-object" in args:'))
+        (self.bin / "pg_restore").write_text(FAKE_PG_RESTORE)
+        for b in self.bin.iterdir():
+            b.chmod(0o755)
+        self.marker = self.tmp / "first-signed-backup"
+        self.marker.write_text("20261028T120000Z\n")
+        _, self.allowed = make_signing_key(self.tmp)
+        (self.bucket / "swift-20261020T010000Z.dump.gpg").write_bytes(os.urandom(256))
+
+    def fetch(self, last_modified, *flags, marker=True):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("BACKUP_", "AWS_"))}
+        env.update({"PATH": f"{self.bin}:{os.environ['PATH']}", "CALL_LOG": str(self.log), "FAKE_BUCKET": str(self.tmp / "bucket"),
+                    "BACKUP_BUCKET": "swift-backups", "AWS_ACCESS_KEY_ID": "id", "AWS_SECRET_ACCESS_KEY": "secret",
+                    "AWS_CLI_IMAGE": IMAGE, "BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.allowed), "OBJ_LAST_MODIFIED": last_modified})
+        if marker:
+            env["BACKUP_FIRST_SIGNED_FILE"] = str(self.marker)
+        else:
+            env["BACKUP_FIRST_SIGNED_FILE"] = str(self.tmp / "absent")
+        return subprocess.run(["bash", str(DEPLOY / "restore.sh"), *flags, "--fetch-encrypted",
+                               "s3://swift-backups/db/swift-20261020T010000Z.dump.gpg"], env=env, capture_output=True,
+                              text=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def test_an_unsigned_object_written_after_signing_began_is_refused_even_with_the_flag(self):
+        r = self.fetch("2026-10-28T12:30:00+00:00", "--allow-unsigned-legacy")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("written after the first signed backup", r.stderr)
+        self.assertNotIn("RESTORING AN UNSIGNED DUMP", r.stderr)
+
+    def test_an_unsigned_object_written_before_signing_began_passes_the_flag_with_its_warning(self):
+        r = self.fetch("2026-10-28T11:59:00+00:00", "--allow-unsigned-legacy")
+        self.assertNotIn("written after the first signed backup", r.stderr)
+        self.assertIn("WARNING: RESTORING AN UNSIGNED DUMP", r.stderr)
+        self.assertIn("server time 2026-10-28T11:59:00", r.stderr)
+
+    def test_without_a_record_of_when_signing_began_the_flag_still_warns_and_says_so(self):
+        r = self.fetch("2026-10-28T12:30:00+00:00", "--allow-unsigned-legacy", marker=False)
+        self.assertIn("no record of the first signed backup", r.stderr)
+        self.assertIn("WARNING: RESTORING AN UNSIGNED DUMP", r.stderr)
+
+
 class DrillCarriesTheHostVerifiedSignature(unittest.TestCase):
     """backup-drill.sh asks the host for the verified signature first; no signature means no drill
     unless the owner passes --allow-unsigned-legacy."""
@@ -717,6 +943,69 @@ sys.exit(0)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("differ", r.stderr)
         self.assertEqual(self.stdin_log.read_bytes(), b"<<BACKUPKEYID01\nright\n>>\n")
+
+
+class DoctorSeesWhatBackupsLeaveBehind(unittest.TestCase):
+    """[SEC-BACKUP · REVIEW-M S3-1 + REVIEW-G S4-2] doctor.sh lists every labelled restore volume (a
+    container can be removed and leave its volume) and FAILS past 24 h; and it FAILS when an installed
+    backup unit loads a credential the backup store does not hold (installed before `backup init`:
+    the unit would not start, and backups would stop)."""
+
+    def doctor(self, *, volumes="", ages="", unit_creds=(), present=()):
+        tmp = Path(tempfile.mkdtemp(prefix="swift-doctor-sep-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        here = tmp / "deploy"
+        here.mkdir()
+        shutil.copy(DEPLOY / "doctor.sh", here / "doctor.sh")
+        shutil.copy(DEPLOY / "swift-secrets", here / "swift-secrets")
+        (here / ".env").write_text("PILOT_ENV=staging\nAPI_HOST=api.example.invalid\n")
+        units = tmp / "systemd"
+        units.mkdir()
+        store = tmp / "store"
+        store.mkdir()
+        if unit_creds:
+            (units / "swift-backup.service").write_text("[Service]\n" + "".join(
+                f"LoadCredentialEncrypted={n}:{store}/{n}.cred\n" for n in unit_creds))
+        for n in present:
+            (store / f"{n}.cred").write_text("x")
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        for tool, body in (
+            ("docker", f'''case "$*" in
+  "ps -a --filter label=swift.restore=1 --format {{{{.Names}}}}") : ;;
+  "volume ls -q --filter label=swift.restore=1") printf '%s\\n' {volumes or '""'} | grep . ;;
+  "volume inspect -f {{{{.CreatedAt}}}} "*) printf '%s\\n' "{ages}" ;;
+  *) exit 7 ;;
+esac
+'''),
+            ("sudo", '[ "$1" = -n ] && shift; exec "$@"\n'),
+            ("systemctl", "exit 0\n"), ("curl", "exit 7\n"), ("gh", "exit 7\n"),
+        ):
+            (bin_dir / tool).write_text("#!/bin/sh\n" + body)
+            (bin_dir / tool).chmod(0o755)
+        r = subprocess.run(["bash", str(here / "doctor.sh")], env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp),
+                           "SWIFT_SYSTEMD_DIR": str(units)}, text=True, capture_output=True, timeout=60)
+        return r.stdout
+
+    def test_a_left_volume_is_listed_and_fails_past_a_day(self):
+        out = self.doctor(volumes="swift-restore-swift_restore_x", ages="2020-01-01T00:00:00Z")
+        self.assertIn("FAIL", out)
+        self.assertIn("swift-restore-swift_restore_x", out)
+        self.assertIn("docker volume rm swift-restore-swift_restore_x", out)
+        fresh = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out = self.doctor(volumes="swift-restore-swift_restore_x", ages=fresh)
+        line = next(l for l in out.splitlines() if "swift-restore-swift_restore_x" in l)
+        self.assertTrue(line.startswith("WARN"), line)
+
+    def test_a_backup_unit_installed_before_the_backup_store_fails_the_doctor(self):
+        names = ("BACKUP_AWS_ACCESS_KEY_ID", "BACKUP_AWS_SECRET_ACCESS_KEY", "BACKUP_KEY_SOURCE", "BACKUP_SIGNING_KEY")
+        out = self.doctor(unit_creds=names, present=names[:2])
+        line = next(l for l in out.splitlines() if "swift-backup.service" in l and "BACKUP_KEY_SOURCE" in l)
+        self.assertTrue(line.startswith("FAIL"), line)
+        self.assertIn("swift-secrets backup init", line)
+        out = self.doctor(unit_creds=names, present=names)
+        self.assertFalse([l for l in out.splitlines() if l.startswith("FAIL") and "swift-backup.service" in l], out)
+        self.assertIn("ok    swift-backup.service: every credential it loads is in the backup store", out)
 
 
 if __name__ == "__main__":
