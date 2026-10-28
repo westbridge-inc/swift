@@ -8,6 +8,7 @@ import { createRideRequest, type RideRequestApp } from './rides.service';
 import { formatMoney } from '../../utils/currency-amount';
 import { log } from '../../utils/logger';
 import { SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
+import { coarsePoint } from '../dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // The 5.5B ride queue (rides spec): position is DERIVED (createdAt FIFO among
@@ -334,24 +335,13 @@ export async function scanRideQueue(
 
 const PRESENCE_CAP = 12;
 const PRESENCE_RADIUS_KM = 5;
-/** ~100m of deterministic jitter: stable per driver per 5-minute bucket so a
- *  refetch never makes parked cars dance, yet true positions never leave the
- *  server. */
-function jitter(id: string, now = Date.now()): { dLat: number; dLng: number } {
-  const bucket = Math.floor(now / 300_000);
-  let h = 2166136261;
-  const seed = `${id}:${bucket}`;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  const angle = ((h >>> 8) % 360) * (Math.PI / 180);
-  const meters = 40 + ((h >>> 3) % 80); // 40–120m off the true point
-  const dLat = (meters * Math.cos(angle)) / 111_320;
-  const dLng = (meters * Math.sin(angle)) / (111_320 * Math.cos((6.8 * Math.PI) / 180));
-  return { dLat, dLng };
-}
-
+/* [F17 · 28 Oct 2026] Presence is snapped to the ONE coarse grid every
+ * unassigned private-point surface uses (board-privacy coarsePoint, ~330 m).
+ * It replaced a ~100 m offset derived from the driver id and a 5-minute
+ * bucket: those inputs are public to a former passenger (the ride read carries
+ * the driver id), so the offset could be recomputed and removed. A grid cell
+ * has no per-driver component, is stable between refetches (cars do not
+ * dance), and never puts the true position on the wire. */
 export async function presenceNear(
   prisma: PrismaClient,
   point: { lat: number; lng: number },
@@ -375,8 +365,8 @@ export async function presenceNear(
       ) <= ${PRESENCE_RADIUS_KM}
     LIMIT ${PRESENCE_CAP}
   `);
-  return rows.map((r) => {
-    const j = jitter(r.id);
-    return { lat: Number(r.lat) + j.dLat, lng: Number(r.lng) + j.dLng };
+  return rows.flatMap((r) => {
+    const cell = coarsePoint(Number(r.lat), Number(r.lng));
+    return cell ? [cell] : [];
   });
 }

@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { walkOrderStatus } from './helpers/order-status-walk';
+import { coarsePoint, PRIVATE_POINT_SNAP_DEG } from '../modules/dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // Presence (5.1/6.2): coarse, capped, hailable-only, jittered — never exact,
@@ -127,6 +128,30 @@ describe('GET /rides/presence', () => {
       headers: { authorization: `Bearer ${c.token}` },
     });
     expect(res2.json().data.cars[0]).toEqual(cars[0]);
+  });
+});
+
+describe('[F17] presence carries nothing a passenger can undo with a driver id', () => {
+  it('every car is a point of the shared coarse grid, and two cars parked together are the same point whoever drives them', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const parked = { lat: 6.8031, lng: -58.1571 };
+    await makeDriver({ at: parked });
+    await makeDriver({ at: parked });
+
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/rides/presence?lat=${GT.lat}&lng=${GT.lng}`,
+      headers: { authorization: `Bearer ${c.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const cars: { lat: number; lng: number }[] = res.json().data.cars;
+    expect(cars.length).toBeGreaterThanOrEqual(2);
+    const onGrid = (v: number) => Math.abs(v / PRIVATE_POINT_SNAP_DEG - Math.round(v / PRIVATE_POINT_SNAP_DEG)) < 1e-6;
+    for (const car of cars) {
+      expect(onGrid(car.lat) && onGrid(car.lng), `off-grid presence point ${car.lat},${car.lng}`).toBe(true);
+    }
+    // No per-driver component: both parked cars land on the parked spot's own cell.
+    const cell = coarsePoint(parked.lat, parked.lng)!;
+    expect(cars.filter((car) => car.lat === cell.lat && car.lng === cell.lng).length).toBe(2);
   });
 });
 
