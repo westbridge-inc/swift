@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { registerErrorHandler } from '../middleware/error-handler';
@@ -19,9 +19,8 @@ import { routedWhileDegradedCounter, unexpectedTenantHeaderCounter } from '../pl
 /** A path segment no route has: long, lowercase letters and dashes only. */
 function randomSegment(length = 600): string {
   const letters = 'abcdefghijklmnopqrstuvwxyz-';
-  const bytes = randomBytes(length);
   let out = 'z';
-  for (let i = 1; i < length; i += 1) out += letters[bytes[i]! % letters.length];
+  for (let i = 1; i < length; i += 1) out += letters[randomInt(letters.length)];
   return out;
 }
 
