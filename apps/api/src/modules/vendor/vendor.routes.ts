@@ -2361,8 +2361,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (stamped) return { row: live, alreadyStamped: true as const };
       // Marking READY implies preparing happened — backfill it for the timeline
       // (from the fresh row, not the stale pre-read).
+      // [F1] The answer goes to the store: never the codes it hands over against.
       const next = await tx.order.update({
         where: { id: order.id },
+        omit: HANDOVER_SECRETS_OMIT,
         data: phase === 'PREPARING'
           ? { preparingAt: now }
           : { readyAt: now, ...(live.preparingAt ? {} : { preparingAt: now }) },
@@ -3260,6 +3262,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     const updated = await app.prisma.order.findUniqueOrThrow({
       where: { id: order.id },
+      // [F1] Returned to the store, the pickup-code verifier: never a handover secret.
+      omit: HANDOVER_SECRETS_OMIT,
       include: { customer: { select: { id: true, firstName: true } } },
     });
 

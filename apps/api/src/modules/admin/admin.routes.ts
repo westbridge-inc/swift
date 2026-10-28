@@ -3490,7 +3490,8 @@ export async function adminRoutes(app: FastifyInstance) {
         },
       });
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return tx.order.findUniqueOrThrow({ where: { id } });
+      // [F1 census] The answer is a console row, never a handover code or the store's MMG snapshot.
+      return tx.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
     });
     orderRefundCounter.labels('settled').inc();
     await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });

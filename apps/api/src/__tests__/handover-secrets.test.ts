@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
+import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ const FORBIDDEN_KEYS = ['ridePin', 'pickupCode', 'pickupCodeAttempts'];
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
+const createdVendorIds: string[] = [];
 let seq = 0;
 
 /** Assert against the raw serialized payload — the bug was in serialization. */
@@ -173,14 +175,20 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
+  await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.ready();
 
   customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
 });
 
 afterAll(async () => {
+  await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: createdOrderIds } } }).catch(() => undefined);
+  await app.prisma.alertDelivery.deleteMany({ where: { subjectId: { in: createdOrderIds } } });
+  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
+  if (createdVendorIds.length) await app.prisma.vendor.deleteMany({ where: { id: { in: createdVendorIds } } });
   if (createdUserIds.length) {
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
@@ -370,5 +378,129 @@ describe('[F-0011] withholding the code did not break verification (positive con
     const after = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(after.ridePinAttempts).toBe(1);
     expect(after.ridePinVerified).toBe(false);
+  });
+});
+
+// [F1 · 28 Oct 2026] The STORE is the pickup-code verifier, and on a delivery
+// it hands the goods to the rider who verifies the customer's delivery PIN.
+// Kitchen progress recorded while a rider already owns the status lane
+// (recordPrepProgress) and the store's decline answered with the full order
+// row, so the store could read both codes out of its own tap's response.
+describe('[F1] the store never receives the delivery PIN or the pickup code', () => {
+  async function makeStore() {
+    const owner = await makeUserWithSession(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const ownerRow = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: ownerRow.id, name: `Secrets Kitchen ${seq}`, slug: `secrets-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT',
+        phone: `+${phoneBase + 500_000 + seq}`, addressLine1: 'Secrets Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+        latitude: 6.8013, longitude: -58.1551, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+      },
+    });
+    createdVendorIds.push(vendor.id);
+    return { ...owner, vendorId: vendor.id };
+  }
+
+  /** A store order carrying REAL codes (a null code would serialize to nothing and pass with the bug present). */
+  async function makeStoreOrder(vendorId: string, data: {
+    status: 'PENDING' | 'ACCEPTED' | 'PREPARING' | 'RIDER_ASSIGNED' | 'RIDER_EN_ROUTE_PICKUP' | 'RIDER_ARRIVED_PICKUP';
+    fulfillment: 'DELIVERY' | 'PICKUP';
+    riderId?: string;
+    preparingAt?: Date;
+  }) {
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SECV-${nanoid(10)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: customer.userId,
+        vendorId,
+        status: data.status,
+        fulfillment: data.fulfillment,
+        ...(data.fulfillment === 'DELIVERY' ? { fulfillmentMode: 'PLATFORM_RIDER' as const } : {}),
+        riderId: data.riderId ?? null,
+        preparingAt: data.preparingAt ?? null,
+        deliveryAddress: 'somewhere',
+        deliveryLat: 6.81,
+        deliveryLng: -58.16,
+        subtotalBase: 2000,
+        subtotalMarkup: 0,
+        subtotalCustomer: 2000,
+        deliveryFee: 700,
+        totalAmount: 2700,
+        paymentMethod: 'CASH',
+        ridePin: '246813',
+        pickupCode: '975310',
+      },
+    });
+    createdOrderIds.push(order.id);
+    return order;
+  }
+
+  const storePut = (store: { token: string; vendorId: string }, url: string, payload: unknown = {}) => app.inject({
+    method: 'PUT',
+    url,
+    payload: payload as Record<string, unknown>,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${store.token}`, 'x-vendor-id': store.vendorId },
+  });
+
+  it('PUT /vendor/orders/:id/preparing with a rider already assigned does not carry the codes', async () => {
+    const store = await makeStore();
+    const rider = await makeRider();
+    const order = await makeStoreOrder(store.vendorId, { status: 'RIDER_ASSIGNED', fulfillment: 'DELIVERY', riderId: rider.riderId });
+
+    const res = await storePut(store, `/api/v1/vendor/orders/${order.id}/preparing`);
+    expect(res.statusCode, res.body).toBe(200);
+    // Proves the milestone path ran (not the double-tap answer).
+    expect(res.json().data?.preparingAt).toBeTruthy();
+    assertNoHandoverSecrets(res.payload, 'PUT /vendor/orders/:id/preparing (rider assigned)');
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.ridePin).toBe('246813');
+    expect(row.preparingAt).not.toBeNull();
+  });
+
+  it('PUT /vendor/orders/:id/ready with a rider already assigned does not carry the codes', async () => {
+    const store = await makeStore();
+    const rider = await makeRider();
+    const order = await makeStoreOrder(store.vendorId, { status: 'RIDER_EN_ROUTE_PICKUP', fulfillment: 'DELIVERY', riderId: rider.riderId, preparingAt: new Date() });
+
+    const res = await storePut(store, `/api/v1/vendor/orders/${order.id}/ready`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data?.readyAt).toBeTruthy();
+    assertNoHandoverSecrets(res.payload, 'PUT /vendor/orders/:id/ready (rider assigned)');
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.readyAt).not.toBeNull();
+  });
+
+  it('PUT /vendor/orders/:id/ready, Mark ready backfilling preparing, does not carry the codes', async () => {
+    const store = await makeStore();
+    const rider = await makeRider();
+    const order = await makeStoreOrder(store.vendorId, { status: 'RIDER_ARRIVED_PICKUP', fulfillment: 'DELIVERY', riderId: rider.riderId });
+
+    const res = await storePut(store, `/api/v1/vendor/orders/${order.id}/ready`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data?.readyAt).toBeTruthy();
+    assertNoHandoverSecrets(res.payload, 'PUT /vendor/orders/:id/ready (backfill)');
+  });
+
+  it('PUT /vendor/orders/:id/reject of a pickup order does not carry the pickup code', async () => {
+    const store = await makeStore();
+    const order = await makeStoreOrder(store.vendorId, { status: 'PREPARING', fulfillment: 'PICKUP' });
+
+    const res = await storePut(store, `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Out of stock' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data?.status).toBe('CANCELLED');
+    assertNoHandoverSecrets(res.payload, 'PUT /vendor/orders/:id/reject (pickup)');
+  });
+
+  it('PUT /vendor/orders/:id/reject of a delivery order does not carry the delivery PIN', async () => {
+    const store = await makeStore();
+    const order = await makeStoreOrder(store.vendorId, { status: 'ACCEPTED', fulfillment: 'DELIVERY' });
+
+    const res = await storePut(store, `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Closing early' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data?.status).toBe('CANCELLED');
+    // The store screen still gets the customer's first name it shows on the declined card.
+    expect(res.json().data?.customer?.firstName).toBe('Secrets');
+    assertNoHandoverSecrets(res.payload, 'PUT /vendor/orders/:id/reject (delivery)');
   });
 });

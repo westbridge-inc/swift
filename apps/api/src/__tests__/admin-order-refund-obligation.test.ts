@@ -207,6 +207,18 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     expect(fresh.refundSettledAt).not.toBeNull();
   });
 
+  it('[F1 census] the settled answer carries no handover code or MMG destination snapshot', async () => {
+    const order = await owedOrder(1300);
+    // Real values: a null code serializes to nothing and would pass with the full row returned.
+    await app.prisma.order.update({ where: { id: order.id }, data: { ridePin: '246813', pickupCode: '975310', pickupCodeAttempts: 1 } });
+    const res = await settle(order.id, { reference: refFor('CASH'), amount: 1300 });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data?.status).toBe('REFUNDED');
+    for (const key of ['ridePin', 'pickupCode', 'pickupCodeAttempts', 'mmgNumberSnapshot', 'mmgPayUrlSnapshot']) {
+      expect(res.payload.includes(`"${key}"`), `refund-settled answered ${key}`).toBe(false);
+    }
+  });
+
   it('a wrong amount is refused in either direction, to the cent', async () => {
     const low = await owedOrder(1300);
     expect((await settle(low.id, { reference: refFor('CASH'), amount: 1200 })).statusCode).toBe(409);
