@@ -68,7 +68,7 @@ const NOT_EDITABLE_HERE: { title: string; body: string }[] = [
   },
   {
     title: 'Cancellation rule',
-    body: 'Product law in the API\'s one cancel rule: a cancel is free or refused, never a fee. A store order cancels free until the store accepts it; a ride, parcel or booking cancels free until a driver, rider or provider accepts it, then for 1 minute from that acceptance; very late orders and orders with no mover found cancel free. The apps show the API\'s verdict.',
+    body: 'Product law in the API\'s one cancel rule: a cancel is free or refused, never a fee. A store order cancels free until the store accepts it; a ride, parcel or booking cancels free until a driver, rider or provider accepts it, then for 1 minute from that acceptance; very late orders and orders with no mover found cancel free. With INSTANT_BOOKING on, a confirmed appointment cancels free until 2 hours before it starts (never less than 1 minute after it was confirmed), and the customer\'s own move stops at the same cutoff. The apps show the API\'s verdict.',
   },
   {
     title: 'Dispatch offer timeout',

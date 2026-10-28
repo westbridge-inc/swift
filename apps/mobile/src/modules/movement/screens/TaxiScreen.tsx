@@ -1689,7 +1689,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               />
             ) : null}
           </View>
-          {/* [owner #50] Five minutes after the driver accepted, the passenger contacts the
+          {/* [owner #50] One minute after the driver accepted (owner 22 Oct; was five), the passenger contacts the
               driver — the server's own words; the driver card above has the call. */}
           {cancelUnavailableMessage && !pinVerified ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{cancelUnavailableMessage}</T>

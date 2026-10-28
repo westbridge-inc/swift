@@ -15,12 +15,19 @@ import { site, launch } from '@/site.config';
  *    paid, and no further (modules/billing/pay-ahead.ts, owner #62), and
  *    closing an account waits until a fee paid for a week that has not
  *    started is refunded (modules/user/partner-wind-down.ts, FEE_CREDIT).
+ *  - [BOOK-S7 · owner B1/B2 28 Oct 2026] while instant appointment booking
+ *    (INSTANT_BOOKING) is switched on, a confirmed appointment cancels free
+ *    until 2 hours before it starts, never less than 1 minute after it was
+ *    confirmed, and the customer's own move stops at the same cutoff
+ *    (cancel-policy.ts appointmentChangeCutoff); with it off, the 1-minute
+ *    booking rule above stands. Terms §7 says the same (pinned in the API's
+ *    legal-appointment-rules.test.ts).
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
  * Owner ruling, 8 Oct 2026: the refund at closing. Owner #62, 14 Oct 2026: one
  * week at a time, no paying ahead (was a four-week limit).
  */
 
-const UPDATED = '17 October 2026';
+const UPDATED = '28 October 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -66,6 +73,13 @@ export default function RefundsPage() {
           <b>Rides, parcels and bookings</b> can be cancelled free at any time while nobody has accepted them, and for
           1 minute after a driver, rider or provider accepts them. After that, contact your driver, rider or provider.
           You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
+        </li>
+        <li>
+          <b>Appointments</b> (a time you book from a business&apos;s listing): while {site.tradeName}&apos;s instant
+          appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app
+          until 2 hours before it starts, and always for at least 1 minute after it was confirmed. Where the app offers
+          it, you can also move it to another free time of the same service until then. After that, contact the business
+          to change or cancel it. The business can also move your appointment, and you are told in the app when it does.
         </li>
         <li>
           <b>A service job</b> (a local pro you hired through the app) can be cancelled free in the app while it is a
