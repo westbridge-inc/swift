@@ -156,9 +156,10 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
           {name.charAt(0).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1 basis-56">
-          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+          {/* [ADMIN-AUDIT S4-2] The shell's header is the page's h1; the person's name is the next level. */}
+          <h2 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
             <Truncate text={name} lines={2} focusable />
-          </h1>
+          </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <span className={`mc-badge ${m.documentsVerified ? 'mc-tone-good' : 'mc-tone-warn'}`}>
               {m.documentsVerified ? 'Documents verified' : 'Documents not verified'}

@@ -19,9 +19,10 @@ describe('[ADMIN-AUDIT S3-4] the date words', () => {
   let gyDateTime: typeof import('./dates').gyDateTime;
   let gyLongDate: typeof import('./dates').gyLongDate;
   let gyTime: typeof import('./dates').gyTime;
+  let gyTodayYmd: typeof import('./dates').gyTodayYmd;
   beforeAll(async () => {
     process.env['TZ'] = 'Pacific/Honolulu';
-    ({ gyCalendarDay, gyDate, gyDateTime, gyLongDate, gyTime } = await import('./dates'));
+    ({ gyCalendarDay, gyDate, gyDateTime, gyLongDate, gyTime, gyTodayYmd } = await import('./dates'));
   });
   afterAll(() => { if (zone === undefined) delete process.env['TZ']; else process.env['TZ'] = zone; });
   it('runs where the browser zone is not Guyana time', () => {
@@ -46,6 +47,13 @@ describe('[ADMIN-AUDIT S3-4] the date words', () => {
     expect(gyCalendarDay('2026-08-23')).toBe('23 Aug 2026');
     expect(gyCalendarDay('2026-08-23T00:00:00Z')).toBe('—');
   });
+  it('today in Guyana as a date-input value: the Guyana day, not the UTC day (REVIEW-F #2155 S4-b)', () => {
+    // 01:00Z on 28 Oct is 21:00 on 27 Oct in Georgetown: a promo made that evening starts on the 27th.
+    expect(gyTodayYmd(new Date('2026-10-28T01:00:00Z'))).toBe('2026-10-27');
+    expect(gyTodayYmd(new Date('2026-10-28T04:00:00Z'))).toBe('2026-10-28');
+    expect(gyTodayYmd(new Date('2026-10-28T01:00:00Z'), 30)).toBe('2026-11-26');
+    expect(gyTodayYmd(new Date('2026-12-31T12:00:00Z'), 1)).toBe('2027-01-01');
+  });
   it('a missing or broken value is an em-dash, never "Invalid Date" or 1970', () => {
     for (const v of [null, undefined, '', 'not a date']) {
       expect(gyDate(v)).toBe('—');
@@ -58,9 +66,6 @@ describe('[ADMIN-AUDIT S3-4] the date words', () => {
 const SRC = join(process.cwd(), 'src');
 /** A hit kept on purpose, with its reason. A cut-off ISO string is keyed by what it cuts, so a new one is a new hit. */
 const ALLOWED: Record<string, string> = {
-  'app/verification/page.tsx | slice(0, 10) of new Date(now).toISOString()': 'the max= of a date input (a form value the browser needs as YYYY-MM-DD), never printed',
-  'app/promos/page.tsx | slice(0, 10) of new Date().toISOString()': 'the default value of a date input (YYYY-MM-DD), never printed',
-  'app/promos/page.tsx | slice(0, 10) of new Date(Date.now() + 30 * 864e5).toISOString()': 'the default value of a date input (YYYY-MM-DD), never printed',
   'lib/approvals.ts | slice(0, 10) of row.entityId': 'shortens a record id for a title, not a date',
 };
 /** [REVIEW-F #2155 S3-1] Options that make toLocaleString write a date or a time, whatever its receiver is called
