@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { OrderStatus } from '@prisma/client';
@@ -32,6 +32,8 @@ import { promoUsesByPersonWhere } from '../modules/promo/promo-uses';
 let app: FastifyInstance;
 const userIds: string[] = [];
 let seq = 0;
+// Referral codes are letters and digits only (customer.routes REFERRAL_CODE_SHAPE); nanoid() can give '-' or '_'.
+const codeSuffix = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', 4);
 const phoneBase = 592_003_100_000 + Math.floor(Math.random() * 800_000);
 
 async function makeUser() {
@@ -40,7 +42,7 @@ async function makeUser() {
     data: {
       phone: `+${phoneBase + seq}`, firstName: 'Promo', lastName: `P${seq}`,
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
-      customer: { create: { referralCode: `PPC${seq}${nanoid(4).toUpperCase()}` } },
+      customer: { create: { referralCode: `PPC${seq}${codeSuffix()}` } },
     },
   });
   userIds.push(u.id);

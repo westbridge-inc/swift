@@ -5,6 +5,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { AdsLifecycleService } from './lifecycle.service';
+import { assertAdvertiserApprovedWithin } from './advertiser.service';
 import { log } from '../../utils/logger';
 
 // Creative upload + review (ads-platform spec §9/§10). Reconciliation: the spec
@@ -70,9 +71,14 @@ export class CreativeService {
   }): Promise<AdCreative> {
     const campaign = await this.prisma.adCampaign.findUnique({
       where: { id: input.campaignId },
-      include: { placement: { select: { tier: true, mediaKind: true } } },
+      include: { placement: { select: { tier: true, mediaKind: true } }, advertiser: { select: { status: true } } },
     });
     if (!campaign) throw new NotFoundError('AdCampaign', input.campaignId);
+    // [SEC-TRUST F6] A creative is uploaded by the advertiser: its account must be APPROVED (checked again
+    // under lock when the row is written, after the file is stored).
+    if (campaign.advertiser.status !== 'APPROVED') {
+      throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account is not active. Contact support.');
+    }
     if (campaign.status === 'COMPLETED' || campaign.status === 'CANCELLED' || campaign.status === 'REJECTED') {
       throw new AppError(409, 'CAMPAIGN_TERMINAL', 'This campaign can no longer take creatives.');
     }
@@ -98,18 +104,21 @@ export class CreativeService {
       folder: `ads/${input.campaignId}`,
     });
 
-    const creative = await this.prisma.adCreative.create({
-      data: {
-        campaignId: input.campaignId,
-        kind: input.kind,
-        fileUrl: url,
-        headline: input.text.headline ?? null,
-        body: input.text.body ?? null,
-        ctaLabel: input.text.ctaLabel ?? null,
-        // Images are review-ready; videos wait on the transcode job (§9.2).
-        transcodeStatus: input.kind === 'VIDEO' ? 'QUEUED' : 'READY',
-        status: 'PENDING',
-      },
+    const creative = await this.prisma.$transaction(async (tx) => {
+      await assertAdvertiserApprovedWithin(tx, campaign.advertiserId);
+      return tx.adCreative.create({
+        data: {
+          campaignId: input.campaignId,
+          kind: input.kind,
+          fileUrl: url,
+          headline: input.text.headline ?? null,
+          body: input.text.body ?? null,
+          ctaLabel: input.text.ctaLabel ?? null,
+          // Images are review-ready; videos wait on the transcode job (§9.2).
+          transcodeStatus: input.kind === 'VIDEO' ? 'QUEUED' : 'READY',
+          status: 'PENDING',
+        },
+      });
     });
     log().info({ creativeId: creative.id, campaignId: input.campaignId, kind: input.kind }, 'ad creative uploaded — PENDING review');
     // §10.4 advisory pre-screen — fire-and-forget. It annotates the review

@@ -50,6 +50,23 @@ export async function assertCapabilityWithin(
   assertRoleHolds(rows[0]!.role, capability);
 }
 
+/**
+ * [SEC-TRUST F6] Advertiser-initiated actions (campaign pause/resume/cancel, booking, checkout, creative
+ * upload) need an APPROVED advertiser, read here under a share lock inside the action's own transaction:
+ * an admin's suspension that commits first is obeyed, and one that comes after waits for the action and
+ * then pauses what it left live.
+ */
+export async function assertAdvertiserApprovedWithin(tx: Prisma.TransactionClient, advertiserId: string): Promise<void> {
+  const rows = await tx.$queryRaw<Array<{ status: string }>>`
+    SELECT "status"::text AS "status" FROM "advertisers" WHERE "id" = ${advertiserId} FOR SHARE`;
+  if (rows[0]?.status !== 'APPROVED') {
+    throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account is not active. Contact support.');
+  }
+}
+
+/** [SEC-TRUST F6] The reason Swift writes on campaigns its suspension paused. Only Swift lifts it (reinstate). */
+export const SUSPENSION_PAUSE_PREFIX = 'Advertiser suspended: ';
+
 // Advertiser lifecycle (ads-platform spec §4). A logged-in user registers a
 // company and becomes its first OWNER member; the application lands
 // PENDING_REVIEW in the founder's queue. Ad-management access is keyed on
@@ -258,6 +275,7 @@ export class AdvertiserService {
 
   async approve(advertiserId: string, adminUserId: string) {
     const a = await this.transition(advertiserId, ['PENDING_REVIEW', 'SUSPENDED'], 'APPROVED', adminUserId, 'ADVERTISER_APPROVE');
+    await this.liftSuspensionPauses(advertiserId);
     await this.notifyOwners(a.id, "You're approved — launch your first campaign", 'Your Swift advertiser account is approved. You can now book placements and pay to go live.', 'advertiser_approved');
     return a;
   }
@@ -274,13 +292,16 @@ export class AdvertiserService {
     const a = await this.transition(advertiserId, ['APPROVED'], 'SUSPENDED', adminUserId, 'ADVERTISER_SUSPEND', reason);
     const paused = await this.prisma.adCampaign.updateMany({
       where: { advertiserId, status: { in: ['LIVE', 'SCHEDULED'] } },
-      data: { status: 'PAUSED', statusReason: `Advertiser suspended: ${reason}` },
+      data: { status: 'PAUSED', statusReason: `${SUSPENSION_PAUSE_PREFIX}${reason}` },
     });
     if (paused.count > 0) {
       await this.prisma.adsAuditLog.create({
         data: { actorUserId: adminUserId, action: 'ADVERTISER_SUSPEND_CASCADE', entityType: 'Advertiser', entityId: advertiserId, reason: `${paused.count} campaign(s) auto-paused` },
       });
     }
+    // [SEC-TRUST F6] The serving pool forgets this advertiser now, not when its cache expires.
+    const { AdServingService } = await import('./serving.service');
+    AdServingService.invalidateTenant(a.tenantId);
     await this.notifyOwners(a.id, 'Advertiser account suspended', `${reason} Your live campaigns are paused — contact support.`, 'advertiser_suspended');
     return a;
   }
@@ -288,8 +309,17 @@ export class AdvertiserService {
   async reinstate(advertiserId: string, adminUserId: string) {
     // Paused campaigns STAY paused until the advertiser resumes them (§4.3).
     const a = await this.transition(advertiserId, ['SUSPENDED'], 'APPROVED', adminUserId, 'ADVERTISER_REINSTATE');
+    await this.liftSuspensionPauses(advertiserId);
     await this.notifyOwners(a.id, 'Advertiser account reinstated', 'Your account is active again. Resume your paused campaigns when ready.', 'advertiser_reinstated');
     return a;
+  }
+
+  /** [SEC-TRUST F6] Swift lifted the suspension: its pauses become ordinary pauses the advertiser may resume (§4.3). */
+  private async liftSuspensionPauses(advertiserId: string): Promise<void> {
+    await this.prisma.adCampaign.updateMany({
+      where: { advertiserId, status: 'PAUSED', statusReason: { startsWith: SUSPENSION_PAUSE_PREFIX } },
+      data: { statusReason: null },
+    });
   }
 
   /** CAS transition + audit log with a before/after snapshot. */

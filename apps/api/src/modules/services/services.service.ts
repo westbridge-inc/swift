@@ -4,6 +4,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { assertUsersMayContact } from '../moderation/user-block.service';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { ownerWallSystem } from '../../lib/owner-rls';
 
@@ -506,6 +507,10 @@ export async function createServiceJobWithLiveAuthority(
     if (provider.userId === input.customerId) {
       throw new AppError(400, 'SELF_JOB', 'You cannot hire yourself');
     }
+    // [SEC-TRUST F2] A block in EITHER direction ends contact (user-block.service): no job, no chat room and
+    // no notice across it. Read after both User rows are locked — a block takes the same two locks — so a
+    // block that committed first is seen here. One neutral answer whichever side blocked.
+    await assertUsersMayContact(tx, input.tenantId, input.customerId, provider.userId);
 
     const trade = canonicalServiceTrade(provider.trade);
     const verified = providerUser.status === 'ACTIVE' && trade

@@ -332,6 +332,9 @@ const promoValidateSchema = z.object({
 const referralRedeemSchema = z.object({
   code: z.string().trim().min(3).max(64),
 });
+/** [SEC-TRUST F16] Every referral code Swift issues is letters and digits only. Anything else is refused
+ *  before the lookup, so the case-insensitive match can never act as a pattern. */
+const REFERRAL_CODE_SHAPE = /^[A-Za-z0-9]{3,64}$/;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -845,9 +848,13 @@ export async function customerRoutes(app: FastifyInstance) {
   // 0. REFERRAL — real attribution: redeeming a code writes Customer.referredBy
   // ========================================================================
 
-  app.post('/referral/redeem', async (request: AuthRequest) => {
+  app.post('/referral/redeem', { preHandler: [velocityGuard(app, 'referral.redeem')] }, async (request: AuthRequest) => {
     const { userId } = request.user;
     const { code } = referralRedeemSchema.parse(request.body);
+    // [SEC-TRUST F16] The same answer as an unknown code: nothing is looked up.
+    if (!REFERRAL_CODE_SHAPE.test(code)) {
+      throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
+    }
 
     const customer = await resolveCustomer(app, userId);
     if (customer.referredBy) {

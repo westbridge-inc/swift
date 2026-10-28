@@ -6,7 +6,7 @@ import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
 import { getChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
-import { reviewCredentialFor, reviewCodeMatches, REVIEW_CODE_TTL } from '../review/credentials';
+import { reviewCredentialFor, reviewCodeMatches, reserveReviewAttempt, REVIEW_CODE_TTL } from '../review/credentials';
 
 /**
  * [ALG-34] Step-up: "confirm it's you" for an EXISTING session, before a
@@ -60,6 +60,8 @@ async function assertNotLocked(redis: Redis, userId: string): Promise<void> {
 
 /** [REVIEW-PARTNER · DL-6] Armed by a step-up "send" for a store-review login (the account's own bucket). */
 export const reviewStepUpKey = (userId: string) => `stepup:review:${userId}`;
+/** [SEC-TRUST F12] The review step-up code's attempt budget (outlives one window, like the sign-in's). */
+export const reviewStepUpTriesKey = (userId: string) => `stepup:review-tries:${userId}`;
 
 /**
  * [REVIEW-PARTNER · DL-6] The account's store-review credential, when it is
@@ -136,9 +138,14 @@ async function verifyReviewStepUp(app: FastifyInstance, userId: string, code: st
   const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, tenantId: true } });
   const credential = user ? await reviewStepUpCredential(app, user) : null;
   if (!credential) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
+  // [SEC-TRUST F12] Like the review sign-in: one place of five is taken atomically before the code is
+  // compared, so simultaneous guesses cannot all be compared before the failure counter below moves.
+  const tries = reviewStepUpTriesKey(userId);
+  if (!(await reserveReviewAttempt(app.redis, tries))) return { valid: false, reason: 'Too many attempts. Request a new OTP.' };
   if (!reviewCodeMatches(credential, code)) return { valid: false, reason: 'Invalid OTP code' };
   const consumed = Number(await app.redis.eval(CONSUME_REVIEW_WINDOW, 1, key, generation));
   if (consumed !== 1) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
+  await app.redis.del(tries);
   return { valid: true };
 }
 

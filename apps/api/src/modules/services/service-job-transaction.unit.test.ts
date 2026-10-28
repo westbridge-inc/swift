@@ -101,6 +101,8 @@ function rollbackModel(state: TransactionState, failAt?: 'audit' | 'chat' | 'not
             return { id: 'notice-1' };
           }),
         },
+        // [SEC-TRUST F2] No block stands between the parties in this model.
+        userBlock: { findFirst: vi.fn(async () => null) },
       } as unknown as Prisma.TransactionClient;
 
       try {

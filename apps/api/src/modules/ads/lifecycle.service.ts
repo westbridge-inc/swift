@@ -4,6 +4,8 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import { mondayOf } from './ads-weeks';
+import { assertAdvertiserApprovedWithin, SUSPENSION_PAUSE_PREFIX } from './advertiser.service';
 
 // Campaign lifecycle (ads-platform spec §6.1). ONE transition function owns
 // every campaign status change downstream of payment — it validates the table,
@@ -55,6 +57,9 @@ const NOTICE: Partial<Record<CampaignEvent, { title: string; body: string; kind:
   kill: { title: 'Campaign removed', body: 'Your campaign was removed for a policy reason. Contact support for details.', kind: 'ad_campaign_killed' },
 };
 
+/** [SEC-TRUST F6 follow-up] Resumed before its booked week: back on schedule, not serving yet. */
+const RESUMED_BEFORE_START = { title: 'Campaign resumed', body: 'Your campaign is back on schedule and goes live when its booked week starts.', kind: 'ad_campaign_resumed' };
+
 export class AdsLifecycleService {
   private notifications: NotificationService;
   constructor(private prisma: PrismaClient, private io: Server) {
@@ -73,6 +78,9 @@ export class AdsLifecycleService {
        *  status moved: the refund obligation is staged in the same database
        *  generation as the terminal state, or neither happens. */
       within?: (tx: Prisma.TransactionClient, moved: { before: AdCampaign; to: AdCampaignStatus }) => Promise<void>;
+      /** [SEC-TRUST F6] The advertiser itself asked (pause, resume, cancel): its account must be APPROVED,
+       *  read under lock in this transaction, and a pause Swift's suspension made is not its to lift. */
+      byAdvertiser?: true;
     } = {},
   ): Promise<AdCampaign> {
     const rule = TABLE[event];
@@ -85,26 +93,52 @@ export class AdsLifecycleService {
       log().warn({ campaignId, from: before.status, event }, 'illegal ad campaign transition rejected');
       throw new AppError(409, 'INVALID_CAMPAIGN_TRANSITION', `Cannot ${event} a ${before.status} campaign.`);
     }
+    // [SEC-TRUST F6 follow-up] A campaign paused before its booked week began (a suspension pauses SCHEDULED
+    // campaigns too) resumes to SCHEDULED, and week_start takes it LIVE when its week arrives — never early.
+    let to: AdCampaignStatus = event === 'resume' && before.startWeek.getTime() > mondayOf(new Date()).getTime() ? 'SCHEDULED' : rule.to;
+    let statusReason: string | null = reason ?? null;
+    let heldForSuspension = false;
     // ONE generation: the status CAS, the audit row and whatever the caller
     // stages within (the refund obligation) commit together — never a killed
     // campaign whose money obligation vanished on the way.
     await this.prisma.$transaction(async (tx) => {
+      if (opts.byAdvertiser) {
+        await assertAdvertiserApprovedWithin(tx, before.advertiserId);
+        const current = await tx.adCampaign.findUnique({ where: { id: campaignId }, select: { statusReason: true } });
+        if (event === 'resume' && current?.statusReason?.startsWith(SUSPENSION_PAUSE_PREFIX)) {
+          throw new AppError(409, 'CAMPAIGN_PAUSED_BY_SWIFT', 'Swift paused this campaign. Contact support.');
+        }
+      }
+      // [SEC-TRUST F6 · REVIEW-M S3-1] Any other move that would put the campaign on schedule or live (creatives
+      // approved, its week starting) reads the advertiser under the same share lock: an advertiser that is not
+      // APPROVED has its campaign land PAUSED under Swift's suspension mark instead — never "live" while it
+      // cannot serve — so week_end, an admin kill and the refunds treat it as the suspension's pause, and
+      // reinstatement hands it back to the advertiser to resume. No "You're scheduled/live" notice is sent.
+      if (!opts.byAdvertiser && (to === 'SCHEDULED' || to === 'LIVE')) {
+        const [advertiser] = await tx.$queryRaw<Array<{ status: string; statusReason: string | null }>>`
+          SELECT "status"::text AS "status", "statusReason" FROM "advertisers" WHERE "id" = ${before.advertiserId} FOR SHARE`;
+        if (advertiser?.status !== 'APPROVED') {
+          to = 'PAUSED';
+          statusReason = `${SUSPENSION_PAUSE_PREFIX}${advertiser?.statusReason ?? 'account not active'}`;
+          heldForSuspension = true;
+        }
+      }
       const moved = await tx.adCampaign.updateMany({
         where: { id: campaignId, status: before.status },
-        data: { status: rule.to, statusReason: reason ?? null },
+        data: { status: to, statusReason },
       });
       if (moved.count === 0) throw new AppError(409, 'CAMPAIGN_TRANSITION_RACE', 'The campaign changed underneath this action — retry.');
       await tx.adsAuditLog.create({
         data: {
           tenantId: before.tenantId, actorUserId: actor, action: `CAMPAIGN_${event.toUpperCase()}`,
           entityType: 'AdCampaign', entityId: campaignId,
-          before: { status: before.status } as never, after: { status: rule.to } as never, reason: reason ?? null,
+          before: { status: before.status } as never, after: { status: to } as never, reason: statusReason,
         },
       });
-      if (opts.within) await opts.within(tx, { before, to: rule.to });
+      if (opts.within) await opts.within(tx, { before, to });
     });
 
-    const notice = NOTICE[event];
+    const notice = heldForSuspension ? undefined : to === 'SCHEDULED' && event === 'resume' ? RESUMED_BEFORE_START : NOTICE[event];
     if (notice) await this.notifyOwners(before.advertiserId, notice.title, notice.body, notice.kind, campaignId).catch(() => {});
     if (event === 'kill') {
       await notifyAdmins(this.prisma, this.notifications, {
@@ -114,7 +148,7 @@ export class AdsLifecycleService {
         data: { kind: 'ad_campaign_killed_ops', campaignId, reason },
       }).catch(() => {});
     }
-    log().info({ campaignId, from: before.status, to: rule.to, event, actor }, 'ad campaign transition');
+    log().info({ campaignId, from: before.status, to, event, actor }, 'ad campaign transition');
     return this.prisma.adCampaign.findUniqueOrThrow({ where: { id: campaignId } });
   }
 

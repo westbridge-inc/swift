@@ -4,6 +4,7 @@ import type { Prisma } from '@prisma/client';
 import { z } from '../../lib/zod';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
+import { blockedAuthorIds } from '../moderation/user-block.service';
 import {
   canonicalServiceTrade,
   createServiceJobWithLiveAuthority,
@@ -452,10 +453,14 @@ export async function servicesRoutes(app: FastifyInstance) {
     const trade = requireCanonicalServiceTrade(query.trade);
     const tenantId = await browseTenant(request.authSessionId !== null);
     const afterId = query.cursor ? decodeProviderCursor(query.cursor, { tenantId, trade }) : undefined;
+    // [SEC-TRUST F2] A signed-in customer never sees the providers they blocked.
+    const viewerId = request.authSessionId !== null ? request.user?.userId : undefined;
+    const blocked = viewerId ? await blockedAuthorIds(app.prisma, tenantId, viewerId) : [];
     const candidates = await app.prisma.serviceProvider.findMany({
       where: {
         trade,
         ...(afterId ? { id: { gt: afterId } } : {}),
+        ...(blocked.length ? { userId: { notIn: blocked } } : {}),
         // ServiceProvider is tenant-owned through its canonical User. Keep the
         // relational predicate here until the model itself carries tenantId.
         user: { tenantId, status: 'ACTIVE' },
