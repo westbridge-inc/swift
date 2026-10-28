@@ -40,6 +40,12 @@ type OrderWithParties = {
 
 const masked = (phone: string | null | undefined) => (phone ? maskPhone(phone) : phone ?? null);
 
+/** [ADMIN-AUDIT S4-5] Rows that name a person (Compliance violations and re-verification cases), each person's
+ *  phone masked the order desk's way. Nobody is called from those pages; the full number stays an audited reveal. */
+export function maskRowUserPhones<T extends { user?: PhoneHolder }>(rows: readonly T[]): T[] {
+  return rows.map((row) => (row.user && 'phone' in row.user ? ({ ...row, user: { ...row.user, phone: masked(row.user.phone) } } as T) : row));
+}
+
 /** The order with every party phone masked. A new object; the input is untouched. */
 // Any order-shaped row: a select may leave a party out, or select it without a phone (the list's
 // `vendor: { id, name }`), so the parties are narrowed here, not in the signature.

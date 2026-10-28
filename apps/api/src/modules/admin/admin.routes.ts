@@ -106,7 +106,7 @@ import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, d
 import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
-import { maskOrderPartyPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
+import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -7132,7 +7132,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/compliance', { preHandler: [adminGuard] }, async () => {
     requireDefaultTenantCompliance();
-    return { success: true, data: await compliance.overview() };
+    // [ADMIN-AUDIT S4-5] Every person on the page with the phone masked: nobody is called from it.
+    const overview = await compliance.overview();
+    return { success: true, data: { ...overview, openViolations: maskRowUserPhones(overview.openViolations), reviewQueue: maskRowUserPhones(overview.reviewQueue) } };
   });
 
   /** Run the invariant check right now (the daily job runs it anyway). */

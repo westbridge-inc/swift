@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
+import { maskedPhone } from '@/lib/review-center';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { humanise } from '@/lib/labels';
@@ -61,8 +62,10 @@ export default function CompliancePage() {
 
   const d = q.data?.data;
   const runs: any[] = d?.runs ?? [];
-  const violations: any[] = d?.openViolations ?? [];
-  const queue: any[] = d?.reviewQueue ?? [];
+  // [ADMIN-AUDIT S4-5] Phones masked like every other console list, whatever the server sends: nobody is called from here.
+  const masked = (row: any) => (row?.user ? { ...row, user: { ...row.user, phone: maskedPhone(row.user.phone ?? undefined) } } : row);
+  const violations: any[] = (d?.openViolations ?? []).map(masked);
+  const queue: any[] = (d?.reviewQueue ?? []).map(masked);
 
   const when = (iso: string) => gyDateTime(iso);
 
