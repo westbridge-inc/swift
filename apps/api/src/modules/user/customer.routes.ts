@@ -42,6 +42,7 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
 import {
   publicOperatingHours,
   publicStorefrontCategory,
@@ -2042,7 +2043,9 @@ export async function customerRoutes(app: FastifyInstance) {
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
           audience: 'business',
-          data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+          // [BOOK-FU2] Not a booking_ kind: builds 9-12 open that family on the jobs list (appointment-moved.ts).
+          dedupeKey: appointmentMovedDedupeKey(result.booking.id),
+          data: appointmentMovedData(result.booking),
         }).catch(() => undefined);
       }
     }

@@ -33,6 +33,7 @@ import { NotificationService } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService, lockBusinessTime } from '../booking/booking.service';
 import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES, peakMoment } from '../booking/availability';
+import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
 import { INSTANT_BOOKING_OFF_MESSAGE, instantBookingSettingsForSave, mergeBookingConfig, overlappingWindows, overlappingWindowsMessage, windowsForSave } from '../booking/booking-config';
 import { instantBookingEnabled, NEW_BOOKABLE_LISTING_DEFAULTS } from '../booking/instant-booking';
 import { bookingLimitsFor } from '../booking/booking-limits';
@@ -4508,7 +4509,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         title: 'Your appointment moved',
         body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
         audience: 'customer',
-        data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+        // [BOOK-FU2] Not a booking_ kind: builds 9-12 open that family on the jobs list (appointment-moved.ts).
+        dedupeKey: appointmentMovedDedupeKey(result.booking.id),
+        data: appointmentMovedData(result.booking),
       }).catch(() => undefined);
     }
     return { success: true, data: result.booking };
