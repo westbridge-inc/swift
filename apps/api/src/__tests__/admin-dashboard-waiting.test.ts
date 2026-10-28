@@ -12,6 +12,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { SUPPORT_OPERATOR_CAPABILITIES } from '../modules/admin/admin-authority';
 import { WAITING_QUEUES, countWaiting, servesRead, type WaitingKey } from '../modules/admin/dashboard-waiting';
 import { testPhone } from './helpers/fixture-ids';
+import { currentDunningClock } from '../modules/billing/dunning-clock';
 
 // ---------------------------------------------------------------------------
 // [ADMIN-AUDIT S2-1] TODAY LISTS EVERY QUEUE THAT WAITS FOR A PERSON.
@@ -35,6 +36,8 @@ const docIds: string[] = [];
 const claimIds: string[] = [];
 const orderIds: string[] = [];
 const riderIds: string[] = [];
+// [FOLLOWUPS · #2152 S4-1] tenant B's waiting rows, one per tenant-scoped queue.
+const b = { approvals: [] as string[], vendors: [] as string[], owners: [] as string[], subs: [] as string[], clocks: [] as string[], holds: [] as string[], checkouts: [] as string[], returns: [] as string[] };
 
 async function makeUser(role: 'ADMIN' | 'SUPER_ADMIN' | 'CUSTOMER', permissions: string[] | null, tenantId = 'swift-default') {
   const user = await runWithoutTenant(() => app.prisma.user.create({
@@ -104,9 +107,18 @@ beforeAll(async () => {
 afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.opsAlert.deleteMany({ where: { id: { in: alertIds } } }).catch(() => {});
+    await app.prisma.paymentConfirmationHold.deleteMany({ where: { id: { in: b.holds } } }).catch(() => {});
+    await app.prisma.mmgCheckoutIntent.deleteMany({ where: { id: { in: b.checkouts } } }).catch(() => {});
+    await app.prisma.billingDunningClock.deleteMany({ where: { id: { in: b.clocks } } }).catch(() => {});
+    await app.prisma.subscription.deleteMany({ where: { id: { in: b.subs } } }).catch(() => {});
+    await app.prisma.privilegedApproval.deleteMany({ where: { id: { in: b.approvals } } }).catch(() => {});
+    await app.prisma.returnRequest.deleteMany({ where: { id: { in: b.returns } } }).catch(() => {});
+    await app.prisma.custodyRecoveryCase.deleteMany({ where: { orderId: { in: orderIds } } }).catch(() => {});
     await app.prisma.verificationDocument.deleteMany({ where: { id: { in: docIds } } }).catch(() => {});
     await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } }).catch(() => {});
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => {});
+    await app.prisma.vendor.deleteMany({ where: { id: { in: b.vendors } } }).catch(() => {});
+    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: b.owners } } }).catch(() => {});
     await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } }).catch(() => {});
     await app.prisma.contentReport.deleteMany({ where: { id: { in: reportIds } } }).catch(() => {});
     await app.prisma.supportTicket.deleteMany({ where: { id: { in: ticketIds } } }).catch(() => {});
@@ -218,6 +230,82 @@ describe('[ADMIN-AUDIT S2-1] Today counts every queue that waits for a person', 
     for (const key of ['supportSafety', 'support', 'moderation'] as const) {
       expect(s1.count(key), key).toBe(s0.count(key));
       expect(a1.count(key), key).toBe(a0.count(key));
+    }
+  });
+
+  // [FOLLOWUPS · REVIEW-G/M #2152 S4-1] Table-driven over every tenant-scoped counter: one waiting row per queue in
+  // ANOTHER tenant, and neither the platform responder nor a tenant ADMIN of this tenant counts any of it. (Tickets and
+  // reports: the case above. Ops pages: the platform responder counts every tenant's on purpose, pinned above.)
+  it('another tenant\'s documents, approvals, confirmations, store VAT, custody cases, claims and returns are never counted', async () => {
+    const counted = ['documents', 'approvals', 'paymentConfirmations', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'claimsAutoToPay', 'returnsToDecide', 'refundsOwed'] as const;
+    const [s0, a0] = [await waiting(superAdmin.token), await waiting(admin.token)];
+    const moverB = await makeUser('CUSTOMER', null, TENANT_B);
+    await runWithoutTenant(async () => {
+      const now = Date.now();
+      const riderB = await app.prisma.rider.create({ data: { userId: moverB.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } });
+      riderIds.push(riderB.id);
+      const orderB = async () => {
+        const o = await app.prisma.order.create({ data: {
+          orderNumber: `WTB-${nanoid(10).toUpperCase()}`, customerId: customerB.id, tenantId: TENANT_B, orderType: 'COURIER', status: 'DELIVERED',
+          deliveryAddress: '1 Test St', deliveryLat: 6.8055, deliveryLng: -58.1553,
+          subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+        } as never, select: { id: true } });
+        orderIds.push(o.id);
+        return o.id;
+      };
+      // documents: a document waiting for review, from a tenant-B person
+      docIds.push((await app.prisma.verificationDocument.create({ data: { userId: customerB.id, role: 'MOVER', docType: 'national_id', fileUrl: `local://waiting-${RUN}/${nanoid(6)}.png` } })).id);
+      // approvals: a second signature owed in tenant B
+      b.approvals.push((await app.prisma.privilegedApproval.create({ data: {
+        tenantId: TENANT_B, action: 'PUT /config/:key', cls: 'C5', capability: 'config.write', fingerprint: `waiting-b-${nanoid(12)}`,
+        requestedBy: customerB.id, reason: 'Fixture ask in another tenant', expiresAt: new Date(now + 3_600_000),
+      } as never })).id);
+      // store VAT: a tenant-B store whose certificate waits; confirmations: a payment held for review on its fee
+      const owner = await app.prisma.vendorOwner.create({ data: { userId: customerB.id } });
+      b.owners.push(owner.id);
+      const vendor = await app.prisma.vendor.create({ data: {
+        ownerId: owner.id, tenantId: TENANT_B, name: 'Waiting B store', slug: `waiting-b-${nanoid(10).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`, vendorType: 'RESTAURANT',
+        phone: 'synthetic', addressLine1: 'B Lane', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', vatStatus: 'PENDING',
+      } as never });
+      b.vendors.push(vendor.id);
+      const sub = await app.prisma.subscription.create({ data: {
+        vendorId: vendor.id, type: 'RESTAURANT', weeklyRate: 20000, billingMethod: 'CASH', autoRenew: false,
+        currentPeriodStart: new Date(now - 7 * 86_400_000), currentPeriodEnd: new Date(now + 86_400_000), nextBillingDate: new Date(now + 86_400_000),
+      } as never });
+      b.subs.push(sub.id);
+      // The held payment: an MMG fee checkout MMG has answered (as partner-deletion's fixture), the hold's source.
+      const checkout = await app.prisma.mmgCheckoutIntent.create({ data: {
+        tenantId: TENANT_B, subscriptionId: sub.id, merchantTransactionId: `${String(now).slice(-13)}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`,
+        amount: 20000, currencyCode: 'GYD', createdByUserId: customerB.id, platform: 'test', status: 'NOT_PAID', nextCheckAt: null,
+        checkoutUrlSealed: Buffer.alloc(40), checkoutUrlDek: Buffer.alloc(60), expiresAt: new Date(now + 600_000), createdAt: new Date(now - 3 * 86_400_000),
+      } as never });
+      b.checkouts.push(checkout.id);
+      const clock = await app.prisma.$transaction((tx) => currentDunningClock(tx, sub.id));
+      expect(clock.tenantId).toBe(TENANT_B);
+      b.clocks.push(clock.id);
+      b.holds.push((await app.prisma.paymentConfirmationHold.create({ data: {
+        tenantId: clock.tenantId, subscriptionId: sub.id, clockId: clock.id, sourceEpoch: clock.epoch, checkoutId: checkout.id,
+        reason: 'SYNTHETIC_REVIEW', beganAt: new Date(), reviewDueAt: new Date(now + 86_400_000),
+      } as never })).id);
+      // custody: an open case on a tenant-B order
+      await app.prisma.custodyRecoveryCase.create({ data: { tenantId: TENANT_B, orderId: await orderB(), reason: 'VEHICLE_BREAKDOWN', holderRiderId: `waiting-b-${RUN}`, deadlineAt: new Date(now + 600_000) } });
+      // claims: one per tab
+      for (const status of ['PENDING_REVIEW', 'APPROVED', 'AUTO_APPROVED'] as const) {
+        claimIds.push((await app.prisma.reimbursementClaim.create({ data: { orderId: await orderB(), customerId: customerB.id, riderId: riderB.id, amount: 1500, reason: 'no_show', gpsLat: 6.8055, gpsLng: -58.1553, status } })).id);
+      }
+      // returns: one to decide, one refund owed
+      for (const status of ['REQUESTED', 'REFUND_DUE'] as const) {
+        b.returns.push((await app.prisma.returnRequest.create({ data: { tenantId: TENANT_B, orderId: await orderB(), customerId: customerB.id, reason: 'Fixture return', status } as never })).id);
+      }
+    }, 'test-fixture:dashboard-waiting-tenant-b');
+    // The fixtures are real waiting rows: tenant B's own count of each queue sees them.
+    const bAdmin = await makeUser('ADMIN', ['*'], TENANT_B);
+    const bw = await waiting(bAdmin.token);
+    for (const key of counted) expect(bw.count(key), `tenant B counts its own ${key}`).toBeGreaterThanOrEqual(1);
+    const [s1, a1] = [await waiting(superAdmin.token), await waiting(admin.token)];
+    for (const key of counted) {
+      expect(s1.count(key), `platform responder: ${key}`).toBe(s0.count(key));
+      expect(a1.count(key), `tenant ADMIN: ${key}`).toBe(a0.count(key));
     }
   });
 

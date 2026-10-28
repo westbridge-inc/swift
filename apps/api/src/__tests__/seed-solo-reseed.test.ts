@@ -9,7 +9,7 @@ import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
   applySeedPlan, buildSeedPlan, cancelSoloReseeds, planApprovalRequest, planRequestFacts, soloNoticeChannelsReady, startSoloReseed,
-  SOLO_RESEED_ACTION, SOLO_RESEED_MAX_WRONG_CODES, type DesiredConfig, type RequestContext,
+  SOLO_RESEED_ACTION, SOLO_RESEED_MAX_WRONG_CODES, unsetEmptyChannelSettings, type DesiredConfig, type RequestContext,
 } from '../modules/ops/seed-plan';
 import {
   approvalRequest, SOLO_COOLING_OFF_MS, SOLO_DEFAULT_LIFETIME_MS, SOLO_RESEED_SHOW_LINE, SOLO_SHOW_LINE, type SignedApproval,
@@ -617,8 +617,17 @@ interface Wire { texts: Array<{ to: string; body: string }>; emails: Array<{ to:
  * ones valued as deploy/.env holds them for the api, and every name read is
  * recorded (wire.reads) so a case can prove it needed nothing the container
  * lacks. Only the test runner's own settings pass through besides.
+ *
+ * [FOLLOWUPS · REVIEW-M #2151 S4-1] A held name deploy/.env does not set
+ * arrives as '' (Compose hands `${NAME:-}` over as an empty string), and the
+ * entry point's own first step runs on it: seed-production.ts main() calls
+ * unsetEmptyChannelSettings(process.env) before anything else (pinned below).
+ * `entryUnset: false` skips that step, to show it is load-bearing.
  */
-async function inSeedContainer<T>(fn: (wire: Wire) => Promise<T>, omit: readonly string[] = [], channels: Readonly<Record<string, string>> = PRODUCTION_CHANNELS): Promise<T> {
+async function inSeedContainer<T>(
+  fn: (wire: Wire) => Promise<T>, omit: readonly string[] = [], channels: Readonly<Record<string, string>> = PRODUCTION_CHANNELS,
+  { entryUnset = true }: { entryUnset?: boolean } = {},
+): Promise<T> {
   const held = seedContainerNames();
   const saved = process.env;
   const wire: Wire = { texts: [], emails: [], via: [], reads: new Set() };
@@ -626,8 +635,11 @@ async function inSeedContainer<T>(fn: (wire: Wire) => Promise<T>, omit: readonly
   for (const name of held) {
     if (omit.includes(name)) continue;
     const value = name === 'DATABASE_URL' ? saved['DATABASE_URL'] : channels[name];
-    if (value !== undefined) env[name] = value;
+    env[name] = value ?? '';
   }
+  // The secret-file loader treats an empty *_FILE as unset (it is outside the channel list).
+  for (const name of Object.keys(env)) if (name.endsWith('_FILE') && env[name] === '') delete env[name];
+  if (entryUnset) unsetEmptyChannelSettings(env);
   for (const [name, value] of Object.entries(saved)) if (isTestRunnerSetting(name) && value !== undefined) env[name] = value;
   const record = (key: string | symbol) => { if (typeof key === 'string') wire.reads.add(key); };
   // Only Twilio is reached, and Resend when the email goes over HTTPS: each is
@@ -724,6 +736,36 @@ describe('[SEED-FIX] in the seed container, in production: what docker-compose.s
     expect(await eventsFor(line)).toEqual([]);
     expect(wire.emails).toEqual([]);
     expect(wire.texts).toEqual([]);
+  });
+
+  // [FOLLOWUPS · REVIEW-M #2151 S4-1] The entry point's unset step is what carries Compose's empty strings: without it
+  // the same start is refused and starts nothing. So the step is load-bearing, and the entry point must keep running it.
+  it('without the entry point\'s unset step, Compose\'s empty settings refuse the start and start nothing', async () => {
+    const c = await reseedCase(34);
+    const line = sign('owner', c.request);
+    const { err, wire } = await inSeedContainer(async (w) => ({
+      err: await startSoloReseed(prisma, URL_, c.desired, c.plan, { approvals: [line], approverKeys: OWNER_ONLY, request: c.ctx }).catch((e: unknown) => e),
+      wire: w,
+    }), [], PRODUCTION_CHANNELS, { entryUnset: false });
+    // The refusal production met on 27 Oct, now from an empty string instead of a missing name.
+    expect((err as { code?: string }).code).toBe('SOLO_EMAIL_UNAVAILABLE');
+    expect(await eventsFor(line)).toEqual([]);
+    expect(wire.emails).toEqual([]);
+    expect(wire.texts).toEqual([]);
+  });
+
+  it('seed-production.ts main() unsets the empty settings first, before it reads a setting for a seed action', () => {
+    const source = readFileSync(join(process.cwd(), 'prisma/seed-production.ts'), 'utf8');
+    const start = source.indexOf('async function main(');
+    expect(start, 'seed-production.ts has a main()').toBeGreaterThan(-1);
+    const body = source.slice(start);
+    const unset = body.indexOf('unsetEmptyChannelSettings(process.env);');
+    expect(unset, 'main() calls unsetEmptyChannelSettings(process.env)').toBeGreaterThan(-1);
+    // Before the first act: the brake, the plan, the solo start or apply, or a channel build.
+    for (const act of ['try {', 'cancelSoloReseeds(', 'buildSeedPlan(', 'startSoloReseed(', 'applySeedPlan(', 'getChannels(', 'soloNoticeChannelsReady(']) {
+      const at = body.indexOf(act);
+      if (at > -1) expect(unset, `the unset runs before ${act}`).toBeLessThan(at);
+    }
   });
 });
 
