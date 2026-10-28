@@ -1651,6 +1651,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await verification.hireLicenceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
+        // [SEC-PII · COORD ruling] The system's investigation holds end with their investigation or their review date
+        // (never renewed by the system); run first, so the overdue alarm below is about people's holds.
+        const { sweepInvestigationHolds } = await import('../modules/verification/investigation-hold');
+        await sweepInvestigationHolds(ctx.prisma);
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
         const { alertOverdueDocLegalHolds } = await import('../modules/verification/legal-hold');
         await alertOverdueDocLegalHolds(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));

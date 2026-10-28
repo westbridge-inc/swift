@@ -42,6 +42,9 @@ export function reviewByWindow(now = new Date()): { min: Date; max: Date } {
   };
 }
 
+/** [SEC-PII] The system's own placer for a hold an open investigation places (investigation-hold.ts). */
+export const INVESTIGATION_HOLD_PLACER = 'system:investigation-hold';
+
 export async function placeDocLegalHold(prisma: PrismaClient, input: PlaceDocLegalHoldInput, now = new Date()) {
   const window = reviewByWindow(now);
   if (!(input.reviewBy >= window.min && input.reviewBy <= window.max)) {
@@ -57,9 +60,14 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
       SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE /* verification-document-purge-authority */
     `;
     if (!locked[0]) throw new NotFoundError('User', input.subjectUserId);
+    // [SEC-PII] A person's hold takes over the documents the system's investigation holds keep (the system never
+    // renews its holds; a person renews one this way). A person's hold always wins (investigation-hold.ts).
+    const systemHolds = input.placedBy === INVESTIGATION_HOLD_PLACER ? []
+      : (await tx.docLegalHold.findMany({ where: { subjectUserId: input.subjectUserId, placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null }, select: { id: true } })).map((h) => h.id);
+    const unheldOrSystem = [{ legalHoldId: null }, ...(systemHolds.length > 0 ? [{ legalHoldId: { in: systemHolds } }] : [])];
     const candidates = await tx.verificationDocument.findMany({
       where: {
-        userId: input.subjectUserId, purgedAt: null, legalHoldId: null,
+        userId: input.subjectUserId, purgedAt: null, OR: unheldOrSystem,
         ...(input.documentIds && input.documentIds.length > 0 ? { id: { in: input.documentIds } } : {}),
       },
       select: { id: true, fileUrl: true },
@@ -79,9 +87,10 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
       placedBy: input.placedBy, placedAt: now, incidentCaseId: input.incidentCaseId ?? null,
     } });
     const stamped = await tx.verificationDocument.updateMany({
-      where: { id: { in: holdable.map((d) => d.id) }, purgedAt: null, legalHoldId: null },
+      where: { id: { in: holdable.map((d) => d.id) }, purgedAt: null, OR: unheldOrSystem },
       data: { legalHoldId: hold.id },
     });
+    // (A system hold whose documents a person's hold took stays open, empty, until its own investigation ends.)
     return { hold, documents: stamped.count };
   }
 }

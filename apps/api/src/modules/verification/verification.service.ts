@@ -20,7 +20,7 @@ import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLE
 import { retentionDaysFor } from './retention-policy';
 import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
-import { documentUnderInvestigation } from './open-investigation';
+import { erasureDelayedWords, placeInvestigationHold, releaseClosedInvestigationHolds } from './investigation-hold';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
@@ -1409,6 +1409,10 @@ export class VerificationService {
    */
   private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string, within?: DecisionWithin): Promise<VerificationDocument> {
     return this.projectionTransaction(async (tx) => {
+      // [SEC-PII] The person first (the lock a purge and a vehicle edit take first): this escalation places the
+      // investigation hold, so it must hold the same lock, in the same order (person, case, paper), as both.
+      const owner = await tx.verificationDocument.findUnique({ where: { id: docId }, select: { userId: true } });
+      if (owner) await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${owner.userId} FOR UPDATE /* verification-document-purge-authority */`;
       // [DS1054 S3 · DS1064 S3] Lock the paper's open case, then the paper itself, BEFORE reading either: the
       // locks a vehicle edit takes, in the same order, before it decides what to withdraw (vehicle-retirement.ts,
       // partner.service.ts). Whichever holds them first wins: an edit that got there first has already withdrawn
@@ -1418,6 +1422,7 @@ export class VerificationService {
       await tx.$queryRaw`SELECT id FROM verification_documents WHERE id = ${docId} FOR UPDATE`;
       const doc = await tx.verificationDocument.findUnique({ where: { id: docId } });
       if (!doc) throw new NotFoundError('VerificationDocument', docId);
+      if (owner && owner.userId !== doc.userId) throw new AppError(409, 'NOT_PENDING', 'Only a pending document can be escalated');
       if (doc.status !== 'PENDING') throw new AppError(409, 'NOT_PENDING', 'Only a pending document can be escalated');
       // [DOC-1 §8.6] Raising the suspicion is a decision too: a recused reviewer may not make it.
       await assertNotRecused(tx, adminId, doc.userId);
@@ -1433,6 +1438,8 @@ export class VerificationService {
         timeOnCaseMs: Math.max(0, now.getTime() - (open.assignedAt ?? open.createdAt).getTime()),
       } });
       await tx.reviewCase.update({ where: { id: open.id }, data: { queue: 'SECOND_REVIEW', priority: Math.min(open.priority, FRAUD_HOLD_PRIORITY), assignedTo: null, assignedAt: null } });
+      // [SEC-PII · COORD ruling] An open investigation holds this person's documents until it ends (investigation-hold.ts).
+      await placeInvestigationHold(tx, doc.userId, { kind: 'second-review', documentId: docId }, now);
       // [DOC-1 P5-1] T15 decide(ESCALATE): back to the queue (a claimed document leaves IN_REVIEW).
       await hopDocState(tx, { id: docId }, 'IN_REVIEW', 'REVIEW_QUEUED');
       // [S2-29] The caller's audit row (the escalation) commits with it.
@@ -1639,6 +1646,8 @@ export class VerificationService {
       if (review.fraud && requestedStatus === 'REJECTED') {
         await this.confirmFraudIn(tx, { docId, subjectUserId: candidate.userId, tenantId: open.tenantId, caseId: open.id, reviewerId: review.reviewerId, reasonCode: review.fraud.reasonCode, now });
       }
+      // [SEC-PII · COORD ruling] The decision closed this case: the system hold of this (and any other closed) investigation ends.
+      await releaseClosedInvestigationHolds(tx, candidate.userId, now);
 
       if (approve) {
         // [DOC-1 P5-1] T17 commit(): the APPROVE decision above is the provenance the
@@ -2017,6 +2026,11 @@ export class VerificationService {
     const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, vendorType: true } } } });
     for (const v of (owner?.vendors ?? []).filter((x) => x.vendorType === roleKey)) lists.push(await this.checklistFor(userId, countryCode, roleKey, undefined, this.prisma, v.id));
     return [...new Set(lists.flat())];
+  }
+
+  /** [SEC-PII · Privacy §6] A person's deletion request delayed by an open review: told why (generically) and when, in writing. */
+  async notifyErasureDelayed(userId: string, revisitBy: Date): Promise<void> {
+    await this.notifications.send({ userId, type: 'SYSTEM_ANNOUNCEMENT', ...erasureDelayedWords(revisitBy), audience: 'customer', data: { kind: 'erasure_delayed', revisitBy: revisitBy.toISOString() } } as never);
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
@@ -3186,23 +3200,17 @@ export class VerificationService {
   async purgeDocumentNow(
     doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },
     deletedBy: string,
-    opts: {
-      requireRetentionElapsed: boolean; shredFields: boolean; now?: Date; still?: Prisma.VerificationDocumentWhereInput;
-      /** [SEC-PII] The person's own erasure: a document under an open investigation is kept (open-investigation.ts),
-       *  decided again under the person's row lock at both steps. */
-      keepUnderInvestigation?: boolean;
-    },
+    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date; still?: Prisma.VerificationDocumentWhereInput },
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const now = opts.now ?? new Date();
     const storage = getStorageProvider();
     // [Row 249] A caller's own condition (the abandoned-application sweep: still abandoned) is re-checked
     // under the person's lock at both steps, with the hold and the retention clock.
     const still: Prisma.VerificationDocumentWhereInput = opts.still ?? {};
-    const keep = opts.keepUnderInvestigation ? (tx: Prisma.TransactionClient) => documentUnderInvestigation(tx, doc.userId, doc.id) : undefined;
     // [Row 243] The bytes are destroyed only under the person's lock and only while still unheld.
     const evidence = doc.fileUrl
       ? await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
-        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still }, keep)
+        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still })
       : NOTHING_STORED;
     if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
@@ -3217,8 +3225,6 @@ export class VerificationService {
         FOR UPDATE /* verification-document-purge-authority */
       `;
       if (!users[0]) return false;
-      // [SEC-PII] A review opened since the bytes step (or a document with no bytes) still keeps the record.
-      if (keep && await keep(tx)) return false;
       const won = await tx.verificationDocument.updateMany({
         where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still },
         data: { purgedAt: new Date(), fileUrl: '' },

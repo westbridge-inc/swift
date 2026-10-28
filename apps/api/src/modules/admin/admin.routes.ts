@@ -6141,6 +6141,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/integrity/reviews/scan', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({ afterId: z.string().optional(), limit: z.number().int().min(1).max(25).default(25) }).parse(request.body ?? {});
     const data = await stageIdentityReviewCases(app.prisma, body.afterId, body.limit);
+    // [SEC-PII · COORD ruling] An identity review holds each member's documents until it ends (investigation-hold.ts).
+    const { holdIdentityReviewMembers } = await import('../verification/investigation-hold');
+    await holdIdentityReviewMembers(app.prisma, data.cases);
     return { success: true, data };
   });
   app.post('/integrity/reviews/:id/retain', { preHandler: [platformControlGuard] }, async (request) => {

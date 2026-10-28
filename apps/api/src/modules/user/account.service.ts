@@ -20,7 +20,7 @@ import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
-import { documentsInSecondReview, documentUnderInvestigation, personUnderInvestigation } from '../verification/open-investigation';
+import { investigationHoldRevisitBy } from '../verification/investigation-hold';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -365,22 +365,8 @@ export class AccountService {
       where: { userId, purgedAt: null, legalHoldId: null },
       select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
-    // [SEC-PII · money/trust scan 28 Oct 2026] A document under an open investigation (a second review, an open
-    // fraud case or identity review: open-investigation.ts) is kept until the review ends, like a held one; the
-    // standing re-sweep (account-erasure-retry) erases it after. Decided again under the person's lock below.
-    const investigated = (await personUnderInvestigation(prisma, userId))
-      ? new Set(docs.map((d) => d.id))
-      : await documentsInSecondReview(prisma, docs.map((d) => d.id));
-    if (investigated.size > 0) {
-      await prisma.auditLog.create({ data: {
-        userId, action: 'ERASURE_DEFERRED_OPEN_INVESTIGATION', entity: 'User', entityId: userId,
-        changes: { documents: investigated.size, reason: 'an open review keeps the document until it ends' },
-      } });
-    }
-    const keepUnderInvestigation = (documentId: string) => (tx: Prisma.TransactionClient) => documentUnderInvestigation(tx, userId, documentId);
     let pendingDocuments = 0;
     for (const doc of docs) {
-      if (investigated.has(doc.id)) continue;
       // [DOC-INV-7] Passing evidence closes the document with its receipt in
       // one transaction. An authority refusal or FAILED probe retains the
       // due pointer; it cannot prevent the other personal-data cleanup.
@@ -388,7 +374,7 @@ export class AccountService {
       try {
         // [Row 243] Destroyed only under the person's lock while still unheld. A hold that landed
         // since the census keeps the document; the tombstone retry then defers it as held.
-        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }, keepUnderInvestigation(doc.id)) : NOTHING_STORED;
+        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }) : NOTHING_STORED;
         if (!fenced) { pendingDocuments += 1; continue; }
         evidence = fenced;
       } catch (error) {
@@ -415,8 +401,6 @@ export class AccountService {
           SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
         `;
         if (person.length !== 1) return false;
-        // [SEC-PII] A review opened since the census keeps the record and its extracted values too.
-        if (await keepUnderInvestigation(doc.id)(tx)) return false;
         const close = await tx.verificationDocument.updateMany({
           where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
         });
@@ -601,16 +585,16 @@ export class AccountService {
       },
     });
 
+    const revisitBy = deferred.count > 0 ? await investigationHoldRevisitBy(prisma, userId) : null;
     // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
     const heldUploads = uploads.held + liveness.held;
-    if (deferred.count > 0 || investigated.size > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
+    if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
         deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
-        // [SEC-PII] Additive: documents kept until an open review ends.
-        heldForReview: investigated.size,
         pendingDocuments, pendingAvatarObjects, pendingUploads,
-        message: investigated.size > 0
-          ? 'Your account is closed. Documents required by a legal hold, or part of a review that is still open, remain protected until the hold is released or the review ends; other pending erasure will be retried automatically.'
+        // [SEC-PII · Privacy §6] Delayed by an open review: why (generically) and when, in the words the app shows.
+        message: revisitBy
+          ? `Your account is closed. Some of your documents are part of a review that is still open, so they are kept until it ends; we will look at your request again by ${revisitBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' })}. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.`
           : 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }

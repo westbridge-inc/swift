@@ -145,6 +145,9 @@ afterAll(async () => {
     await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
     await app.prisma.identityCluster.deleteMany({ where: { id: { in: clusters } } });
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
+    // [SEC-PII] An escalated ID carries the system's investigation hold: the hold goes with the fixture.
+    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: ids } }, data: { legalHoldId: null } });
+    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: ids } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.subject.deleteMany({ where: { createdById: { in: ids } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
