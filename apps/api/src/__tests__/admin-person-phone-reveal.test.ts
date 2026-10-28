@@ -471,7 +471,9 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
       expect(users.ids, q).not.toContain(ids.person);
       const found = await search(`/search?q=${encodeURIComponent(q)}`, tokens['listReaders']!);
       expect(found.ids, q).not.toContain(ids.person);
-      if (/\d{4}|@/.test(q)) {
+      // [REVIEW-F #2170 S3-1] the hint only for a phone-shaped query (7 to 15 digits; digits, spaces, + ( ) - only) or an email
+      const digits = q.replace(/\D/g, '').length;
+      if ((/^[+\d\s().-]+$/.test(q) && digits >= 7 && digits <= 15) || q.includes('@')) {
         expect(users.hint, q).toBe('Searching by phone number or email needs contact access.');
         expect(found.hint, q).toBe('Searching by phone number or email needs contact access.');
       }
@@ -480,7 +482,7 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
       for (const q of [phone, phone.slice(-6)]) {
         const res = await search(`/${list}?search=${encodeURIComponent(q)}`, tokens['listReaders']!);
         expect(res.ids, `${list} ${q}`).not.toContain(id);
-        expect(res.hint, `${list} ${q}`).toBe('Searching by phone number needs contact access.');
+        expect(res.hint, `${list} ${q}`).toBe(q === phone ? 'Searching by phone number needs contact access.' : null);
       }
     }
     // Names keep their search, and a name search carries no hint.
@@ -499,6 +501,26 @@ describe('[SEC-PII] the person lists mask numbers and emails unless the grant ho
       expect((await search(`/riders?search=${encodeURIComponent(q)}`, tokens['moverContact']!)).ids, q).toContain(ids.rider);
     }
     expect((await search(`/drivers?search=${encodeURIComponent(phones.driver.slice(-6))}`, tokens['moverContact']!)).ids).toContain(ids.driver);
+  });
+
+  // [SEC-PII · REVIEW-F #2170 S3-1] The hint is for a query that looks like a phone number (E.164 or a 7-digit local
+  // number: digits, spaces, + ( ) - only) or an email; never for an order number or other reference, and order-number
+  // search itself (not contact data) works for every grant that may search.
+  it('an order number finds the order for a grant without contact access, with no contact hint; a partial number gets no hint either', async () => {
+    const orderNumber = (await system(() => app.prisma.order.findUniqueOrThrow({ where: { id: ids.order }, select: { orderNumber: true } }))).orderNumber;
+    for (const q of [orderNumber, orderNumber.slice(0, -2), 'SW-261028-001AB']) {
+      const res = await get(`/search?q=${encodeURIComponent(q)}`, tokens['listReaders']!);
+      expect(res.statusCode, q).toBe(200);
+      expect(res.json().data.searchHint, q).toBeUndefined();
+    }
+    const found = await get(`/search?q=${encodeURIComponent(orderNumber)}`, tokens['listReaders']!);
+    expect((found.json().data.orders as Array<{ id: string }>).map((o) => o.id)).toContain(ids.order);
+    // phone-shaped: E.164, spaced, a 7-digit local number -> hint; a short run of digits or a reference -> none
+    const hint = async (q: string) => (await get(`/users?search=${encodeURIComponent(q)}`, tokens['listReaders']!)).json().meta.searchHint as string | undefined;
+    for (const q of [phones.person, `${phones.person.slice(0, 4)} ${phones.person.slice(4, 7)} ${phones.person.slice(7)}`, '600 1234', '(592) 600-1234', emails.person]) {
+      expect(await hint(q), q).toBe('Searching by phone number or email needs contact access.');
+    }
+    for (const q of ['1234', '600003', 'SW-261028-001AB', `FUC-${RUN}-1`, `P${RUN}`]) expect(await hint(q), q).toBeUndefined();
   });
 
   it('each contact capability unmasks only its own lists: user.contact.read shows people, never movers or stores', async () => {
