@@ -4,7 +4,7 @@
  *  - a store order: free until the store accepts it; after that, contact the store;
  *  - a ride, parcel or booking: free while unaccepted and for 1 minute after acceptance (owner 22 Oct 2026; was 5);
  *  - [BOOK-S7] an appointment, while instant appointment booking is on: free until 2 hours before it starts
- *    (never less than 1 minute after confirmation, cancel-policy.ts appointmentChangeCutoff);
+ *    (never less than 1 minute after confirmation, cancel-policy.ts APPOINTMENT_FREE_CANCEL_BEFORE_MIN);
  *  - a service job: free until it is booked;
  *  - still free when no driver/rider is found or it runs very late; never once on its way;
  *  - paid by MMG and confirmed by the store: only the store cancels, and it refunds.

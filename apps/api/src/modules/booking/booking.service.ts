@@ -9,15 +9,6 @@ import { isBookingExclusionViolation } from './one-at-a-time';
 import type { BookingLimits } from './booking-limits';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
 import { emitToStoreRoom } from '../order/order-room-emission.service';
-import { APPOINTMENT_FREE_CANCEL_BEFORE_MIN, appointmentChangeCutoff } from '../order/cancel-policy';
-import { instantBookingEnabled } from './instant-booking';
-
-/** [BOOK-S7 · owner B2 28 Oct 2026] With INSTANT_BOOKING on, a customer moves a confirmed
- *  appointment in the app only until the same cutoff as the free cancel (two hours before it
- *  starts, never sooner than one minute after it was confirmed: `appointmentChangeCutoff`).
- *  After it, the customer contacts the business, as Terms §7 says. The business may still move it. */
-export const RESCHEDULE_CUTOFF_CODE = 'RESCHEDULE_WINDOW_CLOSED';
-export const RESCHEDULE_CUTOFF_MESSAGE = `This booking can no longer be moved in the app: it starts in less than ${APPOINTMENT_FREE_CANCEL_BEFORE_MIN / 60} hours. Contact the provider to change or cancel it.`;
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
 export interface BookingConfig {
@@ -403,7 +394,7 @@ export class BookingService {
           await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${booking.orderId} FOR UPDATE`;
           // [L09 · M018] A finished appointment is not reopened by moving its
           // booking: read the parent under its own lock and refuse.
-          const parent = await tx.order.findUniqueOrThrow({ where: { id: booking.orderId }, select: { status: true, acceptedAt: true, placedAt: true } });
+          const parent = await tx.order.findUniqueOrThrow({ where: { id: booking.orderId }, select: { status: true } });
           if (FINISHED_APPOINTMENT_ORDER_STATUSES.has(parent.status)) {
             throw new AppError(400, 'NOT_RESCHEDULABLE', 'This appointment is completed and cannot be moved');
           }
@@ -411,14 +402,6 @@ export class BookingService {
           // the lock: the same answer the lost race has always had.
           if (!LIVE_APPOINTMENT_ORDER_STATUSES.has(parent.status)) {
             throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
-          }
-          // [BOOK-S7 · owner B2] The customer's own move of a CONFIRMED appointment stops at the
-          // free-cancel cutoff, read under the order lock (an accept that committed while we
-          // waited is seen). A request the business has not confirmed yet (PENDING) moves
-          // freely, as it cancels freely. Switch off, or the business moving it: unchanged.
-          if (actor.customerId && !actor.vendorId && instantBookingEnabled() && parent.status !== 'PENDING') {
-            const cutoff = appointmentChangeCutoff(booking.slotStart, parent.acceptedAt ?? parent.placedAt);
-            if (Date.now() > cutoff.getTime()) throw new AppError(409, RESCHEDULE_CUTOFF_CODE, RESCHEDULE_CUTOFF_MESSAGE);
           }
         }
         await lockBusinessTime(tx, vendorId);

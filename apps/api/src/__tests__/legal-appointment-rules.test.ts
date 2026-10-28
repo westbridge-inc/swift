@@ -1,25 +1,23 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { PrismaClient } from '@prisma/client';
 import { PRIVACY, TERMS, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 import {
   APPOINTMENT_FREE_CANCEL_BEFORE_MIN,
   FREE_CANCEL_WINDOW_MIN,
-  appointmentChangeCutoff,
   cancellationVerdict,
   freeCancellationExpiresAt,
   type CancellationSnapshot,
 } from '../modules/order/cancel-policy';
-import { BookingService, RESCHEDULE_CUTOFF_CODE, RESCHEDULE_CUTOFF_MESSAGE } from '../modules/booking/booking.service';
 
 // ---------------------------------------------------------------------------
 // [BOOK-S7 · owner rulings 28 Oct 2026 A3/A4, B1-B3, C2] THE APPOINTMENT RULES, IN WORDS AND IN CODE.
 //
 // The owner ruled: an appointment is free to cancel until 2 hours before it starts (COORD floor: never less than one
-// minute after it was confirmed), the customer may move it until the same cutoff, a no-show is recorded with no fee
+// minute after it was confirmed), the customer may move it until 2 hours before it starts (the move's own rule is
+// booking/reschedule-policy.ts, #2194, with the same number), a no-show is recorded with no fee
 // and no strike while a person reviews repeats, and an instant booking is the business's standing acceptance. The code
-// applies the cancel and move rules only while INSTANT_BOOKING is switched on, so every served sentence must be true
+// applies the cancel (and, with #2194, the move) rules only while INSTANT_BOOKING is switched on, so every served sentence must be true
 // with the switch on AND off: the two-hour rule is stated only under "while Swift's instant appointment booking is
 // switched on", and the one-minute booking rule stays stated for the rest.
 //
@@ -57,14 +55,16 @@ describe('[BOOK-S7] Terms section 7 states the appointment rule the server appli
     expect(TERMS_S7).toContain(
       `While Swift's instant appointment booking is switched on, an appointment the Business has confirmed (by accepting it, or automatically when you booked it) can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${WORD[FREE_CANCEL_WINDOW_MIN]} minute after it was confirmed, instead of the ${WORD[FREE_CANCEL_WINDOW_MIN]} minute above;`,
     );
-    // The hours appear once, inside the switched-on sentence: never as an unconditional promise.
-    expect(TERMS_S7.match(/\d+ hours?/g)).toEqual([`${HOURS} hours`]);
-    const sentence = TERMS_S7.split(/(?<=[.;])\s/).find((s) => s.includes(`${HOURS} hours`))!;
-    expect(sentence).toMatch(/^While Swift's instant appointment booking is switched on,/);
+    // The hours appear only inside the switched-on sentence (its cancel clause and its move clause): never as an
+    // unconditional promise.
+    expect(TERMS_S7.match(/\d+ hours?/g)).toEqual([`${HOURS} hours`, `${HOURS} hours`]);
+    const sentences = TERMS_S7.split(/(?<=\.)\s/).filter((s) => s.includes(`${HOURS} hours`));
+    expect(sentences).toHaveLength(1);
+    expect(sentences[0]).toMatch(/^While Swift's instant appointment booking is switched on,/);
   });
 
-  it('the move (reschedule) has the same cutoff, only where the app offers it; after the cutoff, contact the Business', () => {
-    expect(TERMS_S7).toContain('where the app offers it, you can also move it to another free time of the same service until that same cutoff. After the cutoff, contact the Business to change or cancel it.');
+  it('the move (reschedule): only where the app offers it, until the same number of hours before the start; then contact the Business', () => {
+    expect(TERMS_S7).toContain(`where the app offers it, you can also move it to another free time of the same service until ${HOURS} hours before it starts. After that, contact the Business to change or cancel it.`);
     expect(TERMS_S7).toContain('The Business can also move your appointment, and you are told in the app when it does.');
   });
 
@@ -82,7 +82,7 @@ describe('[BOOK-S7] Terms section 7 states the appointment rule the server appli
 describe('[BOOK-S7] the refunds page and both FAQ answers say the same rule, from the same numbers', () => {
   it('refunds page', () => {
     expect(REFUNDS).toContain(`appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed.`);
-    expect(REFUNDS).toContain('Where the app offers it, you can also move it to another free time of the same service until then. After that, contact the business to change or cancel it.');
+    expect(REFUNDS).toContain(`Where the app offers it, you can also move it to another free time of the same service until ${HOURS} hours before it starts. After that, contact the business to change or cancel it.`);
     expect(REFUNDS).toContain(`and for ${FREE_CANCEL_WINDOW_MIN} minute after a driver, rider or provider accepts them.`);
   });
 
@@ -114,7 +114,8 @@ describe('[BOOK-S7] instant confirmation, missed appointments, the business\'s d
 });
 
 // ---------------------------------------------------------------------------
-// The server side of the same words: the one cancel predicate and the customer's own move.
+// The server side of the same words: the one cancel predicate (cancel-policy.ts). The customer's move is graded by
+// #2194's own suite (booking/reschedule-policy.ts, CUSTOMER_RESCHEDULE_BEFORE_MIN = APPOINTMENT_FREE_CANCEL_BEFORE_MIN).
 // ---------------------------------------------------------------------------
 
 const NOW = new Date('2026-10-28T15:00:00.000Z');
@@ -126,7 +127,7 @@ const appointment = (slotIn: number, confirmedAgo: number): CancellationSnapshot
   scheduledFor: null, appointmentSlot: at(slotIn),
 });
 
-afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('[BOOK-S7 · B1] the cancel verdict at the cutoff the Terms name (switch on)', () => {
   it('free one minute before the cutoff and at it; refused one minute after, in words that send the customer to the business', () => {
@@ -148,11 +149,12 @@ describe('[BOOK-S7 · B1] the cancel verdict at the cutoff the Terms name (switc
     expect(cancellationVerdict(order, new Date(at(FREE_CANCEL_WINDOW_MIN).getTime() + 1000))).toMatchObject({ allowed: false });
   });
 
-  it('one number: the countdown the app is given is the shared cutoff', () => {
+  it('the countdown the app is given is the rule in words: the later of 2 hours before the start and 1 minute after confirmation', () => {
     vi.stubEnv('INSTANT_BOOKING', '1');
     for (const [slotIn, ago] of [[300, 60], [30, 0], [121, 0], [119, 0]] as const) {
       const order = appointment(slotIn, ago);
-      expect(freeCancellationExpiresAt(order, NOW)?.toISOString(), `${slotIn}/${ago}`).toBe(appointmentChangeCutoff(order.appointmentSlot!, order.acceptedAt!).toISOString());
+      const words = Math.max(at(slotIn - APPOINTMENT_FREE_CANCEL_BEFORE_MIN).getTime(), at(-ago + FREE_CANCEL_WINDOW_MIN).getTime());
+      expect(freeCancellationExpiresAt(order, NOW)?.getTime(), `${slotIn}/${ago}`).toBe(words);
     }
   });
 
@@ -161,87 +163,5 @@ describe('[BOOK-S7 · B1] the cancel verdict at the cutoff the Terms name (switc
     const order = appointment(5 * 60, 0);
     expect(cancellationVerdict(order, at(FREE_CANCEL_WINDOW_MIN))).toMatchObject({ allowed: true, reason: 'IN_WINDOW' });
     expect(cancellationVerdict(order, at(FREE_CANCEL_WINDOW_MIN + 1))).toMatchObject({ allowed: false, code: 'CANCEL_WINDOW_CLOSED' });
-  });
-});
-
-// The customer's own move (POST /customer/bookings/:id/reschedule → BookingService.rescheduleBooking), graded on
-// doubles: the cutoff is read under the order lock, and a refused move writes nothing.
-function harness(order: { status: string; acceptedAt: Date | null; placedAt: Date }, slotIn: number) {
-  const writes: string[] = [];
-  const tx = {
-    $queryRaw: async () => [],
-    $executeRaw: async () => 1,
-    booking: {
-      create: async (args: { data: Record<string, unknown> }) => { writes.push('booking.create'); return { id: 'booking-2', ...args.data }; },
-      updateMany: async () => { writes.push('booking.updateMany'); return { count: 1 }; },
-      findMany: async () => [],
-    },
-    vendor: { findUnique: async () => ({ bookingCapacity: 1 }) },
-    order: {
-      findUniqueOrThrow: async () => order,
-      update: async () => { writes.push('order.update'); return {}; },
-    },
-  };
-  const prisma = {
-    booking: {
-      findUnique: async () => ({
-        id: 'booking-1', itemId: 'item-1', customerId: 'user-1', orderId: 'order-1', status: order.status === 'PENDING' ? 'RESERVED' : 'CONFIRMED',
-        slotStart: at(slotIn), slotEnd: at(slotIn + 30), item: { id: 'item-1', vendorId: 'vendor-1', name: 'Cut' },
-      }),
-    },
-    $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
-  } as unknown as PrismaClient;
-  vi.spyOn(BookingService.prototype as unknown as { validatedSlot: () => Promise<unknown> }, 'validatedSlot')
-    .mockResolvedValue({ config: { durationMinutes: 30, slots: [] }, vendorId: 'vendor-1' });
-  return { svc: new BookingService(prisma), writes };
-}
-const accepted = (ago: number) => ({ status: 'ACCEPTED', acceptedAt: at(-ago), placedAt: at(-ago - 5) });
-const TARGET = at(24 * 60);
-
-describe('[BOOK-S7 · B2] the customer moves a confirmed appointment only until the same cutoff (switch on)', () => {
-  const frozen = () => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW); };
-
-  it('inside the last two hours: refused in plain words, nothing written', async () => {
-    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
-    const h = harness(accepted(60), APPOINTMENT_FREE_CANCEL_BEFORE_MIN - 30);
-    await expect(h.svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).rejects.toMatchObject({
-      statusCode: 409, code: RESCHEDULE_CUTOFF_CODE, message: RESCHEDULE_CUTOFF_MESSAGE,
-    });
-    expect(RESCHEDULE_CUTOFF_MESSAGE).toBe(`This booking can no longer be moved in the app: it starts in less than ${HOURS} hours. Contact the provider to change or cancel it.`);
-    expect(h.writes).toEqual([]);
-  });
-
-  it('before the cutoff: moved', async () => {
-    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
-    const h = harness(accepted(60), APPOINTMENT_FREE_CANCEL_BEFORE_MIN + 1);
-    expect((await h.svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).moved).toBe(true);
-    expect(h.writes).toEqual(['booking.updateMany', 'booking.create', 'order.update']);
-  });
-
-  it('the floor: within one minute of the confirmation it still moves; after that minute, refused', async () => {
-    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
-    // A request placed three hours ago and confirmed just now, for a time 30 minutes away: the minute counts from the
-    // CONFIRMATION, never from placing (placing + 1 minute is long gone).
-    expect((await harness({ status: 'ACCEPTED', acceptedAt: NOW, placedAt: at(-180) }, 30).svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).moved).toBe(true);
-    await expect(harness(accepted(FREE_CANCEL_WINDOW_MIN + 1), 30).svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' }))
-      .rejects.toMatchObject({ code: RESCHEDULE_CUTOFF_CODE });
-  });
-
-  it('a request the business has not confirmed yet moves freely, as it cancels freely', async () => {
-    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
-    const h = harness({ status: 'PENDING', acceptedAt: null, placedAt: at(-5) }, 30);
-    expect((await h.svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).moved).toBe(true);
-  });
-
-  it('the business may still move it inside the last two hours (owner B2: the business can reschedule too)', async () => {
-    vi.stubEnv('INSTANT_BOOKING', '1'); frozen();
-    const h = harness(accepted(60), 30);
-    expect((await h.svc.rescheduleBooking('booking-1', TARGET, { vendorId: 'vendor-1' })).moved).toBe(true);
-  });
-
-  it('control — switch off: today\'s move, with no cutoff', async () => {
-    vi.stubEnv('INSTANT_BOOKING', ''); frozen();
-    const h = harness(accepted(60), 30);
-    expect((await h.svc.rescheduleBooking('booking-1', TARGET, { customerId: 'user-1' })).moved).toBe(true);
   });
 });

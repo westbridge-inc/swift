@@ -18,8 +18,8 @@ import { site, launch } from '@/site.config';
  *  - [BOOK-S7 · owner B1/B2 28 Oct 2026] while instant appointment booking
  *    (INSTANT_BOOKING) is switched on, a confirmed appointment cancels free
  *    until 2 hours before it starts, never less than 1 minute after it was
- *    confirmed, and the customer's own move stops at the same cutoff
- *    (cancel-policy.ts appointmentChangeCutoff); with it off, the 1-minute
+ *    confirmed (cancel-policy.ts), and the customer's own move stops 2 hours
+ *    before it starts (reschedule-policy.ts); with it off, the 1-minute
  *    booking rule above stands. Terms §7 says the same (pinned in the API's
  *    legal-appointment-rules.test.ts).
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
@@ -78,8 +78,8 @@ export default function RefundsPage() {
           <b>Appointments</b> (a time you book from a business&apos;s listing): while {site.tradeName}&apos;s instant
           appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app
           until 2 hours before it starts, and always for at least 1 minute after it was confirmed. Where the app offers
-          it, you can also move it to another free time of the same service until then. After that, contact the business
-          to change or cancel it. The business can also move your appointment, and you are told in the app when it does.
+          it, you can also move it to another free time of the same service until 2 hours before it starts. After that,
+          contact the business to change or cancel it. The business can also move your appointment, and you are told in the app when it does.
         </li>
         <li>
           <b>A service job</b> (a local pro you hired through the app) can be cancelled free in the app while it is a

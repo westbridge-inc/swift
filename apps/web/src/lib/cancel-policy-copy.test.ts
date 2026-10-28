@@ -82,7 +82,7 @@ describe('the site says what Terms §7 says about cancelling', () => {
     const refunds = readFileSync(join(process.cwd(), 'src', 'app', 'legal', 'refunds', 'page.tsx'), 'utf8').replace(/\s+/g, ' ');
     expect(TERMS_S7).toMatch(/until 2 hours before it starts, and always for at least one minute after it was confirmed/);
     expect(refunds).toContain('appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app until 2 hours before it starts, and always for at least 1 minute after it was confirmed.');
-    expect(refunds).toContain('you can also move it to another free time of the same service until then. After that, contact the business to change or cancel it.');
+    expect(refunds).toContain('you can also move it to another free time of the same service until 2 hours before it starts. After that, contact the business to change or cancel it.');
     expect(refunds).not.toMatch(/(5|five) minutes/i);
   });
 

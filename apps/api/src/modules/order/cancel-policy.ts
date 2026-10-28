@@ -46,16 +46,6 @@ export const FREE_CANCEL_WINDOW_MIN = 1;
  *  bump + pins); the switch stays off until then. */
 export const APPOINTMENT_FREE_CANCEL_BEFORE_MIN = 120;
 
-/** [BOOK-S7 · owner B1 + B2 28 Oct 2026] The moment a confirmed appointment stops
- *  being free to change in the app: two hours (`APPOINTMENT_FREE_CANCEL_BEFORE_MIN`)
- *  before it starts, never sooner than one minute (`FREE_CANCEL_WINDOW_MIN`) after
- *  it was confirmed. ONE number for both doors: the free cancel below and the
- *  customer's own reschedule (booking.service.ts rescheduleBooking). Terms §7 and
- *  the refunds page say it in words (legal-appointment-rules.test.ts pins them). */
-export function appointmentChangeCutoff(slotStart: Date, confirmedAt: Date): Date {
-  return latest([plusMinutes(slotStart, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN), plusMinutes(confirmedAt, FREE_CANCEL_WINDOW_MIN)]) as Date;
-}
-
 /** [BOOK-S3 · B1] Does the appointment rule decide this order's free window? */
 function appointmentWindowApplies(order: CancellationSnapshot): order is CancellationSnapshot & { appointmentSlot: Date } {
   return order.fulfillment === 'APPOINTMENT' && order.appointmentSlot != null && instantBookingEnabled();
@@ -309,9 +299,12 @@ function notAcceptedYet(order: CancellationSnapshot): boolean {
 function freeWindowEnd(order: CancellationSnapshot): Date | null {
   if (notAcceptedYet(order)) return order.holdExpiresAt ?? null;
   const accepted = order.assignedAt ?? order.acceptedAt ?? order.placedAt;
+  const afterAcceptance = plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
   // [BOOK-S3 · owner B1] An appointment: free until two hours before it starts.
-  if (appointmentWindowApplies(order)) return appointmentChangeCutoff(order.appointmentSlot, accepted);
-  return plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
+  if (appointmentWindowApplies(order)) {
+    return latest([plusMinutes(order.appointmentSlot, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN), afterAcceptance]);
+  }
+  return afterAcceptance;
 }
 
 /**
