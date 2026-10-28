@@ -35,6 +35,35 @@ describe('windowsForSave', () => {
   });
 });
 
+describe('windowsForSave — an editor that re-sends the windows it showed before a save joined them [REVIEW-M N1 on #2187]', () => {
+  // The first save of LEGACY stored the joined windows; the editor still holds the pre-join pair.
+  const JOINED = { durationMinutes: 60, slots: [w(1, '09:00', '12:30'), w(2, '09:00', '17:00')] };
+
+  it('the pre-join windows, re-sent after the join: joined again, not refused', () => {
+    expect(windowsForSave(LEGACY.slots, JOINED)).toEqual({ ok: true, slots: JOINED.slots });
+  });
+
+  it('the pre-join windows beside a separate new window on the same day: joined, and the new window kept', () => {
+    expect(windowsForSave([...LEGACY.slots, w(1, '14:00', '17:00')], JOINED))
+      .toEqual({ ok: true, slots: [w(1, '09:00', '12:30'), w(1, '14:00', '17:00'), w(2, '09:00', '17:00')] });
+  });
+
+  it('the stored time is the stored windows JOINED: against a listing that still stores its overlapping pair, a save that joins into that time is accepted', () => {
+    expect(windowsForSave([w(1, '09:00', '12:30'), w(1, '10:00', '11:00')], LEGACY)).toEqual({ ok: true, slots: [w(1, '09:00', '12:30')] });
+  });
+
+  it('two overlapping windows inside the stored time that join into something else are a NEW overlap: refused', () => {
+    expect(windowsForSave([w(2, '09:00', '12:00'), w(2, '11:00', '14:00')], JOINED)).toEqual({ ok: false, pair: [w(2, '09:00', '12:00'), w(2, '11:00', '14:00')] });
+  });
+
+  it('a window reaching outside the stored time still makes a refused overlap, naming that pair', () => {
+    expect(windowsForSave([...LEGACY.slots, w(2, '16:00', '18:00')], JOINED)).toEqual({ ok: false, pair: [w(2, '09:00', '17:00'), w(2, '16:00', '18:00')] });
+    expect(windowsForSave([w(1, '09:00', '12:00'), w(1, '11:00', '13:00')], JOINED)).toEqual({ ok: false, pair: [w(1, '09:00', '12:00'), w(1, '11:00', '13:00')] });
+    // Another day's stored time covers nothing on this day.
+    expect(windowsForSave([w(3, '09:00', '12:00'), w(3, '10:00', '11:00')], JOINED)).toMatchObject({ ok: false });
+  });
+});
+
 describe('joinOverlappingWindows', () => {
   it('joins chains, keeps back to back apart, keeps other days', () => {
     expect(joinOverlappingWindows([w(4, '13:00', '15:00'), w(4, '09:00', '11:00'), w(4, '10:00', '13:30'), w(4, '15:00', '16:00'), w(0, '08:00', '09:00')]))

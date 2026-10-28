@@ -48,9 +48,15 @@ export function appointmentReminderDedupeKey(bookingId: string): string {
   return `appointment-reminder:${bookingId}`;
 }
 
+/** [REVIEW-G S4-1 on #2188] The same once-per-person key for a service job's reminder. */
+export function jobReminderDedupeKey(jobId: string): string {
+  return `job-reminder:${jobId}`;
+}
+
 /** A reminder handed to the delivery seam. `audience` and `dedupeKey` ride
  * into NotificationService.send unchanged (the booking-reminders worker spreads
- * this object into it). */
+ * this object into it). The seam answers `false` when nothing new was sent (the
+ * person's dedupe key already held this reminder); that is not counted. */
 export type BookingReminder = {
   userId: string;
   title: string;
@@ -109,13 +115,14 @@ export async function sendBookingReminders(
       [job.provider.userId, `You have a job booked for ${when}. Check the details in your jobs list.`],
     ] as Array<[string, string]>) {
       if (await alreadyReminded(userId, [{ kind: 'booking_reminder', idKey: 'refId' }], job.id)) continue;
-      await notify({
+      const delivered = await notify({
         userId,
         title: `Booking ${reminderDayWord(job.scheduledFor!, now)}`,
         body,
+        dedupeKey: jobReminderDedupeKey(job.id),
         data: { kind: 'booking_reminder', refId: job.id },
       });
-      sent += 1;
+      if (delivered !== false) sent += 1;
     }
   }
 
@@ -147,7 +154,7 @@ export async function sendBookingReminders(
         { kind: 'appointment_reminder', idKey: 'bookingId' },
         { kind: 'booking_reminder', idKey: 'refId' },
       ], b.id)) continue;
-      await notify({
+      const delivered = await notify({
         userId,
         title: `Appointment ${reminderDayWord(b.slotStart, now)}`,
         body,
@@ -155,7 +162,7 @@ export async function sendBookingReminders(
         dedupeKey: appointmentReminderDedupeKey(b.id),
         data: { kind: 'appointment_reminder', bookingId: b.id, ...(b.orderId ? { orderId: b.orderId } : {}) },
       });
-      sent += 1;
+      if (delivered !== false) sent += 1;
     }
   }
 

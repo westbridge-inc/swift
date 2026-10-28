@@ -82,18 +82,34 @@ export function joinOverlappingWindows(slots: readonly BookingWindow[]): Booking
 /** [BOOK-S1 · REVIEW-M S4-3] The windows to store for a save. No overlap: as
  *  sent. An overlap made only of windows the listing already stores (an older
  *  listing, saved again unchanged): joined, never refused. An overlap that
- *  involves a window the save adds: refused with that pair. */
+ *  involves a window the save adds: refused with that pair.
+ *  [REVIEW-M N1 on #2187] After such a save the listing stores the JOINED
+ *  window, while an editor may still hold the windows it showed before the save
+ *  and send them again. An overlapping group that joins into exactly a window
+ *  of the listing's stored opening time (its stored windows, joined) adds and
+ *  removes nothing there: it is the stored time re-sent, joined again, never
+ *  refused. A group that joins into anything else is a new overlap. */
 export function windowsForSave(
   incoming: readonly BookingWindow[],
   stored: unknown,
 ): { ok: true; slots: BookingWindow[] } | { ok: false; pair: [BookingWindow, BookingWindow] } {
   if (!overlappingWindows(incoming)) return { ok: true, slots: [...incoming] };
   const storedSlots = (stored as { slots?: unknown } | null | undefined)?.slots;
-  const known = new Set(Array.isArray(storedSlots) ? (storedSlots as BookingWindow[]).map(windowKey) : []);
+  const storedWindows = Array.isArray(storedSlots) ? (storedSlots as BookingWindow[]) : [];
+  const known = new Set(storedWindows.map(windowKey));
+  const storedTime = new Set(joinOverlappingWindows(storedWindows).map(windowKey));
+  const joined = joinOverlappingWindows(incoming);
+  /** The joined window of this save that a window falls in. */
+  const groupOf = (w: BookingWindow) => joined.find((g) => g.dayOfWeek === w.dayOfWeek
+    && toMinutes(g.start) <= toMinutes(w.start) && toMinutes(w.end) <= toMinutes(g.end));
   for (let i = 0; i < incoming.length; i += 1) {
     for (let j = i + 1; j < incoming.length; j += 1) {
       const pair: [BookingWindow, BookingWindow] = [incoming[i]!, incoming[j]!];
-      if (overlappingWindows(pair) && !(known.has(windowKey(pair[0])) && known.has(windowKey(pair[1])))) return { ok: false, pair };
+      if (!overlappingWindows(pair)) continue;
+      if (known.has(windowKey(pair[0])) && known.has(windowKey(pair[1]))) continue;
+      const group = groupOf(pair[0]);
+      if (group && storedTime.has(windowKey(group))) continue;
+      return { ok: false, pair };
     }
   }
   return { ok: true, slots: joinOverlappingWindows(incoming) };

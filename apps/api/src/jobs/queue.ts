@@ -1819,9 +1819,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { sendBookingReminders } = await import('../modules/services/services.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
         const notifications = new NotificationService(ctx.prisma, ctx.io);
-        const sent = await sendBookingReminders(ctx.prisma, async (n) => {
-          await notifications.send({ ...n, type: 'ORDER_UPDATE' });
-        });
+        // [REVIEW-G S4-2 on #2188] Counts only reminders newly sent: a dedupe hit (a reminder already sent to that
+        // person, e.g. by an overlapping run) answers false and is not reported as sent.
+        const sent = await sendBookingReminders(ctx.prisma, (n) => notifications.sendIfNew({ ...n, type: 'ORDER_UPDATE' }));
         ctx.log.info(`Booking reminders: ${sent} sent`);
       }
     },

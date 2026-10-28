@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appointmentReminderDedupeKey, reminderDayWord, sendBookingReminders, type BookingReminder } from '../modules/services/services.service';
+import { appointmentReminderDedupeKey, jobReminderDedupeKey, reminderDayWord, sendBookingReminders, type BookingReminder } from '../modules/services/services.service';
 
 // ---------------------------------------------------------------------------
 // [S4 · BOOK-MEASURE R5] RIGHT SCREEN, RIGHT PERSON — the store appointment's
@@ -66,11 +66,13 @@ function harness(bookings: ReturnType<typeof storeBooking>[], jobs: unknown[] = 
       findFirst: async ({ where }: { where: Record<string, unknown> }) => inbox.find((row) => matches(row, where)) ? { id: 'n' } : null,
     },
   };
+  // Answers as NotificationService.sendIfNew does: false when the key already holds a notice (nothing new sent).
   const deliver = async (n: BookingReminder) => {
     const data = n.audience ? { ...n.data, audience: n.audience } : n.data;
-    if (n.dedupeKey && inbox.some((row) => row.userId === n.userId && row.dedupeKey === n.dedupeKey)) return;
+    if (n.dedupeKey && inbox.some((row) => row.userId === n.userId && row.dedupeKey === n.dedupeKey)) return false;
     inbox.push({ userId: n.userId, data, dedupeKey: n.dedupeKey ?? null });
     delivered.push(n);
+    return true;
   };
   return { prisma: prisma as never, deliver, delivered, inbox };
 }
@@ -113,14 +115,17 @@ describe('[S4] a store appointment reminder names the booking and whose copy it 
     ]);
   });
 
-  it('a service JOB reminder is unchanged: booking_reminder + refId, the jobs list is its screen', async () => {
+  it('a service JOB reminder keeps its kind (booking_reminder + refId, the jobs list) and carries its own once-per-person key', async () => {
     const job = { id: 'job-1', customerId: 'cust-j', scheduledFor: SOON(), provider: { userId: 'pro-j', trade: 'Plumber' } };
     const h = harness([], [job]);
     await sendBookingReminders(h.prisma, h.deliver);
     expect(h.delivered.map((n) => [n.userId, n.data, n.audience, n.dedupeKey])).toEqual([
-      ['cust-j', { kind: 'booking_reminder', refId: 'job-1' }, undefined, undefined],
-      ['pro-j', { kind: 'booking_reminder', refId: 'job-1' }, undefined, undefined],
+      ['cust-j', { kind: 'booking_reminder', refId: 'job-1' }, undefined, 'job-reminder:job-1'],
+      ['pro-j', { kind: 'booking_reminder', refId: 'job-1' }, undefined, 'job-reminder:job-1'],
     ]);
+    expect(jobReminderDedupeKey('job-1')).toBe('job-reminder:job-1');
+    // Never the appointment key: a job id and a booking id live in different key spaces.
+    expect(jobReminderDedupeKey('x')).not.toBe(appointmentReminderDedupeKey('x'));
   });
 });
 
@@ -174,9 +179,32 @@ describe('[S4] once per booking per person', () => {
       await bothLooked;
       return seen;
     };
-    await Promise.all([sendBookingReminders(h.prisma, h.deliver), sendBookingReminders(h.prisma, h.deliver)]);
+    const counts = await Promise.all([sendBookingReminders(h.prisma, h.deliver), sendBookingReminders(h.prisma, h.deliver)]);
     const perPerson = h.inbox.reduce<Record<string, number>>((acc, row) => ({ ...acc, [row.userId]: (acc[row.userId] ?? 0) + 1 }), {});
     expect(perPerson).toEqual({ 'customer-1': 1, 'owner-1': 1 });
+    // [REVIEW-G S4-2 on #2188] The runs report what they newly sent: two reminders, not four.
+    expect(counts[0] + counts[1]).toBe(2);
+  });
+
+  it('the same holds for a service job: two overlapping runs remind each side once and count two sends', async () => {
+    const job = { id: 'job-2', customerId: 'cust-j', scheduledFor: SOON(), provider: { userId: 'pro-j', trade: 'Plumber' } };
+    const h = harness([], [job]);
+    let lookups = 0;
+    let release!: () => void;
+    const bothLooked = new Promise<void>((resolve) => { release = resolve; });
+    const prisma = h.prisma as unknown as { notification: { findFirst: (a: unknown) => Promise<unknown> } };
+    const real = prisma.notification.findFirst;
+    prisma.notification.findFirst = async (args) => {
+      const seen = await real(args);
+      lookups += 1;
+      if (lookups === 2) release();
+      await bothLooked;
+      return seen;
+    };
+    const counts = await Promise.all([sendBookingReminders(h.prisma, h.deliver), sendBookingReminders(h.prisma, h.deliver)]);
+    const perPerson = h.inbox.reduce<Record<string, number>>((acc, row) => ({ ...acc, [row.userId]: (acc[row.userId] ?? 0) + 1 }), {});
+    expect(perPerson).toEqual({ 'cust-j': 1, 'pro-j': 1 });
+    expect(counts[0] + counts[1]).toBe(2);
   });
 });
 
