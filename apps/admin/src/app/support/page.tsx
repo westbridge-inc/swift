@@ -7,6 +7,7 @@ import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
 import { humanise, label } from '@/lib/labels';
+import { gyDateTime } from '@/lib/dates';
 import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['OPEN', 'IN_PROGRESS', 'RESOLVED'] as const;
@@ -36,7 +37,7 @@ const SAFETY_NOTE_MIN = 20;
 const CLOSURE_SUBJECT = 'Account closure request';
 const isClosureRequest = (t: { category?: string; subject?: string }) => t.category === 'ACCOUNT' && t.subject === CLOSURE_SUBJECT;
 
-const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const when = (iso: string) => gyDateTime(iso);
 
 export default function SupportPage() {
   const qc = useQueryClient();

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchIntegrityFlags, errorCode, type IntegrityFlag } from '@/lib/api';
+import { gyDateTime } from '@/lib/dates';
 
 /** [Integrity review · the algorithms' decision log]
  *
@@ -67,7 +68,7 @@ export default function IntegrityPage() {
   const forbidden =
     errorCode(error) === 'FORBIDDEN' || (error as { status?: number } | null)?.status === 403;
 
-  const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const when = (iso: string) => gyDateTime(iso);
 
   return (
     <div className="mc-page">

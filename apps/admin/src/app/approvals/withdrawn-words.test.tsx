@@ -27,7 +27,7 @@ describe('[ADMIN-AUDIT S3-7] a withdrawn request names the one who withdrew it',
     const { user } = renderWithQuery(<ApprovalsPage />);
     await user.click(await screen.findByRole('button', { name: /^Cancelled/ }));
     await screen.findByText(/asked by Asha Persaud/);
-    expect(screen.getByText(/cancelled by Asha Persaud/)).toBeTruthy();
+    expect(screen.getByText(/^Cancelled by Asha Persaud · /)).toBeTruthy(); // DECIDED_WORDS (#2155) + decidedBy (#2156)
     expect(document.body.textContent).not.toMatch(/account not found here/);
     expect(document.body.textContent).not.toMatch(/cm-asker-id/);
   });

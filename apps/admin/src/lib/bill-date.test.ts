@@ -18,6 +18,7 @@ describe('subscription billing date rows [FEE-STATUS]', () => {
   });
   it('the subscriptions list says "due since" for a passed date', () => {
     const src = readFileSync(join(process.cwd(), 'src/app/subscriptions/page.tsx'), 'utf8');
-    expect(src).toContain("billDateLabel(s.nextBillingDate) === 'Due since' ? `due since ");
+    // [ADMIN-AUDIT S3-4] the same rule, now in sentence case with the date in words
+    expect(src).toContain("billDateLabel(s.nextBillingDate) === 'Due since' ? `Due since ${gyDate(s.nextBillingDate)}`");
   });
 });

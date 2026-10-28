@@ -13,6 +13,7 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 /** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
  *  `failed_payment_<outcome>` when a cash order fails at the door). */
@@ -32,7 +33,7 @@ const STRIKE_REASON: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 const when = (iso?: string | null, withTime = false) =>
-  iso ? new Date(iso).toLocaleString('en-GB', withTime ? { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+  iso ? (withTime ? gyDateTime(iso) : gyDate(iso)) : '—';
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
 
 function Row({ label: name, children }: { label: string; children: React.ReactNode }) {

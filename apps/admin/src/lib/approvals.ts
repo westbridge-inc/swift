@@ -11,6 +11,8 @@
 // action it knows will fail is teaching the operator to click through errors.
 // ---------------------------------------------------------------------------
 
+import { gyDateTime } from './dates';
+
 export interface ApprovalRow {
   id: string;
   /** "<METHOD> <route template>" — the classified action, never a raw URL. */
@@ -57,10 +59,10 @@ export type SoloState =
   | { state: 'available'; coolOffHours: number }
   | { state: 'unavailable'; why: string; message: string };
 
-/** "Solo approval: available after 14 Oct, 07:30" — the wait, in plain words. */
+/** "Solo approval: available after 14 Oct 2026, 07:30" — the wait, in plain words, in Guyana time (lib/dates). */
 export function soloWaitCopy(availableAt: string, now = new Date()): string {
   const at = new Date(availableAt);
-  const when = at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const when = gyDateTime(at);
   return at.getTime() > now.getTime() ? `Solo approval: available after ${when}` : `Solo approval: available now (since ${when})`;
 }
 
@@ -112,6 +114,24 @@ export function urgencyOf(row: ApprovalRow, now = new Date()): Urgency {
   const m = minutesLeft(row, now);
   if (m <= 0) return 'expired';
   return m <= 30 ? 'soon' : 'ok';
+}
+
+// [ADMIN-AUDIT S3-7] The card's words: the class, the status and the time left, never the codes alone.
+export const CLASS_WORD: Record<string, string> = { C4: 'Money', C5: 'Platform' };
+export const APPROVAL_STATUS_WORDS: Record<ApprovalRow['status'], string> = {
+  PENDING: 'Waiting for a second admin', APPROVED: 'Approved, not executed yet', REJECTED: 'Rejected',
+  APPLIED: 'Executed', EXPIRED: 'Expired', CANCELLED: 'Cancelled',
+};
+/** The decided line: "Approved by …" (an executed request was approved first), "Rejected by …". */
+export const DECIDED_WORDS: Partial<Record<ApprovalRow['status'], string>> = {
+  APPROVED: 'Approved', APPLIED: 'Approved', REJECTED: 'Rejected', CANCELLED: 'Cancelled', EXPIRED: 'Expired',
+};
+/** "23 h 53 min left", "45 min left", "expired". */
+export function timeLeftWords(minutes: number): string {
+  if (!(minutes > 0)) return 'expired';
+  const h = Math.floor(minutes / 60);
+  const m = Math.floor(minutes % 60);
+  return h > 0 ? `${h} h ${m} min left` : `${m} min left`;
 }
 
 export const CLASS_MEANING: Record<string, string> = {
