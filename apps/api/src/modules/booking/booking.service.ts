@@ -6,6 +6,7 @@ import {
   type BusyInterval, MAX_BUFFER_MINUTES, bufferOf, busyIntervalOf, candidateInterval, hasRoom,
 } from './availability';
 import { isBookingExclusionViolation } from './one-at-a-time';
+import type { BookingLimits } from './booking-limits';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
 import { emitToStoreRoom } from '../order/order-room-emission.service';
 
@@ -70,6 +71,20 @@ function isSlotConflict(error: unknown): boolean {
  *  the writer it waited for. */
 export async function lockBusinessTime(tx: Prisma.TransactionClient, vendorId: string): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`booking-business:${vendorId}`}, 0))`;
+}
+
+/** [BOOK-S2] One customer's booking holds queue here, one at a time, until
+ *  their transaction ends: the slot-squatting caps (booking-limits.ts) are
+ *  counted and the booking written under it. Checkout takes it before the
+ *  business's time lock (customer, then business), the order every holder
+ *  keeps. */
+export async function lockCustomerBookings(tx: Prisma.TransactionClient, customerId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`booking-customer:${customerId}`}, 0))`;
+}
+
+/** [BOOK-S2] Refused in plain words when the customer already holds as many upcoming bookings as a cap allows. */
+function bookingLimitReached(message: string): AppError {
+  return new AppError(409, 'BOOKING_LIMIT_REACHED', message);
 }
 
 /** Parent order states in which an appointment can still be moved. */
@@ -228,16 +243,33 @@ export class BookingService {
    * business. A lost race throws 409 SLOT_TAKEN, which rolls the whole
    * checkout back: no order, no payment instruction. The caller nudges the
    * business's calendars after its commit.
+   * [COORD ruling 28 Oct · slot squatting] Under the customer's booking lock,
+   * a customer already holding `limits.perBusiness` upcoming bookings with
+   * this business, or `limits.total` in all, is refused (409
+   * BOOKING_LIMIT_REACHED), so a customer can never hold a business's time
+   * without limit before paying anything.
    */
   async holdSlotAtCheckout(
     tx: Prisma.TransactionClient,
-    input: { itemId: string; customerId: string; slotStart: Date; orderId: string },
+    input: { itemId: string; customerId: string; slotStart: Date; orderId: string; limits: BookingLimits },
   ) {
     const slotStart = canonicalSlotStart(input.slotStart);
     // On the checkout's own transaction: no second connection while it holds the locks.
     const { config, vendorId } = await this.validatedSlot(input.itemId, slotStart, tx);
+    await lockCustomerBookings(tx, input.customerId);
+    const upcoming = await tx.booking.findMany({
+      where: { customerId: input.customerId, status: { in: ['RESERVED', 'CONFIRMED'] }, slotStart: { gt: new Date() } },
+      select: { vendorId: true },
+    });
+    const withThisBusiness = upcoming.filter((b) => b.vendorId === vendorId).length;
+    if (withThisBusiness >= input.limits.perBusiness) {
+      throw bookingLimitReached(`You already have ${withThisBusiness} upcoming bookings with this business. Cancel one, or book again after one is done.`);
+    }
+    if (upcoming.length >= input.limits.total) {
+      throw bookingLimitReached(`You already have ${upcoming.length} upcoming bookings. Cancel one, or book again after one is done.`);
+    }
     try {
-      return await this.writeBooking(tx, { ...input, vendorId, slotStart, config, status: 'RESERVED' });
+      return await this.writeBooking(tx, { itemId: input.itemId, customerId: input.customerId, orderId: input.orderId, vendorId, slotStart, config, status: 'RESERVED' });
     } catch (error) {
       if (isSlotConflict(error)) throw slotTaken();
       throw error;

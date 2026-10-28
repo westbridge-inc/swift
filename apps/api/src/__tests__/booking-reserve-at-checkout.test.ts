@@ -10,6 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService, lockBusinessTime } from '../modules/booking/booking.service';
+import { ALGO_DEFAULTS } from '../modules/algo/algo-config';
 import { instantBookingEnabled } from '../modules/booking/instant-booking';
 import { autoCancelUnresponsiveOrder } from '../jobs/queue';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -103,7 +104,8 @@ function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: str
 async function book(who: Actor, itemId: string, slot: Date, payment: Record<string, unknown> = { paymentMethod: 'CASH' }) {
   const cleared = await call('DELETE', '/api/v1/customer/cart', who.token);
   expect(cleared.statusCode, cleared.body).toBe(200);
-  const added = await call('POST', '/api/v1/customer/cart/items', who.token, { vendorId, itemId, quantity: 1 });
+  const { vendorId: itemVendorId } = await app.prisma.item.findUniqueOrThrow({ where: { id: itemId }, select: { vendorId: true } });
+  const added = await call('POST', '/api/v1/customer/cart/items', who.token, { vendorId: itemVendorId, itemId, quantity: 1 });
   expect(added.statusCode, added.body).toBe(201);
   return call('POST', '/api/v1/customer/checkout', who.token, {
     ...payment,
@@ -140,6 +142,28 @@ async function waitUntilBlockedBy(pid: number, ms = 10_000) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for a request to queue behind backend ${pid}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+/** Another business with one bookable listing (60 minutes, every hour of every day). */
+async function makeBusiness(name: string): Promise<{ vendorId: string; itemId: string }> {
+  const owner = await makeUser(`${name}Owner`, ['VENDOR_OWNER'], 'VENDOR_OWNER');
+  const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
+  const v = await app.prisma.vendor.create({
+    data: {
+      ownerId: vo.id, name: `S2 ${name}`, slug: `s2-${name.toLowerCase()}-${nanoid(8).toLowerCase()}`, vendorType: 'SERVICE',
+      phone: `${PHONE_PREFIX}${String(900 - vendorIds.length).padStart(3, '0')}`, addressLine1: '9 Chair Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: 6.8013, longitude: -58.1551, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+    },
+  });
+  vendorIds.push(v.id);
+  const category = await app.prisma.category.create({ data: { vendorId: v.id, name: 'Chair', sortOrder: 0 } });
+  const item = await app.prisma.item.create({
+    data: {
+      vendorId: v.id, categoryId: category.id, name: `S2 ${name} Cut`, basePrice: 2000, isAvailable: true, fulfillment: 'APPOINTMENT',
+      bookingConfig: { durationMinutes: 60, slots: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, start: '00:00', end: '24:00' })) },
+    },
+  });
+  return { vendorId: v.id, itemId: item.id };
 }
 
 const on = () => vi.stubEnv('INSTANT_BOOKING', '1');
@@ -466,6 +490,110 @@ describe('[BOOK-S2] the booking follows its order through the one coupling seam'
     const done = await call('PUT', `/api/v1/vendor/orders/${order.id}/complete-appointment`, provider.token, {});
     expect(done.statusCode, done.body).toBe(200);
     expect(await bookingsOf(order.id)).toEqual([expect.objectContaining({ status: 'COMPLETED' })]);
+  });
+});
+
+describe('[BOOK-S2 · COORD 28 Oct] slot squatting: at most 2 upcoming bookings per business and 5 in all, per customer', () => {
+  it('the defaults are 2 per business and 5 in total (algo-config, no platform-config change)', () => {
+    expect(ALGO_DEFAULTS['booking.maxLivePerBusiness']).toBe(2);
+    expect(ALGO_DEFAULTS['booking.maxLiveTotal']).toBe(5);
+  });
+
+  it('the 3rd upcoming booking with one business is refused in plain words, with no order; another business still books', async () => {
+    on();
+    const a = await customer('Abe');
+    await booked(a, cutId, nextSlot());
+    await booked(a, beardId, nextSlot()); // another listing of the SAME business counts too
+    const third = await book(a, cutId, nextSlot());
+    expect(third.statusCode, third.body).toBe(409);
+    expect(third.json().error).toMatchObject({
+      code: 'BOOKING_LIMIT_REACHED',
+      message: 'You already have 2 upcoming bookings with this business. Cancel one, or book again after one is done.',
+    });
+    expect(await ordersOf(a)).toBe(2);
+    const other = await makeBusiness('Elsewhere');
+    expect((await book(a, other.itemId, nextSlot())).statusCode).toBe(200);
+  });
+
+  it('the 6th upcoming booking in all is refused, even at a business where the customer holds none', async () => {
+    on();
+    const a = await customer('Bea');
+    const [b1, b2, b3] = [await makeBusiness('One'), await makeBusiness('Two'), await makeBusiness('Three')];
+    for (const itemId of [b1.itemId, b1.itemId, b2.itemId, b2.itemId, b3.itemId]) await booked(a, itemId, nextSlot());
+    const fresh = await makeBusiness('Four');
+    const sixth = await book(a, fresh.itemId, nextSlot());
+    expect(sixth.statusCode, sixth.body).toBe(409);
+    expect(sixth.json().error).toMatchObject({
+      code: 'BOOKING_LIMIT_REACHED',
+      message: 'You already have 5 upcoming bookings. Cancel one, or book again after one is done.',
+    });
+    expect(await ordersOf(a)).toBe(5);
+  });
+
+  it('a cancelled booking frees its place, and so does a completed one', async () => {
+    on();
+    const a = await customer('Cal');
+    const first = await booked(a, cutId, nextSlot());
+    const second = await booked(a, cutId, nextSlot());
+    expect((await book(a, cutId, nextSlot())).statusCode).toBe(409);
+    // Cancelled frees a place.
+    expect((await call('POST', `/api/v1/customer/orders/${first.id}/cancel`, a.token, {})).statusCode).toBe(200);
+    const third = await booked(a, cutId, nextSlot());
+    expect((await book(a, cutId, nextSlot())).statusCode).toBe(409);
+    // Completed frees a place.
+    expect((await accept(second.id)).statusCode).toBe(200);
+    expect((await call('PUT', `/api/v1/vendor/orders/${second.id}/complete-appointment`, provider.token, {})).statusCode).toBe(200);
+    expect((await book(a, cutId, nextSlot())).statusCode).toBe(200);
+    expect(await bookingsOf(third.id)).toEqual([expect.objectContaining({ status: 'RESERVED' })]);
+  });
+
+  it('control: with the switch OFF there is no cap (requests wait for the business, as before)', async () => {
+    const a = await customer('Dee');
+    for (let i = 0; i < 3; i += 1) expect((await book(a, cutId, nextSlot())).statusCode).toBe(200);
+  });
+
+  it('PARALLEL, on real PostgreSQL: two holds for one customer at two businesses cannot both slip past the cap', async () => {
+    const a = await customer('Eli');
+    const [b1, b2, b3, b4] = [await makeBusiness('Five'), await makeBusiness('Six'), await makeBusiness('Seven'), await makeBusiness('Eight')];
+    on();
+    for (const itemId of [b1.itemId, b1.itemId, b2.itemId, b2.itemId]) await booked(a, itemId, nextSlot());
+    const limits = { perBusiness: 2, total: 5 };
+    const svc = new BookingService(app.prisma);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let pid = 0;
+    let holding = false;
+    // The first hold takes the 5th place and keeps its transaction open...
+    const first = app.prisma.$transaction(async (tx) => {
+      pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+      await svc.holdSlotAtCheckout(tx, { itemId: b3.itemId, customerId: a.userId, slotStart: nextSlot(), orderId: `s2-race-${nanoid(6)}`, limits });
+      holding = true;
+      await gate;
+    }, { timeout: 20_000 });
+    let failed: unknown = null;
+    first.catch((error: unknown) => { failed = error; });
+    const until = Date.now() + 10_000;
+    while (!holding) {
+      if (failed || Date.now() > until) throw new Error(`the first hold never took its place: ${String(failed)}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // ...while the second, at another business, must wait for it rather than count the old number.
+    const second = app.prisma.$transaction(
+      (tx) => svc.holdSlotAtCheckout(tx, { itemId: b4.itemId, customerId: a.userId, slotStart: nextSlot(), orderId: `s2-race-${nanoid(6)}`, limits }),
+      { timeout: 20_000 },
+    ).then(() => 'placed', (error: { code?: string }) => error.code ?? 'error');
+    let queued = true;
+    try {
+      await waitUntilBlockedBy(pid, 3_000);
+    } catch {
+      queued = false;
+    } finally {
+      release();
+      await first;
+    }
+    expect(queued, 'the second hold waits on the customer\'s booking lock').toBe(true);
+    expect(await second).toBe('BOOKING_LIMIT_REACHED');
+    expect(await app.prisma.booking.count({ where: { customerId: a.userId, status: { in: ['RESERVED', 'CONFIRMED'] } } })).toBe(5);
   });
 });
 

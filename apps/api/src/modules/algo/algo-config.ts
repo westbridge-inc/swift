@@ -199,6 +199,16 @@ export const ALGO_DEFAULTS = {
    */
   'rescue.arrivedFixMaxAgeMinutes': 2,
   'rescue.arrivedFixMaxMetres': 150,
+  /**
+   * [BOOK-S2 · COORD ruling 28 Oct 2026] With INSTANT_BOOKING on, a booking
+   * takes the business's time at checkout, before anyone pays: these caps stop
+   * one customer from holding a business's (or many businesses') time. A
+   * customer may hold at most `maxLivePerBusiness` upcoming appointments
+   * (RESERVED or CONFIRMED, not yet started) with one business, and
+   * `maxLiveTotal` in all. Clamped 1..50 at the reader (booking/booking-limits.ts).
+   */
+  'booking.maxLivePerBusiness': 2,
+  'booking.maxLiveTotal': 5,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

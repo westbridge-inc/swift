@@ -48,7 +48,8 @@ import {
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
-import { BookingService, lockBusinessTime } from '../booking/booking.service';
+import { BookingService, lockBusinessTime, lockCustomerBookings } from '../booking/booking.service';
+import { bookingLimitsFor } from '../booking/booking-limits';
 import { instantBookingEnabled } from '../booking/instant-booking';
 import { bookingChangeForOrderTransition, syncOrderBookings } from '../booking/order-coupling';
 import { canonicalSlotStart } from '../booking/availability';
@@ -1417,6 +1418,10 @@ export class OrderService {
     // [M-11] The two effects every order owes after it commits carry their
     // delays; computed before the transaction so the rows inside it are whole.
     const queueTiming = await checkoutQueueTiming(this.prisma);
+    // [BOOK-S2 · COORD 28 Oct] The slot-squatting caps, read before the commit (algo-config, cached).
+    const bookingLimits = reserveAtCheckout && plans.some((p) => p.appointmentSlot)
+      ? await bookingLimitsFor(this.prisma, user.tenantId)
+      : null;
     // [CHECKOUT-IDEM · AX366 F1] Set as the body's last act, when it hands its
     // work to COMMIT: how a rejected transaction is told apart (see
     // settleCheckoutCommit).
@@ -1509,11 +1514,13 @@ export class OrderService {
       // availability are re-read on THIS transaction. The pre-transaction
       // checks above remain the friendly fast-fail; they authorize nothing.
       const planVendorIds = [...new Set(plans.map((p) => p.vendor.id))].sort();
-      // [BOOK-S2] The business's time lock comes BEFORE its vendor row, the
-      // order every other holder of both keeps (the "how many at once" profile
-      // write takes the time lock, then writes the vendor row). Held to commit:
-      // the slot is judged and written under it below, after the order exists.
-      if (reserveAtCheckout) {
+      // [BOOK-S2] The customer's booking lock, then the business's time lock,
+      // come BEFORE the vendor row: the order every other holder keeps (the
+      // "how many at once" profile write takes the time lock, then writes the
+      // vendor row). Held to commit: the caps and the slot are judged and the
+      // booking written under them below, after the order exists.
+      if (reserveAtCheckout && bookingLimits) {
+        await lockCustomerBookings(tx, input.userId);
         for (const vendorWithSlot of [...new Set(plans.filter((p) => p.appointmentSlot).map((p) => p.vendor.id))].sort()) {
           await lockBusinessTime(tx, vendorWithSlot);
         }
@@ -1838,12 +1845,13 @@ export class OrderService {
         // judged against every live booking of the business. A lost race
         // throws 409 SLOT_TAKEN and rolls the whole checkout back: no order,
         // no payment instruction, nothing for the business to accept.
-        if (reserveAtCheckout && plan.appointmentSlot) {
+        if (reserveAtCheckout && bookingLimits && plan.appointmentSlot) {
           await this.booking.holdSlotAtCheckout(tx, {
             itemId: plan.orderItems[0]!.itemId,
             customerId: input.userId,
             slotStart: plan.appointmentSlot,
             orderId: order.id,
+            limits: bookingLimits,
           });
         }
 
