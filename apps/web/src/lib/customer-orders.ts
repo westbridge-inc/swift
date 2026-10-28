@@ -42,3 +42,9 @@ export async function decideSubstitution(orderId: string, lineId: string, approv
 export async function cancelOrder(id: string, reason: string) {
   return apiFetch(`/api/v1/customer/orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
 }
+/** [BOOK-S6b · owner B2] Move my booking to another free time of the same service
+ *  (POST /customer/bookings/:id/reschedule, the phone's useRescheduleBooking). The
+ *  server judges the new time and the two-hour cut-off; its refusal is thrown in its own words. */
+export async function rescheduleBooking(bookingId: string, newSlotStart: string) {
+  return (await apiFetch(`/api/v1/customer/bookings/${encodeURIComponent(bookingId)}/reschedule`, { method: 'POST', body: JSON.stringify({ newSlotStart }) })).data;
+}

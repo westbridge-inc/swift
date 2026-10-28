@@ -1,0 +1,67 @@
+/* [BOOK-S6b] Day and time chips for a bookable listing: the phone's kit chips
+   (MenuItemScreen "Pick a time"), in token variables only. Each chip is at
+   least 44 px tall and the rows wrap on a narrow phone. */
+
+.picker { display: grid; gap: 10px; min-width: 0; }
+
+.label {
+  margin: 0;
+  color: var(--swift-ink);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.days, .times, .modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.chip {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--swift-border);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  font: 600 14px/20px var(--swift-face-body), system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.chip[aria-pressed='true'] { --swift-muted: var(--swift-muted-on-subtle); border-color: var(--swift-red); background: var(--swift-red-50); color: var(--swift-red-600); }
+.chip:disabled { cursor: default; opacity: 0.45; }
+.chip:focus-visible { outline: 2px solid var(--swift-focus); outline-offset: 2px; }
+
+.note {
+  margin: 0;
+  color: var(--swift-muted);
+  font: 400 14px/20px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.error {
+  margin: 0;
+  color: var(--swift-error);
+  font: 600 14px/20px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.instant { display: grid; gap: 4px; justify-items: start; }
+
+.panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-sunken);
+  border: 1px solid var(--swift-border);
+  min-width: 0;
+}
+
+.panelTitle {
+  margin: 0;
+  color: var(--swift-ink);
+  font: 700 16px/22px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
