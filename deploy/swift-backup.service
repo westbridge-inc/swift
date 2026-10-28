@@ -14,23 +14,32 @@ WorkingDirectory=/opt/swift
 # Settings only: deploy/.env holds no secret (pilot-up.sh refuses one).
 EnvironmentFile=/opt/swift/deploy/.env
 Environment=BACKUP_REQUIRED=1
-# The storage keys are systemd encrypted credentials from the same store that
-# swift-secrets writes: decrypted by the service manager with the host key,
-# mounted for this unit's user only at $CREDENTIALS_DIRECTORY, gone when it
-# exits. backup.sh reads them from there (deploy/secret-env.sh). The database
-# password stays inside the postgres container (POSTGRES_PASSWORD_FILE).
-LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred
-LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred
+# [SEC-BACKUP F1/F2] The storage keys and the signing key are systemd encrypted
+# credentials from the BACKUP store, /etc/credstore.encrypted/swift-backup/
+# (deploy/swift-secrets `backup init` / `backup set-keys`). `swift-secrets
+# materialize` never reads that directory, so the api and worker containers
+# never hold a key to the backup bucket. Decrypted by the service manager with
+# the host key, mounted for this unit's user only at $CREDENTIALS_DIRECTORY,
+# gone when it exits. backup.sh reads them from there (deploy/secret-env.sh).
+# BACKUP_KEY_SOURCE says whether the pair is the bucket's own key (dedicated)
+# or, until the owner stores one, a copy of the API's key (shared-api-key:
+# every run warns and the API pages). This unit never loads the API's
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. The database password stays
+# inside the postgres container (POSTGRES_PASSWORD_FILE).
+LoadCredentialEncrypted=BACKUP_AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_ACCESS_KEY_ID.cred
+LoadCredentialEncrypted=BACKUP_AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_SECRET_ACCESS_KEY.cred
+LoadCredentialEncrypted=BACKUP_KEY_SOURCE:/etc/credstore.encrypted/swift-backup/BACKUP_KEY_SOURCE.cred
+LoadCredentialEncrypted=BACKUP_SIGNING_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_SIGNING_KEY.cred
 # deploy/.env legitimately wires AWS_ACCESS_KEY_ID_FILE=/run/secrets/... and
 # AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/... for the API CONTAINERS
 # (STORAGE_PROVIDER=s3; that path exists only inside containers). This unit
 # loads deploy/.env via EnvironmentFile= above, so backup.sh would inherit
 # those container-only paths — and deploy/secret-env.sh checks NAME_FILE
-# BEFORE $CREDENTIALS_DIRECTORY, so the keys this unit declares above would
-# never be reached (observed: "FATAL: AWS_ACCESS_KEY_ID is expected in
-# /run/secrets/AWS_ACCESS_KEY_ID, which cannot be read"). Unset both so the
-# systemd credential directory wins on the host.
-UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE
+# BEFORE $CREDENTIALS_DIRECTORY (observed: "FATAL: AWS_ACCESS_KEY_ID is
+# expected in /run/secrets/AWS_ACCESS_KEY_ID, which cannot be read"). Unset
+# them, and any *_FILE pointer for the backup names, so the systemd credential
+# directory wins on the host.
+UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE BACKUP_AWS_ACCESS_KEY_ID_FILE BACKUP_AWS_SECRET_ACCESS_KEY_FILE BACKUP_KEY_SOURCE_FILE BACKUP_SIGNING_KEY_FILE
 ExecStart=/opt/swift/deploy/backup.sh /var/backups/swift
 # [S3-2, Opus review 14 Oct] A oneshot unit has no start timeout by default, so
 # one hung run (pg_dump waiting on a lock, a stalled upload) would keep the

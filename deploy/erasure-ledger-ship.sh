@@ -11,8 +11,10 @@
 #
 # An entry holds ids, timestamps and de-identified columns only. The plain batch exists only in this
 # run's private directory and is removed before the upload; only the .gpg leaves the host. Settings
-# and storage keys as backup.sh: deploy/.env (settings only), the keys from the environment, *_FILE
-# or $CREDENTIALS_DIRECTORY. The database password stays inside the postgres container.
+# and storage keys as backup.sh: deploy/.env (settings only); the keys are the backup bucket's own
+# pair (BACKUP_AWS_*, from the backup store the containers never see) or, until it exists, the API's
+# pair with a loud warning, from the environment, *_FILE or $CREDENTIALS_DIRECTORY. The database
+# password stays inside the postgres container.
 #
 # Usage: deploy/erasure-ledger-ship.sh --project <compose project>     (live is 'swift')
 # Exit 0: shipped (or nothing to ship). Anything else: nothing was recorded as shipped.
@@ -87,7 +89,8 @@ print(",".join(ids))' "$BATCH")" || die "the unshipped batch is not well-formed;
 [ -n "${BACKUP_BUCKET:-}" ] || die "BACKUP_BUCKET is not set: $COUNT erasure ledger entr(ies) cannot leave this host"
 if [ -n "${AWS_S3_BUCKET:-}" ] && [ "$BACKUP_BUCKET" = "$AWS_S3_BUCKET" ]; then die "BACKUP_BUCKET must differ from AWS_S3_BUCKET"; fi
 . "$HERE/secret-env.sh"
-load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
+# [SEC-BACKUP F1] The backup bucket's own key pair; the API's only as a loud fallback.
+load_backup_storage_keys || exit 1
 
 # The owner's key, proven exactly as every backup proves it (backup.sh --check-key). Required in every
 # environment [#1984 REVIEW-F S4-1]: staging serves real people until the cutover, so no batch ever

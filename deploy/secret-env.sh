@@ -34,3 +34,43 @@ load_secret_env() {
     export "$name=$value"
   done
 }
+
+# [SEC-BACKUP F1] The storage keys a HOST backup tool (backup.sh,
+# erasure-ledger-ship.sh, restore.sh) uses for the backup bucket: the bucket's
+# OWN pair, BACKUP_AWS_ACCESS_KEY_ID + BACKUP_AWS_SECRET_ACCESS_KEY, from the
+# backup store (/etc/credstore.encrypted/swift-backup, which swift-secrets
+# never materializes for the containers). Once that pair is here the API's
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are never read. FALLBACK, so
+# backups never stop: with no backup pair (a unit installed before the backup
+# store existed) the API's pair is used, with a loud warning. Exports the pair
+# under the AWS CLI's names for the pinned CLI container, and
+# BACKUP_STORAGE_KEY=dedicated|shared for the heartbeat.
+backup_key_warning() {
+  echo "WARNING: BACKUPS STILL SHARE THE API'S STORAGE KEY ($1): whoever holds the API's key can read, overwrite or delete every off-site backup. Create a key limited to the backup bucket and store it with deploy/owner/swift-backup-key.command (owner sheet BACKUP-KEY-SETUP)." >&2
+}
+load_backup_storage_keys() {
+  load_secret_env BACKUP_AWS_ACCESS_KEY_ID BACKUP_AWS_SECRET_ACCESS_KEY BACKUP_KEY_SOURCE || return 1
+  if [ -n "${BACKUP_AWS_ACCESS_KEY_ID:-}" ] && [ -n "${BACKUP_AWS_SECRET_ACCESS_KEY:-}" ]; then
+    export AWS_ACCESS_KEY_ID="$BACKUP_AWS_ACCESS_KEY_ID"
+    export AWS_SECRET_ACCESS_KEY="$BACKUP_AWS_SECRET_ACCESS_KEY"
+    unset BACKUP_AWS_ACCESS_KEY_ID BACKUP_AWS_SECRET_ACCESS_KEY
+    if [ "${BACKUP_KEY_SOURCE:-dedicated}" = shared-api-key ]; then
+      BACKUP_STORAGE_KEY=shared
+      backup_key_warning "the backup store holds a copy of it"
+    else
+      BACKUP_STORAGE_KEY=dedicated
+    fi
+  else
+    if [ -n "${BACKUP_AWS_ACCESS_KEY_ID:-}${BACKUP_AWS_SECRET_ACCESS_KEY:-}" ]; then
+      echo "WARNING: only one half of the backup storage key pair is present; using the API's pair instead." >&2
+    fi
+    unset BACKUP_AWS_ACCESS_KEY_ID BACKUP_AWS_SECRET_ACCESS_KEY
+    load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || return 1
+    BACKUP_STORAGE_KEY=shared
+    if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+      backup_key_warning "no backup key pair is installed for this run"
+    fi
+  fi
+  unset BACKUP_KEY_SOURCE
+  export BACKUP_STORAGE_KEY
+}

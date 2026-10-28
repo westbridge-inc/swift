@@ -16,12 +16,18 @@ pinned AWS CLI, Compose), pg_restore and SSH. What is proven:
     passphrase at hidden prompts, decrypts on the way through, sends neither
     to the host, and the host receives exactly the plain dump;
   - production runs the hourly timer; staging keeps the nightly one.
+[SEC-BACKUP F2] Off-site objects here are signed as backup.sh signs them (a
+signing key of the tests' own); deploy/tests/test_backup_separation.py proves
+the signature rules themselves. Objects planted to test the encryption checks
+are signed with the trusted key too, so those checks stay what refuses them.
 """
 
+import base64
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -43,6 +49,9 @@ with open(os.environ["CALL_LOG"], "a") as log:
 bucket = os.environ["FAKE_BUCKET"]
 if args[:1] == ["compose"]:
     joined = " ".join(args)
+    if "config" in args:
+        print('{"services":{"postgres":{"image":"postgis/postgis:16-3.4"}}}')
+        sys.exit(0)
     if "pg_dump" in joined:
         sys.stdout.buffer.write(open(os.environ["FIXTURE_DUMP"], "rb").read())
     else:
@@ -63,12 +72,21 @@ if args[:1] == ["run"]:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copyfile(local(src), target)
         else:
-            shutil.copyfile(os.path.join(bucket, src[len("s3://"):].split("/", 1)[1]), local(dst))
+            source = os.path.join(bucket, src[len("s3://"):].split("/", 1)[1])
+            if not os.path.exists(source):
+                sys.stderr.write('fatal error: An error occurred (404) when calling the HeadObject operation: Key "x" does not exist\n')
+                sys.exit(1)
+            shutil.copyfile(source, local(dst))
         sys.exit(0)
     if "head-object" in args:
         key = args[args.index("--key") + 1]
         print(os.path.getsize(os.path.join(bucket, key)))
         sys.exit(0)
+# [SEC-BACKUP F2] the throwaway restore instance: ready at once, never already there
+if args[:1] == ["logs"]:
+    print("PostgreSQL init process complete; ready for start up.")
+if args[:2] in (["container", "inspect"], ["volume", "inspect"]):
+    sys.exit(1)
 sys.exit(0)
 '''
 # pg_restore --list reads only a real custom archive (magic PGDMP); a
@@ -126,6 +144,12 @@ class BackupEncryption(unittest.TestCase):
         cls.keys = Path(tempfile.mkdtemp(prefix="swift-backup-keys-"))
         cls.fpr, cls.public, cls.private = make_owner_key(cls.keys / "owner")
         cls.other_fpr, cls.other_public, cls.other_private = make_owner_key(cls.keys / "other")
+        # [SEC-BACKUP F2] the host's backup signing key, and the allowed-signers file restores trust
+        cls.signing = cls.keys / "signing"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "swift-backup-signing", "-f", str(cls.signing)], check=True)
+        cls.allowed = cls.keys / "allowed_signers"
+        cls.allowed.write_text('swift-backup namespaces="swift-backup" ' + " ".join((cls.keys / "signing.pub").read_text().split()[:2]) + "\n")
+        cls.allowed.chmod(0o644)
 
     @classmethod
     def tearDownClass(cls):
@@ -309,9 +333,19 @@ class BackupEncryption(unittest.TestCase):
 
     # ── restore.sh never decrypts ──────────────────────────────────────────
     def restore(self, *args, stdin=None, **extra):
-        env = self.env(**extra)
-        return subprocess.run(["bash", str(DEPLOY / "restore.sh"), *args], env=env, input=stdin,
+        env = self.env(BACKUP_SIGNING_ALLOWED_SIGNERS=str(self.allowed), **extra)
+        return subprocess.run(["bash", str(DEPLOY / "restore.sh"), *args], env=env,
+                              **({"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}),
                               capture_output=True, timeout=60)
+
+    def signed_backup(self):
+        """A production backup signed on the host, as the current unit runs it."""
+        return self.backup(BACKUP_SIGNING_KEY_FILE=str(self.signing), BACKUP_SIGNING_ALLOWED_SIGNERS=str(self.allowed))
+
+    def sign_planted(self, obj: Path):
+        """Sign an object planted in the bucket with the TRUSTED key, so a check after the signature is what refuses it."""
+        subprocess.run([sys.executable, "-I", str(DEPLOY / "backup-signature.py"), "sign", "--key", str(self.signing),
+                        "--object", str(obj), "--out", f"{obj}.sig", "--created", "20261028T000000Z"], check=True, capture_output=True)
 
     def test_restore_refuses_an_encrypted_dump_and_points_at_the_drill(self):
         enc = self.tmp / "swift-20261013T010000Z.dump.gpg"
@@ -325,7 +359,7 @@ class BackupEncryption(unittest.TestCase):
                 self.assertNotIn("docker", self.log.read_text())
 
     def test_fetch_encrypted_streams_only_ciphertext(self):
-        ok = self.backup()
+        ok = self.signed_backup()
         self.assertEqual(ok.returncode, 0, ok.stderr)
         [obj] = [p for p in self.bucket.rglob("*.dump.gpg")]
         key = f"s3://swift-backups/{obj.relative_to(self.bucket)}"
@@ -338,6 +372,12 @@ class BackupEncryption(unittest.TestCase):
         self.assertIn(b"only an encrypted off-site dump", r.stderr)
         plain = self.bucket / "db" / "swift-20261013T020000Z.dump.gpg"
         plain.write_bytes(self.fixture.read_bytes())
+        # [SEC-BACKUP F2] unsigned, it is refused for that first
+        r = self.restore("--fetch-encrypted", "s3://swift-backups/db/swift-20261013T020000Z.dump.gpg")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(b"has NO signature", r.stderr)
+        self.assertEqual(r.stdout, b"")
+        self.sign_planted(plain)
         r = self.restore("--fetch-encrypted", "s3://swift-backups/db/swift-20261013T020000Z.dump.gpg")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"PLAIN dump", r.stderr)
@@ -363,7 +403,7 @@ class BackupEncryption(unittest.TestCase):
             kill_agent(home)
         if kind == "spliced":
             before = set(self.bucket.rglob("*.dump.gpg"))
-            ok = self.backup()
+            ok = self.signed_backup()
             self.assertEqual(ok.returncode, 0, ok.stderr)
             [real] = [q for q in self.bucket.rglob("*.dump.gpg") if q not in before]
             data = real.read_bytes()
@@ -373,6 +413,7 @@ class BackupEncryption(unittest.TestCase):
             self.assertEqual((data[0] >> 2) & 0x0F, 1, "the first packet is a public-key session key")
             out.write_bytes(data[:first] + out.read_bytes())
             real.unlink()
+            Path(f"{real}.sig").unlink()
         return out
 
     def test_fetch_encrypted_refuses_an_object_that_is_not_encrypted_to_a_key(self):
@@ -382,6 +423,7 @@ class BackupEncryption(unittest.TestCase):
                 target = self.bucket / "db" / f"swift-20261014T0{len(kind)}0000Z.dump.gpg"
                 target.parent.mkdir(exist_ok=True)
                 shutil.copyfile(obj, target)
+                self.sign_planted(target)
                 r = self.restore("--fetch-encrypted", f"s3://swift-backups/db/{target.name}")
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn(b"not encrypted to a key", r.stderr)
@@ -390,15 +432,20 @@ class BackupEncryption(unittest.TestCase):
     def test_source_dash_restores_the_dump_piped_in(self):
         # The fake pg_restore refuses anything but a custom archive: what came in
         # on stdin is what it was given. A ciphertext piped in is refused there.
-        r = self.restore("-", "swift_restore_y", stdin=b"not an archive")
+        # (unsigned on purpose: the owner's legacy flag; the drill's signed path is proven below)
+        r = self.restore("--allow-unsigned-legacy", "-", "swift_restore_y", stdin=b"not an archive")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"pg_restore cannot read this archive", r.stderr)
         r = self.restore("-", "swift_restore_y", stdin=b"")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"nothing arrived on stdin", r.stderr)
-        r = self.restore("--project", "swift", "-", "swift_restore_y", stdin=self.fixture.read_bytes())
+        r = self.restore("--project", "swift", "--allow-unsigned-legacy", "-", "swift_restore_y", stdin=self.fixture.read_bytes())
         self.assertNotIn(b"pg_restore cannot read this archive", r.stderr)
-        self.assertIn("CREATE DATABASE", self.log.read_text())
+        log = self.log.read_text()
+        self.assertIn("CREATE DATABASE", log)
+        # [SEC-BACKUP F2] in the throwaway instance, not through the live stack's postgres
+        self.assertIn("--network none", log)
+        self.assertFalse([l for l in log.splitlines() if l.startswith("docker compose") and "CREATE DATABASE" in l])
 
     # ── the drill, on the owner's computer ─────────────────────────────────
     def drill(self, key_text: str, passphrase: str, obj: str, scratch="swift_drill_t", project="swift"):
@@ -409,6 +456,7 @@ class BackupEncryption(unittest.TestCase):
         shim(self.bin, "ssh", f'''printf '%s\\n' "$*" >> "{ssh_log}"
 for last; do :; done
 case "$last" in
+  *--fetch-signature*) key="${{last##*--fetch-signature \\'}}"; key="${{key%\\'}}"; sig="{self.bucket}/${{key#s3://swift-backups/}}.sig"; if [ -f "$sig" ]; then cat "$sig"; else echo "swift-backup-signature none"; fi;;
   *--fetch-encrypted*) key="${{last##*--fetch-encrypted \\'}}"; key="${{key%\\'}}"; cat "{self.bucket}/${{key#s3://swift-backups/}}";;
   *"--compare-source - "*) cat > "{received}"; echo "compare-source: equal"; echo "RESTORE OK";;
   *) exit 9;;
@@ -427,7 +475,7 @@ esac
         self.assertFalse(ssh_log.exists() and ssh_log.read_text())
 
     def test_the_drill_decrypts_on_the_owner_side_and_the_host_receives_the_plain_dump(self):
-        ok = self.backup()
+        ok = self.signed_backup()
         self.assertEqual(ok.returncode, 0, ok.stderr)
         [obj] = [p for p in self.bucket.rglob("*.dump.gpg")]
         key = f"s3://swift-backups/{obj.relative_to(self.bucket)}"
@@ -439,14 +487,17 @@ esac
         self.assertEqual(received.read_bytes(), self.fixture.read_bytes())
         host_saw = ssh_log.read_text()
         self.assertIn("restore.sh --fetch-encrypted", host_saw)
-        self.assertIn("restore.sh --project 'swift' --compare-source - 'swift_drill_t'", host_saw)
+        # [SEC-BACKUP F2] the host verified the signature first, and the restore gets exactly that bundle
+        self.assertIn(f"restore.sh --fetch-signature '{key}'", host_saw)
+        bundle = base64.b64encode(Path(f"{obj}.sig").read_bytes()).decode()
+        self.assertIn(f"restore.sh --project 'swift' --signature-b64 '{bundle}' --signed-object '{obj.name}' --compare-source - 'swift_drill_t'", host_saw)
         # Neither the key nor the passphrase ever reaches the host or a log.
         for secret in (PASSPHRASE, key_text.splitlines()[3]):
             self.assertNotIn(secret, host_saw)
             self.assertNotIn(secret, r.stdout + r.stderr)
 
     def test_the_drill_refuses_a_wrong_passphrase_or_another_key_and_the_host_gets_nothing(self):
-        ok = self.backup()
+        ok = self.signed_backup()
         self.assertEqual(ok.returncode, 0, ok.stderr)
         [obj] = [p for p in self.bucket.rglob("*.dump.gpg")]
         key = f"s3://swift-backups/{obj.relative_to(self.bucket)}"
@@ -467,6 +518,7 @@ esac
                 target = self.bucket / "db" / f"swift-20261014T1{len(kind)}0000Z.dump.gpg"
                 target.parent.mkdir(exist_ok=True)
                 shutil.copyfile(obj, target)
+                self.sign_planted(target)
                 r, received, _ = self.drill(self.private.read_text(), PASSPHRASE, f"s3://swift-backups/db/{target.name}")
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("is not a backup encrypted to this key", r.stderr)

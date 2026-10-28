@@ -596,10 +596,31 @@ From the retained root session after the deploy user can run Docker:
     systemctl list-timers swift-backup.timer
 
 The timer runs as swift-deploy and requires BACKUP_BUCKET and the R2/S3
-endpoint in deploy/.env, and AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the
-encrypted store: the unit declares them as LoadCredentialEncrypted= and systemd
-hands them to backup.sh in a private credentials directory for the run. The
-unit does not start until both are stored. backup.sh runs pg_dump inside the
+endpoint in deploy/.env, and the BACKUP store. [SEC-BACKUP] The backup,
+erasure-ledger and restore units never load the API's AWS_ACCESS_KEY_ID /
+AWS_SECRET_ACCESS_KEY: they load BACKUP_AWS_ACCESS_KEY_ID,
+BACKUP_AWS_SECRET_ACCESS_KEY, BACKUP_KEY_SOURCE and BACKUP_SIGNING_KEY from
+/etc/credstore.encrypted/swift-backup/, a directory `swift-secrets
+materialize` never reads, so the api and worker containers never hold a key
+to the backup bucket. Before installing the units (and after installing the
+current /usr/local/sbin/swift-secrets, §2), run once:
+
+    swift-secrets backup init
+
+It creates the signing key (its public half goes to
+/etc/swift/backup-allowed-signers; keep a copy of that file off the host) and,
+until the owner stores the backup bucket's own key, a COPY of the API's pair
+under the backup names (BACKUP_KEY_SOURCE=shared-api-key), so backups never
+stop. Every run then warns "BACKUPS STILL SHARE THE API'S STORAGE KEY", the
+API pages weekly ("Backups are not protected from the API key") and
+doctor.sh warns, until the owner creates a key limited to the backup bucket
+and stores it (`swift-secrets backup set-keys`, two lines on stdin; from a
+Mac: deploy/owner/swift-backup-key.command, which also does this install).
+Only after a backup has run on the new key does the API's own key lose
+access to the backup bucket. The unit does not start until the backup store
+exists. Every dump is signed on the host and its signature uploaded beside it
+as `<object>.sig`; restore.sh and backup-drill.sh refuse a dump that does not
+verify. backup.sh runs pg_dump inside the
 private Postgres container (which reads its own password file), checks the
 archive table of contents, uploads to the separate bucket, checks the remote
 object length, and records a heartbeat. A successful object-length check is
@@ -710,16 +731,54 @@ scratch database through a transient unit that receives the same two keys:
     SCRATCH_DB="swift_restore_$(date -u +%Y%m%d%H%M%S)"
     sudo systemd-run --pipe --wait --collect --uid=swift-deploy --gid=swift-deploy \
       -p SupplementaryGroups=docker -p WorkingDirectory=/opt/swift \
-      -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE" \
-      -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
-      -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
+      -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE BACKUP_AWS_ACCESS_KEY_ID_FILE BACKUP_AWS_SECRET_ACCESS_KEY_FILE BACKUP_KEY_SOURCE_FILE" \
+      -p LoadCredentialEncrypted=BACKUP_AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_ACCESS_KEY_ID.cred \
+      -p LoadCredentialEncrypted=BACKUP_AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_SECRET_ACCESS_KEY.cred \
+      -p LoadCredentialEncrypted=BACKUP_KEY_SOURCE:/etc/credstore.encrypted/swift-backup/BACKUP_KEY_SOURCE.cred \
       /opt/swift/deploy/restore.sh --project swift "$OFFSITE_OBJECT" "$SCRATCH_DB"
+
+[SEC-BACKUP F2] restore.sh first fetches `<object>.sig` and verifies it
+against /etc/swift/backup-allowed-signers (BACKUP_SIGNING_ALLOWED_SIGNERS):
+the signature, the object's name, size and SHA-256. A dump with NO signature
+(made before signing existed) is restored only with `--allow-unsigned-legacy`,
+the owner's explicit decision, and it warns loudly; and only when the bucket's
+own LastModified for the object is BEFORE the first signed backup (backup.sh
+records that stamp once in /var/backups/swift/.first-signed-backup; on a new
+host set the owner's copy as BACKUP_SIGNED_SINCE in deploy/.env). An unsigned
+object written after signing began is refused even with the flag; with no
+record at all it is refused unless BACKUP_SIGNED_SINCE is set or
+`--legacy-without-signing-record` is added too (a host that never signed). The
+version whose time is checked is the version downloaded (VersionId and ETag
+pinned). A signature
+that fails is refused whatever the flags. The archive is then restored into a THROWAWAY
+Postgres instance (a container of the live database's image, no network, its
+own volume `swift-restore-<scratch>`), never into the live cluster, by a login
+named like the live owner that is NOT a superuser there and owns only the
+scratch database; the instance's own superuser only creates the roles the
+dump grants to (no login) and the extensions it names (a fixed allowlist).
+The live database is only read (erasure ledger, --compare-source snapshot).
+When the run ends the instance AND its volume are removed, whatever the
+outcome (success, a failed comparison or check, any error): the copy holds
+everyone's data and is erasure-complete only at the moment of the restore.
+`--keep-for-inspection` keeps it and prints how to remove it
+(`docker rm -f swift-restore-<scratch> && docker volume rm swift-restore-<scratch>`)
+within 24 hours; doctor.sh lists every labelled restore volume and FAILs on
+one older than a day. A disaster-recovery restore (`--no-live-ledger
+--i-know-live-is-gone`) keeps its copy by purpose, so it needs
+`--keep-for-inspection` up front. For a disaster recovery on a NEW host,
+put the owner's copy of the allowed-signers file at
+/etc/swift/backup-allowed-signers first.
 
 On production the off-site objects are `.dump.gpg` and the host cannot
 decrypt them: restore.sh refuses an encrypted dump. The drill runs from the
 OWNER's computer instead:
 
     SWIFT_RESTORE_PROJECT=swift ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
+
+The host first verifies the object's signature (`restore.sh --fetch-signature`);
+the drill carries that verified signature to the restore, which checks the
+decrypted dump against the digest signed with it. An object made before
+signing existed needs `--allow-unsigned-legacy` as the drill's first argument.
 
 It asks for the private key (paste the armored block) and its passphrase at
 hidden prompts and keeps them only in a throwaway keyring for the run. The
@@ -759,9 +818,11 @@ are left out, since backup.sh writes them after the dump). A row written to
 the live database since the dump is a mismatch, so run it right after the
 backup. Restore an encrypted document from the separate document
 bucket and verify it can be decrypted with the off-host MASTER_KEK escrow
-copy; the database dump alone cannot prove this. Keep the scratch database
-until the drill evidence is reviewed. A controlled cleanup then uses a
-separately reviewed SQL DROP DATABASE command against that scratch name only.
+copy; the database dump alone cannot prove this. The drill's evidence is its
+printed lines (both summaries, the compare-source line, RESTORE OK); the
+scratch copy itself is removed with its throwaway instance when the run ends
+(add `--keep-for-inspection` to restore.sh only to look inside it, and remove
+it the same day).
 
 ## 6. Seed the platform spine (first SUPER_ADMIN)
 
