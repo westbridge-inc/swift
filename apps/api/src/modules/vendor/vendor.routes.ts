@@ -2327,7 +2327,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           select: { name: true, subStatus: true, substituteDecideBy: true },
         }));
         if (appointmentItemId && order.appointmentSlot) {
-          await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx, bookingLimits);
+          // Switch off: the call it always was (no cap argument).
+          await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx, ...(bookingLimits ? [bookingLimits] : []));
         }
         if (body.estimatedPrepTime) {
           await tx.order.update({
