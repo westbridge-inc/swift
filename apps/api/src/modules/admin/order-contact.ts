@@ -81,7 +81,8 @@ export interface OrderContactResult {
   auditId: string;
 }
 
-function assertReason(reason: string | null): string {
+/** The reveal's reason rule (x-swift-reason, 12-500 characters). Shared with the person pages' reveal (person-contact.ts). */
+export function assertReason(reason: string | null): string {
   const trimmed = (reason ?? '').trim();
   if (trimmed.length < ADMIN_REASON_MIN) {
     throw new AppError(400, 'REASON_REQUIRED', 'Say why you need this phone number, in a sentence. The audit trail records it.');
@@ -116,21 +117,46 @@ export async function revealOrderPartyPhone(deps: OrderContactDeps, input: Order
         ? { holder: 'user' as const, id: order.rider.user.id, phone: order.rider.user.phone }
         : order.driver?.user ? { holder: 'user' as const, id: order.driver.user.id, phone: order.driver.user.phone } : null);
 
+  const revealed = await recordPhoneReveal(deps, {
+    subject,
+    audit: { userId: input.actorId, entity: 'Order', entityId: order.id, ipAddress: input.ip, userAgent: input.userAgent },
+    changes: { reason, party: input.party, orderNumber: order.orderNumber },
+    missMessage: 'This order has no phone number for that party.',
+  });
+  return { party: input.party, ...revealed };
+}
+
+/** Whose number a reveal reads: a person (user) or a store (vendor), and the number on file (maybe none). */
+export type PhoneRevealSubject = { holder: 'user' | 'vendor'; id: string; phone: string | null } | null;
+
+/**
+ * [O-1] The reveal's one write-then-return step, used by the order desk and the person pages (person-contact.ts):
+ * no number on file -> a REVEAL_PARTY_PHONE_MISS row and a 404; otherwise a REVEAL_PARTY_PHONE row naming the actor,
+ * the page's record, the party, the person and the reason (never the number) is WRITTEN FIRST, and only then is the
+ * number returned. If the row cannot be written, the operator gets an error, never the number.
+ */
+export async function recordPhoneReveal(
+  deps: OrderContactDeps,
+  input: {
+    subject: PhoneRevealSubject;
+    audit: { userId: string; entity: string; entityId: string; ipAddress?: string | undefined; userAgent?: string | undefined };
+    changes: { reason: string; party: string } & Record<string, string | null>;
+    missMessage: string;
+  },
+): Promise<{ phone: string; auditId: string }> {
+  const { subject, audit } = input;
   const changes = {
-    reason,
-    party: input.party,
-    orderNumber: order.orderNumber,
+    ...input.changes,
     ...(subject ? (subject.holder === 'vendor' ? { vendorId: subject.id } : { subjectUserId: subject.id }) : {}),
   };
-  const audit = { userId: input.actorId, entity: 'Order', entityId: order.id, ipAddress: input.ip, userAgent: input.userAgent };
 
   if (!subject?.phone) {
     // Nothing to show, and the ask is still worth recording.
     await deps.prisma.auditLog.create({ data: { ...audit, action: 'REVEAL_PARTY_PHONE_MISS', changes: { ...changes, outcome: 'no_number_for_party' } } });
-    throw new AppError(404, 'NO_PARTY_PHONE', 'This order has no phone number for that party.');
+    throw new AppError(404, 'NO_PARTY_PHONE', input.missMessage);
   }
 
   // Written BEFORE the number leaves: if this fails, the operator gets an error, never the number.
   const row = await deps.prisma.auditLog.create({ data: { ...audit, action: 'REVEAL_PARTY_PHONE', changes } });
-  return { party: input.party, phone: subject.phone, auditId: row.id };
+  return { phone: subject.phone, auditId: row.id };
 }

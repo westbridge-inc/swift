@@ -258,6 +258,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // ── People ──────────────────────────────────────────────────────────────
   'GET /users': c('C1', 'user.read'),
   'GET /users/:id': c('C1', 'user.read'),
+  'GET /users/:id/phone': c('C1', 'user.contact.read'),
   'GET /users/:id/risk': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
@@ -268,6 +269,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /vendors': c('C0', 'vendor.read'),
   'GET /vendors/pending': c('C0', 'vendor.read'),
   'GET /vendors/:id': c('C1', 'vendor.read'),
+  'GET /vendors/:id/party-phone': c('C1', 'vendor.contact.read'),
   // [MC-PR2] which of the owner's documents are approved, waiting, rejected or missing — document status, so C1
   'GET /vendors/:id/activation-checklist': c('C1', 'vendor.read'),
   'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
@@ -278,10 +280,13 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /riders': c('C1', 'mover.read'),
   'GET /riders/:id': c('C1', 'mover.read'),
   'GET /riders/:id/activation-checklist': c('C1', 'mover.read'),
+  // [FOLLOWUPS · follows O-1] One person's full number from a person page: its own capability, like order.contact.read.
+  'GET /riders/:id/phone': c('C1', 'mover.contact.read'),
   'PUT /riders/:id/verify-documents': c('C3', 'mover.verify', E.rider),
   'GET /drivers': c('C1', 'mover.read'),
   'GET /drivers/:id': c('C1', 'mover.read'),
   'GET /drivers/:id/activation-checklist': c('C1', 'mover.read'),
+  'GET /drivers/:id/phone': c('C1', 'mover.contact.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
   // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
@@ -317,6 +322,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // someone else's goods and a rider's fronted cash go, so a reason is owed (C3).
   'GET /custody-cases': c('C1', 'custody.read'),
   'GET /custody-cases/:id': c('C1', 'custody.read'),
+  'GET /custody-cases/:id/party-phone': c('C1', 'custody.contact.read'),
   'POST /custody-cases/:id/claim': c('C2', 'custody.claim', E.custodyCase),
   'POST /custody-cases/:id/direct': c('C3', 'custody.decide', E.custodyCase),
   'POST /custody-cases/:id/relay': c('C3', 'custody.decide', E.custodyCase),

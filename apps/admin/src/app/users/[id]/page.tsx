@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchUserDetail, suspendUser, unsuspendUser, banUser } from '@/lib/api';
+import { fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
@@ -13,6 +13,7 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
+import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { gyDate, gyDateTime } from '@/lib/dates';
 
 /** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
@@ -54,6 +55,8 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
   const dialog = useActionDialog();
   const [result, setResult] = useState<Outcome | null>(null);
   const person = useQuery({ queryKey: ['user', id], queryFn: () => fetchUserDetail(id) });
+  // [FOLLOWUPS · follows O-1] The number is masked; "Show number" is the audited read, for this page view only.
+  const { revealed, revealFor } = usePhoneReveal(async (request) => show(await dialog.run(request)));
 
   const show = (outcome: Outcome | null) => {
     if (!outcome) return;
@@ -125,7 +128,10 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             {(u.roles ?? []).map((r: string) => <span key={r} className="mc-badge">{label('UserRole', r)}</span>)}
             {u.trustLevel ? <span className="mc-badge mc-tone-info">Trust {u.trustLevel}</span> : null}
           </div>
-          <p className="mc-muted mt-1.5">{[u.phone, u.email].filter(Boolean).join(' · ')}</p>
+          <p className="mc-muted mt-1.5">
+            <PhoneReveal phone={u.phone} revealed={revealed['person']} onReveal={revealFor('person', `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealUserPhone(id, reason))} />
+            {u.phone && u.email ? ' · ' : ''}{u.email}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
           {u.status === 'SUSPENDED' ? (

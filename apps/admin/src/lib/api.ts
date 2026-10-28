@@ -317,6 +317,16 @@ export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/$
 export type OrderContactParty = 'customer' | 'store' | 'mover';
 export const revealOrderPartyPhone = (id: string, party: OrderContactParty, reason: string): Promise<{ data: { party: OrderContactParty; phone: string; auditId: string } }> =>
   apiFetch(`/api/v1/admin/orders/${id}/party-phone?party=${party}`, { reason });
+/** [FOLLOWUPS · follows O-1] The person pages' audited reveals: ONE party's full number, a stated reason, recorded first. */
+export type PhoneReveal = { data: { party: string; phone: string; auditId: string } };
+export const revealUserPhone = (id: string, reason: string): Promise<PhoneReveal> =>
+  apiFetch(`/api/v1/admin/users/${id}/phone`, { reason });
+export const revealVendorPartyPhone = (id: string, party: 'owner' | 'store', reason: string): Promise<PhoneReveal> =>
+  apiFetch(`/api/v1/admin/vendors/${id}/party-phone?party=${party}`, { reason });
+export const revealMoverPhone = (kind: 'rider' | 'driver', id: string, reason: string): Promise<PhoneReveal> =>
+  apiFetch(`/api/v1/admin/${kind === 'driver' ? 'drivers' : 'riders'}/${id}/phone`, { reason });
+export const revealCustodyPartyPhone = (id: string, party: 'holder' | 'relay', reason: string): Promise<PhoneReveal> =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/party-phone?party=${party}`, { reason });
 
 // ─── Detail pages (People phase) ─────────────────────────────────
 export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${id}`);

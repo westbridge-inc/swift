@@ -98,6 +98,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
+import { CUSTODY_CONTACT_PARTIES, maskCaseRiderPhones, maskOwnPhone, maskUserPhone, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -1364,7 +1365,19 @@ export async function adminRoutes(app: FastifyInstance) {
     // [S1 response-shaping] passwordHash / failedLoginAttempts / lockedUntil /
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
-    return { success: true, data: sanitizeUser({ ...user, addresses }) };
+    // [FOLLOWUPS · follows O-1] The person's number masked; the full one is the audited GET /users/:id/phone.
+    return { success: true, data: maskOwnPhone(sanitizeUser({ ...user, addresses })) };
+  });
+
+  // [FOLLOWUPS · follows O-1] The audited door to this person's full number (person-contact.ts): a stated reason
+  // (x-swift-reason) and an audit row written before the number is returned.
+  app.get('/users/:id/phone', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const result = await revealPersonPhone(
+      { prisma: app.prisma },
+      { target: { page: 'user', id }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   /** GET /users/:id/risk — one deterministic number from existing signals
@@ -1572,7 +1585,8 @@ export async function adminRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        ...vendor,
+        // [FOLLOWUPS · follows O-1] The store line and the owner's number masked; GET /vendors/:id/party-phone reveals one.
+        ...maskVendorPhones(vendor),
         vatRegistrationNumber: undefined,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
         prohibitedItems,
@@ -1580,6 +1594,18 @@ export async function adminRoutes(app: FastifyInstance) {
         storeCheck: storeCheckOf(vendor),
       },
     };
+  });
+
+  // [FOLLOWUPS · follows O-1] The audited door to the store's line or its owner's full number (person-contact.ts).
+  const vendorContactQuery = z.object({ party: z.enum(VENDOR_CONTACT_PARTIES) });
+  app.get('/vendors/:id/party-phone', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { party } = vendorContactQuery.parse(request.query);
+    const result = await revealPersonPhone(
+      { prisma: app.prisma },
+      { target: { page: 'vendor', id, party }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   // =========================================================================
@@ -2032,7 +2058,20 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!rider) throw new NotFoundError('Rider', id);
 
-    return { success: true, data: rider };
+    // [FOLLOWUPS · follows O-1] The rider's number masked; GET /riders/:id/phone is the audited reveal.
+    return { success: true, data: maskUserPhone(rider) };
+  });
+
+  // [FOLLOWUPS · follows O-1] The audited door to this rider's full number: the page's own read (id + tenant).
+  app.get('/riders/:id/phone', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const result = await revealPersonPhone(
+      { prisma: app.prisma },
+      { target: { page: 'rider', id, tenantId }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   /**
@@ -2219,7 +2258,20 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!driver) throw new NotFoundError('Driver', id);
 
-    return { success: true, data: driver };
+    // [FOLLOWUPS · follows O-1] The driver's number masked; GET /drivers/:id/phone is the audited reveal.
+    return { success: true, data: maskUserPhone(driver) };
+  });
+
+  // [FOLLOWUPS · follows O-1] The audited door to this driver's full number: the page's own read (id + tenant).
+  app.get('/drivers/:id/phone', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const result = await revealPersonPhone(
+      { prisma: app.prisma },
+      { target: { page: 'driver', id, tenantId }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   app.get('/drivers/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
@@ -3064,7 +3116,20 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/custody-cases/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    return { success: true, data: await caseDetail(app.prisma, id) };
+    // [FOLLOWUPS · follows O-1] The holder's and relay rider's numbers masked; .../party-phone is the audited reveal.
+    return { success: true, data: maskCaseRiderPhones(await caseDetail(app.prisma, id)) };
+  });
+
+  // [FOLLOWUPS · follows O-1] The audited door to the holder's or relay rider's full number (person-contact.ts).
+  const custodyContactQuery = z.object({ party: z.enum(CUSTODY_CONTACT_PARTIES) });
+  app.get('/custody-cases/:id/party-phone', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { party } = custodyContactQuery.parse(request.query);
+    const result = await revealPersonPhone(
+      { prisma: app.prisma },
+      { target: { page: 'custody', id, party }, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   app.post('/custody-cases/:id/claim', { preHandler: [adminGuard] }, async (request) => {

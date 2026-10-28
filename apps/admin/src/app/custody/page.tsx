@@ -10,9 +10,11 @@ import {
   directCustodyCase,
   fetchCustodyCase,
   fetchCustodyCases,
+  revealCustodyPartyPhone,
 } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { gyDateTime } from '@/lib/dates';
 
@@ -52,6 +54,8 @@ function CaseDetail({ id }: { id: string }) {
   // that belong to someone else: each is asked in the in-page panel (no browser
   // prompt), run once, and its refusal stays in view.
   const actions = useActionRunner(() => refresh());
+  // [FOLLOWUPS · follows O-1] Riders' numbers are masked; "Show number" is the audited read, for this page view only.
+  const { revealed, revealFor } = usePhoneReveal(actions.run);
   const busy = claim.isPending;
 
   if (caseQ.isLoading) return <div className="mc-loading mt-4" aria-busy="true">Loading the case…</div>;
@@ -66,13 +70,24 @@ function CaseDetail({ id }: { id: string }) {
   // a return while a relay rider is on the way (call the handoff off first).
   const directable = (['SUPPORT_HOLD', 'RELAY_REQUIRED', 'RETURN_REQUIRED'] as const)
     .filter((o) => o !== k.state && !(k.state === 'TRANSFER_IN_PROGRESS' && o === 'RETURN_REQUIRED'));
-  const person = (r: any) => (r ? `${r.user?.firstName ?? ''} ${r.user?.lastName ?? ''}`.trim() + (r.user?.phone ? ` · ${r.user.phone}` : '') + (r.isOnline ? ' · online' : ' · offline') : '—');
+  const person = (r: any, party: 'holder' | 'relay') => {
+    if (!r) return '—';
+    const who = `${r.user?.firstName ?? ''} ${r.user?.lastName ?? ''}`.trim();
+    const role = party === 'holder' ? 'holding rider' : 'relay rider';
+    return (
+      <>
+        {who}
+        {r.user?.phone ? <>{' · '}<PhoneReveal phone={r.user.phone} revealed={revealed[party]} onReveal={revealFor(party, `Show the ${role}'s full number for order ${k.order?.orderNumber}?`, `The ${role}'s number is shown.`, (reason) => revealCustodyPartyPhone(id, party, reason))} /></> : null}
+        {r.isOnline ? ' · online' : ' · offline'}
+      </>
+    );
+  };
 
   return (
     <div className="mt-4 space-y-4">
       <div className="grid grid-cols-1 gap-x-6 gap-y-2 rounded-[var(--mc-radius-sm)] bg-[var(--mc-surface)] p-3 md:grid-cols-2">
-        <div><span className="mc-muted">Holding the goods: </span>{person(k.holder)}</div>
-        <div><span className="mc-muted">Relay rider: </span>{k.relayRiderId ? person(k.relay) : '—'}</div>
+        <div><span className="mc-muted">Holding the goods: </span>{person(k.holder, 'holder')}</div>
+        <div><span className="mc-muted">Relay rider: </span>{k.relayRiderId ? person(k.relay, 'relay') : '—'}</div>
         <div><span className="mc-muted">Payment: </span>{k.order?.paymentMethod}{k.order?.floatAttached > 0 ? ` · rider fronted ${gyd(k.order.floatAttached)}` : ''}</div>
         <div><span className="mc-muted">Owner: </span>{k.ownerUserId ?? 'nobody yet'}</div>
         <div><span className="mc-muted">Next page at: </span>{open ? gyDateTime(k.deadlineAt) : '—'}{k.escalationCount ? ` · escalated ${k.escalationCount}×` : ''}</div>

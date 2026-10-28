@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRiderDetail,
   fetchDriverDetail,
+  revealMoverPhone,
   fetchMoverActivationChecklist,
   verifyRiderDocuments,
   verifyDriverDocuments,
@@ -21,6 +22,7 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
+import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { billDateLabel } from '@/lib/bill-date';
 import { gyDate } from '@/lib/dates';
 
@@ -88,6 +90,8 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
     void qc.invalidateQueries({ queryKey: [`${kind}-checklist`, id] });
     void qc.invalidateQueries({ queryKey: [`${kind}s`] });
   };
+  // [FOLLOWUPS · follows O-1] The number is masked; "Show number" is the audited read, for this page view only.
+  const { revealed, revealFor } = usePhoneReveal(async (request) => show(await dialog.run(request)));
 
   const listHref = isDriver ? '/drivers' : '/riders';
   const listLabel = isDriver ? 'Drivers' : 'Riders';
@@ -116,6 +120,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
   }
 
   const name = [m.user?.firstName, m.user?.lastName].filter(Boolean).join(' ') || 'Unnamed';
+  const kindWords = isDriver ? 'Taxi driver' : label('RiderType', m.riderType);
   const vehicle = [m.vehicleColor, m.vehicleMake, m.vehicleModel].filter(Boolean).join(' ');
   const sub = m.subscription;
   const earnings: any[] = m.earnings ?? [];
@@ -167,7 +172,9 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
             {isDriver && m.rideClass ? <span className="mc-badge mc-tone-info">{label('RideClass', m.rideClass)}</span> : null}
           </div>
           <p className="mc-muted mt-1.5">
-            {[isDriver ? 'Taxi driver' : label('RiderType', m.riderType), m.user?.phone, `Joined ${when(m.user?.createdAt)}`].filter(Boolean).join(' · ')}
+            {kindWords}{kindWords && m.user?.phone ? ' · ' : ''}
+            {m.user?.phone ? <PhoneReveal phone={m.user.phone} revealed={revealed['mover']} onReveal={revealFor('mover', `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealMoverPhone(kind, id, reason))} /> : null}
+            {kindWords || m.user?.phone ? ' · ' : ''}{`Joined ${when(m.user?.createdAt)}`}
           </p>
         </div>
         <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
