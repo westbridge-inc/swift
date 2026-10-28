@@ -28,7 +28,9 @@ import { AccountService } from '../modules/user/account.service';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { placeDocLegalHold, releaseDocLegalHold } from '../modules/verification/legal-hold';
-import { holdIdentityReviewMembers, INVESTIGATION_HOLD_PLACER, releaseClosedInvestigationHolds, sweepInvestigationHolds } from '../modules/verification/investigation-hold';
+import * as investigationHold from '../modules/verification/investigation-hold';
+import { accountClosedKeptWords, erasureCompletedWords, holdIdentityReviewMembers, INVESTIGATION_HOLD_PLACER, releaseClosedInvestigationHolds, sweepInvestigationHolds } from '../modules/verification/investigation-hold';
+import { vi } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { stageIdentityReviewCases } from '../modules/integrity/identity-review';
@@ -325,8 +327,10 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     expect(result).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
     // [REVIEW-F S3-2 · COORD] a two-line toast: the date first, about 80 characters, singular for one, no jargon
     const day = reviewBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
-    expect(result.message).toBe(`Account closed. 1 document kept until ${day} for a check, then deleted.`);
-    expect(result.message.length).toBeLessThanOrEqual(84);
+    expect(result.message).toBe(`Account closed. 1 document kept for a check until at least ${day}, then deleted.`);
+    expect(result.message.length).toBeLessThanOrEqual(90);
+    // the longest date (a nine-letter month, two-digit day) still fits the 90-character, two-line toast
+    expect(`Account closed. 1 document kept for a check until at least 30 September 2027, then deleted.`.length).toBeLessThanOrEqual(90);
     expect(result.message).not.toMatch(/fraud|tamper|legal hold/i);
     expect((await docRow(doc)).purgedAt).toBeNull();
     // the review ends (any way): the sweep releases the hold, and the existing retry (the reaper on the deferred clock) erases it
@@ -473,7 +477,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     expect((await docRow(doc)).purgedAt).not.toBeNull();
     expect(await system(() => app.prisma.auditLog.count({ where: { userId: me, action: 'DSAR_DOCUMENT_ERASURE' } }))).toBe(2);
     // [COORD 10:24Z] one notice to the requester once it is done
-    expect((await system(() => app.prisma.notification.findMany({ where: { userId: me, title: 'Your document has been deleted' } }))).map((n) => n.body)).toEqual(['The review has ended, and we deleted the document you asked us to delete.']);
+    expect((await system(() => app.prisma.notification.findMany({ where: { userId: me, title: 'Your document has been deleted' } }))).map((n) => n.body)).toEqual(['We have now deleted the document you asked us to delete.']);
     // ... and through the daily sweep when the review ends another way
     const other = await person();
     const otherDoc = (await submit(other)).id;
@@ -695,5 +699,70 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     await system(() => service.retryDelayedErasures());
     expect((await docRow(doc)).purgedAt).toBeNull();
     expect(await system(() => app.prisma.auditLog.count({ where: { userId: me, action: 'DSAR_DOCUMENT_ERASURE' } }))).toBe(rows);
+  });
+
+  it('[COORD 10:44Z F S4] the words: plural forms, and the toast counts every kept document, a person\'s holds included', async () => {
+    expect(erasureCompletedWords(2)).toEqual({ title: 'Your documents have been deleted', body: 'We have now deleted the documents you asked us to delete.' });
+    const at = new Date('2027-09-30T15:00:00Z');
+    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. 3 documents kept for a check until at least 30 September 2027, then deleted.');
+    // an account with one document under the review's hold and one under a person's hold: both are counted
+    const me = await person();
+    const suspected = (await submit(me)).id;
+    const courtHeld = (await submit(me, OTHER_TYPE)).id;
+    await system(() => placeDocLegalHold(app.prisma, { subjectUserId: me, documentIds: [courtHeld], reason: `Court order ${RUN}`, ownerId: reviewerB, placedBy: reviewerB, reviewBy: new Date(Date.now() + 30 * DAY) }));
+    await suspect(suspected);
+    const accounts = new AccountService({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as never } as never);
+    const result = await accounts.deleteAccount(me) as { message: string };
+    expect(result.message).toMatch(/^Account closed\. 2 documents kept for a check until at least /);
+  });
+
+  it('[COORD 10:44Z F S4-2] the daily job wires the renewal notice to the requester-only path (a revert turns this red)', () => {
+    const queue = readFileSync(join(__dirname, '../jobs/queue.ts'), 'utf8');
+    const sweep = queue.slice(queue.indexOf('await sweepInvestigationHolds(ctx.prisma'), queue.indexOf('await sweepInvestigationHolds(ctx.prisma') + 1600);
+    expect(sweep).toMatch(/notifyPerson: \(userId, revisitBy, holdId\) => verification\.notifyRenewalIfDelayed\(userId, revisitBy, holdId\)/);
+    expect(sweep).toContain('retryDelayedErasures: () => verification.retryDelayedErasures()');
+    expect(sweep).not.toContain('notifyErasureDelayed');
+  });
+
+  it('[REVIEW-M S4-1 · MN4] a renewal tells a requester only when THAT hold keeps the requested document', async () => {
+    const me = await person();
+    const requested = (await submit(me)).id;
+    const other = (await submit(me, OTHER_TYPE)).id;
+    await suspect(requested); // hold A keeps the requested document
+    await erase(me, [requested]); // refused on the hold: a delayed request on record
+    await suspect(other); // hold B keeps another document
+    const holdA = await system(() => app.prisma.docLegalHold.findFirstOrThrow({ where: { subjectUserId: me, reason: `INVESTIGATION_OPEN second-review:${requested}`, releasedAt: null } }));
+    const holdB = await system(() => app.prisma.docLegalHold.findFirstOrThrow({ where: { subjectUserId: me, reason: `INVESTIGATION_OPEN second-review:${other}`, releasedAt: null } }));
+    await system(() => app.prisma.docLegalHold.update({ where: { id: holdA.id }, data: { reviewBy: new Date(Date.now() + 300 * DAY) } }));
+    const sent = () => system(() => app.prisma.notification.count({ where: { userId: me, title: 'Your deletion request is delayed' } }));
+    const before = await sent();
+    const notifyPerson = (userId: string, revisitBy: Date, holdId: string) => service.notifyRenewalIfDelayed(userId, revisitBy, holdId);
+    // only B is due: B keeps no requested document, so nothing is sent
+    await system(() => sweepInvestigationHolds(app.prisma, new Date(holdB.reviewBy.getTime() + DAY), undefined, { notifyPerson }));
+    expect(await sent()).toBe(before);
+    // A comes due: it keeps the requested document, so the requester is told A's new date
+    const at = new Date(Date.now() + 301 * DAY);
+    await system(() => sweepInvestigationHolds(app.prisma, at, undefined, { notifyPerson }));
+    expect(await sent()).toBe(before + 1);
+  });
+
+  it('[REVIEW-G S4 · G6] the account-close lock check alone keeps a document an open identity review needs (no bytes, no hold yet)', async () => {
+    const root = `cl-${nanoid(8)}`; clusters.push(root);
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await system(() => app.prisma.verificationDocument.update({ where: { id: doc }, data: { fileUrl: '' } })); // no bytes: the record close is the only step
+    await system(async () => {
+      await app.prisma.identityCluster.create({ data: { id: root, authorityReviewRequired: true } });
+      await app.prisma.identityClusterMember.create({ data: { accountId: me, clusterId: root, linkedVia: [] } });
+      await app.prisma.identityReviewCase.create({ data: { tenantId: 'swift-default', clusterId: root, snapshotDigest: nanoid(8), snapshot: {}, complete: true } });
+    });
+    // the review's hold has not reached this person yet (modelled: the pre-erasure placement found nothing to do)
+    const spy = vi.spyOn(investigationHold, 'holdForOpenIdentityReviews').mockResolvedValue(0);
+    try {
+      const accounts = new AccountService({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as never } as never);
+      await accounts.deleteAccount(me);
+    } finally { spy.mockRestore(); }
+    expect((await docRow(doc)).legalHoldId).toBeNull();
+    expect((await docRow(doc)).purgedAt).toBeNull();
   });
 });
