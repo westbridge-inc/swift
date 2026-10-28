@@ -95,7 +95,7 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     // [BOOK-S7 · owner rulings 28 Oct 2026 B1-B3 · PROVISIONAL: non-material PRE-LAUNCH, as 2026-10-22's cancel-window
     // edit; the owner rules on it. If ruled MATERIAL, move this version to MATERIAL_CHANGES with a summary instead.]
     version: '2026-10-28',
-    why: 'Appointments booked from a business’s listing: while Swift’s instant appointment booking is switched on, a confirmed appointment cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; a booking the app shows as confirmed when it is made was accepted in advance by the business; a missed appointment carries no fee or strike, and a person reviews repeats. With the switch off nothing changes for anyone. It lands before launch, gives customers more time, and asks no one for more, so nobody is asked again.',
+    why: 'Appointments booked from a business’s listing: while Swift’s instant appointment booking is switched on, a confirmed appointment cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; a booking the app shows as confirmed when it is made was accepted in advance by the business; businesses keep their availability current and honour bookings or cancel them with a reason. With the switch off nothing changes for anyone. It lands before launch, gives customers more time, and asks no one for more, so nobody is asked again.',
   },
 ];
 

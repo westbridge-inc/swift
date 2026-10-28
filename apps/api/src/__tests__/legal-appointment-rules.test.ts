@@ -18,8 +18,8 @@ import {
 //
 // The owner ruled: an appointment is free to cancel until 2 hours before it starts (COORD floor: never less than one
 // minute after it was confirmed), the customer may move it until 2 hours before it starts (the move's own rule is
-// booking/reschedule-policy.ts, #2194, with the same number), a no-show is recorded with no fee
-// and no strike while a person reviews repeats, and an instant booking is the business's standing acceptance. The code
+// booking/reschedule-policy.ts, #2194, with the same number), and an instant booking is the business's standing
+// acceptance. (The no-show rule, B3, is worded with the feature that records it, not here: COORD 19:06Z.) The code
 // applies the cancel (and, with #2194, the move) rules only while INSTANT_BOOKING is switched on, so every served sentence must be true
 // with the switch on AND off: the two-hour rule is stated only under "while Swift's instant appointment booking is
 // switched on", and the one-minute booking rule stays stated for the rest.
@@ -94,21 +94,18 @@ describe('[BOOK-S7] the refunds page and both FAQ answers say the same rule, fro
   });
 });
 
-describe('[BOOK-S7] instant confirmation, missed appointments, the business\'s duty, the record kept', () => {
+describe('[BOOK-S7] instant confirmation and the business\'s duty', () => {
   it('Terms 5: a booking the app shows as confirmed when it is made was accepted in advance by the business\'s setting', () => {
     expect(TERMS_S5).toContain("A Business can set a bookable service to confirm bookings automatically: if the app shows your booking as confirmed the moment you book it, that is the Business's acceptance, given in advance through that setting, and the contract forms at that moment.");
     // The general rule stays first: an Order is an offer the Business accepts.
     expect(TERMS_S5).toMatch(/^Submitting an Order is an offer to the Business; the contract forms when the Business accepts it in the app\./);
   });
 
-  it('Terms 6: a missed appointment carries no fee and no strike; a person reviews repeats', () => {
-    expect(TERMS_S6).toContain('If a Business records in the app that you did not come to an appointment you booked, that record carries no fee and no strike; a person at Swift reviews repeated missed appointments and may contact you about them.');
-  });
-
-  it('Privacy 6: what the missed-appointment record holds, why, and how long (with its order\'s record)', () => {
-    expect(PRIVACY_S6).toContain("If a Business records that a customer did not come to an appointment, Swift keeps that record (which booking it was, and when the Business recorded it) with its order's record, for as long as that order's record is kept, so that a person at Swift can review repeated missed appointments; it carries no fee or strike.");
-    // The retention it borrows is the order record's own, stated in the same section.
-    expect(PRIVACY_S6).toContain('Order, ride and settlement history is retained for the period required for disputes, guarantees, tax and legal obligations');
+  // [COORD 28 Oct 19:06Z · REVIEW-M] No code creates a no-show record yet, so neither the Terms nor the Privacy Policy
+  // describes one. The words wait for the feature PR (owner B3), which ships them as a material version.
+  it('no missed-appointment record is described before the feature that creates it', () => {
+    expect(TERMS_S6).not.toMatch(/did not come|missed appointment/i);
+    expect(PRIVACY_S6).not.toMatch(/did not come|missed appointment/i);
   });
 
   it('Business Agreement 5: keep availability current, honour bookings, or cancel in the app with a reason', () => {

@@ -275,15 +275,15 @@ const PUBLISHED: Record<
     vendor_agreement: '9f3f9ddadd2753ef60760bfe16b56904858d09d2ce91966d5988b4de8a105f93',
   },
   // [BOOK-S7 · owner rulings 28 Oct 2026 · NON-material pre-launch, pending the owner] Appointments: Terms s.5 (a booking
-  // the app shows as confirmed when it is made was accepted in advance by the business's setting), s.6 (a missed
-  // appointment carries no fee and no strike; a person reviews repeats), s.7 (while instant appointment booking is
-  // switched on: free cancel until 2 hours before, never less than one minute after confirmation; the customer's move
-  // until 2 hours before; then contact the business); Privacy s.6 (the missed-appointment record, kept with its order's
-  // record); Business Agreement s.5 (keep availability current, honour bookings or cancel with a reason). Nothing else
-  // changed: removing those five additions and putting 27 October back reproduces all four 2026-10-27 pins exactly.
+  // the app shows as confirmed when it is made was accepted in advance by the business's setting), s.7 (while instant
+  // appointment booking is switched on: free cancel until 2 hours before, never less than one minute after
+  // confirmation; the customer's move until 2 hours before; then contact the business); Business Agreement s.5 (keep
+  // availability current, honour bookings or cancel with a reason). Privacy: only the date (the no-show wording waits
+  // for the feature that creates the record, COORD 19:06Z). Nothing else changed: removing those three additions and
+  // putting 27 October back reproduces all four 2026-10-27 pins exactly.
   '2026-10-28': {
-    terms: '5a3912091a9cceff70d91b5a56df70dc54736413e8eedc8866d65fccbfb11c6f',
-    privacy: '9bd94a26b25f08e726ec382ec1e3c153a5d9cc5627392f1487f25a4afc9eb1de',
+    terms: '94e238d9fd18fa7a0ccd81808179d022064479d275eb383692044661815a6a2e',
+    privacy: 'a2f555e75c10cb2b6ef40c230fe9737a5822ed89efc2e84f17c557e8ea49c810',
     driver_agreement: '88858e16c7cbee85bb9e52e64c34383668cf8e079f0b456a30845f31e0d74bfc',
     vendor_agreement: 'b594c5fc7bc2b83bdba4a07228b7c0b8421b4a267793299b5a575b6fd01b59d8',
   },
