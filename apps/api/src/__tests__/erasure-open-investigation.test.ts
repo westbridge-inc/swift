@@ -52,6 +52,12 @@ const clusters: string[] = [];
 let reviewerA = '';
 let reviewerB = '';
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'erasure-open-investigation-test');
+/** The database's clock (a missing row fails the test, never hides it). */
+async function dbNow(): Promise<Date> {
+  const [row] = await system(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`);
+  if (!row) throw new Error('the database did not return its clock');
+  return row.now;
+}
 
 class ManualKyc implements KycProvider {
   readonly engine: KycEngine = { name: 'manual', version: 'test', external: false };
@@ -326,14 +332,21 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const result = await accounts.deleteAccount(me) as { message: string };
     expect(result).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
     // [REVIEW-F S3-2 · COORD] a two-line toast: the date first, about 80 characters, singular for one, no jargon
-    const day = reviewBy.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
-    expect(result.message).toBe(`Account closed. 1 document kept for a check until at least ${day}, then deleted.`);
+    // [REVIEW-F · COORD 16:02Z] a short month (Jan..Dec, never 'Sept') so it fits at large font sizes
+    const SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'numeric', year: 'numeric' }).formatToParts(reviewBy);
+    const pick = (t: string) => Number(parts.find((p) => p.type === t)!.value);
+    const day = `${pick('day')} ${SHORT[pick('month') - 1]} ${pick('year')}`;
+    expect(result.message).toBe(`Account closed. Until at least ${day}, 1 document is kept for a check, then deleted.`);
     expect(result.message.length).toBeLessThanOrEqual(90);
-    // [COORD 10:44Z] the date always sits inside the two-line toast: with the longest date (two-digit day, September)
-    // and a two-digit count it still ends by character 80; the whole line stays at 93 or under in that worst case
+    // the worst case (two-digit day and count): the date is read first; the line is COORD's own example length
     const worst = accountClosedKeptWords(new Date('2027-09-30T15:00:00Z'), 12);
-    expect(worst.indexOf('30 September 2027') + '30 September 2027'.length).toBeLessThanOrEqual(80);
-    expect(worst.length).toBeLessThanOrEqual(93);
+    expect(worst).toBe('Account closed. Until at least 30 Sep 2027, 12 documents are kept for a check, then deleted.');
+    // [REVIEW-F #2190 S3-1] the date ends by character 45 in the worst case (1.3x text: ~60-68 characters on two lines)
+    expect(worst.indexOf('30 Sep 2027') + '30 Sep 2027'.length).toBeLessThanOrEqual(45);
+    expect(worst.length).toBeLessThanOrEqual(92);
+    // the day is Guyana's: 02:00 UTC on 1 October is still 30 September in Georgetown
+    expect(accountClosedKeptWords(new Date('2027-10-01T02:00:00Z'), 1)).toContain('Until at least 30 Sep 2027,');
     expect(result.message).not.toMatch(/fraud|tamper|legal hold/i);
     expect((await docRow(doc)).purgedAt).toBeNull();
     // the review ends (any way): the sweep releases the hold, and the existing retry (the reaper on the deferred clock) erases it
@@ -707,7 +720,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
   it('[COORD 10:44Z F S4] the words: plural forms, and the toast counts every kept document, a person\'s holds included', async () => {
     expect(erasureCompletedWords(2)).toEqual({ title: 'Your documents have been deleted', body: 'We have now deleted the documents you asked us to delete.' });
     const at = new Date('2027-09-30T15:00:00Z');
-    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. 3 documents kept for a check until at least 30 September 2027, then deleted.');
+    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. Until at least 30 Sep 2027, 3 documents are kept for a check, then deleted.');
     // an account with one document under the review's hold and one under a person's hold: both are counted
     const me = await person();
     const suspected = (await submit(me)).id;
@@ -716,7 +729,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     await suspect(suspected);
     const accounts = new AccountService({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as never } as never);
     const result = await accounts.deleteAccount(me) as { message: string };
-    expect(result.message).toMatch(/^Account closed\. 2 documents kept for a check until at least /);
+    expect(result.message).toMatch(/^Account closed\. Until at least .+, 2 documents are kept for a check, then deleted\.$/);
   });
 
   it('[COORD 10:44Z F S4-2] the daily job wires the renewal notice to the requester-only path (a revert turns this red)', () => {
@@ -767,5 +780,119 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     } finally { spy.mockRestore(); }
     expect((await docRow(doc)).legalHoldId).toBeNull();
     expect((await docRow(doc)).purgedAt).toBeNull();
+  });
+
+  it('[COORD 16:02Z] the catch-all keeps a durable watermark: it reads only from the oldest request still waiting, and that request is still finished when its hold ends', async () => {
+    // an older request that is settled (the review ended and the erasure ran)
+    const settled = await person();
+    const settledDoc = (await submit(settled)).id;
+    await suspect(settledDoc);
+    await erase(settled, [settledDoc]);
+    await runWithTenant('swift-default', () => service.rejectDocument(settledDoc, reviewerB, `Photo too dark ${RUN}`, 'UNREADABLE'));
+    expect((await docRow(settledDoc)).purgedAt).not.toBeNull();
+    // a later request still waiting on its review
+    const waiting = await person();
+    const waitingDoc = (await submit(waiting)).id;
+    await suspect(waitingDoc);
+    await erase(waiting, [waitingDoc]);
+    const waitingRow = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: waiting, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'asc' } }));
+    await system(() => service.retryDelayedErasures());
+    // the watermark sits at the oldest request still waiting: nothing older is read again
+    const mark = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' } }));
+    expect(new Date((mark.changes as { since: string }).since).getTime()).toBeLessThanOrEqual(waitingRow.createdAt.getTime());
+    const since = new Date((mark.changes as { since: string }).since).getTime();
+    // (other requests in this database may still wait, so the mark may sit earlier than this person's: never later)
+    const read: number[] = [];
+    const notDelayed: string[] = [];
+    const original = app.prisma.auditLog.findMany.bind(app.prisma.auditLog);
+    const spy = vi.spyOn(app.prisma.auditLog, 'findMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
+      const rows = await original(args as never);
+      if ((args as { where?: { action?: string } } | undefined)?.where?.action === 'DSAR_DOCUMENT_ERASURE' && (args as { select?: { createdAt?: boolean } }).select?.createdAt) {
+        for (const r of rows as Array<{ id: string; createdAt: Date; changes: { outcomes?: Array<{ outcome?: string; ground?: string }> } }>) {
+          read.push(r.createdAt.getTime());
+          // only answers that delayed something are read (a fully destroyed or refused-elsewhere answer never is)
+          if (!(r.changes?.outcomes ?? []).some((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD')) notDelayed.push(r.id);
+        }
+      }
+      return rows;
+    }) as never);
+    try {
+      await system(() => service.retryDelayedErasures());
+    } finally { spy.mockRestore(); }
+    expect(read.length).toBeGreaterThan(0);
+    expect(read.every((t) => t >= since)).toBe(true); // nothing behind the mark is read again
+    expect(notDelayed).toEqual([]);
+    // a mark that has passed a settled request: once nothing older waits, it is never read again
+    const settledRow = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: settled, action: 'DSAR_DOCUMENT_ERASURE' }, orderBy: { createdAt: 'asc' } }));
+    await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: new Date(settledRow.createdAt.getTime() + 1).toISOString() } } }));
+    read.length = 0;
+    const spy2 = vi.spyOn(app.prisma.auditLog, 'findMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
+      const rows = await original(args as never);
+      if ((args as { where?: { action?: string } } | undefined)?.where?.action === 'DSAR_DOCUMENT_ERASURE' && (args as { select?: { createdAt?: boolean } }).select?.createdAt) {
+        read.push(...(rows as Array<{ createdAt: Date }>).map((r) => r.createdAt.getTime()));
+      }
+      return rows;
+    }) as never);
+    try {
+      await system(() => service.retryDelayedErasures());
+    } finally { spy2.mockRestore(); }
+    expect(read).not.toContain(settledRow.createdAt.getTime());
+    // the waiting request becomes unheld much later (a person releases its hold): it is still finished
+    const hold = (await systemHoldOf(waiting))!;
+    await system(() => releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: reviewerB, reason: `Not needed ${RUN}` }));
+    await system(() => service.retryDelayedErasures());
+    expect((await docRow(waitingDoc)).purgedAt).not.toBeNull();
+  });
+
+  it('[COORD 16:35Z race] a request written with an earlier time but committed after a run read still gets finished on the next run', async () => {
+    const latestMark = async () => new Date(((await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' } }))).changes as { since: string }).since).getTime();
+    // a clean slate: the earlier tests' requests no longer wait (a newer answer closes each), and an earlier test set
+    // the mark ahead by hand (a deliberate fixture): start this one from a day back
+    const earlier = await system(() => app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true, userId: true } }));
+    for (const userId of new Set(earlier.map((d) => d.userId))) {
+      await system(() => app.prisma.auditLog.create({ data: { userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,
+        changes: { outcomes: earlier.filter((d) => d.userId === userId).map((d) => ({ documentId: d.id, outcome: 'REFUSED', ground: 'AML_RECORD' })) } } }));
+    }
+    await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: new Date(Date.now() - 86_400_000).toISOString() } } }));
+    await system(() => service.retryDelayedErasures());
+    const now = await dbNow();
+    // a request whose row carries a time from just before the run started, committed only now (after its read)
+    const me = await person();
+    const doc = (await submit(me)).id;
+    await system(() => app.prisma.auditLog.create({ data: { userId: me, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: me,
+      changes: { outcomes: [{ documentId: doc, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }] }, createdAt: new Date(now.getTime() - 60_000) } }));
+    // the mark never jumped past it: it stays at least the commit margin behind the database's clock
+    expect(await latestMark()).toBeLessThanOrEqual(now.getTime() - 9 * 60_000);
+    // and the app's clock does not move it: with the app an hour fast, a run still marks by the database's clock
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 3_600_000));
+    try {
+      await system(() => service.retryDelayedErasures());
+    } finally { vi.useRealTimers(); }
+    expect(await latestMark()).toBeLessThanOrEqual(now.getTime() - 9 * 60_000 + 120_000);
+    await system(() => service.retryDelayedErasures());
+    expect((await docRow(doc)).purgedAt).not.toBeNull();
+  });
+
+  it('[COORD 16:35Z] the mark is monotonic: a run never moves it backwards, and two runs never overlap', async () => {
+    await system(() => service.retryDelayedErasures());
+    const marks = async () => (await system(() => app.prisma.auditLog.findMany({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'asc' } })))
+      .map((r) => new Date((r.changes as { since: string }).since).getTime());
+    const before = await marks();
+    // one run at a time: of two runs started together, only one does the work
+    const work = vi.spyOn(service as unknown as { finishDelayedSince: (...a: unknown[]) => Promise<unknown> }, 'finishDelayedSince');
+    try {
+      await Promise.all([system(() => service.retryDelayedErasures()), system(() => service.retryDelayedErasures())]);
+      expect(work).toHaveBeenCalledTimes(1);
+    } finally { work.mockRestore(); }
+    const after = await marks();
+    for (let i = Math.max(1, before.length); i < after.length; i += 1) expect(after[i]!, `mark ${i}`).toBeGreaterThanOrEqual(after[i - 1]!);
+    // a mark ahead of what a run would compute is never moved backwards by it
+    const now = await dbNow();
+    const ahead = new Date(now.getTime() - 60_000);
+    await system(() => app.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: ahead.toISOString() } } }));
+    await system(() => service.retryDelayedErasures());
+    const last = (await marks()).at(-1)!;
+    expect(last).toBeGreaterThanOrEqual(ahead.getTime());
   });
 });
