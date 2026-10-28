@@ -88,7 +88,8 @@ export function erasureCompletedWords(documents: number): { title: string; body:
 /** [REVIEW-F S3-2 · COORD 10:44Z] The account-deletion answer is a two-line toast (90 characters at most, the date
  *  inside it). 'At least': a renewal can move the date, so it is never promised as firm. Counts every kept document. */
 export function accountClosedKeptWords(revisitBy: Date, documents: number): string {
-  return `Account closed. ${documents === 1 ? '1 document' : `${documents} documents`} kept for a check until at least ${guyanaShortDay(revisitBy)}, then deleted.`;
+  // [REVIEW-F #2190 S3-1] At 1.3x text two toast lines hold about 60-68 characters: the date comes FIRST.
+  return `Account closed. Until at least ${guyanaShortDay(revisitBy)}, ${documents === 1 ? '1 document is' : `${documents} documents are`} kept for a check, then deleted.`;
 }
 
 const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;

@@ -546,6 +546,10 @@ async function walkSubmission(
   return tx.verificationDocument.findUniqueOrThrow({ where: { id } });
 }
 
+/** [COORD 16:35Z] How far behind the database clock the delayed-erasure mark stays: a row stamped before a run started
+ *  may commit after the run read (a long transaction, clock skew between app and database). */
+const DSAR_MARK_COMMIT_MARGIN_MS = 10 * 60_000;
+
 export class VerificationService {
   private readonly projectionNotices = new WeakMap<object, string[]>();
 
@@ -2140,14 +2144,37 @@ export class VerificationService {
    *
    *  It does not read the whole erasure history each day. A durable WATERMARK (an append-only audit row,
    *  DSAR_DELAYED_WATERMARK, newest wins) holds the time of the oldest request that still waits; each run reads only
-   *  the hold-refused answers from there on, and moves the mark to the oldest one still waiting after it ran (or to
-   *  the run's start when none waits). Correct by construction: a request only stops waiting once its documents are
-   *  answered since (destroyed, refused on another ground) or purged, and a later answer is a newer row, so nothing
-   *  behind the mark can ever need finishing again; a request that becomes unheld later is still ahead of the mark. */
+   *  the hold-refused answers from there on, and moves the mark to the oldest one still waiting after it ran, but
+   *  never past the DATABASE clock at its start minus a 10-minute commit margin (a row stamped earlier may commit
+   *  late), and never backwards. Runs are serialised by a transaction-scoped advisory lock. Correct by construction:
+   *  a request only stops waiting once its documents are answered since (destroyed, refused on another ground) or
+   *  purged, and a later answer is a newer row, so nothing behind the mark can ever need finishing again; a request
+   *  that becomes unheld later is still ahead of the mark. */
   async retryDelayedErasures(page = 200): Promise<number> {
-    const startedAt = new Date();
-    const mark = await this.prisma.auditLog.findFirst({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' }, select: { changes: true } });
-    const since = new Date((mark?.changes as { since?: string } | null)?.since ?? 0);
+    // [COORD 16:35Z] One run at a time, and the mark only ever moves forward: the run holds a transaction-scoped
+    // advisory lock for its whole length (another run that finds it taken does nothing this time), reads and writes
+    // the mark inside it, and takes its times from the DATABASE clock, never the app's.
+    return this.prisma.$transaction(async (tx) => {
+      const [{ locked }] = await tx.$queryRaw<Array<{ locked: boolean }>>`SELECT pg_try_advisory_xact_lock(hashtextextended('dsar-delayed-erasures-v1', 0)) AS locked`;
+      if (!locked) return 0;
+      const [{ now: dbStartedAt }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
+      const mark = await tx.auditLog.findFirst({ where: { action: 'DSAR_DELAYED_WATERMARK' }, orderBy: { createdAt: 'desc' }, select: { changes: true } });
+      const since = new Date((mark?.changes as { since?: string } | null)?.since ?? 0);
+      const { ran, oldestWaiting } = await this.finishDelayedSince(since, page);
+      // A row stamped before this run started may still be committing: the mark stays a margin behind the database's
+      // clock, and never behind a request that still waits; and it never moves backwards (the previous mark already
+      // covers everything before it).
+      const ceiling = new Date(Math.min(oldestWaiting?.getTime() ?? Infinity, dbStartedAt.getTime() - DSAR_MARK_COMMIT_MARGIN_MS));
+      const next = new Date(Math.max(since.getTime(), ceiling.getTime()));
+      if (next.getTime() !== since.getTime()) {
+        await tx.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: next.toISOString(), finished: ran } } });
+      }
+      return ran;
+    }, { timeout: 15 * 60_000, maxWait: 10_000 });
+  }
+
+  /** The catch-all's work from `since` on (outside the lock's transaction: each erasure keeps its own transactions). */
+  private async finishDelayedSince(since: Date, page: number): Promise<{ ran: number; oldestWaiting: Date | null }> {
     let ran = 0;
     let oldestWaiting: Date | null = null;
     let cursor: { createdAt: Date; id: string } | null = null;
@@ -2188,11 +2215,7 @@ export class VerificationService {
       }
       if (rows.length < page) break;
     }
-    const next = oldestWaiting ?? startedAt;
-    if (next.getTime() !== since.getTime()) {
-      await this.prisma.auditLog.create({ data: { userId: null, action: 'DSAR_DELAYED_WATERMARK', entity: 'System', entityId: 'dsar-delayed-erasures', changes: { since: next.toISOString(), finished: ran } } });
-    }
-    return ran;
+    return { ran, oldestWaiting };
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {

@@ -331,15 +331,16 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'numeric', year: 'numeric' }).formatToParts(reviewBy);
     const pick = (t: string) => Number(parts.find((p) => p.type === t)!.value);
     const day = `${pick('day')} ${SHORT[pick('month') - 1]} ${pick('year')}`;
-    expect(result.message).toBe(`Account closed. 1 document kept for a check until at least ${day}, then deleted.`);
+    expect(result.message).toBe(`Account closed. Until at least ${day}, 1 document is kept for a check, then deleted.`);
     expect(result.message.length).toBeLessThanOrEqual(90);
-    // the worst case (two-digit day and count) now fits 90, and the date ends by character 80
+    // the worst case (two-digit day and count): the date is read first; the line is COORD's own example length
     const worst = accountClosedKeptWords(new Date('2027-09-30T15:00:00Z'), 12);
-    expect(worst).toBe('Account closed. 12 documents kept for a check until at least 30 Sep 2027, then deleted.');
-    expect(worst.indexOf('30 Sep 2027') + '30 Sep 2027'.length).toBeLessThanOrEqual(80);
-    expect(worst.length).toBeLessThanOrEqual(90);
+    expect(worst).toBe('Account closed. Until at least 30 Sep 2027, 12 documents are kept for a check, then deleted.');
+    // [REVIEW-F #2190 S3-1] the date ends by character 45 in the worst case (1.3x text: ~60-68 characters on two lines)
+    expect(worst.indexOf('30 Sep 2027') + '30 Sep 2027'.length).toBeLessThanOrEqual(45);
+    expect(worst.length).toBeLessThanOrEqual(92);
     // the day is Guyana's: 02:00 UTC on 1 October is still 30 September in Georgetown
-    expect(accountClosedKeptWords(new Date('2027-10-01T02:00:00Z'), 1)).toContain('until at least 30 Sep 2027,');
+    expect(accountClosedKeptWords(new Date('2027-10-01T02:00:00Z'), 1)).toContain('Until at least 30 Sep 2027,');
     expect(result.message).not.toMatch(/fraud|tamper|legal hold/i);
     expect((await docRow(doc)).purgedAt).toBeNull();
     // the review ends (any way): the sweep releases the hold, and the existing retry (the reaper on the deferred clock) erases it
@@ -713,7 +714,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
   it('[COORD 10:44Z F S4] the words: plural forms, and the toast counts every kept document, a person\'s holds included', async () => {
     expect(erasureCompletedWords(2)).toEqual({ title: 'Your documents have been deleted', body: 'We have now deleted the documents you asked us to delete.' });
     const at = new Date('2027-09-30T15:00:00Z');
-    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. 3 documents kept for a check until at least 30 Sep 2027, then deleted.');
+    expect(accountClosedKeptWords(at, 3)).toBe('Account closed. Until at least 30 Sep 2027, 3 documents are kept for a check, then deleted.');
     // an account with one document under the review's hold and one under a person's hold: both are counted
     const me = await person();
     const suspected = (await submit(me)).id;
@@ -722,7 +723,7 @@ describe('[SEC-PII] an open investigation holds the person\'s documents', () => 
     await suspect(suspected);
     const accounts = new AccountService({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as never } as never);
     const result = await accounts.deleteAccount(me) as { message: string };
-    expect(result.message).toMatch(/^Account closed\. 2 documents kept for a check until at least /);
+    expect(result.message).toMatch(/^Account closed\. Until at least .+, 2 documents are kept for a check, then deleted\.$/);
   });
 
   it('[COORD 10:44Z F S4-2] the daily job wires the renewal notice to the requester-only path (a revert turns this red)', () => {
