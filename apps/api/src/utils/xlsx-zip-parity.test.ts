@@ -139,6 +139,12 @@ describe('[SEC-DOS F3] the guard reads the directory exactly as JSZip does, or r
     const honest = zip([HARMLESS]);
     expect(reasonOf(Buffer.concat([honest, Buffer.from([0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0])]))).not.toBe('accepted');
     expect(reasonOf(Buffer.concat([honest, Buffer.from('trailing')]))).not.toBe('accepted');
+    // A signature inside the end record's own comment, near the end of the file: JSZip takes THAT as the end record.
+    const one = part(HARMLESS);
+    one.patch(0);
+    const comment = Buffer.from([0x50, 0x4b, 0x05, 0x06, 1, 2, 3, 4]);
+    const decoy = Buffer.concat([one.local, one.central, eocd(1, one.central.length, one.local.length, comment)]);
+    expect(reasonOf(decoy)).not.toBe('accepted');
   });
 
   it('a local file name that differs from its directory name is refused (JSZip names the entry from the LOCAL header)', () => {
