@@ -71,6 +71,22 @@ export function peakOverlap(span: BusyInterval, busy: readonly BusyInterval[]): 
   return peak;
 }
 
+/** The most of `busy` held at one moment anywhere, and the first moment it is
+ *  reached (null when nothing is held). Same sweep as peakOverlap. */
+export function peakMoment(busy: readonly BusyInterval[]): { count: number; at: Date | null } {
+  const events: Array<[number, number]> = [];
+  for (const b of busy) if (b.start < b.end) events.push([b.start.getTime(), 1], [b.end.getTime(), -1]);
+  events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let now = 0;
+  let count = 0;
+  let at: number | null = null;
+  for (const [t, d] of events) {
+    now += d;
+    if (now > count) { count = now; at = t; }
+  }
+  return { count, at: at === null ? null : new Date(at) };
+}
+
 /** THE rule: does the business have room for `span`, given what it already
  *  holds and how many it serves at once? */
 export function hasRoom(span: BusyInterval, busy: readonly BusyInterval[], capacity: number): boolean {

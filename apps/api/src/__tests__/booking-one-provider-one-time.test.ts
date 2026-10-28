@@ -249,6 +249,21 @@ describe('a business may serve several at once (capacity)', () => {
     await expect(svc.rescheduleBooking(mine.id, at(9, 30), { customerId: a.userId })).resolves.toMatchObject({ moved: true });
   });
 
+  it('lowering "how many at once" below what the business already holds at one moment is refused in plain words; down to it is fine', async () => {
+    const { owner, vendor, haircut, beard } = await makeBusiness();
+    const put = (bookingCapacity: number) => app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', headers: { authorization: `Bearer ${owner.token}` }, payload: { bookingCapacity } });
+    expect((await put(3)).statusCode).toBe(200);
+    await svc.reserveSlot(haircut.id, (await customer()).userId, at(10));
+    await svc.reserveSlot(beard.id, (await customer()).userId, at(10, 30));
+    const refused = await put(1);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ error: { code: 'BOOKING_CAPACITY_IN_USE' } });
+    expect(JSON.stringify(refused.json())).toContain('You already have 2 appointments at the same time');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).bookingCapacity).toBe(3);
+    expect((await put(2)).statusCode).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).bookingCapacity).toBe(2);
+  });
+
   it('the capacity is a small whole number: 0 and 21 are refused', async () => {
     const { owner } = await makeBusiness();
     for (const bookingCapacity of [0, 21, 1.5]) {
@@ -330,6 +345,19 @@ describe('the listing\'s booking settings', () => {
       bookingConfig: { durationMinutes: 60, slots: [{ dayOfWeek: 1, start: '09:00', end: '12:00' }, { dayOfWeek: 2, start: '09:30', end: '12:30' }, { dayOfWeek: 1, start: '13:00', end: '17:00' }] },
     });
     expect(splitDays.statusCode).toBe(200);
+  });
+
+  it('a listing that already stores overlapping windows stays saveable: an unchanged build-9-shaped save is accepted and the windows are joined', async () => {
+    const { owner, makeItem } = await makeBusiness();
+    const legacySlots = [{ dayOfWeek: 1, start: '09:00', end: '12:00' }, { dayOfWeek: 1, start: '09:30', end: '12:30' }, { dayOfWeek: 2, start: '09:00', end: '17:00' }];
+    const legacy = await makeItem('Colour', 60, legacySlots);
+    const save = await putItem(legacy.id, owner.token, { bookingConfig: { durationMinutes: 60, slots: legacySlots, serviceMode: 'AT_BUSINESS' } });
+    expect(save.statusCode).toBe(200);
+    const stored = (await app.prisma.item.findUniqueOrThrow({ where: { id: legacy.id } })).bookingConfig as { slots: unknown[] };
+    expect(stored.slots).toEqual([{ dayOfWeek: 1, start: '09:00', end: '12:30' }, { dayOfWeek: 2, start: '09:00', end: '17:00' }]);
+    // A new overlap on that listing is still refused.
+    const added = await putItem(legacy.id, owner.token, { bookingConfig: { durationMinutes: 60, slots: [...legacySlots, { dayOfWeek: 2, start: '16:00', end: '18:00' }] } });
+    expect(added.statusCode).toBe(400);
   });
 
   it('accepts the gap after each booking and the minimum notice; an older app\'s save (without them) keeps them', async () => {

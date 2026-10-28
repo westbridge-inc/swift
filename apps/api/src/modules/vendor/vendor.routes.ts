@@ -31,9 +31,9 @@ import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } f
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, mmgDispatchBlocked, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
-import { BookingService } from '../booking/booking.service';
-import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES } from '../booking/availability';
-import { mergeBookingConfig, overlappingWindows, overlappingWindowsMessage } from '../booking/booking-config';
+import { BookingService, lockBusinessTime } from '../booking/booking.service';
+import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES, peakMoment } from '../booking/availability';
+import { mergeBookingConfig, overlappingWindows, overlappingWindowsMessage, windowsForSave } from '../booking/booking-config';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
@@ -213,9 +213,10 @@ const optionGroupInputSchema = z.object({
 // SERVICE listings carry a bookingConfig: how long an appointment is, the weekly
 // availability windows, and WHERE it happens — AT_BUSINESS (customer comes in),
 // MOBILE (provider travels to the customer), or BOTH. serviceRadiusKm caps travel.
-// [BOOK-S1] Windows on one day may not overlap; the gap after each booking and
-// the minimum notice are the business's to set (an older app's save keeps them:
-// mergeBookingConfig on update).
+// [BOOK-S1] Windows on one day may not overlap (judged by the handlers, which
+// know what the listing already stores: windowsForSave); the gap after each
+// booking and the minimum notice are the business's to set (an older app's save
+// keeps them: mergeBookingConfig on update).
 const bookingConfigSchema = z.object({
   durationMinutes: z.number().int().min(5).max(600),
   slots: z
@@ -231,10 +232,12 @@ const bookingConfigSchema = z.object({
   serviceRadiusKm: z.number().min(0).max(100).optional(),
   bufferMinutes: z.number().int().min(0).max(MAX_BUFFER_MINUTES).optional(),
   minNoticeMinutes: z.number().int().min(0).max(MAX_MIN_NOTICE_MINUTES).optional(),
-}).superRefine((config, ctx) => {
-  const pair = overlappingWindows(config.slots);
-  if (pair) ctx.addIssue({ code: 'custom', path: ['slots'], message: overlappingWindowsMessage(pair) });
 });
+
+/** [BOOK-S1] The refusal of a new overlap between two opening times on one day. */
+function overlappingHoursError(pair: Parameters<typeof overlappingWindowsMessage>[0]): AppError {
+  return new AppError(400, 'OVERLAPPING_HOURS', overlappingWindowsMessage(pair));
+}
 
 const createItemSchema = z.object({
   categoryId: z.string().min(1),
@@ -1815,6 +1818,24 @@ export async function vendorRoutes(app: FastifyInstance) {
     // it replaces is read, and the audit row (and the owner notice, when the
     // mover is not the owner) lands in this same transaction.
     const { vendor, pinNoticeId } = await app.prisma.$transaction(async (tx) => {
+      // [BOOK-S1 · REVIEW-M S4-1] Lowering "how many at once" below what the business already
+      // holds at one moment is refused in plain words, under the business's time lock (no booking
+      // can slip in between the count and the change). Raising it, or keeping it, is never refused.
+      if (body.bookingCapacity !== undefined) {
+        await lockBusinessTime(tx, vendorId);
+        const current = await tx.vendor.findUnique({ where: { id: vendorId }, select: { bookingCapacity: true } });
+        if (body.bookingCapacity < (current?.bookingCapacity ?? 1)) {
+          const held = await tx.booking.findMany({
+            where: { vendorId, status: { not: 'CANCELLED' }, slotEnd: { gt: new Date() } },
+            select: { slotStart: true, slotEnd: true },
+          });
+          const peak = peakMoment(held.map((b) => ({ start: b.slotStart, end: b.slotEnd })));
+          if (peak.count > body.bookingCapacity && peak.at) {
+            throw new AppError(409, 'BOOKING_CAPACITY_IN_USE',
+              `You already have ${peak.count} appointments at the same time (${fmtSlotTime(peak.at)}). Move or cancel some of them first, or keep how many you take at once at ${peak.count} or more.`);
+          }
+        }
+      }
       const before = pin ? await lockStorePin(tx, vendorId) : null;
       // [IMAGES-E2E PR4] A logo or cover this save takes down is deleted, not just unlinked:
       // read under the row's lock, queued for deletion in this transaction, deleted after.
@@ -3475,6 +3496,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireListingAllowed(app, verification, vendorId);
 
     const body = createItemSchema.parse(request.body);
+    // [BOOK-S1] A new listing stores nothing yet: any overlap is new.
+    const newOverlap = body.bookingConfig ? overlappingWindows(body.bookingConfig.slots) : null;
+    if (newOverlap) throw overlappingHoursError(newOverlap);
     // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] An item's photo is uploaded (POST /items/:id/image), never typed.
     uploadOnlyPhotoField(body.imageUrl, null, 'the item\'s photo');
 
@@ -3987,6 +4011,14 @@ export async function vendorRoutes(app: FastifyInstance) {
     await assertNotBanned(app.prisma, existing.id, { wordBanEditable: true });
 
     const body = updateItemSchema.parse(request.body);
+    // [BOOK-S1 · REVIEW-M S4-3] A new overlap is refused; overlapping windows the listing already
+    // stores (saved before the rule) are joined, so an unchanged save from any app build still works.
+    let bookingConfigToStore: Record<string, unknown> | undefined;
+    if (body.bookingConfig !== undefined) {
+      const windows = windowsForSave(body.bookingConfig.slots, existing.bookingConfig);
+      if (!windows.ok) throw overlappingHoursError(windows.pair);
+      bookingConfigToStore = mergeBookingConfig(existing.bookingConfig, { ...body.bookingConfig, slots: windows.slots });
+    }
     // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] Typed text may only take the item's photo down ('') or repeat it.
     const photo = uploadOnlyPhotoField(body.imageUrl, existing.imageUrl, 'the item\'s photo');
     let photoOrphans: string[] = [];
@@ -4051,7 +4083,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
           ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
           // [BOOK-S1] A save that does not mention the gap or the notice keeps the stored ones.
-          ...(body.bookingConfig !== undefined && { bookingConfig: mergeBookingConfig(existing.bookingConfig, body.bookingConfig) as object }),
+          ...(bookingConfigToStore !== undefined && { bookingConfig: bookingConfigToStore as object }),
         },
         include: itemInclude,
       });
