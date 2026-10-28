@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { SNAPSHOT_UNIQUE_FIELDS, type AdminRouteEntity } from './admin-authority';
 import { adminAuditSnapshotCounter } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
+import { isProduction } from '../../utils/runtime-mode';
 
 /**
  * [ZONE-FARES] The tenant predicate for an entity walled only through its
@@ -62,15 +63,65 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-/** The whole row, as one hash. A field nobody declared still moves this. */
+/** The whole row, as one hash. A field nobody declared still moves this.
+ *  (Also the value identity money-surface.ts stores and compares; the audit snapshot uses snapshotDigestOf.) */
 export function digestOf(row: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonical(row))).digest('hex');
+}
+
+/**
+ * [SEC-PII · security scan 28 Oct 2026] THE COLUMNS AN AUDIT SNAPSHOT NEVER COVERS.
+ *
+ * The snapshot digest was a plain SHA-256 over the whole row, secrets included, and every other column of
+ * the row is readable elsewhere in the console: a 6-digit custody transfer code (or a pickup code, a ride
+ * PIN) was the only unknown left, so anyone who could read the trail could recompute the digest for every
+ * candidate and recover the live code offline. These columns are removed from the row before it is
+ * digested, and from the declared diff. ONE list for every audited model: a new secret column is added
+ * here (the census test checks each name is a real column and that no audited entity declares one).
+ *
+ * Rows already in the trail are never rewritten (append-only). Codes whose old digests sit in it are an
+ * operations matter (rotate the live ones), not something this code can undo.
+ */
+export const SNAPSHOT_SECRET_FIELDS = [
+  // one-use hand-off codes and their guess counters (a counter narrows the code's guess space)
+  'transferCode', 'transferAttempts', 'pickupCode', 'ridePin', 'pickupCodeAttempts', 'ridePinAttempts',
+  // what the order showed the customer to pay into (a store's MMG number / pay link at order time)
+  'mmgNumberSnapshot', 'mmgPayUrlSnapshot',
+  // credentials and bearer values
+  'passwordHash', 'paymentToken', 'courierTrackingToken', 'stateHash', 'hostedUrl',
+] as const;
+const SECRET_FIELD_SET: ReadonlySet<string> = new Set(SNAPSHOT_SECRET_FIELDS);
+
+function withoutSecrets(row: unknown): unknown {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+  return Object.fromEntries(Object.entries(row as Record<string, unknown>).filter(([key]) => !SECRET_FIELD_SET.has(key)));
+}
+
+/**
+ * The snapshot digest's key: derived (HMAC, its own label) from the server's JWT_SECRET, which the boot
+ * guard already requires in production and no admin can read. No new secret to set. A keyed digest also
+ * means no OTHER low-entropy column (a phone number, a coordinate) can be guessed back from the trail.
+ * Outside production without the secret, a fixed local key (tests and local development only).
+ */
+function snapshotDigestKey(): Buffer {
+  const secret = process.env['JWT_SECRET'];
+  if (!secret) {
+    if (isProduction()) throw new Error('JWT_SECRET is required in production');
+    return createHmac('sha256', 'swift-local-audit-digest-key-not-for-production').update('swift:admin-audit-snapshot:v1').digest();
+  }
+  return createHmac('sha256', secret).update('swift:admin-audit-snapshot:v1').digest();
+}
+
+/** The audit snapshot's digest: the row without its secret columns, keyed. Every other column still moves it. */
+export function snapshotDigestOf(row: unknown): string {
+  return createHmac('sha256', snapshotDigestKey()).update(JSON.stringify(canonical(withoutSecrets(row)))).digest('hex');
 }
 
 /** The declared fields, canonicalised, for the human-readable diff. */
 export function declaredFields(row: unknown, fields: readonly string[]): Record<string, unknown> {
   const source = (row ?? {}) as Record<string, unknown>;
-  return Object.fromEntries(fields.filter((f) => f in source).map((f) => [f, canonical(source[f])]));
+  // [SEC-PII] A secret column never reaches the diff, whatever an entity declares.
+  return Object.fromEntries(fields.filter((f) => f in source && !SECRET_FIELD_SET.has(f)).map((f) => [f, canonical(source[f])]));
 }
 
 export interface EntitySnapshot {
@@ -129,7 +180,7 @@ export async function snapshot(
       return ABSENT;
     }
     adminAuditSnapshotCounter.labels('found', entity.model).inc();
-    return { digest: digestOf(row), fields: declaredFields(row, entity.fields), exists: true };
+    return { digest: snapshotDigestOf(row), fields: declaredFields(row, entity.fields), exists: true };
   } catch {
     // [C-01] A swallowed read is how this defect lived: ABSENT is
     // indistinguishable from "the row genuinely does not exist". It stays
