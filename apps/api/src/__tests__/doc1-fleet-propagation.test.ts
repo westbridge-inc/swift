@@ -72,6 +72,10 @@ const approved = (userId: string, docType: string, extra: Record<string, unknown
   userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${RUN}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'fleet-test', reviewedAt: new Date(),
   expiresAt: new Date(Date.now() + 200 * DAY), ...extra,
 } }));
+/** [SEC-TRUST F9] A registrant's link starts PENDING; a person's approval of its own paper approves it (the decision this fixture models). */
+const registrantApproved = (userId: string, subjectId: string) => system(() => app.prisma.subjectLink.updateMany({
+  where: { accountId: userId, subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null }, data: { approvedAt: new Date() },
+}));
 const online = (userId: string) => system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId }, select: { isOnline: true } })).then((d) => d.isOnline);
 const notices = (userId: string, kind: string) => system(() => app.prisma.notification.findMany({ where: { userId, data: { path: ['kind'], equals: kind } }, orderBy: { createdAt: 'asc' } }));
 
@@ -200,6 +204,7 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     await system(() => app.prisma.driver.update({ where: { userId: a }, data: { licensePlate: PLATE_B } }));
     const subjectA = (await system(() => resolveSubject(app.prisma, { userId: a, countryCode: 'GY', docType: 'vehicle_insurance', tenantId: 'swift-default' })))!;
     expect(subjectA.owned).toBe(true);
+    await registrantApproved(a, subjectA.subjectId);
     for (const t of personalTypes) await approved(a, t);
     for (const t of vehicleTypes) {
       await approved(a, t, { subjectId: subjectA.subjectId, ...(t === 'vehicle_insurance' ? { coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } : {}) });
@@ -252,6 +257,7 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     const owner = await mover(11);
     await system(() => app.prisma.driver.update({ where: { userId: owner }, data: { licensePlate: PLATE_A } }));
     const subject = (await system(() => resolveSubject(app.prisma, { userId: owner, countryCode: 'GY', docType: 'vehicle_insurance', tenantId: 'swift-default' })))!;
+    await registrantApproved(owner, subject.subjectId);
     for (const t of personalTypes) await approved(owner, t);
     for (const t of vehicleTypes) {
       await approved(owner, t, { subjectId: subject.subjectId, ...(t === 'vehicle_insurance' ? { coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } : {}) });
@@ -309,6 +315,7 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     await system(() => app.prisma.driver.update({ where: { userId: d }, data: { licensePlate: PLATE_M } }));
     const subject = (await system(() => resolveSubject(app.prisma, { userId: d, countryCode: 'GY', docType: 'vehicle_insurance', tenantId: 'swift-default' })))!;
     expect(subject.owned).toBe(true);
+    await registrantApproved(d, subject.subjectId);
     for (const t of personalTypes) await approved(d, t);
     for (const t of vehicleTypes) {
       if (t === 'vehicle_insurance') {
@@ -336,6 +343,7 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     await system(() => app.prisma.rider.update({ where: { userId: a }, data: { licensePlate: PLATE_R } }));
     const subjectA = (await system(() => resolveSubject(app.prisma, { userId: a, countryCode: 'GY', docType: 'vehicle_insurance', tenantId: 'swift-default' })))!;
     expect(subjectA.owned).toBe(true);
+    await registrantApproved(a, subjectA.subjectId);
     for (const t of personalTypes) await approved(a, t);
     for (const t of vehicleTypes) {
       await approved(a, t, { subjectId: subjectA.subjectId, ...(t === 'vehicle_insurance' ? { coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } : {}) });

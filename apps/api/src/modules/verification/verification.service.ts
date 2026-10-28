@@ -7,7 +7,7 @@ import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
-import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
+import { approveRegistrantLink, linkedAccountIds, normalizeRegistrationMark, plateClassOf, resolveSubject, rootSubjectId } from './subjects';
 import { POLICE_CLEARANCE_WITHDRAWN_NOTE } from './police-clearance-consent';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, FOOD_HANDLER_ATTESTATION_TYPE, isNeverAcceptedDocType, OWN_NAME_DOC_TYPE, OWN_NAME_TIER, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -625,8 +625,10 @@ export class VerificationService {
       let doc = await walkSubmission(tx, created.id, finalVerdict, review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
-      // and a later resubmission starts a fresh pending assignment.
-      if (doc.status === 'REJECTED' && subject !== null && subject.kind === 'VEHICLE' && !subject.owned) {
+      // and a later resubmission starts a fresh pending assignment. [SEC-TRUST F9] The same for
+      // the account that registered the vehicle: its link is pending until a person approves
+      // one of its own papers, so a rejected first paper leaves it nothing.
+      if (doc.status === 'REJECTED' && subject !== null && subject.kind === 'VEHICLE') {
         await tx.subjectLink.updateMany({
           where: { accountId: data.userId, subjectId: subject.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
           data: { validTo: new Date() },
@@ -1674,21 +1676,24 @@ export class VerificationService {
         const mark = normalizeRegistrationMark(vehicle?.registrationMark ?? '');
         const onPlate = mark !== '' && [riderOnAccount, driverOnAccount].some((profile) => !!profile && normalizeRegistrationMark(profile.licensePlate ?? '') === mark);
         if (subject?.createdById === updated.userId && vehicle && onPlate) {
-          await tx.subjectLink.updateMany({ where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null }, data: { approvedAt: now } });
+          // [SEC-TRUST F9] A person approved the registrant's own paper: this is what approves its link.
+          await approveRegistrantLink(tx, updated.userId, updated.subjectId, open.tenantId, now);
         }
       }
       // [High #9 · DS109] The PENDING vehicle link lifecycle rides the doc decision: rejecting
       // the submission that created a cross-account assignment closes the link, so it can
       // never be approved later by anything else. A human decision can restore the registrant
       // after an identity edit; cross-account assignments still need the explicit admin action.
+      // [SEC-TRUST F9] The registrant's still-pending link closes the same way (an approved one is
+      // never touched here); a person's later approval of one of its own papers opens an approved one.
       if (requestedStatus === 'REJECTED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
         // Filter on the RAW stored subjectId on purpose: `resolveSubject` keys the link it
         // creates at the same root-of-moment value it stores on the document (one transaction),
         // so this closes exactly the link THIS submission created. Resolving to the current
         // root instead would miss that link if the subject were merged after submission, and
         // would close a sibling submission's link — see DRAFT-NOTES, defect D6.
-        const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { kind: true, createdById: true } });
-        if (subject !== null && subject.kind === 'VEHICLE' && subject.createdById !== updated.userId) {
+        const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { kind: true } });
+        if (subject !== null && subject.kind === 'VEHICLE') {
           await tx.subjectLink.updateMany({
             where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
             data: { validTo: now },

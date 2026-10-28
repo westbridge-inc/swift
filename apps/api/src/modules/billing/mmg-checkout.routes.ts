@@ -32,6 +32,7 @@ import {
   replyCodeClass,
   resultCodeOf,
 } from './mmg-checkout-reply';
+import { ReplyGateBusyError } from './mmg-reply-gate';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout ROUTES [mmg checkout 3/6] — MMG-CHECKOUT-API.md
@@ -73,6 +74,8 @@ export const MMG_CHECKOUT_NOTIFY_RATE = { max: 60, timeWindow: '1 minute' } as c
 export const MMG_CHECKOUT_RETURN_BODY_LIMIT = 96 * 1024;
 /** The contract: JSON or a form of up to 16 KB. */
 export const MMG_CHECKOUT_NOTIFY_BODY_LIMIT = 16 * 1024;
+/** [SEC-DOS F8] How long a sender (the return page, MMG's notify) is told to wait when too many replies are waiting to be opened. */
+export const RETURN_BUSY_RETRY_SECONDS = 1;
 /** Everything the return page may render (its `words`); the API never answers more. */
 export const RETURN_STATES = ['CONFIRMED', 'CONFIRMING', 'NOT_PAID', 'UNKNOWN'] as const satisfies readonly ReturnState[];
 
@@ -355,28 +358,48 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
   /** The web return page forwards MMG's reply, from either registered URL, with the path as `outcome`. */
-  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request, reply) => {
     const body = returnBody.parse(request.body ?? {});
     if (!mmgCheckoutEnabled()) return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     if (ambiguousToken(body.params)) {
       log().warn({ source: 'RETURN' }, '[MMG checkout] a reply token arrived more than once; refused as UNKNOWN');
       return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     }
-    const state = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params });
-    return { success: true, data: { state } };
+    try {
+      const state = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params, from: request.ip });
+      return { success: true, data: { state } };
+    } catch (err) {
+      if (!(err instanceof ReplyGateBusyError)) throw err;
+      // [SEC-DOS F8] Too many replies waiting to be opened: retryable, and says nothing about the payment.
+      mmgCheckoutEventsCounter.labels('reply_busy').inc();
+      reply.header('retry-after', RETURN_BUSY_RETRY_SECONDS);
+      throw new AppError(503, 'TRY_AGAIN', 'Too many payment replies are being checked right now. Try again in a moment.', { retryAfterSeconds: RETURN_BUSY_RETRY_SECONDS });
+    }
   });
 
-  /** MMG's own servers, if MMG calls one: JSON or a form, always 200, never a word about any account. */
-  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  /** MMG's own servers, if MMG calls one: JSON or a form, 200 and never a word about any account; a
+   *  503 TRY_AGAIN only when too many replies wait to be opened, so the sender redelivers it. */
+  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request, reply) => {
     if (mmgCheckoutEnabled()) {
       const params = notifyParams(request.body, request.query);
       if (ambiguousToken(params)) {
         log().warn({ source: 'NOTIFY' }, '[MMG checkout] a reply token arrived more than once; ignored');
         return { success: true };
       }
-      await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params }).catch((err) => {
+      let busy = false;
+      await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params, from: request.ip }).catch((err) => {
+        if (err instanceof ReplyGateBusyError) {
+          busy = true;
+          return;
+        }
         log().error({ err }, '[MMG checkout] a notify could not be processed; the poll will look again');
       });
+      if (busy) {
+        // [SEC-DOS F8] Never dropped silently: retryable, and says nothing about the payment.
+        mmgCheckoutEventsCounter.labels('reply_busy').inc();
+        reply.header('retry-after', RETURN_BUSY_RETRY_SECONDS);
+        throw new AppError(503, 'TRY_AGAIN', 'Too many payment replies are being checked right now. Try again in a moment.', { retryAfterSeconds: RETURN_BUSY_RETRY_SECONDS });
+      }
     }
     return { success: true };
   });
@@ -397,7 +420,7 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
 async function observeReply(
   app: FastifyInstance,
   runtime: MmgCheckoutRuntime,
-  input: { source: 'RETURN' | 'NOTIFY'; outcome: string; params: unknown },
+  input: { source: 'RETURN' | 'NOTIFY'; outcome: string; params: unknown; from: string },
 ): Promise<ReturnState> {
   let provider: MmgCheckoutProvider | null = null;
   try {
@@ -405,13 +428,15 @@ async function observeReply(
   } catch {
     provider = null;
   }
-  const reply = provider && provider.driver !== 'disabled' ? openReply(provider, input.params) : null;
+  // [SEC-DOS F8] Opened ONCE, here, from the token field only and under the
+  // reply gate; the service is handed the opened reply and never opens it again.
+  const reply = provider && provider.driver !== 'disabled' ? await openReply(provider, input.params, `${input.source}:${input.from}`) : null;
   const code = reply ? resultCodeOf(reply) : null;
   if (reply && replyCodeClass(code) === 'ALERT') {
     await alertOnRefusedRequest(app, runtime, { source: input.source, outcome: input.outcome, reply, code: code as string });
     return 'UNKNOWN';
   }
-  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params });
+  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params, opened: { reply } });
 }
 
 /** [I9] Written down first, under the checkout's own tenant when the reply names one of ours; then the page. */

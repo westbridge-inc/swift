@@ -40,6 +40,8 @@ export interface PageMeta {
   hasPrev: boolean;
   /** How many test records the server left out of this list (only while they are hidden). */
   hiddenTestRecords?: number;
+  /** [SEC-PII] Set when the search looked like a phone number or email and this admin may not search by those. */
+  searchHint?: string;
 }
 
 /** "Showing 26–50 of 312", or the honest empty line. */

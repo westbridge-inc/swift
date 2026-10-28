@@ -304,7 +304,7 @@ export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20')
 export interface ListEnvelope<T> {
   success: boolean;
   data: T[];
-  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number; searchHint?: string };
 }
 // [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
 export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
@@ -544,6 +544,8 @@ export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
   users: { id: string; firstName: string; lastName: string; phone: string; roles: string[]; status: string }[];
   vendors: { id: string; name: string; vendorType: string; status: string; city: string }[];
+  /** [SEC-PII] Set when the search looked like a phone number or email and this admin may not search people by those. */
+  searchHint?: string;
 }
 export const fetchGlobalSearch = (q: string): Promise<Envelope<GlobalSearchResult>> =>
   apiFetch(`/api/v1/admin/search?q=${encodeURIComponent(q)}`);
