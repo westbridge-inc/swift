@@ -99,6 +99,8 @@ import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugi
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
 import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
+// [SEC-PII] the subscriptions list's masking (its own line: the line above is shared with other open changes)
+import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -4310,8 +4312,10 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.subscription.findMany({
         where,
         include: {
-          rider: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
-          driver: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
+          // [SEC-PII · security scan 28 Oct 2026] The mover as the page draws them: id and name (and the number,
+          // masked below). Never the whole row: it carried the live position and the float limit.
+          rider: { select: { id: true, user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
+          driver: { select: { id: true, user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           vendor: { select: { id: true, name: true } },
           // The unused credit a refund would pay back (the console shows the action only then).
           prepaidBalance: { select: { balance: true, currencyCode: true } },
@@ -4333,7 +4337,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutAsks.get(sub.id) === 'ACTIVE', refundPayoutAsk: payoutAsks.get(sub.id) ?? null };
+      // [SEC-PII] The payer number masked and the card token dropped (maskSubscription); the mover's number masked.
+      return { ...maskSubscription(sub), rider: maskUserPhone(sub.rider), driver: maskUserPhone(sub.driver), effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutAsks.get(sub.id) === 'ACTIVE', refundPayoutAsk: payoutAsks.get(sub.id) ?? null };
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };

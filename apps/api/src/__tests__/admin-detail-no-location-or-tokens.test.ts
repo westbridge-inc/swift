@@ -11,6 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { testPhone } from './helpers/fixture-ids';
+import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 
 // ---------------------------------------------------------------------------
 // [FOLLOWUPS · COORD privacy ruling 28 Oct 2026] Two admin detail reads carry only what their page uses:
@@ -26,7 +27,7 @@ const DAY = 86_400_000;
 let app: FastifyInstance;
 let token = '';
 const userIds: string[] = [];
-const ids = { rider: '', relay: '', order: '', kase: '', customer: '' };
+const ids = { rider: '', relay: '', order: '', kase: '', customer: '', subscription: '', driver: '', driverSubscription: '' };
 const LAT = 6.80123;
 const LNG = -58.15987;
 const DEVICE_TOKEN = `ExponentPushToken[fixture-${RUN}]`;
@@ -68,6 +69,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await system(async () => {
+    await app.prisma.subscription.deleteMany({ where: { OR: [{ riderId: { in: [ids.rider, ids.relay] } }, { driverId: ids.driver || 'none' }] } });
+    if (ids.driver) await app.prisma.driver.deleteMany({ where: { id: ids.driver } });
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-detail-no-location').catch(() => 0);
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'test-cleanup:admin-detail-no-location').catch(() => 0);
     await app.prisma.custodyRecoveryCase.deleteMany({ where: { id: ids.kase } });
@@ -102,5 +105,70 @@ describe('[FOLLOWUPS] admin detail reads carry only what their page uses', () =>
     expect(res.statusCode).toBe(200);
     expect('deviceTokens' in res.json().data).toBe(false);
     expect(res.payload).not.toContain(DEVICE_TOKEN);
+  });
+});
+
+// [SEC-PII · security scan 28 Oct 2026] The weekly-fee subscriptions list carried each mover's whole row (live
+// position, float limit) with their full number, and each subscription's raw MMG payer number and card token,
+// under an unlogged read. The console's subscriptions page draws the mover's id and name only. The list now
+// selects the mover's id and name (and the number, masked), masks the payer number, never sends the token, and
+// is a logged sensitive read (C1) because names remain.
+describe('[SEC-PII] the subscriptions list carries no live position, no full number and no token', () => {
+  const TOKEN = `fixture-card-token-${RUN}`;
+  it('a mover\'s subscription row: id and name, masked number and payer number, nothing else of theirs', async () => {
+    const rider = await system(() => app.prisma.rider.findUnique({ where: { id: ids.rider }, select: { user: { select: { phone: true } } } }));
+    const phone = rider!.user.phone;
+    const week = new Date(Date.now() + 7 * DAY);
+    ids.subscription = (await system(() => app.prisma.subscription.create({ data: {
+      riderId: ids.rider, type: 'DELIVERY_RIDER', weeklyRate: 1000, currentPeriodStart: new Date(), currentPeriodEnd: week, nextBillingDate: week,
+      billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: phone, paymentToken: TOKEN,
+    } as never }))).id;
+    const res = await get('/subscriptions?type=DELIVERY_RIDER&limit=100');
+    expect(res.statusCode).toBe(200);
+    const row = (res.json().data as Array<Record<string, any>>).find((s) => s['id'] === ids.subscription)!;
+    expect(row).toBeTruthy();
+    expect(res.payload).not.toContain(phone);
+    expect(res.payload).not.toContain(TOKEN);
+    expect(res.payload).not.toContain(String(LAT));
+    expect(res.payload).not.toContain(String(LNG));
+    expect('paymentToken' in row).toBe(false);
+    expect(row['mmgPayerMsisdn']).toMatch(new RegExp(`•+${phone.slice(-4)}$`));
+    expect(Object.keys(row['rider']).sort()).toEqual(['id', 'user']);
+    expect(row['rider']['id']).toBe(ids.rider);
+    expect(row['rider']['user']).toMatchObject({ firstName: 'Detail', lastName: `P${RUN}` });
+    expect(row['rider']['user']['phone']).toMatch(new RegExp(`•+${phone.slice(-4)}$`));
+    // what the console's subscriptions page reads is still there
+    expect(row).toMatchObject({ status: expect.any(String), type: 'DELIVERY_RIDER', weeklyRate: 1000 });
+  });
+
+  it('a driver\'s subscription row: the same', async () => {
+    const userId = await person(['DRIVER']);
+    const phone = (await system(() => app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } })))!.phone;
+    ids.driver = (await system(() => app.prisma.driver.create({ data: {
+      userId, vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', vehicleYear: 2015, licensePlate: `PDN ${RUN.slice(0, 4)}`,
+      driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', currentLat: LAT, currentLng: LNG, lastLocationUpdate: new Date(),
+    } as never }))).id;
+    const week = new Date(Date.now() + 7 * DAY);
+    ids.driverSubscription = (await system(() => app.prisma.subscription.create({ data: {
+      driverId: ids.driver, type: 'TAXI_DRIVER', weeklyRate: 1000, currentPeriodStart: new Date(), currentPeriodEnd: week, nextBillingDate: week,
+      billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: phone, paymentToken: TOKEN,
+    } as never }))).id;
+    const res = await get('/subscriptions?type=TAXI_DRIVER&limit=100');
+    expect(res.statusCode).toBe(200);
+    const row = (res.json().data as Array<Record<string, any>>).find((s) => s['id'] === ids.driverSubscription)!;
+    for (const value of [phone, TOKEN, String(LAT), String(LNG)]) expect(res.payload, value).not.toContain(value);
+    expect(Object.keys(row['driver']).sort()).toEqual(['id', 'user']);
+    expect(row['driver']['user']['phone']).toMatch(new RegExp(`•+${phone.slice(-4)}$`));
+    expect(row['mmgPayerMsisdn']).toMatch(new RegExp(`•+${phone.slice(-4)}$`));
+  });
+
+  it('the list is a sensitive read: classified C1, and each read leaves its access row', async () => {
+    expect(ADMIN_ROUTE_AUTHORITY['GET /subscriptions']).toMatchObject({ cls: 'C1', capability: 'subscription.read' });
+    const reads = () => system(() => app.prisma.sensitiveReadLog.count({ where: { actorUserId: { in: userIds }, action: 'GET /subscriptions' } }));
+    // The access row is written as the response completes (onResponse): wait for the earlier read's row to settle.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const before = await reads();
+    expect((await get('/subscriptions?limit=5')).statusCode).toBe(200);
+    await expect.poll(reads, { timeout: 3000 }).toBe(before + 1);
   });
 });
