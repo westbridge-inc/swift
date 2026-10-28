@@ -98,7 +98,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
-import { CUSTODY_CONTACT_PARTIES, maskCaseRiderPhones, maskMoverPage, maskPersonPage, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
+import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
@@ -1250,6 +1250,8 @@ export async function adminRoutes(app: FastifyInstance) {
     // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
     const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
+    // [SEC-PII · COORD ruling] Without user.contact.read there is no search by number or email (names only).
+    const contactSearch = holdsPersonContact(request, 'user');
     const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
@@ -1257,8 +1259,7 @@ export async function adminRoutes(app: FastifyInstance) {
         OR: [
           { firstName: { contains: search, mode: 'insensitive' } },
           { lastName: { contains: search, mode: 'insensitive' } },
-          { phone: { contains: search } },
-          { email: { contains: search, mode: 'insensitive' } },
+          ...(contactSearch ? [{ phone: { contains: search } }, { email: { contains: search, mode: 'insensitive' } }] : []),
         ],
       }),
     };
@@ -1289,8 +1290,11 @@ export async function adminRoutes(app: FastifyInstance) {
       hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    const result = paginatedResponse(users, total, { page, limit, skip });
-    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
+    // [SEC-PII] Numbers and emails masked unless the live grant holds user.contact.read (search above still matches the full number).
+    const rows = contactSearch ? users : users.map(maskUserListRow);
+    const result = paginatedResponse(rows, total, { page, limit, skip });
+    const searchHint = contactSearch ? undefined : contactSearchHint(search, { email: true });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords, ...(searchHint ? { searchHint } : {}) } };
   });
 
   /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
@@ -1532,11 +1536,14 @@ export async function adminRoutes(app: FastifyInstance) {
       hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    const result = paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip });
+    // [SEC-PII] The store's and its owner's numbers and emails masked unless the live grant holds vendor.contact.read.
+    const contact = holdsPersonContact(request, 'vendor');
+    const rows = vendors.map((v) => ({ ...(contact ? v : maskVendorListRow(v)), vatRegistrationNumber: undefined }));
+    const result = paginatedResponse(rows, total, { page, limit, skip });
     return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
-  app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
+  app.get('/vendors/pending', { preHandler: [adminGuard] }, async (request) => {
     const vendors = await app.prisma.vendor.findMany({
       where: { status: 'PENDING_APPROVAL' },
       include: {
@@ -1544,7 +1551,9 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { success: true, data: vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })) };
+    // [SEC-PII] As GET /vendors: masked unless the live grant holds vendor.contact.read.
+    const contact = holdsPersonContact(request, 'vendor');
+    return { success: true, data: vendors.map((v) => ({ ...(contact ? v : maskVendorListRow(v)), vatRegistrationNumber: undefined })) };
   });
 
   /** One business, whole story: profile, owner, sibling stores, subscription,
@@ -2006,6 +2015,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
     const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
+    // [SEC-PII · COORD ruling] Without mover.contact.read there is no search by number (names only).
+    const contactSearch = holdsPersonContact(request, 'mover');
     const base: any = {
       user: {
         tenantId,
@@ -2013,7 +2024,7 @@ export async function adminRoutes(app: FastifyInstance) {
           OR: [
             { firstName: { contains: search, mode: 'insensitive' } },
             { lastName: { contains: search, mode: 'insensitive' } },
-            { phone: { contains: search } },
+            ...(contactSearch ? [{ phone: { contains: search } }] : []),
           ],
         }),
       },
@@ -2042,8 +2053,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
-    const result = paginatedResponse(withLive, total, { page, limit, skip });
-    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
+    // [SEC-PII] The mover's number masked unless the live grant holds mover.contact.read (search still matches the full number).
+    const rows = contactSearch ? withLive : withLive.map(maskMoverListRow);
+    const result = paginatedResponse(rows, total, { page, limit, skip });
+    const searchHint = contactSearch ? undefined : contactSearchHint(search, { email: false });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords, ...(searchHint ? { searchHint } : {}) } };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -2209,6 +2223,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status, search } = moverFilterQuerySchema.parse(request.query);
     const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
+    // [SEC-PII · COORD ruling] Without mover.contact.read there is no search by number (names only).
+    const contactSearch = holdsPersonContact(request, 'mover');
     const base: any = {
       user: {
         tenantId,
@@ -2216,7 +2232,7 @@ export async function adminRoutes(app: FastifyInstance) {
           OR: [
             { firstName: { contains: search, mode: 'insensitive' } },
             { lastName: { contains: search, mode: 'insensitive' } },
-            { phone: { contains: search } },
+            ...(contactSearch ? [{ phone: { contains: search } }] : []),
           ],
         }),
       },
@@ -2244,8 +2260,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
-    const result = paginatedResponse(withLive, total, { page, limit, skip });
-    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
+    // [SEC-PII] The mover's number masked unless the live grant holds mover.contact.read (search still matches the full number).
+    const rows = contactSearch ? withLive : withLive.map(maskMoverListRow);
+    const result = paginatedResponse(rows, total, { page, limit, skip });
+    const searchHint = contactSearch ? undefined : contactSearchHint(search, { email: false });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords, ...(searchHint ? { searchHint } : {}) } };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -2736,6 +2755,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/search', { preHandler: [adminGuard] }, async (request) => {
     const { q } = globalSearchQuerySchema.parse(request.query);
     const contains = { contains: q, mode: 'insensitive' as const };
+    // [SEC-PII · COORD ruling] Without user.contact.read there is no search for people by number or email (names only).
+    const contactSearch = holdsPersonContact(request, 'user');
+    const searchHint = contactSearch ? undefined : contactSearchHint(q, { email: true });
 
     const [orders, users, vendors] = await Promise.all([
       app.prisma.order.findMany({
@@ -2746,7 +2768,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       app.prisma.user.findMany({
         where: {
-          OR: [{ phone: contains }, { firstName: contains }, { lastName: contains }, { email: contains }],
+          OR: contactSearch
+            ? [{ phone: contains }, { firstName: contains }, { lastName: contains }, { email: contains }]
+            : [{ firstName: contains }, { lastName: contains }],
         },
         select: { id: true, firstName: true, lastName: true, phone: true, roles: true, status: true },
         take: 5,
@@ -2762,8 +2786,10 @@ export async function adminRoutes(app: FastifyInstance) {
       success: true,
       data: {
         orders: orders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
-        users,
+        // [SEC-PII] The people found, as GET /users lists them: masked unless the live grant holds user.contact.read.
+        users: contactSearch ? users : users.map(maskUserListRow),
         vendors,
+        ...(searchHint ? { searchHint } : {}),
       },
     };
   });
