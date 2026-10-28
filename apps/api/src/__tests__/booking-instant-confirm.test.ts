@@ -106,7 +106,8 @@ async function makeBusiness(name: string, extra: { serviceMode?: 'AT_BUSINESS' |
       ownerId: vo.id, name: `S3 ${name}`, slug: `s3-${name.toLowerCase()}-${nanoid(8).toLowerCase()}`, vendorType: 'SERVICE',
       phone: `${PHONE_PREFIX}${String(900 - vendorIds.length).padStart(3, '0')}`, addressLine1: '7 Chair Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8013, longitude: -58.1551, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
-      mmgNumber: '+5926001288', mmgPayUrl: 'https://pay.example.com/pay/s3-studio',
+      // MMG by the store's pay link only (no phone number fixture needed).
+      mmgPayUrl: 'https://pay.example.com/pay/s3-studio',
     },
   });
   vendorIds.push(v.id);
@@ -337,7 +338,7 @@ describe('[BOOK-S3] switch ON — a cash booking of an automatic listing is conf
     vi.stubEnv('STORE_MMG_PAY_LINK', '1');
     vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
     const slot = nextSlot();
-    const res = await book(await customer('Eli'), shop.instantId, slot, { paymentMethod: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER' });
+    const res = await book(await customer('Eli'), shop.instantId, slot, { paymentMethod: 'MOBILE_MONEY' });
     expect(res.statusCode, res.body).toBe(200);
     const id = res.json().data.order.id as string;
     expect((await orderRow(id)).status).toBe('PENDING');
