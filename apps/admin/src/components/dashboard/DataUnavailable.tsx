@@ -1,7 +1,6 @@
 'use client';
 
 import { AlertOctagon } from 'lucide-react';
-import { gyTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [A-06] ABSENCE OF DATA IS NOT EVIDENCE OF ABSENCE.
@@ -44,7 +43,7 @@ export function DataUnavailable({
         <p className="text-[var(--mc-muted-strong)]">{notAnAllClear}</p>
         {lastSuccessAt ? (
           <p className="mt-1 text-xs text-[var(--mc-muted-strong)]">
-            Last successful read {gyTime(lastSuccessAt)}.
+            Last successful read {new Date(lastSuccessAt).toLocaleTimeString()}.
           </p>
         ) : null}
       </div>

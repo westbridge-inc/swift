@@ -11,11 +11,10 @@ import { QueryFailed } from '@/components/mc/QueryFailed';
 import { PaymentDispute } from '@/components/mc/PaymentDispute';
 import { HeldDoorCash } from '@/components/mc/HeldDoorCash';
 import { useActionRunner } from '@/components/mc/useActionRunner';
-import { gyDateTime, gyTime } from '@/lib/dates';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 const clock = (iso: string | null | undefined) =>
-  iso ? gyTime(iso) : '';
+  iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
 
 /** [TAXI multi-stop 8/8] One stop of a ride, as the server reports it. */
 type RideStop = {
@@ -205,7 +204,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <p className="text-sm mc-text-warn font-medium">Refund owed — not yet settled</p>
           <p className="mt-1 text-sm mc-muted">
             GY${Number(o.refundOwedAmount ?? 0).toLocaleString()} recorded as owed on{' '}
-            {gyDateTime(o.refundOwedAt)}. Nothing here says the money moved.
+            {new Date(o.refundOwedAt).toLocaleString()}. Nothing here says the money moved.
           </p>
           <button
             type="button"
@@ -235,7 +234,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <p className="text-sm font-medium">Refund settled</p>
           <p className="mt-1 text-sm mc-muted">
             GY${Number(o.refundPaidAmount ?? 0).toLocaleString()} — reference {o.refundRef} —{' '}
-            {gyDateTime(o.refundSettledAt)}
+            {new Date(o.refundSettledAt).toLocaleString()}
           </p>
         </div>
       )}
@@ -309,7 +308,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                     <div className={`pb-4 ${i === 0 ? '' : 'opacity-80'}`}>
                       <p className="text-sm font-medium">{label('OrderStatus', ev.status)}</p>
                       {ev.note ? <p className="text-xs mc-muted mt-0.5">{ev.note}</p> : null}
-                      <p className="text-xs mc-muted mt-0.5">{gyDateTime(ev.createdAt)}</p>
+                      <p className="text-xs mc-muted mt-0.5">{new Date(ev.createdAt).toLocaleString()}</p>
                     </div>
                   </div>
                 ))}
@@ -394,12 +393,12 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <div className="space-y-1.5 text-sm">
               <div className="flex justify-between">
                 <span className="mc-muted">Placed</span>
-                <span>{o.placedAt ? gyDateTime(o.placedAt) : '—'}</span>
+                <span>{o.placedAt ? new Date(o.placedAt).toLocaleString() : '—'}</span>
               </div>
               {o.deliveredAt && (
                 <div className="flex justify-between">
                   <span className="mc-muted">Delivered</span>
-                  <span>{gyDateTime(o.deliveredAt)}</span>
+                  <span>{new Date(o.deliveredAt).toLocaleString()}</span>
                 </div>
               )}
               {o.fulfillment && (

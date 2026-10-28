@@ -6,7 +6,6 @@ import { LiveOrderFeed } from '@/components/dashboard/LiveOrderFeed';
 import { AlertsPanel } from '@/components/dashboard/AlertsPanel';
 import { useQuery } from '@tanstack/react-query';
 import { fetchDashboard, fetchWaiting } from '@/lib/api';
-import { gyLongDate } from '@/lib/dates';
 import { DataUnavailable, METRIC_UNAVAILABLE } from '@/components/dashboard/DataUnavailable';
 
 export default function DashboardPage() {
@@ -31,8 +30,12 @@ export default function DashboardPage() {
   return (
     <div className="mc-page space-y-5">
       <p className="mc-muted">
-        {/* [ADMIN-AUDIT S3-4] today in Guyana, whatever the browser's zone */}
-        {gyLongDate(Date.now())}
+        {new Date().toLocaleDateString('en-GB', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })}
       </p>
 
       {blind && (

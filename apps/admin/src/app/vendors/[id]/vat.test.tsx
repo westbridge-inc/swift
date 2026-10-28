@@ -57,8 +57,7 @@ describe('[O-5] a store’s VAT on its admin page', () => {
     renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-vat' })} />);
     const section = (await screen.findByRole('heading', { name: 'VAT' })).closest('section')!;
     expect(within(section).getByText('Sample Shop Ltd')).toBeTruthy();
-    // [REVIEW-F #2155 S4-4] The day it takes effect (a stored calendar day) in words, the day stored.
-    expect(within(section).getByText('1 Jan 2026')).toBeTruthy();
+    expect(within(section).getByText('2026-01-01')).toBeTruthy();
     await user.click(within(section).getByRole('button', { name: 'Withdraw VAT' }));
     const dialog = screen.getByRole('dialog', { name: 'Withdraw VAT for Sample Shop?' });
     await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);

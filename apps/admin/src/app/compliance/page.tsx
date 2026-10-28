@@ -3,10 +3,10 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
+import { maskedPhone } from '@/lib/review-center';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { humanise } from '@/lib/labels';
-import { gyDate, gyDateTime } from '@/lib/dates';
 
 /**
  * The liability shield. Three panels:
@@ -61,10 +61,12 @@ export default function CompliancePage() {
 
   const d = q.data?.data;
   const runs: any[] = d?.runs ?? [];
-  const violations: any[] = d?.openViolations ?? [];
-  const queue: any[] = d?.reviewQueue ?? [];
+  // [ADMIN-AUDIT S4-5] Phones masked like every other console list, whatever the server sends: nobody is called from here.
+  const masked = (row: any) => (row?.user ? { ...row, user: { ...row.user, phone: maskedPhone(row.user.phone ?? undefined) } } : row);
+  const violations: any[] = (d?.openViolations ?? []).map(masked);
+  const queue: any[] = (d?.reviewQueue ?? []).map(masked);
 
-  const when = (iso: string) => gyDateTime(iso);
+  const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
   return (
     <div className="mc-page">
@@ -159,7 +161,7 @@ export default function CompliancePage() {
                     {c.user?.firstName} {c.user?.lastName}
                   </span>
                   <span className="mc-muted mc-numbers text-xs">{c.user?.phone}</span>
-                  <span className="mc-badge mc-tone-warn">Due {gyDate(c.dueAt)}</span>
+                  <span className="mc-badge mc-tone-warn">Due {new Date(c.dueAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
                 </div>
                 <p className="mc-muted mt-1.5 text-xs">
                   Re-open their documents in Documents and confirm they are genuine and current — then decide here.

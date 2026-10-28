@@ -14,7 +14,6 @@ import {
 import { StatusPill } from '@/components/detail';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { QueryFailed } from '@/components/mc/QueryFailed';
-import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006] CUSTODY CASES — deliveries that went wrong AFTER pickup.
@@ -75,7 +74,7 @@ function CaseDetail({ id }: { id: string }) {
         <div><span className="mc-muted">Relay rider: </span>{k.relayRiderId ? person(k.relay) : '—'}</div>
         <div><span className="mc-muted">Payment: </span>{k.order?.paymentMethod}{k.order?.floatAttached > 0 ? ` · rider fronted ${gyd(k.order.floatAttached)}` : ''}</div>
         <div><span className="mc-muted">Owner: </span>{k.ownerUserId ?? 'nobody yet'}</div>
-        <div><span className="mc-muted">Next page at: </span>{open ? gyDateTime(k.deadlineAt) : '—'}{k.escalationCount ? ` · escalated ${k.escalationCount}×` : ''}</div>
+        <div><span className="mc-muted">Next page at: </span>{open ? new Date(k.deadlineAt).toLocaleString() : '—'}{k.escalationCount ? ` · escalated ${k.escalationCount}×` : ''}</div>
         <div><span className="mc-muted">Reported: </span>{words(k.reason)}{k.reasonNote ? ` — “${k.reasonNote}”` : ''}</div>
       </div>
       {k.order?.paymentMethod === 'MOBILE_MONEY' ? (
@@ -149,7 +148,7 @@ function CaseDetail({ id }: { id: string }) {
         <ol className="mc-muted space-y-1 text-xs">
           {(k.trail ?? []).map((t: any, i: number) => (
             <li key={i}>
-              {gyDateTime(t.createdAt)} — {words(String(t.action).replace(/^CUSTODY_CASE_/, ''))}
+              {new Date(t.createdAt).toLocaleString()} — {words(String(t.action).replace(/^CUSTODY_CASE_/, ''))}
               {t.changes?.to ? ` → ${words(t.changes.to)}` : ''}
               {t.changes?.actorRole ? ` (${words(t.changes.actorRole)})` : ''}
             </li>
@@ -198,7 +197,7 @@ export default function CustodyCasesPage() {
                   <StatusPill value={r.state} />
                   {r.overdue ? <span className="mc-badge mc-tone-bad">OVERDUE</span> : null}
                   <span className="font-semibold">Order {r.order?.orderNumber} · {r.order?.vendor?.name ?? 'courier'} · {words(r.reason)}</span>
-                  <span className="mc-muted mc-numbers ml-auto text-xs">{gyDateTime(r.createdAt)}</span>
+                  <span className="mc-muted mc-numbers ml-auto text-xs">{new Date(r.createdAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
                 </div>
               </button>
               <div className="mt-1">

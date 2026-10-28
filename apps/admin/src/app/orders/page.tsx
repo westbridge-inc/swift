@@ -15,7 +15,6 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { ListToolbar, Pager } from '@/components/mc/ListControls';
-import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-3] Orders.
@@ -44,7 +43,7 @@ interface OrderRow {
 }
 
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
-const when = (iso?: string | null) => (iso ? gyDateTime(iso) : '—');
+const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
 
 function payment(o: OrderRow): string {
   const method = label('PaymentMethod', o.paymentMethod);

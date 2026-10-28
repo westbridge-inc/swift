@@ -22,7 +22,6 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 import { billDateLabel } from '@/lib/bill-date';
-import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-2] Rider (delivery/courier) and driver (taxi) pages.
@@ -39,7 +38,7 @@ import { gyDate } from '@/lib/dates';
 const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'] as const;
 
 const when = (iso: string | null | undefined) =>
-  iso ? gyDate(iso) : '—';
+  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
 
 function Row({ label: name, children }: { label: string; children: React.ReactNode }) {

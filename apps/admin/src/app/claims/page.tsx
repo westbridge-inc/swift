@@ -7,7 +7,6 @@ import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fet
 import { StatusPill, gyd } from '@/components/detail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
-import { gyDateTime } from '@/lib/dates';
 import { label } from '@/lib/labels';
 import { useStatusFromUrl } from '@/lib/status-from-url';
 
@@ -146,7 +145,7 @@ export default function ClaimsPage() {
         {reserve?.entries?.length ? (
           <ul className="mt-3 text-xs mc-muted space-y-1">
             {reserve.entries.slice(0, 5).map((e: any) => (
-              <li key={e.id}>{gyDateTime(e.createdAt)} · {String(e.kind).toLowerCase()} · {gyd(e.amount)}{e.note ? ` · ${e.note}` : ''}</li>
+              <li key={e.id}>{new Date(e.createdAt).toLocaleString()} · {String(e.kind).toLowerCase()} · {gyd(e.amount)}{e.note ? ` · ${e.note}` : ''}</li>
             ))}
           </ul>
         ) : null}
@@ -189,7 +188,7 @@ export default function ClaimsPage() {
                     {f.replaceAll('_', ' ')}
                   </span>
                 ))}
-                <span className="text-xs mc-muted ml-auto">{gyDateTime(c.createdAt)}</span>
+                <span className="text-xs mc-muted ml-auto">{new Date(c.createdAt).toLocaleString()}</span>
               </div>
               <div className="flex flex-wrap items-center gap-4 mt-3 text-sm mc-muted">
                 <Link href={`/orders/${c.orderId}`} className="text-[var(--mc-accent)] font-semibold">

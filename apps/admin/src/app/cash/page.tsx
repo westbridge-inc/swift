@@ -15,7 +15,6 @@ import {
 } from '@/lib/cashRail';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
-import { gyDate, gyDateTime } from '@/lib/dates';
 
 /**
  * [SAN spec Part 4] The agent-cash rail.
@@ -217,7 +216,7 @@ function UnmatchedCard({ row }: { row: UnmatchedPayment }) {
         {row.payerMsisdn && <div><span className="block text-xs uppercase tracking-wide">Paid from</span><code>{row.payerMsisdn}</code></div>}
         {row.mmgTxnId && <div><span className="block text-xs uppercase tracking-wide">MMG txn</span><code>{row.mmgTxnId}</code></div>}
         {row.agentRef && <div><span className="block text-xs uppercase tracking-wide">Agent</span><code>{row.agentRef}</code></div>}
-        <div><span className="block text-xs uppercase tracking-wide">Paid at</span>{gyDateTime(row.paidAt)}</div>
+        <div><span className="block text-xs uppercase tracking-wide">Paid at</span>{new Date(row.paidAt).toLocaleString()}</div>
       </div>
 
       <div className="border-t border-[var(--mc-line)] pt-3 flex flex-col gap-2">
@@ -355,7 +354,7 @@ function CollectionRow({ row, onLogged }: { row: Record<string, unknown>; onLogg
         </span>
         {row['nextBillingDate'] ? (
           <span className="ml-auto text-xs mc-muted">
-            due {gyDate(String(row['nextBillingDate']))}
+            due {new Date(String(row['nextBillingDate'])).toLocaleDateString()}
           </span>
         ) : null}
       </div>
@@ -433,11 +432,11 @@ function Batches() {
         <tbody>
           {batches.map((b) => (
             <tr key={String(b['id'])} className="border-t border-[var(--mc-line)]">
-              <td className="px-4 py-2">{gyDate(String(b['periodStart']))}</td>
+              <td className="px-4 py-2">{new Date(String(b['periodStart'])).toLocaleDateString()}</td>
               <td className="px-4 py-2 tabular-nums">{gyd(Number(b['grossGyd'] ?? 0))}</td>
               <td className="px-4 py-2">{String(b['status'] ?? '')}</td>
               <td className="px-4 py-2">
-                {b['depositConfirmedAt'] ? gyDate(String(b['depositConfirmedAt'])) : '—'}
+                {b['depositConfirmedAt'] ? new Date(String(b['depositConfirmedAt'])).toLocaleDateString() : '—'}
               </td>
             </tr>
           ))}

@@ -15,7 +15,6 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { ListToolbar, Pager } from '@/components/mc/ListControls';
-import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-3] People.
@@ -31,7 +30,7 @@ import { gyDate } from '@/lib/dates';
 const asOptions = (group: 'UserRole' | 'UserStatus', all: string): Array<[string, string]> =>
   [['', all], ...Object.entries(ENUM_LABELS[group]).map(([v, w]): [string, string] => [v, w])];
 
-const when = (iso: string) => gyDate(iso);
+const when = (iso: string) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 
 export default function UsersPage() {
   const qc = useQueryClient();

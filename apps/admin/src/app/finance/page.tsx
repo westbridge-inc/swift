@@ -12,7 +12,6 @@ import {
 } from '@/lib/api';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
-import { gyCalendarDay, gyDate } from '@/lib/dates';
 
 /**
  * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
@@ -43,8 +42,10 @@ const gyd = (n: unknown) => {
  * Anything that is not a `YYYY-MM-DD` renders as an em-dash: a wrong date is a
  * lie, a missing one is only missing.
  */
-// [ADMIN-AUDIT S3-4] lib/dates gyCalendarDay: the same UTC anchor, now day first with the month in words.
-const gyDay = (ymd: unknown) => gyCalendarDay(ymd);
+const gyDay = (ymd: unknown) =>
+  typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd)
+    ? new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })
+    : '—';
 
 const METHOD_LABELS: Record<string, string> = {
   CASH: 'Cash',
@@ -157,7 +158,7 @@ function MmgSection() {
                 <span className={`px-2 py-0.5 rounded-full text-xs shrink-0 ${LEDGER_STATUS[r.status].cls}`}>
                   {LEDGER_STATUS[r.status].label}
                 </span>
-                <span className="mc-muted text-xs shrink-0">{gyDate(r.createdAt)}</span>
+                <span className="mc-muted text-xs shrink-0">{new Date(r.createdAt).toLocaleDateString()}</span>
               </div>
             ))}
           </div>
@@ -206,8 +207,8 @@ function SettlementsSection() {
             <div key={s.id} className="flex items-center gap-3 p-3 rounded-lg bg-[var(--mc-surface)] text-sm">
               <span className="font-medium">{s.vendor?.name ?? 'Vendor'}</span>
               <span className="mc-muted text-xs">
-                {s.periodStart ? gyDate(s.periodStart) : ''} –{' '}
-                {s.periodEnd ? gyDate(s.periodEnd) : ''}
+                {s.periodStart ? new Date(s.periodStart).toLocaleDateString() : ''} –{' '}
+                {s.periodEnd ? new Date(s.periodEnd).toLocaleDateString() : ''}
               </span>
               <span className="ml-auto font-semibold">{gyd(s.netSales ?? s.totalBase ?? s.amount)}</span>
               <button

@@ -20,7 +20,6 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { humanise } from '@/lib/labels';
-import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // The taxonomy, and the two decisions nobody could make.
@@ -214,7 +213,7 @@ export default function DiscoveryPage() {
                   <div className="min-w-0">
                     <p className="mc-card-title">{r.proposedName}</p>
                     <p className="mc-muted text-xs">
-                      {r.vendorName ?? 'Vendor no longer on Swift'} · {gyDate(r.createdAt)}
+                      {r.vendorName ?? 'Vendor no longer on Swift'} · {new Date(r.createdAt).toLocaleDateString('en-GB')}
                     </p>
                     {r.note && <p className="mt-2">“{r.note}”</p>}
                     {r.resolutionNote && <p className="mc-muted mt-2 text-xs">Resolution: {r.resolutionNote}</p>}

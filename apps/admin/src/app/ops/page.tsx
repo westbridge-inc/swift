@@ -6,7 +6,6 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchLiveOps } from '@/lib/api';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { StatusBadge } from '@/components/mc/StatusBadge';
-import { gyTime } from '@/lib/dates';
 
 // Leaflet touches `window` — client-only.
 const OpsMap = dynamic(() => import('@/components/ops/OpsMap'), {
@@ -49,7 +48,7 @@ export default function OpsPage() {
           <span className="mc-numbers font-semibold text-[var(--mc-ink)]">{unknown ? '—' : inFlight}</span> orders in flight
         </span>
         <span className="mc-muted ml-auto text-xs">
-          Refreshes every 15 seconds{dataUpdatedAt && !isError ? ` · updated ${gyTime(dataUpdatedAt)}` : ''}
+          Refreshes every 15 seconds{dataUpdatedAt && !isError ? ` · updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ''}
         </span>
       </div>
 

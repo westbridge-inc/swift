@@ -6,7 +6,6 @@ import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/l
 import { Modal } from '@/components/Modal';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
-import { gyCalendarDay, gyDate } from '@/lib/dates';
 
 const EMPTY: CreatePromoInput = {
   code: '',
@@ -47,7 +46,7 @@ export default function PromosPage() {
       body: (
         <p>
           {body.discountType === 'PERCENTAGE' ? `${body.discountValue}% off` : body.discountType === 'FIXED_AMOUNT' ? `GY$${body.discountValue.toLocaleString()} off` : 'Free delivery'}
-          , valid {gyCalendarDay(body.validFrom)} to {gyCalendarDay(body.validUntil)}{body.maxUses ? `, at most ${body.maxUses} uses` : ''}.
+          , valid {body.validFrom} to {body.validUntil}{body.maxUses ? `, at most ${body.maxUses} uses` : ''}.
         </p>
       ),
       confirmLabel: 'Create promo code',
@@ -112,7 +111,7 @@ export default function PromosPage() {
                   </td>
                   <td className="p-4">{promo.currentUses} / {promo.maxUses || '∞'}</td>
                   <td className="p-4 text-right mc-muted">
-                    {promo.validUntil ? gyDate(promo.validUntil) : 'Never'}
+                    {promo.validUntil ? new Date(promo.validUntil).toLocaleDateString() : 'Never'}
                   </td>
                 </tr>
               ))

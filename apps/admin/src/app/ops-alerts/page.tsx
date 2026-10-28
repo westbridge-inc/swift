@@ -15,7 +15,6 @@ import { succeeded, type Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
-import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [DRILL-STORM · S-19 · GUARDRAILS §3] OPS ALERTS — where a page is acknowledged.
@@ -35,7 +34,7 @@ import { gyDateTime } from '@/lib/dates';
 // ---------------------------------------------------------------------------
 
 const KIND_WORDS: Record<OpsAlertKind, string> = { SOS: 'SOS', DRILL: 'Drill', PLATFORM: 'Operations page' };
-const when = (iso: string) => gyDateTime(iso);
+const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
 function reach(recipients: OpsAlertRow['recipients']): string {
   const delivered = recipients.filter((r) => r.deliveredAt).length;

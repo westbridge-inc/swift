@@ -9,7 +9,6 @@ import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
-import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] Stores waiting for a VAT decision, oldest certificate first.
@@ -22,6 +21,7 @@ import { gyDate } from '@/lib/dates';
 // ---------------------------------------------------------------------------
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const day = (iso: string) => iso.slice(0, 10);
 /** The certificate's document status, in words (VerificationDocumentStatus). */
 const CERTIFICATE_WORDS: Readonly<Record<string, string>> = {
   PENDING: 'not decided yet',
@@ -105,7 +105,7 @@ export default function StoreVatPage() {
                 <Link href={`/vendors/${row.vendorId}`} className="font-semibold underline">{row.name}</Link>
                 <span className="text-sm">Number the store gave: <span className="mc-numbers">{row.vatRegistrationNumber ?? '—'}</span></span>
                 <span className="text-sm">
-                  {row.certificate ? `Certificate sent ${gyDate(row.certificate.createdAt)} (${CERTIFICATE_WORDS[row.certificate.status] ?? 'in a state this page does not know'})` : 'No certificate sent yet'}
+                  {row.certificate ? `Certificate sent ${day(row.certificate.createdAt)} (${CERTIFICATE_WORDS[row.certificate.status] ?? 'in a state this page does not know'})` : 'No certificate sent yet'}
                 </span>
               </div>
               {row.certificate && openId === row.vendorId && (

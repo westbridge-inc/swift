@@ -10,7 +10,6 @@ import { EVIDENCE_REFERENCE_MAX, evidenceReferenceProblem } from '@swift/types/s
 import { useConfirmationRequestLocks, type ConfirmationRequestLocks } from '@/lib/confirmation-request-locks';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { MutationError } from '@/components/MutationError';
-import { gyDateTime } from '@/lib/dates';
 
 const ACTION = '/billing/confirmations/:id/resolve';
 const QUEUE_KEY = ['payment-confirmations'] as const;
@@ -42,7 +41,7 @@ const codeWords = (code: string) => code.split('_').filter(Boolean).map((word, i
 const reasonWords = (code: string) => REASON_WORDS[code] ?? (code.startsWith(RETURN_PREFIX)
   ? `A suspended partner's payment paid the week that fell due as it stood (${RETURN_WHY[code.slice(RETURN_PREFIX.length)] ?? codeWords(code.slice(RETURN_PREFIX.length)).toLowerCase()}): the days they were suspended may have been billed`
   : /^[A-Z0-9_]+$/.test(code) ? codeWords(code) : code);
-const when = (date: string) => gyDateTime(date);
+const when = (date: string) => new Date(date).toLocaleString('en-GB', { timeZone: 'America/Guyana' });
 const grace = (ms: number) => { const minutes = Math.max(0, Math.floor(ms / 60_000)); return `${Math.floor(minutes / 60)} h ${minutes % 60} min`; };
 function activeApproval(row: PaymentConfirmation, approvals: ApprovalRow[]) {
   return approvals.find((approval) => {

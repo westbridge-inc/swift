@@ -14,7 +14,6 @@ import { MutationError } from '@/components/MutationError';
 import { useAskReason } from '@/components/mc/ReasonDialog';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { humanise, label } from '@/lib/labels';
-import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // STORE-001 — the reviewer's side of moderation.
@@ -64,7 +63,7 @@ function targetSummary(report: any): string {
   return report.targetId;
 }
 
-const when = (iso: string) => gyDateTime(iso);
+const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 export default function ModerationPage() {
   const queryClient = useQueryClient();
