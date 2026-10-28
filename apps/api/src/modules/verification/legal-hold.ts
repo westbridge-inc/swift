@@ -17,6 +17,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { isUuid } from '../../utils/uuid';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { docLegalHoldGauge } from '../../plugins/observability';
+import { assertNotRecused } from './recusal';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -57,6 +58,9 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
       SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE /* verification-document-purge-authority */
     `;
     if (!locked[0]) throw new NotFoundError('User', input.subjectUserId);
+    // [SEC-PII · money/trust scan 28 Oct 2026] Recused like every document decision (DOC-1 §8.6): the person
+    // placing a hold is never its subject nor in the subject's identity cluster.
+    await assertNotRecused(tx, input.placedBy, input.subjectUserId);
     const candidates = await tx.verificationDocument.findMany({
       where: {
         userId: input.subjectUserId, purgedAt: null, legalHoldId: null,
@@ -94,6 +98,9 @@ export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId:
     if (!hold) throw new NotFoundError('DocLegalHold', input.holdId);
     if (hold.releasedAt) throw new AppError(409, 'HOLD_ALREADY_RELEASED', 'This hold was already released');
     await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${hold.subjectUserId} FOR UPDATE /* verification-document-purge-authority */`;
+    // [SEC-PII · money/trust scan 28 Oct 2026] Releasing makes held evidence erasable again: never by its subject
+    // or anyone in the subject's identity cluster (the same recusal as every document decision).
+    await assertNotRecused(tx, input.releasedBy, hold.subjectUserId);
     const released = await tx.docLegalHold.update({
       where: { id: hold.id },
       data: { releasedAt: now, releasedBy: input.releasedBy, releaseReason: input.reason },
