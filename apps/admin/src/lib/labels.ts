@@ -76,6 +76,7 @@ export const ENUM_LABELS = {
     DELIVERY_RIDER: 'Delivery rider', COURIER_RIDER: 'Courier rider', TAXI_DRIVER: 'Taxi driver',
     RESTAURANT: 'Restaurant', SUPERMARKET: 'Supermarket', RETAIL_STORE: 'Retail store',
     SERVICE_PROVIDER: 'Service provider',
+    INDEPENDENT_PRO: 'Independent pro',
   },
   BillingEventType: {
     CHARGE_ATTEMPT: 'Weekly fee charge started', CHARGE_ATTEMPT_RECLAIMED: 'Stalled charge restarted',

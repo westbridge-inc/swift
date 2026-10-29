@@ -485,8 +485,13 @@ describe('Waivers, reminders, tier recalculation', () => {
   it('sends exactly one due-tomorrow reminder per period', async () => {
     // A corrupt legacy subscription cannot be notified, but it also must not
     // poison the batch or consume a REMINDER idempotency key.
+    // [BILL-PRO PR1] A subscription is born with exactly one owner, so the orphan is made the way
+    // it really arises: born to a rider, then its owner column set to NULL (the FK's ON DELETE SET NULL).
+    const gone = await makeUserWithSession(['MOVER'], 'MOVER');
+    const goneRider = await app.prisma.rider.create({ data: { userId: gone.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
     const orphan = await app.prisma.subscription.create({
       data: {
+        riderId: goneRider.id,
         type: 'DELIVERY_RIDER',
         status: 'ACTIVE',
         weeklyRate: 12000,
@@ -497,6 +502,7 @@ describe('Waivers, reminders, tier recalculation', () => {
       },
     });
     createdSubIds.push(orphan.id);
+    await app.prisma.subscription.update({ where: { id: orphan.id }, data: { riderId: null } });
 
     const { subId } = await makeMoverWithCardSub({
       token: 'tok_good_reminder',
