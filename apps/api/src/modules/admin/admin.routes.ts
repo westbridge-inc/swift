@@ -113,7 +113,7 @@ import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, stor
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
-import { moverUserOf, subscriptionTenantWhere } from '../subscription/subscription-owner';
+import { moverUserOf, PAYER_INCLUDE, subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -4371,11 +4371,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const subscription = await app.prisma.subscription.findFirst({
       where: { id, ...tenantScope },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
     });
     if (!subscription) throw new NotFoundError('Subscription', id);
 

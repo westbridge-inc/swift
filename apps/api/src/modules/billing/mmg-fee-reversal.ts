@@ -11,7 +11,7 @@ import { verifiedCheckoutCredit } from './confirmation-finance';
 import type { BillingService } from './billing.service';
 import { postLedger, returnedNotBookedPostings } from './ledger';
 import { amountMinorOf, decideAfterLookup, returnedWhilePaymentNotFound, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
-import { payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { lookupProof, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS } from './mmg-reversal-proof';
 
 // ---------------------------------------------------------------------------
@@ -882,10 +882,7 @@ export class MmgFeeReversalService {
         this.deps.prisma.mmgCheckoutIntent.findUnique({ where: { id: row.checkoutId }, select: { confirmedAt: true, createdAt: true } }),
         this.deps.prisma.subscription.findUnique({
           where: { id: row.subscriptionId },
-          select: {
-            rider: { select: { userId: true } }, driver: { select: { userId: true } },
-            vendor: { select: { id: true, owner: { select: { userId: true } } } },
-          },
+          select: PAYER_INCLUDE,
         }),
       ]);
       const userId = payerUserIdOf(sub);
