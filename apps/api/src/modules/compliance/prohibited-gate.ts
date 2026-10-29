@@ -400,12 +400,14 @@ export async function unhideRestocked(db: Db, itemIds: string | readonly string[
   // in a transaction (the stock adjust route, a cancelled order, a picking restock, a till sync) is joined, not left.
   // Rows are locked in id order, as every path that moves several items locks them. [DS1267 S4]
   const judgeAndWrite = async (tx: Prisma.TransactionClient): Promise<void> => {
-    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "items" WHERE id IN (${Prisma.join(ids)}) AND "autoHiddenAt" IS NOT NULL AND "stockQuantity" > 0 ORDER BY id FOR UPDATE`;
+    // [POS-SYNC · REVIEW-F S3-1] An item Swift does not count (stock null) is never empty: one a till file hid
+    // comes back when a file has it for sale again. The engine never hides an uncounted item at zero.
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "items" WHERE id IN (${Prisma.join(ids)}) AND "autoHiddenAt" IS NOT NULL AND ("stockQuantity" > 0 OR "stockQuantity" IS NULL) ORDER BY id FOR UPDATE`;
     if (locked.length === 0) return;
     const checks = await catalogueChecksFor(tx, locked.map((row) => row.id));
     const allowed = locked.map((row) => row.id).filter((id) => checks.get(id)?.state !== 'BANNED');
     if (allowed.length === 0) return;
-    await tx.item.updateMany({ where: { id: { in: allowed }, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } }, data: { isAvailable: true, autoHiddenAt: null } });
+    await tx.item.updateMany({ where: { id: { in: allowed }, autoHiddenAt: { not: null }, OR: [{ stockQuantity: { gt: 0 } }, { stockQuantity: null }] }, data: { isAvailable: true, autoHiddenAt: null } });
   };
   // A transaction's own client has no $transaction; the root client opens one.
   if ('$transaction' in db) await db.$transaction(judgeAndWrite);

@@ -5,6 +5,7 @@ import { catalogueChecksFor, unhideRestocked } from '../compliance/prohibited-ga
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { OrderService } from '../order/order.service';
 import { applyStockMovements, recordOpeningBalances } from './stock';
+import { holdTillSyncLock } from './till-sync-lock';
 
 // ---------------------------------------------------------------------------
 // [POS-SYNC] Re-uploading a till export updates the store.
@@ -38,9 +39,12 @@ import { applyStockMovements, recordOpeningBalances } from './stock';
 //    Swift does not count stays uncounted (the till's figure is shown, not
 //    applied).
 //  - sold out: the inventory engine's own edges — zero hides an item that is
-//    switched on; a restock brings back only an item the ENGINE hid. The
-//    owner's own "off" is never undone. A till that says "not for sale" switches
-//    the item off the way the owner would.
+//    switched on; a restock brings back only an item the SYSTEM hid. The
+//    owner's own "off" is never undone. A till that says "not for sale", and
+//    "mark them sold out" for items missing from the file, hide an item the
+//    same way the engine does (sold out, not switched off): a later file that
+//    has it for sale, with stock if Swift counts it, brings it back.
+//    [REVIEW-F S3-1]
 //  - prices: applied and listed old -> new. Orders already placed keep the
 //    prices they were placed at (order lines are snapshots); carts hold no
 //    price, so an open cart shows the new price when it is next read.
@@ -281,11 +285,12 @@ export function buildSyncPlan(input: {
     for (const item of owners) {
       // An appointment listing is never the till's, so it is never "missing" from a till file.
       if (isAppointment(item)) continue;
-      // An item the ENGINE hid at zero is switched off too: the store chose
-      // "sold out", and a later restock must not bring it back on its own.
+      // [REVIEW-F S3-1] "Mark them sold out" is sold out, as the engine's own
+      // hide is: an item on sale is hidden and comes back when stock returns;
+      // one already off (sold out, or switched off by the store) is left as it is.
       const action = missingPolicy === 'LEAVE'
         ? 'LEAVE'
-        : item.isAvailable || item.autoHiddenAt !== null ? 'SWITCH_OFF' : 'ALREADY_OFF';
+        : item.isAvailable ? 'SWITCH_OFF' : 'ALREADY_OFF';
       if (action === 'SWITCH_OFF') switchOffIds.push(item.id);
       missing.push({ itemId: item.id, sku: item.sku ?? '', name: item.name, action });
     }
@@ -300,7 +305,7 @@ export function buildSyncPlan(input: {
   }
 
   const digest = createHash('sha256').update(JSON.stringify({
-    v: 2,
+    v: 3,
     vendorId: input.vendorId,
     contentHash: input.contentHash,
     missingPolicy,
@@ -311,6 +316,8 @@ export function buildSyncPlan(input: {
     attention: needsAttention.map((n) => n.row).sort((a, b) => a - b),
     // What happens to each missing item, exactly as the preview said it.
     missing: missing.map((m) => [m.itemId, m.action]).sort(),
+    // [REVIEW-F S3-1] Which items come back on sale, and which the till keeps off.
+    back: changes.filter((c) => c.soldOut === 'BACK_ON_SALE').map((c) => c.itemId).sort(),
   })).digest('hex');
 
   const count = (effect: SoldOutEffect) => changes.filter((c) => c.soldOut === effect).length;
@@ -362,15 +369,21 @@ function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
   const currentPrice = Number(item.basePrice);
   const price = m.price !== null && m.price !== currentPrice ? { from: currentPrice, to: m.price } : null;
 
-  // Sold out, by the engine's own edges (see applyAvailabilityEdges).
+  // Sold out, by the engine's own edges. [REVIEW-F S3-1] An item the SYSTEM
+  // hid (at zero, by a till's "not for sale", or "mark them sold out") comes
+  // back when this file has it for sale with stock (any, if Swift does not
+  // count it); one the store switched off itself stays off.
   let soldOut: SoldOutEffect | null = null;
   const after = stock ? stock.to! : from;
-  if (m.tillOff && (item.isAvailable || item.autoHiddenAt !== null)) {
-    soldOut = 'SWITCHED_OFF_BY_TILL';
+  const hiddenBySystem = !item.isAvailable && item.autoHiddenAt !== null;
+  if (m.tillOff) {
+    if (item.isAvailable) soldOut = 'SWITCHED_OFF_BY_TILL';
   } else if (stock && after !== null && after <= 0 && item.isAvailable) {
     soldOut = 'BECOMES_SOLD_OUT';
+  } else if (hiddenBySystem && (after === null || after > 0)) {
+    soldOut = 'BACK_ON_SALE';
   } else if (stock && after !== null && after > 0 && !item.isAvailable) {
-    soldOut = item.autoHiddenAt !== null ? 'BACK_ON_SALE' : 'STAYS_SWITCHED_OFF';
+    soldOut = 'STAYS_SWITCHED_OFF';
   }
   if (soldOut === 'STAYS_SWITCHED_OFF') notes.push('You switched this item off on Swift, so it stays off. Switch it back on in Swift when you want to sell it.');
 
@@ -492,8 +505,9 @@ const AUDIT_PRICE_LINES = 200;
  * whatever the size of the file: one UPDATE for the prices, the single
  * writer's batch (one UPDATE + one INSERT) for the counts, one UPDATE per
  * sold-out rule, one INSERT for new items (+ their opening balances). A
- * checkout that does meet the lock waits a bounded time and is told the store
- * is updating (order.service: STORE_BUSY), never a server error.
+ * checkout that meets the sync is told at once that the store is updating its
+ * menu (till-sync-lock: it shares the key the sync holds; STORE_BUSY), never a
+ * server error; checkouts never refuse each other.
  */
 export async function confirmSync(
   db: { $transaction: <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, opts?: { timeout?: number; maxWait?: number }) => Promise<T> },
@@ -503,6 +517,9 @@ export async function confirmSync(
     throw new AppError(409, 'PREVIEW_STALE', 'This is not the file you previewed. Preview it again before you apply it.');
   }
   const run = () => db.$transaction(async (tx) => {
+    // [REVIEW-M S3-2] The till-sync key first: a checkout arriving now is told
+    // the store is updating its menu; checkouts already running finish first.
+    await holdTillSyncLock(tx, input.vendorId);
     await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${input.vendorId} FOR UPDATE`;
 
     const earlier = await tx.posImport.findUnique({ where: { id: input.uploadId } });
@@ -558,27 +575,32 @@ export async function confirmSync(
     });
     const movedIds = [...moved.keys()];
     if (movedIds.length > 0) {
-      // Zero hides an item that is switched on (marked as the engine's hide)...
+      // Zero hides an item that is switched on (marked as the engine's hide).
       await tx.item.updateMany({
         where: { id: { in: movedIds }, vendorId: input.vendorId, stockQuantity: { lte: 0 }, isAvailable: true },
         data: { isAvailable: false, autoHiddenAt: now },
       });
-      // ...and a restock brings back only an item the engine hid. The owner's
-      // own "off" carries no marker, so it is never undone; an item Swift does
-      // not allow never comes back (the one guard every restock uses).
-      await unhideRestocked(tx, movedIds);
     }
+    // A restock, or a file that has it for sale again, brings back only an item
+    // the system hid. The owner's own "off" carries no marker, so it is never
+    // undone; an item the till still says is not for sale stays off; an item
+    // Swift does not allow never comes back (the one guard every restock uses).
+    const tillKeepsOff = new Set(plan.matched.filter((m) => m.tillOff).map((m) => m.item.id));
+    const comeBack = [...new Set([...movedIds, ...changes.filter((c) => c.soldOut === 'BACK_ON_SALE').map((c) => c.itemId)])]
+      .filter((id) => !tillKeepsOff.has(id));
+    await unhideRestocked(tx, comeBack);
 
-    // The till says "not for sale", and items missing from the file when the
-    // store chose "mark them sold out": switched off the way the owner would.
-    const switchOff = [
+    // [REVIEW-F S3-1] The till says "not for sale", and items missing from the
+    // file when the store chose "mark them sold out": hidden as SOLD OUT (the
+    // system's marker), so a later file with them for sale brings them back.
+    const soldOutNow = [
       ...changes.filter((c) => c.soldOut === 'SWITCHED_OFF_BY_TILL').map((c) => c.itemId),
       ...plan.switchOffIds,
     ];
-    if (switchOff.length > 0) {
+    if (soldOutNow.length > 0) {
       await tx.item.updateMany({
-        where: { id: { in: switchOff }, vendorId: input.vendorId },
-        data: { isAvailable: false, autoHiddenAt: null },
+        where: { id: { in: soldOutNow }, vendorId: input.vendorId, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: now },
       });
     }
 

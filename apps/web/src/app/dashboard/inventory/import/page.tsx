@@ -39,7 +39,7 @@ const SOLD_OUT_WORDS: Record<NonNullable<SyncChange['soldOut']>, string> = {
   BECOMES_SOLD_OUT: 'Will show as sold out',
   BACK_ON_SALE: 'Back on sale',
   STAYS_SWITCHED_OFF: 'Stays off (you switched it off)',
-  SWITCHED_OFF_BY_TILL: 'Will be switched off (your till says not for sale)',
+  SWITCHED_OFF_BY_TILL: 'Will show as sold out (your till says not for sale)',
 };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
@@ -363,6 +363,7 @@ export default function ImportPage() {
         <ul className="mt-1 list-disc space-y-1 pl-5">
           <li>Loyverse and QuickBooks item lists are recognised by their own columns. Other files are read by their column names, and you can change any choice.</li>
           <li>Stock changes are saved in your stock history as &ldquo;till export&rdquo;. An item at zero shows as sold out, and comes back when stock returns, unless you switched it off yourself.</li>
+          <li>An item your till says is not for sale, or one you mark sold out because it is not in the file, shows as sold out too. It comes back when a later file has it for sale, with stock if Swift counts it.</li>
           <li>A price, count or code Swift cannot read is never guessed. That row is listed for you to fix.</li>
           <li>The same file cannot be applied twice, so items sold since then are never counted back in.</li>
         </ul>

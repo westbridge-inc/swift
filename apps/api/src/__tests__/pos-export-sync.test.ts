@@ -15,6 +15,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { reconcileItemStock, applyStockMovement, applyStockMovements } from '../modules/inventory/stock';
 import { OrderService } from '../modules/order/order.service';
 import { prohibitedStoreCategory, unhideRestocked } from '../modules/compliance/prohibited-gate';
+import { holdTillSyncLock } from '../modules/inventory/till-sync-lock';
 import ExcelJS from 'exceljs';
 import type { Server } from 'socket.io';
 import { rateLimitKey } from '../utils/rate-limit-key';
@@ -498,7 +499,8 @@ describe('items missing from the file', () => {
     expect(result.missing).toEqual([expect.objectContaining({ itemId: gone.id, action: 'SWITCH_OFF' })]);
     const goneAfter = await itemOf(gone.id);
     expect(goneAfter.isAvailable).toBe(false);
-    expect(goneAfter.autoHiddenAt).toBeNull(); // the store's own choice: a restock does not undo it
+    // [REVIEW-F S3-1] Sold out, as the store chose: the system's marker, so stock brings it back.
+    expect(goneAfter.autoHiddenAt).not.toBeNull();
     expect(goneAfter.stockQuantity).toBe(6); // no count was given, so none was invented
     expect((await movementsOf(gone.id)).filter((m) => m.reason === 'POS_IMPORT')).toHaveLength(0);
     expect((await itemOf(noSku.id)).isAvailable).toBe(true); // never matched, never touched
@@ -788,7 +790,7 @@ describe('till export profiles (F1): cost is never the price', () => {
     expect(wrong.json().error.code).toBe('UNKNOWN_COLUMN');
   });
 
-  it('a Loyverse re-upload end to end: price and count from the store columns, "not for sale" switches off, an uncounted till item is left alone', async () => {
+  it('a Loyverse re-upload end to end: price and count from the store columns, "not for sale" shows it as sold out, an uncounted till item is left alone', async () => {
     const store = await makeStore();
     const rice = await makeItem(store, '10001', 50, 3400);
     const friedRice = await makeItem(store, '10002', 5, 1800);
@@ -810,7 +812,8 @@ describe('till export profiles (F1): cost is never the price', () => {
     expect(fried.isAvailable).toBe(true);
     const off = await itemOf(biscuit.id);
     expect(off.isAvailable).toBe(false);
-    expect(off.autoHiddenAt).toBeNull();
+    // [REVIEW-F S3-1] The till's "not for sale" is sold out, not the store's own switch.
+    expect(off.autoHiddenAt).not.toBeNull();
   });
 });
 
@@ -902,9 +905,10 @@ describe('availability: a big file never turns a checkout into a server error (S
     const customer = await makeCustomer();
     expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: item.id, quantity: 1 })).statusCode).toBe(201);
 
-    // Hold the store's lock the way an apply does, for longer than checkout may wait.
+    // Hold the store's till-sync key and row the way an apply does.
     let releaseAt = 0;
     const holder = app.prisma.$transaction(async (tx) => {
+      await holdTillSyncLock(tx, store.vendorId);
       await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${store.vendorId} FOR UPDATE`;
       await sleep(6_000);
       releaseAt = Date.now();
@@ -1136,20 +1140,20 @@ describe('smaller edges from the review (S4)', () => {
     expect(res.json().error.code).toBe('PREVIEW_STALE');
   });
 
-  it('"mark them sold out" also covers an item the engine hid at zero, so a later restock does not bring it back', async () => {
+  it('"mark them sold out" leaves an item already sold out as it is, and a later restock brings it back (REVIEW-F S3-1)', async () => {
     const store = await makeStore();
     await makeItem(store, 'KEEP-2', 5, 100);
     const hidden = await makeItem(store, 'HID-2', 0, 100, { isAvailable: false });
     await app.prisma.item.update({ where: { id: hidden.id }, data: { autoHiddenAt: new Date() } });
     const { result } = await syncOk(store, csvOf(row('KEEP-2', 'k', '100', '5')), 'SOLD_OUT');
-    expect(result.missing).toEqual([expect.objectContaining({ itemId: hidden.id, action: 'SWITCH_OFF' })]);
-    expect((await itemOf(hidden.id)).autoHiddenAt).toBeNull();
+    expect(result.missing).toEqual([expect.objectContaining({ itemId: hidden.id, action: 'ALREADY_OFF' })]);
+    expect((await itemOf(hidden.id)).autoHiddenAt).not.toBeNull();
     const restock = await app.inject({
       method: 'POST', url: `/api/v1/vendor/items/${hidden.id}/adjust`, payload: { delta: 5, reason: 'RECEIVED' },
       headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
     });
     expect(restock.statusCode, restock.body).toBe(200);
-    expect((await itemOf(hidden.id)).isAvailable).toBe(false);
+    expect((await itemOf(hidden.id)).isAvailable).toBe(true);
   });
 
   it('an Excel code typed as a zero-padded number keeps its leading zeros', async () => {
@@ -1392,4 +1396,137 @@ describe('what a till file never touches (today’s rules)', () => {
     expect(applied.statusCode, applied.body).toBe(409);
     expect(applied.json().error.code).toBe('PROHIBITED_ITEM');
   });
+});
+
+// ---------------------------------------------------------------------------
+// [REVIEW-F S3-1] A till's "not for sale" and "mark them sold out" are SOLD
+// OUT, not the store's own switch: a later file that has the item for sale
+// brings it back, and the store is never told it switched it off itself.
+// [REVIEW-M S3-1/S3-2] Only a till sync makes a checkout "try again": ordinary
+// lock waits in a checkout (another checkout, a shared promo code) still wait.
+// ---------------------------------------------------------------------------
+const forSaleRow = (sku: string, name: string, price: string, stock: string, forSale: 'true' | 'false' | '') =>
+  ['Groceries', name, '', price, sku, '', stock, forSale, '', ''].join(',');
+
+describe('sold out by a file comes back with the file (REVIEW-F S3-1)', () => {
+  it('an item the till marked not for sale comes back when a later file has it for sale, and the store is never blamed', async () => {
+    const store = await makeStore();
+    const biscuit = await makeItem(store, 'TOF-1', 12, 450, { name: 'Biscuit' });
+    const tea = await makeItem(store, 'TOF-2', null, 300, { name: 'Tea (not counted)' });
+    await syncOk(store, csvOf(forSaleRow('TOF-1', 'Biscuit', '450', '12', 'false'), forSaleRow('TOF-2', 'Tea', '300', '', 'false')));
+    expect((await itemOf(biscuit.id)).isAvailable).toBe(false);
+    expect((await itemOf(tea.id)).isAvailable).toBe(false);
+
+    // Still not for sale, with a new count: it stays off (the till keeps it off), never "you switched it off".
+    const still = await previewOk(store, csvOf(forSaleRow('TOF-1', 'Biscuit', '450', '20', 'false'), forSaleRow('TOF-2', 'Tea', '300', '', 'false')));
+    expect(still.changes.find((c) => c.itemId === biscuit.id)?.soldOut ?? null).toBeNull();
+    expect(JSON.stringify(still.changes)).not.toContain('You switched this item off');
+    expect((await confirm(store, csvOf(forSaleRow('TOF-1', 'Biscuit', '450', '20', 'false'), forSaleRow('TOF-2', 'Tea', '300', '', 'false')), still)).statusCode).toBe(200);
+    expect((await itemOf(biscuit.id)).isAvailable).toBe(false);
+
+    // For sale again: both come back, the counted one with its stock, the uncounted one as it is.
+    const again = csvOf(forSaleRow('TOF-1', 'Biscuit', '450', '20', 'true'), forSaleRow('TOF-2', 'Tea', '300', '', ''));
+    const p = await previewOk(store, again);
+    expect(p.changes.map((c) => [c.itemId, c.soldOut]).sort()).toEqual([[biscuit.id, 'BACK_ON_SALE'], [tea.id, 'BACK_ON_SALE']].sort());
+    expect(JSON.stringify(p.changes)).not.toContain('You switched this item off');
+    expect((await confirm(store, again, p)).statusCode).toBe(200);
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 20 });
+    expect(await itemOf(tea.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: null });
+  });
+
+  it('"mark them sold out" for an item missing from the file: a later file with stock brings it back', async () => {
+    const store = await makeStore();
+    await makeItem(store, 'MSO-1', 5, 100);
+    const gone = await makeItem(store, 'MSO-2', 6, 100);
+    await syncOk(store, csvOf(row('MSO-1', 'k', '100', '5')), 'SOLD_OUT');
+    expect((await itemOf(gone.id)).isAvailable).toBe(false);
+    const { preview: p } = await syncOk(store, csvOf(row('MSO-1', 'k', '100', '5'), row('MSO-2', 'g', '100', '4')));
+    expect(p.changes.find((c) => c.itemId === gone.id)?.soldOut).toBe('BACK_ON_SALE');
+    expect(await itemOf(gone.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 4 });
+  });
+
+  it('the store’s own switch-off still survives a file that has the item for sale with stock', async () => {
+    const store = await makeStore();
+    const mine = await makeItem(store, 'OWN-1', 3, 100);
+    const toggle = await app.inject({
+      method: 'PUT', url: `/api/v1/vendor/items/${mine.id}/availability`, payload: { isAvailable: false },
+      headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
+    });
+    expect(toggle.statusCode).toBe(200);
+    const { preview: p } = await syncOk(store, csvOf(forSaleRow('OWN-1', 'o', '100', '9', 'true')));
+    expect(p.changes.find((c) => c.itemId === mine.id)?.soldOut).toBe('STAYS_SWITCHED_OFF');
+    expect((await itemOf(mine.id)).isAvailable).toBe(false);
+  });
+});
+
+describe('only a till sync makes a checkout try again (REVIEW-M S3-1, S3-2)', () => {
+  it('a sync takes the till-sync key: it waits for a checkout already sharing it', async () => {
+    const store = await makeStore();
+    await makeItem(store, 'KEY-1', 5, 100);
+    const file = csvOf(row('KEY-1', 'k', '100', '7'));
+    const p = await previewOk(store, file);
+    let releaseAt = 0;
+    // A checkout in flight shares the key (and holds nothing else of the store's).
+    const checkout = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_try_advisory_xact_lock_shared(hashtextextended(${`pos-sync:${store.vendorId}`}, 0)) AS ok`;
+      await sleep(1_500);
+      releaseAt = Date.now();
+    }, { timeout: 30_000 });
+    await sleep(200);
+    const res = await confirm(store, file, p);
+    const appliedAt = Date.now();
+    await checkout;
+    expect(res.statusCode, res.body).toBe(200);
+    expect(appliedAt).toBeGreaterThanOrEqual(releaseAt);
+  }, 60_000);
+
+  it('a checkout that waits more than 3 s for the store’s row behind another writer (not a sync) is placed', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'WAIT-1', 10, 500);
+    const customer = await makeCustomer();
+    expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: item.id, quantity: 1 })).statusCode).toBe(201);
+    let releaseAt = 0;
+    // Another checkout at the same store holds its row this long during a rush.
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${store.vendorId} FOR UPDATE`;
+      await sleep(4_000);
+      releaseAt = Date.now();
+    }, { timeout: 30_000 });
+    await sleep(200);
+    const res = await asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' });
+    await holder;
+    expect(res.statusCode, res.body).toBe(200);
+    expect(Date.now()).toBeGreaterThanOrEqual(releaseAt);
+    expect((await itemOf(item.id)).stockQuantity).toBe(9);
+  }, 60_000);
+
+  it('a checkout whose promo code row another checkout holds for more than 3 s still waits and is placed', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'PROMO-1', 10, 2000);
+    const code = `TILL${RUN}`.toUpperCase().slice(0, 20);
+    const promo = await app.prisma.promoCode.create({
+      data: {
+        code, description: '100 off', discountType: 'FIXED_AMOUNT', discountValue: 100, applicableTo: [], vendorId: store.vendorId,
+        validFrom: new Date(Date.now() - DAY), validUntil: new Date(Date.now() + DAY), maxUsesPerUser: 5,
+      },
+    });
+    try {
+      const customer = await makeCustomer();
+      expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: item.id, quantity: 1 })).statusCode).toBe(201);
+      const holder = app.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promo.id} FOR UPDATE`;
+        await sleep(4_000);
+      }, { timeout: 30_000 });
+      await sleep(200);
+      const res = await asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH', promoCode: code, fulfillmentSelections: { [store.vendorId]: 'PICKUP' } } /* a promo is not offered on cash delivery */);
+      await holder;
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await app.prisma.order.count({ where: { customerId: customer.userId, promoCodeId: promo.id } })).toBe(1);
+    } finally {
+      await runWithoutTenant(async () => {
+        const orders = await app.prisma.order.findMany({ where: { promoCodeId: promo.id }, select: { id: true } });
+        createdOrderIds.push(...orders.map((o) => o.id));
+      });
+    }
+  }, 60_000);
 });

@@ -25,7 +25,7 @@
 --   DROP TABLE "pos_imports";
 --   DROP FUNCTION pos_imports_tenant_matches_vendor();
 --   DROP FUNCTION pos_imports_frozen();
---   DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261029010000_pos_export_sync';
+--   DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261029020000_pos_export_sync';
 --   COMMIT;
 
 SET lock_timeout = '10s';

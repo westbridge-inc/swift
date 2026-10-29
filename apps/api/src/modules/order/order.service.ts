@@ -69,6 +69,7 @@ import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
+import { shareTillSyncLock } from '../inventory/till-sync-lock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { newRidePin } from '../rides/ride-pin';
@@ -161,14 +162,6 @@ interface CheckoutStaged {
   orders: CheckoutCreatedOrder[];
   answer: CheckoutAnswer;
   receiptId: string | null;
-}
-
-/** Postgres gave up waiting for a row lock (`lock_timeout`, SQLSTATE 55P03). */
-function isLockTimeout(err: unknown): boolean {
-  const e = err as { code?: unknown; meta?: { code?: unknown } | null; message?: unknown } | null;
-  if (!e) return false;
-  if (e.meta?.code === '55P03' || e.code === '55P03') return true;
-  return typeof e.message === 'string' && /55P03|lock timeout/i.test(e.message);
 }
 
 /** [L09 · M023 · F4] How checkout refuses a line its options no longer allow.
@@ -1541,19 +1534,17 @@ export class OrderService {
           await lockBusinessTime(tx, vendorWithSlot);
         }
       }
-      // [POS-SYNC] A store applying a till export holds this lock while it
-      // writes. The wait is bounded below this transaction's own time limit,
-      // and a store that is still busy is a plain "try again" (409), never a
-      // server error.
-      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-      try {
-        await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
-      } catch (err) {
-        if (isLockTimeout(err)) {
+      // [POS-SYNC · REVIEW-M S3-2] A store applying a till file holds its
+      // till-sync key; this checkout shares it without waiting, so it is told
+      // to try again (409) only when a sync really holds it. Checkouts share
+      // the key, so they never refuse each other, and the wait for the store's
+      // row below stays unbounded, as it always was. No lock_timeout is set.
+      for (const planVendorId of planVendorIds) {
+        if (!(await shareTillSyncLock(tx, planVendorId))) {
           throw new AppError(409, 'STORE_BUSY', 'This store is updating its menu — try again in a moment.');
         }
-        throw err;
       }
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: planVendorId },
@@ -1731,14 +1722,7 @@ export class OrderService {
       // Every tracked item this checkout will move is locked in id order first,
       // the order every multi-item stock path uses (lockItemsInIdOrder), so a
       // checkout and a cancellation or a till sync can never deadlock.
-      try {
-        await lockItemsInIdOrder(tx, plans.flatMap((p) => p.orderItems.filter((oi) => oi.tracksStock).map((oi) => oi.itemId)));
-      } catch (err) {
-        if (isLockTimeout(err)) {
-          throw new AppError(409, 'STORE_BUSY', 'This store is updating its menu — try again in a moment.');
-        }
-        throw err;
-      }
+      await lockItemsInIdOrder(tx, plans.flatMap((p) => p.orderItems.filter((oi) => oi.tracksStock).map((oi) => oi.itemId)));
       for (const [index, plan] of plans.entries()) {
         const sequence = await nextSequence();
         const pricedPlan = priced.perPlan[index]!;
