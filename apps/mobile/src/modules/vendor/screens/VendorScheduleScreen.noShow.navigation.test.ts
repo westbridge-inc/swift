@@ -180,7 +180,8 @@ describe('[BOOK-NS-APP] which Schedule bookings offer "Customer didn\'t come"', 
   });
 
   it('an older server\'s booking (no orderId, no itemId): no button, no Move, nothing breaks', async () => {
-    const { orderId: _o, itemId: _i, noShow: _n, ...old } = booking();
+    // The row an older server sends: no orderId, no itemId, no noShow word.
+    const old = { id: 'b-1', serviceName: 'Haircut', price: 2000, slotStart: at(-15 * MIN), slotEnd: at(15 * MIN), status: 'CONFIRMED', customer: { firstName: 'Asha' } };
     await render([old]);
     expect(host.textContent).toContain('Haircut');
     expect(button(NO_SHOW)).toBeUndefined();
