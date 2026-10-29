@@ -101,11 +101,17 @@ describe('[BOOK-S7] instant confirmation and the business\'s duty', () => {
     expect(TERMS_S5).toMatch(/^Submitting an Order is an offer to the Business; the contract forms when the Business accepts it in the app\./);
   });
 
-  // [COORD 28 Oct 19:06Z · REVIEW-M] No code creates a no-show record yet, so neither the Terms nor the Privacy Policy
-  // describes one. The words wait for the feature PR (owner B3), which ships them as a material version.
-  it('no missed-appointment record is described before the feature that creates it', () => {
-    expect(TERMS_S6).not.toMatch(/did not come|missed appointment/i);
-    expect(PRIVACY_S6).not.toMatch(/did not come|missed appointment/i);
+  // [BOOK-FU2 · owner B3 · COORD 28 Oct 19:06Z] The no-show words ship WITH the feature that creates the record
+  // (PUT /vendor/orders/:id/no-show), as the material version 2026-10-28.1. The record holds exactly what Privacy 6
+  // says (booking, when, who): pinned on the schema in appointment-no-show.unit.test.ts.
+  it('Terms 6: a missed appointment carries no fee and no strike; a person reviews repeats', () => {
+    expect(TERMS_S6).toContain('If a Business records in the app that you did not come to an appointment you booked, that record carries no fee and no strike; a person at Swift reviews repeated missed appointments and may contact you about them.');
+  });
+
+  it('Privacy 6: what the missed-appointment record holds, why, and how long (with its order\'s record)', () => {
+    expect(PRIVACY_S6).toContain("If a Business records that a customer did not come to an appointment, Swift keeps that record (which booking it was, when the Business recorded it, and who at the Business recorded it) with its order's record, for as long as that order's record is kept, so that a person at Swift can review repeated missed appointments; it carries no fee or strike.");
+    // The retention it borrows is the order record's own, stated in the same section.
+    expect(PRIVACY_S6).toContain('Order, ride and settlement history is retained for the period required for disputes, guarantees, tax and legal obligations');
   });
 
   it('Business Agreement 5: keep availability current, honour bookings, or cancel in the app with a reason', () => {
