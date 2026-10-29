@@ -428,6 +428,7 @@ const CENSUS: Case[] = [
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both sides of a service JOB, 24h out (a store appointment has its own kind since S4, below)' },
+  { k: 'booking_moved', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — [BOOK-P2] a time booked from a pro\'s menu moved; the jobs list shows the new time (builds 9-12 route the booking_ prefix there)' },
   { k: 'appointment_reminder', d: { bookingId: 'b1', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [S4] their store appointment is within 24h: the booking\'s own order screen. The store copy (audience business) opens its order desk; both are tabled below' },
   { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28]. [BOOK-FU2] No longer sent (appointment_moved, below): kept for inbox rows sent before it', scan: false },
   { k: 'appointment_moved', d: { bookingId: 'b2', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [BOOK-FU2] the business moved their store appointment: the booking\'s own order screen. The store copy (audience business, the customer moved it) opens its order desk; both are tabled below' },
