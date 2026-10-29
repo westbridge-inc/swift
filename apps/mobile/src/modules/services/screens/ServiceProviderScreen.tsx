@@ -19,6 +19,7 @@ import {
 import { ProviderPortfolioCard } from '../../../components/ProviderPortfolioCard';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import {
+  useMyBookable,
   useSaveServiceProvider,
   useServiceProviderProfile,
   useVerificationStatus,
@@ -142,6 +143,7 @@ function ProviderDashboard({
   const statusQuery = useVerificationStatus<any>('SERVICE_PROVIDER', undefined, { poll: true });
   const status = statusQuery.data;
   const presentation = providerVerificationPresentation(status, provider.isVerified);
+  const bookableQ = useMyBookable<{ bookable?: boolean }>();
 
   // The approval path persists public listability before returning. Refresh the
   // profile projection as soon as the shared checklist reports completion.
@@ -193,6 +195,17 @@ function ProviderDashboard({
           style={{ flex: 1 }}
         />
       </View>
+
+      {/* [BOOK-P3] Bookable services, hours and time off: only when the server has them for this pro
+          (the switch on; a trade with a bookable menu). Off = 404, so nothing is shown. */}
+      {bookableQ.data?.bookable ? (
+        <PillButton
+          label="Bookable services and hours"
+          variant="soft"
+          icon="calendar"
+          onPress={() => navigation?.navigate?.('ProBookable')}
+        />
+      ) : null}
 
       {editing ? (
         <ProviderProfileForm

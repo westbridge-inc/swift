@@ -17,12 +17,13 @@ import {
   armServiceJobDueWakeup,
   parseServiceQuoteInput,
   serviceJobDueDelayMs,
-  serviceJobCancelView,
   serviceJobErrorMessage,
   showsServiceJobAgreedPrice,
 } from '../../../lib/serviceJobPresentation';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 import { errorMessage } from '../../../lib/apiError';
+import { isListBookedJob, serviceJobControls } from '../../../lib/proBooking';
+import { ProJobMoveCard } from '../ProJobMoveCard';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -292,7 +293,10 @@ const SOS_STATUSES = new Set(['SCHEDULED', 'IN_PROGRESS']);
 function JobCard({ job, navigation }: { job: any; navigation: any }) {
   const myId = useAuthStore((s) => s.user?.id);
   const isCustomer = job.customerId === myId;
-  const cancelView = serviceJobCancelView(job.status, isCustomer);
+  // [BOOK-P3] One read of what this card offers: the server's appointment view for a job booked from a
+  // pro's list (customer), the quote-job rule otherwise (lib/proBooking serviceJobControls).
+  const controls = serviceJobControls(job, isCustomer);
+  const listBooked = isListBookedJob(job);
   const cancel = useCancelJob();
   const [scheduling, setScheduling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -359,16 +363,33 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
             onPress={() => navigation.navigate('Conversation', { roomId: job.chatRoomId, title: 'Job chat' })}
           />
         ) : null}
-        {cancelView.canCancel ? (
+        {controls.canCancel ? (
           <PillButton label="Cancel" variant="outline" size="md" style={{ flex: 1 }} loading={cancel.isPending} onPress={() => setConfirmCancel(true)} />
         ) : null}
       </View>
 
       {/* [coordinator ruling 14 Oct · Terms §7] A booked or started job is not the
           customer's to cancel in the app: the server's own words say who to contact. */}
-      {cancelView.contactWords ? (
+      {controls.contactWords ? (
         <View accessibilityRole="summary" style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
-          <T variant="label" tone="info">{cancelView.contactWords}</T>
+          <T variant="label" tone="info">{controls.contactWords}</T>
+        </View>
+      ) : null}
+
+      {/* [BOOK-P3 · owner B1/B2] A booking from a pro's list: the server's free-cancel moment, its very-late
+          words, and the move (either side; the customer until the server's cut-off, else its words). */}
+      {controls.freeCancelUntil ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+          Free to cancel in the app until {formatAppointmentSlot(controls.freeCancelUntil)}.
+        </T>
+      ) : null}
+      {controls.cancelNote ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{controls.cancelNote}</T>
+      ) : null}
+      {controls.canMove && job.scheduledFor ? <ProJobMoveCard job={job} isCustomer={isCustomer} /> : null}
+      {controls.moveWords ? (
+        <View style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+          <T variant="label" tone="info">{controls.moveWords}</T>
         </View>
       ) : null}
 
@@ -411,7 +432,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isCustomer
-            ? 'This withdraws the job request.'
+            ? (listBooked ? 'This cancels your appointment. There is no fee.' : 'This withdraws the job request.')
             : 'The customer will be told immediately so they can choose another provider.'}
         </T>
         <PillButton
