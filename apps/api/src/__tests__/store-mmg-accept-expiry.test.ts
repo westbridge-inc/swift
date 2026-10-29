@@ -371,11 +371,16 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
   it('only accepted, unpaid MMG orders expire: a waiting (not yet accepted) MMG order and an accepted CASH order are left alone', async () => {
     const pending = await placeOrder('MOBILE_MONEY');
     await sys(() => app.prisma.order.update({ where: { id: pending }, data: { createdAt: new Date(Date.now() - 2 * 60 * MIN) } }));
+    // [RIDER-SAFE 2] Both cash orders are PLACED before either is accepted: an
+    // accepted, riderless delivery order is one waiting for a rider, and this
+    // store already has two (the "Paid by MMG" orders above), so a checkout
+    // after the first acceptance would meet the store's rider-backlog pause
+    // (cap 3) — the throttle working, not what this test is about.
     const cash = await placeOrder('CASH');
-    await acceptedAgo(cash, 2 * 60 * MIN);
     // [O-3] Accept now starts preparation, so a cash order the store accepts today is PREPARING. A cash order
     // accepted before the one-tap accept still sits at ACCEPTED: the sweep must leave that one alone too.
     const legacyCash = await placeOrder('CASH');
+    await acceptedAgo(cash, 2 * 60 * MIN);
     await sys(() => app.prisma.order.update({ where: { id: legacyCash }, data: { status: 'ACCEPTED', acceptedAt: new Date(Date.now() - 2 * 60 * MIN) } }));
     const swept = await sweep();
     expect(swept).not.toContain(pending);

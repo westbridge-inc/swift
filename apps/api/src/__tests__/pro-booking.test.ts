@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+
+// [BOOK-P3 · COORD 16:13Z] A pro is bookable from their list only after accepting the agreement version with the
+// advance-acceptance clause; no such version exists on main yet (fail-closed), so this suite names one and every
+// pro it makes accepted it (makePro). The gate itself: pro-booking-followups.test.ts + pro-booking.unit.test.ts.
+vi.mock('../modules/services/pro-menu-agreement-version', () => ({
+  PRO_MENU_AGREEMENT: { documentType: 'vendor_agreement', sinceVersion: '2026-10-29' },
+}));
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Prisma } from '@prisma/client';
@@ -82,6 +89,13 @@ async function makePro(trade = 'tutor', opts: { hours?: unknown; tenantId?: stri
       data: { userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}.jpg`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
     }));
   }
+  // [BOOK-P3] The pro accepted the agreement with the advance-acceptance clause (the mocked version above).
+  await runWithoutTenant(() => app.prisma.consentRecord.create({
+    data: {
+      subjectType: 'vendor_user', subjectId: u.userId, documentType: 'vendor_agreement', documentVersion: '2026-10-29',
+      documentContentHash: 'book-p3-test', action: 'granted', surface: 'ios',
+    },
+  }));
   return { ...u, providerId: provider.id, checklist };
 }
 

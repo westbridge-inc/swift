@@ -1047,11 +1047,12 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     // An owner's deletion sets the subscription's owner to NULL; the conversion
     // job already skips such a trial (no valid payer). Its clock cannot be read.
     const ended = new Date(t0.getTime() - DAY);
-    const orphan = (await app.prisma.subscription.create({ data: {
-      type: 'RESTAURANT', status: 'TRIAL', isTrialActive: true, trialEndDate: ended, weeklyRate: 12000, billingMethod: 'CASH',
-      currentPeriodStart: new Date(ended.getTime() - 14 * DAY), currentPeriodEnd: ended, nextBillingDate: ended,
-    } })).id;
-    subIds.push(orphan);
+    // [BILL-PRO PR1] A subscription is born with exactly one owner, so the orphan is made the way
+    // it really arises: born to a store, then its owner column set to NULL (the FK's ON DELETE SET NULL).
+    const orphan = await makeVendorSub(ended, { method: 'CASH', status: 'TRIAL', extra: {
+      isTrialActive: true, trialEndDate: ended, currentPeriodStart: new Date(ended.getTime() - 14 * DAY),
+    } });
+    await app.prisma.subscription.update({ where: { id: orphan }, data: { vendorId: null } });
     const due = new Date(Date.now() - 20 * DAY);
     const other = await makeVendorSub(due, { method: 'CASH' });
     await app.prisma.prepaidBalance.create({ data: { subscriptionId: other, balance: 50000, currencyCode: 'GYD' } });

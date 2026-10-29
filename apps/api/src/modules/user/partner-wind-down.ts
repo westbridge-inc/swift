@@ -286,13 +286,16 @@ export async function windDownPartner(
   // order: starting vendor and subscription updates together allowed the
   // database to choose vendor-first here while billing held subscription-first,
   // producing a real ABBA deadlock under overlap.
-  const [rider, driver] = await Promise.all([
+  const [rider, driver, pro] = await Promise.all([
     prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
     prisma.driver.findUnique({ where: { userId }, select: { id: true } }),
+    prisma.serviceProvider.findUnique({ where: { userId }, select: { id: true } }),
   ]);
   const links: Prisma.SubscriptionWhereInput[] = [];
   if (rider) links.push({ riderId: rider.id });
   if (driver) links.push({ driverId: driver.id });
+  // [BILL-PRO] A pro's own weekly fee winds down with the person, like a mover's.
+  if (pro) links.push({ serviceProviderId: pro.id });
   if (vendorIds.length) links.push({ vendorId: { in: vendorIds } });
   const subs = links.length === 0
     ? { count: 0 }

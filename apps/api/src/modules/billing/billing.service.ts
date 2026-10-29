@@ -51,7 +51,7 @@ import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
-import { moverUserIdOf, payerAudienceOf, payerOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { moverUserIdOf, PAYER_INCLUDE, payerAudienceOf, payerOf, payerUserIdOf } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -205,6 +205,8 @@ const SUB_TYPE_TRIAL_ROLE: Record<string, string> = {
   SUPERMARKET: 'VENDOR',
   RETAIL_STORE: 'VENDOR',
   SERVICE_PROVIDER: 'SERVICE',
+  // [BILL-PRO] A pro pays the services rate, priced like a Services store.
+  INDEPENDENT_PRO: 'SERVICE',
   DELIVERY_RIDER: 'RIDER',
   COURIER_RIDER: 'RIDER',
   TAXI_DRIVER: 'DRIVER',
@@ -216,6 +218,8 @@ type SubWithRelations = Subscription & {
   rider: { userId: string } | null;
   driver: { userId: string } | null;
   vendor: { id: string; owner: { userId: string } } | null;
+  /** Loaded by PAYER_INCLUDE; a pro row read without it is refused (PAYER_NOT_LOADED). */
+  serviceProvider?: { userId: string } | null;
 };
 
 export interface BillingCycleResult {
@@ -455,11 +459,7 @@ export class BillingService {
           { status: { in: ['PAST_DUE', 'SUSPENDED'] }, nextRetryAt: { lte: now } },
         ],
       },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
     });
 
     const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0, errorCodes: {} };
@@ -578,10 +578,7 @@ export class BillingService {
     const candidate = await this.prisma.$transaction(async (tx) => {
       const authority = await lockFeeCollectionAuthority(tx, sub.id);
       if (!authority.allowed) return null;
-      const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, include: {
-        rider: { select: { userId: true } }, driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      } });
+      const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, include: PAYER_INCLUDE });
       // A worker selected one period and attempt. Refreshing ownership or
       // price must not license it to open the next retry after another worker
       // already advanced that selection.
@@ -1522,11 +1519,7 @@ export class BillingService {
     const [sub, payment] = await Promise.all([
       this.prisma.subscription.findUnique({
         where: { id: input.subscriptionId },
-        include: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
+        include: PAYER_INCLUDE,
       }),
       this.prisma.subscriptionPayment.findUnique({ where: { id: input.paymentId } }),
     ]);
@@ -1619,11 +1612,7 @@ export class BillingService {
       if (stamped.count === 0) continue;
       const sub = await this.prisma.subscription.findUnique({
         where: { id: row.subscriptionId },
-        include: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
+        include: PAYER_INCLUDE,
       });
       if (!sub || !row.clientKey) { out.stillUnknown += 1; continue; }
       // [PT-1] A charge held because the provider reported a different amount
@@ -3408,11 +3397,7 @@ export class BillingService {
       const itemNow = clock();
       const sub = await this.prisma.subscription.findUnique({
         where: { id: payment.subscriptionId },
-        include: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
+        include: PAYER_INCLUDE,
       });
       if (!sub) continue;
       const periodKey = payment.periodStart.toISOString().slice(0, 10);
@@ -3610,11 +3595,7 @@ export class BillingService {
     if (method === 'MOBILE_MONEY' && mmgPayerMsisdn) {
       const human = await this.prisma.subscription.findUnique({
         where: { id: subscriptionId },
-        select: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { owner: { select: { userId: true } } } },
-        },
+        select: PAYER_INCLUDE,
       });
       const payer = payerOf(human);
       if (payer) {
@@ -3654,11 +3635,7 @@ export class BillingService {
   ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped' | 'pending'> {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
     });
     if (!sub || sub.status !== 'ACTIVE' || !sub.autoRenew || sub.nextBillingDate.getTime() !== resumedDue.getTime()) {
       return 'skipped';
@@ -3795,11 +3772,7 @@ export class BillingService {
       const ageMinutes = Math.round((now.getTime() - (p.lastPolledAt ?? p.createdAt).getTime()) / 60_000);
       const sub = await this.prisma.subscription.findUnique({
         where: { id: p.subscriptionId },
-        include: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
+        include: PAYER_INCLUDE,
       });
       if (!sub) {
         failedInBatch += 1;
@@ -4316,11 +4289,7 @@ export class BillingService {
   async sweepSuspended(now = new Date()): Promise<{ nudged: number; churned: number }> {
     const suspended = await this.prisma.subscription.findMany({
       where: { status: 'SUSPENDED' },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
       take: 500,
     });
     const out = { nudged: 0, churned: 0 };
@@ -4338,11 +4307,7 @@ export class BillingService {
           if (!authority.collectionAllowed || authority.status !== 'SUSPENDED') return null;
           const sub = await tx.subscription.findUnique({
             where: { id: candidate.id },
-            include: {
-              rider: { select: { userId: true } },
-              driver: { select: { userId: true } },
-              vendor: { select: { id: true, owner: { select: { userId: true } } } },
-            },
+            include: PAYER_INCLUDE,
           });
           if (!sub || sub.status !== 'SUSPENDED' || await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
           // [PROD-PATH] No live way to pay: nobody is nudged to pay or
@@ -4514,10 +4479,7 @@ export class BillingService {
         const proof = await verifiedCheckoutCredit(tx, checkout);
         if (!proof) return false;
         const identity = proof.identity;
-        const sub = await tx.subscription.findUniqueOrThrow({ where: { id: hold.subscriptionId }, include: {
-          rider: { select: { userId: true } }, driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        } });
+        const sub = await tx.subscription.findUniqueOrThrow({ where: { id: hold.subscriptionId }, include: PAYER_INCLUDE });
         const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
         const evidence = { actor: 'checkout-settlement', reference: identity.id };
         if (!await billingEffectsReady(tx)) return false; // Credit is recorded; preserve application protection through cutover.
@@ -4582,11 +4544,7 @@ export class BillingService {
     }
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
     });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
 
@@ -4853,11 +4811,7 @@ export class BillingService {
     const dayAhead = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const upcoming = await this.prisma.subscription.findMany({
       where: { status: 'ACTIVE', autoRenew: true, nextBillingDate: { gt: now, lte: dayAhead } },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
     });
 
     let sent = 0;
@@ -5125,7 +5079,7 @@ export class BillingService {
     try {
       const sub = await this.prisma.subscription.findUnique({
         where: { id: subscriptionId },
-        include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+        include: PAYER_INCLUDE,
       });
       if (!sub) return;
       await this.notifications.send({
@@ -5235,7 +5189,7 @@ export class BillingService {
   }
 
   /** Billing notices belong to the surface that pays the fee. */
-  private payerAudience(sub: SubWithRelations): 'earner' | 'business' {
+  private payerAudience(sub: SubWithRelations): 'earner' | 'business' | 'provider' {
     return payerAudienceOf(sub);
   }
 
@@ -5302,7 +5256,7 @@ export class BillingService {
   private async tellFeeRise(subscriptionId: string, held: HeldFeeRise, now: Date): Promise<'told' | 'untold' | 'dropped'> {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+      include: PAYER_INCLUDE,
     });
     if (this.feeRiseObstacle(sub, held) !== null || sub?.feeWaived) {
       // Gone, negotiated, waived or moved under it before anyone was told: nothing to tell, nothing to apply.
@@ -5443,7 +5397,7 @@ export class BillingService {
     try {
       const sub = await this.prisma.subscription.findUnique({
         where: { id: subscriptionId },
-        include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+        include: PAYER_INCLUDE,
       });
       if (!sub) return;
       const copy = feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date: held.appliesFrom ? new Date(held.appliesFrom) : null });
