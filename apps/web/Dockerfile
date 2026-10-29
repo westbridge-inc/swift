@@ -97,6 +97,8 @@ COPY apps/mobile/src/lib/storePick.ts apps/mobile/src/lib/storePick.ts
 COPY apps/mobile/src/lib/inStoreSale.ts apps/mobile/src/lib/inStoreSale.ts
 # [BOOK-S6b] Web booking says what the phone says: its booking words and outcome rules (imports nothing).
 COPY apps/mobile/src/lib/appointmentBooking.ts apps/mobile/src/lib/appointmentBooking.ts
+# [BOOK-S5b] The Products editor's booking hours, gap, notice and confirm-automatically rules (imports nothing).
+COPY apps/mobile/src/lib/bookingHours.ts apps/mobile/src/lib/bookingHours.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 
