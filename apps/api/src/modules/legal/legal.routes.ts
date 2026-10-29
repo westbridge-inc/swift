@@ -125,7 +125,12 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // started it VERY_LATE_AFTER_MIN (30) minutes after its start; the customer's move until the same cut-off
 // (booking/reschedule-policy.ts), the pro's move at any time with an in-app notice to the customer. With the switch
 // off, every such job keeps the quote job's rule ("Any other service job request ..."), so every sentence is true in
-// both states. Non-material (reaccept.ts NON_MATERIAL_CHANGES says why). A new day: LAST_UPDATED moves.
+// both states. Terms section 5 (COORD 29 Oct 16:13Z, REVIEW-G S3-1): a booking from such a list is confirmed at
+// booking (SCHEDULED with providerConfirmedAt set, pro-booking.routes.ts), so s5 says the provider gives the same
+// advance acceptance by publishing a list of services with bookable times, as a Business does through its "confirm
+// bookings automatically" setting. (The provider side agreeing to it, a pro-agreement clause plus a server gate, is
+// owed before the P3 OTA in another PR.) Non-material (reaccept.ts NON_MATERIAL_CHANGES says why). A new day:
+// LAST_UPDATED moves.
 export const LEGAL_VERSION = '2026-10-29';
 const LAST_UPDATED = '29 October 2026'; // human form of LEGAL_VERSION
 
@@ -171,7 +176,7 @@ export const TERMS = page(
 <p><b>Taxi waiting charge.</b> When the app shows a waiting charge beside the taxi fare before you book, that charge applies to the ride: GY$300 for each full 10 minutes the car waits for you. Waiting is counted at the pickup, from when your driver arrives until your trip starts (the app checks the driver's location before the count starts, or you confirm the arrival yourself), and at any stop on the way, from when the car arrives until it leaves. Waiting at your final destination is never counted, and part of a 10-minute block is never charged. The Swift app shows the waiting time and the charge as they run, and the ride's receipt lists the waiting charge separately from the route fare. You pay it with your fare, directly to the driver. A ride that is cancelled, or that ends without the trip being completed, carries no waiting charge.</p>
 
 <h2>5. Placing an Order</h2>
-<p>Submitting an Order is an offer to the Business; the contract forms when the Business accepts it in the app. A Business can set a bookable service to confirm bookings automatically: if the app shows your booking as confirmed the moment you book it, that is the Business's acceptance, given in advance through that setting, and the contract forms at that moment. A Business may decline an Order and must tell you why through the app. If an item turns out to be unavailable, the app asks <b>you</b> to approve a substitution or that line is removed and, where you already paid by MMG, refunded by the Business — never swapped silently. Service bookings reserve the time slot shown; express delivery, where offered, buys priority handling.</p>
+<p>Submitting an Order is an offer to the Business; the contract forms when the Business accepts it in the app. A Business can set a bookable service to confirm bookings automatically: if the app shows your booking as confirmed the moment you book it, that is the Business's acceptance, given in advance through that setting, and the contract forms at that moment. An individual service provider gives the same advance acceptance by publishing a list of services with bookable times: if the app shows your booking from that list as confirmed the moment you book it, that is the provider's acceptance, given in advance through that list, and the contract forms at that moment. A Business may decline an Order and must tell you why through the app. If an item turns out to be unavailable, the app asks <b>you</b> to approve a substitution or that line is removed and, where you already paid by MMG, refunded by the Business — never swapped silently. Service bookings reserve the time slot shown; express delivery, where offered, buys priority handling.</p>
 
 <h2>6. Paying at Handover</h2>
 <p>Payment is due before or at Handover. Refusing to pay for what you ordered, or repeatedly failing to accept deliveries you requested, results in recorded strikes on your account and can restrict or end your access to cash-on-delivery or to the Platform. If a Business records in the app that you did not come to an appointment you booked, that record carries no fee and no strike; a person at Swift reviews repeated missed appointments and may contact you about them.</p>

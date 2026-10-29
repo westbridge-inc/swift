@@ -158,6 +158,13 @@ describe('[BOOK-S7] instant confirmation and the business\'s duty', () => {
     expect(TERMS_S5).toMatch(/^Submitting an Order is an offer to the Business; the contract forms when the Business accepts it in the app\./);
   });
 
+  // [TERMS 2026-10-29 · COORD 29 Oct 16:13Z · REVIEW-G S3-1] A pro has no "confirm automatically" setting: a booking
+  // from a pro's list of services is confirmed at booking (book-a-pro: SCHEDULED with providerConfirmedAt set), so s5
+  // names the list itself as the provider's advance acceptance, right after the Business's setting.
+  it('Terms 5: a booking from a provider\'s list of services was accepted in advance by publishing that list', () => {
+    expect(TERMS_S5).toContain("that is the Business's acceptance, given in advance through that setting, and the contract forms at that moment. An individual service provider gives the same advance acceptance by publishing a list of services with bookable times: if the app shows your booking from that list as confirmed the moment you book it, that is the provider's acceptance, given in advance through that list, and the contract forms at that moment.");
+  });
+
   // [BOOK-FU2 · owner B3 · COORD 28 Oct 19:06Z] The no-show words ship WITH the feature that creates the record
   // (PUT /vendor/orders/:id/no-show), as the material version 2026-10-28.1. The record holds exactly what Privacy 6
   // says (booking, when, who): pinned on the schema in appointment-no-show.unit.test.ts.

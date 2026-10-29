@@ -301,11 +301,13 @@ const PUBLISHED: Record<
   // includes a time booked from an individual service provider's list of services (book-a-pro, behind
   // INSTANT_BOOKING): the switched-on cancel and move rule names "the Business or provider"; while the switch is on the
   // provider can also move it (the customer is told in the app) and, if the provider has not started it 30 minutes
-  // after its start, it cancels free; "Any other service job request" keeps the request rule. A new day, so every
-  // text carries 29 October. Nothing else changed: putting the old s.7 paragraph and 28 October back reproduces all
-  // four 2026-10-28.1 pins exactly.
+  // after its start, it cancels free; "Any other service job request" keeps the request rule. Terms s.5 (COORD 29 Oct
+  // 16:13Z): the provider gives the same advance acceptance by publishing a list of services with bookable times (one
+  // added sentence after the Business's setting). A new day, so every text carries 29 October. Nothing else changed:
+  // taking out the s.5 sentence, putting the old s.7 paragraph and 28 October back reproduces all four 2026-10-28.1
+  // pins exactly. (2026-10-29 was never served anywhere, so its pin was replaced in place before merge.)
   '2026-10-29': {
-    terms: '3e1ea5683d1a9d36d3e904433db0b3934db7aec8809e5b206b03231551be135e',
+    terms: '2d8e7e471a4527a928346ff77f76b1f3b8b07ccd464b6553ca1ec978c89d6d00',
     privacy: 'cecd2b439bd410d76e79abc48f1f15fb62316ab2e0e2b2ebbf34011edfee473a',
     driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
     vendor_agreement: '7a89f3321e109bd9f0082f77ea97b5457fb398b246c270b491038f3f84971ed8',
