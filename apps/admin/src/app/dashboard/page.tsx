@@ -80,7 +80,7 @@ export default function DashboardPage() {
           title="Riders online"
           value={metric(stats?.activeRiders?.toString())}
           // [RIDER-SAFE 6] Free riders beside the orders waiting for one (an older server sends neither).
-          subtitle={!blind && stats?.riderSupply ? `${stats.riderSupply.freeRiders} free · ${stats.riderSupply.waitingForRider} orders waiting` : 'online'}
+          subtitle={!blind && stats?.riderSupply ? `${stats.riderSupply.freeRiders} free · ${stats.riderSupply.waitingForRider} ${stats.riderSupply.waitingForRider === 1 ? 'order' : 'orders'} waiting` : 'online'}
           loading={isLoading}
         />
         <MetricCard

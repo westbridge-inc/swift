@@ -5,14 +5,15 @@ import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { Card, Chip, PillButton, T } from '../kit';
 
-import { nextKitchenCapacity } from '../lib/kitchenCapacity';
+import { kitchenCapacityLine, nextKitchenCapacity } from '../lib/kitchenCapacity';
 
-export { KITCHEN_CAPACITY_MAX, nextKitchenCapacity, storedKitchenCapacity } from '../lib/kitchenCapacity';
+export { KITCHEN_CAPACITY_MAX, kitchenCapacityLine, nextKitchenCapacity, storedKitchenCapacity } from '../lib/kitchenCapacity';
 
 /**
  * [RIDER-SAFE 4 · FUL-007] "How many orders at once": a store can cap how many
- * orders it holds (new, cooking or ready) so it is never drowned; past the cap
- * customers are asked to try again in a few minutes. No limit by default.
+ * orders it holds (new, cooking or ready) so it is never drowned; at the cap
+ * customers cannot order until one is collected or cancelled (asked to try
+ * again in a few minutes); nothing queues. No limit by default.
  */
 export function KitchenCapacityCard({
   value,
@@ -36,9 +37,7 @@ export function KitchenCapacityCard({
         <T variant="label" weight="semibold">How many orders at once</T>
       </View>
       <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-        {count == null
-          ? 'No limit. Set one if too many orders at once would make every order late: customers are asked to try again in a few minutes.'
-          : `Up to ${count} orders at a time (new, cooking or ready). More wait until one is collected.`}
+        {kitchenCapacityLine(count)}
       </T>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
         <Chip label="Fewer" selected={false} onPress={() => setCount((c) => nextKitchenCapacity(c, 'fewer'))} style={{ height: 40, minWidth: 48 }} />

@@ -7,7 +7,7 @@ import { color, radius, space } from '@swift/ui';
 import { createHomeRefreshGate, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { customerApi } from '../../../services/api';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { deliveryNoticeFor } from '../deliveryAvailability';
+import { deliveryNoticeFor, riderBasketKey } from '../deliveryAvailability';
 import {
   useCart,
   useClearCart,
@@ -316,7 +316,7 @@ export function CartScreen() {
   const riderStore: string | null = c?.vendor?.id ?? null;
   const riderReadOn = !!riderStore && !!c?.deliveryAddress && !quoteBasis.bookingsOnly && fulfillment !== 'PICKUP';
   const riderRead = useQuery({
-    queryKey: ['delivery-availability', riderStore, c?.deliveryAddress?.id ?? null, effectivePaySelection.method],
+    queryKey: ['delivery-availability', riderStore, c?.deliveryAddress?.id ?? null, effectivePaySelection.method, riderBasketKey(c?.items)],
     queryFn: async () => (await customerApi.getDeliveryAvailability(riderStore!, effectivePaySelection.method === 'MMG' ? 'MOBILE_MONEY' : 'CASH')).data?.data,
     enabled: riderReadOn,
     staleTime: 10_000,

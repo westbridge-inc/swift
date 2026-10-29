@@ -19,8 +19,18 @@ export type DeliveryAvailability = {
   gate: boolean;
 };
 
-export async function getDeliveryAvailability(vendorId: string, paymentMethod: 'CASH' | 'MOBILE_MONEY'): Promise<DeliveryAvailability> {
+/**
+ * `at` is the drop-off the customer chose. [REVIEW-F #2214 S4-1] Without it the
+ * server reads the CART's saved address, which lags a new pick while
+ * PUT /cart/address is still on its way.
+ */
+export async function getDeliveryAvailability(
+  vendorId: string,
+  paymentMethod: 'CASH' | 'MOBILE_MONEY',
+  at?: { lat: number; lng: number } | null,
+): Promise<DeliveryAvailability> {
   const qs = new URLSearchParams({ vendorId, paymentMethod });
+  if (at) { qs.set('lat', String(at.lat)); qs.set('lng', String(at.lng)); }
   return (await apiFetch(`/api/v1/customer/delivery-availability?${qs.toString()}`)).data as DeliveryAvailability;
 }
 
@@ -29,4 +39,14 @@ export function deliveryNoticeShown(a: DeliveryAvailability): boolean {
   if (!a.message) return false;
   if (a.level === 'PAUSED') return true;
   return (a.level === 'BUSY' || a.level === 'NONE') && a.gate;
+}
+
+/** A saved address's own point, or null (the server then reads the cart's saved address). */
+export function addressPoint(a: { latitude?: unknown; longitude?: unknown } | null | undefined): { lat: number; lng: number } | null {
+  return typeof a?.latitude === 'number' && typeof a.longitude === 'number' ? { lat: a.latitude, lng: a.longitude } : null;
+}
+
+/** [REVIEW-G N1] What is in the basket: its size and cash band are part of the reading. */
+export function riderBasketKey(lines: ReadonlyArray<{ id?: string; quantity?: number }> | null | undefined): string {
+  return (lines ?? []).map((l) => `${l.id}:${l.quantity}`).join();
 }

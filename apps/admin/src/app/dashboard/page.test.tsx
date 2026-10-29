@@ -128,3 +128,28 @@ describe('[A-07] the revenue figure says what it is', () => {
     expect(screen.queryByText('Monthly Projection')).toBeNull();
   });
 });
+
+// [RIDER-SAFE 6 · REVIEW-F #2214 S4-2] The riders card: free riders beside the orders waiting for one,
+// counted in words that read right at one.
+describe('[RIDER-SAFE 6] the riders card counts in plain words', () => {
+  function withSupply(freeRiders: number, waitingForRider: number) {
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/dashboard/overview') {
+        return { body: { success: true, data: { ...healthy, riderSupply: { freeRiders, waitingForRider } } } };
+      }
+      return handler('ok')(request);
+    });
+  }
+
+  it('one order waiting reads "1 order waiting"', async () => {
+    withSupply(1, 1);
+    renderWithQuery(<DashboardPage />);
+    expect(await screen.findByText('1 free · 1 order waiting')).toBeTruthy();
+  });
+
+  it('several read in the plural', async () => {
+    withSupply(2, 7);
+    renderWithQuery(<DashboardPage />);
+    expect(await screen.findByText('2 free · 7 orders waiting')).toBeTruthy();
+  });
+});

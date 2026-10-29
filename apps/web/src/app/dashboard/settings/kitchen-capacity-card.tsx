@@ -17,6 +17,17 @@ export function storedKitchenCapacity(store: unknown): number | null {
 }
 
 /**
+ * [REVIEW-F #2214 S3-1] What the limit does, in the server's terms: at the cap
+ * checkout REFUSES new orders (VENDOR_AT_CAPACITY, "try again in a few
+ * minutes"); nothing queues. A slot frees when an order is collected
+ * (PICKED_UP) or cancelled. The phone card says the same (lib/kitchenCapacity.ts).
+ */
+export function kitchenCapacityLine(count: number | null): string {
+  if (count == null) return 'No limit. Set one if too many orders at once would make every order late: customers are asked to try again in a few minutes.';
+  return `Up to ${count} ${count === 1 ? 'order' : 'orders'} at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.`;
+}
+
+/**
  * [RIDER-SAFE 4 · FUL-007] "How many orders at once": a store can cap how many
  * orders it holds in the kitchen (new, accepted, cooking or ready) so it is
  * never drowned; past the cap customers are told the store is at capacity and
@@ -38,17 +49,18 @@ export function KitchenCapacityCard({ storeId }: { storeId: string | null }) {
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'profile') }),
   });
 
+  // A failed read: the settings page's own "Couldn't load your store details" (same
+  // query) says so; this card never shows the store's limit as "No limit" for it.
+  if (profile.isError) return null;
   if (!manager || !store || store.vendorType === 'SERVICE') return null;
   const dirty = count !== value;
   return (
     <div className="sw-card p-6">
       <h2 className="font-bold" id="kitchen-capacity-title">How many orders at once</h2>
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
-        {count == null
-          ? 'No limit. Set one if too many orders at once would make every order late: customers are asked to try again in a few minutes.'
-          : `Up to ${count} orders at a time (new, cooking or ready). More wait until one is collected.`}
+        {kitchenCapacityLine(count)}
       </p>
-      <div className="mt-3 flex items-center gap-3" role="group" aria-labelledby="kitchen-capacity-title">
+      <div className="mt-3 flex flex-wrap items-center gap-3" role="group" aria-labelledby="kitchen-capacity-title">
         <button type="button" className="sw-chip" disabled={count == null || save.isPending} onClick={() => { save.reset(); setCount((c) => (c == null || c <= 1 ? null : c - 1)); }}>Fewer</button>
         <span className="min-w-16 text-center text-lg font-bold" aria-live="polite">{count == null ? 'No limit' : count}</span>
         <button type="button" className="sw-chip" disabled={(count ?? 0) >= KITCHEN_CAPACITY_MAX || save.isPending} onClick={() => { save.reset(); setCount((c) => (c == null ? 10 : Math.min(KITCHEN_CAPACITY_MAX, c + 1))); }}>{count == null ? 'Set a limit' : 'More'}</button>

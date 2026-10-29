@@ -39,7 +39,7 @@ import type { NewAddress } from '@/components/checkout/new-address-form';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { photo } from '@/lib/media';
 import { ApiRequestError } from '@/lib/auth';
-import { getDeliveryAvailability, deliveryNoticeShown, type DeliveryAvailability } from '@/lib/delivery-availability';
+import { addressPoint, getDeliveryAvailability, deliveryNoticeShown, riderBasketKey, type DeliveryAvailability } from '@/lib/delivery-availability';
 import {
   cartPaymentOptions,
   checkoutPaymentFields,
@@ -347,16 +347,23 @@ export function CheckoutPanel() {
   // server's words, when riders are busy ("about N min extra") or delivery is
   // off for now (no riders near, Swift paused it, or the store has orders
   // waiting for riders) — with pickup one tap away. A failed read shows nothing.
+  // [REVIEW-F #2214 S4-1] Read for the address chosen HERE (its own point), not
+  // the cart's saved one, which lags a new pick while it is being saved; and
+  // [REVIEW-G N1] again when the basket changes (its size and cash band count).
   const riderStore = cart?.vendor?.id ?? null;
+  const riderPoint = addressPoint(addresses.find((a) => a?.id === addrId));
+  const riderLat = riderPoint?.lat ?? null;
+  const riderLng = riderPoint?.lng ?? null;
+  const riderBasket = riderBasketKey(cart?.items);
   const [riderNotice, setRiderNotice] = useState<DeliveryAvailability | null>(null);
   useEffect(() => {
     if (pickup || booking || !riderStore || !addrId) { setRiderNotice(null); return; }
     let live = true;
-    getDeliveryAvailability(riderStore, payByMmg ? 'MOBILE_MONEY' : 'CASH')
+    getDeliveryAvailability(riderStore, payByMmg ? 'MOBILE_MONEY' : 'CASH', riderLat != null && riderLng != null ? { lat: riderLat, lng: riderLng } : null)
       .then((a) => { if (live) setRiderNotice(a); })
       .catch(() => { if (live) setRiderNotice(null); });
     return () => { live = false; };
-  }, [pickup, booking, riderStore, addrId, payByMmg]);
+  }, [pickup, booking, riderStore, addrId, riderLat, riderLng, riderBasket, payByMmg]);
   const riderBanner = riderNotice && deliveryNoticeShown(riderNotice) ? riderNotice : null;
 
   function resetCheckoutReplay() {

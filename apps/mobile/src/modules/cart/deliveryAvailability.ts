@@ -28,3 +28,8 @@ export function deliveryNoticeFor(a: unknown): DeliveryNotice | null {
   if (v.level === 'NONE') return { text: v.message, offerPickup: true };
   return null;
 }
+
+/** [REVIEW-G N1] What is in the basket (its size and cash band are part of the reading), line order aside. */
+export function riderBasketKey(lines: ReadonlyArray<{ id?: string; itemId?: string; quantity?: number }> | null | undefined): string {
+  return (lines ?? []).map((l) => `${l.id ?? l.itemId ?? ''}:${l.quantity ?? 0}`).sort().join(',');
+}

@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { KitchenCapacityCard } from './kitchen-capacity-card';
+import { KitchenCapacityCard, kitchenCapacityLine } from './kitchen-capacity-card';
 import { DeliveryStatusNotice } from '../delivery-status-notice';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
 
@@ -42,7 +42,7 @@ describe('[RIDER-SAFE 4] How many orders at once', () => {
     expect(screen.getByText('No limit')).toBeTruthy();
     await click('Set a limit');
     await click('Fewer');
-    expect(screen.getByText('Up to 9 orders at a time (new, cooking or ready). More wait until one is collected.')).toBeTruthy();
+    expect(screen.getByText('Up to 9 orders at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.')).toBeTruthy();
     await click('Save');
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ maxConcurrentOrders: 9 });
@@ -51,6 +51,21 @@ describe('[RIDER-SAFE 4] How many orders at once', () => {
     await click('Save');
     await waitFor(() => expect(writes).toHaveLength(2));
     expect(JSON.parse(String(writes[1]!.init?.body))).toEqual({ maxConcurrentOrders: null });
+  });
+
+  // [REVIEW-F #2214 S3-1] At the cap the server REFUSES new orders (VENDOR_AT_CAPACITY, "try again in a few
+  // minutes"); nothing queues. The card says exactly that, and counts one order as one.
+  it('says what happens at the limit: customers cannot order until one is collected or cancelled', () => {
+    expect(kitchenCapacityLine(null)).toBe('No limit. Set one if too many orders at once would make every order late: customers are asked to try again in a few minutes.');
+    expect(kitchenCapacityLine(1)).toBe('Up to 1 order at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.');
+    expect(kitchenCapacityLine(12)).toBe('Up to 12 orders at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.');
+    for (const n of [null, 1, 12]) expect(kitchenCapacityLine(n)).not.toMatch(/wait|queue/i);
+  });
+
+  it('a stored limit of one reads "1 order"', async () => {
+    store = { ...store, maxConcurrentOrders: 1 };
+    renderWithQuery(<KitchenCapacityCard storeId="store-1" />);
+    expect(await screen.findByText(/^Up to 1 order at a time/)).toBeTruthy();
   });
 
   it('not for staff below manager, nor for a Services business', async () => {

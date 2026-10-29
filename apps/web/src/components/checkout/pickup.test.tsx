@@ -260,6 +260,69 @@ describe('[RIDER-SAFE 1] told before ordering when riders are short', () => {
     expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
   });
 
+  // [REVIEW-F #2214 S4-1 / REVIEW-G N2] The server reads the CART's saved address unless told the point.
+  // Choosing another address fires the read while PUT /cart/address is still on its way, so the read
+  // must carry the chosen address's own point, or it describes the previous address.
+  it('a newly chosen address is read for itself, even while the cart is still saving it', async () => {
+    const PLACES = { a1: { lat: 6.8013, lng: -58.1551 }, a2: { lat: 6.9123, lng: -58.0123 } };
+    let saved: 'a1' | 'a2' = 'a1';
+    let savePut: () => void = () => undefined;
+    const withSaved = () => ({ ...deliveryCart(mmg), deliveryAddress: { id: saved, label: saved === 'a1' ? 'Home' : 'Work', addressLine1: 'Fixture street', city: 'Georgetown' } });
+    deliveryQuote = withSaved;
+    const json = (reply: { status?: number; body: unknown }) => new Response(JSON.stringify(reply.body), { status: reply.status ?? 200, headers: { 'Content-Type': 'application/json' } });
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.pathname === '/api/v1/customer/addresses') return json(ok([
+        { id: 'a1', label: 'Home', addressLine1: 'Fixture street', city: 'Georgetown', isDefault: true, latitude: PLACES.a1.lat, longitude: PLACES.a1.lng },
+        { id: 'a2', label: 'Work', addressLine1: 'Fixture avenue', city: 'Georgetown', isDefault: false, latitude: PLACES.a2.lat, longitude: PLACES.a2.lng },
+      ]));
+      if (url.pathname === '/api/v1/customer/cart/address' && method === 'PUT') {
+        await new Promise<void>((resolve) => { savePut = () => { saved = 'a2'; resolve(); }; });
+        return json(ok({ cart: withSaved() }));
+      }
+      if (url.pathname === '/api/v1/customer/delivery-availability') {
+        // As the server: the point it is given, else the cart's saved address.
+        const lat = url.searchParams.get('lat');
+        const point = lat != null ? Number(lat) : PLACES[saved].lat;
+        return json(ok(point === PLACES.a2.lat
+          ? { level: 'PAUSED', reason: 'SWIFT_PAUSED', extraMinutes: null, message: 'Swift has paused delivery here for now — you can order for Pickup instead.', gate: true }
+          : { level: 'GOOD', reason: null, extraMinutes: null, message: null, gate: true }));
+      }
+      return base(input, init);
+    });
+    at('/checkout', <CheckoutPage />);
+    const picker = await screen.findByLabelText('Saved delivery address') as HTMLSelectElement;
+    await waitFor(() => expect(picker.disabled).toBe(false));
+    await waitFor(() => expect(calls('GET', '/api/v1/customer/delivery-availability').length).toBeGreaterThan(0));
+    expect(screen.queryByRole('status', { name: 'Delivery right now' })).toBeNull();
+    fireEvent.change(picker, { target: { value: 'a2' } });
+    await waitFor(() => expect(calls('PUT', '/api/v1/customer/cart/address')).toHaveLength(1));
+    savePut();
+    expect(await screen.findByText('Swift has paused delivery here for now — you can order for Pickup instead.')).toBeTruthy();
+    const last = calls('GET', '/api/v1/customer/delivery-availability').at(-1)!;
+    expect(Object.fromEntries(new URL(String(last[0])).searchParams)).toEqual({ vendorId: 'v1', paymentMethod: 'CASH', lat: String(PLACES.a2.lat), lng: String(PLACES.a2.lng) });
+  });
+
+  // [REVIEW-G N1] The basket's size and cash band are part of the reading: a basket change reads again.
+  it('changing the basket reads delivery again for the new basket', async () => {
+    let quantity = 2;
+    deliveryQuote = () => ({ ...deliveryCart(mmg), items: [{ ...line, quantity }] });
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/v1/customer/cart/items/l1' && init?.method === 'PUT') { quantity = JSON.parse(String(init.body)).quantity; return new Response(JSON.stringify({ success: true, data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }); }
+      return base(input, init);
+    });
+    availabilityReply = { level: 'GOOD', reason: null, extraMinutes: null, message: null, gate: true };
+    at('/checkout', <CheckoutPage />);
+    await waitFor(() => expect(calls('GET', '/api/v1/customer/delivery-availability')).toHaveLength(1));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add another Bake and saltfish' }));
+    await waitFor(() => expect(quantity).toBe(3));
+    await waitFor(() => expect(calls('GET', '/api/v1/customer/delivery-availability')).toHaveLength(2));
+  });
+
   it('with the availability gate off a rider shortage blocks nothing, so nothing is said', async () => {
     availabilityReply = { level: 'NONE', reason: 'NO_RIDERS', extraMinutes: null, message: 'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.', gate: false };
     at('/checkout', <CheckoutPage />);

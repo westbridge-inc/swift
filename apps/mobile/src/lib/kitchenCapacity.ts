@@ -15,6 +15,16 @@ export function nextKitchenCapacity(current: number | null, step: 'fewer' | 'mor
   return current == null ? 10 : Math.min(KITCHEN_CAPACITY_MAX, current + 1);
 }
 
+/**
+ * [REVIEW-F #2214 S3-1] What the limit does, in the server's terms: at the cap
+ * checkout REFUSES new orders (VENDOR_AT_CAPACITY, "try again in a few
+ * minutes"); nothing queues. The website's card says the same.
+ */
+export function kitchenCapacityLine(count: number | null): string {
+  if (count == null) return 'No limit. Set one if too many orders at once would make every order late: customers are asked to try again in a few minutes.';
+  return `Up to ${count} ${count === 1 ? 'order' : 'orders'} at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.`;
+}
+
 /** [RIDER-SAFE 4/5] What the store is told, from GET /vendor/vendor/delivery-status; null while delivery is open or unknown. */
 export function deliveryStatusNote(s: unknown): { title: string; body: string } | null {
   if (!s || typeof s !== 'object') return null;

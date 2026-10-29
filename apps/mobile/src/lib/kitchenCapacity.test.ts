@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliveryStatusNote, nextKitchenCapacity, storedKitchenCapacity, KITCHEN_CAPACITY_MAX } from './kitchenCapacity';
+import { deliveryStatusNote, kitchenCapacityLine, nextKitchenCapacity, storedKitchenCapacity, KITCHEN_CAPACITY_MAX } from './kitchenCapacity';
 
 // [RIDER-SAFE 4/5] The partner app's "How many orders at once" (maxConcurrentOrders) and the note that
 // tells a store why customers cannot order delivery right now.
@@ -19,6 +19,16 @@ describe('[RIDER-SAFE 4] How many orders at once', () => {
     expect(nextKitchenCapacity(1, 'fewer')).toBeNull();
     expect(nextKitchenCapacity(null, 'fewer')).toBeNull();
     expect(nextKitchenCapacity(KITCHEN_CAPACITY_MAX, 'more')).toBe(KITCHEN_CAPACITY_MAX);
+  });
+  // [REVIEW-F #2214 S3-1] At the cap the server REFUSES new orders (VENDOR_AT_CAPACITY); nothing queues.
+  it('says what happens at the limit, the same words as the website, one order as one', () => {
+    expect(kitchenCapacityLine(null)).toBe('No limit. Set one if too many orders at once would make every order late: customers are asked to try again in a few minutes.');
+    expect(kitchenCapacityLine(1)).toBe('Up to 1 order at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.');
+    expect(kitchenCapacityLine(12)).toBe('Up to 12 orders at a time (new, cooking or ready). Once you have that many, customers cannot order from you until one is collected or cancelled: they are asked to try again in a few minutes.');
+    for (const n of [null, 1, 12]) expect(kitchenCapacityLine(n)).not.toMatch(/wait|queue/i);
+    const card = readFileSync(join(__dirname, '..', 'components', 'KitchenCapacityCard.tsx'), 'utf8');
+    expect(card).toMatch(/\{kitchenCapacityLine\(count\)\}/);
+    expect(card).not.toMatch(/More wait/);
   });
   it('the store account screen offers it to managers of stores that cook or pack, and saves null for no limit', () => {
     const screen = readFileSync(join(__dirname, '..', 'modules', 'vendor', 'screens', 'VendorAccountScreen.tsx'), 'utf8');

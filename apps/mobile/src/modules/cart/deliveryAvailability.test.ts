@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliveryNoticeFor } from './deliveryAvailability';
+import { deliveryNoticeFor, riderBasketKey } from './deliveryAvailability';
 
 // [RIDER-SAFE 1] The cart's rider note: the server's words, only when checkout acts on them.
 describe('[RIDER-SAFE 1] deliveryNoticeFor', () => {
@@ -26,5 +26,15 @@ describe('[RIDER-SAFE 1] deliveryNoticeFor', () => {
     expect(screen).toMatch(/customerApi\.getDeliveryAvailability\(riderStore!, effectivePaySelection\.method === 'MMG' \? 'MOBILE_MONEY' : 'CASH'\)/);
     expect(screen).toMatch(/deliveryNoticeFor\(/);
     expect(screen).toMatch(/\{noRiders \|\| riderNotice\?\.offerPickup \? \(/);
+    // [REVIEW-G N1] The basket (its size and cash band) is part of the reading: it is in the key.
+    expect(screen).toMatch(/queryKey: \['delivery-availability', riderStore, c\?\.deliveryAddress\?\.id \?\? null, effectivePaySelection\.method, riderBasketKey\(c\?\.items\)\]/);
+  });
+  it('the basket key changes with what is in the basket, not with the order the lines arrive in', () => {
+    const a = { itemId: 'i1', quantity: 2 };
+    const b = { itemId: 'i2', quantity: 1 };
+    expect(riderBasketKey([a, b])).toBe(riderBasketKey([b, a]));
+    expect(riderBasketKey([a, b])).not.toBe(riderBasketKey([{ ...a, quantity: 3 }, b]));
+    expect(riderBasketKey([a])).not.toBe(riderBasketKey([a, b]));
+    expect(riderBasketKey(undefined)).toBe('');
   });
 });

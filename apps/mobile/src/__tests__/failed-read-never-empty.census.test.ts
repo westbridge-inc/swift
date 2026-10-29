@@ -291,7 +291,7 @@ const KNOWN: Record<string, string> = {
   'modules/vendor/screens/VendorMenuScreen.tsx | No items yet.': 'A row of the windowed menu list (SPEED 22 Oct): the list, and so this row, renders only once the menu read has data; a failed first read shows the ErrorState instead (menuQ.isError && !menuQ.data), and a failed re-read keeps the last menu under its own "Showing the menu from the last check" line, exactly as before the list was windowed.',
   // [RIDER-SAFE 4] The card renders only from a profile read that has data (VendorAccountScreen: isManager && store);
   // "No limit" is the store's own stored setting (maxConcurrentOrders null), never a stand-in for a failed read.
-  'components/KitchenCapacityCard.tsx | No limit. Set one if too many orders at once wou': 'The stored setting is no limit (maxConcurrentOrders null); the card exists only once the profile read has the store.',
+  // (Its sentence now comes from lib/kitchenCapacity.ts kitchenCapacityLine, shared words with the website.)
   'components/KitchenCapacityCard.tsx | No limit': 'The stored setting is no limit (maxConcurrentOrders null); the card exists only once the profile read has the store.',
   'modules/movement/screens/TaxiScreen.tsx | No eligible driver available for this request': 'With no supply snapshot, supplyNone can only be the server refusing this request with NO_DRIVERS_NEARBY: the message repeats that refusal, it does not read the counts.',
 };
