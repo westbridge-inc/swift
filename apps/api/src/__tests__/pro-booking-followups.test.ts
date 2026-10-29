@@ -479,3 +479,46 @@ describe('[BOOK-P3] browse says which pros take bookings from their list (the ph
     expect(Object.values(await read())).toEqual([false, false, false, false]);
   });
 });
+
+describe('[BOOK-P3 · COORD (b)] after the PROVIDER moves it, the customer cancels free for 60 minutes, even inside the cut-off', () => {
+  it('the move stamps providerMovedAt; the view counts down to it + 60 min; the cancel goes through; the customer\'s own move stamps nothing', async () => {
+    on();
+    const allDay = [0, 1, 2, 3, 4, 5, 6].map((d) => ({ dayOfWeek: d, start: '00:00', end: '23:59' }));
+    const pro = await makePro('tutor', { hours: allDay });
+    const c = await makeUser();
+    const quick = await makeOffering(pro.providerId, 5);
+    // A booking ten days out, confirmed long ago.
+    const job = await rowAppointment(pro, c.userId, quick, new Date(Date.now() + 10 * DAY), new Date(Date.now() - DAY));
+    // The customer moves it first: no stamp.
+    let target = new Date(Math.ceil((Date.now() + 9 * DAY) / (5 * MIN)) * 5 * MIN);
+    expect((await reschedule(c.token, job.id, target)).statusCode).toBe(200);
+    expect((await jobRow(job.id)).providerMovedAt).toBeNull();
+    // The pro moves it to the first open time after the 2-hour notice: the customer's 2-hour rule alone would close
+    // almost at once; the move opens 60 minutes.
+    target = new Date(Math.ceil((Date.now() + 125 * MIN) / (5 * MIN)) * 5 * MIN);
+    const local = hhmm(target);
+    if (local >= '23:50') target = new Date(target.getTime() + 15 * MIN);
+    const moved = await reschedule(pro.token, job.id, target);
+    expect(moved.statusCode, moved.body).toBe(200);
+    const row = await jobRow(job.id);
+    expect(row.providerMovedAt).not.toBeNull();
+    const view = (await inject('GET', `/api/v1/services/jobs/${job.id}`, c.token)).json().data.appointment;
+    expect(view).toMatchObject({ canCancel: true, cancelUnavailable: null });
+    expect(view.freeCancellationExpiresAt).toBe(new Date(row.providerMovedAt!.getTime() + 60 * MIN).toISOString());
+    const told = await runWithoutTenant(() => app.prisma.notification.findFirstOrThrow({ where: { userId: c.userId, data: { path: ['kind'], equals: 'booking_moved' } } }));
+    expect(told.body).toContain(`cancel it free in the app until ${formatGuyanaTime(new Date(row.providerMovedAt!.getTime() + 60 * MIN), { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short', hour12: true }, 'en-US')}`);
+    expect((await cancel(c.token, job.id)).statusCode).toBe(200);
+  });
+
+  it('control — an hour and a minute after the pro\'s move, inside the cut-off: refused, contact the provider', async () => {
+    on();
+    const pro = await makePro('tutor');
+    const c = await makeUser();
+    const hour = await makeOffering(pro.providerId, 60);
+    const job = await rowAppointment(pro, c.userId, hour, new Date(Date.now() + 90 * MIN), new Date(Date.now() - DAY));
+    await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: job.id }, data: { providerMovedAt: new Date(Date.now() - 61 * MIN) } }));
+    expect(errorOf(await cancel(c.token, job.id))).toEqual([409, 'CANCEL_WINDOW_CLOSED']);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: job.id }, data: { providerMovedAt: new Date(Date.now() - 50 * MIN) } }));
+    expect((await cancel(c.token, job.id)).statusCode).toBe(200);
+  });
+});

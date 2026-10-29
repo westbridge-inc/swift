@@ -27,6 +27,10 @@ import { site, launch } from '@/site.config';
  *    serviceJobCancelVerdict), plus the provider's move and the free cancel
  *    once the provider is 30 minutes late and has not started; with the switch
  *    off such a job keeps the service job rule below.
+ *  - [BOOK-P3 · COORD 29 Oct 2026 (b)] while the switch is on, an appointment
+ *    the business or provider moves cancels free for 60 minutes after the
+ *    customer is told (APPOINTMENT_MOVED_FREE_CANCEL_MIN), or until it starts
+ *    if sooner, even inside the 2-hour cut-off.
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
  * Owner ruling, 8 Oct 2026: the refund at closing. Owner #62, 14 Oct 2026: one
  * week at a time, no paying ahead (was a four-week limit).
@@ -88,7 +92,9 @@ export default function RefundsPage() {
           or cancel it. The business can also move your appointment, and you are told in the app when it does. While
           instant appointment booking is switched on, a provider can also move an appointment booked from their list of
           services, and you are told in the app when they do; if the provider has not started it 30 minutes after its
-          start time, you can still cancel it free in the app.
+          start time, you can still cancel it free in the app. While instant appointment booking is switched on, if the
+          business or provider moves your appointment, you can also cancel it free in the app for 60 minutes after you
+          are told, or until it starts if that is sooner, even within 2 hours of its start.
         </li>
         <li>
           <b>Any other service job</b> (a local pro you hired through the app) can be cancelled free in the app while it

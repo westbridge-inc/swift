@@ -506,10 +506,11 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
     // [BOOK-P3 · X S4-3 / G S4-1 / M S4-1] The pro's notice says only what the app will allow: the
     // customer's free cancel of the moved time (cancel-policy serviceAppointmentFreeCancelEnd, the
     // rule the cancel route applies) runs until two hours before the NEW start, and the notice names
-    // that moment instead of a bare 'or cancel it'. A longer window after a pro's move is not in the
-    // Terms (s7), so it is not given here (NOTE for COORD).
+    // that moment instead of a bare 'or cancel it'. [BOOK-P3 · COORD (b) · Terms s7] A PRO's move also
+    // opens APPOINTMENT_MOVED_FREE_CANCEL_MIN of free cancel from now (providerMovedAt, written below).
     const freeUntil = serviceAppointmentFreeCancelEnd({
       status: 'SCHEDULED', offeringId: job.offeringId, scheduledFor: to, providerConfirmedAt: job.providerConfirmedAt,
+      providerMovedAt: byCustomer ? job.providerMovedAt : now,
     });
     const customerChoice = freeUntil != null && freeUntil.getTime() > now.getTime()
       ? `If the new time doesn\u2019t suit you, cancel it free in the app until ${slotLabel(freeUntil)}, or contact them.`
@@ -536,7 +537,7 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
             ...(byCustomer ? { customerId: userId } : { provider: { userId } }),
           },
           // [P1 owed] The end moves with the start: the held range stays the booked length.
-          data: { scheduledFor: to, endsAt },
+          data: { scheduledFor: to, endsAt, ...(byCustomer ? {} : { providerMovedAt: now }) },
           action: PRO_BOOKING_MOVED_AUDIT_ACTION,
           audit: { scheduledFor: to.toISOString(), endsAt: endsAt.toISOString(), previousScheduledFor: body.expectedScheduledFor.toISOString(), movedBy: byCustomer ? 'CUSTOMER' : 'PROVIDER' },
           notices: [{
