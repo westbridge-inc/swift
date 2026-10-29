@@ -251,8 +251,10 @@ describe('[RIDER-SAFE 1] honest capacity, measured on real rows', () => {
     expect(two.counts).toMatchObject({ free: 1, ridersNear: 2, backlog: 1 });
     expect(two).toMatchObject({ level: 'BUSY', riderWaitMinutes: 9 });
 
-    // An order waiting 30 km away is not this store's backlog.
+    // An order waiting 200 km away is not this store's backlog — nor one in the
+    // corner of the search box: ~4 km north and ~4 km east is ~5.7 km away.
     await makeOrder(other.vendorId, cell(9));
+    await makeOrder(other.vendorId, { lat: at.lat + 0.036, lng: at.lng + 0.036 });
     expect((await sys(() => dispatch.getDeliveryCapacity(probe))).counts.backlog).toBe(1);
   });
 
