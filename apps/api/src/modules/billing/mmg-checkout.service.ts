@@ -784,7 +784,16 @@ export class MmgCheckoutService {
         if (bound.intentId !== open.id) return withBranches(await bound.answer());
         throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
       }
-      if (open && open.expiresAt > now) return withBranches(await (await this.bindKey(who, open, now)).answer());
+      if (open && open.expiresAt > now) {
+        // [REVIEW-M #2224 S4-2] The open pay-all is handed back only for the list it was opened for: a tap from a
+        // stale list (another device) is shown the list again before any MMG page, never sent to pay a different one.
+        const parts = await this.prisma.mmgCheckoutPart.findMany({ where: { checkoutId: open.id }, select: { subscriptionId: true, amount: true } });
+        const opened = parts.map((p) => ({ subscriptionId: p.subscriptionId, amountGyd: Number(p.amount) }));
+        if (!sameChainQuote(opened, Number(open.amount), input.confirmed)) {
+          throw new AppError(409, 'PAYMENT_QUOTE_CHANGED', 'A payment for a different list of branches is open. Reload the list before paying.', { ref: open.id });
+        }
+        return withBranches(await (await this.bindKey(who, open, now)).answer());
+      }
       if (open) {
         await this.expireUnanswered(open.id, now);
         continue;

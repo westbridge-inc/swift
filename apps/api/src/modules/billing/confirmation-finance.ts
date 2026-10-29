@@ -229,8 +229,15 @@ export async function resolveFinanceConfirmation(db: PrismaClient, input: {
       }
     }
     const resolved = await tx.paymentConfirmationHold.findUniqueOrThrow({ where: { id: hold.id } });
+    // [ENTERPRISE E1 · REVIEW-M #2224 S4-1] A pay-all checkout resolved as not paid released every branch it covered:
+    // the one record names each of their holds and subscriptions.
+    const coveredHolds = chain && chainPart && input.decision === 'UNPAID'
+      ? (await tx.paymentConfirmationHold.findMany({ where: { OR: chain.covered.map((f) => f.source) }, orderBy: { id: 'asc' }, select: { id: true, subscriptionId: true, status: true } }))
+        .map((h) => `${h.id}:${h.subscriptionId}:${h.status}`).join(' ')
+      : null;
     await onAudit(tx, { confirmationId: hold.id, subscriptionId: hold.subscriptionId, sourceId, epoch: hold.sourceEpoch,
-      decision: input.decision, evidenceReference: input.evidenceReference, status: resolved.status });
+      decision: input.decision, evidenceReference: input.evidenceReference, status: resolved.status,
+      ...(coveredHolds ? { checkoutId: chainPart!.checkoutId, coveredHolds } : {}) });
     return { id: hold.id, subscriptionId: hold.subscriptionId, status: resolved.status, changed: true };
   });
 }

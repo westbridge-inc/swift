@@ -35,7 +35,8 @@ import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTe
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
-import { FakeMmgHistory } from './helpers/mmg-history-fake';
+import { FakeMmgHistory, mmgTimeOf } from './helpers/mmg-history-fake';
+import { NO_REPLY_CHECK_ACTOR, NO_REPLY_CLOSE_AUDIT, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
 
 // ---------------------------------------------------------------------------
 // [ENTERPRISE E1 · owner 29 Oct 2026 "just do whats best"; COORD ruling
@@ -628,6 +629,77 @@ describe('P5 not paid, expired and late answers: as a single checkout, for every
       const history = hold.resolutionHistory as Array<{ status: string }>;
       expect(history.some((h) => h.status === 'VERIFIED_POSITIVE_CORRECTION')).toBe(true);
     }
+  });
+});
+
+describe('[REVIEW-M #2224 S3-1] an abandoned pay-all is closed by MMG\'s own records, for every branch at once', () => {
+  const MIN = 60_000;
+  /** A confirmed pay-all of another owner: the control that proves MMG's history is read whole. */
+  async function control() {
+    const other = await makeChain([{}]);
+    const { row } = await openPayAll(other);
+    const txn = tx(`E1CTRL${nanoid(4).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`);
+    mmgPaid(row, txn, Number(row.amount));
+    expect((await ret({ token: replyOf(row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+  }
+  const after = (row: { expiresAt: Date }, ms: number) => new Date(row.expiresAt.getTime() + ms);
+
+  it('MMG shows no payment: closed as not paid by the system, every branch released and able to pay again, one audit naming every hold', async () => {
+    await control();
+    const o = await makeChain([{}, {}]);
+    const { ref, row } = await openPayAll(o);
+    await service.pollIntents(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS - 5 * MIN));
+    expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('EXPIRED');
+    for (const b of o.branches) expect(await activeHoldsOf(b.subId)).toHaveLength(1);
+    await service.pollIntents(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
+    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).toMatchObject({ status: 'NOT_PAID', reason: 'MMG_HISTORY_CONFIRMED_UNPAID' });
+    const holds = await app.prisma.paymentConfirmationHold.findMany({ where: { checkoutPart: { is: { checkoutId: ref } } } });
+    expect(holds).toHaveLength(2);
+    expect(holds.every((h) => h.status === 'PROVEN_UNPAID' && h.resolvedBy === NO_REPLY_CHECK_ACTOR)).toBe(true);
+    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { action: NO_REPLY_CLOSE_AUDIT, entityId: { in: holds.map((h) => h.id) } } });
+    expect(((audit.changes as Record<string, unknown>)['coveredHolds'] as unknown[]).length).toBe(2);
+    expect((await payOne(o, o.branches[0]!)).statusCode).toBe(201);
+  });
+
+  it('an MMG payment on ANY covered branch since the page opened leaves it to the admins', async () => {
+    await control();
+    const o = await makeChain([{}, {}]);
+    const { ref, row } = await openPayAll(o);
+    await app.prisma.providerPayment.create({ data: {
+      tenantId: row.tenantId, provider: 'MMG', providerTxnId: tx('E1OTHERBRANCH'), status: 'OPEN', amount: 2100, currencyCode: 'GYD', subscriptionId: o.branches[1]!.subId,
+    } });
+    await service.pollIntents(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
+    expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('EXPIRED');
+    for (const b of o.branches) expect(await activeHoldsOf(b.subId)).toHaveLength(1);
+  });
+
+  it('a record naming it after the close puts it back in front of a person: every branch paused again, nothing credited', async () => {
+    await control();
+    const o = await makeChain([{}, {}]);
+    const { ref, row } = await openPayAll(o);
+    const closedAt = after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN);
+    await service.pollIntents(closedAt);
+    expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('NOT_PAID');
+    history.holds(tx('E1AFTERCLOSE'), Number(row.amount), { external_id: row.merchantTransactionId, modificationDate: mmgTimeOf(new Date(closedAt.getTime() + 10 * MIN)) });
+    await service.pollIntents(new Date(closedAt.getTime() + 31 * MIN));
+    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).toMatchObject({ status: 'HELD', reason: 'LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE', providerPaymentId: null });
+    for (const b of o.branches) {
+      const holds = await activeHoldsOf(b.subId);
+      expect(holds).toHaveLength(1);
+      expect(holds[0]!.reason).toBe('LATE_POSITIVE_REVIEW');
+      expect(await checkoutTopups(b.subId)).toHaveLength(0);
+    }
+  });
+});
+
+describe('[REVIEW-M #2224 S4-2] an open pay-all is handed back only for the list it was opened for', () => {
+  it('a tap from a stale list is shown the list again (409, naming the open checkout), never sent to pay another list', async () => {
+    const o = await makeChain([{}, {}]);
+    const { ref } = await openPayAll(o);
+    const stale = { branches: [{ subscriptionId: o.branches[0]!.subId, amountGyd: 2100 }], totalGyd: 2100 };
+    const res = await payAll(o, stale);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'PAYMENT_QUOTE_CHANGED', details: { ref } });
   });
 });
 
