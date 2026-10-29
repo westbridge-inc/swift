@@ -116,7 +116,7 @@ export default function AddBranchPage() {
       <div>
         <Link href="/dashboard/branches" className="text-sm font-semibold text-[var(--swift-muted)] hover:underline">Back to branches</Link>
         <h1 className="sw-title mt-2">Add a branch</h1>
-        <p className="sw-caption mt-1">A new store of your business, under this same login. Your documents are not asked again.</p>
+        <p className="sw-caption mt-1">A new store of your business, under this same login. Documents Swift already checked are not asked again.</p>
       </div>
 
       <section aria-labelledby="branch-details" className="sw-card space-y-3 p-5">

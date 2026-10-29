@@ -26,6 +26,10 @@ describe('branches', () => {
     expect(ownerSteps({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'SWIFT', steps: ['DOCUMENTS'] } })).toEqual([]);
     expect(ownerSteps({ status: 'ACTIVE', goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS'] } })).toEqual([]);
     expect(BRANCH_IS_CHECKED).not.toMatch(/You’ll see it as waiting for Swift’s approval/);
+    // [REVIEW-F #2220 f710ebda S4-1] A documents-only branch has no button on the website (documents are added in the
+    // Swift app), so the promise is what is left and where, never a button.
+    expect(BRANCH_IS_CHECKED).not.toMatch(/button/);
+    expect(BRANCH_IS_CHECKED).toBe('A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what is left and where: on this website, or in the Swift app for documents.');
   });
 
   it('the shared trial holds only if Swift approves the branch before it ends; with no running trial, billed from approval', () => {

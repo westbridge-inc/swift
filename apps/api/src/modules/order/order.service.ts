@@ -36,6 +36,8 @@ import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-v
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
+import { capacitySentence, storeRiderBacklog, type CapacityProbe, type DeliveryCapacity } from '../dispatch/delivery-capacity';
+import { deliveryPausedAt } from '../dispatch/delivery-pause';
 import {
   TERMINAL_ORDER_STATUSES,
   LIVE_ORDER_STATUSES,
@@ -778,6 +780,10 @@ export class OrderService {
      *  production construction passes it, which offer-withdrawal-census.test.ts
      *  enforces; without it (unit tests, scripts) the withdrawal is skipped. */
     private offerStore?: Redis,
+    /** [RIDER-SAFE 1] The honest delivery capacity (DispatchService.getDeliveryCapacity),
+     *  injected like riderAvailability so this service stays dispatch-free. Without it
+     *  (jobs, scripts) checkout keeps the plain supply read. */
+    private deliveryCapacity?: (probe: CapacityProbe) => Promise<DeliveryCapacity>,
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
@@ -1042,6 +1048,8 @@ export class OrderService {
         bulkUnits: number | null;
       }>;
     }> = [];
+    /** [RIDER-SAFE 2] The honest rider wait (seconds) per DELIVERY store when riders are BUSY; the promise carries it. */
+    const riderWaitByVendor = new Map<string, number>();
 
     for (const { vendorId, lines: items } of groups) {
       const vendor = items[0]!.item.vendor;
@@ -1179,6 +1187,24 @@ export class OrderService {
           throw new AppError(409, 'DELIVERY_TOO_BIG',
             'This order is too big for delivery by bike or motorbike, and no vehicle on Swift can carry this right now. Choose Pickup for this order.');
         }
+        // [RIDER-SAFE 5] Swift's delivery pause (platform-wide or this store's
+        // zone) and [RIDER-SAFE 4] the store's own rider backlog: new DELIVERY
+        // orders stop, pickup stays open. Not behind the availability flag —
+        // both are switches an operator or the backlog throws on purpose.
+        // The refusal keeps the code every app already answers with "order
+        // for pickup instead" (DELIVERY_NO_RIDERS); `reason` says which.
+        const pause = await deliveryPausedAt(this.prisma, user.tenantId, { lat: vendor.latitude, lng: vendor.longitude });
+        if (pause.paused) {
+          throw new AppError(409, 'DELIVERY_NO_RIDERS',
+            'Swift has paused delivery here for now — you can order for Pickup instead, or try delivery again later.',
+            { reason: 'SWIFT_PAUSED' });
+        }
+        const backlog = await storeRiderBacklog(this.prisma, vendor.id, user.tenantId);
+        if (backlog.paused) {
+          throw new AppError(409, 'DELIVERY_NO_RIDERS',
+            `${vendor.name} has orders waiting for riders, so delivery from this store is paused for a few minutes — you can order for Pickup instead.`,
+            { reason: 'STORE_BUSY' });
+        }
         // §2 checkout gate (availability spec, flag-gated): zero riders online
         // means an order that would strand food on a counter — honesty beats
         // accepting it. Pickup remains available; appointments never get here.
@@ -1193,31 +1219,65 @@ export class OrderService {
           const cashFloat = input.paymentMethod === 'CASH'
             ? items.reduce((s, ci) => s + (Number(ci.item.basePrice) + optionsUnitPrice(resolveSelectedOptions(ci.item, ci.selectedOptions))) * ci.quantity, 0)
             : 0;
-          const supply = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat).catch(() => null);
-          if (supply?.level === 'NONE') {
-            throw new AppError(
-              409,
-              'DELIVERY_NO_RIDERS',
-              'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
-            );
-          }
-          // [owner #20] Too big for a bike: the order is offered only to a
-          // vehicle that can carry it (a bulky line → a car or van), so the
-          // customer is told NOW, before anything is placed, when none such is
-          // near — never an order that silently finds nobody.
-          // (requiredSize: computed above, before the flag.)
-          // Only a size a bicycle cannot carry narrows the pool; anything smaller
-          // was already answered by the probe above.
-          if (supply && requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE')) {
-            const fitting = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat, requiredSize).catch(() => null);
-            if (fitting?.level === 'NONE') {
+          const storePoint = { lat: vendor.latitude, lng: vendor.longitude };
+          const tooBig = () => new AppError(
+            409,
+            'DELIVERY_TOO_BIG',
+            requiredSize === 'EXTRA_LARGE'
+              ? 'This order is too big for delivery by bike or motorbike, and no car or van is free nearby right now. Choose Pickup, or try delivery again later.'
+              : 'This order is too big for delivery by bike, and no bigger vehicle is free nearby right now. Choose Pickup, or try delivery again later.',
+          );
+          const bulky = !!requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE');
+          // [RIDER-SAFE 1] HONEST capacity: riders near are not all free. The
+          // orders already waiting near this store take the free riders first;
+          // a stacked rider counts only where the stacking rules pass for THIS
+          // store; a rider busy with a bag still frees up. GOOD goes ahead.
+          // BUSY goes ahead with the rider wait in the promise (the customer
+          // saw it on the cart). NONE — nobody near, or a wait past the cap —
+          // is the refusal every app answers with "order for pickup instead".
+          // A probe that fails falls back to the plain supply read below.
+          const capacity = this.deliveryCapacity
+            ? await this.deliveryCapacity({
+                tenantId: user.tenantId,
+                store: { id: vendor.id, ...storePoint },
+                orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+                dropoff: address ? { lat: address.latitude, lng: address.longitude } : null,
+                floatRequired: cashFloat,
+                cashToCollect: cashFloat,
+                packageSize: requiredSize,
+              }).catch(() => null)
+            : null;
+          if (capacity) {
+            if (capacity.level === 'NONE') {
+              // [owner #20] Nobody near who can carry THIS size while smaller
+              // vehicles have room: the size is the reason, said as such.
+              if (capacity.reason === 'NO_RIDERS' && bulky) {
+                const anyone = await this.riderAvailability(storePoint, cashFloat).catch(() => null);
+                if (anyone && anyone.level !== 'NONE') throw tooBig();
+              }
+              throw new AppError(409, 'DELIVERY_NO_RIDERS', capacitySentence(capacity)!, { reason: capacity.reason ?? 'NO_RIDERS' });
+            }
+            if (capacity.level === 'BUSY') riderWaitByVendor.set(vendor.id, capacity.riderWaitMinutes * 60);
+          } else {
+            const supply = await this.riderAvailability(storePoint, cashFloat).catch(() => null);
+            if (supply?.level === 'NONE') {
               throw new AppError(
                 409,
-                'DELIVERY_TOO_BIG',
-                requiredSize === 'EXTRA_LARGE'
-                  ? 'This order is too big for delivery by bike or motorbike, and no car or van is free nearby right now. Choose Pickup, or try delivery again later.'
-                  : 'This order is too big for delivery by bike, and no bigger vehicle is free nearby right now. Choose Pickup, or try delivery again later.',
+                'DELIVERY_NO_RIDERS',
+                'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
+                { reason: 'NO_RIDERS' },
               );
+            }
+            // [owner #20] Too big for a bike: the order is offered only to a
+            // vehicle that can carry it (a bulky line → a car or van), so the
+            // customer is told NOW, before anything is placed, when none such is
+            // near — never an order that silently finds nobody.
+            // (requiredSize: computed above, before the flag.)
+            // Only a size a bicycle cannot carry narrows the pool; anything smaller
+            // was already answered by the probe above.
+            if (supply && bulky) {
+              const fitting = await this.riderAvailability(storePoint, cashFloat, requiredSize).catch(() => null);
+              if (fitting?.level === 'NONE') throw tooBig();
             }
           }
         }
@@ -1744,6 +1804,7 @@ export class OrderService {
               orderType: plan.vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
               vendorId: plan.vendor.id, vendorType: plan.vendor.vendorType, declaredMinutes: plan.vendor.estimatedPrepTime ?? null,
               distanceKm: plan.distanceKm, itemCount: plan.orderItems.reduce((n, it) => n + it.quantity, 0), placedAt,
+              riderWaitSeconds: riderWaitByVendor.get(plan.vendor.id) ?? 0,
             })
           : null;
 

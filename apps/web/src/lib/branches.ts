@@ -37,7 +37,7 @@ export function branchTrialLine(sharedTrialEndsAt: string | null, fee: string): 
 export const BRANCH_TRIAL_IS_THE_BUSINESS =
   'The free trial belongs to your business, not to one branch: a branch you close during the free trial still uses it up.';
 export const BRANCH_IS_CHECKED =
-  'A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what, with a button to finish it.';
+  'A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what is left and where: on this website, or in the Swift app for documents.';
 
 
 /** "Your agreed rate: $12,000/week (or the branch's own fee, if lower)", or null with no deal. */

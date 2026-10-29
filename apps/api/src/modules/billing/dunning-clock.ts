@@ -4,6 +4,7 @@ import { lockSubscriptionPayer, lockMoverFeeAuthority, type MoverFeeResolution }
 import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient, Subscription, SubscriptionPayment, SubscriptionStatus } from '@prisma/client';
 import { settledFeePeriodInTx, voluntaryResumeProofInTx, voluntaryLapseInTx } from './obligation-evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { PAYER_INCLUDE } from '../subscription/subscription-owner';
 
 export const FULL_FEE_GRACE_MS = 48 * 3_600_000;
 export const FEE_RETRY_MS = 24 * 3_600_000;
@@ -17,10 +18,7 @@ export type ConfirmationResolution = 'PAID' | 'PROVEN_UNPAID' | 'PROVEN_NO_EFFEC
 export async function lockBillingAuthority(tx: Tx, subscriptionId: string) {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
   const userId = payer.userId;
-  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId }, include: {
-    rider: { select: { userId: true } }, driver: { select: { userId: true } },
-    vendor: { select: { owner: { select: { userId: true } } } },
-  } });
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId }, include: PAYER_INCLUDE });
   const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true, status: true } });
   return { sub, userId, tenantId: user.tenantId, userStatus: user.status };
 }

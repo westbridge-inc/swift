@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { Prisma, type ServiceJob } from '@prisma/client';
+import { Prisma, type PrismaClient, type ServiceJob } from '@prisma/client';
 import { z } from '../../lib/zod';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
@@ -12,12 +12,20 @@ import { instantBookingEnabled } from '../booking/instant-booking';
 import { bookingLimitsFor } from '../booking/booking-limits';
 import { isTransactionConflict, lockCustomerBookings } from '../booking/booking.service';
 import { customerRescheduleVerdict } from '../booking/reschedule-policy';
-import { serviceAppointmentCancelView } from '../order/cancel-policy';
+import { serviceAppointmentCancelView, serviceAppointmentFreeCancelEnd } from '../order/cancel-policy';
 import { canonicalServiceTrade, serviceTradeLabel } from './services.service';
 import { isProTradeBookable } from './service-catalog';
-import { PRO_MIN_NOTICE_MINUTES, providerDaySlots, storedWeeklyHours } from './provider-calendar';
+import {
+  lockProviderTime,
+  PRO_BOOKING_HORIZON_DAYS,
+  PRO_MIN_NOTICE_MINUTES,
+  proBookingHorizonEnd,
+  providerDaySlots,
+  storedWeeklyHours,
+} from './provider-calendar';
 import { isServiceJobExclusionViolation } from './provider-time';
 import { assertProviderCanOperate } from './provider-operate';
+import { assertProviderMenuAgreement, providerAcceptedMenuAgreement } from './pro-menu-agreement';
 import { proBookingOff } from './provider-bookable.routes';
 import { serviceQuoteAmountSchema, transitionServiceJob } from './service-job-transition';
 import { executeTenantBoundServiceJobTransaction } from './service-job-transaction';
@@ -54,6 +62,17 @@ import { transitionGenerationSchema } from './service-job-client-contract';
 //                                 to another free time of the same length; the
 //                                 customer only until two hours before it
 //                                 starts. Its end moves with its start.
+//  GET  /jobs/:id/slots           [BOOK-P3 · X S4-2] the free times to move a
+//                                 booked service to on one date: its BOOKED
+//                                 length, its own time not counted as taken,
+//                                 so the picker offers exactly what the move
+//                                 accepts.
+//
+// [BOOK-P3 · COORD 16:13Z] A pro is bookable from their list only once they
+// accepted the agreement version with the advance-acceptance clause
+// (pro-menu-agreement.ts; fail-closed until BILL-PRO names that version).
+// [BOOK-P3 · G S4-3] Nothing is bookable more than PRO_BOOKING_HORIZON_DAYS
+// ahead (the pro's time off reaches as far).
 //
 // Cash at the appointment only (owner A3): a pro's job carries no payment.
 // Builds 9, 11 and 12 call none of these routes; a booked job reaches the pro's
@@ -74,6 +93,18 @@ const slotsQuerySchema = z.object({
   offeringId: z.string().min(1).max(64),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
 });
+
+const jobSlotsQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
+});
+
+/** A YYYY-MM-DD that names a real calendar date. */
+function assertRealDate(date: string): void {
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number];
+  if (new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) !== date) {
+    throw new AppError(400, 'BAD_DATE', 'Choose a real date.');
+  }
+}
 
 const rescheduleSchema = transitionGenerationSchema.extend({
   scheduledFor: z.coerce.date(),
@@ -101,14 +132,8 @@ function shownOffering(o: { id: string; name: string; durationMinutes: number; p
   return { id: o.id, name: o.name, durationMinutes: o.durationMinutes, price: Number(o.price) };
 }
 
-/** [BOOK-P2] Writers of one pro's time (a booking, a move) queue here, one at a time, until their
- *  transaction ends, the store's lockBusinessTime twin: the time check that follows reads every
- *  job the writer before it committed, so a race is answered SLOT_TAKEN by the check, never by
- *  two writers waiting on each other's uncommitted rows (a deadlock). Taken before any User row
- *  lock (a booking) and before the job row (a move): no cycle with the quote flow's User locks. */
-export async function lockProviderTime(tx: Prisma.TransactionClient, providerId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`pro-time:${providerId}`}, 0))`;
-}
+/** [BOOK-P2] The pro-time lock (provider-calendar.ts since BOOK-P3: the pro's hours and time off take it too). */
+export { lockProviderTime };
 
 /** A lost write: the identical-start unique (P2002) or the one-pro-one-time exclusion (23P01). */
 function isSlotConflict(error: unknown): boolean {
@@ -128,6 +153,10 @@ async function assertBookableTime(
   if (input.start.getTime() <= input.now.getTime()) throw new AppError(400, 'SLOT_IN_PAST', 'Pick a time in the future');
   if (input.start.getTime() <= input.now.getTime() + PRO_MIN_NOTICE_MINUTES * 60_000) {
     throw new AppError(409, 'TOO_SOON', `Book at least ${PRO_MIN_NOTICE_MINUTES / 60} hours ahead. Pick a later time.`);
+  }
+  // [BOOK-P3 · G S4-3] No further ahead than the pro can set time off (a year).
+  if (input.start.getTime() > proBookingHorizonEnd(input.now).getTime()) {
+    throw new AppError(409, 'TOO_FAR_AHEAD', 'Pick a time within the next year.');
   }
   const day = { providerId: input.providerId, weeklyHours: input.weeklyHours, offering: { durationMinutes: input.durationMinutes }, date: guyanaDayKey(input.start), now: input.now };
   const at = (list: Date[]) => list.some((s) => s.getTime() === input.start.getTime());
@@ -165,6 +194,8 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
     }
     if (!isProTradeBookable(canonicalServiceTrade(provider.trade))) throw tradeNotBookable();
     await assertProviderCanOperate(app.prisma, provider);
+    // [BOOK-P3 · COORD 16:13Z] Only a pro who agreed to be booked from their list.
+    await assertProviderMenuAgreement(app.prisma, provider);
     return provider;
   }
 
@@ -187,6 +218,7 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
         offerings: offerings.map(shownOffering),
         bookableWeekdays: [...new Set(hours.map((w) => w.dayOfWeek))].sort((a, b) => a - b),
         minNoticeMinutes: PRO_MIN_NOTICE_MINUTES,
+        horizonDays: PRO_BOOKING_HORIZON_DAYS,
         paymentMethod: 'CASH',
       },
     };
@@ -202,12 +234,11 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
       select: { id: true, name: true, durationMinutes: true, price: true },
     });
     if (!offering) throw new NotFoundError('ServiceOffering', query.offeringId);
-    const [year, month, day] = query.date.split('-').map(Number) as [number, number, number];
-    if (new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) !== query.date) {
-      throw new AppError(400, 'BAD_DATE', 'Choose a real date.');
-    }
+    assertRealDate(query.date);
     // THE day computation: the one the booking checks its time against (assertBookableTime).
-    const slots = await providerDaySlots(app.prisma, { providerId: provider.id, weeklyHours: provider.weeklyHours, offering, date: query.date });
+    const horizon = proBookingHorizonEnd();
+    const slots = (await providerDaySlots(app.prisma, { providerId: provider.id, weeklyHours: provider.weeklyHours, offering, date: query.date }))
+      .filter((s) => s.getTime() <= horizon.getTime());
     return {
       success: true,
       data: {
@@ -217,6 +248,53 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
         slots: slots.map((s) => s.toISOString()),
         bookableWeekdays: [...new Set(storedWeeklyHours(provider.weeklyHours).map((w) => w.dayOfWeek))].sort((a, b) => a - b),
         minNoticeMinutes: PRO_MIN_NOTICE_MINUTES,
+        horizonDays: PRO_BOOKING_HORIZON_DAYS,
+      },
+    };
+  });
+
+  /** [BOOK-P3 · X S4-2] GET /jobs/:id/slots?date=YYYY-MM-DD — the free times to move a booked service
+   *  to, for either side of it: the SAME day computation the move checks (assertBookableTime with the
+   *  booked length and the job itself not counted), so the picker offers exactly what the move takes. */
+  app.get<{ Params: { id: string } }>('/jobs/:id/slots', auth, async (request) => {
+    if (!instantBookingEnabled()) throw proBookingOff();
+    const query = jobSlotsQuerySchema.parse(request.query);
+    const userId = request.user.userId;
+    const job = await app.prisma.serviceJob.findUnique({
+      where: { id: request.params.id },
+      select: {
+        id: true, customerId: true, status: true, offeringId: true, scheduledFor: true, endsAt: true, providerId: true,
+        provider: { select: { userId: true, weeklyHours: true } },
+      },
+    });
+    if (!job) throw new NotFoundError('ServiceJob', request.params.id);
+    if (job.customerId !== userId && job.provider.userId !== userId) throw new AppError(403, 'FORBIDDEN', 'You are not part of this job');
+    if (!job.offeringId || !job.scheduledFor || !job.endsAt) {
+      throw new AppError(400, 'NOT_RESCHEDULABLE', 'Only a time booked from a provider\u2019s list of services can be moved here. Agree a new time in the chat.');
+    }
+    if (job.status !== 'SCHEDULED') throw new AppError(400, 'NOT_RESCHEDULABLE', `This job is ${job.status.toLowerCase().replace('_', ' ')} and cannot be moved`);
+    // The customer's cut-off, the move's own (owner B2): no list of times the move would refuse.
+    if (job.customerId === userId) {
+      const verdict = customerRescheduleVerdict(job.scheduledFor, new Date());
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+    }
+    assertRealDate(query.date);
+    const bookedMinutes = Math.round((job.endsAt.getTime() - job.scheduledFor.getTime()) / 60_000);
+    const horizon = proBookingHorizonEnd();
+    const slots = (await providerDaySlots(app.prisma, {
+      providerId: job.providerId, weeklyHours: job.provider.weeklyHours, offering: { durationMinutes: bookedMinutes }, date: query.date, excludeJobId: job.id,
+    })).filter((s) => s.getTime() <= horizon.getTime() && s.getTime() !== job.scheduledFor!.getTime());
+    return {
+      success: true,
+      data: {
+        date: query.date,
+        jobId: job.id,
+        durationMinutes: bookedMinutes,
+        currentStart: job.scheduledFor.toISOString(),
+        slots: slots.map((s) => s.toISOString()),
+        bookableWeekdays: [...new Set(storedWeeklyHours(job.provider.weeklyHours).map((w) => w.dayOfWeek))].sort((a, b) => a - b),
+        minNoticeMinutes: PRO_MIN_NOTICE_MINUTES,
+        horizonDays: PRO_BOOKING_HORIZON_DAYS,
       },
     };
   });
@@ -270,6 +348,8 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
         if (!isProTradeBookable(trade)) throw tradeNotBookable();
         // [BOOK-P2 · BILL-PRO hook] Live verification today; the weekly fee joins it (provider-operate.ts).
         await assertProviderCanOperate(tx, provider);
+        // [BOOK-P3 · COORD 16:13Z] ... and only a pro who accepted the agreement with the advance-acceptance clause.
+        await assertProviderMenuAgreement(tx, provider);
 
         // A retried booking (a lost answer, a second tap) is the same booking: this customer already
         // holds this service with this pro at this time. Read under the customer's locks above.
@@ -398,7 +478,7 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
     const userId = request.user.userId;
     const job = await app.prisma.serviceJob.findUnique({
       where: { id: request.params.id },
-      include: { provider: { select: { id: true, userId: true, weeklyHours: true } } },
+      include: { provider: { select: { id: true, userId: true } } },
     });
     if (!job) throw new NotFoundError('ServiceJob', request.params.id);
     const byCustomer = job.customerId === userId;
@@ -423,12 +503,26 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
     const otherUserId = byCustomer ? job.provider.userId : job.customerId;
     const from = slotLabel(job.scheduledFor);
     const when = slotLabel(to);
+    // [BOOK-P3 · X S4-3 / G S4-1 / M S4-1] The pro's notice says only what the app will allow: the
+    // customer's free cancel of the moved time (cancel-policy serviceAppointmentFreeCancelEnd, the
+    // rule the cancel route applies) runs until two hours before the NEW start, and the notice names
+    // that moment instead of a bare 'or cancel it'. A longer window after a pro's move is not in the
+    // Terms (s7), so it is not given here (NOTE for COORD).
+    const freeUntil = serviceAppointmentFreeCancelEnd({
+      status: 'SCHEDULED', offeringId: job.offeringId, scheduledFor: to, providerConfirmedAt: job.providerConfirmedAt,
+    });
+    const customerChoice = freeUntil != null && freeUntil.getTime() > now.getTime()
+      ? `If the new time doesn\u2019t suit you, cancel it free in the app until ${slotLabel(freeUntil)}, or contact them.`
+      : 'If the new time doesn\u2019t suit you, contact them.';
     let moved: Awaited<ReturnType<typeof transitionServiceJob>>;
     try {
       moved = await executeTenantBoundServiceJobTransaction(app.prisma, async (tx) => {
         await lockProviderTime(tx, job.providerId);
+        // [BOOK-P3 · M S4-3] The pro's hours as they are now, read under the pro-time lock their own
+        // edits take too (not the copy read before the lock).
+        const hours = await tx.serviceProvider.findUniqueOrThrow({ where: { id: job.providerId }, select: { weeklyHours: true } });
         await assertBookableTime(tx, {
-          providerId: job.providerId, weeklyHours: job.provider.weeklyHours, durationMinutes: bookedMinutes, start: to, now, excludeJobId: job.id,
+          providerId: job.providerId, weeklyHours: hours.weeklyHours, durationMinutes: bookedMinutes, start: to, now, excludeJobId: job.id,
         });
         return transitionServiceJob(tx, {
           jobId: job.id,
@@ -451,7 +545,7 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
             title: 'Booking moved',
             body: byCustomer
               ? `The customer moved their booking from ${from} to ${when}.`
-              : `Your provider moved your booking from ${from} to ${when}. If the new time doesn’t suit you, contact them or cancel it.`,
+              : `Your provider moved your booking from ${from} to ${when}. ${customerChoice}`,
             data: { kind: 'booking_moved', jobId: job.id },
           }],
           now,
@@ -467,11 +561,36 @@ export function registerProBookingRoutes(app: FastifyInstance): void {
   });
 }
 
+/** [BOOK-P3] The pros of one browse page a customer can book from their list now (see services.routes.ts
+ *  GET /providers): the switch on, a trade with a bookable menu, weekly hours, an active service, and
+ *  the agreement with the advance-acceptance clause. A display hint only: every booking route re-checks. */
+export async function proBookableFromListOf(
+  db: Prisma.TransactionClient | PrismaClient,
+  providers: ReadonlyArray<{ id: string; userId: string; weeklyHours: Prisma.JsonValue | null }>,
+  trade: string,
+): Promise<Set<string>> {
+  if (!instantBookingEnabled() || !isProTradeBookable(canonicalServiceTrade(trade))) return new Set();
+  const withHours = providers.filter((p) => storedWeeklyHours(p.weeklyHours).length > 0);
+  if (withHours.length === 0) return new Set();
+  const offering = await db.serviceOffering.groupBy({
+    by: ['providerId'], where: { providerId: { in: withHours.map((p) => p.id) }, active: true }, _count: { _all: true },
+  });
+  const withOffering = new Set(offering.map((o) => o.providerId));
+  const agreed = await Promise.all(withHours.filter((p) => withOffering.has(p.id))
+    .map(async (p) => ((await providerAcceptedMenuAgreement(db, p.userId)) ? p.id : null)));
+  return new Set(agreed.filter((id): id is string => id != null));
+}
+
 /** [BOOK-P2] The appointment rules the customer reads on a job booked from a menu (the booking,
  *  the move, GET /jobs and /jobs/:id): cancel and move, from the same verdicts the routes apply.
  *  Null for the pro, a quote job, or the switch off. */
 export function serviceAppointmentViewFor(job: ServiceJob, viewerId: string, now = new Date()) {
   if (!job.offeringId || !job.scheduledFor || job.customerId !== viewerId || !instantBookingEnabled()) return null;
+  // [BOOK-P3 · X S4-1] A closed appointment (done or cancelled) offers nothing and blocks nothing:
+  // no 'booked, contact your provider' line under a job that is over.
+  if (job.status === 'COMPLETED' || job.status === 'CANCELLED') {
+    return { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: null, canReschedule: false, rescheduleUnavailable: null };
+  }
   const cancel = serviceAppointmentCancelView(job, now);
   const live = job.status === 'SCHEDULED';
   const move = customerRescheduleVerdict(job.scheduledFor, now);

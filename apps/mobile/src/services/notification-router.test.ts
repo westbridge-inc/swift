@@ -505,6 +505,7 @@ const CENSUS: Case[] = [
   { k: 'ops_collusion_affinity', to: null, why: 'admins' },
   { k: 'ops_billing_failures', to: null, why: 'admins' },
   { k: 'ops_pool_saturation', to: null, why: 'admins' },
+  { k: 'ops_riders_short', to: null, why: 'admins — [RIDER-SAFE 6] one page when riders run short; the console holds the pause switch' },
   // Backups are stale, or are running but never leaving the machine they
   // protect. Admin-only and acted on from the server, not the phone.
   { k: 'ops_backup_stale', to: null, why: 'admins' },
