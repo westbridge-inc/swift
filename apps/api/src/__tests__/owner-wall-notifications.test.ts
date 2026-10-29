@@ -592,6 +592,9 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/rating/vendor-review-visibility.ts insertNoticeFor': 1,
       'modules/rides/driver-pickup.ts upsertNoticeFor': 1,
       'modules/safety/incident.service.ts insertNoticeFor': 1,
+      // [BOOK-P2] a booked pro appointment: 'booking confirmed' to the pro and to the customer, inside the booking's
+      // transaction (a blocked pair is refused before it; a replay returns the first job and writes nothing)
+      'modules/services/pro-booking.routes.ts insertNoticeFor': 1,
       'modules/services/service-job-transition.ts insertNoticeFor': 1,
       // [STORE-VAT · O-5] the store owner's VAT approved / not approved / withdrawn notice (noticeStore, inside the decision's transaction)
       'modules/store-vat/store-vat-decisions.ts insertNoticeFor': 1,

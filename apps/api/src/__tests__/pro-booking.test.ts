@@ -156,6 +156,7 @@ async function purge() {
     await app.prisma.serviceOffering.deleteMany({ where: { providerId: { in: providerIds } } });
     await app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.userBlock.deleteMany({ where: { OR: [{ blockerId: { in: ids } }, { blockedId: { in: ids } }] } });
     await purgeAuditLogs(app.prisma, { userId: { in: ids } }, 'test-cleanup:book-p2');
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   });
@@ -412,6 +413,64 @@ describe('switch on: a customer books a pro', () => {
     expect((await book(c.token, proB, theirs, at(10))).statusCode).toBe(404);
     expect((await inject('GET', `/api/v1/services/providers/${proB.providerId}/offerings`, c.token)).statusCode).toBe(404);
   });
+
+  it('[REVIEW-M S4-2] a customer holds at most five upcoming bookings with pros in all (the store\'s total cap)', async () => {
+    on();
+    const c = await makeUser();
+    const pros = [await makePro('tutor'), await makePro('cleaner'), await makePro('photographer')];
+    const hours = await Promise.all(pros.map((p) => makeOffering(p.providerId, 60)));
+    // Two with each of the first two pros (their own cap), one with the third: five in all.
+    for (const [i, start] of [[0, at(9)], [0, at(10)], [1, at(9)], [1, at(10)], [2, at(9)]] as const) {
+      const res = await book(c.token, pros[i]!, hours[i]!, start);
+      expect(res.statusCode, res.body).toBe(201);
+    }
+    // The third pro has room for one more with this customer, but the customer is at five.
+    const sixth = await book(c.token, pros[2]!, hours[2]!, at(10));
+    expect([sixth.statusCode, sixth.json().error.code]).toEqual([409, 'BOOKING_LIMIT_REACHED']);
+    expect(sixth.json().error.message).toContain('5 upcoming bookings with providers');
+    expect((await liveJobsOf(pros[2]!.providerId)).length).toBe(1);
+  });
+
+  it('[REVIEW-X S4-4 · G1 G5] a blocked pair: the pro reads as not found to the customer (neutral), and a booking is refused 403 USER_BLOCKED', async () => {
+    on();
+    const pro = await makePro('tutor');
+    const c = await makeUser();
+    const hour = await makeOffering(pro.providerId, 60);
+    expect((await inject('GET', `/api/v1/services/providers/${pro.providerId}/offerings`, c.token)).statusCode).toBe(200);
+    // The pro blocked this customer; the customer is never told whose decision it was.
+    await runWithoutTenant(() => app.prisma.userBlock.create({ data: { tenantId: 'swift-default', blockerId: pro.userId, blockedId: c.userId, reason: 'test' } }));
+    const notFound = { code: 'NOT_FOUND', message: `ServiceProvider with id ${pro.providerId} not found` };
+    const listed = await inject('GET', `/api/v1/services/providers/${pro.providerId}/offerings`, c.token);
+    expect([listed.statusCode, listed.json().error]).toEqual([404, expect.objectContaining(notFound)]);
+    const open = await inject('GET', `/api/v1/services/providers/${pro.providerId}/slots?offeringId=${hour.id}&date=${DATE}`, c.token);
+    expect([open.statusCode, open.json().error]).toEqual([404, expect.objectContaining(notFound)]);
+    const res = await book(c.token, pro, hour, at(10));
+    expect([res.statusCode, res.json().error.code]).toEqual([403, 'USER_BLOCKED']);
+    expect(await liveJobsOf(pro.providerId)).toEqual([]);
+  });
+
+  it('[REVIEW-G G4] an account that is not active (still verifying) books nothing: 403 CUSTOMER_NOT_ACTIVE', async () => {
+    on();
+    const pro = await makePro('tutor');
+    const c = await makeUser();
+    const hour = await makeOffering(pro.providerId, 60);
+    await runWithoutTenant(() => app.prisma.user.update({ where: { id: c.userId }, data: { status: 'PENDING_VERIFICATION' } }));
+    const res = await book(c.token, pro, hour, at(10));
+    expect([res.statusCode, res.json().error.code]).toEqual([403, 'CUSTOMER_NOT_ACTIVE']);
+    expect(await liveJobsOf(pro.providerId)).toEqual([]);
+  });
+
+  it('[REVIEW-G G3] another pro\'s service is not on this pro\'s menu: 404, nothing booked', async () => {
+    on();
+    const pro = await makePro('tutor');
+    const other = await makePro('tutor');
+    const theirs = await makeOffering(other.providerId, 60);
+    const c = await makeUser();
+    const res = await book(c.token, pro, theirs, at(10));
+    expect([res.statusCode, res.json().error.code]).toEqual([404, 'NOT_FOUND']);
+    expect(await liveJobsOf(pro.providerId)).toEqual([]);
+    expect(await liveJobsOf(other.providerId)).toEqual([]);
+  });
 });
 
 describe('switch on: cancel (owner B1) — free until two hours before', () => {
@@ -535,6 +594,23 @@ describe('switch on: move a booking (owner B2) — its end moves with its start'
       scheduledFor: at(11).toISOString(), expectedUpdatedAt: new Date(job.updatedAt.getTime() - 1000).toISOString(), expectedScheduledFor: job.scheduledFor!.toISOString(),
     });
     expect([stale.statusCode, stale.json().error.code]).toEqual([409, 'SERVICE_JOB_CHANGED']);
+  });
+
+  it('[REVIEW-X S4-4 · G6] a third account cannot move it, not even to the same time (403, no job row handed back)', async () => {
+    on();
+    const pro = await makePro('tutor');
+    const c = await makeUser();
+    const stranger = await makeUser();
+    const hour = await makeOffering(pro.providerId, 60);
+    const id = (await book(c.token, pro, hour, at(10))).json().data.id as string;
+    const before = await jobRow(id);
+    for (const to of [at(12), at(10)]) {
+      const res = await reschedule(stranger.token, id, to);
+      expect([res.statusCode, res.json().error?.code], res.body).toEqual([403, 'FORBIDDEN']);
+      expect(res.body).not.toContain(c.userId);
+    }
+    const after = await jobRow(id);
+    expect([after.scheduledFor!.toISOString(), after.updatedAt.toISOString()]).toEqual([before.scheduledFor!.toISOString(), before.updatedAt.toISOString()]);
   });
 });
 
