@@ -5,7 +5,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Download, Upload } from 'lucide-react';
 import { ApiRequestError, BROWSER_CLIENT, getSelectedStore } from '@/lib/auth';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
-import { lazyRetry } from '@/lib/chunk-retry';
+import { isChunkLoadError, lazyRetry, retryImport } from '@/lib/chunk-retry';
 import type { ColumnChoice, ColumnReading, ImportField, MissingPolicy, SyncPreview, SyncResult } from '@/lib/catalogue-import-api';
 import type { AddResult, Problem } from './panels';
 
@@ -21,7 +21,9 @@ import type { AddResult, Problem } from './panels';
 // loads when a file is chosen, so the page's first load stays small.
 // ---------------------------------------------------------------------------
 
-const importApi = () => import('@/lib/catalogue-import-api');
+// [REVIEW-F S4-2] The calls' code is tried once more when it fails to arrive, and a failure that remains is told in
+// plain words (never webpack's own "Loading chunk N failed" with its address).
+const importApi = retryImport(() => import('@/lib/catalogue-import-api'));
 const panels = () => import('./panels');
 const ProblemPanel = lazyRetry(() => panels().then((m) => ({ default: m.ProblemPanel })));
 const ColumnsPanel = lazyRetry(() => panels().then((m) => ({ default: m.ColumnsPanel })));
@@ -29,6 +31,10 @@ const SyncPreviewPanel = lazyRetry(() => panels().then((m) => ({ default: m.Sync
 const SyncResultPanel = lazyRetry(() => panels().then((m) => ({ default: m.SyncResultPanel })));
 const AddReadyPanel = lazyRetry(() => panels().then((m) => ({ default: m.AddReadyPanel })));
 const AddResultPanel = lazyRetry(() => panels().then((m) => ({ default: m.AddResultPanel })));
+
+function messageOf(e: unknown): string {
+  return isChunkLoadError(e) ? 'Couldn\'t load the import tools. Check your connection and try again.' : (e as Error).message;
+}
 
 function problemOf(e: unknown): Problem | null {
   if (!(e instanceof ApiRequestError) || !e.code) return null;
@@ -83,7 +89,7 @@ export default function ImportPage() {
         setProblem(p);
         setError(null);
       } else {
-        setError((e as Error).message);
+        setError(messageOf(e));
       }
     },
   });
@@ -91,19 +97,19 @@ export default function ImportPage() {
   const apply = useMutation({
     mutationFn: async () => (await importApi()).confirmTillSync(reading!.normalizedCsv, preview!),
     onSuccess: (r) => { setResult(r); setPreview(null); },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(messageOf(e)),
   });
 
   /** The old path: no SKU column, so every row is added as a new item. */
   const readAsNew = useMutation({
     mutationFn: async () => (await importApi()).automapCsv(sourceCsv!, { tillStore: choice.tillStore, mapping: choice.mapping }),
     onSuccess: (r) => { setAddReading(r); setProblem(null); setError(null); },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(messageOf(e)),
   });
   const addAll = useMutation({
     mutationFn: async () => (await importApi()).confirmImport(addReading!.normalizedCsv),
     onSuccess: (r) => { setAddResult(r); setAddReading(null); },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(messageOf(e)),
   });
 
   async function onFile(file: File) {
@@ -207,8 +213,9 @@ export default function ImportPage() {
 
       {error && <p role="alert" className="rounded-xl bg-[var(--swift-red)]/5 p-4 text-sm text-[var(--swift-red)]">{error}</p>}
 
-      <Suspense fallback={null}>
-        {problem && (
+      {/* [REVIEW-F S4-1] One boundary per panel: a panel's first load never blanks one already on screen. */}
+      {problem && (
+        <Suspense fallback={null}>
           <ProblemPanel
             problem={problem}
             sourceCsv={sourceCsv}
@@ -216,13 +223,17 @@ export default function ImportPage() {
             onTillStore={(s) => reread({ ...choice, tillStore: s })}
             onAddAsNew={() => readAsNew.mutate()}
           />
-        )}
+        </Suspense>
+      )}
 
-        {fileName && headers.length > 0 && !result && !addResult && (
+      {fileName && headers.length > 0 && !result && !addResult && (
+        <Suspense fallback={null}>
           <ColumnsPanel fileName={fileName} reading={reading} headers={headers} mapping={mapping} sourceCsv={sourceCsv} busy={busy} onChoose={chooseColumn} />
-        )}
+        </Suspense>
+      )}
 
-        {preview && (
+      {preview && (
+        <Suspense fallback={null}>
           <SyncPreviewPanel
             preview={preview}
             missing={missing}
@@ -232,23 +243,25 @@ export default function ImportPage() {
             onApply={() => { setError(null); apply.mutate(); }}
             onCancel={() => { reset(); setFileName(null); }}
           />
-        )}
+        </Suspense>
+      )}
 
-        {result && <SyncResultPanel result={result} />}
+      {result && <Suspense fallback={null}><SyncResultPanel result={result} /></Suspense>}
 
-        {addReading && (
+      {addReading && (
+        <Suspense fallback={null}>
           <AddReadyPanel reading={addReading} pending={addAll.isPending} onAdd={() => addAll.mutate()} onCancel={() => setAddReading(null)} />
-        )}
+        </Suspense>
+      )}
 
-        {addResult && <AddResultPanel result={addResult} />}
-      </Suspense>
+      {addResult && <Suspense fallback={null}><AddResultPanel result={addResult} /></Suspense>}
 
       <div className="rounded-2xl bg-[var(--swift-subtle)] p-5 text-sm text-[var(--swift-muted)]">
         <p className="font-semibold text-[var(--swift-ink)]">How it works</p>
         <ul className="mt-1 list-disc space-y-1 pl-5">
           <li>Loyverse and QuickBooks item lists are recognised by their own columns. Other files are read by their column names, and you can change any choice.</li>
           <li>Stock changes are saved in your stock history as &ldquo;till export&rdquo;. An item at zero shows as sold out, and comes back when stock returns, unless you switched it off yourself.</li>
-          <li>An item your till says is not for sale stays off, even when stock comes back, until a later file has it for sale or you switch it on.</li>
+          <li>An item your till says is not for sale stays off, even when stock comes back, until a later file has it for sale, with stock if Swift counts it, or you switch it on.</li>
           <li>An item you mark sold out because it is not in the file comes back when a later file has it for sale, with stock if Swift counts it.</li>
           <li>A price, count or code Swift cannot read is never guessed. That row is listed for you to fix.</li>
           <li>The same file cannot be applied twice, so items sold since then are never counted back in.</li>
