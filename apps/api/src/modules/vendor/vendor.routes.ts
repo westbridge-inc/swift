@@ -77,6 +77,7 @@ import { IMPORT_PHOTO_ADDRESS_NOTE, uploadOnlyPhotoField } from '../../utils/pho
 import { retryStorageOrphan } from '../../lib/storage-orphans';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { queueStorePhotoDeletions } from './store-photos';
+import { MENU_COPY_AUDIT_ACTION, assertCopyable, copyPhotos, judgeSourceItems, menuExportCsv, menuHasAnything, priorCopy, readLiveMenu, writeMenuCopy, type MenuCopyResult } from './menu-copy';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -170,6 +171,14 @@ const updateVendorProfileSchema = z.object({
     message: 'Send latitude and longitude together',
     path: ['longitude'],
   });
+
+/** [CHAINS PR2] POST /menu/copy: the branch to copy from, and the client's key for this one copy (a retry sends it again). */
+const menuCopySchema = z.object({
+  fromStoreId: z.string().min(1).max(64),
+  copyKey: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/),
+});
+const menuNotEmpty = () => new AppError(409, 'MENU_NOT_EMPTY',
+  'This branch already has a menu. A copy only goes into an empty menu: delete its sections first, or add items one by one.');
 
 const acceptOrderSchema = z.object({
   estimatedPrepTime: z.number().int().min(1).max(480).optional(),
@@ -326,6 +335,8 @@ const updatePromoSchema = z.object({
 const addStaffSchema = z.object({
   phone: z.string().min(10).max(15),
   role: z.enum(['MANAGER', 'STAFF']).default('STAFF'),
+  // [CHAINS PR2] Several branches of the owner in one step (default: the selected store). One add, one allowance.
+  vendorIds: z.array(z.string().min(1)).min(1).max(50).optional(),
 });
 const updateStaffSchema = z.object({
   role: z.enum(['MANAGER', 'STAFF']),
@@ -431,6 +442,8 @@ const vendorOrdersQuerySchema = z.object({
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
   search: z.string().max(100).optional(),
+  // [CHAINS PR2] "All branches": every store the caller works in, even while one is selected (x-vendor-id).
+  scope: z.enum(['all']).optional(),
 });
 
 const vendorItemsQuerySchema = z.object({
@@ -1062,9 +1075,37 @@ export async function vendorRoutes(app: FastifyInstance) {
     const stores = await app.prisma.vendor.findMany({
       where: { id: { in: access.vendorIds } },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true, isVerified: true },
+      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true, isVerified: true, status: true, personApprovalRequired: true },
     });
-    return { success: true, data: { stores, selectedId: access.vendorId, myRole: access.role } };
+    // [CHAINS PR2] A branch waiting for Swift's approval says so in the switcher (status PENDING_APPROVAL).
+    const shown = stores.map(({ personApprovalRequired, ...store }) => ({ ...store, awaitingApproval: store.status === 'PENDING_APPROVAL' || personApprovalRequired }));
+    return { success: true, data: { stores: shown, selectedId: access.vendorId, myRole: access.role } };
+  });
+
+  /**
+   * [CHAINS PR2 · owner 29 Oct 2026] GET /stores/summary — sales per branch and in all (today, 7 and 30 days; the
+   * queue), for exactly the stores where this caller may see sales: an owner every store, a team member only the
+   * stores they MANAGE. Staff-only callers are refused, like every analytics route. The same numbers as the
+   * per-store overview (vendor-analytics.service overview), one store at a time.
+   */
+  app.get('/stores/summary', auth, async (request) => {
+    const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const managed = access.role === 'OWNER' && access.ownerId
+      ? access.vendorIds
+      : (await app.prisma.vendorStaff.findMany({ where: { userId: request.user.userId, role: 'MANAGER', vendorId: { in: access.vendorIds } }, select: { vendorId: true } })).map((m) => m.vendorId);
+    if (managed.length === 0) requireRole(access, 'MANAGER');
+    const stores = await app.prisma.vendor.findMany({ where: { id: { in: managed } }, orderBy: { createdAt: 'asc' }, select: { id: true, name: true, city: true } });
+    const branches: Array<{ vendorId: string; name: string; city: string | null } & Awaited<ReturnType<typeof analytics.overview>>> = [];
+    for (const store of stores) branches.push({ vendorId: store.id, name: store.name, city: store.city, ...(await analytics.overview(store.id)) });
+    const sum = (pick: (b: (typeof branches)[number]) => number) => branches.reduce((total, b) => total + pick(b), 0);
+    const total = {
+      today: { orders: sum((b) => b.today.orders), revenue: sum((b) => b.today.revenue) },
+      week: { orders: sum((b) => b.week.orders), revenue: sum((b) => b.week.revenue) },
+      month: { orders: sum((b) => b.month.orders), revenue: sum((b) => b.month.revenue) },
+      pendingOrders: sum((b) => b.pendingOrders),
+      queueValue: sum((b) => b.queueValue),
+    };
+    return { success: true, data: { branches, total } };
   });
 
   /**
@@ -1140,16 +1181,21 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  account gets an invite and joins only when it accepts; with it off (the
    *  app build without the Accept card) it is added at once, as before. */
   app.post('/staff', auth, async (request) => {
-    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const access = await requireVendor(app, request, 'OWNER');
+    const body = addStaffSchema.parse(request.body);
+    // [CHAINS PR2] The stores this add is for: the selected one, or several of the owner's branches at once. Every
+    // one must be the caller's own (an owner's store list, never a store they only work at) and approved.
+    const targets = [...new Set(body.vendorIds ?? [access.vendorId])];
+    if (targets.some((id) => !access.vendorIds.includes(id))) throw new AppError(404, 'VENDOR_NOT_FOUND', 'One of those stores is not yours.');
     // [SEC-TRUST F15] A team is added to a store Swift has approved (ACTIVE), never to one still waiting.
-    const store = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { status: true } });
-    if (store?.status !== 'ACTIVE') {
+    const approved = await app.prisma.vendor.count({ where: { id: { in: targets }, status: 'ACTIVE' } });
+    if (approved !== targets.length) {
       throw new AppError(403, 'STORE_NOT_APPROVED', 'You can add team members once your store is approved and open.');
     }
     await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
-    const body = addStaffSchema.parse(request.body);
     // [Row 55] A daily allowance per owner account, spent BEFORE the number is
     // looked up: reaching it reads the same for every number and grants nothing.
+    // [CHAINS PR2] One person added to several branches in one step spends ONE add (the cap is about numbers looked up).
     if (!(await spendStaffAddAllowance(app.redis, request.user.userId))) {
       throw new AppError(429, 'STAFF_ADD_DAILY_LIMIT', `You can add up to ${staffAddDailyCap()} team members a day. Try again tomorrow.`);
     }
@@ -1166,38 +1212,40 @@ export async function vendorRoutes(app: FastifyInstance) {
     // answers about the caller alone, so it says nothing about the number.
     await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
     const reply = staffAddReply(body.role);
-    // The same read runs for every number. Capture authority before scheduling
-    // delivery, without waiting for invitation persistence or publication.
-    const revocationVersion = staffInviteAcceptEnabled()
-      ? await staffInviteRevocationVersion(app.prisma, vendorId, target?.id ?? 'unresolved-recipient') : 0;
-    if (!target || target.status !== 'ACTIVE') return reply;
+    for (const vendorId of targets) {
+      // The same read runs for every number. Capture authority before scheduling
+      // delivery, without waiting for invitation persistence or publication.
+      const revocationVersion = staffInviteAcceptEnabled()
+        ? await staffInviteRevocationVersion(app.prisma, vendorId, target?.id ?? 'unresolved-recipient') : 0;
+      if (!target || target.status !== 'ACTIVE') continue;
 
-    if (staffInviteAcceptEnabled()) {
-      // Off the request path: the reply never waits on whether an invite was due
-      // (deliverStaffInvite also sends nothing to a demo account).
-      void deliverStaffInvite(app.prisma, notifications, {
-        vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(), revocationVersion,
-      }).catch((err: unknown) => request.log.error({ err, vendorId }, '[row 55] staff invite not delivered'));
-      return reply;
-    }
-    // [REVIEW-PARTNER] ...nor granted to one: the same reply as any number, nothing granted.
-    if (await isReviewAccount(app.prisma, target.id)) return reply;
+      if (staffInviteAcceptEnabled()) {
+        // Off the request path: the reply never waits on whether an invite was due
+        // (deliverStaffInvite also sends nothing to a demo account).
+        void deliverStaffInvite(app.prisma, notifications, {
+          vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(), revocationVersion,
+        }).catch((err: unknown) => request.log.error({ err, vendorId }, '[row 55] staff invite not delivered'));
+        continue;
+      }
+      // [REVIEW-PARTNER] ...nor granted to one: the same reply as any number, nothing granted.
+      if (await isReviewAccount(app.prisma, target.id)) return reply;
 
-    const existing = await app.prisma.vendorStaff.findUnique({
-      where: { vendorId_userId: { vendorId, userId: target.id } },
-      select: { id: true },
-    });
-    if (!existing) {
-      await app.prisma.vendorStaff.create({
-        data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
+      const existing = await app.prisma.vendorStaff.findUnique({
+        where: { vendorId_userId: { vendorId, userId: target.id } },
+        select: { id: true },
       });
-      void notifications.send({
-        userId: target.id,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'You joined a store team',
-        body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
-        data: { kind: 'staff_added', vendorId },
-      }).catch((err: unknown) => request.log.error({ err, vendorId }, 'staff added notice failed'));
+      if (!existing) {
+        await app.prisma.vendorStaff.create({
+          data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
+        });
+        void notifications.send({
+          userId: target.id,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'You joined a store team',
+          body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
+          data: { kind: 'staff_added', vendorId },
+        }).catch((err: unknown) => request.log.error({ err, vendorId }, 'staff added notice failed'));
+      }
     }
     return reply;
   });
@@ -2272,12 +2320,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await resolveVendor(app, request.user.userId, requested);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
-    const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
+    const { status, orderType, from, to, search, scope } = vendorOrdersQuerySchema.parse(request.query);
 
     // LIFECYCLE_V2: a held order does not exist for the vendor yet, and one
     // cancelled inside its hold never will [Q12]. Lives in AND[] so the search
     // block's own OR can't clobber it.
-    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested), AND: [vendorVisibleFilter(app.prisma)] };
+    // [CHAINS PR2] scope=all: the all-branches board, over exactly the stores resolveVendor gave this caller.
+    const where: Record<string, unknown> = { vendorId: ordersScope(access, scope === 'all' ? undefined : requested), AND: [vendorVisibleFilter(app.prisma)] };
     if (status) where['status'] = status;
     if (orderType) where['orderType'] = orderType;
     if (from) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: from };
@@ -3202,7 +3251,9 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/cash-settlements', auth, async (request) => {
     const requested = selectedVendorId(request);
     const access = await resolveVendor(app, request.user.userId, requested);
-    const scope = ordersScope(access, requested);
+    // [CHAINS PR2] ?scope=all: every store the caller works in, as the all-branches board.
+    const all = z.object({ scope: z.enum(['all']).optional() }).passthrough().parse(request.query ?? {}).scope === 'all';
+    const scope = ordersScope(access, all ? undefined : requested);
     const data = await settlementLedger.listForVendors(typeof scope === 'string' ? [scope] : scope.in);
     return { success: true, data };
   });
@@ -3587,6 +3638,80 @@ export async function vendorRoutes(app: FastifyInstance) {
     const categories = await menu.reorderCategories(vendorId, body.order);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: categories };
+  });
+
+  /**
+   * [CHAINS PR2 · owner 29 Oct 2026] POST /menu/copy — copy another branch's menu into this (selected) branch, whose
+   * menu must still be empty (modules/vendor/menu-copy.ts has the rules). The same business only: both stores are
+   * this caller's (the owner, or a manager at both) and belong to one owner. The same copyKey sent again answers the
+   * first copy. Rate limited: a copy writes a whole menu and keeps its photos again.
+   */
+  app.post('/menu/copy', { ...auth, config: { rateLimit: { max: 10, timeWindow: '1 hour' } } }, async (request) => {
+    const access = await requireVendor(app, request, 'MANAGER');
+    const body = menuCopySchema.parse(request.body);
+    const targetId = access.vendorId;
+    if (body.fromStoreId === targetId) throw new AppError(400, 'SAME_STORE', 'Choose a different branch to copy from.');
+    // A store the caller does not work in is not named (404, never 403: existence is not confirmed).
+    if (!access.vendorIds.includes(body.fromStoreId)) throw new NotFoundError('Store', body.fromStoreId);
+    if (!access.ownerId) {
+      const at = await app.prisma.vendorStaff.findUnique({ where: { vendorId_userId: { vendorId: body.fromStoreId, userId: request.user.userId } }, select: { role: true } });
+      requireRole({ role: (at?.role ?? 'STAFF') as VendorAccessRole }, 'MANAGER');
+    }
+    const pair = await app.prisma.vendor.findMany({ where: { id: { in: [targetId, body.fromStoreId] } }, select: { id: true, ownerId: true, tenantId: true } });
+    const target = pair.find((v) => v.id === targetId);
+    const source = pair.find((v) => v.id === body.fromStoreId);
+    if (!target || !source || source.ownerId !== target.ownerId || source.tenantId !== target.tenantId) {
+      throw new NotFoundError('Store', body.fromStoreId);
+    }
+    const replay = await priorCopy(app.prisma, targetId, body.copyKey);
+    if (replay) return { success: true, data: replay };
+    await requireListingAllowed(app, verification, targetId);
+    await assertStoreAllowed(app.prisma, targetId);
+    if (await menuHasAnything(app.prisma, targetId)) throw menuNotEmpty();
+    const menu = await readLiveMenu(app.prisma, source.id);
+    assertCopyable(menu);
+    const { banned, waiting } = await judgeSourceItems(app.prisma, menu);
+    const shown = menu.flatMap((c) => {
+      const items = c.items.filter((i) => !banned.has(i.id));
+      return c.items.length > 0 && items.length === 0 ? [] : [c.imageUrl, ...items.map((i) => i.imageUrl)];
+    });
+    const photos = await copyPhotos(storage, source.id, targetId, shown);
+    const discard = async () => { for (const url of photos.kept) await discardKeptPhoto(targetId, url); };
+    let result: MenuCopyResult;
+    try {
+      result = await app.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${targetId} FOR UPDATE /* menu-copy-target */`;
+        const again = await priorCopy(tx, targetId, body.copyKey);
+        if (again) return again;
+        if (await menuHasAnything(tx, targetId)) throw menuNotEmpty();
+        const written = await writeMenuCopy(tx, { targetId, menu, banned, photoMap: photos.map });
+        const out: MenuCopyResult = {
+          fromStoreId: source.id, ...written, photosNotCopied: photos.failed,
+          waitingForCheck: [...waiting].filter((id) => !banned.has(id)).length,
+          notAllowed: menu.flatMap((c) => c.items.filter((i) => banned.has(i.id)).map((i) => ({ name: i.name }))),
+          replayed: false,
+        };
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId, action: MENU_COPY_AUDIT_ACTION, entity: 'Vendor', entityId: targetId,
+          changes: { copyKey: body.copyKey, fromStoreId: source.id, result: out } as unknown as Prisma.InputJsonValue,
+        } });
+        return out;
+      }, { timeout: 60_000 });
+    } catch (err) {
+      await discard();
+      throw err;
+    }
+    if (result.replayed) await discard();
+    else scheduleVendorSearchSync(app, targetId);
+    return { success: true, data: result };
+  });
+
+  /** [CHAINS PR2] GET /menu/export — this store's live menu as a CSV (the import template's columns + options). */
+  app.get('/menu/export', auth, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const csv = await menuExportCsv(app.prisma, vendorId);
+    reply.type('text/csv; charset=utf-8').header('content-disposition', 'attachment; filename="swift-menu.csv"');
+    return csv;
   });
 
   // =========================================================================

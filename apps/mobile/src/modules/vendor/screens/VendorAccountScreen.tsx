@@ -56,6 +56,7 @@ import {
   type DayHours,
 } from '../../../hooks/vendorops';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { awaitingApproval } from '../../../lib/branches';
 import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
@@ -234,6 +235,10 @@ export function VendorAccountScreen() {
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
+          {/* [CHAINS PR2] Every branch at a glance, several at once, and (owner) adding one. */}
+          {isManager ? (
+            <SettingsRow icon="git-branch" label="Branches" sub={isOwner ? 'All your branches, and add a branch' : 'Your branches at a glance'} onPress={() => navigation.navigate('VendorBranches')} />
+          ) : null}
           <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
           <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
@@ -751,6 +756,10 @@ function StaffSection() {
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
   const [removing, setRemoving] = useState<any | null>(null);
+  // [CHAINS PR2] One person, several branches in one step (the owner's approved branches; one daily add).
+  const { store: here, stores: allStores } = useVendorProfile();
+  const otherBranches: any[] = (allStores ?? []).filter((s: any) => s.id !== here?.id && !awaitingApproval(s));
+  const [alsoAt, setAlsoAt] = useState<string[]>([]);
 
   const members: any[] = staffQ.data ?? [];
   const errMsg = isStepUpDismissed(addStaff.error)
@@ -760,7 +769,9 @@ function StaffSection() {
   const submit = () => {
     const p = phone.trim();
     if (p.length < 10) return;
-    addStaff.mutate({ phone: p, role }, { onSuccess: () => setPhone('') });
+    const also = alsoAt.filter((id) => otherBranches.some((s) => s.id === id));
+    const vendorIds = here?.id && also.length > 0 ? [here.id, ...also] : undefined;
+    addStaff.mutate({ phone: p, role, ...(vendorIds ? { vendorIds } : {}) }, { onSuccess: () => { setPhone(''); setAlsoAt([]); } });
   };
 
   return (
@@ -819,6 +830,19 @@ function StaffSection() {
           <Chip label="Staff · queue + availability" selected={role === 'STAFF'} onPress={() => setRole('STAFF')} />
           <Chip label="Manager" selected={role === 'MANAGER'} onPress={() => setRole('MANAGER')} />
         </View>
+        {otherBranches.length > 0 ? (
+          <>
+            <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
+              Also add them to these branches:
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
+              {otherBranches.map((s) => (
+                <Chip key={s.id} label={s.name} selected={alsoAt.includes(s.id)}
+                  onPress={() => setAlsoAt((a) => (a.includes(s.id) ? a.filter((x) => x !== s.id) : [...a, s.id]))} />
+              ))}
+            </View>
+          </>
+        ) : null}
         {errMsg ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
             {errMsg}

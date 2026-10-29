@@ -265,7 +265,7 @@ const passThrough: MutationGuard = (fn) => fn;
 export function useAddStaff(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: guard(guardVendorOperation((data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data)))),
+    mutationFn: guard(guardVendorOperation((data: { phone: string; role: 'MANAGER' | 'STAFF'; vendorIds?: string[] }) => unwrap(vendorApi.addStaff(data)))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
 }
@@ -1374,5 +1374,88 @@ export function useVendorTier<T = any>() {
     queryFn: async () => (await vendorApi.tier()).data?.data as T,
     enabled: !pv,
     refetchInterval: 60000,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// [CHAINS PR2 · owner 29 Oct 2026] One owner, many branches. Nothing here runs in a sample preview.
+// ---------------------------------------------------------------------------
+
+export type BranchStore = {
+  id: string; name: string; vendorType: string; city?: string | null; status?: string; awaitingApproval?: boolean;
+  acceptingOrders?: boolean; isCurrentlyOpen?: boolean; isVerified?: boolean;
+};
+export type BranchMoney = { orders: number; revenue: number };
+export type BranchSummaryRow = { vendorId: string; name: string; city?: string | null; today: BranchMoney; week: BranchMoney; month: BranchMoney; pendingOrders: number; queueValue: number };
+export type BranchesSummary = { branches: BranchSummaryRow[]; total: { today: BranchMoney; week: BranchMoney; month: BranchMoney; pendingOrders: number; queueValue: number } };
+export type BranchTerms = {
+  weeklyFee: { amount: number; currencyCode: string; tier: string; version: string };
+  terms: { version: string; items: { heading: string; text: string }[]; tick: string } | null;
+  sharedTrialEndsAt: string | null; stores: number; limit: number; dealWeeklyRate: number | null; dealCurrencyCode: string | null;
+};
+
+/** Every store this account works in (GET /vendor/stores), with which branch waits for Swift's approval. */
+export function useBranchStores(enabled = true) {
+  const pv = usePreviewDataset();
+  return useQuery({
+    queryKey: ['vendor', 'branches', 'stores'],
+    queryFn: () => unwrap<{ stores: BranchStore[]; selectedId: string; myRole: string }>(vendorApi.stores()),
+    enabled: enabled && !pv,
+  });
+}
+
+/** Sales per branch and in all; polled like the overview. */
+export function useBranchesSummary(enabled = true) {
+  const pv = usePreviewDataset();
+  return useQuery({
+    queryKey: ['vendor', 'branches', 'summary'],
+    queryFn: () => unwrap<BranchesSummary>(vendorApi.storesSummary()),
+    enabled: enabled && !pv,
+    refetchInterval: 60_000,
+  });
+}
+
+/** Every branch's orders on one board (each names its store). */
+export function useAllBranchOrders(enabled = true) {
+  const pv = usePreviewDataset();
+  return useQuery({
+    queryKey: ['vendor', 'branches', 'orders'],
+    queryFn: () => unwrap<any[]>(vendorApi.allBranchOrders()),
+    enabled: enabled && !pv,
+    refetchInterval: POLL.vendorOrders(),
+  });
+}
+
+/** The add-a-branch screen's terms for this business type, read fresh. */
+export function useBranchTerms(vendorType: string, enabled = true) {
+  const pv = usePreviewDataset();
+  return useQuery({
+    queryKey: ['vendor', 'branches', 'terms', vendorType],
+    queryFn: () => unwrap<BranchTerms>(vendorApi.branchTerms(vendorType)),
+    enabled: enabled && !pv,
+    staleTime: 0,
+  });
+}
+
+/** Add a branch: owner, confirm-it's-you (guard), the weekly fee ticked for this branch. */
+export function useAddBranch(guard: MutationGuard = passThrough) {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: guard(guardVendorOperation((data: Parameters<typeof vendorApi.addBranch>[0]) => unwrap<{ id: string; name: string; status: string }>(vendorApi.addBranch(data)))),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'branches'] });
+    },
+  });
+}
+
+/** Copy another branch's menu into one branch (its menu must be empty). The key rides along on a retry. */
+export function useCopyMenu() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (v: { toStoreId: string; fromStoreId: string; copyKey: string }) => unwrap(vendorApi.copyMenu(v.toStoreId, v.fromStoreId, v.copyKey)),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor'] });
+    },
   });
 }

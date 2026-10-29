@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { memo, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Search } from 'lucide-react';
@@ -13,6 +13,10 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { useStoreRole } from '@/lib/store-role';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [CHAINS PR2] Drawn only for an empty menu of a business with more than one store (its code loads then).
+const BranchMenuCopy = lazyRetry(() => import('@/components/branch-menu-copy'));
 
 // [TAP-AUDIT 27 Oct · owner rule 11 Oct: the website copies the app] The app's item editor, section tools, delete ask,
 // and the parts of a row shown only on a tap, in their own chunk: fetched in the background when the page mounts (once,
@@ -258,6 +262,20 @@ export default function InventoryPage() {
   }, [sections, list, categoryId, filtered]);
   const toggle = availMut.mutate;
   const onToggle = useCallback((id: string, isAvailable: boolean) => toggle({ id, isAvailable }), [toggle]);
+  // [CHAINS PR2] An empty branch menu can start as a copy of another branch's; managers can export the menu as CSV.
+  const storeList = stores.data?.stores ?? [];
+  const emptyMenu = items.isSuccess && categories.isSuccess && (items.data ?? []).length === 0 && sections.length === 0;
+  const [exportState, setExportState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const exportMenu = async () => {
+    if (!storeId || exportState.busy) return;
+    setExportState({ busy: true, error: null });
+    try {
+      await (await import('@/lib/menu-export')).downloadMenuCsv(storeId);
+      setExportState({ busy: false, error: null });
+    } catch (e) {
+      setExportState({ busy: false, error: e instanceof Error && e.message ? e.message : 'Couldn\u2019t export the menu. Try again.' });
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -275,6 +293,12 @@ export default function InventoryPage() {
           >
             Bulk import CSV / Excel
           </Link>
+          {manager && !emptyMenu && (
+            <button type="button" disabled={exportState.busy} onClick={() => void exportMenu()}
+              className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
+              {exportState.busy ? 'Exporting…' : 'Export menu (CSV)'}
+            </button>
+          )}
           {manager && (
             <button type="button" disabled={!sections.length} onClick={() => setDialog({ kind: 'item', item: null })}
               className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)] disabled:opacity-50">
@@ -283,6 +307,12 @@ export default function InventoryPage() {
           )}
         </div>
       </div>
+      {exportState.error && <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">{exportState.error}</p>}
+      {manager && emptyMenu && storeId && storeList.length > 1 && (
+        <Suspense fallback={null}>
+          <BranchMenuCopy storeId={storeId} stores={storeList} onCopied={() => { void refresh(); void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'categories') }); }} />
+        </Suspense>
+      )}
       {manager && categories.isSuccess && !sections.length && <p className="sw-caption">Add a section first, then add individual items.</p>}
 
       <div className="flex flex-wrap items-center gap-3">

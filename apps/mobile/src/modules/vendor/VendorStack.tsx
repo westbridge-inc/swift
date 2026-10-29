@@ -10,6 +10,8 @@ import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
+import { VendorBranchesScreen } from './screens/VendorBranchesScreen';
+import { VendorAddBranchScreen } from './screens/VendorAddBranchScreen';
 import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
@@ -266,6 +268,9 @@ export function VendorStack() {
         <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
         {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
         <Stack.Screen name="VendorTier" component={VendorTierScreen} />
+        {/* [CHAINS PR2] One owner, many branches: every branch at a glance, and adding one. */}
+        <Stack.Screen name="VendorBranches" component={VendorBranchesScreen} />
+        <Stack.Screen name="VendorAddBranch" component={VendorAddBranchScreen} />
       </Stack.Group>
       {/* Keep the notification destination registered across the handoff. Its
           vendor fee editor already remounts with key={storeId}. */}

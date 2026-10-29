@@ -264,7 +264,10 @@ export default function SettingsPage() {
   const storeId = useStoreId();
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
   const p = selectedProfileStore(profile.data as ProfileData | undefined, storeId);
-  const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
+  const myRole = (profile.data as { myRole?: string } | undefined)?.myRole;
+  const isOwner = myRole === 'OWNER';
+  // [CHAINS PR2] A manager sees the branches they manage (GET /vendor/stores/summary allows it); the team is the owner's.
+  const seesBranches = isOwner || myRole === 'MANAGER';
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -285,6 +288,17 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* [CHAINS PR2] The team (owner) and the branches (owner and managers); the phone has them under Account. */}
+      {seesBranches && (
+        <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-bold">{isOwner ? 'Team and branches' : 'Branches'}</h2>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">{isOwner ? 'Add managers and staff, or another branch of your business.' : 'Every branch you manage at a glance.'}</p>
+          </div>
+          {isOwner && <Link href="/dashboard/team" className="sw-chip">Team</Link>}
+          <Link href="/dashboard/branches" className="sw-chip">Branches</Link>
+        </div>
+      )}
       <StorePhotosCard storeId={storeId} />
       {/* [BOOK-S5b · owner C1] Services only, and only when the server sends the setting. */}
       <BookingCapacityCard storeId={storeId} />

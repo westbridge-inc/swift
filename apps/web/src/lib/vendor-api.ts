@@ -16,6 +16,10 @@ export interface Store {
   acceptingOrders: boolean;
   city: string | null;
   isVerified: boolean;
+  /** [CHAINS PR2] The store's status; a branch waiting for Swift's approval is PENDING_APPROVAL. */
+  status?: string;
+  /** [CHAINS PR2] The server's word that this branch waits for Swift's approval (the switcher says so). */
+  awaitingApproval?: boolean;
 }
 
 // ── The money seam ───────────────────────────────────────────────────────────
@@ -355,3 +359,4 @@ export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((
 // a mis-click on the wrong row cannot close a debt.
 export const confirmSettlement = (id: string, amount: string | number) =>
   apiFetch(`${V}/cash-settlements/${id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });
+
