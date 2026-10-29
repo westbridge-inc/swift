@@ -11,6 +11,7 @@ import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
+import { BookingCapacityCard } from './booking-capacity-card';
 import { FoodHandlersCard } from './food-handlers-card';
 import { StorePhotosCard } from './store-photos-card';
 import { VatCard } from './vat-card';
@@ -285,6 +286,8 @@ export default function SettingsPage() {
       )}
 
       <StorePhotosCard storeId={storeId} />
+      {/* [BOOK-S5b · owner C1] Services only, and only when the server sends the setting. */}
+      <BookingCapacityCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
       {/* [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's owner ticks for its food handlers */}
       <FoodHandlersCard storeId={storeId} isOwner={isOwner} vendorType={p?.vendorType} />

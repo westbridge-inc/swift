@@ -95,6 +95,8 @@ export interface VendorOrder {
   mmgClaimMismatchAt?: string | null;
   placedAt: string;
   appointmentSlot?: string | null;
+  /** [#2198] The server's word on "Customer didn't come" for this appointment, at the read. An older server omits it. */
+  noShow?: { allowed?: unknown } | null;
   /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
   respondBy?: string | null;
   acceptedAt?: string | null;
