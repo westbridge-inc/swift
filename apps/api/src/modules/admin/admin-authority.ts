@@ -880,6 +880,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'PUT /billing/price-book': 'a versioned price book; the version register is the record',
   'PUT /billing/agent-cash-config': 'a tenant-wide settings singleton with no id in the route',
   'PUT /batching/settings': 'a tenant-wide settings singleton with no id in the route',
+  // [RIDER-SAFE 5] each write creates a new immutable AlgoConfig version row; the inline audit row names it
+  'PUT /delivery-pause': 'creates a new immutable version row of the delivery.pause switch; there is no before row to digest — the audit facts carry the new version row id, the version and both sides of the switch',
   'POST /billing/fx-rates': 'creates a rate row; there is no before state to digest',
   'POST /billing/usd-migration/mode-a': 'a fleet-wide migration over many rows, not one subject',
   'POST /billing/usd-migration/mode-b': 'a fleet-wide migration over many rows, not one subject',

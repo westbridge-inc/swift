@@ -420,6 +420,21 @@ describe("[RIDER-SAFE 5] Swift's delivery pause switch", () => {
     });
     expect(set.statusCode, set.body).toBe(200);
     expect(set.json().data).toMatchObject({ platform: false, zoneIds: [zone.id] });
+    // [ADM-004] ONE audit row, written inside the switch's transaction, naming
+    // the version row it created and both sides of the switch, with the reason.
+    // (The after-response backstop must find it and write nothing more.)
+    const versionRow = await sys(() => app.prisma.algoConfig.findFirstOrThrow({
+      where: { tenantId: 'swift-default', key: 'delivery.pause', version: set.json().data.version }, select: { id: true },
+    }));
+    await new Promise((r) => setTimeout(r, 400));
+    const pauseAudits = await sys(() => app.prisma.auditLog.findMany({
+      where: { userId: admin.userId, OR: [{ action: 'DELIVERY_PAUSE_SET' }, { action: { contains: '/delivery-pause' } }] },
+    }));
+    expect(pauseAudits.map((a) => ({ action: a.action, entityId: a.entityId }))).toEqual([{ action: 'ADMIN PUT /api/v1/admin/delivery-pause', entityId: versionRow.id }]);
+    expect(pauseAudits[0]!.changes).toMatchObject({
+      reason: 'Only two riders left in the south today', versionRowId: versionRow.id, configKey: 'delivery.pause',
+      fromPlatform: false, toPlatform: false, toZoneIds: zone.id,
+    });
     const unknown = await call('PUT', '/api/v1/admin/delivery-pause', admin.token, { platform: false, zoneIds: ['no-such-zone'], reason: 'A zone that does not exist here' });
     expect(unknown.statusCode, unknown.body).toBe(400);
 

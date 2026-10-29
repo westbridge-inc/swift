@@ -2874,6 +2874,12 @@ export async function adminRoutes(app: FastifyInstance) {
     const state = await setDeliveryPause(app.prisma, {
       tenantId, platform: body.platform, zoneIds: body.zoneIds, actorUserId: request.user.userId,
       reason: body.reason.trim(), expectedVersion: body.expectedVersion,
+      // [ADM-004] One audit row, inside the switch's transaction, naming the
+      // version row it created (ADMIN_ROUTES_WITHOUT_ENTITY says why there is
+      // no route-declared subject to digest).
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        entityId: typeof facts['versionRowId'] === 'string' ? facts['versionRowId'] : undefined, extra: facts,
+      }),
     });
     return { success: true, data: state };
   });

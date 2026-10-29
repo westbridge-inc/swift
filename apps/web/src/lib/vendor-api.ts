@@ -350,29 +350,7 @@ export const updateItem = (id: string, body: Record<string, unknown>) =>
 export const setItemAvailability = (id: string, isAvailable: boolean) =>
   apiFetch(`${V}/items/${id}/availability`, { method: 'PUT', body: JSON.stringify({ isAvailable }) });
 
-// ── CSV / Excel import (the desktop star) ────────────────────────────────────
-export const templateUrl = () => `${V}/items/import/template`;
-export const automapCsv = (csv: string) =>
-  apiFetch(`${V}/items/import/automap`, { method: 'POST', body: JSON.stringify({ csv }) }).then(
-    (r) => r.data as { mapping: Record<string, string>; rowCount: number; preview: Record<string, string>[]; normalizedCsv: string },
-  );
-export const automapXlsx = (file: File) => {
-  const form = new FormData();
-  form.append('file', file);
-  return apiFetch(`${V}/items/import/xlsx`, { method: 'POST', body: form }).then(
-    (r) => r.data as { mapping: Record<string, string>; rowCount: number; preview: Record<string, string>[]; normalizedCsv: string },
-  );
-};
-export const confirmImport = (csv: string) =>
-  apiFetch(`${V}/items/import`, { method: 'POST', body: JSON.stringify({ csv }) }).then(
-    (r) => r.data as {
-      imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }>;
-      /** [GUARDRAILS §8] Imported rows a banned word is holding for a quick check (absent on older servers). */
-      waitingForCheck?: Array<{ row: number; name: string }>; waitingForCheckCount?: number;
-      /** [IMAGES-E2E PR4] Imported rows whose photo address was not used (absent on older servers). */
-      notes?: Array<{ row: number; note: string }>; notesCount?: number;
-    },
-  );
+// ── CSV / Excel import + till export sync: lib/catalogue-import-api.ts (only the import page loads it) ──
 
 // ── Analytics + money ────────────────────────────────────────────────────────
 export const getOverview = () => apiFetch(`${V}/analytics/overview`).then((r) => r.data);
