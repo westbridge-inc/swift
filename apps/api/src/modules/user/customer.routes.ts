@@ -20,6 +20,10 @@ import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
 import { z } from '../../lib/zod';
+import { tenantCacheKey } from '../../utils/tenant-cache';
+import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { capacitySentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
+import { deliveryPausedAt } from '../dispatch/delivery-pause';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
@@ -818,6 +822,9 @@ export async function customerRoutes(app: FastifyInstance) {
     // [owner #20] …and, for an order too big for a bike, only the movers whose vehicle can carry it.
     (point, floatRequired, packageSize) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired, undefined, packageSize),
     app.redis,
+    // [RIDER-SAFE 1] …and the HONEST capacity: the orders already waiting near
+    // the store, and stacked riders only where the stacking rules pass for it.
+    (probe) => dispatchForAvailability.getDeliveryCapacity(probe),
   );
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma, app.io, (vendorId) => scheduleVendorSearchSync(app, vendorId));
@@ -3107,6 +3114,102 @@ export async function customerRoutes(app: FastifyInstance) {
         // [owner #46/#50] Why there is no Cancel, and who to contact instead —
         // the server's verdict, so no client re-derives the rule (additive).
         cancelUnavailable,
+      },
+    };
+  });
+
+  /**
+   * GET /delivery-availability — [RIDER-SAFE 1 · COORD ruling 29 Oct 2026]
+   * What the cart and checkout show BEFORE the customer orders delivery from
+   * one store: GOOD, BUSY ("Riders are busy — about N min extra"), NONE
+   * ("order for pickup instead"), or PAUSED (Swift's pause switch, or the
+   * store's own rider backlog). The same reads checkout decides with, for
+   * this customer's basket from this store (its size and cash) and drop-off.
+   * Levels and minutes only — never rider counts or positions. The rider
+   * read is cached 10 s per store, basket size, cash band and ~1 km drop-off
+   * cell; the two switches are read fresh.
+   * `gate` mirrors DISPATCH_AVAILABILITY: with it off, checkout does not
+   * refuse on riders, so clients show the truth but block nothing (the two
+   * switches refuse either way).
+   */
+  app.get('/delivery-availability', async (request: AuthRequest) => {
+    const q = z.object({
+      vendorId: z.string().min(1).max(64),
+      lat: z.coerce.number().min(-90).max(90).optional(),
+      lng: z.coerce.number().min(-180).max(180).optional(),
+      paymentMethod: z.enum(['CASH', 'MOBILE_MONEY']).optional(),
+    }).parse(request.query);
+    const userId = request.user.userId;
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id: q.vendorId, tenantId: user.tenantId },
+      select: { id: true, name: true, latitude: true, longitude: true, vendorType: true },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', q.vendorId);
+    const gate = process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['DELIVERY_BLOCK_ON_NONE'] !== '0';
+    const storePoint = { lat: vendor.latitude, lng: vendor.longitude };
+
+    const pause = await deliveryPausedAt(app.prisma, user.tenantId, storePoint);
+    if (pause.paused) {
+      return { success: true, data: { level: 'PAUSED' as const, reason: 'SWIFT_PAUSED' as const, extraMinutes: null, gate,
+        message: 'Swift has paused delivery here for now — you can order for Pickup instead.' } };
+    }
+    const backlog = await storeRiderBacklog(app.prisma, vendor.id, user.tenantId);
+    if (backlog.paused) {
+      return { success: true, data: { level: 'PAUSED' as const, reason: 'STORE_BUSY' as const, extraMinutes: null, gate,
+        message: `${vendor.name} has orders waiting for riders, so delivery from this store is paused for a few minutes — you can order for Pickup instead.` } };
+    }
+
+    // The basket from this store: its vehicle size and the cash a rider fronts.
+    const cart = await app.prisma.cart.findUnique({
+      where: { customerId: userId },
+      select: {
+        deliveryAddressId: true,
+        items: { where: { item: { vendorId: vendor.id } }, select: { quantity: true, item: { select: { basePrice: true, bulkUnits: true } } } },
+      },
+    });
+    const lines = cart?.items ?? [];
+    const orderType = vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY';
+    const packageSize = lines.length > 0
+      ? requiredPackageSizeForOrder({ orderType, courierPackageSize: null, items: lines.map((l) => ({ quantity: l.quantity, bulkUnits: l.item.bulkUnits ?? null })) }, DEFAULT_LOAD_BANDS)
+      : null;
+    const cash = q.paymentMethod === 'MOBILE_MONEY' ? 0 : lines.reduce((sum, l) => sum + Number(l.item.basePrice) * l.quantity, 0);
+    let dropoff: { lat: number; lng: number } | null = q.lat != null && q.lng != null ? { lat: q.lat, lng: q.lng } : null;
+    if (!dropoff) {
+      const addr = cart?.deliveryAddressId
+        ? await app.prisma.address.findFirst({ where: { id: cart.deliveryAddressId, userId }, select: { latitude: true, longitude: true } })
+        : await app.prisma.address.findFirst({ where: { userId, isDefault: true }, select: { latitude: true, longitude: true } });
+      if (addr) dropoff = { lat: addr.latitude, lng: addr.longitude };
+    }
+
+    const cacheKey = tenantCacheKey(`avail:DELIVERY:${vendor.id}:${packageSize ?? '-'}:${Math.ceil(cash / 1000)}:${dropoff ? `${dropoff.lat.toFixed(2)}:${dropoff.lng.toFixed(2)}` : '-'}`);
+    type Reading = { level: 'GOOD' | 'BUSY' | 'NONE'; reason: 'NO_RIDERS' | 'RIDERS_BUSY' | null; riderWaitMinutes: number };
+    let reading: Reading | null = null;
+    const cached = await app.redis.get(cacheKey).catch(() => null);
+    if (cached) {
+      try { reading = JSON.parse(cached) as Reading; } catch { reading = null; }
+    }
+    if (!reading) {
+      const capacity = await dispatchForAvailability.getDeliveryCapacity({
+        tenantId: user.tenantId,
+        store: { id: vendor.id, ...storePoint },
+        orderType,
+        dropoff,
+        floatRequired: cash,
+        cashToCollect: cash,
+        packageSize,
+      });
+      reading = { level: capacity.level, reason: capacity.reason, riderWaitMinutes: capacity.riderWaitMinutes };
+      await app.redis.set(cacheKey, JSON.stringify(reading), 'EX', 10).catch(() => {});
+    }
+    return {
+      success: true,
+      data: {
+        level: reading.level,
+        reason: reading.reason,
+        extraMinutes: reading.level === 'BUSY' ? reading.riderWaitMinutes : null,
+        message: capacitySentence(reading),
+        gate,
       },
     };
   });

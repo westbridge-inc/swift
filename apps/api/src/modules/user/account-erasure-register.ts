@@ -113,6 +113,7 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'MmgRefundSend.customerId': 'settlement history: a refund sent on a kept order (Privacy Policy §6)',
   'Subscription.riderId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'Subscription.driverId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
+  'Subscription.serviceProviderId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'BillingFeeNotice.userId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'BillingDunningClock.moverPayerUserId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'MoverFeeSubscription.userId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',

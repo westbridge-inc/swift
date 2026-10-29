@@ -25,8 +25,19 @@ const COPIES: Array<{ name: string; pattern: RegExp }> = [
   { name: 'SQL 3-way owner join', pattern: /LEFT\s+JOIN\s+"?riders"?[\s\S]{0,300}?LEFT\s+JOIN\s+"?drivers"?[\s\S]{0,300}?LEFT\s+JOIN\s+"?vendors"?/i },
   // SQL: the payer column picked from the joined owners.
   { name: 'SQL payer COALESCE', pattern: /COALESCE\(\s*r\."userId"\s*,\s*d\."userId"/ },
+  // Prisma: "every subscription this person pays" (rider, driver, store owner). [REVIEW-X #2191 S3-1]
+  // An order's participant filter starts with the customer and is not this rule.
+  { name: 'Prisma paid-by filter', pattern: /OR:\s*\[\s*\{\s*rider:\s*\{\s*userId\b[\s\S]{0,120}?\{\s*driver:\s*\{\s*userId\b[\s\S]{0,120}?\{\s*vendor:\s*\{\s*owner:\s*\{\s*userId/ },
   // Prisma: the one-owner tenant scope.
   { name: 'Prisma one-owner tenant scope', pattern: /vendor:\s*\{\s*tenantId\s*\},\s*riderId:\s*null,\s*driverId:\s*null/ },
+  // Prisma: the owner relations a payer read loads, written out instead of PAYER_INCLUDE. [BILL-PRO PR2]
+  // A hand-written copy is how a read silently forgets the pro.
+  { name: 'Prisma owner include', pattern: /rider:\s*\{\s*select:\s*\{\s*userId:\s*true\s*\}\s*\},\s*driver:\s*\{\s*select:\s*\{\s*userId:\s*true\s*\}\s*\},\s*vendor:\s*\{\s*select:\s*\{\s*(?:id:\s*true,\s*)?owner:/ },
+];
+
+/** Shapes that look like the rule but are not a subscription's owner. Each must still match (no stale entry). */
+const NOT_A_SUBSCRIPTION: Array<{ file: string; name: string; why: string }> = [
+  { file: join('src', 'modules', 'rating', 'rating.service.ts'), name: 'Prisma owner include', why: "an order's participants (who may rate it)" },
 ];
 
 function sources(dir: string): string[] {
@@ -53,9 +64,20 @@ describe('one subscription payer resolver (source-scan gate)', () => {
       const rel = relative(API, file);
       if (rel === MODULE) continue;
       const text = readFileSync(file, 'utf8');
-      for (const { name, pattern } of COPIES) if (pattern.test(text)) offenders.push(`${rel}: ${name}`);
+      for (const { name, pattern } of COPIES) {
+        if (!pattern.test(text)) continue;
+        if (NOT_A_SUBSCRIPTION.some((x) => x.file === rel && x.name === name)) continue;
+        offenders.push(`${rel}: ${name}`);
+      }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('every listed look-alike still has the shape it is listed for', () => {
+    for (const { file, name } of NOT_A_SUBSCRIPTION) {
+      const pattern = COPIES.find((c) => c.name === name)!.pattern;
+      expect(pattern.test(readFileSync(join(API, file), 'utf8')), `${file}: ${name}`).toBe(true);
+    }
   });
 
   it('the module itself still holds every rule (the gate is not scanning nothing)', () => {
@@ -73,6 +95,15 @@ describe('one subscription payer resolver (source-scan gate)', () => {
       .toEqual(['SQL 3-way owner join']);
     expect(hit('JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")')).toEqual(['SQL payer COALESCE']);
     expect(hit("{ vendor: { tenantId }, riderId: null, driverId: null },")).toEqual(['Prisma one-owner tenant scope']);
+    expect(hit('include: {\n  rider: { select: { userId: true } },\n  driver: { select: { userId: true } },\n  vendor: { select: { id: true, owner: { select: { userId: true } } } },\n}')).toEqual(['Prisma owner include']);
+    expect(hit('select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } }')).toEqual(['Prisma owner include']);
+    // A mover-only include is not the payer read.
+    expect(hit('include: { rider: { select: { userId: true } }, driver: { select: { userId: true } } }')).toEqual([]);
+    expect(hit('where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },')).toEqual(['Prisma paid-by filter']);
+    expect(hit('OR: [\n  { rider: { userId: { in: memberIds } } },\n  { driver: { userId: { in: memberIds } } },\n  { vendor: { owner: { userId: { in: memberIds } } } },\n]')).toEqual(['Prisma paid-by filter']);
+    // An order's participants (customer first) and a mover-only filter are not the payer rule.
+    expect(hit('OR: [{ customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }]')).toEqual([]);
+    expect(hit('where: { OR: [{ rider: { userId: payer.userId } }, { driver: { userId: payer.userId } }] }')).toEqual([]);
     // A mover-only lookup (riders + drivers, no store) is not the three-owner rule.
     expect(hit('LEFT JOIN "riders" r ON r."id" = s."riderId"\n LEFT JOIN "drivers" d ON d."id" = s."driverId"\n WHERE r."userId" = $1')).toEqual([]);
     // An order's counterparty is not a subscription payer.

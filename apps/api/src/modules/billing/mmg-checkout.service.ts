@@ -29,7 +29,7 @@ import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
-import { payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../providers/mmg/mmg-history';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
@@ -1582,11 +1582,7 @@ export class MmgCheckoutService {
     try {
       const sub = await this.prisma.subscription.findUnique({
         where: { id: intent.subscriptionId },
-        select: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
+        select: PAYER_INCLUDE,
       });
       const userId = payerUserIdOf(sub);
       if (!userId) return;

@@ -209,6 +209,37 @@ export const ALGO_DEFAULTS = {
    */
   'booking.maxLivePerBusiness': 2,
   'booking.maxLiveTotal': 5,
+  /**
+   * [RIDER-SAFE · COORD ruling 29 Oct 2026] The delivery safeguard for when
+   * riders run short (dispatch/delivery-capacity.ts). Every value is a dial,
+   * read per tenant; the defaults are the launch values.
+   *
+   *  · `avgRiderLegMinutes` — how long one delivery takes a rider, store to
+   *    door and free again. The honest rider wait when every rider is busy is
+   *    (orders ahead of this one + 1) × this ÷ (riders near + 1). Clamped 5..120.
+   *  · `maxRiderWaitMinutes` — past this wait, delivery is refused at checkout
+   *    (NONE: order for pickup instead) rather than promised. Clamped 5..120.
+   *  · `vendorBacklogCap` — when this many of ONE store's delivery orders are
+   *    waiting for a rider (longer than `waitingGraceMinutes`), new delivery
+   *    orders for that store pause by themselves; pickup stays open. 0 = off.
+   *    Clamped 0..50.
+   *  · `waitingGraceMinutes` — an order is "waiting for a rider" only after
+   *    this long without one (the first offers take about a minute). Clamped 1..30.
+   *  · `ridersShortWaiting` / `ridersShortExhaustions` — operations is paged
+   *    ONCE ("riders are short") when this many orders wait for a rider, or
+   *    this many searches ran out of riders in the last 10 minutes. Clamped 1..500.
+   *  · `pause` — Swift's own switch: delivery paused platform-wide, or in the
+   *    listed zones; pickup stays open. Written only by the admin route
+   *    (audited, a reason required); rows are versions, so the history is the
+   *    log of who paused and lifted it.
+   */
+  'delivery.avgRiderLegMinutes': 25,
+  'delivery.maxRiderWaitMinutes': 30,
+  'delivery.vendorBacklogCap': 3,
+  'delivery.waitingGraceMinutes': 3,
+  'delivery.ridersShortWaiting': 5,
+  'delivery.ridersShortExhaustions': 3,
+  'delivery.pause': { platform: false, zoneIds: [] as string[] } as { platform: boolean; zoneIds: string[] },
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;
