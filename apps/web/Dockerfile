@@ -93,6 +93,8 @@ COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/mo
 COPY apps/mobile/src/lib/storePick.ts apps/mobile/src/lib/storePick.ts
 # [IN-STORE-SALE] ... and the app's "Sold in store" line of taps and its words (imports nothing).
 COPY apps/mobile/src/lib/inStoreSale.ts apps/mobile/src/lib/inStoreSale.ts
+# [BOOK-S5b] The Products editor's booking hours, gap, notice and confirm-automatically rules (imports nothing).
+COPY apps/mobile/src/lib/bookingHours.ts apps/mobile/src/lib/bookingHours.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 
