@@ -25,8 +25,10 @@ const TYPES = [
 const input = 'w-full rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-2 text-sm';
 
 /**
- * [CHAINS · owner 29 Oct 2026] Add a branch (owner only): the branch's own details (name, type, its published phone,
- * address and pin, as sign-up asks them), then its terms as the server states them: its own weekly fee, ticked for
+ * [CHAINS · owner 29 Oct 2026] Add a branch (owner only): the branch's own details (name, type, its private contact
+ * phone, address and pin, as sign-up asks them) and [REVIEW-F #2220 S3-1] what go-live needs from the owner — the
+ * number customers can call (required; the phone's call-us disclosure) and, for a restaurant, the food handlers tick
+ * in the server's words (optional: Settings has it later) — then its terms as the server states them: its own weekly fee, ticked for
  * THIS branch; whether the business's running free trial covers it (only if Swift approves it before that trial
  * ends; a branch closed during the trial still uses it up); the chain's agreed rate, if any. Swift checks every new
  * branch before it goes live. Sending it asks this browser to confirm it's you (lib/step-up).
@@ -37,6 +39,7 @@ export default function AddBranchPage() {
   const { role, known } = useStoreRole();
   const owner = role === 'OWNER';
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', phone: '+592', addressLine1: '', city: '', region: '' });
+  const [callUs, setCallUs] = useState('+592');
   const [pin, setPin] = useState<StorePin | null>(null);
   const [placing, setPlacing] = useState(false);
   const [Picker, setPicker] = useState<typeof StoreLocationPickerComponent | null>(null);
@@ -58,6 +61,11 @@ export default function AddBranchPage() {
   const fee = t ? weeklyFeeWords(t.weeklyFee.amount, t.weeklyFee.currencyCode) : null;
   const deal = t ? dealLine(t.dealWeeklyRate, t.dealCurrencyCode) : null;
   const full = !!t && t.stores >= t.limit;
+  // The food handlers tick counts only for the words (and business type) it was given to.
+  const food = t?.foodHandlers && typeof t.foodHandlers.tick === 'string' && t.foodHandlers.tick ? t.foodHandlers : null;
+  const foodKey = food ? `${biz.vendorType}|${food.version}` : null;
+  const [foodFor, setFoodFor] = useState<string | null>(null);
+  const foodTicked = !!foodKey && foodFor === foodKey;
 
   const stepUp = useStepUp();
   const [busy, setBusy] = useState(false);
@@ -68,7 +76,7 @@ export default function AddBranchPage() {
     setError(null);
   };
   const ready = owner && ticked && !!pin && !full && biz.name.trim().length >= 2 && biz.phone.trim().length >= 5
-    && biz.addressLine1.trim().length >= 3 && biz.city.trim().length >= 2;
+    && callUs.trim().length >= 8 && biz.addressLine1.trim().length >= 3 && biz.city.trim().length >= 2;
 
   const submit = async () => {
     if (!ready || !t || busy) return;
@@ -80,6 +88,8 @@ export default function AddBranchPage() {
         city: biz.city.trim(), ...(biz.region.trim() ? { region: biz.region.trim() } : {}), latitude: pin!.latitude, longitude: pin!.longitude,
       },
       weeklyFeeAck: { version: t.terms?.version ?? t.weeklyFee.version, amount: t.weeklyFee.amount, currencyCode: t.weeklyFee.currencyCode },
+      publicPhone: callUs.trim(),
+      ...(food && foodTicked ? { foodHandlers: { accept: true as const, attestationVersion: food.version } } : {}),
     };
     try {
       await stepUp.withStepUp(() => addBranch(body))();
@@ -119,9 +129,23 @@ export default function AddBranchPage() {
             {TYPES.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}
           </select>
         </label>
-        <label className="block text-sm font-semibold">The branch&apos;s phone (customers see it)
+        <label className="block text-sm font-semibold">Branch phone (Swift&apos;s contact line for the branch; customers don&apos;t see it)
           <input className={`${input} mt-1`} inputMode="tel" autoComplete="tel" value={biz.phone} onChange={(e) => edit({ phone: e.target.value })} />
         </label>
+        <label className="block text-sm font-semibold">The number customers can call
+          <input className={`${input} mt-1`} inputMode="tel" placeholder="+592 225 1234" aria-describedby="call-us-help" value={callUs} onChange={(e) => { setCallUs(e.target.value); setError(null); }} />
+        </label>
+        <p id="call-us-help" className="text-xs text-[var(--swift-muted)]">Shown on the branch&apos;s page so customers can call before they order. The branch goes live only with one. This is separate from the number you sign in with, which stays private.</p>
+        {food && (
+          <div className="space-y-1">
+            <p className="text-sm font-semibold">Your food handlers</p>
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1 h-4 w-4 accent-[var(--swift-red)]" checked={foodTicked} onChange={(e) => setFoodFor(e.target.checked ? foodKey : null)} />
+              <span>{food.tick}</span>
+            </label>
+            <p className="text-xs text-[var(--swift-muted)]">Needed before a restaurant branch goes live: tick it now or later in its Settings.</p>
+          </div>
+        )}
         <label className="block text-sm font-semibold">Street address
           <input className={`${input} mt-1`} autoComplete="street-address" disabled={placing} value={biz.addressLine1} onChange={(e) => edit({ addressLine1: e.target.value }, true)} />
         </label>

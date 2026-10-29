@@ -11,7 +11,7 @@ import { vendorApi } from '../../../services/api';
 import { moneyIn } from '../../../lib/money';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import {
-  BRANCH_COPY, awaitingApproval, bulkOutcomeLine, forEachBranch, menuCopyLines, newCopyKey, refusalWords, storeLabel, type MenuCopyResult,
+  BRANCH_COPY, awaitingApproval, bulkOutcomeLine, forEachBranch, goLiveOf, menuCopyLines, newCopyKey, ownerStepWords, refusalWords, storeLabel, type MenuCopyResult,
 } from '../../../lib/branches';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 
@@ -38,6 +38,8 @@ export function VendorBranchesScreen({ navigation }: { navigation?: { navigate?:
 
   // Bulk: the branches picked (approved ones only: a waiting branch takes no orders yet).
   const live = stores.filter((s) => !awaitingApproval(s));
+  // [REVIEW-F #2220 S3-1] Branches not live yet, each saying whose turn it is; the owner's steps open the branch.
+  const notLive = stores.filter((s) => awaitingApproval(s));
   const [picked, setPicked] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
@@ -82,6 +84,25 @@ export function VendorBranchesScreen({ navigation }: { navigation?: { navigate?:
         {storesQ.isLoading ? <LoadingBlock /> : null}
         {storesQ.isError ? <ErrorState onRetry={() => void storesQ.refetch()} message="Couldn't load your branches." /> : null}
 
+        {isOwner && notLive.length > 0 ? (
+          <Card>
+            <T variant="title">Not live yet</T>
+            {notLive.map((s) => {
+              const steps = ownerStepWords(s);
+              return (
+                <View key={s.id} style={{ marginTop: space.md, gap: 4 }}>
+                  <T variant="label" weight="semibold">{storeLabel(s)}</T>
+                  {steps.map((line) => <T key={line} variant="caption" tone="muted">{`• ${line}`}</T>)}
+                  {goLiveOf(s)?.waitingFor === 'OWNER' ? (
+                    <PillButton label={BRANCH_COPY.finishButton} size="sm" variant="soft" style={{ alignSelf: 'flex-start', marginTop: 4 }}
+                      onPress={() => setSelectedStore(s.id)} />
+                  ) : null}
+                </View>
+              );
+            })}
+          </Card>
+        ) : null}
+
         {canManage && summary ? (
           <Card>
             <T variant="title">All branches</T>
@@ -115,7 +136,7 @@ export function VendorBranchesScreen({ navigation }: { navigation?: { navigate?:
 
         <Card>
           <T variant="title">Live orders, all branches</T>
-          {ordersQ.isError ? <T variant="caption" tone="error">Couldn&apos;t load the orders. Pull to try again.</T> : null}
+          {ordersQ.isError ? <ErrorState onRetry={() => void ordersQ.refetch()} message="Couldn't load the orders." /> : null}
           {!ordersQ.isLoading && !ordersQ.isError && orders.length === 0 ? (
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>No live orders right now.</T>
           ) : null}

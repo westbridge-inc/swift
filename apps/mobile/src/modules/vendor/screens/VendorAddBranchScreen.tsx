@@ -3,7 +3,8 @@ import React, { useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, Chip, ErrorState, Header, LabeledInput, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { BrandCheckbox, Card, Chip, ErrorState, Header, LabeledInput, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { PublicCallNumberField } from '../../../components/PublicCallNumberCard';
 import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { useStepUp } from '../../../hooks/useStepUp';
@@ -21,8 +22,11 @@ type StorePin = BusinessSetupFields['pin'];
 
 /**
  * [CHAINS PR2 · owner 29 Oct 2026] Add a branch: one more store under the same business (owner only). It reuses the
- * owner's documents Swift already checked; the branch's own details (address and pin, phone) are asked here, and its
- * hours, delivery area, published phone, food handlers tick and MMG details on its own screens once it exists.
+ * owner's documents Swift already checked; the branch's own details (address and pin, its private contact phone) are
+ * asked here — and [REVIEW-F #2220 S3-1] what go-live needs from the owner, so the branch then waits for Swift and not
+ * for them: the number customers can call (required, with the call-us card's own disclosure) and, for a restaurant,
+ * the food handlers tick in the server's words (optional: it can be given later on the branch's screen). Its hours,
+ * delivery area and MMG details are set on its own screens once it exists.
  * Before anything is sent the screen says, in the server's numbers: this branch's own weekly fee (ticked for this
  * branch), whether the business's free trial covers it and only if Swift approves it before that trial ends, that a
  * branch closed during the trial still uses it up, and that a person at Swift checks every new branch first.
@@ -33,6 +37,7 @@ export function VendorAddBranchScreen({ navigation }: { navigation?: { goBack?: 
   const [type, setType] = useState<BusinessSetupFields['type']>('RESTAURANT');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  const [callUs, setCallUs] = useState('');
   const [addr, setAddr] = useState('');
   const [city, setCity] = useState('');
   const [pin, setPin] = useState<StorePin>(null);
@@ -43,6 +48,11 @@ export function VendorAddBranchScreen({ navigation }: { navigation?: { goBack?: 
   const fee = branchFeeTick(t);
   const [tickedFor, setTickedFor] = useState<string | null>(null);
   const ticked = fee.kind === 'tick' && tickedFor === fee.key;
+  // The food handlers tick counts only for the words (and business type) it was given to.
+  const food = t?.foodHandlers && typeof t.foodHandlers.tick === 'string' && t.foodHandlers.tick ? t.foodHandlers : null;
+  const foodKey = food ? `${type}|${food.version}` : null;
+  const [foodFor, setFoodFor] = useState<string | null>(null);
+  const foodTicked = !!foodKey && foodFor === foodKey;
 
   // The owner agreed to the Business Agreement when the business joined; a branch is not a new agreement. A branch is
   // added under a business name (a chain), never the own-name declaration.
@@ -50,14 +60,18 @@ export function VendorAddBranchScreen({ navigation }: { navigation?: { goBack?: 
   const blocker = businessSetupBlocker(form);
   const atLimit = !!t && t.stores >= t.limit;
   const feeAsk = fee.kind === 'invalid' ? FEE_TICK_COPY.invalid : fee.kind === 'tick' && !ticked ? FEE_TICK_COPY.ask : fee.kind === 'none' ? 'Reading the weekly fee…' : null;
-  const ask = atLimit ? `You run ${t!.stores} stores, the most one account can` : blocker ?? feeAsk;
+  const callUsAsk = callUs.trim() ? null : 'Add the number customers can call';
+  const ask = atLimit ? `You run ${t!.stores} stores, the most one account can` : blocker ?? callUsAsk ?? feeAsk;
   const feeLabel = t ? moneyIn(t.weeklyFee.amount, t.weeklyFee.currencyCode) : '';
 
   const submit = () => {
     if (ask || fee.kind !== 'tick') return;
     const business = vendorBusinessPayload(form);
     if (!business) return;
-    add.mutate({ business, weeklyFeeAck: fee.ack }, {
+    add.mutate({
+      business, weeklyFeeAck: fee.ack, publicPhone: callUs.trim(),
+      ...(food && foodTicked ? { foodHandlers: { accept: true as const, attestationVersion: food.version } } : {}),
+    }, {
       onSuccess: () => navigation?.goBack?.(),
       onError: (e) => { if (feeTickError(e)) void termsQ.refetch(); },
     });
@@ -87,7 +101,7 @@ export function VendorAddBranchScreen({ navigation }: { navigation?: { goBack?: 
 
         <Card style={{ gap: space.md }}>
           <LabeledInput value={name} onChangeText={setName} placeholder="Branch name (for example, Royal Castle Camp Street)" />
-          <LabeledInput value={phone} onChangeText={setPhone} placeholder="Branch phone" keyboardType="phone-pad" />
+          <LabeledInput value={phone} onChangeText={setPhone} placeholder="Branch phone (Swift’s contact line, private)" keyboardType="phone-pad" />
           <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
           <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
           <Pressable accessibilityRole="button" accessibilityLabel={pin ? 'Move the branch pin' : 'Place the branch on the map'} onPress={() => setPinOpen(true)}>
@@ -104,6 +118,21 @@ export function VendorAddBranchScreen({ navigation }: { navigation?: { goBack?: 
             )}
           </Pressable>
         </Card>
+
+        <Card>
+          <PublicCallNumberField value={callUs} onChange={setCallUs} required />
+        </Card>
+
+        {food ? (
+          <Card style={{ gap: space.sm }}>
+            <T variant="label" weight="bold">Your food handlers</T>
+            <T variant="caption" tone="muted">A restaurant branch goes live only once you confirm this. Tick it now, or later on the branch’s own screen.</T>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
+              <BrandCheckbox checked={foodTicked} onToggle={() => setFoodFor(foodTicked ? null : foodKey)} label={food.tick} />
+              <T variant="body" style={{ flex: 1 }}>{food.tick}</T>
+            </View>
+          </Card>
+        ) : null}
 
         {termsQ.isLoading ? <LoadingBlock /> : null}
         {termsQ.isError ? <ErrorState onRetry={() => void termsQ.refetch()} message={refusalWords(termsQ.error, 'Couldn’t load this branch’s weekly fee.')} /> : null}

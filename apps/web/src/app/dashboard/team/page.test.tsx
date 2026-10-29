@@ -20,6 +20,8 @@ function api(opts: { role?: string; stepUp?: boolean; cap?: boolean } = {}) {
       { id: 'north', name: 'Royal North', vendorType: 'RESTAURANT', isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true, status: 'ACTIVE', awaitingApproval: false },
       { id: 'camp', name: 'Royal Camp', vendorType: 'RESTAURANT', isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true, status: 'ACTIVE', awaitingApproval: false },
       { id: 'east', name: 'Royal East', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: null, isVerified: false, status: 'PENDING_APPROVAL', awaitingApproval: true },
+      { id: 'south', name: 'Royal South', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: null, isVerified: true, status: 'SUSPENDED', awaitingApproval: false },
+      { id: 'old', name: 'Royal Old', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: null, isVerified: true, status: 'CLOSED', awaitingApproval: false },
     ], selectedId: 'north', myRole: opts.role ?? 'OWNER' } } };
     if (path === '/vendor/staff' && method === 'GET') return { body: { success: true, data: [{ id: 'm1', role: 'MANAGER', user: { firstName: 'Ann', lastName: null, phone: '+5926000001' } }] } };
     if (path === '/auth/step-up') return { body: { success: true, data: { sentTo: '+592 ••• 1234' } } };
@@ -44,6 +46,9 @@ describe('[CHAINS] the team page (web)', () => {
     const { user } = renderWithQuery(<TeamPage />);
     expect(await screen.findByText('Ann')).toBeTruthy();
     expect(screen.queryByRole('checkbox', { name: /Royal East/ }), 'a branch waiting for approval takes no team yet').toBeNull();
+    // [REVIEW-F #2220 S4-3] nor a suspended or closed one (the server refuses the whole add)
+    expect(screen.queryByRole('checkbox', { name: /Royal South/ })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /Royal Old/ })).toBeNull();
     await user.type(screen.getByLabelText('Their phone'), '+5926001111');
     await user.click(screen.getByRole('radio', { name: 'Manager' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Royal Camp' }));

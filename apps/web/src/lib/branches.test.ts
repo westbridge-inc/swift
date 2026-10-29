@@ -1,16 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import {
   BRANCH_TRIAL_IS_THE_BUSINESS, branchLabel, branchOutcomeWords, branchTrialLine, copyResultWords, dealLine,
-  forEachBranch, isAwaitingApproval, newCopyKey, weeklyFeeWords,
+  forEachBranch, isAwaitingApproval, newCopyKey, weeklyFeeWords, BRANCH_IS_CHECKED,
 } from './branches';
+import { ownerSteps } from './branch-go-live';
 
 // [CHAINS PR2] The branch words and the bulk rule the branch pages share.
 describe('branches', () => {
-  it('a branch waiting for Swift\'s approval says so where it is named', () => {
-    expect(branchLabel({ name: 'Royal Camp', awaitingApproval: true })).toBe('Royal Camp · waiting for Swift’s approval');
-    expect(branchLabel({ name: 'Royal Camp', status: 'PENDING_APPROVAL' })).toBe('Royal Camp · waiting for Swift’s approval');
+  // [REVIEW-F #2220 S3-1] "Waiting for Swift's approval" only on Swift's turn.
+  it('a store not live yet says whose turn it is where it is named', () => {
+    expect(branchLabel({ name: 'Royal Camp', awaitingApproval: true, goLive: { waitingFor: 'SWIFT', steps: [] } })).toBe('Royal Camp · waiting for Swift’s approval');
+    expect(branchLabel({ name: 'Royal Camp', status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['FOOD_HANDLERS'] } })).toBe('Royal Camp · not live yet: finish setting it up');
+    expect(branchLabel({ name: 'Royal Camp', status: 'PENDING_APPROVAL' })).toBe('Royal Camp · not live yet');
+    expect(branchLabel({ name: 'Royal Camp', awaitingApproval: true, goLive: { waitingFor: 'LATER' as never, steps: [] } })).toBe('Royal Camp · not live yet');
     expect(branchLabel({ name: 'Royal North', awaitingApproval: false, status: 'ACTIVE' })).toBe('Royal North');
     expect(isAwaitingApproval({ status: 'ACTIVE' })).toBe(false);
+  });
+
+  it('the owner\'s steps, each with where it is done; none on Swift\'s turn; unknown steps left out', () => {
+    expect(ownerSteps({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS', 'PUBLISHED_PHONE', 'FOOD_HANDLERS', 'NEW_THING'] } })).toEqual([
+      { words: 'Add the documents it still needs, in the Swift app under Documents', where: 'app' },
+      { words: 'Add the number customers can call', where: 'settings' },
+      { words: 'Confirm your food handlers', where: 'settings' },
+    ]);
+    expect(ownerSteps({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'SWIFT', steps: ['DOCUMENTS'] } })).toEqual([]);
+    expect(ownerSteps({ status: 'ACTIVE', goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS'] } })).toEqual([]);
+    expect(BRANCH_IS_CHECKED).not.toMatch(/You’ll see it as waiting for Swift’s approval/);
   });
 
   it('the shared trial holds only if Swift approves the branch before it ends; with no running trial, billed from approval', () => {

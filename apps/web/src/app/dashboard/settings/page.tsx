@@ -13,6 +13,7 @@ import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
 import { BookingCapacityCard } from './booking-capacity-card';
 import { FoodHandlersCard } from './food-handlers-card';
+import { CallUsCard } from './call-us-card';
 import { StorePhotosCard } from './store-photos-card';
 import { VatCard } from './vat-card';
 import { VatReportLink } from './vat-report-link';
@@ -303,6 +304,8 @@ export default function SettingsPage() {
       {/* [BOOK-S5b · owner C1] Services only, and only when the server sends the setting. */}
       <BookingCapacityCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
+      {/* [REVIEW-F #2220 S3-1] the number customers can call (a waiting store's go-live step) */}
+      <CallUsCard storeId={storeId} />
       {/* [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's owner ticks for its food handlers */}
       <FoodHandlersCard storeId={storeId} isOwner={isOwner} vendorType={p?.vendorType} />
       <VatCard storeId={storeId} />

@@ -24,8 +24,24 @@ describe('[CHAINS] add a branch', () => {
   });
   it('sends the branch\'s own fee tick, behind confirm-it\'s-you', () => {
     expect(screen).toMatch(/useAddBranch\(stepUp\.withStepUp\)/);
-    expect(screen).toMatch(/add\.mutate\(\{ business, weeklyFeeAck: fee\.ack \}/);
+    expect(screen).toMatch(/business, weeklyFeeAck: fee\.ack, publicPhone: callUs\.trim\(\),/);
     expect(screen).toMatch(/\{stepUp\.sheet\}/);
+  });
+  // [REVIEW-F #2220 S3-1] What go-live needs from the owner comes with the add.
+  it('asks for the number customers can call (required, the call-us card\'s own disclosure); the branch phone is the private line', () => {
+    expect(screen).toMatch(/<PublicCallNumberField value=\{callUs\} onChange=\{setCallUs\} required \/>/);
+    expect(screen).toMatch(/const callUsAsk = callUs\.trim\(\) \? null : 'Add the number customers can call';/);
+    expect(screen).toMatch(/blocker \?\? callUsAsk \?\? feeAsk/);
+    expect(screen).toMatch(/placeholder="Branch phone \(Swift’s contact line, private\)"/);
+    const card = read('components/PublicCallNumberCard.tsx');
+    expect(card).toMatch(/\{PUBLIC_CALL_COPY\.separate\}/g);
+    expect(card.match(/\{PUBLIC_CALL_COPY\.separate\}/g)).toHaveLength(2);
+  });
+  it('offers a restaurant\'s food handlers tick in the server\'s words, sent only when ticked for those words', () => {
+    expect(screen).toMatch(/const food = t\?\.foodHandlers && typeof t\.foodHandlers\.tick === 'string'/);
+    expect(screen).toMatch(/const foodKey = food \? `\$\{type\}\|\$\{food\.version\}` : null;/);
+    expect(screen).toMatch(/\.\.\.\(food && foodTicked \? \{ foodHandlers: \{ accept: true as const, attestationVersion: food\.version \} \} : \{\}\)/);
+    expect(screen).toMatch(/<T variant="body" style=\{\{ flex: 1 \}\}>\{food\.tick\}<\/T>/);
   });
   it('is registered and reachable', () => {
     const stack = read('modules/vendor/VendorStack.tsx');
@@ -44,6 +60,23 @@ describe('[CHAINS] every store switcher names a branch waiting for Swift', () =>
       expect(text).not.toMatch(/<Chip[^>]*label=\{(s|candidate)\.name\}[^>]*selected=\{(s|candidate)\.id === store\.id\}/);
     });
   }
+});
+
+describe('[CHAINS] a branch not live yet names the owner\'s next step, with a way to it (REVIEW-F #2220 S3-1)', () => {
+  it('the Branches screen lists them with the steps and a button that opens the branch', () => {
+    const screen = read('modules/vendor/screens/VendorBranchesScreen.tsx');
+    expect(screen).toMatch(/const notLive = stores\.filter\(\(s\) => awaitingApproval\(s\)\);/);
+    expect(screen).toMatch(/const steps = ownerStepWords\(s\);/);
+    expect(screen).toMatch(/goLiveOf\(s\)\?\.waitingFor === 'OWNER' \? \(\s*<PillButton label=\{BRANCH_COPY\.finishButton\}[^>]*\s*onPress=\{\(\) => setSelectedStore\(s\.id\)\}/);
+  });
+  it('the branch\'s own waiting screen says whose turn it is', () => {
+    expect(read('modules/vendor/screens/BusinessSetup.tsx')).toMatch(/\{goLiveLine\(store\) \?\? BRANCH_COPY\.checkFirst\}/);
+  });
+  it('the all-branches orders error offers Try again (no pull-to-refresh there: REVIEW-F S4-1)', () => {
+    const screen = read('modules/vendor/screens/VendorBranchesScreen.tsx');
+    expect(screen).not.toMatch(/Pull to try again/);
+    expect(screen).toMatch(/ordersQ\.isError \? <ErrorState onRetry=\{\(\) => void ordersQ\.refetch\(\)\}/);
+  });
 });
 
 describe('[CHAINS] bulk actions use each branch\'s own route, one branch at a time', () => {
@@ -67,5 +100,8 @@ describe('[CHAINS] one person to several branches', () => {
     const text = read('modules/vendor/screens/VendorAccountScreen.tsx');
     expect(text).toMatch(/const vendorIds = here\?\.id && also\.length > 0 \? \[here\.id, \.\.\.also\] : undefined;/);
     expect(text).toMatch(/addStaff\.mutate\(\{ phone: p, role, \.\.\.\(vendorIds \? \{ vendorIds \} : \{\}\) \}/);
+  });
+  it('offers only branches open on Swift (the server refuses a waiting, suspended or closed one: REVIEW-F S4-3)', () => {
+    expect(read('modules/vendor/screens/VendorAccountScreen.tsx')).toMatch(/\.filter\(\(s: any\) => s\.id !== here\?\.id && s\.status === 'ACTIVE'\)/);
   });
 });

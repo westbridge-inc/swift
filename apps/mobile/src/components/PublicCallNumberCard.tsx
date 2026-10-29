@@ -22,6 +22,42 @@ import { Card, LabeledInput, PillButton, T } from '../kit';
  * reason. The caption says so, because a shopkeeper typing here has no other
  * way to know which of their numbers Swift already holds.
  */
+/** [REVIEW-F #2220 S3-1] The card's words, shared with the add-a-branch form (the same disclosure wherever the
+ *  number is asked for). */
+export const PUBLIC_CALL_COPY = {
+  title: 'Your call-us number',
+  shown: 'Customers see this on your store page and can call before they order. Your landline or your mobile — whichever you actually answer. Leave it empty to hide it.',
+  separate: 'This is separate from the number you sign in with, which stays private.',
+  placeholder: '+592 225 1234',
+} as const;
+
+/**
+ * The number field with its disclosure, without a save button: the add-a-branch form sends it with the branch
+ * (POST /vendor/stores `publicPhone`), where it is required — a branch goes live only with a number to call.
+ */
+export function PublicCallNumberField({ value, onChange, required = false }: { value: string; onChange: (v: string) => void; required?: boolean }) {
+  return (
+    <View style={{ gap: space.xs }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+        <MaterialCommunityIcons name="phone-in-talk" size={18} color={color.brand[600]} />
+        <T variant="label" weight="semibold">{required ? 'The number customers can call' : PUBLIC_CALL_COPY.title}</T>
+      </View>
+      <T variant="caption" tone="muted">
+        {required ? 'Customers see this on the branch’s page and can call before they order. Your landline or your mobile — whichever the branch actually answers. The branch goes live only with one.' : PUBLIC_CALL_COPY.shown}
+      </T>
+      <T variant="caption" tone="muted">{PUBLIC_CALL_COPY.separate}</T>
+      <LabeledInput
+        value={value}
+        onChangeText={onChange}
+        placeholder={PUBLIC_CALL_COPY.placeholder}
+        autoCapitalize="none"
+        keyboardType="phone-pad"
+        accessibilityLabel="The number customers can call"
+      />
+    </View>
+  );
+}
+
 export function PublicCallNumberCard({
   value,
   saving,
@@ -47,21 +83,20 @@ export function PublicCallNumberCard({
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
         <MaterialCommunityIcons name="phone-in-talk" size={18} color={color.brand[600]} />
         <T variant="label" weight="semibold">
-          Your call-us number
+          {PUBLIC_CALL_COPY.title}
         </T>
       </View>
       <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-        Customers see this on your store page and can call before they order. Your landline or
-        your mobile — whichever you actually answer. Leave it empty to hide it.
+        {PUBLIC_CALL_COPY.shown}
       </T>
       <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-        This is separate from the number you sign in with, which stays private.
+        {PUBLIC_CALL_COPY.separate}
       </T>
       <View style={{ marginTop: space.md }}>
         <LabeledInput
           value={phone}
           onChangeText={setPhone}
-          placeholder="+592 225 1234"
+          placeholder={PUBLIC_CALL_COPY.placeholder}
           autoCapitalize="none"
           keyboardType="phone-pad"
         />

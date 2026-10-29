@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import type { Store } from '@/lib/vendor-api';
 import { copyMenu, type MenuCopyResult } from '@/lib/branches-api';
-import { copyResultWords, isAwaitingApproval, newCopyKey } from '@/lib/branches';
+import { copyResultWords, newCopyKey } from '@/lib/branches';
 
 /**
  * [CHAINS PR2 · owner 29 Oct 2026] An empty branch menu can start as a copy of another branch's: its sections,
@@ -12,7 +12,9 @@ import { copyResultWords, isAwaitingApproval, newCopyKey } from '@/lib/branches'
  * of a business with more than one store.
  */
 export default function BranchMenuCopy({ storeId, stores, onCopied }: { storeId: string; stores: Store[]; onCopied: () => void }) {
-  const sources = stores.filter((s) => s.id !== storeId && !isAwaitingApproval(s));
+  // [REVIEW-F #2220 N2] Any other branch of the business, live or not yet (the phone offers the same; the server
+  // decides who may copy from where).
+  const sources = stores.filter((s) => s.id !== storeId);
   const [from, setFrom] = useState(sources[0]?.id ?? '');
   const [key, setKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
