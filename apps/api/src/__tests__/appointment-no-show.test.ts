@@ -303,6 +303,38 @@ describe('[BOOK-FU2 · owner B3] the business records "Customer didn\'t come"', 
   });
 });
 
+describe('[BOOK-FU2 · REVIEW-F S3-1 on #2201] the server says when the partner app may offer it: noShow.allowed', () => {
+  const detail = async (orderId: string) => {
+    const res = await call('GET', `/api/v1/vendor/orders/${orderId}`, provider.token);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().data.noShow as { allowed: boolean } | undefined;
+  };
+  const row = async (bookingId: string, slot: Date) => {
+    const from = new Date(slot.getTime() - DAY).toISOString();
+    const to = new Date(slot.getTime() + DAY).toISOString();
+    const res = await call('GET', `/api/v1/vendor/bookings?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, provider.token);
+    expect(res.statusCode, res.body).toBe(200);
+    return (res.json().data as Array<{ id: string; noShow?: { allowed: boolean } }>).find((b) => b.id === bookingId)?.noShow;
+  };
+
+  it('true only on an accepted appointment whose time has started; false before it, before acceptance, and after it is recorded', async () => {
+    const customer = await makeUser('Bea', ['CUSTOMER'], 'CUSTOMER');
+    const future = await acceptedAppointment(customer, -1);
+    expect(await detail(future.order.id)).toEqual({ allowed: false });
+    expect(await row(future.booking!.id, future.booking!.slotStart)).toEqual({ allowed: false });
+
+    const pending = await acceptedAppointment(customer, 50, { accept: false });
+    expect(await detail(pending.order.id)).toEqual({ allowed: false });
+
+    const started = await acceptedAppointment(customer, 55);
+    expect(await detail(started.order.id)).toEqual({ allowed: true });
+    expect(await row(started.booking!.id, started.booking!.slotStart)).toEqual({ allowed: true });
+    // The word and the route agree: it is recorded, and the word turns false.
+    expect((await noShow(started.order.id)).statusCode).toBe(200);
+    expect(await detail(started.order.id)).toEqual({ allowed: false });
+  });
+});
+
 describe('[BOOK-FU2 · owner B3] a person reviews repeat cases; the customer sees their record', () => {
   it('the review lists a customer with two records (count, latest date, number masked), not one with a single record', async () => {
     const repeat = await makeUser('Wren', ['CUSTOMER'], 'CUSTOMER');

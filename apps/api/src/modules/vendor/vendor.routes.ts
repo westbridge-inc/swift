@@ -35,7 +35,7 @@ import { BookingService, lockBusinessTime } from '../booking/booking.service';
 import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES, peakMoment } from '../booking/availability';
 import { INSTANT_BOOKING_OFF_MESSAGE, instantBookingSettingsForSave, mergeBookingConfig, overlappingWindows, overlappingWindowsMessage, windowsForSave } from '../booking/booking-config';
 import { instantBookingEnabled, NEW_BOOKABLE_LISTING_DEFAULTS } from '../booking/instant-booking';
-import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, recordNoShowInTransaction } from '../booking/appointment-no-show';
+import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, noShowView, recordNoShowInTransaction } from '../booking/appointment-no-show';
 import { bookingLimitsFor } from '../booking/booking-limits';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -2255,7 +2255,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
     const handover = (await storeHandoverFields(app, [order])).get(order.id);
-    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    // [BOOK-FU2 · REVIEW-F S3-1 on #2201] An appointment says whether "Customer didn't come" may be recorded now
+    // (booking/appointment-no-show.ts noShowView); the partner app shows the button only on noShow.allowed === true.
+    const noShow = order.fulfillment === 'APPOINTMENT' ? { noShow: noShowView(order, new Date()) } : {};
+    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role), ...noShow }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -4466,6 +4469,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true } }) // only the first name is served
       : [];
     const byId = new Map(users.map((u) => [u.id, u]));
+    // [BOOK-FU2 · REVIEW-F S3-1 on #2201] Each booking's order, for the "Customer didn't come" word (the store's own orders).
+    const orderIds = [...new Set(bookings.map((b) => b.orderId).filter((id): id is string => !!id))];
+    const orders = orderIds.length
+      ? await app.prisma.order.findMany({
+        where: { id: { in: orderIds }, vendorId },
+        select: { id: true, fulfillment: true, status: true, appointmentSlot: true, paymentMethod: true, paymentStatus: true },
+      })
+      : [];
+    const orderById = new Map(orders.map((o) => [o.id, o]));
+    const now = new Date();
     return {
       success: true,
       data: bookings.map((b) => ({
@@ -4479,6 +4492,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         // [BOOK-S5a · owner B2] The listing booked: the partner app's "Move" offers its free times.
         itemId: b.itemId,
         customer: byId.has(b.customerId) ? { firstName: byId.get(b.customerId)!.firstName } : null,
+        // [BOOK-FU2] Whether "Customer didn't come" may be recorded on this booking's order now (false with no order).
+        noShow: noShowView(b.orderId ? orderById.get(b.orderId) : null, now),
       })),
     };
   });
