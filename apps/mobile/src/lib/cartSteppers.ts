@@ -14,13 +14,26 @@
 export const MAX_CART_QTY = 99;
 
 /** A cart line as the server sends it (only what a tap needs). */
-export type CartLine = { id: string; itemId?: string; quantity?: unknown; selectedOptions?: unknown; specialInstructions?: unknown };
+export type CartLine = { id: string; itemId?: string; quantity?: unknown; selectedOptions?: unknown; specialInstructions?: unknown; fulfillment?: unknown };
 
 /** What to tell the server next: add N of an item not in the cart yet (the server adds to a line), or set a line. */
 export type CartSend = { kind: 'add'; quantity: number } | { kind: 'set'; lineId: string; quantity: number };
 
-export function clampQty(n: number): number {
-  return Math.max(0, Math.min(MAX_CART_QTY, Math.round(Number.isFinite(n) ? n : 0)));
+export function clampQty(n: number, max: number = MAX_CART_QTY): number {
+  return Math.max(0, Math.min(max, Math.round(Number.isFinite(n) ? n : 0)));
+}
+
+/**
+ * [BOOK-POLISH · #2205] A booking (an APPOINTMENT listing, or its cart line) is ONE appointment: the server refuses any
+ * other number (APPOINTMENT_QUANTITY), so it has no + / − anywhere; the cart shows its time instead.
+ */
+export function isBooking(x: { fulfillment?: unknown } | null | undefined): boolean {
+  return x?.fulfillment === 'APPOINTMENT';
+}
+
+/** The most a line may be tapped to: 1 for a booking, MAX_CART_QTY otherwise. */
+export function maxQtyFor(line: { fulfillment?: unknown } | null | undefined): number {
+  return isBooking(line) ? 1 : MAX_CART_QTY;
 }
 
 /** The line's quantity as the server last answered it (no line = none in the cart). */
