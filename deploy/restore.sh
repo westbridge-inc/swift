@@ -9,6 +9,8 @@
 #                       line "swift-backup-signature none" when the object has no signature)
 #   ... --signature-b64 <bundle> --signed-object <name> -     (the drill's plain dump on stdin)
 #   ... --keep-for-inspection   keep the throwaway instance afterwards (otherwise it is removed)
+#   ... --ledger-from <dir> [--ledger-accept-fork]   the off-site erasure ledger; a forked one only
+#                       with the owner's explicit flag (PILOT-RUNBOOK section 4)
 #
 # [SEC-BACKUP F2] SIGNED DUMPS ONLY. backup.sh signs every dump on the host
 # (deploy/backup-signature.py) and keeps the signature beside it as
@@ -105,6 +107,9 @@ PROJECT=""
 LEDGER_FROM=""
 # [BACKUP-FU · COORD] Skip listing the bucket for the off-site ledger (only when the bucket is gone).
 LEDGER_NO_BUCKET=0
+# [BACKUP-FU2 · #2207 REVIEW-G S4-1] The operator's explicit acceptance of a FORKED ledger (two hosts
+# shipped to one prefix) whose every batch verifies. Refused by default; never excuses any other break.
+LEDGER_ACCEPT_FORK=0
 # [SEC-BACKUP F2] The signature: the owner's explicit flag for a dump made before signing existed;
 # the drill's verified bundle (base64) and object name for the plain dump it pipes in; and
 # --fetch-signature, which prints an off-site object's verified signature.
@@ -122,6 +127,7 @@ while [ $# -gt 0 ]; do
     --signature-b64) [ $# -ge 2 ] || die "--signature-b64 needs the signature bundle"; SIGNATURE_B64="$2"; shift ;;
     --signed-object) [ $# -ge 2 ] || die "--signed-object needs the signed object's name"; SIGNED_OBJECT="$2"; shift ;;
     --ledger-no-bucket-check) LEDGER_NO_BUCKET=1 ;;
+    --ledger-accept-fork) LEDGER_ACCEPT_FORK=1 ;;
     --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the directory of decrypted off-site ledger batches"; LEDGER_FROM="$2"; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
     --compare-source) COMPARE_SOURCE=1 ;;
@@ -143,6 +149,8 @@ if [ "$NO_LIVE_LEDGER" = 1 ] || [ "$LIVE_IS_GONE" = 1 ]; then
   [ "$KEEP_INSPECT" = 1 ] ||
     die "a disaster-recovery restore exists to keep its copy, and every copy is removed at the end unless kept: add --keep-for-inspection (nothing was started)"
 fi
+[ "$LEDGER_ACCEPT_FORK" = 0 ] || [ -n "$LEDGER_FROM" ] ||
+  die "--ledger-accept-fork goes with --ledger-from (the off-site ledger it applies to); nothing was started"
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
@@ -377,8 +385,14 @@ PY
   # [BACKUP-FU · COORD] THE CHAIN: every signed batch names the one shipped before it (inside its
   # signature), the first one says "prev none". A batch missing from the start or the middle, or one
   # out of order, is refused here, before anything is created. CHAIN_BROKEN.
-  python3 -I - "$TMP_DIR/ledger-signed" <<'PY' || die "--ledger-from: CHAIN_BROKEN (above): a signed erasure ledger batch is missing or out of order, so erasures would be skipped; fetch and decrypt EVERY batch. Nothing was created"
+  # [BACKUP-FU2 · #2207 REVIEW-G S4-1] A FORK (two batches after the same one: two hosts shipped to
+  # one prefix, which the runbook forbids) is refused too. Only --ledger-accept-fork takes it, and only
+  # when every other check holds (one start, every link present, the exact signature it followed,
+  # older): every branch's entries are then replayed (erasing more is the safe direction), loudly.
+  : > "$TMP_DIR/ledger-forks"
+  python3 -I - "$TMP_DIR/ledger-signed" "$LEDGER_ACCEPT_FORK" "$TMP_DIR/ledger-forks" <<'PY' || die "--ledger-from: CHAIN_BROKEN (above): a signed erasure ledger batch is missing or out of order, so erasures would be skipped; fetch and decrypt EVERY batch. Nothing was created"
 import sys
+accept_fork = sys.argv[2] == "1"
 rows = [l.split() for l in open(sys.argv[1]).read().splitlines() if l.strip()]
 if rows:
     have = {r[0] + ".jsonl.gpg": r for r in rows}
@@ -395,9 +409,9 @@ if rows:
     for base, _created, prev, _prev_sha, _sha in rows:
         if prev != "none":
             followers.setdefault(prev, []).append(base)
-    for prev, bases in sorted(followers.items()):
-        if len(bases) > 1:
-            sys.exit(f"CHAIN_BROKEN: {' and '.join(sorted(bases))} both follow {prev}: the chain forks")
+    forks = [f"{' and '.join(sorted(bases))} both follow {prev}" for prev, bases in sorted(followers.items()) if len(bases) > 1]
+    if forks and not accept_fork:
+        sys.exit(f"CHAIN_BROKEN: {forks[0]}: the chain forks (two hosts shipped to one bucket prefix?). Only if every branch is genuine, the owner may pass --ledger-accept-fork: PILOT-RUNBOOK section 4")
     for base, _created, prev, prev_sha, _sha in rows:
         if prev == "none":
             continue
@@ -407,7 +421,16 @@ if rows:
             sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, but the {prev}.sig here is not the one it was signed after")
         if not have[prev][0] < base:
             sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, which is not older: the chain is out of order")
+    with open(sys.argv[3], "w") as out:
+        out.write("".join(f + "\n" for f in forks))
 PY
+  LEDGER_CHAIN_NOTE="the signed batches form one unbroken chain"
+  if [ -s "$TMP_DIR/ledger-forks" ]; then
+    while IFS= read -r fork; do
+      echo "WARNING: LEDGER FORK ACCEPTED (--ledger-accept-fork): $fork; every batch on every branch was verified and is replayed (the erasures of all branches are applied). Two hosts shipped to one prefix: keep one shipper per bucket prefix (PILOT-RUNBOOK section 4) and find out why before the next shipment." >&2
+    done < "$TMP_DIR/ledger-forks"
+    LEDGER_CHAIN_NOTE="the signed batches FORK (accepted with --ledger-accept-fork; every branch verified and replayed)"
+  fi
   # [BACKUP-FU · COORD] THE BUCKET: when it can be listed (read-only, the backup key), every batch it
   # holds must be here, so no batch is missing from the end either.
   LEDGER_BUCKET_NOTE="the bucket was NOT listed (--ledger-no-bucket-check or no BACKUP_BUCKET): a batch newer than the newest one here would not be noticed"
@@ -714,12 +737,27 @@ if [[ "$SOURCE" == s3://* ]]; then
   chmod 700 "$TMP_DIR"
   DUMP="$TMP_DIR/restore.dump"
   aws_cli_image >/dev/null || die "off-site restore needs a pinned AWS_CLI_IMAGE"
+  # [BACKUP-FU2 · owner 29 Oct] The bucket deletes each hourly dump, and its .sig, a set number of
+  # days after it was made (deploy/backup-versioning.sh, BACKUP_OFFSITE_RETAIN_DAYS). A dump that is
+  # gone is said to be gone: never taken for an UNSIGNED dump, never a bare AWS error.
+  dump_gone() {
+    local days="${BACKUP_OFFSITE_RETAIN_DAYS:-$(env_value BACKUP_OFFSITE_RETAIN_DAYS)}"
+    die "$(basename "$SOURCE") is not in the backup bucket: it was deleted by the bucket's retention rule (hourly dumps are kept ${days:-30} days after they are made), or by someone. Pick a newer dump; with versioning on, its old version stays for BACKUP_VERSION_RETAIN_DAYS more days (s3api list-object-versions). Nothing was restored"
+  }
+  KEY_PATH="${SOURCE#s3://"$BACKUP_BUCKET"/}"
   # [SEC-BACKUP F2] The signature first: a missing one is told apart from a failed fetch.
   SIG="$TMP_DIR/restore.sig"
   HAVE_SIG=1
   if ! aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE.sig" /data/restore.sig --only-show-errors 2>"$TMP_DIR/sig.err"; then
     if grep -qE '404|Not Found|NoSuchKey|does not exist' "$TMP_DIR/sig.err"; then HAVE_SIG=0
     else cat "$TMP_DIR/sig.err" >&2; die "could not fetch the signature $SOURCE.sig; nothing was restored"; fi
+  fi
+  if [ "$HAVE_SIG" = 0 ]; then
+    # No signature: is the dump itself there? Expired together, it is not.
+    if ! aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" --output text >/dev/null 2>"$TMP_DIR/head.err"; then
+      if grep -qE '404|Not Found|NoSuchKey|does not exist' "$TMP_DIR/head.err"; then dump_gone; fi
+      cat "$TMP_DIR/head.err" >&2; die "could not read the object's details from the bucket; nothing was restored"
+    fi
   fi
   if [ "$FETCH_SIGNATURE" = 1 ]; then
     # No signature is an answer, not an error: the drill decides (--allow-unsigned-legacy).
@@ -729,14 +767,17 @@ if [[ "$SOURCE" == s3://* ]]; then
   fi
   if [ "$HAVE_SIG" = 1 ]; then
     # Any version the bucket serves must carry this signature: the bytes are checked against it.
-    aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors
+    if ! aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors 2>"$TMP_DIR/get.err"; then
+      # The .sig is uploaded after its dump, so it can outlive the dump by a day.
+      if grep -qE '404|Not Found|NoSuchKey|does not exist' "$TMP_DIR/get.err"; then dump_gone; fi
+      cat "$TMP_DIR/get.err" >&2; die "could not download $(basename "$SOURCE"); nothing was restored"
+    fi
     chmod 600 "$DUMP"
     verify_signature "$SIG" "$(basename "$SOURCE")" --object "$DUMP"
   else
     [ "$ALLOW_UNSIGNED" = 1 ] || unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket"
     # [COORD 12:20Z] The version whose server time is checked is the version downloaded: the
     # head-object answer pins it (VersionId on a versioned bucket, and its ETag either way).
-    KEY_PATH="${SOURCE#s3://"$BACKUP_BUCKET"/}"
     HEAD="$(aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" \
       --query '[LastModified,VersionId,ETag]' --output text 2>/dev/null)" || die "could not read the object's details from the bucket; nothing was restored"
     IFS=$'\t' read -r WRITTEN VERSION ETAG <<<"$HEAD" || true
@@ -1246,8 +1287,8 @@ if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
   echo "quarantine: $SCRATCH lives in the throwaway instance $SCRATCH_CTR (no network); only the restore login (and the instance's superuser) can connect; no application login can"
   if [ -n "$LEDGER_FROM" ]; then
-    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; the signed batches form one unbroken chain; $LEDGER_BUCKET_NOTE)"
-    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; the signed batches form one unbroken chain; $LEDGER_BUCKET_NOTE)" >&2
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; $LEDGER_CHAIN_NOTE; $LEDGER_BUCKET_NOTE)"
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; $LEDGER_CHAIN_NOTE; $LEDGER_BUCKET_NOTE)" >&2
     echo "Anything erased after $OFFSITE_NEWEST never reached the off-site ledger and is still whole in this copy: check the erasure receipts and the ops pages for an unshipped ledger before anything from it is used. Keep it quarantined until then."
   else
     echo "NOT erasure-complete: replay the off-site ledger before use"

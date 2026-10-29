@@ -26,7 +26,12 @@
 #      everyone's data; BACKUP_VERSION_RETAIN_DAYS). DigitalOcean allows this
 #      only through its API and only with a FULL-access key, so it runs with the
 #      API's current key (deploy/backup-versioning.sh): do it BEFORE that key
-#      is narrowed to the uploads bucket.
+#      is narrowed to the uploads bucket. In the same lifecycle configuration
+#      it adds the retention you chose (owner ruling 29 Oct): hourly backups
+#      deleted 30 days after they are made (never the erasure ledger), only
+#      the dump files ("<prefix>/swift-..."; BACKUP_OFFSITE_RETAIN_DAYS). It
+#      keeps the bucket's other rules, and changes nothing if one of them
+#      would delete the erasure ledger.
 #   4. PROVE: starts one backup now and shows its last lines, so you can see
 #      "backups use the backup bucket's own storage key" working.
 #
@@ -100,7 +105,9 @@ else
 fi
 
 say ""
-say "Step 3 of 4 — versioning for the backup bucket, old versions deleted after 30 days (uses the API's current full-access key, once)."
+say "Step 3 of 4 — versioning for the backup bucket, old versions deleted after 30 days, and"
+say "             hourly backups deleted 30 days after they are made (never the erasure ledger)"
+say "             (uses the API's current full-access key, once)."
 if ask "Turn versioning on now (safe to repeat)?"; then
   "${SSH[@]}" -n "sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-deploy --gid=swift-deploy \
 -p SupplementaryGroups=docker -p WorkingDirectory=/opt/swift \
