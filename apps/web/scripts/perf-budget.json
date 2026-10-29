@@ -2,11 +2,11 @@
   "targetKb": 120,
   "firstLoadJsKb": {
     "/(app)/page": 156,
-    "/(app)/store/[slug]/page": 166,
+    "/(app)/store/[slug]/page": 167,
     "/(app)/market/page": 153,
     "/(app)/order/browse/page": 150,
-    "/(app)/cart/page": 157,
-    "/(app)/checkout/page": 157,
+    "/(app)/cart/page": 158,
+    "/(app)/checkout/page": 158,
     "/login/page": 117,
     "/signup/page": 123,
     "/dashboard/orders/page": 173,
@@ -22,5 +22,10 @@
     "/portal/weekly-fee/page": 154,
     "/portal/account/page": 146,
     "/advertiser/page": 144
+  },
+  "raisedBecause": {
+    "/(app)/store/[slug]/page": "[BOOK-S6b 29 Oct] +1 kB: web customer booking (owner C3). The sheet, time picker and held time load on tap; what stays is the Book button, its sign-in path and the lazy loader (measured 166.6 kB; main 165.7).",
+    "/(app)/cart/page": "[BOOK-S6b 29 Oct] +1 kB: the one checkout books an appointment (owner C3). Its panels, words and held time load on demand; what stays is the one-booking checks and the phone payment-copy module the success words share (measured 157.9 kB; main 156.1).",
+    "/(app)/checkout/page": "[BOOK-S6b 29 Oct] +1 kB: as /(app)/cart/page (the same checkout)."
   }
 }

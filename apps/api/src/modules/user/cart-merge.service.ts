@@ -87,6 +87,8 @@ export async function mergeGuestCart(prisma: PrismaClient, userId: string, key: 
       const combined = prepared.filter(p => p.line.itemId === part.line.itemId && selectionKey(p.selection) === identity).reduce((n, p) => n + p.line.quantity, 0)
         + existing.filter(l => l.itemId === part.line.itemId && selectionKey(l.selectedOptions) === identity && normalizeItemNote(l.specialInstructions) === null).reduce((n, l) => n + l.quantity, 0);
       if (combined > 99 && part.verdict.status === 'READY') part.verdict.status = 'QUANTITY_LIMIT';
+      // [BOOK-FU3 · money] A booking line is one appointment: a guest basket never lands one above 1.
+      if (part.item.fulfillment === 'APPOINTMENT' && combined > 1 && part.verdict.status === 'READY') part.verdict.status = 'QUANTITY_LIMIT';
     }
     const applied = prepared.every(p => p.verdict.status === 'READY');
     if (applied) {
