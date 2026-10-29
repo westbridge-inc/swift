@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Prisma, type Order } from '@prisma/client';
-import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, recordNoShowInTransaction, repeatNoShowCustomers } from '../modules/booking/appointment-no-show';
+import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, noShowView, recordNoShowInTransaction, repeatNoShowCustomers } from '../modules/booking/appointment-no-show';
 
 // ---------------------------------------------------------------------------
 // [BOOK-FU2 · owner B3] "Customer didn't come": the rules without a database. The routes are proved on real Postgres
@@ -31,6 +31,16 @@ describe('who may record it, and when', () => {
     expect(code({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' })).toBe('NO_SHOW_PAID_MMG');
     expect(code({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' })).toBe('NO_SHOW_PAID_MMG');
     expect(code({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' })).toBeNull();
+  });
+});
+
+describe('the word the partner app reads (noShow.allowed) is the route\'s own rule', () => {
+  it('true exactly when the route would record it; false with no order', () => {
+    expect(noShowView(base, NOW)).toEqual({ allowed: true });
+    expect(noShowView({ ...base, appointmentSlot: new Date(NOW.getTime() + 60_000) } as Order, NOW)).toEqual({ allowed: false });
+    expect(noShowView({ ...base, status: 'COMPLETED' } as Order, NOW)).toEqual({ allowed: false });
+    expect(noShowView({ ...base, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' } as Order, NOW)).toEqual({ allowed: false });
+    expect(noShowView(null, NOW)).toEqual({ allowed: false });
   });
 });
 

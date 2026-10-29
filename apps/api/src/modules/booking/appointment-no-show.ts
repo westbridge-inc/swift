@@ -42,6 +42,16 @@ export function noShowRefusal(
   return null;
 }
 
+/** [REVIEW-F S3-1 on #2201] The server's word for the partner app: may "Customer didn't come" be recorded on this
+ *  order now (the same rule the route applies; a store under a hold is still refused by the route's operate gate).
+ *  Served as `noShow: { allowed }` on the vendor order detail and the vendor bookings rows; old apps ignore it. */
+export function noShowView(
+  order: Pick<Order, 'fulfillment' | 'status' | 'appointmentSlot' | 'paymentMethod' | 'paymentStatus'> | null | undefined,
+  now: Date,
+): { allowed: boolean } {
+  return { allowed: !!order && noShowRefusal(order, now) === null };
+}
+
 /**
  * Inside the canonical CANCELLED transition, on the locked order row: judge the order as it stood when the lock was
  * taken (a move or a cancel that committed first wins), then write the one record. Throws to roll the whole close
