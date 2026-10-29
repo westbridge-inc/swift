@@ -87,9 +87,3 @@ export function visitModeFor(serviceMode: string | undefined, chosen: VisitMode)
   if (serviceMode === 'AT_BUSINESS') return 'AT_BUSINESS';
   return undefined;
 }
-
-/** A visit to the customer's address: the one case a booking needs a delivery address. */
-export function isHomeVisit(held: Pick<HeldTime, 'mode' | 'serviceMode'> | null | undefined): boolean {
-  if (!held) return false;
-  return held.mode === 'MOBILE' || (held.mode === undefined && (held.serviceMode === 'MOBILE' || held.serviceMode === 'BOTH'));
-}

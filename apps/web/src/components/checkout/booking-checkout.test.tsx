@@ -109,7 +109,7 @@ describe('[BOOK-S6b] the one checkout books an appointment', () => {
     holdTime({});
     at('/checkout', <CheckoutPage />);
     const panel = await screen.findByRole('region', { name: 'Your booking' });
-    expect(panel.textContent).toMatch(/10:00\sAM/);
+    await waitFor(() => expect(panel.textContent).toMatch(/10:00\sAM/));
     expect(screen.queryByRole('radiogroup', { name: 'How would you like your order?' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Tip your rider' })).toBeNull();
     expect(screen.queryByLabelText('Saved delivery address')).toBeNull();
@@ -310,6 +310,22 @@ describe('[BOOK-S6b] Book on the store page', () => {
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/checkout'));
     expect(calls('DELETE', '/api/v1/customer/cart')).toHaveLength(1);
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(1);
+  });
+
+  it('an earlier checkout with no answer yet freezes the cart: Book writes nothing and says why', async () => {
+    cart = () => ({ items: [] });
+    at('/store/fixture-studio', await storePage());
+    const book = await screen.findByRole('button', { name: 'Book Fixture trim' });
+    await waitFor(() => expect((book as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(book);
+    const sheet = await screen.findByRole('dialog', { name: 'Fixture trim' });
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Tomorrow' }));
+    fireEvent.click(await within(sheet).findByRole('button', { name: /10:00\sAM/ }));
+    sessionStorage.setItem('swift_web_checkout_attempt:c1', JSON.stringify({ signature: 'earlier-order', key: 'earlier-key' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: /^Book 10:00\sAM/ }));
+    expect((await within(sheet).findByRole('alert')).textContent).toMatch(/unresolved server outcome/);
+    expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
+    expect(state.push).not.toHaveBeenCalled();
   });
 
   it('a guest is sent to sign in first (the free times are read signed in), and nothing is added', async () => {
