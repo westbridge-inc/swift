@@ -58,6 +58,25 @@ export const MAX_OFFERINGS_PER_PROVIDER = 30;
 export const MAX_UPCOMING_TIME_OFF = 100;
 /** How far ahead a day off may be set. */
 export const TIME_OFF_HORIZON_DAYS = 366;
+/** [BOOK-P3 · G S4-3] How far ahead a pro can be booked from their list (or a booking moved): as far as
+ *  they can set time off, so a pro can always take a booked day off. */
+export const PRO_BOOKING_HORIZON_DAYS = TIME_OFF_HORIZON_DAYS;
+
+/** The last instant a booking from a pro's list may start at. */
+export function proBookingHorizonEnd(now: Date = new Date()): Date {
+  return new Date(now.getTime() + PRO_BOOKING_HORIZON_DAYS * 24 * 60 * 60_000);
+}
+
+/** [BOOK-P2] Writers of one pro's time (a booking, a move) queue here, one at a time, until their
+ *  transaction ends, the store's lockBusinessTime twin: the time check that follows reads every
+ *  job the writer before it committed, so a race is answered SLOT_TAKEN by the check, never by
+ *  two writers waiting on each other's uncommitted rows (a deadlock). Taken before any User row
+ *  lock (a booking) and before the job row (a move): no cycle with the quote flow's User locks.
+ *  [BOOK-P3 · M S4-3] The pro's own changes to their time (weekly hours, time off) queue here too,
+ *  so a booking never lands in a day off added while it was being checked. */
+export async function lockProviderTime(tx: Prisma.TransactionClient, providerId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`pro-time:${providerId}`}, 0))`;
+}
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
