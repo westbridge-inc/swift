@@ -101,14 +101,20 @@ function responseContextIsCurrent(snapshot: AuthSnapshot, storeId: string | null
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
+  /** The server's `ref`, when it sent one as text. */
   readonly details?: { ref?: string };
+  /** The server's `error.details` exactly as sent (unchecked: a screen that acts on it checks its shape). */
+  readonly errorDetails?: unknown;
 
-  constructor(message: string, status: number, code?: string, details?: { ref?: string }) {
+  /** `code` and `errorDetails` may be the server's own (unchecked): a code is kept only when it is text. */
+  constructor(message: string, status: number, code?: unknown, errorDetails?: unknown) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
-    this.details = details;
-    if (code !== undefined) this.code = code;
+    const ref = (errorDetails as { ref?: unknown } | null | undefined)?.ref;
+    this.details = typeof ref === 'string' ? { ref } : undefined;
+    if (typeof code === 'string') this.code = code;
+    this.errorDetails = errorDetails;
   }
 }
 
@@ -378,8 +384,10 @@ export async function apiFetch(
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
   }
+  // [W2] Read once: every page carries this module, so its size counts on the customer home page too.
+  const error = json?.error;
   // [Row 225] The server saw another account behind this tab's cookie: learn who, so the page re-renders as them.
-  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') {
+  if (res.status === 409 && error?.code === 'SESSION_CHANGED') {
     void sessionProbe();
     // The page re-renders as that account by itself (the probe above): say what happened, ask for nothing.
     throw new ApiRequestError(SERVER_SESSION_CHANGED, 409, 'SESSION_CHANGED');
@@ -390,12 +398,12 @@ export async function apiFetch(
   }
   if (!res.ok || json?.success === false) {
     throw new ApiRequestError(
-      json?.error?.message || (res.status >= 500
+      error?.message || (res.status >= 500
         ? 'Something went wrong on our side. Please try again.'
         : 'We couldn’t complete that. Please try again.'),
       res.status,
-      typeof json?.error?.code === 'string' ? json.error.code : undefined,
-      typeof json?.error?.details?.ref === 'string' ? { ref: json.error.details.ref } : undefined,
+      error?.code,
+      error?.details,
     );
   }
   return json;

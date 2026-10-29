@@ -143,6 +143,7 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'PromoTerms.createdBy': 'staff work: who published promo terms (administrative trail, Privacy Policy §7)',
   'StockAdjustment.createdBy': "a store's stock ledger: who adjusted stock (the store's business record)",
   'StockMovement.actorId': "a store's stock ledger: who moved stock (the store's business record)",
+  'PosImport.actorId': "a store's stock ledger: who applied a till export (the store's business record)",
   'SupportTicket.resolvedById': 'staff work: who resolved a ticket (administrative trail, Privacy Policy §7)',
   'OpsAlertRecipient.userId': 'staff work: who was paged for an operations alert and who acknowledged it (administrative trail, Privacy Policy §7)',
   'CustodyRecoveryCase.ownerUserId': 'staff work: the staff member who owned a parcel recovery case (administrative trail, Privacy Policy §7). A resolved case the person held or relayed as a rider loses its location and note (owner 19 Oct G3)',
