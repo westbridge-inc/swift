@@ -76,10 +76,18 @@ export function requireAdminPhone(raw: string | undefined): string {
 
 // ── [TASK-057] shared provisioning ───────────────────────────────────────────
 
-/** Types that expire: an admin must approve them with an expiresAt (doc-registry.ts). */
+/** Types that expire: an admin must approve them with an expiresAt (doc-registry.ts AUTO_APPROVE_EXPIRY_DAYS;
+ *  the API answers 400 EXPIRY_REQUIRED without one). Every registry type is here, pinned by
+ *  apps/api/src/__tests__/livetest-expiring-docs.unit.test.ts: the hire licences were missing (26 Oct), so
+ *  no roster taxi driver held both and none could go online. */
 const EXPIRING = new Set([
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit', 'road_service_licence',
   'drivers_licence', 'vehicle_registration', 'food_handler_cert', 'gra_restaurant_licence', 'self_declaration_unregistered',
+  // [VERIFY-DOCS · ruling 8] the two licences that replaced the hire-car permit: the person's (3 years) and the car's (1 year)
+  'hire_car_driver_licence', 'hire_car_vehicle_licence',
+  // the other registry types that expire (store certificates checked every January, the service trades' documents)
+  'sanitary_certificate', 'trade_licence', 'pesticide_applicator_certificate', 'pest_control_operator_licence',
+  'eating_house_registration', 'gei_electrical_licence',
 ]);
 const PRIVACY_NOTICE_VERSION = '2026-09-23'; // modules/legal/legal.routes.ts LEGAL_VERSION
 
@@ -114,14 +122,43 @@ export async function submitDoc(owner: Session, role: string, docType: string, l
 
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString();
 
-/** Approve one pending document as the admin (with an expiry, and hire insurance for a taxi). */
-export async function approveDoc(admin: Session, docId: string, docType: string, vehicleType?: string): Promise<Res> {
-  const body: Record<string, unknown> = {};
+/** [VERIFY-DOCS] What a reviewer TYPES at approval (the queue's `reviewerTypes`): the number on an ID or
+ *  licence — synthetic and unique to the document, so no two journey accounts are ever joined — or a
+ *  police clearance's issue date. */
+const NUMBER_TYPED = new Set(['national_id', 'owner_national_id', 'passport', 'identity_l2', 'drivers_licence']);
+/** [R15] Certificates checked again every January: the reviewer types the year printed on them
+ *  (doc-registry CERTIFICATE_YEAR_DOC_TYPES). */
+const YEAR_TYPED = new Set([
+  'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
+  'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
+]);
+/** The year in Guyana (UTC-4, no daylight saving): the API refuses a certificate year that has not started there. */
+const guyanaYear = () => new Date(Date.now() - 4 * 3_600_000).getUTCFullYear();
+export function reviewerTypedBody(docType: string, docId: string): Record<string, string | number | boolean> {
+  if (NUMBER_TYPED.has(docType)) return { documentNumber: `SYN${docId.replace(/[^a-zA-Z0-9]/g, '').slice(-16)}` };
+  if (docType === 'police_clearance') return { issuedOn: new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10) };
+  if (YEAR_TYPED.has(docType)) return { certificateYear: guyanaYear() };
+  // [R16] A business registration says what it is: the synthetic stores are companies (a certificate of
+  // incorporation never expires, so no January re-check falls inside a journey). The year is typed too.
+  if (docType === 'business_registration') return { registrationKind: 'COMPANY', certificateYear: guyanaYear() };
+  // [ROLE-DOCS] An own-name declaration is approved only on the reviewer's check of the name against the ID.
+  if (docType === 'own_name_declaration') return { ownNameConfirmed: true };
+  return {};
+}
+
+/** The approve request's body: what the reviewer types, an expiry, and hire insurance for a taxi. */
+export function approvalBody(docId: string, docType: string, vehicleType?: string): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...reviewerTypedBody(docType, docId) };
   if (EXPIRING.has(docType)) body.expiresAt = inDays(300);
   if (docType === 'vehicle_insurance' && vehicleType && ['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15'].includes(vehicleType)) {
     body.insurance = { insurerName: 'Synthetic Assurance', policyNumber: `SYN-${docId.slice(-8)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true };
   }
-  return asAdmin(admin.token, `approve synthetic ${docType} submitted by the journey roster`, 'PUT', `/admin/verification/${docId}/approve`, body);
+  return body;
+}
+
+/** Approve one pending document as the admin. */
+export async function approveDoc(admin: Session, docId: string, docType: string, vehicleType?: string): Promise<Res> {
+  return asAdmin(admin.token, `approve synthetic ${docType} submitted by the journey roster`, 'PUT', `/admin/verification/${docId}/approve`, approvalBody(docId, docType, vehicleType));
 }
 
 /**
@@ -384,7 +421,7 @@ export async function provisionJourneyWorld(roster: Roster, admin: Session, log:
       const face = await upload('/verification/upload', c7.session.token, { name: 'face.png', type: 'image/png', bytes: uniquePng('C7-identity') });
       const idv = await POST('/verification/identity', { idDocumentUrl: idDoc.url, selfieUrl: face.json?.data?.url, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION }, c7.session.token);
       const docId = idv.json?.data?.id;
-      if (docId) await asAdmin(admin.token, 'approve the synthetic identity check of the taxi journey passenger', 'PUT', `/admin/verification/${docId}/approve`, {});
+      if (docId) await asAdmin(admin.token, 'approve the synthetic identity check of the taxi journey passenger', 'PUT', `/admin/verification/${docId}/approve`, reviewerTypedBody('identity_l2', docId));
       else if (idv.status !== 409) log(`  C7: identity → ${idv.status} ${codeOf(idv)} ${idv.text.slice(0, 160)}`);
     }
     const after = (await GET('/verification/status?role=MOVER', c7.session.token)).json?.data;

@@ -51,7 +51,7 @@
  */
 import type { CoverageClass, PrismaClient, RiderType, VehicleType } from '@prisma/client';
 import { CountryConfigService } from '../country/country-config.service';
-import { approvedEvidenceFor } from '../verification/evidence';
+import { recordEvidenceFor } from '../verification/evidence';
 import { AUTO_APPROVE_EXPIRY_DAYS, IDENTITY_DOC_TYPES } from '../verification/doc-registry';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { renderPackPicture } from './pack-image';
@@ -150,11 +150,28 @@ async function partnerAccounts(db: Db, tenantId: string) {
   return accounts;
 }
 
-/** What the checklist still lacks for this account now — by THE evidence query the gates read. */
+/**
+ * [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] The documents a pack partner presents: what the vehicle
+ * requires, plus any identity document a mover MAY add. [ROLE-DOCS · owner 21 Oct 2026] No vehicle partner is
+ * offered a second ID any more (the licence is photo ID), so a motorised pack partner presents none.
+ */
+export async function packPartnerDocuments(db: Db, countryCode: string, vehicleType: VehicleType): Promise<string[]> {
+  const countries = new CountryConfigService(db);
+  const required = await countries.getMoverChecklist(countryCode, vehicleType);
+  const identity = (await countries.getMoverOptionalDocuments(countryCode, vehicleType)).filter((t) => IDENTITY_DOC_TYPES.includes(t));
+  return [...required, ...identity];
+}
+
+/**
+ * What the checklist still lacks for this account now, by the records the gates read. [Opus 13 Oct · #1546
+ * S3-1] A pack seeded before the split holds the old permit; a re-seed commits the two real licences, so the
+ * review taxi stays ready. [Owner 15 Oct 2026] The permit no longer counts at all (no grace), so the gates
+ * read these same records. The fiction always holds the real documents.
+ */
 async function missingEvidence(db: Db, role: PartnerRole, userId: string, countryCode: string, now: Date): Promise<string[]> {
   const spec = REVIEW_PACK_PARTNERS[role];
-  const checklist = await new CountryConfigService(db).getMoverChecklist(countryCode, spec.vehicleType);
-  const rows = await approvedEvidenceFor(db, userId, checklist, now);
+  const checklist = await packPartnerDocuments(db, countryCode, spec.vehicleType);
+  const rows = await recordEvidenceFor(db, userId, checklist, now);
   const held = new Set(rows.map((r) => r.docType));
   const missing = checklist.filter((t) => !held.has(t));
   if (role === 'DRIVER') {
@@ -262,11 +279,10 @@ export async function seedReviewPartners(db: Db, tenantId: string, now = new Dat
       await commitFixtureDocument(db, spec, user.id, docType, now);
       documentsCommitted += 1;
     }
-    // An approved identity document is L2, exactly as the approval path promotes it.
-    if (user.trustLevel === 'L1') {
-      const checklist = await new CountryConfigService(db).getMoverChecklist(user.countryCode, spec.vehicleType);
-      if (checklist.some((t) => IDENTITY_DOC_TYPES.includes(t))) await db.user.update({ where: { id: user.id }, data: { trustLevel: 'L2' } });
-    }
+    // The pack partners have always been L2 (the store build under review was approved with them so). [ROLE-DOCS ·
+    // owner 21 Oct 2026] The optional national ID this was hung on is gone for vehicle partners, so the fiction keeps
+    // its level as it always had it rather than change a store-reviewed account; no production path reads this.
+    if (user.trustLevel === 'L1') await db.user.update({ where: { id: user.id }, data: { trustLevel: 'L2' } });
   }
   return { ...(await reviewPartnerFacts(db, tenantId, now)), documentsCommitted };
 }

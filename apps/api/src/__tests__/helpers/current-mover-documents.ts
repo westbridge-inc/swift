@@ -11,3 +11,14 @@ export async function currentMoverDocuments(db: PrismaClient, userId: string, ve
     ...(taxi && docType === 'vehicle_insurance' ? { coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } : {}),
   } });
 }
+
+/** Legacy taxi fixtures still need the two newly required licences; the legacy flag cannot supply them. */
+export async function currentTaxiSplitDocuments(db: PrismaClient, userId: string) {
+  for (const docType of ['hire_car_driver_licence', 'hire_car_vehicle_licence']) {
+    await db.verificationDocument.create({ data: {
+      userId, role: 'MOVER', docType, status: 'APPROVED',
+      fileUrl: `storage://synthetic/current-taxi/${docType}`,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    } });
+  }
+}

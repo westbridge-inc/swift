@@ -27,8 +27,10 @@ import {
 import { CountryConfigService } from '../modules/country/country-config.service';
 import { guyanaWallClockParts } from '../utils/guyana-day';
 import { EXTRA_DOC_TYPES, BUCKET_OF, DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } from '../modules/verification/doc-registry';
+import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-micro-vendor-tier-test');
 let app: FastifyInstance;
@@ -37,6 +39,10 @@ const users: string[] = [];
 const extraVendorIds: string[] = [];
 let mkUser: (n: number, roles: string[], active: string, extra?: Record<string, unknown>) => Promise<{ id: string }>;
 const orderIds: string[] = [];
+
+// Today's orders are seeded "a minute ago" and counted for the Guyana day:
+// never run across Guyana midnight (helpers/guyana-day-clock).
+beforeAll(waitClearOfGuyanaMidnight, GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS);
 
 beforeAll(async () => {
   vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64'));
@@ -214,14 +220,21 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     const v2 = owner2.vendors[0]!.id;
     extraVendorIds.push(v2);
     const post = (payload: unknown) => app.inject({ method: 'POST', url: '/api/v1/vendor/onboarding/declaration', payload: payload as Record<string, unknown>, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-vendor-id': v2 } });
-    const res = await post({ tradingName: `Auntie ${RUN}`, activityClass: 'home_cook', declaredAddress: '2 Stall Row, Georgetown', attestationVersion: 'v1' });
+    // [R15 · research D9] Home cooks are held: the declaration is refused before anything is written.
+    const held = await post({ tradingName: `Auntie ${RUN}`, activityClass: 'home_cook', declaredAddress: '2 Stall Row, Georgetown', attestationVersion: 'v1' });
+    expect(held.statusCode, held.body).toBe(409);
+    expect(held.json().error.code).toBe('HOME_COOK_HELD');
+    expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: o.id, documentType: DECLARATION_CONSENT_TYPE } }))).toBe(0);
+    expect(await system(() => app.prisma.verificationDocument.count({ where: { userId: o.id, docType: DECLARATION_DOC_TYPE } }))).toBe(0);
+    expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: v2 }, select: { tier: true } }))).tier).not.toBe('UNREGISTERED');
+    const res = await post({ tradingName: `Auntie ${RUN}`, activityClass: 'snackette', declaredAddress: '2 Stall Row, Georgetown', attestationVersion: 'v1' });
     expect(res.statusCode, res.body).toBe(201);
     const data = res.json().data;
     expect(data.tier).toBe('UNREGISTERED');
     expect(data.declaration.docType).toBe(DECLARATION_DOC_TYPE);
     const store = await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: v2 }, select: { tier: true, tierNote: true } }));
     expect(store.tier).toBe('UNREGISTERED');
-    expect(store.tierNote).toContain('home_cook');
+    expect(store.tierNote).toContain('snackette');
     const consent = await system(() => app.prisma.consentRecord.findFirst({ where: { subjectId: o.id, documentType: DECLARATION_CONSENT_TYPE }, orderBy: { capturedAt: 'desc' } }));
     expect(consent).toMatchObject({ action: 'granted', documentVersion: 'v1' });
     expect((consent?.evidence as { tradingName?: string })?.tradingName).toBe(`Auntie ${RUN}`);
@@ -236,7 +249,7 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     expect(checklist).toContain(DECLARATION_DOC_TYPE);
     expect(checklist).not.toContain(REGISTRATION_DOC_TYPES[0]);
     // Signing twice is refused; a registered store (the first owner holds a VALID registration record) is refused.
-    expect((await post({ tradingName: 'x y', activityClass: 'home_cook', declaredAddress: '2 Stall Row, Georgetown', attestationVersion: 'v1' })).json().error.code).toBe('DECLARATION_EXISTS');
+    expect((await post({ tradingName: 'x y', activityClass: 'snackette', declaredAddress: '2 Stall Row, Georgetown', attestationVersion: 'v1' })).json().error.code).toBe('DECLARATION_EXISTS');
     // The first owner holds a VALID, unexpired registration record (the promotion test expired its earlier one).
     await system(() => app.prisma.verificationDocument.create({ data: {
       userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `storage://t/${RUN}-reg2.jpg`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture',

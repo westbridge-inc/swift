@@ -5,7 +5,10 @@ import type { DispatchService } from '../dispatch/dispatch.service';
 import type { FareService } from './fare.service';
 import type { NotificationService } from '../notification/notification.service';
 import { createRideRequest, type RideRequestApp } from './rides.service';
+import { formatMoney } from '../../utils/currency-amount';
 import { log } from '../../utils/logger';
+import { SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
+import { coarsePoint, PRIVATE_POINT_SNAP_DEG } from '../dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // The 5.5B ride queue (rides spec): position is DERIVED (createdAt FIFO among
@@ -120,8 +123,26 @@ export async function scanRideQueue(
   const prisma = app.prisma;
   const now = new Date();
 
-  // ---- 1) expiry sweep ----
+  // Retired classes cannot wait for supply or be offered again by a stale-trip deep link.
   let expired = 0;
+  const unavailable = await prisma.rideQueueEntry.findMany({
+    where: { status: 'WAITING', rideClass: { notIn: [...SERVED_RIDE_CLASSES] } },
+    orderBy: { createdAt: 'asc' }, take: cap,
+  });
+  for (const entry of unavailable) {
+    const claimed = await prisma.rideQueueEntry.updateMany({
+      where: { id: entry.id, tenantId: entry.tenantId, status: 'WAITING' },
+      data: { status: 'EXPIRED', expiredNotifiedAt: now },
+    });
+    if (claimed.count !== 1) continue;
+    expired += 1;
+    await notifications.send({ userId: entry.customerId, type: 'ORDER_UPDATE', audience: 'customer',
+      title: 'Choose another ride class', body: 'Your queued ride class is no longer offered. Open Rides to choose an available class.',
+      data: { kind: 'ride_queue_unavailable' },
+    }).catch(() => {});
+  }
+
+  // ---- 1) expiry sweep ----
   const dead = await prisma.rideQueueEntry.findMany({
     where: { status: 'WAITING', expiresAt: { lte: now } },
     orderBy: { createdAt: 'asc' },
@@ -134,14 +155,15 @@ export async function scanRideQueue(
     });
     if (claimed.count === 0) continue;
     expired += 1;
+    const offered = [...SERVED_RIDE_CLASSES].some((rideClass) => rideClass === e.rideClass);
     await notifications
       .send({
         userId: e.customerId,
         type: 'ORDER_UPDATE',
-        title: `Still need a ride to ${e.dropoffAddress}?`,
-        body: 'Your place in line timed out. Tap to request again — one tap, same trip.',
+        title: offered ? `Still need a ride to ${e.dropoffAddress}?` : 'Choose another ride class',
+        body: offered ? 'Your place in line timed out. Tap to request again — one tap, same trip.' : 'Your queued ride class is no longer offered. Open Rides to choose an available class.',
         audience: 'customer',
-        data: {
+        data: !offered ? { kind: 'ride_queue_unavailable' } : {
           kind: 'ride_queue_expired',
           pickup: { lat: e.pickupLat, lng: e.pickupLng, address: e.pickupAddress },
           dropoff: { lat: e.dropoffLat, lng: e.dropoffLng, address: e.dropoffAddress },
@@ -173,11 +195,18 @@ export async function scanRideQueue(
     const cell = `${e.tenantId}:${cellOf(e.pickupLat, e.pickupLng)}`;
     if ((cellBudget.get(cell) ?? 1) <= 0) continue;
 
+    // [TAXI-FLOW 22 Oct 2026] Supply FOR this customer: their own driver
+    // profile (one account, two modes) can never take their ride, and counting
+    // it created a ride nobody could fill.
     const supply = await dispatch.getAvailability(
       'DRIVER',
       { lat: e.pickupLat, lng: e.pickupLng },
       0,
       e.tenantId,
+      null,
+      e.customerId,
+      // [REVIEW-G #2022 S4-3] A car that can take THIS ride: its class and party.
+      { rideClass: e.rideClass as RideClass, passengerCount: e.passengerCount },
     );
     if (supply.level === 'NONE') continue;
     if (!cellBudget.has(cell)) cellBudget.set(cell, supply.level === 'GOOD' ? 3 : 1);
@@ -203,6 +232,11 @@ export async function scanRideQueue(
           dropoffAddress: e.dropoffAddress,
           passengerCount: e.passengerCount,
           rideClass: e.rideClass as RideClass,
+          // [PRICE-LOCK · row 448] Booked only at the fare the passenger was shown
+          // when they joined (or, from an app before the lock, the fare at the
+          // join); a fare that moved since is refused (FARE_CHANGED) and handled
+          // below. Entries from before this migration have none.
+          ...(e.quotedFare != null ? { expectedFare: Number(e.quotedFare) } : {}),
         },
         false, // the scan just read supply — no availability pre-check race
         e.tenantId,
@@ -228,6 +262,42 @@ export async function scanRideQueue(
         .catch(() => {});
     } catch (err) {
       const code = (err as { code?: string }).code;
+      if (code === 'FARE_CHANGED') {
+        // [PRICE-LOCK · row 448] The fare moved while they waited: nothing was
+        // booked. The entry ends and the passenger is asked again, with the trip
+        // one tap away (the same re-request link an expired entry carries); the
+        // new fare is quoted to them before anything is booked.
+        const details = (err as { details?: { fare?: number; currencyCode?: string } }).details;
+        const fareNow = details?.fare;
+        const shown = (n: number) => formatMoney(n, details?.currencyCode ?? 'GYD', { code: true, whole: true });
+        const ended = await prisma.rideQueueEntry
+          .updateMany({
+            where: { id: e.id, tenantId: e.tenantId, status: 'MATCHED' },
+            data: { status: 'EXPIRED', expiredNotifiedAt: new Date() },
+          })
+          .catch(() => ({ count: 0 }));
+        if (ended.count > 0) {
+          await notifications
+            .send({
+              userId: e.customerId,
+              type: 'ORDER_UPDATE',
+              title: `The fare to ${e.dropoffAddress} changed`,
+              body: typeof fareNow === 'number'
+                ? `A driver freed up, but the fare is now ${shown(fareNow)}, not the ${shown(Number(e.quotedFare))} you joined at. Nothing was booked. Tap to see it and request again.`
+                : 'A driver freed up, but the fare changed since you joined. Nothing was booked. Tap to see the new fare and request again.',
+              audience: 'customer',
+              data: {
+                kind: 'ride_queue_expired',
+                pickup: { lat: e.pickupLat, lng: e.pickupLng, address: e.pickupAddress },
+                dropoff: { lat: e.dropoffLat, lng: e.dropoffLng, address: e.dropoffAddress },
+                rideClass: e.rideClass,
+                passengerCount: e.passengerCount,
+              },
+            })
+            .catch(() => {});
+        }
+        continue;
+      }
       if (
         code === 'RIDE_IN_PROGRESS'
         || code === 'RIDE_QUEUE_TENANT_CHANGED'
@@ -265,49 +335,48 @@ export async function scanRideQueue(
 
 const PRESENCE_CAP = 12;
 const PRESENCE_RADIUS_KM = 5;
-/** ~100m of deterministic jitter: stable per driver per 5-minute bucket so a
- *  refetch never makes parked cars dance, yet true positions never leave the
- *  server. */
-function jitter(id: string, now = Date.now()): { dLat: number; dLng: number } {
-  const bucket = Math.floor(now / 300_000);
-  let h = 2166136261;
-  const seed = `${id}:${bucket}`;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  const angle = ((h >>> 8) % 360) * (Math.PI / 180);
-  const meters = 40 + ((h >>> 3) % 80); // 40–120m off the true point
-  const dLat = (meters * Math.cos(angle)) / 111_320;
-  const dLng = (meters * Math.sin(angle)) / (111_320 * Math.cos((6.8 * Math.PI) / 180));
-  return { dLat, dLng };
-}
-
+/* [F17 · 28 Oct 2026] Presence is snapped to the ONE coarse grid every
+ * unassigned private-point surface uses (board-privacy coarsePoint, ~330 m).
+ * It replaced a ~100 m offset derived from the driver id and a 5-minute
+ * bucket: those inputs are public to a former passenger (the ride read carries
+ * the driver id), so the offset could be recomputed and removed. A grid cell
+ * has no per-driver component, is stable between refetches (cars do not
+ * dance), and never puts the true position on the wire. */
 export async function presenceNear(
   prisma: PrismaClient,
   point: { lat: number; lng: number },
   tenantId: string,
 ): Promise<{ lat: number; lng: number }[]> {
+  // [F17 · REVIEW-M S3-1] Membership is decided on the SNAPPED cell, never on
+  // the true position: a radius judged on the true point is a distance oracle
+  // (walk the query point across the edge and the car is found to metres).
+  // The cell is the same grid coarsePoint draws below.
   const rows = await prisma.$queryRaw<{ id: string; lat: number; lng: number }[]>(Prisma.sql`
-    SELECT d."id", d."currentLat" AS lat, d."currentLng" AS lng
-    FROM drivers d
-    JOIN users u ON u."id" = d."userId"
-    WHERE u."tenantId" = ${tenantId}
-      AND d."isOnline" AND d."isAvailable"
-      AND d."currentLat" IS NOT NULL AND d."currentLng" IS NOT NULL
-      AND (
+    SELECT c."id", c.lat, c.lng
+    FROM (
+      SELECT d."id",
+        ROUND(d."currentLat" / ${PRIVATE_POINT_SNAP_DEG}) * ${PRIVATE_POINT_SNAP_DEG} AS lat,
+        ROUND(d."currentLng" / ${PRIVATE_POINT_SNAP_DEG}) * ${PRIVATE_POINT_SNAP_DEG} AS lng
+      FROM drivers d
+      JOIN users u ON u."id" = d."userId"
+      WHERE u."tenantId" = ${tenantId}
+        AND d."isOnline" AND d."isAvailable"
+        AND d."currentLat" IS NOT NULL AND d."currentLng" IS NOT NULL
+    ) c
+    WHERE (
         6371 * acos(
           LEAST(1.0,
-            cos(radians(${point.lat})) * cos(radians(d."currentLat")) *
-            cos(radians(d."currentLng") - radians(${point.lng})) +
-            sin(radians(${point.lat})) * sin(radians(d."currentLat"))
+            cos(radians(${point.lat})) * cos(radians(c.lat)) *
+            cos(radians(c.lng) - radians(${point.lng})) +
+            sin(radians(${point.lat})) * sin(radians(c.lat))
           )
         )
       ) <= ${PRESENCE_RADIUS_KM}
     LIMIT ${PRESENCE_CAP}
   `);
-  return rows.map((r) => {
-    const j = jitter(r.id);
-    return { lat: Number(r.lat) + j.dLat, lng: Number(r.lng) + j.dLng };
+  // The rows are already cells; coarsePoint keeps the wire values on the one grid function.
+  return rows.flatMap((r) => {
+    const cell = coarsePoint(Number(r.lat), Number(r.lng));
+    return cell ? [cell] : [];
   });
 }

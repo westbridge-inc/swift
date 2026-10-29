@@ -160,18 +160,8 @@ beforeAll(async () => {
     select: { id: true },
   });
   if (stale.length) {
-    const orders = await app.prisma.order.findMany({
-      where: { customerId: { in: stale.map((u) => u.id) } },
-      select: { id: true },
-    });
-    // The log table is append-only by design, so a prior run's rows are cleared
-    // through the raw path rather than the guarded client.
-    if (orders.length) {
-      await app.prisma.$executeRawUnsafe(
-        `DELETE FROM "order_status_logs" WHERE "orderId" = ANY($1::text[])`,
-        orders.map((o) => o.id),
-      );
-    }
+    // [row 264] The log table is append-only in the database too: a prior run's
+    // rows leave with their orders (the foreign-key cascade), never on their own.
     await app.prisma.order.deleteMany({ where: { customerId: { in: stale.map((u) => u.id) } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: stale.map((u) => u.id) } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: stale.map((u) => u.id) } } });
@@ -185,12 +175,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (createdOrderIds.length) {
-    await app.prisma.$executeRawUnsafe(
-      `DELETE FROM "order_status_logs" WHERE "orderId" = ANY($1::text[])`,
-      createdOrderIds,
-    );
-  }
+  // [row 264] The status-log rows leave with their orders (the foreign-key cascade).
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
@@ -378,8 +363,10 @@ describe('an arrival records the fix the platform already had', () => {
   });
 
   it('leaves the non-arrival rungs unadorned', async () => {
-    // Only the two rungs that ASSERT a position carry a fix. "Started the run"
-    // claims nothing about where the rider is.
+    // Only the rungs that ASSERT a position carry a fix: the two arrivals and
+    // [O-2 · owner 22 Oct 2026] "Picked up" (how far from the store the rider
+    // said they collected it; evidence only). "Started the run" claims nothing
+    // about where the rider is.
     const rider = await makeRider();
     const order = await makeAssignedOrder(await makeCustomer(), rider.riderId);
     await app.prisma.rider.update({
@@ -389,8 +376,9 @@ describe('an arrival records the fix the platform already had', () => {
 
     const logs = await walkTheLeg(rider.token, order.id);
 
-    for (const status of ['RIDER_EN_ROUTE_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY']) {
+    for (const status of ['RIDER_EN_ROUTE_PICKUP', 'EN_ROUTE_DELIVERY']) {
       expect(logs.find((l) => l.status === status)!.note, `${status} makes no position claim`).not.toMatch(/gps:/);
     }
+    expect(logs.find((l) => l.status === 'PICKED_UP')!.note).toMatch(/^Rider confirmed collecting the order — gps:.* m from the pickup, fix \d+s old\)$/);
   });
 });

@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { log } from '../../utils/logger';
+import { runWithTenant } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // [ALGO Band 0.2] READING A TUNABLE.
@@ -146,6 +147,8 @@ export const ALGO_DEFAULTS = {
    */
   'velocity.limits': {
     'promo.validate': { max: 10, perSeconds: 600, clusterMax: 30 },
+    // [SEC-TRUST F16] a referral code is redeemed once per person: a few tries an hour is generous
+    'referral.redeem': { max: 10, perSeconds: 3_600, clusterMax: 30 },
     'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
     // [R048-007] the money surfaces: a pay link is changed a handful of times a day at most,
     // and these fail CLOSED when the control is unavailable (integrity/velocity.ts)
@@ -177,6 +180,35 @@ export const ALGO_DEFAULTS = {
   // only if the founder sets an amount here.
   'rescue.incentiveGyd': 0,
   'rescue.incentiveFromCascade': 2,
+  /**
+   * [OF-33 · COORD ruling 21 Oct 2026] A rider who accepted and never picks
+   * up. Pickup is due at the later of the order's ready time and the rider's
+   * accept + `pickupTravelMinutes`; `pickupNudgeMinutes` past that the rider
+   * gets ONE push ("pick up now or release the order"); `pickupReleaseMinutes`
+   * past it, with no pickup confirmed, the order goes back to dispatch (never
+   * cancelled) and the acceptance counts as a no-show.
+   */
+  'rescue.pickupTravelMinutes': 20,
+  'rescue.pickupNudgeMinutes': 10,
+  'rescue.pickupReleaseMinutes': 20,
+  /**
+   * [OF-33 · COORD security ruling 21 Oct] A rider at the counter of a store
+   * that has not marked the order ready is exempt from the release only with
+   * a fresh GPS fix near the pickup point: at most `arrivedFixMaxAgeMinutes`
+   * old and within `arrivedFixMaxMetres`. A tap alone is never proof.
+   */
+  'rescue.arrivedFixMaxAgeMinutes': 2,
+  'rescue.arrivedFixMaxMetres': 150,
+  /**
+   * [BOOK-S2 · COORD ruling 28 Oct 2026] With INSTANT_BOOKING on, a booking
+   * takes the business's time at checkout, before anyone pays: these caps stop
+   * one customer from holding a business's (or many businesses') time. A
+   * customer may hold at most `maxLivePerBusiness` upcoming appointments
+   * (RESERVED or CONFIRMED, not yet started) with one business, and
+   * `maxLiveTotal` in all. Clamped 1..50 at the reader (booking/booking-limits.ts).
+   */
+  'booking.maxLivePerBusiness': 2,
+  'booking.maxLiveTotal': 5,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;
@@ -220,11 +252,15 @@ export async function algoConfig<K extends AlgoConfigKey>(
 
   let resolved: ResolvedConfig<(typeof ALGO_DEFAULTS)[K]> = { value: fallback, version: 0, source: 'default' };
   try {
-    const row = await prisma.algoConfig.findFirst({
+    // The read runs bound to the tenant it NAMES. The tenant wall replaces a
+    // query's tenantId with the ambient one (a request's, or a job's bound to
+    // its object's tenant), which would read another operator's dial and cache
+    // it under this tenant's key.
+    const row = await runWithTenant(tenantId, () => prisma.algoConfig.findFirst({
       where: { tenantId, key },
       orderBy: { version: 'desc' },
       select: { value: true, version: true },
-    });
+    }));
     // A row whose value is JSON `null` is not a configured value — it is a row
     // that says nothing. Treat it as absent rather than handing an algorithm a
     // null where it expects a number.

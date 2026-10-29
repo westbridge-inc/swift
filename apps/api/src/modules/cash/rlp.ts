@@ -16,6 +16,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { admittedHandoverEvidence } from './handover-evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -221,6 +222,22 @@ export async function rollingClaimTotal(
 // The reserve — a named liability line per country
 // ---------------------------------------------------------------------------
 
+/**
+ * [REVIEW-G2 S4-1 + REVIEW-M S4 on #2079] Whose program this is. The reserve is a COUNTRY line
+ * (rlp_reserve_entries has no tenant) and it is Swift's own: like billing (requireDefaultTenantBilling),
+ * loss protection belongs to the default tenant until a per-operator reserve exists. Another operator's
+ * claim is never paid from it, its partners' fees never provision it, and its admins are never paged with
+ * the line's balance. (Reading and topping it up are the default tenant's since #2079.)
+ */
+export const RLP_TENANT = 'swift-default';
+
+/** Refuses a payout for another operator's claim, before the reserve is read (so nothing states its balance). */
+export function assertRlpOperator(tenantId: string | null | undefined): void {
+  if (tenantId === RLP_TENANT) return;
+  throw new AppError(409, 'RLP_NOT_THIS_OPERATOR',
+    'Loss protection is paid from Swift\'s own reserve, which this operator does not use. Settle this claim through the operator\'s own process.');
+}
+
 export async function reserveBalance(db: Db, countryCode: string): Promise<number> {
   const agg = await db.rlpReserveEntry.aggregate({ _sum: { amount: true }, where: { countryCode } });
   return Number(agg._sum.amount ?? 0);
@@ -234,8 +251,9 @@ export async function reserveBalance(db: Db, countryCode: string): Promise<numbe
  */
 export async function drawReserveForPayout(
   tx: Prisma.TransactionClient,
-  input: { countryCode: string; claimId: string; amount: number; byId: string },
+  input: { countryCode: string; claimId: string; amount: number; byId: string; tenantId: string | null | undefined },
 ): Promise<{ balanceAfter: number }> {
+  assertRlpOperator(input.tenantId);
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance < input.amount) {
@@ -272,7 +290,7 @@ export async function adjustReserve(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance + input.amount < 0) {
-    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (balance ${balance.toLocaleString()}).`);
+    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (it holds ${balance.toLocaleString()}).`);
   }
   const row = await tx.rlpReserveEntry.create({ data: { countryCode: input.countryCode, kind: 'ADJUSTMENT', amount: input.amount, createdById: input.byId, note: input.note } });
   return { id: row.id, balanceAfter: balance + input.amount };
@@ -322,7 +340,15 @@ export async function provisionReserveForPreviousMonth(
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const periodKey = periodKeyOf(monthStart);
   const payments = await prisma.subscriptionPayment.findMany({
-    where: { status: 'CAPTURED', paidAt: { gte: monthStart, lt: monthEnd } },
+    where: {
+      status: 'CAPTURED', paidAt: { gte: monthStart, lt: monthEnd },
+      // Only Swift's own partners' fees provision Swift's reserve (RLP_TENANT).
+      subscription: { OR: [
+        { vendor: { tenantId: RLP_TENANT }, riderId: null, driverId: null },
+        { rider: { user: { tenantId: RLP_TENANT } }, vendorId: null, driverId: null },
+        { driver: { user: { tenantId: RLP_TENANT } }, vendorId: null, riderId: null },
+      ] },
+    },
     select: {
       amount: true,
       subscription: { select: {
@@ -358,7 +384,7 @@ export async function provisionReserveForPreviousMonth(
     if (created && opts.notifications) {
       const balance = await reserveBalance(prisma, countryCode);
       await notifyAdmins(prisma, opts.notifications, {
-        tenantId: null,
+        tenantId: RLP_TENANT,
         title: `Loss-protection reserve provisioned (${countryCode})`,
         body: `${provisioned.toLocaleString()} added for ${periodKey} (${rules.rlpReserveRatePct}% of ${total.toLocaleString()} paid fee revenue). The reserve line now holds ${balance.toLocaleString()}.`,
         data: { kind: 'rlp_reserve_provisioned', countryCode, periodKey, provisioned, balance },
@@ -400,13 +426,14 @@ export async function sweepLossProtection(
     where: { status: { in: ['AUTO_APPROVED', 'APPROVED'] } },
     select: { id: true, amount: true, status: true, flags: true, createdAt: true, orderId: true },
   });
-  // A claim carries no country of its own; the order's customer does.
+  // A claim carries no country of its own; the order's customer does. Only Swift's own claims (RLP_TENANT):
+  // another operator's claim is never paid from this reserve, so it is not this sweep's to list or page about.
   const orders = await prisma.order.findMany({
-    where: { id: { in: openRows.map((c) => c.orderId) } },
+    where: { id: { in: openRows.map((c) => c.orderId) }, tenantId: RLP_TENANT },
     select: { id: true, customer: { select: { countryCode: true } } },
   });
   const countryOf = new Map(orders.map((o) => [o.id, o.customer.countryCode]));
-  const open = openRows.map((c) => ({ ...c, countryCode: countryOf.get(c.orderId) ?? 'GY' }));
+  const open = openRows.filter((c) => countryOf.has(c.orderId)).map((c) => ({ ...c, countryCode: countryOf.get(c.orderId)! }));
   const slaHours: Record<string, number> = {};
   const breached: LossProtectionSweep['breached'] = [];
   let newlyFlagged = 0;
@@ -439,7 +466,7 @@ export async function sweepLossProtection(
   if (opts.notifications) {
     if (breached.length > 0 && !(await noticedToday(prisma, 'rlp_sla_breached', today))) {
       await notifyAdmins(prisma, opts.notifications, {
-        tenantId: null,
+        tenantId: RLP_TENANT,
         title: `${breached.length} loss-protection payout${breached.length === 1 ? '' : 's'} past the SLA`,
         body: `Approved claims unpaid beyond the pay-out SLA: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider who is owed money and waiting stops taking cash orders — pay from the reserve line today.`,
         data: { kind: 'rlp_sla_breached', breached: breached.length, date: today },
@@ -447,7 +474,7 @@ export async function sweepLossProtection(
     }
     if (lowReserve.length > 0 && !(await noticedToday(prisma, 'rlp_reserve_low', today))) {
       await notifyAdmins(prisma, opts.notifications, {
-        tenantId: null,
+        tenantId: RLP_TENANT,
         title: 'Loss-protection reserve below its floor',
         body: lowReserve.map((l) => `${l.countryCode}: ${l.balance.toLocaleString()} of a ${l.floor.toLocaleString()} floor`).join('; ') + '. Payouts refuse once the line is empty — provision it.',
         data: { kind: 'rlp_reserve_low', countries: lowReserve.map((l) => l.countryCode), date: today },
@@ -458,10 +485,11 @@ export async function sweepLossProtection(
 }
 
 async function noticedToday(prisma: PrismaClient, kind: string, today: string): Promise<boolean> {
-  const already = await prisma.notification.findFirst({
+  // [item 20] Any admin's notice today, looked up by the reserve job: the named capability under the owner wall.
+  const already = await ownerWallSystem('rlp:noticed-today', () => prisma.notification.findFirst({
     where: { data: { path: ['kind'], equals: kind }, createdAt: { gte: new Date(`${today}T00:00:00Z`) } },
     select: { id: true },
-  });
+  }));
   return Boolean(already);
 }
 

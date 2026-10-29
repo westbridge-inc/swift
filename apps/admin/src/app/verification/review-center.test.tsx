@@ -41,8 +41,8 @@ describe('Review Center applicant workspace', () => {
     await user.selectOptions(screen.getByLabelText('Document type'), 'police_clearance');
     expect(screen.getAllByRole('button', { name: 'Review' })).toHaveLength(1);
     await openAlice(user);
-    expect(screen.getByRole('button', { name: /national id.*PENDING/i })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /police clearance.*PENDING/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /national id.*Waiting for review/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /police clearance.*Waiting for review/i })).toBeTruthy();
     expect(await screen.findByText('Demo grocery')).toBeTruthy();
     expect(await screen.findByText('Review case opened')).toBeTruthy();
   });
@@ -70,7 +70,7 @@ describe('Review Center applicant workspace', () => {
     expect(await screen.findByText(/Document could not be displayed/)).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
   });
-  it('shows inline evidence, waits for image load, and advances only after the server decision', async () => {
+  it('shows inline evidence, waits for image load, and moves on only after the server decision (to the applicant\'s next waiting document)', async () => {
     const fetch = fixture();
     const { user } = renderWithQuery(<VerificationPage />);
     await openAlice(user);
@@ -84,11 +84,13 @@ describe('Review Center applicant workspace', () => {
     await user.type(within(dialog).getByLabelText('Decision note'), 'Matches the submitted identity');
     expect(requestsByMethod(fetch, 'PUT')).toHaveLength(0);
     await user.click(within(dialog).getByRole('button', { name: 'Confirm approval' }));
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Bob Applicant' })).toBeTruthy());
+    // [ADMIN-AUDIT S2-2] Alice still has her police clearance waiting: it opens, not the next applicant.
+    await waitFor(() => expect(screen.getByRole('heading', { level: 3, name: 'Police clearance' })).toBeTruthy());
+    expect(screen.getByRole('heading', { level: 2, name: 'Alice Applicant' })).toBeTruthy();
     expect(screen.getByRole('status').textContent).toContain('Approved National ID');
     expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({});
   });
-  it('shows PENDING honestly after a fraud-class verdict and advances to the next applicant', async () => {
+  it('shows PENDING honestly after a fraud-class verdict and moves on to the applicant\'s next waiting document', async () => {
     fixture({ pending: true });
     const { user } = renderWithQuery(<VerificationPage />);
     await openAlice(user);
@@ -98,7 +100,9 @@ describe('Review Center applicant workspace', () => {
     await user.type(screen.getByLabelText('Decision note'), 'The name area appears altered');
     await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
     expect((await screen.findByRole('status')).textContent).toMatch(/not rejected/i);
-    await screen.findByRole('heading', { name: 'Bob Applicant' });
+    // [ADMIN-AUDIT S2-2] Alice's police clearance still waits: it opens; the next applicant only after it.
+    await screen.findByRole('heading', { level: 3, name: 'Police clearance' });
+    expect(screen.getByRole('heading', { level: 2, name: 'Alice Applicant' })).toBeTruthy();
   });
   it('keeps a failed decision and its entered note open, without navigation', async () => {
     fixture({ fail: true });

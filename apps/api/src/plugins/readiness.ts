@@ -3,8 +3,16 @@ import { readInfrastructureClocks } from '../utils/infrastructure-clock';
 import type { WorkerCheck } from '../utils/scheduler-health';
 import { readinessGauge, readyReasonCounter, routedWhileDegradedCounter } from './observability';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
+import type { RoutingProbe } from '../providers/maps/routing-probe';
+import type { PlacesReadiness } from '../providers/places/places-health';
+import { runtimeMode } from '../utils/runtime-mode';
 
 export interface RuntimeReadinessState {
+  /** Report routing independently: an outage blocks new road quotes, not SOS. */
+  checkRouting?: () => Promise<RoutingProbe>;
+  /** [PLACES-LOUD] Address search's provider and last known status (ok / failing since T),
+   *  read from memory: reported only, never a readiness failure, never a call to Google. */
+  checkPlaces?: () => PlacesReadiness;
   checkQueues: () => boolean | Promise<boolean>;
   checkConsumers?: () => boolean | Promise<boolean>;
   checkRealtime?: () => boolean | Promise<boolean>;
@@ -16,6 +24,8 @@ export interface RuntimeReadinessState {
 
 export interface ReadinessSnapshot {
   ready: boolean;
+  routing?: RoutingProbe;
+  places?: PlacesReadiness;
   deps: {
     database: boolean;
     redis: boolean;
@@ -210,6 +220,15 @@ export async function hasRequiredSchema(
   return cutover[0]?.ok === true;
 }
 
+/** [PLACES-LOUD] A places report that cannot be read is "unknown", never a readiness failure. */
+function placesReport(check: () => PlacesReadiness): PlacesReadiness {
+  try {
+    return check();
+  } catch {
+    return { provider: 'unknown', status: 'unknown', since: null };
+  }
+}
+
 function fulfilledBoolean(result: PromiseSettledResult<boolean>): boolean {
   return result.status === 'fulfilled' && result.value;
 }
@@ -230,6 +249,7 @@ export async function evaluateReadiness(
     clockResult,
     workerResult,
     bootResult,
+    routingResult,
   ] = await Promise.allSettled([
     bounded(
       hasRequiredSchema(app.prisma),
@@ -264,6 +284,7 @@ export async function evaluateReadiness(
       Promise.resolve().then(() => state.checkBoot?.() ?? true),
       'Readiness boot contract check',
     ),
+    bounded(Promise.resolve().then(() => state.checkRouting?.()), 'Readiness routing report'),
   ]);
 
   const deps = {
@@ -281,6 +302,10 @@ export async function evaluateReadiness(
   for (const r of reasons) readyReasonCounter.labels(r).inc();
   const snapshot: ReadinessSnapshot = {
     ready: reasons.length === 0,
+    ...(state.checkRouting ? { routing: routingResult.status === 'fulfilled' && routingResult.value
+      ? routingResult.value
+      : { status: 'degraded' as const, provider: 'unknown', why: 'The routing probe did not answer.' } } : {}),
+    ...(state.checkPlaces ? { places: placesReport(state.checkPlaces) } : {}),
     deps,
     reasons,
     timestamp: new Date().toISOString(),
@@ -289,13 +314,48 @@ export async function evaluateReadiness(
   return snapshot;
 }
 
+/**
+ * [row 331 · APP-PLATFORM-GUARDS c] How long one /ready verdict is reused.
+ * /ready is public (the edge proxies every API path but /metrics), and each
+ * evaluation runs the catalog query, a Redis ping and the clock probe: reused
+ * for 2 s, a caller hammering it costs one evaluation per window, and the
+ * deploy scripts and the container probe (which poll every few seconds) see a
+ * change at most 2 s late. READINESS_CACHE_MS tunes it, 0..5000; anything else
+ * falls back. The test runtime defaults to 0 so a test that breaks a
+ * dependency sees it on the next request (tests of the window set it).
+ */
+export function readinessCacheMs(env: Record<string, string | undefined> = process.env): number {
+  const fallback = runtimeMode(env) === 'test' ? 0 : 2_000;
+  const raw = env['READINESS_CACHE_MS']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value <= 5_000 ? value : fallback;
+}
+
 export function registerReadinessRoute(
   app: FastifyInstance,
   state: RuntimeReadinessState,
 ): void {
-  // Infra probes are deliberately unauthenticated but expose booleans only.
+  // Infra probes are deliberately unauthenticated but expose booleans only
+  // (deps, reasons, a fixed-text routing report, the address-search
+  // provider's name and last known status, a timestamp: no host,
+  // version or credential). The deploy scripts read the status code and the
+  // coordinator's gates read the booleans, so the shape stays public.
+  const cacheMs = readinessCacheMs();
+  // One evaluation per window, shared by every caller, the concurrent ones
+  // included (single flight): its start time opens the window.
+  let current: { startedAt: number; verdict: Promise<ReadinessSnapshot> } | undefined;
   app.get('/ready', async (_request, reply) => {
-    const snapshot = await evaluateReadiness(app, state);
+    const now = Date.now();
+    let entry = current;
+    if (!entry || now - entry.startedAt >= cacheMs) {
+      const verdict = evaluateReadiness(app, state);
+      entry = { startedAt: now, verdict };
+      current = entry;
+      // An evaluation that throws is not reused: the next caller tries again.
+      verdict.catch(() => { if (current?.verdict === verdict) current = undefined; });
+    }
+    const snapshot = await entry.verdict;
     reply.status(snapshot.ready ? 200 : 503);
     return snapshot;
   });
@@ -310,7 +370,10 @@ const PROCESS_BOOTED_AT = new Date();
  * dependency it cannot fix by restarting this container.
  */
 export function registerLivenessRoute(app: FastifyInstance): void {
-  app.get('/live', async () => ({
+  // [row 331 · APP-PLATFORM-GUARDS b] Not even the rate limiter: its counters
+  // live in Redis in production, and a probe that answers 500 when Redis blips
+  // would restart a healthy process for a dependency it cannot fix.
+  app.get('/live', { config: { rateLimit: false } }, async () => ({
     status: 'alive',
     bootedAt: PROCESS_BOOTED_AT.toISOString(),
     uptimeSeconds: Math.round(process.uptime()),
@@ -331,12 +394,16 @@ export function registerRoutedWhileDegradedCounter(app: FastifyInstance): void {
     if (!snap || snap.ready) return;
     const path = request.url.split('?')[0] ?? '';
     if (PROBE_PATHS.has(path)) return;
-    routedWhileDegradedCounter.labels(apiFamilyOf(path)).inc();
+    routedWhileDegradedCounter.labels(apiFamilyOf(request.routeOptions?.url)).inc();
   });
 }
 
-function apiFamilyOf(path: string): string {
-  const m = /^\/api\/v1\/([a-z-]+)/.exec(path);
+/** The family label, from the matched route's TEMPLATE (bounded by the routes
+ *  this server registers), never the caller's path; a request no route matched
+ *  is the one 'unmatched' series. */
+function apiFamilyOf(routeUrl: string | undefined): string {
+  if (routeUrl === undefined) return 'unmatched';
+  const m = /^\/api\/v1\/([a-z-]+)/.exec(routeUrl);
   return m?.[1] ?? 'other';
 }
 

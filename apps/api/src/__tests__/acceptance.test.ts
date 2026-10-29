@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -261,8 +262,10 @@ afterAll(async () => {
 });
 
 describe('Spec §I — acceptance conformance baseline', () => {
-  // 1. Threshold gate — OrderService.checkout blocks an L1 cart at/over the gate.
-  it('1. an L1 customer over the ID threshold is blocked at checkout (ID_VERIFICATION_REQUIRED)', async () => {
+  // 1. Threshold gate — REMOVED by owner ruling 24 Oct 2026 ~05:55Z (no customer ID for orders at or over the
+  //    ID-gate threshold; Swift's own 8 Oct choice, not a legal duty). OrderService.checkout used to refuse an L1
+  //    cart at/over the gate; it now places it like any other.
+  it('1. an L1 customer over the old ID threshold checks out — no ID asked (owner 24 Oct 2026)', async () => {
     const category = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
     const item = await app.prisma.item.create({
       data: { vendorId, categoryId: category.id, name: 'Big Combo', basePrice: 60000 }, // well over the ~$50 (GYD) gate
@@ -274,7 +277,10 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const orders = new OrderService(app.prisma, app.io);
     await expect(
       orders.checkout({ userId: customer.id, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' }, now: new Date() }),
-    ).rejects.toMatchObject({ code: 'ID_VERIFICATION_REQUIRED' });
+    ).resolves.toBeTruthy();
+    const placed = await app.prisma.order.findMany({ where: { customerId: customer.id }, select: { totalAmount: true, status: true } });
+    expect(placed.map((o) => [Number(o.totalAmount), o.status])).toEqual([[60000, 'PENDING']]);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.id } })).trustLevel).toBe('L1');
   });
 
   // 2. Float gate — D.3, now LIVE. A rider without enough free float to front the
@@ -369,7 +375,8 @@ describe('Spec §I — acceptance conformance baseline', () => {
   // 6. Insurance-class hard-fail — REAL
   it('6. a taxi driver without HIRE-class confirmed insurance is blocked with reason "insurance"', async () => {
     const u = await makeUser(PHONES[1]!);
-    // legacyVerified bypasses the base checklist so we isolate the taxi insurance gate;
+    await currentTaxiSplitDocuments(app.prisma, u.id);
+    // Legacy base evidence remains grandfathered; the two new licences are supplied explicitly.
     // an APPROVED vehicle_insurance with no confirmed HIRE class must still hard-fail.
     await approveDoc(u.id, 'vehicle_insurance');
     const status = await verification.getLiveOperationStatus(u.id, { vehicleType: 'CAR', legacyVerified: true });

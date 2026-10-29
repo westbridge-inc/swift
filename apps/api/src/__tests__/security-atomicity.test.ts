@@ -10,6 +10,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestPasswordResetOtp } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
 const ADMIN_PHONE = '+5927009190';
@@ -85,6 +86,24 @@ function transactionClientWithFailure(
 /** Run the next real interactive transaction with one delegate method replaced
  * by a deterministic fault. PostgreSQL still owns begin/commit/rollback, so
  * these tests prove actual rollback rather than mocked call ordering. */
+/** Fail the next callback transaction's raw query whose SQL names `marker` (a SECURITY DEFINER action). */
+function failNextTransactionRaw(marker: string, message: string) {
+  const originalTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: any[]) => any;
+  return vi.spyOn(app.prisma, '$transaction').mockImplementationOnce(((operation: any, options?: any) => {
+    if (typeof operation !== 'function') return originalTransaction(operation, options);
+    return originalTransaction((tx: any) => operation(new Proxy(tx, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property !== '$queryRaw') return typeof value === 'function' ? value.bind(target) : value;
+        return (query: TemplateStringsArray, ...values: unknown[]) => {
+          if (query.join('?').includes(marker)) return Promise.reject(new Error(message));
+          return value.call(target, query, ...values);
+        };
+      },
+    })), options);
+  }) as never);
+}
+
 function failNextTransactionDelegate(
   delegateName: string,
   methodName: string,
@@ -125,7 +144,7 @@ async function cleanupFixtures() {
 
 async function createSession(userId: string, role: 'CUSTOMER' | 'MOVER' | 'SUPER_ADMIN') {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
-  return app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId,
       token,
@@ -136,6 +155,8 @@ async function createSession(userId: string, role: 'CUSTOMER' | 'MOVER' | 'SUPER
       expiresAt: new Date(Date.now() + 60 * 60_000),
     },
   });
+  // [Row 231] the row holds the digest; the credential a client presents is the plaintext
+  return { ...session, token };
 }
 
 async function createMoverFixture(phone: string): Promise<MoverFixture> {
@@ -396,6 +417,9 @@ describe('password-reset security transaction', () => {
   it('does not let a previously authenticated password change overwrite a completed recovery', async () => {
     const user = await createPasswordUser(SET_PASSWORD_RESET_RACE_PHONE);
     const session = await createSession(user.id, 'CUSTOMER');
+    // [L04 · MASTER-003] password/set needs a step-up on this session; grant it
+    // so the race below is still the one under test.
+    await grantStepUp(app, session.token);
     const attackerPassword = 'attacker-chosen-password';
 
     let passwordHashReached!: () => void;
@@ -475,9 +499,9 @@ describe('password-reset security transaction', () => {
     // A tail write fails after the outbox and session deletion have executed.
     // The inserted outbox row must roll back with every other security write.
     code = await requestPasswordResetOtp(app, RESET_PHONE);
-    fault = failNextTransactionDelegate(
-      'deviceToken',
-      'updateMany',
+    // [item 20] The device revocation is the owner wall's narrow SECURITY DEFINER action (a raw call on the transaction).
+    fault = failNextTransactionRaw(
+      'swift_owner_wall_revoke_devices',
       'injected device revocation failure',
     );
     try {

@@ -46,7 +46,7 @@ import { spawnSync } from 'node:child_process';
 import { assertSafeBootConfig } from '../apps/api/src/utils/boot-config';
 import { SECRET_FILE_NAMES, applySecretFiles, assembleDatabaseUrl } from '../apps/api/src/utils/secret-files';
 import { bucketVersioningStatus, kekEscrowStatus, parseBucketVersioning } from '../apps/api/src/modules/ops/document-durability';
-import { darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
+import { darkFeatureMisconfigurations, darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let envPath = path.join(HERE, '.env');
@@ -113,11 +113,12 @@ const STUBS: Record<string, string> = {
   ORDER_HOLD_MINUTES: '5',
   OTP_HASH_SECRET: 'x'.repeat(48),
   JWT_SECRET: 'x'.repeat(48),
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'STUB-NOT-A-REAL-KEY',
-  ID_ANALYZER_API_KEY: 'STUB-NOT-A-REAL-KEY',
+  KYC_PROVIDER: 'manual',
+  FEATURE_BIOMETRIC_FACE_MATCH: '0',
   PAYMENT_PROVIDER: 'disabled',
   CARD_RAIL_KILL: '1',
+  // [LAUNCH-LOCK] production refuses card rail v2 and ads until an attorney signs off.
+  CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '0', CARD_RAIL_ENROLL: '0', ADS_ENABLED: '0',
   PAYMENT_GATEWAY_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_GATEWAY_SECRET: 'STUB-NOT-A-REAL-KEY',
   POWERTRANZ_API_URL: 'https://stub.invalid/powertranz',
@@ -136,14 +137,34 @@ const STUBS: Record<string, string> = {
   STORAGE_SIGNING_SECRET: 'x'.repeat(48),
   STORAGE_PROVIDER: 's3',
   CONSENT_IP_PEPPER: 'x'.repeat(48),
+  OPS_ONCALL_PHONES: '+15550000001',
+  EMAIL_PROVIDER: 'smtp',
+  SMTP_HOST: 'stub.invalid', SMTP_PORT: '465', SMTP_USER: 'STUB',
+  SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
+  RESEND_API_KEY: 'STUB-NOT-A-REAL-SECRET',
+  BILLING_TOPUP_HOLD: '1',
+  AGENT_CASH_WEBHOOK_SECRET: '',
+  // The hash salts come from the store (*_FILE); stubbing them lets the
+  // walkthrough see past a missing one, and lists each by name below.
+  SCAN_IP_SALT: 'STUB-NOT-A-REAL-SALT',
+  ATTRIB_SALT: 'STUB-NOT-A-REAL-SALT',
+  IDENTITY_SALT: 'STUB-NOT-A-REAL-SALT',
 };
 
 const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);
 // The store, wired the way Compose wires it: DIR/NAME → NAME_FILE for every
 // allowlisted name present in DIR. Then the real loader, with its real
 // refusals — a refusal here is the exact message the server would print.
+// [TA-S0-003 · R3] As the compose files do: with TENANT_RLS_BIND=1
+// (deploy/docker-compose.wall.yml) the API gets the two runtime URLs and never
+// the owner's password; otherwise it gets the owner's parts and never the URLs.
+// After Phase C the store holds all three, so reading every name would refuse
+// on "both set" what the server would boot.
+const wallOverlay = fileEnv['TENANT_RLS_BIND'] === '1';
+const notWiredByCompose = new Set<string>(wallOverlay ? ['POSTGRES_PASSWORD'] : ['DATABASE_URL', 'SYSTEM_DATABASE_URL']);
 if (secretsDir) {
   for (const name of SECRET_FILE_NAMES) {
+    if (notWiredByCompose.has(name)) continue;
     const candidate = path.join(secretsDir, name);
     if (fileEnv[`${name}_FILE`] === undefined && existsSync(candidate)) fileEnv[`${name}_FILE`] = candidate;
   }
@@ -221,6 +242,24 @@ for (const v of WATCHED) {
   const present = fileEnv[v] !== undefined && fileEnv[v] !== '';
   const source = fromStore.includes(v) ? 'STORE  ' : present ? 'PRESENT' : 'MISSING';
   console.log(`  ${source}  ${v}`);
+}
+console.log('');
+
+// ── UPLOAD MALWARE SCAN [Row 312 · COORD 21 Oct] ──────────────────────────
+// The emergency switch is loud: while MALWARE_SCAN_BYPASS=1, a mover's uploads are stored
+// WITHOUT a scan whenever the scanner is down (rescanned later). Not a boot refusal: it exists
+// for an outage. But nobody deploys with it on without reading this.
+console.log('UPLOAD MALWARE SCAN');
+console.log('─'.repeat(72));
+if (fileEnv['MALWARE_SCAN_BYPASS'] === '1') {
+  console.log('  ✗✗✗ MALWARE_SCAN_BYPASS=1 — THE EMERGENCY BYPASS IS ON ✗✗✗');
+  console.log('    While the scanner is down, liveness selfies, onboarding documents and vehicle photos');
+  console.log('    are stored WITHOUT a malware scan. Ops are paged every hour it stays on.');
+  console.log('    Remove the line once clamd answers again.');
+} else if (fileEnv['MALWARE_SCAN'] && fileEnv['MALWARE_SCAN'] !== 'clamd') {
+  console.log(`  ✗ MALWARE_SCAN=${fileEnv['MALWARE_SCAN']}: uploads are stored unscanned (production refuses this).`);
+} else {
+  console.log('  ✓ every upload is scanned by the private clamd service before it is stored');
 }
 console.log('');
 
@@ -309,9 +348,17 @@ console.log('');
     console.log('  Every env-gated capability in the register is on.');
   } else {
     for (const f of off) {
-      console.log(`  ${f.title}  [${f.setting}]`);
+      // [row 331] A kill switch is off BECAUSE it is set: name the value.
+      console.log(`  ${f.title}  [${f.offWhen !== undefined ? `${f.setting}=${f.offWhen}` : f.setting}]`);
       console.log(`    ${f.whileOff}`);
     }
+  }
+  // [SWITCHES fact-check] Switched ON without what it needs: worse than off, and just as quiet.
+  const broken = darkFeatureMisconfigurations(production);
+  if (broken.length > 0) {
+    console.log('');
+    console.log('  Switched ON but missing what it needs:');
+    for (const line of broken) console.log(`    ${line}`);
   }
   const configRows = darkFeatureStatus(production).filter((r) => r.source === 'config');
   if (configRows.length > 0) {

@@ -1,15 +1,19 @@
 /** @jsxImportSource react */
 import { useVendorMutation } from '../../../hooks/useVendorMutation';
-import { useState } from 'react';
+import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
+import { usePreventRemove } from '@react-navigation/native';
 import { useQueryClient } from '@tanstack/react-query';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as Crypto from 'expo-crypto';
 import {
+  BrandSwitch,
   Card,
   Chip,
+  ConfirmDialog,
   IconChip,
   LabeledInput,
   LinkText,
@@ -24,6 +28,9 @@ import {
 import { DAY_LABELS, GUTTER, InlineInput, SubHeader } from '../shared';
 import { vendorApi } from '../../../services/api';
 import { toast } from '../../../kit/toast';
+import { useRowHold } from '../../../lib/useRowHold';
+import { SOLD_IN_STORE } from '../../../lib/inStoreSale';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import {
   useVendorProfile,
   useSaveItem,
@@ -32,7 +39,11 @@ import {
   useDeleteOptionGroup,
   useAddOption,
   useDeleteOption,
+  MENU_WRITE_KEY,
+  answerIntoMenu,
+  menuScope,
 } from '../../../hooks/vendorops';
+import { menuWithItemFields } from '../../../lib/menuAnswers';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -41,17 +52,69 @@ import {
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
-import { mediaUrl } from '../../../lib/images';
+import { vatClassChoices, type VatClass } from '../../../lib/storeVat';
+import { useStoreVat } from '../../../hooks/storeVat';
+import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
+import { STORE_PICK } from '../../../lib/storePick';
+import {
+  BUFFER_CHOICES, NOTICE_CHOICES, choicesWith, instantBookingAvailable, minutesLabel, nextWindow, openingBookingSettings,
+  slotsFromWeekHours, weekHoursFromSlots, weekHoursProblem, type WeekHours,
+} from '../../../lib/bookingHours';
+
+/** [TAP-AUDIT] An option group (with its choices) written on a NEW item, before its first save: kept on the phone and
+ *  sent with the item in the one create request (POST /vendor/items takes `optionGroups`), so a store adds an item
+ *  with its sizes in one visit instead of saving, finding the item again and adding each choice one request at a time. */
+export type DraftOptionGroup = {
+  key: string;
+  name: string;
+  isRequired: boolean;
+  maxSelect: number;
+  options: { key: string; name: string; additionalPrice: number }[];
+};
+
+/** The create request's `optionGroups`, exactly what the store typed (the server checks every name, as it does for
+ *  a group added later). */
+export function draftOptionGroupsPayload(groups: DraftOptionGroup[]) {
+  return groups.map((g) => ({
+    name: g.name,
+    isRequired: g.isRequired,
+    minSelect: g.isRequired ? 1 : 0,
+    maxSelect: g.maxSelect,
+    options: g.options.map((o) => ({ name: o.name, additionalPrice: o.additionalPrice })),
+  }));
+}
+
+let draftKeys = 0;
+const nextDraftKey = () => `draft-${++draftKeys}`;
+
+/** [REVIEW-F #2141 S4-2] The item or its section was deleted on another phone: the server's "Category with id … not
+ *  found" names an internal id, so the store reads this instead. */
+export const ITEM_GONE_WORDS = 'This section or item was removed on another phone. Go back and open the menu again.';
+
+/** [TAP-AUDIT] Why the server would not save the item, in its own words (a banned word, documents not yet checked).
+ *  A refusal with no words for a person (the form's shape, a duplicate, a server fault) keeps the editor's own
+ *  sentence; a missing item or section says so in plain words. */
+export function saveRefusal(error: unknown): string | null {
+  const body = (error as { response?: { data?: { error?: { code?: unknown; message?: unknown } } } } | null)?.response?.data?.error;
+  if (body?.code === 'NOT_FOUND') return ITEM_GONE_WORDS;
+  if (!body || body.code === 'VALIDATION_ERROR' || body.code === 'DUPLICATE' || body.code === 'INTERNAL_ERROR') return null;
+  if (typeof body.message !== 'string' || !body.message.trim()) return null;
+  return body.message;
+}
 
 /**
  * Modifiers editor (master plan §4.2): size / add-ons / toppings on an item.
  * The OptionGroup CRUD already exists server-side — this is its operator UI.
  * Mutations resolve to the created row, so the list updates from the response
- * instead of waiting on the menu query.
+ * instead of waiting on the menu query. On a NEW item (no id yet) the groups and
+ * choices are a draft the editor sends with the item ([TAP-AUDIT], `staged`).
  */
-function ModifiersSection({ item }: { item: any }) {
+function ModifiersSection({ item, staged }: { item: any; staged?: { groups: DraftOptionGroup[]; set: Dispatch<SetStateAction<DraftOptionGroup[]>> } }) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
-  const [groups, setGroups] = useState<any[]>(item.optionGroups ?? []);
+  const [savedGroups, setGroups] = useState<any[]>(item?.optionGroups ?? []);
+  const groups: any[] = staged
+    ? staged.groups.map((g) => ({ id: g.key, name: g.name, isRequired: g.isRequired, maxSelect: g.maxSelect, options: g.options.map((o) => ({ id: o.key, name: o.name, additionalPrice: o.additionalPrice })) }))
+    : savedGroups;
   const addGroup = useAddOptionGroup();
   const delGroup = useDeleteOptionGroup();
   const addOption = useAddOption();
@@ -68,6 +131,13 @@ function ModifiersSection({ item }: { item: any }) {
     if (readOnly) return;
     const name = groupName.trim();
     if (!name || addGroup.isPending) return;
+    if (staged) {
+      staged.set((gs) => [...gs, { key: nextDraftKey(), name, isRequired: groupRequired, maxSelect: groupMulti ? 10 : 1, options: [] }]);
+      setGroupName('');
+      setGroupRequired(false);
+      setGroupMulti(false);
+      return;
+    }
     const owner = requireAuthSessionSnapshot();
     const g = await addGroup.mutateAsync({
       itemId: item.id,
@@ -86,6 +156,12 @@ function ModifiersSection({ item }: { item: any }) {
     const d = draft(groupId);
     const name = d.name.trim();
     if (!name || addOption.isPending) return;
+    if (staged) {
+      const additionalPrice = Number(d.price) || 0;
+      staged.set((gs) => gs.map((g) => (g.key === groupId ? { ...g, options: [...g.options, { key: nextDraftKey(), name, additionalPrice }] } : g)));
+      setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
+      return;
+    }
     const owner = requireAuthSessionSnapshot();
     const opt = await addOption.mutateAsync({
       groupId,
@@ -97,21 +173,27 @@ function ModifiersSection({ item }: { item: any }) {
     setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
   };
 
+  // [BUG-GUARDS C2] Each option's x waits for its own delete (a second tap on it is ignored); another option's x goes through.
+  const holdRow = useRowHold();
   const removeOption = (groupId: string, optionId: string) => {
     if (readOnly) return;
+    if (staged) {
+      staged.set((gs) => gs.map((g) => (g.key === groupId ? { ...g, options: g.options.filter((o) => o.key !== optionId) } : g)));
+      return;
+    }
     const owner = requireAuthSessionSnapshot();
-    delOption.mutate({ id: optionId, authSession: owner }, {
-      onSuccess: () => {
-        try {
-          requireAuthSessionForPrincipal(owner);
-          setGroups((gs) =>
-            gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
-          );
-        } catch {
-          // The editor belongs to an older account and is being unmounted.
-        }
-      },
-    });
+    // [REVIEW-F #2123 S3-1] The option comes off on ITS OWN call's promise: with two options' x in flight, per-call
+    // callbacks (mutate/mutateAsync options) reach only the latest call. A sample preview never gets here (readOnly).
+    holdRow(optionId, () => delOption.mutateAsync({ id: optionId, authSession: owner }).then(() => {
+      try {
+        requireAuthSessionForPrincipal(owner);
+        setGroups((gs) =>
+          gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
+        );
+      } catch {
+        // The editor belongs to an older account and is being unmounted.
+      }
+    }, () => undefined)); // a failed delete is told by the app's mutation error notice; the row is released for another try
   };
 
   return (
@@ -120,6 +202,11 @@ function ModifiersSection({ item }: { item: any }) {
       <T variant="label" tone="muted" style={{ marginTop: 4 }}>
         Sizes, toppings, extras — customers pick these when ordering.
       </T>
+      {staged && groups.length > 0 ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+          Saved with the item when you tap Add item.
+        </T>
+      ) : null}
       {readOnly ? (
         <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
           Read-only in the sample preview.
@@ -137,7 +224,13 @@ function ModifiersSection({ item }: { item: any }) {
                 {g.isRequired ? 'Required' : 'Optional'} · {g.maxSelect > 1 ? `up to ${g.maxSelect}` : 'pick one'}
               </T>
             </View>
-            <Pressable disabled={readOnly} onPress={() => setRemoveGroupId(g.id)} hitSlop={8}>
+            <Pressable
+              disabled={readOnly}
+              onPress={() => (staged ? staged.set((gs) => gs.filter((d) => d.key !== g.id)) : setRemoveGroupId(g.id))}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${g.name}`}
+            >
               <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
                 <Feather name="trash-2" size={18} color={color.text.muted} />
               </View>
@@ -222,8 +315,9 @@ function ModifiersSection({ item }: { item: any }) {
         <PillButton
           label="Delete"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={delGroup.isPending}
           onPress={() => {
-            if (readOnly) return;
+            if (readOnly || delGroup.isPending) return;
             const gid = removeGroupId!;
             setRemoveGroupId(null);
             const owner = requireAuthSessionSnapshot();
@@ -253,12 +347,24 @@ function StockAdjustRow({ item }: { item: any }) {
   const [open, setOpen] = useState(false);
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState<'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN'>('RECEIVED');
+  // [MASTER-025] One key per adjustment as entered: tapping Apply again after a
+  // failure cannot move stock twice; changing the entry is a new adjustment.
+  const [commandKey, setCommandKey] = useState(() => Crypto.randomUUID());
   const adjust = useVendorMutation({
-    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }),
-    onSuccess: () => {
+    mutationKey: MENU_WRITE_KEY,
+    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }, commandKey),
+    onMutate: menuScope,
+    onSuccess: (res: any, _vars: void, scope) => {
+      setCommandKey(Crypto.randomUUID());
       setOpen(false);
       setDelta('');
-      qc.invalidateQueries({ queryKey: ['vendor', 'menu'] });
+      // [TAP-AUDIT] The count the ledger now holds goes into the menu at once; the menu is read again once, later.
+      const answer = res?.data?.data;
+      const fields = {
+        ...(typeof answer?.stockQuantity === 'number' ? { stockQuantity: answer.stockQuantity } : {}),
+        ...(typeof answer?.isAvailable === 'boolean' ? { isAvailable: answer.isAvailable } : {}),
+      };
+      answerIntoMenu(qc, scope, (menu) => menuWithItemFields(menu, item.id, fields));
     },
   });
   const n = Number(delta);
@@ -282,10 +388,10 @@ function StockAdjustRow({ item }: { item: any }) {
   }
   return (
     <View style={{ gap: space.sm }}>
-      <InlineInput value={delta} onChangeText={setDelta} placeholder="+50 received, -3 damaged" keyboardType="default" />
+      <InlineInput value={delta} onChangeText={(v) => { setDelta(v); setCommandKey(Crypto.randomUUID()); }} placeholder="+50 received, -3 damaged" keyboardType="default" />
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
         {(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN'] as const).map((r) => (
-          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => setReason(r)} style={{ height: 32, paddingHorizontal: space.md }} />
+          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => { setReason(r); setCommandKey(Crypto.randomUUID()); }} style={{ height: 32, paddingHorizontal: space.md }} />
         ))}
       </View>
       {adjust.isError ? (
@@ -325,24 +431,65 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const [photoErr, setPhotoErr] = useState<string | null>(null);
 
   // Service businesses configure a bookable appointment instead of stock.
-  const { store } = useVendorProfile();
+  const { store, myRole } = useVendorProfile();
   const isService = store?.vendorType === 'SERVICE';
+  // [STORE-VAT · owner O-5] The owner of a store that told Swift it is VAT-registered gives each item its VAT class.
+  // A sample preview has no VAT; a manager does not see it (the business's tax registration is the owner's).
+  const samplePreview = useVendorPreview((st) => st.previewType) != null;
+  const storeVat = useStoreVat(myRole === 'OWNER' && !samplePreview);
+  const vatRate = storeVat.data && storeVat.data.status !== 'NONE' ? storeVat.data.ratePercent : null;
+  const vatEffective = storeVat.data?.effective === true;
+  const [vatClass, setVatClass] = useState<VatClass>((existing?.vatClass as VatClass | undefined) ?? 'STANDARD');
   const existingBooking = (existing?.bookingConfig ?? {}) as any;
   const [duration, setDuration] = useState<number>(existingBooking.durationMinutes ?? 30);
-  const [days, setDays] = useState<number[]>(() => {
-    const ds: number[] = (existingBooking.slots ?? []).map((s: any) => s.dayOfWeek);
-    return ds.length ? Array.from(new Set(ds)) : [1, 2, 3, 4, 5];
-  });
-  const [startTime, setStartTime] = useState<string>(existingBooking.slots?.[0]?.start ?? '09:00');
-  const [endTime, setEndTime] = useState<string>(existingBooking.slots?.[0]?.end ?? '17:00');
+  // [BOOK-S5a] Hours per day, more than one window a day (a break is the gap between two). Every
+  // stored window is kept: the old editor put the first window's times on every day when it saved.
+  const [week, setWeek] = useState<WeekHours>(() => weekHoursFromSlots(existingBooking.slots));
+  // [BOOK-S5a · owner A4/C2] The gap after each booking, the minimum notice and "Confirm bookings
+  // automatically". null = not touched: the opening value follows the server (the switch's word on
+  // the profile can arrive after the editor opens).
+  const instantAvailable = isService && instantBookingAvailable(store);
+  const opening = openingBookingSettings(existing?.bookingConfig ?? null, instantAvailable);
+  const [instantTouched, setInstant] = useState<boolean | null>(null);
+  const [bufferTouched, setBuffer] = useState<number | null>(null);
+  const [noticeTouched, setNotice] = useState<number | null>(null);
+  const instant = instantTouched ?? opening.instantBooking;
+  const buffer = bufferTouched ?? opening.bufferMinutes;
+  const notice = noticeTouched ?? opening.minNoticeMinutes;
+  const hoursProblem = isService ? weekHoursProblem(week) : null;
+  const setDayWindows = (day: number, update: (windows: WeekHours[number]) => WeekHours[number]) =>
+    setWeek((w) => w.map((windows, d) => (d === day ? update(windows) : windows)));
   const [mode, setMode] = useState<'AT_BUSINESS' | 'MOBILE' | 'BOTH'>(existingBooking.serviceMode ?? 'AT_BUSINESS');
   const [radiusKm, setRadiusKm] = useState<string>(existingBooking.serviceRadiusKm != null ? String(existingBooking.serviceRadiusKm) : '5');
 
+  // [UI-SWEEP U67] Typed, unsaved changes are never thrown away silently.
+  // Back, a swipe, or a board door to the menu list (navigate + pop) stops on
+  // "Discard your changes?"; Discard lets that same navigation through. A
+  // change is a difference from how the editor opened (a toggle put back is
+  // not one); a saved item, or a read-only preview, leaves without an ask.
+  // [TAP-AUDIT] A new item's option groups and choices, sent with it in the one create request.
+  const [draftGroups, setDraftGroups] = useState<DraftOptionGroup[]>([]);
+  const formNow = JSON.stringify([
+    name, price, description, categoryId, available, popular, sku, unit, bulk, stock, lowStock,
+    duration, week, instantTouched, bufferTouched, noticeTouched, mode, radiusKm,
+    draftGroups.map((g) => [g.name, g.isRequired, g.maxSelect, g.options.map((o) => [o.name, o.additionalPrice])]),
+  ]);
+  const [formAtOpen] = useState(formNow);
+  const [leaving, setLeaving] = useState(false);
+  const [discardAsk, setDiscardAsk] = useState<{ action: any } | null>(null);
+  const unsaved = !readOnly && !leaving && (formNow !== formAtOpen || localPhoto !== null);
+  usePreventRemove(unsaved, ({ data }) => setDiscardAsk({ action: data.action }));
+  // The ask is lifted (a render) before the saved editor closes itself.
+  useEffect(() => {
+    if (leaving) navigation.goBack();
+  }, [leaving, navigation]);
+
   const priceNum = Number(price);
   const valid =
-    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || days.length > 0);
+    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || hoursProblem == null);
   const busy = save.isPending || uploadImage.isPending;
-  const previewUri = localPhoto?.uri ?? mediaUrl(existing?.imageUrl) ?? undefined;
+  // [IMAGES-E2E PR4] Only a photo Swift keeps is drawn (an outside address is not shown to customers either).
+  const previewUri = localPhoto?.uri ?? (isKeptPhoto(existing?.imageUrl) ? storePhotoUrl(existing?.imageUrl, HERO_PHOTO_WIDTH) : null) ?? undefined;
 
   const [photoMenu, setPhotoMenu] = useState(false);
 
@@ -385,8 +532,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
     const bookingConfig = isService
       ? {
           durationMinutes: duration,
-          slots: days.map((d) => ({ dayOfWeek: d, start: startTime, end: endTime })),
+          slots: slotsFromWeekHours(week),
           serviceMode: mode,
+          bufferMinutes: buffer,
+          minNoticeMinutes: notice,
+          // [BOOK-S5a] Sent only while the server says it can be chosen; otherwise the listing keeps what it stores.
+          ...(instantAvailable ? { instantBooking: instant } : {}),
           ...(mode !== 'AT_BUSINESS' ? { serviceRadiusKm: Number(radiusKm) || 0 } : {}),
         }
       : undefined;
@@ -407,9 +558,13 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               sku: sku.trim() || undefined,
               unit: unit.trim() || undefined,
               bulk,
+              // [STORE-VAT] Sent only when the owner sees the choice; otherwise the item keeps its class.
+              ...(vatRate != null ? { vatClass } : {}),
               // '' clears tracking (null) so a vendor can stop tracking stock.
               stockQuantity: stock.trim() === '' ? null : Number.isFinite(stockNum as number) ? stockNum : undefined,
               lowStockThreshold: lowStock.trim() === '' ? null : Number(lowStock) >= 0 ? Number(lowStock) : undefined,
+              // [TAP-AUDIT] A new item's groups and choices travel with it (one request, not one per choice).
+              ...(!existing && draftGroups.length > 0 ? { optionGroups: draftOptionGroupsPayload(draftGroups) } : {}),
             }),
       },
     });
@@ -433,7 +588,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
       current = requireAuthSessionForPrincipal(owner);
     }
     requireAuthSessionForPrincipal(current);
-    navigation.goBack();
+    setLeaving(true);
   };
 
   return (
@@ -505,31 +660,97 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               ))}
             </View>
 
+            {/* [BOOK-S5a] Hours per day. A day with no hours is closed; a break is the gap between two windows. */}
             <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
-              Available days
+              Hours each day
             </T>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
-              {DAY_LABELS.map((d, i) => (
-                <Chip
-                  key={i}
-                  label={d}
-                  selected={days.includes(i)}
-                  onPress={() => setDays((p) => (p.includes(i) ? p.filter((x) => x !== i) : [...p, i]))}
-                  style={{ height: 36, paddingHorizontal: space.md }}
-                />
-              ))}
+            <View style={{ gap: space.sm, marginBottom: space.lg }}>
+              {DAY_LABELS.map((label, d) => {
+                const windows = week[d] ?? [];
+                const open = windows.length > 0;
+                return (
+                  <View key={label} style={{ gap: space.xs }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                      <Chip
+                        label={open ? label : `${label} · closed`}
+                        selected={open}
+                        onPress={() => setDayWindows(d, (w) => (w.length > 0 ? [] : [nextWindow([])]))}
+                        style={{ height: 36, paddingHorizontal: space.md, minWidth: 64 }}
+                      />
+                      {open ? (
+                        <LinkText label="Add hours" onPress={() => setDayWindows(d, (w) => [...w, nextWindow(w)])} />
+                      ) : null}
+                    </View>
+                    {windows.map((w, i) => (
+                      <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                        <InlineInput
+                          style={{ flex: 1 }}
+                          value={w.start}
+                          onChangeText={(t) => setDayWindows(d, (ws) => ws.map((x, j) => (j === i ? { ...x, start: t } : x)))}
+                          placeholder="09:00"
+                          center
+                        />
+                        <T variant="label" tone="muted">to</T>
+                        <InlineInput
+                          style={{ flex: 1 }}
+                          value={w.end}
+                          onChangeText={(t) => setDayWindows(d, (ws) => ws.map((x, j) => (j === i ? { ...x, end: t } : x)))}
+                          placeholder="17:00"
+                          center
+                        />
+                        <Pressable
+                          onPress={() => setDayWindows(d, (ws) => ws.filter((_, j) => j !== i))}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Remove ${label} ${w.start}–${w.end}`}
+                        >
+                          <Feather name="x" size={18} color={color.text.muted} />
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })}
+              {hoursProblem ? (
+                <T variant="caption" tone="error">{hoursProblem}</T>
+              ) : null}
             </View>
 
             <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
-              Hours
+              Gap after each booking
             </T>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
-              <InlineInput style={{ flex: 1 }} value={startTime} onChangeText={setStartTime} placeholder="09:00" center />
-              <T variant="label" tone="muted">
-                to
-              </T>
-              <InlineInput style={{ flex: 1 }} value={endTime} onChangeText={setEndTime} placeholder="17:00" center />
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
+              {choicesWith(BUFFER_CHOICES, buffer).map((m) => (
+                <Chip key={m} label={minutesLabel(m)} selected={buffer === m} onPress={() => setBuffer(m)} style={{ height: 36, paddingHorizontal: space.md }} />
+              ))}
             </View>
+
+            <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.xs }}>
+              Minimum notice
+            </T>
+            <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
+              How soon before a time a customer can still book it.
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
+              {choicesWith(NOTICE_CHOICES, notice).map((m) => (
+                <Chip key={m} label={minutesLabel(m)} selected={notice === m} onPress={() => setNotice(m)} style={{ height: 36, paddingHorizontal: space.md }} />
+              ))}
+            </View>
+
+            {/* [BOOK-S5a · owner A3/A4] Shown only while the server says it can be chosen. */}
+            {instantAvailable ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
+                <View style={{ flex: 1 }}>
+                  <T variant="label" weight="semibold">Confirm bookings automatically</T>
+                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                    {instant
+                      ? 'Bookings paid in cash at the appointment are confirmed as soon as the customer books. MMG bookings still wait for you to accept.'
+                      : 'Every booking waits for you to accept it.'}
+                  </T>
+                </View>
+                <BrandSwitch value={instant} onChange={setInstant} label="Confirm bookings automatically" />
+              </View>
+            ) : null}
 
             <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
               Where does it happen?
@@ -584,13 +805,34 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                       : 'Fits in a delivery bag with room to spare.'}
                 </T>
               </View>
+              {vatRate != null ? (
+                <View>
+                  <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+                    VAT on this item
+                  </T>
+                  <Segmented
+                    options={vatClassChoices(vatRate, vatEffective).map((c) => ({ key: c.value, label: c.value === 'STANDARD' ? 'Standard' : c.value === 'ZERO_RATED' ? 'Zero-rated' : 'Exempt' }))}
+                    value={vatClass}
+                    onChange={(k) => setVatClass(k as VatClass)}
+                  />
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {vatClassChoices(vatRate, vatEffective).find((c) => c.value === vatClass)?.label}. You choose each item’s VAT class and
+                    are responsible for it; check with the GRA.
+                  </T>
+                </View>
+              ) : null}
               <InlineInput value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
               <InlineInput value={lowStock} onChangeText={setLowStock} placeholder="Low-stock alert at (e.g. 5)" keyboardType="number-pad" />
               {stock.trim() !== '' ? (
                 <T variant="caption" tone="muted">
                   Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.
                 </T>
-              ) : null}
+              ) : (
+                // [IN-STORE-SALE] Why the menu list shows no "Sold in store −1" for this item.
+                <T variant="caption" tone="muted">
+                  {SOLD_IN_STORE.untracked}
+                </T>
+              )}
               {/* Reasoned movements (received/damaged/…) keep an audit trail —
                   different from overwriting the number above. */}
               {existing && existing.stockQuantity != null ? (
@@ -603,9 +845,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
         {existing && !isService ? (
           <ModifiersSection item={existing} />
         ) : !isService ? (
-          <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
-            Save the item first to add options &amp; add-ons (sizes, toppings, extras).
-          </T>
+          <ModifiersSection item={null} staged={{ groups: draftGroups, set: setDraftGroups }} />
         ) : null}
 
         <T variant="label" weight="semibold" tone="muted" style={{ marginTop: space.lg, marginBottom: space.sm }}>
@@ -619,12 +859,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
           <Chip label={available ? 'Available' : 'Sold out'} selected={available} onPress={() => setAvailable((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
-          <Chip label="★ Popular" selected={popular} onPress={() => setPopular((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
+          <Chip label={`★ ${STORE_PICK}`} selected={popular} onPress={() => setPopular((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
         </View>
 
         {save.isError ? (
           <T variant="label" tone="error" style={{ marginBottom: space.md }}>
-            Couldn&apos;t save. Check the details and try again.
+            {saveRefusal(save.error) ?? "Couldn't save. Check the details and try again."}
           </T>
         ) : null}
         {/* [#947's grammar] A disabled button says WHY — the first unmet
@@ -639,8 +879,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                   ? 'Set a price'
                   : !categoryId
                     ? 'Pick a category'
-                    : isService && days.length === 0
-                      ? 'Pick available days'
+                    : isService && hoursProblem
+                      ? 'Fix the hours'
                       : existing
                         ? 'Save changes'
                         : 'Add item'
@@ -671,6 +911,22 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
           />
         ) : null}
       </PopupCard>
+
+      {/* [UI-SWEEP U67] The ask before typed changes are thrown away. */}
+      <ConfirmDialog
+        open={discardAsk !== null}
+        title="Discard your changes?"
+        body="What you changed on this item is not saved."
+        confirmLabel="Discard"
+        cancelLabel="Keep editing"
+        destructive
+        onConfirm={() => {
+          const ask = discardAsk;
+          setDiscardAsk(null);
+          if (ask) afterDismiss(() => navigation.dispatch(ask.action));
+        }}
+        onClose={() => setDiscardAsk(null)}
+      />
     </Screen>
   );
 }

@@ -5,7 +5,7 @@ import { color, radius, space } from '@swift/ui';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, Screen, T, TonePill } from '../../../kit';
 import { useVendorTier } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
-import { capLine, registrationLine, tierLabel, type TierView } from '../tier-view';
+import { capLine, declarationLine, registrationLine, tierLabel, type TierView } from '../tier-view';
 
 function Bar({ fraction, hot }: { fraction: number; hot: boolean }) {
   return (
@@ -49,7 +49,7 @@ export function VendorTierScreen({ navigation }: { navigation?: { navigate?: (s:
             <Card>
               <T variant="title">Business registration</T>
               <T variant="caption" style={{ marginTop: 4 }}>{registrationLine(t)}</T>
-              {t.declaration ? <T variant="caption" style={{ color: color.text.secondary, marginTop: 4 }}>Self-declaration {t.declaration.status.toLowerCase().replace(/_/g, ' ')}{t.declaration.expiresAt ? ` · valid to ${new Date(t.declaration.expiresAt).toLocaleDateString()}` : ''}</T> : null}
+              {declarationLine(t) ? <T variant="caption" style={{ color: color.text.secondary, marginTop: 4 }}>{declarationLine(t)}</T> : null}
               {t.capped ? (
                 <View style={{ marginTop: space.sm, gap: 4 }}>
                   <T variant="caption" style={{ fontWeight: '700' }}>How to lift the limits</T>

@@ -5,17 +5,25 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 
 const fakes = vi.hoisted(() => ({
-  session: vi.fn(), createRide: vi.fn(), gates: vi.fn(), queueCreate: vi.fn(), queueUpdate: vi.fn(),
+  session: vi.fn(), user: vi.fn(), createRide: vi.fn(), gates: vi.fn(), queueCreate: vi.fn(), queueUpdate: vi.fn(),
 }));
-vi.mock('../plugins/prisma', () => ({ enterTenant: vi.fn(), getTenantId: () => 'tenant-test' }));
+vi.mock('../plugins/prisma', () => ({ enterTenant: vi.fn(), enterOwner: vi.fn(), getTenantId: () => 'tenant-test' }));
 vi.mock('../modules/auth/auth.service', () => ({ AuthService: class {} }));
 vi.mock('../modules/review/gate', () => ({ reviewGate: vi.fn() }));
-vi.mock('../modules/rides/fare.service', () => ({ FareService: class {} }));
+// [PRICE-LOCK · row 448] The queue join prices the trip; this suite is about
+// credential transport, so the quote is a fixed synthetic one.
+vi.mock('../modules/rides/fare.service', () => ({
+  FareService: class {
+    async estimateTiers() {
+      return { tiers: [{ rideClass: 'ECONOMY', multiplier: 1, fare: 1_000, capacity: 4, source: 'formula' }], currencyCode: 'GYD' };
+    }
+  },
+}));
 vi.mock('../modules/order/order.service', () => ({ OrderService: class {} }));
 vi.mock('../modules/safety/sos.service', () => ({ SosService: class {} }));
 vi.mock('../modules/dispatch/dispatch.service', () => ({ makeDispatchService: () => ({}) }));
 vi.mock('../modules/rides/rides.service', () => ({
-  createRideRequest: fakes.createRide, assertRideGates: fakes.gates, assertL2: vi.fn(),
+  createRideRequest: fakes.createRide, assertRideGates: fakes.gates,
 }));
 vi.mock('../modules/rides/queue.service', () => ({
   getSupplySnapshot: vi.fn(), queueStatusFor: vi.fn().mockResolvedValue({ id: 'queue-test' }),
@@ -35,10 +43,13 @@ beforeEach(async () => {
   vi.stubEnv('CORS_ORIGIN', 'https://swift.example');
   resetBrowserOriginsForTests();
   vi.clearAllMocks();
+  // A session row names its account; the account (walled per tenant) is its own read.
   fakes.session.mockResolvedValue({
-    id: 'session-test', expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP',
-    user: { id: 'customer-test', tenantId: 'tenant-test', tenant: { kind: 'STANDARD' },
-      status: 'ACTIVE', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' },
+    id: 'session-test', userId: 'customer-test', expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP',
+  });
+  fakes.user.mockResolvedValue({
+    id: 'customer-test', tenantId: 'tenant-test', tenant: { kind: 'STANDARD' },
+    status: 'ACTIVE', roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
   });
   fakes.createRide.mockResolvedValue({
     order: { id: 'ride-test', orderNumber: 'TEST', status: 'REQUESTED' },
@@ -50,6 +61,7 @@ beforeEach(async () => {
   app = Fastify();
   app.decorate('prisma', {
     session: { findUnique: fakes.session },
+    user: { findUnique: fakes.user },
     rideQueueEntry: { updateMany: fakes.queueUpdate, create: fakes.queueCreate },
     supplyWatch: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     order: { findFirst: vi.fn().mockResolvedValue(null) },

@@ -32,7 +32,7 @@ vi.mock('react', async (original) => {
   return { ...actual, ...hooks, default: { ...actual, ...hooks } };
 });
 vi.mock('react-native', () => ({ ScrollView: 'ScrollView', View: 'View', RefreshControl: 'RefreshControl', AppState: { addEventListener: () => ({ remove: () => {} }) } }));
-vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => {} }));
+vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => {}, useNavigation: () => ({ navigate: () => {} }) }));
 vi.mock('expo-web-browser', () => ({ openAuthSessionAsync: (...args: unknown[]) => host.open(...args) }));
 vi.mock('expo-crypto', () => ({ randomUUID: () => `tap-key-${++host.keys}` }));
 vi.mock('@swift/ui', () => {
@@ -74,14 +74,14 @@ function text(tree: unknown): string {
 }
 const refresh = vi.fn();
 let tree: unknown;
-function render(sub: FeeSubscription) {
+function render(sub: FeeSubscription, family: 'vendor' | 'rider' | 'driver' = 'vendor') {
   host.index = 0;
-  tree = expand(WeeklyFeeScreen({ family: 'vendor', sub, refresh }));
+  tree = expand(WeeklyFeeScreen({ family, sub, refresh }));
   for (const run of host.effects.splice(0)) run();
   return text(tree);
 }
 /** Renders until effects settle (a child's state reported to the parent shows on the next pass). */
-function settle(sub: FeeSubscription) { render(sub); render(sub); return render(sub); }
+function settle(sub: FeeSubscription, family: 'vendor' | 'rider' | 'driver' = 'vendor') { render(sub, family); render(sub, family); return render(sub, family); }
 const button = (label: string) => nodes(tree).find((n) => n.type === 'PillButton' && n.props.label === label)?.props;
 const MMG = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' } as const;
 const VISA = { id: 'card-1', brand: 'VISA', last4: '4242', expMonth: 4, expYear: 2031, status: 'ACTIVE' };
@@ -267,5 +267,33 @@ describe('card states come from the server only', () => {
     expect(host.cardRemove).toHaveBeenCalledExactlyOnceWith('card-1');
     expect(refresh).toHaveBeenCalled();
     expect(settle(s)).toContain('Card removed. Nothing more will be charged to it.');
+  });
+});
+
+describe('an app restart follows the server\'s latest card session', () => {
+  // A fresh app run holds no card session of its own. The earlier cases started sessions in the
+  // vendor context (remembered for the app run), so these read as a rider and a driver.
+  const withLatest = (s: FeeSubscription, latest: unknown) => ({ ...s, latestCardSession: latest } as FeeSubscription);
+  it('a card payment still being checked (no session of this app\'s own) is shown and followed, and nothing can be paid twice', async () => {
+    host.cardRead.mockResolvedValue(view('UNKNOWN'));
+    const s = withLatest(sub(MMG, cardLive()), view('UNKNOWN'));
+    const rendered = settle(s, 'rider');
+    expect(rendered).toContain("Checking with the bank. Don't pay again.");
+    expect(button('Pay GY$1,200 by card')).toBeUndefined();
+    expect(button('Pay GY$1,200 with MMG')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(host.cardRead.mock.calls.some((args) => args.includes('card-session-1'))).toBe(true);
+    expect(host.cardStart).not.toHaveBeenCalled();
+  });
+  it('is shown even when card payments have since been switched off', () => {
+    const rendered = settle(withLatest(sub(MMG, { id: 'CARD', state: 'off' }), view('HELD')), 'driver');
+    expect(rendered).toContain("We're checking this payment by hand. Don't pay again. Support will contact you.");
+    expect(button('Pay GY$1,200 with MMG')).toBeUndefined();
+  });
+  it('a finished latest session brings nothing back: the ways to pay are offered', () => {
+    const rendered = settle(withLatest(sub(MMG, cardLive()), view('FAILED')), 'rider');
+    expect(button('Pay GY$1,200 by card')).toBeDefined();
+    expect(button('Pay GY$1,200 with MMG')).toBeDefined();
+    expect(rendered).not.toContain("didn't go through");
   });
 });

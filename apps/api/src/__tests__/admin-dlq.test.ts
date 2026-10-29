@@ -357,6 +357,34 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(await job.getState()).toBe('waiting');
+    // [Item 63] The audited manual replay authorizes ONE fresh execution, even
+    // when the dead job's last worker had started it (the automatic-replay
+    // guard refuses a re-start it did not authorize). The attempt history stays.
+    const retried = await testQueue.getJob(job.id!);
+    expect(retried!.attemptsStarted).toBe(0);
+    expect(retried!.attemptsMade).toBe(1);
+  });
+
+  it('[Item 63 · review] a dead vendor-alert escalation can be replayed by ops once they reconcile it — and the replay runs once', async () => {
+    const job = await failedJob(`escalate-${nanoid(6)}`, 'vendor-alert-escalate');
+    const blind = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
+    });
+    expect(blind.statusCode, blind.body).toBe(409);
+    expect(blind.json().error.details.policy).toBe('RECONCILE_FIRST');
+    expect(await job.getState()).toBe('failed');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue?acknowledgedReconciled=true`,
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await job.getState()).toBe('waiting');
+    // Both counters start again for an uncertified class: a worker dying in
+    // the middle of THIS run is a prior start the automatic-replay guard
+    // refuses, so the operator's one replay can never become two.
+    const retried = await testQueue.getJob(job.id!);
+    expect({ started: retried!.attemptsStarted, made: retried!.attemptsMade }).toEqual({ started: 0, made: 0 });
   });
 
   it('every listed dead job carries its own policy — one blanket promise no longer stands for 53', async () => {
@@ -367,5 +395,42 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
       .find((r) => r.id === String(job.id));
     expect(row?.recovery?.policy).toBe('NOT_CERTIFIED');
     expect(row?.recovery?.why).toBeTruthy();
+  });
+});
+
+describe('[row 267] the outboxes’ dead letters on the Background jobs page', () => {
+  it('lists an outbox dead letter beside the dead jobs, requeues it once against the stamp the operator saw, and refuses to discard it', async () => {
+    const id = `r267-admin-${nanoid(8)}`;
+    const stampedAt = new Date(Date.now() - 5_000);
+    await app.prisma.orderOutbox.create({
+      data: {
+        id, dedupeKey: id, orderId: `${id}-order`, kind: 'dispatch-order', queue: 'dispatch', payload: { version: 1, orderId: `${id}-order` },
+        attempts: 20, maxAttempts: 20, lastError: 'queue down', deadLetteredAt: stampedAt,
+      },
+    });
+    try {
+      const list = await app.inject({ method: 'GET', url: '/api/v1/admin/dlq', headers: adminHeaders() });
+      expect(list.statusCode).toBe(200);
+      const row = (list.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === id);
+      expect(row).toMatchObject({ queue: 'order-outbox', name: 'dispatch-order', failedReason: 'queue down', attemptsMade: 20, finishedOn: stampedAt.getTime() });
+      expect((row!['recovery'] as { policy: string }).policy).toBe('SAFE_REPLAY');
+
+      const discard = await app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order-outbox/${id}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(discard.statusCode).toBe(409);
+      expect(discard.json().error?.code ?? discard.json().code).toBe('OUTBOX_DEAD_LETTER_NOT_DISCARDABLE');
+      expect((await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id } })).deadLetteredAt).toEqual(stampedAt);
+
+      const stale = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order-outbox/${id}/requeue?expectedFinishedOn=${stampedAt.getTime() - 1}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(stale.statusCode).toBe(409);
+      const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order-outbox/${id}/requeue?expectedFinishedOn=${stampedAt.getTime()}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(requeue.statusCode).toBe(200);
+      expect(await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id } })).toMatchObject({ attempts: 0, deadLetteredAt: null });
+      const again = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order-outbox/${id}/requeue`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(again.statusCode).toBe(409);
+      const audit = await app.prisma.auditLog.findFirst({ where: { action: 'REQUEUE_DLQ_JOB', entityId: `order-outbox:${id}` } });
+      expect(audit).not.toBeNull();
+    } finally {
+      await app.prisma.orderOutbox.deleteMany({ where: { id } });
+    }
   });
 });

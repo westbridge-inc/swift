@@ -1,48 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { taxiDoorFor } from './taxiDoors';
 
-// [E27] A signed-in customer no longer takes a selfie at the door of the app
-// (no selfie merely to browse/order). Booking a taxi still needs one, so the
-// ride request's SELFIE_REQUIRED must open the camera, the same way
-// ID_VERIFICATION_REQUIRED opens the ID check.
+// [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] The server no longer sends a customer
+// SELFIE_REQUIRED (#1554); this build opens no camera door for it and the customer stack has no
+// Selfie screen. Partner selfie flows are untouched (root gate, go-online).
+// [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] A ride no longer needs the ID on file
+// either: the server never answers a ride or a queue join with ID_VERIFICATION_REQUIRED, so the
+// "Add your ID" doors (and taxiDoors.ts, which mapped that code to them) are gone. A refusal the
+// passenger meets still shows its own words — never a silent tap.
 
-describe('taxiDoorFor', () => {
-  it('maps the two fixable account gates to their doors', () => {
-    expect(taxiDoorFor('SELFIE_REQUIRED')).toBe('selfie');
-    expect(taxiDoorFor('ID_VERIFICATION_REQUIRED')).toBe('identity');
-  });
+const src = (rel: string) => readFileSync(join(__dirname, '..', rel), 'utf8');
 
-  it('opens no door for anything else', () => {
-    for (const code of ['NO_DRIVERS_NEARBY', 'STRIKE_RESTRICTED', 'VALIDATION_ERROR', '', null, undefined]) {
-      expect(taxiDoorFor(code)).toBeNull();
-    }
-  });
-});
-
-describe('the taxi screen wires the selfie door to a reachable screen', () => {
-  const src = (rel: string) => readFileSync(join(__dirname, '..', rel), 'utf8');
-
-  it('TaxiScreen opens the doors for BOTH the ride request and the queue join', () => {
+describe('the taxi screen opens no ID door and no photo door', () => {
+  it('TaxiScreen asks for neither an ID nor a photo', () => {
     const taxi = src('modules/movement/screens/TaxiScreen.tsx');
-    // one mapping for the request's refusal, one for the queue join's
-    expect(taxi.match(/taxiDoorFor\(/g)?.length).toBe(2);
+    expect(taxi).not.toMatch(/IdentityVerification/);
+    expect(taxi).not.toMatch(/Add your ID/);
+    expect(taxi).not.toMatch(/taxiDoorFor|ID_VERIFICATION_REQUIRED/);
+    expect(taxi).not.toMatch(/navigate\?\.\('Selfie'\)|Add your photo/);
+    expect(existsSync(join(__dirname, 'taxiDoors.ts'))).toBe(false);
+  });
+
+  it('a refused queue join still shows the server\'s words', () => {
+    const taxi = src('modules/movement/screens/TaxiScreen.tsx');
     expect(taxi).toMatch(/joinQueue\.error/);
     expect(taxi).toMatch(/queueErrMsg \?/);
-    // the selfie door and the ID door each appear for both paths
-    expect(taxi.match(/navigate\?\.\('Selfie'\)/g)?.length).toBe(2);
-    expect(taxi.match(/navigate\?\.\('IdentityVerification'\)/g)?.length).toBe(2);
   });
 
-  it('the customer stack registers the Selfie screen, so the door is not a dead end', () => {
+  it('the customer stack registers no Selfie screen', () => {
     const stack = src('navigation/CustomerStack.tsx');
-    expect(stack).toMatch(/<Stack\.Screen name="Selfie" component=\{SelfieCaptureScreen\} \/>/);
-  });
-
-  it('a pushed selfie screen goes back instead of signing out', () => {
-    const selfie = src('screens/auth/SelfieCaptureScreen.tsx');
-    expect(selfie).toMatch(/canGoBack/);
-    expect(selfie).toMatch(/Not now/);
+    expect(stack).not.toMatch(/name="Selfie"|SelfieCaptureScreen/);
   });
 });

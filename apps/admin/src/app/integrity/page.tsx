@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchIntegrityFlags, errorCode, type IntegrityFlag } from '@/lib/api';
+import { gyDateTime } from '@/lib/dates';
 
 /** [Integrity review · the algorithms' decision log]
  *
@@ -41,9 +42,9 @@ const SUBJECT_HREF: Partial<Record<IntegrityFlag['subjectType'], (_id: string) =
 /** Settled → green, waiting → yellow, needs-a-human → red. Outcomes are
  *  per-algorithm vocabulary; anything unrecognised reads as needs-a-human. */
 function outcomeClass(outcome: string) {
-  if (outcome === 'CLEARED' || outcome === 'APPLIED') return 'bg-green-500/20 text-green-400';
-  if (outcome === 'STAGED' || outcome === 'UNCORROBORATED') return 'bg-yellow-500/20 text-yellow-400';
-  return 'bg-red-500/20 text-red-400';
+  if (outcome === 'CLEARED' || outcome === 'APPLIED') return 'mc-badge mc-tone-good';
+  if (outcome === 'STAGED' || outcome === 'UNCORROBORATED') return 'mc-badge mc-tone-warn';
+  return 'mc-badge mc-tone-bad';
 }
 
 export default function IntegrityPage() {
@@ -67,93 +68,69 @@ export default function IntegrityPage() {
   const forbidden =
     errorCode(error) === 'FORBIDDEN' || (error as { status?: number } | null)?.status === 403;
 
-  const chip = (active: boolean) =>
-    `px-3 py-1.5 rounded-lg text-xs ${
-      active
-        ? 'bg-[var(--accent)] text-white'
-        : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
-    }`;
+  const when = (iso: string) => gyDateTime(iso);
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-2">Integrity</h1>
-      <p className="text-[var(--muted)] mb-6 text-sm">
-        The algorithms&apos; decision log — every detection is one reviewer-facing sentence.
+    <div className="mc-page">
+      <p className="mc-muted mb-4 max-w-3xl">
+        What the detection algorithms decided — every detection is one sentence written for a reviewer.
         Nothing on this page is a penalty button; review, then open the subject.
       </p>
 
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <span className="text-[10px] font-semibold tracking-widest text-[var(--muted)]/70 w-16">
-          ALGORITHM
-        </span>
-        <button onClick={() => setAlgo(null)} className={chip(algo === null)}>
-          All
-        </button>
-        {ALGOS.map((a) => (
-          <button key={a} onClick={() => setAlgo(a)} className={chip(algo === a)}>
-            {a}
-          </button>
-        ))}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <span className="text-[10px] font-semibold tracking-widest text-[var(--muted)]/70 w-16">
-          SUBJECT
-        </span>
-        <button onClick={() => setSubjectType(null)} className={chip(subjectType === null)}>
-          All
-        </button>
-        {SUBJECT_TYPES.map((s) => (
-          <button key={s} onClick={() => setSubjectType(s)} className={chip(subjectType === s)}>
-            {s}
-          </button>
-        ))}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <span className="text-[10px] font-semibold tracking-widest text-[var(--muted)]/70 w-16">
-          WINDOW
-        </span>
-        {WINDOWS.map((w) => (
-          <button key={w} onClick={() => setDays(w)} className={chip(days === w)}>
-            {w} days
-          </button>
-        ))}
+      <div className="mc-card mb-4 space-y-2">
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Algorithm">
+          <span className="mc-label w-24">Algorithm</span>
+          <button type="button" onClick={() => setAlgo(null)} aria-pressed={algo === null} className="mc-tab">All</button>
+          {ALGOS.map((a) => (
+            <button key={a} type="button" onClick={() => setAlgo(a)} aria-pressed={algo === a} className="mc-tab">{a}</button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Subject">
+          <span className="mc-label w-24">Subject</span>
+          <button type="button" onClick={() => setSubjectType(null)} aria-pressed={subjectType === null} className="mc-tab">All</button>
+          {SUBJECT_TYPES.map((s) => (
+            <button key={s} type="button" onClick={() => setSubjectType(s)} aria-pressed={subjectType === s} className="mc-tab">{s}</button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Window">
+          <span className="mc-label w-24">Window</span>
+          {WINDOWS.map((w) => (
+            <button key={w} type="button" onClick={() => setDays(w)} aria-pressed={days === w} className="mc-tab">{w} days</button>
+          ))}
+        </div>
       </div>
 
       {forbidden ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-sm text-[var(--muted)]">
+        <div className="mc-note">
           This log is super-admin only — the server&apos;s platform guard said no, and this page
           believes it.
         </div>
       ) : error ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-sm text-red-400">
+        <div className="mc-alert" role="alert">
           {(error as Error).message}
         </div>
       ) : (
         <>
-          <p className="text-xs text-[var(--muted)] mb-2">
+          <p className="mc-muted mb-2 text-xs">
             {isLoading
               ? 'Loading…'
               : `${flags.length} flag${flags.length === 1 ? '' : 's'} · last ${windowDays} days · newest first · shadow runs are never listed here`}
           </p>
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-            <table className="w-full text-sm">
+          <div className="mc-table-wrap overflow-x-auto">
+            <table className="mc-table">
               <thead>
-                <tr className="border-b border-[var(--border)]">
-                  <th className="text-left p-4 text-[var(--muted)] font-medium">When</th>
-                  <th className="text-left p-4 text-[var(--muted)] font-medium">Algorithm</th>
-                  <th className="text-left p-4 text-[var(--muted)] font-medium">Outcome</th>
-                  <th className="text-left p-4 text-[var(--muted)] font-medium w-1/2">
-                    What happened
-                  </th>
-                  <th className="text-right p-4 text-[var(--muted)] font-medium">Subject</th>
+                <tr>
+                  <th className="mc-label" style={{ width: '9rem' }}>When</th>
+                  <th className="mc-label" style={{ width: '7rem' }}>Algorithm</th>
+                  <th className="mc-label" style={{ width: '9rem' }}>Outcome</th>
+                  <th className="mc-label">What happened</th>
+                  <th className="mc-label" style={{ width: '16rem', textAlign: 'right' }}>Subject</th>
                 </tr>
               </thead>
               <tbody>
                 {flags.length === 0 && !isLoading ? (
                   <tr>
-                    <td colSpan={5} className="p-6 text-center text-[var(--muted)]">
+                    <td colSpan={5} className="mc-table-empty">
                       No flags in this window.
                     </td>
                   </tr>
@@ -161,36 +138,25 @@ export default function IntegrityPage() {
                   flags.map((f) => {
                     const href = SUBJECT_HREF[f.subjectType]?.(f.subjectId);
                     return (
-                      <tr key={f.id} className="border-b border-[var(--border)] last:border-0 align-top">
-                        <td className="p-4 whitespace-nowrap text-[var(--muted)]">
-                          {new Date(f.createdAt).toLocaleString()}
-                        </td>
-                        <td className="p-4 whitespace-nowrap">
+                      <tr key={f.id} className="align-top">
+                        <td data-label="When" className="mc-muted mc-numbers">{when(f.createdAt)}</td>
+                        <td data-label="Algorithm">
                           {f.algo}
-                          <span className="block text-[10px] text-[var(--muted)]">
-                            {f.configVersion}
-                          </span>
+                          <span className="mc-cell-sub">{f.configVersion}</span>
                         </td>
-                        <td className="p-4">
-                          <span
-                            className={`px-2 py-0.5 rounded text-xs whitespace-nowrap ${outcomeClass(f.outcome)}`}
-                          >
-                            {f.outcome.replaceAll('_', ' ')}
-                          </span>
+                        <td data-label="Outcome">
+                          <span className={outcomeClass(f.outcome)}>{f.outcome.replaceAll('_', ' ')}</span>
                         </td>
                         {/* The sentence, VERBATIM — and only the sentence. f.inputs
                             (the evidence Json with its signal tokens) is never
                             rendered anywhere on this page, deliberately. */}
-                        <td className="p-4">{f.sentence}</td>
-                        <td className="p-4 text-right whitespace-nowrap">
-                          <span className="text-[var(--muted)] text-xs mr-2">
+                        <td data-label="What happened" style={{ whiteSpace: 'normal' }}>{f.sentence}</td>
+                        <td data-label="Subject" data-align="right">
+                          <span className="mc-muted mr-2 text-xs">
                             {f.subjectType} · {f.subjectId.slice(0, 8)}…
                           </span>
                           {href ? (
-                            <Link
-                              href={href}
-                              className="text-[var(--accent)] text-xs underline underline-offset-2"
-                            >
+                            <Link href={href} className="text-xs font-semibold underline underline-offset-2" style={{ color: 'var(--mc-accent)' }}>
                               Open the subject
                             </Link>
                           ) : null}

@@ -1,8 +1,11 @@
+import { POLL } from '../lib/pollPolicy';
+import { prepareUploadImage } from '../lib/uploadImage';
+import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Vibration } from 'react-native';
-import { useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
-import { vendorApi, vendorDiscoveryApi } from '../services/api';
+import { useMutationState, useQuery, useQueryClient, type QueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
+import { customerApi, vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
@@ -18,14 +21,25 @@ import type { AuthSessionSnapshot } from '../lib/authSession';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
+  newCommandKey,
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../stores/authStore';
 import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
+import { withStoreFields, withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
+import {
+  MENU_REREAD_SETTLE_MS, menuWithItem, menuWithItemFields, menuWithOption, menuWithOptionGroup, menuWithSection,
+  menuWithoutItem, menuWithoutOption, menuWithoutOptionGroup, menuWithoutSection,
+} from '../lib/menuAnswers';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
+import { pendingOrderIds } from '../modules/vendor/boardTaps';
+import { answeredSinceAsked } from '../modules/vendor/storeOrderRules';
+import { errorMessage } from '../lib/apiError';
+import type { SaleAnswer, SaleOp } from '../lib/inStoreSale';
+import { phoneSaleFailure, soldInStore } from './useSoldInStore';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -83,7 +97,7 @@ export function useVendorProfile() {
     queryKey: ['vendor', 'profile'],
     queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
-    refetchInterval: 20000,
+    refetchInterval: POLL.vendorProfile,
     enabled: !pv,
   });
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
@@ -256,6 +270,13 @@ export function useAddStaff(guard: MutationGuard = passThrough) {
   });
 }
 
+/** [Row 55] Withdraw every unanswered team invite (nothing pending is listed). */
+export function useWithdrawStaffInvites() {
+  return usePreviewSafeMutation({
+    mutationFn: () => unwrap<{ withdrawn: boolean; message?: string }>(vendorApi.withdrawStaffInvites()),
+  });
+}
+
 export function useRemoveStaff() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
@@ -278,7 +299,7 @@ export function useVendorOrders(enabled: boolean) {
     queryKey: ['vendor', 'orders'],
     queryFn: () => unwrap(vendorApi.orders()),
     enabled: enabled && !pv,
-    refetchInterval: enabled && !pv ? 12000 : false,
+    refetchInterval: () => enabled && !pv ? POLL.vendorOrders() : false,
   });
   return pv ? previewQuery(pv.orders) : q;
 }
@@ -288,7 +309,8 @@ export function useVendorOrders(enabled: boolean) {
  *  signal) instead of waiting out the 12s poll — the poll stays as the
  *  reconnect safety net. A new order also buzzes the phone: the board is a
  *  counter appliance, not a screen someone stares at. */
-export function useVendorOrdersLive(vendorId: string | undefined) {
+/** `ownsStore`: the server admits only the store owner to the store room. */
+export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = false) {
   const qc = useQueryClient();
   const previewType = useVendorPreview((s) => s.previewType);
   // NEW-ORDER takeover queue (alerts spec §A1): every order:new lands here;
@@ -301,10 +323,6 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     // Only the selected store's layer may (re)join its room: a store handoff
     // reconnects the shared socket, and a retired layer's handler can run
     // before React unmounts it.
-    const join = () => { if (useStoreSwitcher.getState().selectedStoreId === vendorId) s.emit('vendor:subscribe', { vendorId }); };
-    join();
-    s.on('connect', join); // rooms are per-connection — re-join after reconnects
-    const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     const onNew = (payload?: { orderId?: string; orderNumber?: string }) => {
       Vibration.vibrate(400);
       if (payload?.orderId) {
@@ -314,23 +332,41 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
             : [...q, { orderId: payload.orderId!, orderNumber: payload.orderNumber }],
         );
       }
-      refresh();
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     };
-    s.on('order:new', onNew);
-    s.on('order:status_changed', refresh);
-    s.on('order:prep_update', refresh);
     // Scheduling liveness nudge (spec 2.6): calendar + picker refetch the
     // moment a booking is made, moved or cancelled; the poll stays the floor.
-    const refreshBookings = () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
-    s.on('bookings:changed', refreshBookings);
-    return () => {
-      s.off('connect', join);
-      s.off('order:new', onNew);
-      s.off('order:status_changed', refresh);
-      s.off('order:prep_update', refresh);
-      s.off('bookings:changed', refreshBookings);
+    return bindVendorOrderFeed(s, vendorId, () => useStoreSwitcher.getState().selectedStoreId === vendorId, {
+      onNew,
+      refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+      refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+      refreshOverview: () => qc.invalidateQueries({ queryKey: ['vendor', 'analytics'] }),
+    }, { serverAdmits: ownsStore });
+  }, [vendorId, ownsStore, qc, previewType]);
+
+  // [STORE-DASH · REVIEW-F S3-1 on #2048] The customer answered the store's "Out of stock" question:
+  // the server sends no push (only order:pick_state, which re-reads the board) and the store's response
+  // clock restarts from the answer. Watch the board: an order that was waiting on the customer and is
+  // the store's decision again takes the new-order screen again (as the web popup does).
+  const askedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!vendorId || previewType) return;
+    const check = () => {
+      const { answered, deciding } = answeredSinceAsked(askedRef.current, qc.getQueryData(['vendor', 'orders']));
+      askedRef.current = deciding;
+      if (answered.length === 0) return;
+      Vibration.vibrate(400);
+      // The takeover opens on the board's fresh copy (useVendorOrder's placeholder), never on a
+      // stale copy of the order that still shows the question (which would settle it at once).
+      for (const a of answered) qc.removeQueries({ queryKey: ['vendor', 'orders', 'detail', a.orderId], exact: true });
+      setTakeover((q) => [...q, ...answered.filter((a) => !q.some((x) => x.orderId === a.orderId))]);
     };
-  }, [vendorId, qc, previewType]);
+    check();
+    return qc.getQueryCache().subscribe((event) => {
+      const key = event?.query?.queryKey;
+      if (event?.type === 'updated' && Array.isArray(key) && key.length === 2 && key[0] === 'vendor' && key[1] === 'orders') check();
+    });
+  }, [vendorId, previewType, qc]);
 
   const dismissTakeover = useCallback(
     (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),
@@ -343,11 +379,15 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
  *  Keyed under ['vendor','orders'] so order-action mutations refresh it too. */
 export function useVendorOrder(id: string | undefined) {
   const pv = usePreviewDataset();
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ['vendor', 'orders', 'detail', id],
     queryFn: () => unwrap<any>(vendorApi.order(id!)),
     enabled: !!id && !pv,
-    refetchInterval: 15000,
+    refetchInterval: POLL.vendorOrder,
+    // [STORE-DASH] The order opens at once from the board's own copy of it; the
+    // order's own read replaces it the moment it answers (isPlaceholderData).
+    placeholderData: () => boardOrder(qc.getQueryData(['vendor', 'orders']), id),
   });
   return pv ? previewQuery(pv.orders.find((o) => o.id === id) ?? pv.orders[0]) : q;
 }
@@ -446,27 +486,109 @@ export function useSetOrderFulfillmentMode() {
   });
 }
 
+/** [PERF row 562] lib/storeOpenSwitch: the screen shows the tapped state while
+ *  this is out; the server's answer (both flags) goes into the store at once and
+ *  the re-read runs on its own. An answer it cannot place keeps the switch on
+ *  the tapped state until the re-read (the old wait); a failure re-reads too, so
+ *  the switch goes back to what the server holds. */
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  const reread = () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+  return usePreviewSafeMutation({
+    mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)),
+    // The store this request is for: the header carries the selected store, and
+    // a store switch before the send refuses it (useVendorMutation).
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: StoreSwitchAnswer, _open: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreSwitchAnswer(before, storeId, answer);
+      if (after === before) return reread();
+      qc.setQueryData(['vendor', 'profile'], after);
+      void reread();
+      return undefined;
+    },
+    onError: () => { void reread(); },
+  });
 }
+/** [TAP-AUDIT] Pause / resume new orders answers at the tap, as Store open does (PERF row 562): the screen shows the
+ *  tapped state while the request is out (shownStoreOpen), the server's own answer (both flags) goes into the store at
+ *  once, and the re-read runs on its own. A refusal re-reads, so the button shows what the server holds. */
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  const reread = () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+  return usePreviewSafeMutation({
+    mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)),
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: StoreSwitchAnswer, _accepting: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreSwitchAnswer(before, storeId, answer);
+      if (after !== before) qc.setQueryData(['vendor', 'profile'], after);
+      void reread();
+    },
+    onError: () => { void reread(); },
+  });
 }
+/** [TAP-AUDIT] A store setting switch answers at the tap: the tapped state shows while the request is out, the saved
+ *  store's own value goes into the profile at once, and the re-reads run on their own (they used to hold the switch
+ *  until a second round trip). */
+function settingSwitchAnswers(qc: ReturnType<typeof useQueryClient>, field: 'requirePickupCode' | 'selfDeliveryEnabled', reread: () => void) {
+  return {
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: unknown, _on: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreFields(before, storeId, answer, [field]);
+      if (after !== before) qc.setQueryData(['vendor', 'profile'], after);
+      reread();
+    },
+    onError: () => { reread(); },
+  };
+}
+/** [STORE-DASH · O-2] The store's "Ask for the pickup code" setting (owner/manager; rides the store profile). */
+export function useSetRequirePickupCode() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (requirePickupCode: boolean) => unwrap(vendorApi.updateProfile({ requirePickupCode })),
+    // The orders carry pickupCodeRequired: re-read them too, so the cards switch with the setting.
+    ...settingSwitchAnswers(qc, 'requirePickupCode', () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    }),
+  });
+}
+
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
 export function useSetSelfDelivery() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
     mutationFn: (selfDeliveryEnabled: boolean) => unwrap(vendorApi.updateProfile({ selfDeliveryEnabled })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    ...settingSwitchAnswers(qc, 'selfDeliveryEnabled', () => { void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }); }),
   });
+}
+
+/** [STORE-DASH] Every store tap on an order shares this key, so the board can
+ *  tell WHICH orders are waiting for the server (usePendingOrderIds). */
+export const ORDER_ACTION_KEY = ['vendor', 'order-action'] as const;
+
+/** The board copy of one order, when the board holds it. */
+export function boardOrder(board: unknown, id: string | undefined): any {
+  if (!id || !Array.isArray(board)) return undefined;
+  return board.find((o) => o?.id === id) ?? undefined;
+}
+
+/** [STORE-DASH] The orders whose store tap is still out: only those cards wait. */
+export function usePendingOrderIds(): ReadonlySet<string> {
+  const variables = useMutationState({
+    filters: { mutationKey: ORDER_ACTION_KEY, status: 'pending' },
+    select: (m) => m.state.variables,
+  });
+  return useMemo(() => pendingOrderIds(variables), [variables]);
 }
 
 export function useOrderAction() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: ORDER_ACTION_KEY,
     mutationFn: ({
       id,
       action,
@@ -474,7 +596,7 @@ export function useOrderAction() {
       reason,
     }: {
       id: string;
-      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
       code?: string;
       /** reject only — the server records it and tells the customer why. */
       reason?: string;
@@ -485,14 +607,37 @@ export function useOrderAction() {
       if (action === 'ready') return unwrap(vendorApi.ready(id));
       if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
+      // [STORE-DASH · O-2] The store's pickup code is off: no code is sent (the server completes the hand-over).
+      if (action === 'handed-to-customer') return unwrap(vendorApi.completePickup(id));
+      if (action === 'handed-to-rider') return unwrap(vendorApi.handedToRider(id));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
       // [E10] Never send a bare rejection: the API refuses it, and the customer
       // must be told why. Every screen collects a preset before it gets here.
       if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    // [PERF row 562] The server's confirmed answer lands at once: its status and clocks go into the
+    // order and the board right away, and the re-read runs on its own. The tap used to stay busy
+    // until that re-read came back (one more round trip). Nothing shows before the answer: dispatch
+    // and money never show success early.
+    onSuccess: (answer, vars) => {
+      applyConfirmedOrder(qc, vars.id, answer);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
   });
+}
+
+/** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
+const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt', 'handedToRiderAt'] as const;
+
+/** Writes the confirmed fields of a tap's answer into the order's caches, when the answer is that order. */
+export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 'setQueryData'>, id: string, answer: unknown): boolean {
+  const row = answer as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== 'object' || row['id'] !== id || typeof row['status'] !== 'string') return false;
+  const confirmed = Object.fromEntries(CONFIRMED_ORDER_FIELDS.filter((key) => key in row).map((key) => [key, row[key]]));
+  qc.setQueryData(['vendor', 'orders', 'detail', id], (order: any) => (order ? { ...order, ...confirmed } : order));
+  qc.setQueryData(['vendor', 'orders'], (orders: any) => (Array.isArray(orders) ? orders.map((o) => (o?.id === id ? { ...o, ...confirmed } : o)) : orders));
+  return true;
 }
 
 /** MMG cash ledger — delivery fees this store owes riders in cash (the
@@ -515,6 +660,29 @@ export function useConfirmVendorCashSettlement() {
   });
 }
 
+/** [REVIEW-F #2143 S3-2] What a refused pick tick says: the server's own reason, or a plain sentence. */
+export const TICK_REFUSED_TITLE = 'That tick didn’t save';
+export function tickRefusalWords(error: unknown): string {
+  return errorMessage(error, 'Check your connection and tap it again.');
+}
+
+/** [TAP-AUDIT] Every pick tick carries this key: the screen reads which lines are waiting (usePendingPickLines). */
+export const PICK_KEY = ['vendor', 'orders', 'pick'] as const;
+/** An order with one line's `picked` as given (an order without that line, or not an order, comes back as it is). */
+export function withLinePicked(order: unknown, lineId: string, picked: boolean): unknown {
+  const items = (order as { items?: unknown } | null | undefined)?.items;
+  if (!Array.isArray(items) || !items.some((l) => (l as { id?: unknown } | null)?.id === lineId)) return order;
+  return { ...(order as object), items: items.map((l) => ((l as { id?: unknown } | null)?.id === lineId ? { ...(l as object), picked } : l)) };
+}
+/** The lines of this order whose tick is still on its way to the server (each waits alone). */
+export function usePendingPickLines(orderId: string | undefined): ReadonlySet<string> {
+  const lines = useMutationState({
+    filters: { mutationKey: PICK_KEY, status: 'pending' },
+    select: (m) => m.state.variables as { orderId?: string; lineId?: string } | undefined,
+  });
+  return new Set(lines.filter((v) => v?.orderId === orderId).map((v) => v!.lineId!));
+}
+
 /** Grocery picking (§5.3): tick lines, swap out-of-stock, refund a line. */
 export function usePickingActions() {
   const qc = useQueryClient();
@@ -522,10 +690,36 @@ export function usePickingActions() {
     qc.invalidateQueries({ queryKey: ['vendor', 'order', orderId] });
     qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
   };
+  // [TAP-AUDIT] A pick tick shows at the tap (on the order and its board card), the server's answer is written, and
+  // the order alone is read again once after the last tick. It used to wait for the write AND a re-read of every
+  // vendor order query (board, every open order, history) before the box ticked: ~1.3 s a line on a mobile link.
+  const writePick = (orderId: string, lineId: string, picked: boolean) => {
+    qc.setQueryData(['vendor', 'orders', 'detail', orderId], (order: unknown) => withLinePicked(order, lineId, picked));
+    qc.setQueryData(['vendor', 'orders'], (orders: unknown) => (Array.isArray(orders)
+      ? orders.map((o: any) => (o?.id === orderId ? withLinePicked(o, lineId, picked) : o))
+      : orders));
+  };
   const setPicked = usePreviewSafeMutation({
+    mutationKey: PICK_KEY,
     mutationFn: ({ orderId, lineId, picked }: { orderId: string; lineId: string; picked: boolean }) =>
-      unwrap(vendorApi.setLinePicked(orderId, lineId, picked)),
-    onSuccess: (_d, v) => invalidate(v.orderId),
+      unwrap<{ picked?: unknown }>(vendorApi.setLinePicked(orderId, lineId, picked)),
+    onMutate: async ({ orderId, lineId, picked }) => {
+      // A read already on its way would land with the box as it was.
+      await qc.cancelQueries({ queryKey: ['vendor', 'orders', 'detail', orderId], exact: true });
+      writePick(orderId, lineId, picked);
+    },
+    // [REVIEW-F #2143 S3-2] A refused tick goes back WITH words, as on the web: the server's reason, or a plain
+    // sentence. Said here, once (the app-wide notice stays quiet for this tap). The toast is loaded when needed.
+    meta: { silent: true },
+    onError: (error, { orderId, lineId, picked }) => {
+      writePick(orderId, lineId, !picked);
+      void import('../kit/toast').then(({ toast }) => toast.error(TICK_REFUSED_TITLE, tickRefusalWords(error)));
+    },
+    onSuccess: (line, { orderId, lineId }) => { if (typeof line?.picked === 'boolean') writePick(orderId, lineId, line.picked); },
+    onSettled: (_d, _e, { orderId }) => {
+      // Only the last tick re-reads (a re-read while another tick is out would show that box as it was).
+      if (qc.isMutating({ mutationKey: PICK_KEY }) <= 1) void qc.invalidateQueries({ queryKey: ['vendor', 'orders', 'detail', orderId], exact: true });
+    },
   });
   const substitute = usePreviewSafeMutation({
     mutationFn: ({ orderId, lineId, substituteItemId }: { orderId: string; lineId: string; substituteItemId: string }) =>
@@ -542,6 +736,48 @@ export function usePickingActions() {
 
 // ─── Menu ────────────────────────────────────────────────────────────────────
 
+const MENU_KEY = ['vendor', 'menu'] as const;
+/** [TAP-AUDIT] Every menu change carries this key, so the one re-read waits while any change is still on its way. */
+export const MENU_WRITE_KEY = ['vendor', 'menu', 'write'] as const;
+export type MenuScope = { storeId: string | null; generation: number };
+/** The store a menu change is sent for (onMutate): its answer is written only while that store is still the one shown. */
+export function menuScope(): MenuScope {
+  const s = useStoreSwitcher.getState();
+  return { storeId: s.selectedStoreId, generation: s.storeGeneration };
+}
+function sameMenuScope(scope: MenuScope | undefined): boolean {
+  const s = useStoreSwitcher.getState();
+  return !!scope && s.selectedStoreId === scope.storeId && s.storeGeneration === scope.generation;
+}
+const menuRereads = new WeakMap<QueryClient, ReturnType<typeof setTimeout>>();
+/** [TAP-AUDIT] ONE re-read of the menu after a burst of changes (lib/menuAnswers): it waits until the changes stop
+ *  and none is still on its way (a re-read then would show that change's old value for a moment). */
+export function rereadMenuSoon(qc: QueryClient, delay = MENU_REREAD_SETTLE_MS): void {
+  const waiting = menuRereads.get(qc);
+  if (waiting) clearTimeout(waiting);
+  menuRereads.set(qc, setTimeout(() => {
+    menuRereads.delete(qc);
+    if (qc.isMutating({ mutationKey: MENU_WRITE_KEY }) > 0) {
+      rereadMenuSoon(qc, delay);
+      return;
+    }
+    void qc.invalidateQueries({ queryKey: MENU_KEY });
+  }, delay));
+}
+/** [TAP-AUDIT] The server's answer written into the menu on screen (for the store it was sent for), then the one
+ *  re-read. Returns nothing: the button is free at the answer, not after a whole-menu download. */
+export function answerIntoMenu(qc: QueryClient, scope: MenuScope | undefined, apply: (menu: unknown) => unknown): void {
+  if (!sameMenuScope(scope)) return;
+  if (qc.getQueryData(MENU_KEY) !== undefined) {
+    // [REVIEW-G #2141 S3-1] A menu read already on its way left BEFORE this change: landing, it would put the old menu
+    // back on screen (a switched-off item on again, a deleted one back) until the next re-read. It is cancelled (the
+    // menu stays as the screen held it) and the answer is written; the one re-read below reads the menu again.
+    void qc.cancelQueries({ queryKey: MENU_KEY, exact: true });
+    qc.setQueryData(MENU_KEY, (menu: unknown) => (menu === undefined ? menu : apply(menu)));
+  }
+  rereadMenuSoon(qc);
+}
+
 /** Categories with their nested items (the menu, grouped by section). */
 export function useVendorMenu(enabled = true) {
   const pv = usePreviewDataset();
@@ -552,16 +788,20 @@ export function useVendorMenu(enabled = true) {
 export function useCreateCategory() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (data: { name: string }) => unwrap(vendorApi.createCategory(data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _data, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
 export function useUpdateCategory() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ id, data }: { id: string; data: { name?: string } }) => unwrap(vendorApi.updateCategory(id, data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _vars, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
@@ -569,15 +809,19 @@ export function useUpdateCategory() {
 export function useDeleteCategory() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (id: string) => unwrap(vendorApi.deleteCategory(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, id, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutSection(menu, id)),
   });
 }
 
-/** Create (no id) or update (id present) an item. */
+/** Create (no id) or update (id present) an item. A new item may carry its option groups and their choices
+ *  (`data.optionGroups`): the server saves them with the item, in the same request. */
 export function useSaveItem() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ id, data, authSession, storeId }: {
       id?: string;
       data: any;
@@ -587,94 +831,186 @@ export function useSaveItem() {
       id
         ? unwrap(vendorApi.updateItem(id, data, authSession, storeId))
         : unwrap(vendorApi.createItem(data, authSession, storeId)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, _vars, scope) => answerIntoMenu(qc, scope, (menu) => menuWithItem(menu, answer)),
   });
 }
 
 export function useDeleteItem() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (id: string) => unwrap(vendorApi.deleteItem(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, id, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutItem(menu, id)),
   });
 }
 
 export function useSetItemAvailability() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ id, isAvailable }: { id: string; isAvailable: boolean }) =>
-      unwrap(vendorApi.setItemAvailability(id, isAvailable)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+      unwrap<{ isAvailable?: unknown }>(vendorApi.setItemAvailability(id, isAvailable)),
+    onMutate: menuScope,
+    onSuccess: (answer, { id }, scope) => answerIntoMenu(qc, scope, (menu) => (
+      typeof answer?.isAvailable === 'boolean' ? menuWithItemFields(menu, id, { isAvailable: answer.isAvailable }) : menu
+    )),
   });
 }
 
+// [IN-STORE-SALE] The sender for the app's "Sold in store −1" taps (hooks/useSoldInStore, lib/inStoreSale): each tap
+// is one request with its own key; the server's count is written into the menu on screen (for the store it was tapped
+// in) and the menu is read again once, later. Its failures show on the row in words (never the app-wide toast).
+const MENU_READ_KEY = ['vendor', 'menu'] as const;
+const saleFields = (answer: SaleAnswer) => ({
+  ...(typeof answer?.stockQuantity === 'number' ? { stockQuantity: answer.stockQuantity } : {}),
+  ...(typeof answer?.isAvailable === 'boolean' ? { isAvailable: answer.isAvailable } : {}),
+});
+export function useSoldInStoreSender(): { tap: (_itemId: string) => void; undo: (_itemId: string) => void; retry: (_itemId: string) => void } {
+  const qc = useQueryClient();
+  const session = useAuthStore((s) => s.sessionGeneration);
+  const sale = useVendorMutation({
+    mutationKey: MENU_WRITE_KEY,
+    meta: { silent: true },
+    mutationFn: ({ itemId, op }: { itemId: string; op: SaleOp }) => unwrap<SaleAnswer>(
+      op.kind === 'sale' ? vendorApi.inStoreSale(itemId, op.key) : vendorApi.undoInStoreSale(itemId, op.saleKey),
+    ),
+  });
+  // Another person signed in (or out): nothing of the last one's taps carries over.
+  if (saleGeneration !== session) { soldInStore.reset(); saleGeneration = session; }
+  soldInStore.setSender({
+    newKey: () => newCommandKey(),
+    send: (itemId, op) => sale.mutateAsync({ itemId, op }),
+    // [REVIEW-F #2157 S4-5] Taps made in one store are never sent while another is open (they wait for Try again there).
+    canSend: (scope) => (scope as MenuScope | undefined)?.storeId === useStoreSwitcher.getState().selectedStoreId,
+    answered: (itemId, answer, scope) => answerIntoMenu(qc, scope as MenuScope, (menu) => menuWithItemFields(menu, itemId, saleFields(answer))),
+    reread: () => rereadMenuSoon(qc),
+    classify: phoneSaleFailure,
+  });
+  return {
+    tap: (itemId) => {
+      // A menu read already on its way left before this tap: landing, it would show the count from before it.
+      void qc.cancelQueries({ queryKey: MENU_READ_KEY, exact: true });
+      soldInStore.tap(itemId, menuScope());
+    },
+    undo: (itemId) => soldInStore.undo(itemId, menuScope()),
+    retry: (itemId) => soldInStore.retry(itemId),
+  };
+}
+let saleGeneration: number | null = null;
+
 // ─── Modifiers (option groups + options) ─────────────────────────────────────
-// Each mutation resolves to the updated group (with options) so the editor can
-// refresh its local list without waiting for the menu query.
+// Each mutation resolves to the saved group (with options) or option, so the editor updates its own list from the
+// answer, and the menu takes the same answer (no whole-menu download per choice).
 
 export function useAddOptionGroup() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ itemId, data, authSession }: {
       itemId: string;
       data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number };
       authSession?: AuthSessionSnapshot;
     }) => unwrap<any>(vendorApi.addOptionGroup(itemId, data, authSession)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, { itemId }, scope) => answerIntoMenu(qc, scope, (menu) => menuWithOptionGroup(menu, itemId, answer)),
   });
 }
 
 export function useDeleteOptionGroup() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (input: string | { id: string; authSession?: AuthSessionSnapshot }) => {
       const id = typeof input === 'string' ? input : input.id;
       const authSession = typeof input === 'string' ? undefined : input.authSession;
       return unwrap(vendorApi.deleteOptionGroup(id, authSession));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, input, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutOptionGroup(menu, typeof input === 'string' ? input : input.id)),
   });
 }
 
 export function useAddOption() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ groupId, data, authSession }: {
       groupId: string;
       data: { name: string; additionalPrice?: number };
       authSession?: AuthSessionSnapshot;
     }) => unwrap<any>(vendorApi.addOption(groupId, data, authSession)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, { groupId }, scope) => answerIntoMenu(qc, scope, (menu) => menuWithOption(menu, groupId, answer)),
   });
 }
 
 export function useDeleteOption() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
     mutationFn: (input: string | { id: string; authSession?: AuthSessionSnapshot }) => {
       const id = typeof input === 'string' ? input : input.id;
       const authSession = typeof input === 'string' ? undefined : input.authSession;
       return unwrap(vendorApi.deleteOption(id, authSession));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (_answer, input, scope) => answerIntoMenu(qc, scope, (menu) => menuWithoutOption(menu, typeof input === 'string' ? input : input.id)),
   });
 }
 
-/** Upload (or replace) an item's photo — multipart to the StorageProvider. */
+/** Upload (or replace) an item's photo — multipart to the StorageProvider. [TAP-AUDIT] Sized on the phone first, as
+ *  section and store photos are (lib/uploadImage: 1280 px, a few hundred KB instead of a 2-4 MB camera original, so
+ *  seconds instead of most of a minute on a mobile line); the server still checks, scans and redraws it. If the
+ *  phone cannot size it (an older app binary, a decoder failure), the original is sent, never dropped. */
 export function useUploadItemImage() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ id, file, authSession, storeId }: {
+    mutationKey: MENU_WRITE_KEY,
+    mutationFn: async ({ id, file, authSession, storeId }: {
       id: string;
       file: { uri: string; name: string; type: string };
       authSession?: AuthSessionSnapshot;
       storeId?: string | null;
     }) => {
+      const prepared = await prepareUploadImage(file);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
-      return unwrap(vendorApi.uploadItemImage(id, form, authSession, storeId));
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap<{ imageUrl?: unknown }>(vendorApi.uploadItemImage(id, form, authSession, storeId));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+    onMutate: menuScope,
+    onSuccess: (answer, { id }, scope) => answerIntoMenu(qc, scope, (menu) => (
+      answer && 'imageUrl' in answer ? menuWithItemFields(menu, id, { imageUrl: answer.imageUrl }) : menu
+    )),
+  });
+}
+
+/** [IMAGES-E2E PR4] A menu section's own photo, sized on the phone first (a smaller upload on
+ *  a mobile network); the server checks, scans and redraws it without the camera's data. */
+export function useUploadCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
+    mutationFn: async ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const prepared = await prepareUploadImage(file);
+      const form = new FormData();
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadCategoryPhoto(id, form));
+    },
+    onMutate: menuScope,
+    onSuccess: (answer, _vars, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
+  });
+}
+
+/** [IMAGES-E2E PR4] Takes a menu section's photo down. */
+export function useRemoveCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationKey: MENU_WRITE_KEY,
+    mutationFn: (id: string) => unwrap(vendorApi.removeCategoryPhoto(id)),
+    onMutate: menuScope,
+    onSuccess: (answer, _id, scope) => answerIntoMenu(qc, scope, (menu) => menuWithSection(menu, answer)),
   });
 }
 
@@ -687,7 +1023,7 @@ export function useVendorAnalytics(enabled = true) {
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
-    refetchInterval: 30000,
+    refetchInterval: () => POLL.vendorAnalytics(),
     enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;
@@ -843,6 +1179,8 @@ export interface VendorBooking {
   status: string;
   orderId: string | null;
   customer: { firstName: string } | null;
+  /** [BOOK-S5a] The listing booked (its free times are what a move may pick). An older server omits it. */
+  itemId?: string;
 }
 
 /** The Services SCHEDULE: upcoming appointments (default two-week window) for the
@@ -877,6 +1215,31 @@ export function useVendorBookingExceptions(enabled = true) {
     staleTime: 30_000,
   });
   return pv ? previewQuery([] as VendorBookingException[]) : q;
+}
+
+/** [BOOK-S5a · owner B2] The free times of a listing on one Guyana day, for "Move" on the Schedule:
+ *  the same answer the customer's picker reads (GET /customer/items/:id/slots), never re-derived here. */
+export function useBookingMoveTimes(itemId: string, date: string) {
+  return useQuery<{ slots?: string[]; bookableWeekdays?: number[] }>({
+    queryKey: ['vendor', 'move-times', itemId, date],
+    queryFn: ({ signal }) => unwrap(customerApi.getItemSlots(itemId, date, { signal, timeout: 8_000 })),
+    enabled: !!itemId && !!date,
+    retry: false,
+  });
+}
+
+/** [BOOK-S5a · owner B2] Move a booking to another free time of the same service. The schedule (and
+ *  the order the booking belongs to) is read again whatever the outcome: a timeout can mean it moved. */
+export function useRescheduleVendorBooking() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: ({ bookingId, newSlotStart }: { bookingId: string; newSlotStart: string }) =>
+      unwrap(vendorApi.rescheduleBooking(bookingId, newSlotStart)),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
+  });
 }
 
 /** Block time — "funeral afternoon in two taps" (scheduling 2.1). */

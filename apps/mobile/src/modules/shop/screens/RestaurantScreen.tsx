@@ -5,16 +5,23 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
-import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
+import { useCart, useReportContent, useToggleFavorite, useVendor } from '../../../hooks/customer';
+import { useCartSteppers } from '../../../hooks/useCartSteppers';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { requestAuthContinuation } from '../../../navigation/authContinuation';
 import { distanceLabel } from '../../../lib/geo';
-import { itemPhoto, vendorPhoto } from '../../../lib/images';
+import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
+import { forgivingFilter } from '../../../lib/forgivingSearch';
+import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { itemVatNote, storefrontVat, storefrontVatLine, type StorefrontVat } from '../../../lib/storeVat';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
+import { SellerInfo } from '../../../components/SellerInfo';
+import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
+import { STORE_PICKS_TITLE } from '../../../lib/storePick';
 import {
   AddMorph,
   CartBar,
@@ -23,6 +30,7 @@ import {
   CircleChip,
   ErrorState,
   FoodCard,
+  Header,
   HeartBadge,
   IconChip,
   LoadingBlock,
@@ -100,22 +108,25 @@ const TILE_W = (SCREEN_W - GUTTER * 2 - space.md * 2) / 3;
  *  on-card add. In-cart shows a mini stepper — shopping without detail hops. */
 function ProductTile({
   item,
-  line,
+  qty,
   onAdd,
   onSetQty,
   onOpen,
   busy,
+  vat = null,
 }: {
   item: any;
-  line: any;
+  /** [TAP-AUDIT] What the customer has tapped to (hooks/useCartSteppers), else the cart's quantity. */
+  qty: number;
   onAdd: () => void;
   onSetQty: (qty: number) => void;
   onOpen: () => void;
   busy: boolean;
+  /** [STORE-VAT] The store's VAT (null for every store but a person-approved VAT store). */
+  vat?: StorefrontVat | null;
 }) {
   const hasOptions = (item.optionGroups?.length ?? 0) > 0;
   const out = item.stockQuantity === 0;
-  const qty = line?.quantity ?? 0;
   return (
     <View style={{ width: TILE_W }}>
       <Pressable onPress={onOpen}>
@@ -137,6 +148,7 @@ function ProductTile({
       ) : null}
       <View style={{ marginTop: 2, gap: 4 }}>
         <Money amount={item.customerPrice ?? item.basePrice} tone={out ? 'muted' : 'brand'} numberOfLines={1} />
+        {itemVatNote(vat, item) ? <T variant="micro" tone="faint">{itemVatNote(vat, item)}</T> : null}
         {out ? (
           <T variant="micro" tone="warning">
             Sold out
@@ -160,7 +172,7 @@ function ProductTile({
 
 /** Service listing row: what it costs, how long it takes, where it happens —
  *  tapping opens the booking screen (slots), never a qty flow. */
-function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
+function ServiceRow({ item, onOpen, vat = null }: { item: any; onOpen: () => void; vat?: StorefrontVat | null }) {
   const cfg = (item.bookingConfig ?? {}) as { durationMinutes?: number; serviceMode?: string };
   const modeLabel =
     cfg.serviceMode === 'MOBILE' ? 'Comes to you' : cfg.serviceMode === 'BOTH' ? 'Your choice' : 'At their place';
@@ -177,9 +189,12 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             padding: space.md,
           }}
         >
+          {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+              beside the tile; squeezed into 64pt it broke across lines. */}
           <Photo
             uri={itemPhoto(item)}
             label={item.name}
+            showLabel={false}
             style={{ width: 64, height: 64, borderRadius: radius.md }}
             contentFit="cover"
           />
@@ -194,6 +209,7 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
               {/* [law 3] Money is ink — maroon stays on the acts. */}
               <Money amount={item.customerPrice ?? item.basePrice} />
+              {itemVatNote(vat, item) ? <T variant="micro" tone="faint">{itemVatNote(vat, item)}</T> : null}
             </View>
           </View>
           <View style={{ alignItems: 'center', gap: 2 }}>
@@ -211,6 +227,16 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
 // Kit 14–20: cover hero + floating chips, white sheet w/ name + info strip,
 // promos row, Recommended/Best-seller rails, then the full menu by category.
 export function RestaurantScreen() {
+  const route = useRoute<any>();
+  // [UI-SWEEP U10 S3-1] A store link or QR goes back to a store page already
+  // in the stack (navigate + pop) and hands the SAME mounted page the new
+  // store. The aisle, menu section, search and open sheets below belong to
+  // ONE store: a new store id is a new page, so store A's menu section can
+  // never empty store B's menu and A's report sheet can never file against B.
+  return <RestaurantStore key={route.params?.vendorId ?? ''} />;
+}
+
+function RestaurantStore() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
@@ -237,10 +263,12 @@ export function RestaurantScreen() {
   const cart = useCart<any>();
   // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
   const cartClearance = useCartBarClearance({ vendorId });
-  const addToCart = useAddToCart();
-  const updateCartItem = useUpdateCartItem();
+  // [TAP-AUDIT] + and − answer at the tap and add up; only that item has a request out (hooks/useCartSteppers).
+  const steppers = useCartSteppers(cart);
 
   const v = vendor.data;
+  // [STORE-VAT · owner O-5] Only a store whose VAT a person approved sends `vat`; every other store (and an older server) shows none.
+  const storeVat = storefrontVat(v?.vat);
   const categories: any[] = useMemo(() => v?.categories ?? [], [v?.categories]);
   const allItems = useMemo(() => categories.flatMap((c: any) => c.items ?? []), [categories]);
   const recommended = useMemo(() => allItems.filter((i: any) => i.isPopular).slice(0, 8), [allItems]);
@@ -264,8 +292,9 @@ export function RestaurantScreen() {
   })();
   const martItems = useMemo(() => {
     const base = aisleId ? (categories.find((c: any) => c.id === aisleId)?.items ?? []) : allItems;
-    const q = storeQuery.trim().toLowerCase();
-    return q ? base.filter((i: any) => String(i.name).toLowerCase().includes(q)) : base;
+    // Owner, 13 Oct: the in-store search forgives like the Search tab — any
+    // word order, a typed plural, one slip — exact matches first (lib/forgivingSearch).
+    return forgivingFilter(base, storeQuery, (i: any) => ({ name: i?.name, description: i?.description }));
   }, [aisleId, storeQuery, categories, allItems]);
 
   // Bounded render windows (see renderCap above). The mart grid is a flat slice;
@@ -289,7 +318,9 @@ export function RestaurantScreen() {
 
   if (vendor.isLoading) {
     return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <LoadingBlock />
       </View>
     );
@@ -297,6 +328,8 @@ export function RestaurantScreen() {
   if (vendor.isError || !v) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => vendor.refetch()} />
       </View>
     );
@@ -321,6 +354,7 @@ export function RestaurantScreen() {
       image={itemPhoto(item)}
       name={item.name}
       priceLabel={money(item.customerPrice ?? item.basePrice)}
+      priceNote={itemVatNote(storeVat, item)}
       onPress={() => openItem(item)}
     />
   );
@@ -344,7 +378,7 @@ export function RestaurantScreen() {
             colour; nothing here tints the image. */}
         <View>
           <Photo
-            uri={vendorPhoto(v)}
+            uri={vendorPhoto(v, HERO_PHOTO_WIDTH)}
             label={v.name}
             // The store's name is set ON this photo, in the title below — so
             // a store with no cover photo must not print it a second time in
@@ -417,7 +451,7 @@ export function RestaurantScreen() {
                 size={44}
                 active={!!v.isFavorite}
                 onPress={() =>
-                  isAuthenticated ? toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
+                  isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
                 }
               />
               <CircleChip
@@ -634,14 +668,12 @@ export function RestaurantScreen() {
                   <ProductTile
                     key={item.id}
                     item={item}
-                    line={lineFor(item.id)}
-                    busy={addToCart.isPending || updateCartItem.isPending}
+                    vat={storeVat}
+                    qty={steppers.qty(item.id, lineFor(item.id))}
+                    busy={false}
                     onOpen={() => openItem(item)}
-                    onAdd={() => guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))}
-                    onSetQty={(qty) => {
-                      const line = lineFor(item.id);
-                      if (line) updateCartItem.mutate({ id: line.id, quantity: qty });
-                    }}
+                    onAdd={() => guardAuth(() => steppers.set(item.id, lineFor(item.id), steppers.qty(item.id, lineFor(item.id)) + 1, { vendorId, itemId: item.id }))}
+                    onSetQty={(qty) => guardAuth(() => steppers.set(item.id, lineFor(item.id), qty, { vendorId, itemId: item.id }))}
                   />
                 ))}
               </View>
@@ -657,16 +689,16 @@ export function RestaurantScreen() {
               <SectionHeader title="Services" style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
               <View style={{ paddingHorizontal: GUTTER, paddingTop: space.lg, gap: space.md }}>
                 {allItems.map((item: any) => (
-                  <ServiceRow key={item.id} item={item} onOpen={() => openItem(item)} />
+                  <ServiceRow key={item.id} item={item} vat={storeVat} onOpen={() => openItem(item)} />
                 ))}
               </View>
             </>
           ) : (
             <>
-          {/* Recommended rail */}
+          {/* The store's own picks (its isPopular tick), named as such: never "Recommended for you". */}
           {recommended.length > 0 ? (
             <>
-              <SectionHeader title="Recommended for you" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
+              <SectionHeader title={STORE_PICKS_TITLE} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -720,7 +752,7 @@ export function RestaurantScreen() {
             .map((cat: any) =>
               (cat.items?.length ?? 0) > 0 ? (
                 <View key={cat.id}>
-                  <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <SectionPhotoHeader title={cat.name} imageUrl={cat.imageUrl} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
                   <View
                     style={{
                       marginHorizontal: GUTTER,
@@ -735,30 +767,24 @@ export function RestaurantScreen() {
                     {cat.items.map((item: any, idx: number) => {
                       const hasOptions = (item.optionGroups?.length ?? 0) > 0;
                       const line = lineFor(item.id);
-                      const qty = hasOptions ? 0 : (line?.quantity ?? 0);
+                      const shown = hasOptions ? 0 : steppers.qty(item.id, line);
+                      const tapTo = (next: number) => guardAuth(() => steppers.set(item.id, line, next, { vendorId, itemId: item.id }));
                       return (
                         <MenuRow
                           key={item.id}
                           name={item.name}
                           description={item.description}
                           price={item.customerPrice ?? item.basePrice}
+                          priceNote={itemVatNote(storeVat, item)}
                           image={itemPhoto(item)}
                           soldOut={item.stockQuantity === 0}
-                          qty={qty}
-                          busy={addToCart.isPending || updateCartItem.isPending}
+                          qty={shown}
+                          busy={false}
                           last={idx === cat.items.length - 1}
                           onOpen={() => openItem(item)}
-                          onAdd={() =>
-                            hasOptions
-                              ? openItem(item)
-                              : guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))
-                          }
-                          onInc={() => {
-                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) + 1 });
-                          }}
-                          onDec={() => {
-                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) - 1 });
-                          }}
+                          onAdd={() => (hasOptions ? openItem(item) : tapTo(shown + 1))}
+                          onInc={() => tapTo(shown + 1)}
+                          onDec={() => tapTo(shown - 1)}
                         />
                       );
                     })}
@@ -775,6 +801,15 @@ export function RestaurantScreen() {
               This store hasn’t published a menu yet.
             </T>
           ) : null}
+
+          {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {/* [STORE-VAT · VAT Act s.90(2)] A person-approved VAT store's prices include VAT, and the page says so. */}
+          {storefrontVatLine(storeVat) ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.lg, marginHorizontal: GUTTER }}>
+              {storefrontVatLine(storeVat)}
+            </T>
+          ) : null}
+          {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
 
@@ -845,18 +880,13 @@ export function RestaurantScreen() {
         open={reportOpen}
         onClose={() => setReportOpen(false)}
         title="Report this store"
-        actions={[
-          { key: 'SPAM', label: 'Misleading or spam' },
-          { key: 'ILLEGAL_GOODS', label: 'Selling something it shouldn’t' },
-          { key: 'HATE_SPEECH', label: 'Hateful content' },
-          { key: 'SEXUAL_CONTENT', label: 'Sexual content' },
-          { key: 'OTHER', label: 'Something else' },
-        ].map((reason) => ({
+        // [R19] the shared list, Child safety (CSAE) included
+        actions={STORE_REPORT_REASONS.map((reason) => ({
           label: reason.label,
           onPress: () => {
             setReportOpen(false);
             reportContent.mutate(
-              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key as never },
+              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key },
               {
                 onSuccess: () => toast.success('Thanks — our team will look', 'Reports are reviewed by a human.'),
                 onError: () => toast.error('Couldn’t send that report', 'Check your connection and try again.'),

@@ -11,9 +11,10 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { useAuthStore } from '../../../stores/authStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto } from '../../../lib/images';
-import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
+import { useRowHold } from '../../../lib/useRowHold';
 import {
+  AddMorph,
   Chip,
   EmptyState,
   ErrorState,
@@ -162,29 +163,15 @@ const MarketCard = React.memo(function MarketCard({ item, onOpen, onAdd, adding 
                   REGISTERED, not silently resolved: the screenshot is
                   the binding spec for this tab [WS-3.6]. */}
               <Money amount={item.basePrice} tone="brand" />
-              <Pressable
-                onPress={() => onAdd(item)}
-                disabled={adding}
-                accessibilityRole="button"
-                accessibilityLabel={`Add ${item.name} to cart`}
-                hitSlop={10}
-              >
-                {({ pressed: p2 }) => (
-                  <View
-                    style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: radius.full,
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      backgroundColor: color.brand[500],
-                      opacity: p2 || adding ? 0.7 : 1,
-                    }}
-                  >
-                    <Feather name="plus" size={18} color={color.white} />
-                  </View>
-                )}
-              </Pressable>
+              {/* [Triage row 113] THE shared add "+" (kit/add-morph): the same maroon circle as the menu rows. */}
+              <AddMorph
+                qty={0}
+                onAdd={() => onAdd(item)}
+                onInc={() => onAdd(item)}
+                onDec={() => {}}
+                busy={adding}
+                addLabel={`Add ${item.name} to cart`}
+              />
             </View>
           </View>
         </View>
@@ -223,27 +210,27 @@ export function MarketScreen() {
 
   const activeChip = chips.find((c) => c.slug === category);
 
-  const mutateCart = addToCart.mutate;
+  // [TAP-AUDIT] Only the card tapped waits for its add (one shared "adding" used to hold every card's + until the
+  // answer); a second tap on THAT card while it adds sends nothing; another card's add goes at once. Each answer is
+  // the card's own (its promise), so two adds in flight each say "added" or why not.
+  const addAsync = addToCart.mutateAsync;
+  const holdCard = useRowHold();
   const onAdd = useCallback((item: MarketItem) => {
     if (!isAuthenticated) { promptLogin(); return; }
-    haptic.select();
-    mutateCart(
-      { vendorId: item.vendorId, itemId: item.id, quantity: 1 },
-      {
-        onSuccess: () => toast.success(`${item.name} added`),
-        // The cart refuses a second vendor mid-order; that refusal is the
-        // server's to explain, so its words are shown rather than replaced.
-        onError: (e: any) =>
-          toast.error(e?.response?.data?.error?.message ?? 'Couldn’t add that — try again.'),
-      },
-    );
-  }, [isAuthenticated, promptLogin, mutateCart]);
+    // The haptic tick is AddMorph's (one per press).
+    holdCard(item.id, () => addAsync({ vendorId: item.vendorId, itemId: item.id, quantity: 1 }).then(
+      () => { toast.success(`${item.name} added`); },
+      // The cart refuses a second vendor mid-order; that refusal is the
+      // server's to explain, so its words are shown rather than replaced.
+      (e: any) => { toast.error(e?.response?.data?.error?.message ?? 'Couldn’t add that — try again.'); },
+    ));
+  }, [isAuthenticated, promptLogin, addAsync, holdCard]);
   const onOpen = useCallback((item: MarketItem) => {
     navigation.navigate('MenuItem', { itemId: item.id, vendorId: item.vendorId });
   }, [navigation]);
   const renderItem = useCallback(({ item }: { item: MarketItem }) => (
-    <MarketCard item={item} onOpen={onOpen} onAdd={onAdd} adding={addToCart.isPending} />
-  ), [onOpen, onAdd, addToCart.isPending]);
+    <MarketCard item={item} onOpen={onOpen} onAdd={onAdd} adding={holdCard.holds(item.id)} />
+  ), [onOpen, onAdd, holdCard]);
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>

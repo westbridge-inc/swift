@@ -67,6 +67,29 @@ export interface MmgDirectPaymentAction {
   url: string;
 }
 
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] On the customer's OWN order, once the store has accepted and
+ * until it marks the order "Paid by MMG": where to send the money, directly to the store, in MMG's app.
+ * Swift never holds, moves or confirms it. */
+export interface MmgStoreNumberPayment {
+  payTo: 'STORE_NUMBER';
+  provider: 'MMG';
+  fundsFlow: 'DIRECT_TO_VENDOR';
+  recipientName: string;
+  /** Canonical +592 mobile, e.g. "+5926001234". */
+  number: string;
+  /** How a person reads it, e.g. "+592 600 1234". */
+  numberDisplay: string;
+  /** The exact order total (goods + delivery fee + tip). */
+  amount: number;
+  currencyCode: string;
+  /** The server's own sentence: "Pay $X by MMG to <store>'s MMG number <number>." */
+  instruction: string;
+  /** [owner 18 Oct 2026] When the order cancels if the store has not marked it "Paid by MMG" (ISO). */
+  payBy?: string;
+  /** The server's sentence for it: "If <store> hasn't marked it paid by 3:45 PM, the order is cancelled automatically." */
+  deadline?: string;
+}
+
 export interface OrderCheckoutResult<TOrder = unknown> {
   order: TOrder;
   orders: TOrder[];
@@ -218,3 +241,7 @@ export interface OrderProjection {
 export interface LegacyOrderProjection extends Omit<OrderProjection, 'vertical'> {
   vertical?: undefined;
 }
+
+/** Persisted order-line substitution states, shared by every client. */
+export const SUBSTITUTION_STATUSES = ['NONE', 'PENDING', 'APPROVED', 'REJECTED', 'REFUNDED'] as const;
+export type SubstitutionStatus = (typeof SUBSTITUTION_STATUSES)[number];

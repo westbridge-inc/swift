@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import LoginPage from './page';
+import { axeViolations } from '@/test/axe';
 
 const mocked = vi.hoisted(() => ({
   query: '',
@@ -15,7 +16,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(mocked.query),
 }));
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
-vi.mock('@/lib/customer', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
+vi.mock('@/lib/customer-login', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
 vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> }));
 
 beforeEach(() => {
@@ -32,9 +33,10 @@ async function signIn(query: string) {
   const phone = screen.getByLabelText('Phone number');
   await user.clear(phone);
   await user.type(phone, '+5926001001');
-  await user.click(screen.getByRole('button', { name: 'Send code' }));
+  // [WEB-REDESIGN] The design's words: Continue, then Verify.
+  await user.click(screen.getByRole('button', { name: 'Continue' }));
   await user.type(await screen.findByLabelText('Verification code'), '246810');
-  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  await user.click(screen.getByRole('button', { name: 'Verify' }));
   await waitFor(() => expect(mocked.replace).toHaveBeenCalledTimes(1));
   return String(mocked.replace.mock.calls[0]?.[0]);
 }
@@ -54,6 +56,8 @@ describe('[Q7b] signing in from the customer app', () => {
     ['Market', '/market'],
     ['a store, on one item', '/order/vendor/v1?item=i1'],
     ['the cart', '/cart'],
+    ['an advertising account', '/advertiser'],
+    ['an advertising campaign', '/advertiser/campaigns/a1/c1'],
   ])('from %s is a customer sign-in that returns there', async (_name, next) => {
     expect(await signIn(`next=${encodeURIComponent(next)}`)).toBe(next);
     expect(mocked.verifyCustomerLogin).toHaveBeenCalledWith('+5926001001', '246810');
@@ -74,5 +78,14 @@ describe('[Q7b] signing in from the customer app', () => {
   it('refuses an off-site return, whatever it looks like', async () => {
     expect(await signIn(`next=${encodeURIComponent('//evil.example/')}`)).toBe('/dashboard');
     expect(mocked.verifyCustomerLogin).not.toHaveBeenCalled();
+  });
+});
+
+// [Row 111 · W8] The sign-in page, as a page.
+describe('[W8] sign-in is accessible', () => {
+  it('has no accessibility violations axe can find', async () => {
+    render(<LoginPage />);
+    await screen.findAllByRole('button');
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });

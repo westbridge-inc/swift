@@ -86,19 +86,28 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
   });
 
   it('serves role document checklists from config', async () => {
-    const moverDocs = await countryConfig.getDocumentChecklist('GY', 'MOVER');
-    expect(moverDocs).toContain('national_id');
+    // [VERIFY-DOCS · owner rulings 6 Oct 2026] No document is required of EVERY mover: identity
+    // comes with the vehicle (licence, or the national ID on a bicycle); the rest may be added.
+    expect(await countryConfig.getDocumentChecklist('GY', 'MOVER')).toEqual([]);
+    expect(await countryConfig.getDocumentChecklist('GY', 'MOVER_NO_LICENCE')).toEqual(['national_id']);
+    // [ROLE-DOCS · owner 21 Oct 2026] no optional document for every mover; a taxi driver may add a police clearance
+    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER', [])).toEqual([]);
+    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER_TAXI_EXTRA', [])).toEqual(['police_clearance']);
     const restaurantDocs = await countryConfig.getDocumentChecklist('GY', 'RESTAURANT');
-    expect(restaurantDocs).toContain('food_handler_cert');
+    // [FOOD-PERMIT · owner ruling 24 Oct 2026 — a DELIBERATE change to this pin] a registered restaurant's food handler's
+    // certificate is optional (its owner ticks for its food handlers instead); a home cook keeps it required
+    expect(restaurantDocs).not.toContain('food_handler_cert');
+    expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_OPTIONAL')).toEqual(['food_handler_cert']);
+    expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_UNREGISTERED')).toContain('food_handler_cert');
   });
 
   it('scales the mover checklist to the vehicle (no docs a vehicle can\'t have)', async () => {
-    // Police clearance is base (every courier — cash + home visits, master
-    // plan §3.2); only VEHICLE documents scale away. A car/taxi adds the
-    // occupational extras (hire permit, plate + exterior photos, fitness).
+    // [VERIFY-DOCS · owner rulings 6 Oct 2026] Police clearance is optional for every mover; a
+    // bicycle rider keeps the national ID (no licence). A car/taxi adds the occupational extras
+    // (hire permit, the car photo with the plate showing, fitness).
     const bicycle = await countryConfig.getMoverChecklist('GY', 'BICYCLE');
     expect(bicycle).toContain('national_id');
-    expect(bicycle).toContain('police_clearance');
+    expect(bicycle).not.toContain('police_clearance');
     expect(bicycle).not.toContain('drivers_licence');
 
     const motorcycle = await countryConfig.getMoverChecklist('GY', 'MOTORCYCLE');
@@ -108,7 +117,8 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
 
     const car = await countryConfig.getMoverChecklist('GY', 'CAR');
     expect(car).toContain('drivers_licence');
-    expect(car).toContain('police_clearance');
+    expect(car).not.toContain('police_clearance');
+    expect(car).not.toContain('vehicle_plate_photo');
     expect(car).toContain('vehicle_exterior_photo');
     expect(car).toContain('fitness_cert');
   });

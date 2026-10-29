@@ -16,6 +16,8 @@ export default defineConfig({
       DEV_OTP_BYPASS: '0',
       DATABASE_URL: 'postgresql://service-free:service-free@127.0.0.1:1/service_free',
       REDIS_URL: 'redis://127.0.0.1:1/15',
+      // [AUD-G7-040] the service-free target is a disposable name of its own.
+      TEST_TARGET_DB_ALLOWLIST: 'service_free',
     },
   },
 });

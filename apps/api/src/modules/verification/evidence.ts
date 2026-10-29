@@ -7,11 +7,15 @@
  *  - an image purged under its bucket's policy (`imagePurgedAt`, E2E-DOC-5) changes nothing;
  *  - the account's own records count, and so do the records of every VEHICLE subject the
  *    account holds an OPEN, APPROVED link to (a fleet's insurance serves every assigned
- *    driver) — [High #9 · DS109] a PENDING link (retyped plate) propagates nothing.
+ *    driver) — [High #9 · DS109] a PENDING link (retyped plate) propagates nothing, and
+ *    [SEC-TRUST F9] the registrant's link counts only on a person-approved paper of its own.
  * Used by the verification service (predicate, validity bound, live-operation gate) and
  * by the service-provider projection — one rule, one implementation.
  */
 import type { CoverageClass, Prisma, PrismaClient } from '@prisma/client';
+import { validExpiryOr } from './document-validity';
+import { HIRE_SPLIT_DOC_TYPES } from './hire-permit-grace';
+import { personApprovedOwnVehiclePaper } from './subjects';
 
 export type EvidenceDb = Prisma.TransactionClient | PrismaClient;
 
@@ -25,27 +29,55 @@ export interface EvidenceRow {
   coverageClass: CoverageClass | null;
   hireClassConfirmed: boolean;
   plateCrossChecked: boolean;
+  /** [ROLE-DOCS · PR 3] Who approved the record ('system' / 'kyc:auto' for an engine; else the reviewer's user id), and when. */
+  approvedBy: string;
+  approvedAt: Date;
 }
 
 export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
   if (checklist.length === 0) return [];
-  const vehicles = await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
-    select: { subjectId: true },
+  // [Owner ruling 15 Oct 2026 · no grace] The records alone. The old hire-car permit never stands in for the
+  // Hire Car Driver's Licence or the car's hire licence (the 6 Oct 60-day allowance is removed).
+  return recordEvidenceFor(db, userId, checklist, now);
+}
+
+/**
+ * [SEC-TRUST F9] The vehicle subjects whose evidence counts for this account: every OPEN, APPROVED link —
+ * except that the link of the account that REGISTERED the vehicle counts only while that account holds a
+ * paper of its own for the vehicle that a person approved (not revoked). Naming a plate first proves
+ * nothing, so another account's approved papers never stand in for the registrant's own. Read here, at
+ * evidence time, so it binds every approval path and every link however old (no data is rewritten).
+ * `asOf` also requires the link to have started (the go-online gate's reading).
+ */
+export async function countableVehicleSubjectIds(db: EvidenceDb, userId: string, asOf?: Date): Promise<string[]> {
+  const links = await db.subjectLink.findMany({
+    where: { accountId: userId, validTo: null, approvedAt: { not: null }, ...(asOf ? { validFrom: { lte: asOf } } : {}), subject: { kind: 'VEHICLE' } },
+    select: { subjectId: true, subject: { select: { createdById: true } } },
   });
-  const vehicleIds = vehicles.map((v) => v.subjectId);
+  const countable = new Set<string>();
+  for (const link of links) {
+    if (link.subject.createdById === userId && !(await personApprovedOwnVehiclePaper(db, userId, link.subjectId))) continue;
+    countable.add(link.subjectId);
+  }
+  return [...countable];
+}
+
+/** The records themselves: the evidence rule. */
+export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
+  const vehicleIds = await countableVehicleSubjectIds(db, userId);
   const records = await db.documentRecord.findMany({
     where: {
       docType: { in: [...checklist] },
       status: 'VALID',
       AND: [
-        { OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+        // [FOLLOWUPS ruling] valid through the end of its expiry day in Guyana (document-validity.ts)
+        { OR: validExpiryOr('expiresOn', now) },
         { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
         { submission: { purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
       ],
     },
     select: {
-      docType: true, expiresOn: true,
+      docType: true, expiresOn: true, approvedBy: true, approvedAt: true,
       submission: { select: { retentionExpiresAt: true, reviewedAt: true, userId: true, subjectId: true, coverageClass: true, hireClassConfirmed: true, plateCrossChecked: true } },
     },
   });
@@ -53,6 +85,7 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
     docType: r.docType, expiresAt: r.expiresOn, retentionExpiresAt: r.submission.retentionExpiresAt, reviewedAt: r.submission.reviewedAt,
     userId: r.submission.userId, subjectId: r.submission.subjectId, coverageClass: r.submission.coverageClass,
     hireClassConfirmed: r.submission.hireClassConfirmed, plateCrossChecked: r.submission.plateCrossChecked,
+    approvedBy: r.approvedBy, approvedAt: r.approvedAt,
   }));
 }
 
@@ -72,6 +105,8 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
  */
 export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], currentSubjectId?: string | null): Promise<boolean> {
   if (checklist.length === 0) return false;
+  // The hire licences require current evidence, never a legacy flag (and never the old permit: no grace).
+  if (checklist.some((type) => HIRE_SPLIT_DOC_TYPES.includes(type))) return true;
   // Historical links and retired submissions still establish that proof was
   // filed. A missing current record is not a never-filed legacy account.
   const vehicles = await db.subjectLink.findMany({

@@ -197,7 +197,7 @@ describe('deploy/.env.deploy.example — the template declares no secret', () =>
 
   it('documents the *_FILE wiring for the optional provider secrets it names', () => {
     for (const name of [
-      'TWILIO_API_KEY_SECRET', 'SMTP_PASS', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD',
+      'TWILIO_API_KEY_SECRET', 'TWILIO_WEBHOOK_AUTH_TOKEN', 'SMTP_PASS', 'RESEND_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD',
       'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
       'GOOGLE_MAPS_API_KEY_BACKEND', 'SENTRY_DSN', 'AGENT_CASH_WEBHOOK_SECRET',
       'SWIFT_BOOTSTRAP_PASSWORD', 'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET',
@@ -303,8 +303,13 @@ describe('scripts — no secret value ever rides in argv', () => {
 
   it('the backup unit takes the storage keys from systemd encrypted credentials, not the env file', () => {
     const unit = read('swift-backup.service');
-    expect(unit).toContain('LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred');
-    expect(unit).toContain('LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred');
+    // [SEC-BACKUP F1] From the BACKUP store, which `swift-secrets materialize` never copies for the
+    // containers: the backup bucket's own pair, its source, and the signing key. Never the API's pair.
+    for (const name of ['BACKUP_AWS_ACCESS_KEY_ID', 'BACKUP_AWS_SECRET_ACCESS_KEY', 'BACKUP_KEY_SOURCE', 'BACKUP_SIGNING_KEY']) {
+      expect(unit).toContain(`LoadCredentialEncrypted=${name}:/etc/credstore.encrypted/swift-backup/${name}.cred`);
+    }
+    expect(unit).not.toMatch(/^LoadCredentialEncrypted=AWS_/m);
+    expect(unit).not.toContain('/etc/credstore.encrypted/swift/');
     // No Environment= line SETS an AWS_ value: bare, quoted, or anywhere in a
     // multi-assignment line. (UnsetEnvironment= removes values; it is pinned below.)
     // Read it the way systemd does (systemd.syntax(7)): a trailing backslash joins
@@ -315,7 +320,7 @@ describe('scripts — no secret value ever rides in argv', () => {
     expect(unit).toContain('BACKUP_REQUIRED=1');
     // deploy/.env's container-only AWS_*_FILE pointers are unset on the host, so
     // secret-env.sh reaches the credential directory instead of /run/secrets.
-    expect(unit).toMatch(/^UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE$/m);
+    expect(unit).toMatch(/^UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE BACKUP_AWS_ACCESS_KEY_ID_FILE BACKUP_AWS_SECRET_ACCESS_KEY_FILE BACKUP_KEY_SOURCE_FILE BACKUP_SIGNING_KEY_FILE$/m);
   });
 
   it('the materialize unit is a oneshot that runs before Docker', () => {

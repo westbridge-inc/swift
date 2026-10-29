@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -23,6 +23,8 @@ import { AuthService } from '../modules/auth/auth.service';
 let app: FastifyInstance;
 const userIds: string[] = [];
 let seq = 0;
+// Referral codes are letters and digits only (customer.routes REFERRAL_CODE_SHAPE); nanoid() can give '-' or '_'.
+const codeSuffix = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', 4);
 const phoneBase = 592_002_000_000 + Math.floor(Math.random() * 8_000_000);
 // TEST-NET-3 address reserved for this suite: the per-IP daily budget key
 // must not accumulate against other suites across repeat runs.
@@ -34,7 +36,7 @@ async function makeUser(roles: ('CUSTOMER' | 'VENDOR_OWNER')[] = ['CUSTOMER']) {
     data: {
       phone: `+${phoneBase + seq}`, firstName: 'Ext', lastName: `U${seq}`,
       roles, activeRole: roles[0]!, isPhoneVerified: true,
-      customer: { create: { referralCode: `EXT${seq}${nanoid(4).toUpperCase()}` } },
+      customer: { create: { referralCode: `EXT${seq}${codeSuffix()}` } },
     },
     include: { customer: true },
   });

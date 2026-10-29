@@ -11,9 +11,10 @@ import {
   isBillingStopped,
   isBlocked,
   shortDate,
-  walletLine,
+  feePaidAheadLine,
   weeklyFeeGyd,
   billingStoppedLine,
+  stopBillingConfirmBody,
 } from '../../lib/billing';
 
 // ---------------------------------------------------------------------------
@@ -156,16 +157,17 @@ export function BillingStatusBlock({
   // amber CTA instead of a link buried under two lines of copy.
   if (isBehind(sub)) return <FeeReminderBanner sub={sub} onPay={onPay} style={style} />;
 
-  // Healthy — surface a parked wallet balance as reassurance (covers N weeks).
-  const wallet = walletLine(Number(sub.walletBalanceGyd ?? 0), weeklyFeeGyd(sub));
-  if (wallet) {
+  // Healthy — the next weekly fee already paid, as reassurance (owner #62:
+  // one week at a time, never "paid ahead"; the action is "Pay weekly fee").
+  const paidAhead = feePaidAheadLine(Number(sub.walletBalanceGyd ?? 0), weeklyFeeGyd(sub));
+  if (paidAhead) {
     return (
       <View style={[{ marginTop: space.md, flexDirection: 'row', alignItems: 'center', gap: space.sm }, style]}>
         <Feather name="check-circle" size={14} color={color.success} />
         <T variant="caption" weight="semibold" tone="success" style={{ flex: 1 }}>
-          {wallet}
+          {paidAhead}
         </T>
-        {onPay && !compact ? <LinkText label="Top up" onPress={onPay} /> : null}
+        {onPay && !compact ? <LinkText label="Pay weekly fee" onPress={onPay} /> : null}
       </View>
     );
   }
@@ -194,9 +196,14 @@ export function BillingStopControl({
   onStop,
   onResume,
   pending,
+  style,
 }: {
   sub: any;
   who: 'store' | 'driver' | 'rider';
+  /** [OWNER 21 Oct] The space around the control is the SCREEN's section
+   *  gap: a screen that stacks its cards with marginBottom passes it here,
+   *  or the button sits flush on the card below ("Your MMG number"). */
+  style?: ViewStyle;
   onStop: () => void;
   onResume: () => void;
   pending?: boolean;
@@ -206,12 +213,9 @@ export function BillingStopControl({
   const status = String(sub.status ?? '').toUpperCase();
   if (status === 'CANCELLED' || status === 'CHURNED') return null;
   const stopped = isBillingStopped(sub);
-  const blocked = isBlocked(sub);
-  const periodEnd = shortDate(sub?.currentPeriodEnd);
   const untilLine = billingStoppedLine(sub, who);
-  const confirmBody = blocked
-    ? `Your ${who} is already paused. Stopping means no more weekly fees will be charged — what you owe still stands until you pay it. You can resume billing anytime.`
-    : `Your ${who} keeps working until ${periodEnd ?? 'the end of the current period'}. After that, the ${who} stops receiving work and no more weekly fees are charged. You can resume billing anytime.`;
+  // [FEE-STATUS] Never "keeps working until" a period end that has passed.
+  const confirmBody = stopBillingConfirmBody(sub, who);
 
   return (
     <>
@@ -227,6 +231,7 @@ export function BillingStopControl({
             borderColor: withAlpha(color.brand[500], 0.25),
             backgroundColor: color.surface.base,
             padding: space.lg,
+            ...style,
           }}
         >
           <Feather name="pause-circle" size={18} color={color.brand[500]} />
@@ -245,7 +250,8 @@ export function BillingStopControl({
           label="Stop weekly billing"
           variant="outline"
           size="md"
-          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          // PillButton spreads its style into an object: pass one object.
+          style={{ alignSelf: 'stretch', marginTop: space.md, ...style }}
           onPress={() => setConfirmOpen(true)}
         />
       )}

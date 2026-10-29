@@ -34,12 +34,26 @@ export const SECRET_FILE_NAMES = [
   'MASTER_KEK',
   'STORAGE_SIGNING_SECRET',
   'STORAGE_SIGNING_SECRET_PREVIOUS',
+  // [AUD-G7-023] The emergency-number policy signing key (Ed25519 derived from
+  // it; the app pins the public half). Read by the API process only, generated
+  // ON the host by deploy/owner/emergency-policy-key.command.
+  'EMERGENCY_POLICY_SIGNING_KEY',
   'CONSENT_IP_PEPPER',
   // Search.
   'MEILISEARCH_KEY',
   // Notifications.
   'TWILIO_API_KEY_SECRET',
+  // [R22] The account token Twilio signs inbound STOP requests with
+  // (sms-inbound.routes.ts). Verification only, under its own name: the
+  // outbound adapter never reads it (deploy/TWILIO.md).
+  'TWILIO_WEBHOOK_AUTH_TOKEN',
+  // [O-1] Swift's number for the call bridge's caller ID, entered by the owner
+  // at a hidden prompt (helper 21) into the secret store, never a compose file.
+  'CALL_RELAY_CALLER_ID',
   'SMTP_PASS',
+  // [EMAIL-HTTPS] Resend's API key (EMAIL_PROVIDER=resend), set by the owner
+  // at a hidden prompt into the store.
+  'RESEND_API_KEY',
   // [L04] Non-production SMS recipient allowlist: phone numbers are personal
   // data, so they arrive by file from the store, never in a compose file.
   'SMS_RECIPIENT_ALLOWLIST',
@@ -57,6 +71,11 @@ export const SECRET_FILE_NAMES = [
   'PAYMENT_GATEWAY_KEY',
   'PAYMENT_GATEWAY_SECRET',
   'STRIPE_SECRET_KEY',
+  // [PT-4] The real card provider's credentials (its guide, sec. 4): the
+  // merchant id and password, and the gateway key once the provider issues one.
+  'POWERTRANZ_ID',
+  'POWERTRANZ_PASSWORD',
+  'POWERTRANZ_GATEWAY_KEY',
   // Object storage (documents, and the backup bucket).
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',
@@ -66,9 +85,11 @@ export const SECRET_FILE_NAMES = [
   'METRICS_TOKEN',
   'HEALTH_DETAIL_TOKEN',
   'SWIFT_BOOTSTRAP_PASSWORD',
-  // The key both halves of a two-person seed or promotion approval are signed
-  // with (seed-plan.ts). Only the one-off seed ceremony container reads it.
-  'SEED_PLAN_SECRET',
+  // [PROD-PATH] The seed ceremony approvers' pinned PUBLIC keys, one
+  // `<name> ssh-ed25519 <key>` per line (approver-signatures.ts). Not a secret,
+  // but pinned in the root-only store so nobody can swap an approver's key.
+  // Only the one-off seed ceremony container reads it.
+  'SEED_APPROVER_KEYS',
   // Keyed hashes and signatures: the salts and the ads token secret are
   // required in production and generated; the cursor and velocity secrets
   // fall back to the session secret and may be delivered separately.

@@ -1,11 +1,13 @@
 import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
+import type {} from '@fastify/rate-limit';
 import { AppError } from '../utils/errors';
-import { ZodError } from 'zod';
+import { ZodError } from '../lib/zod';
 import { isDevelopment } from '../utils/runtime-mode';
 import { requestLogContext } from '../utils/logger-config';
+import { captureError } from '../plugins/observability';
 
 export function registerErrorHandler(app: FastifyInstance) {
-  app.setErrorHandler((error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
+  const respond = (error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
     // Zod validation errors
     if (error instanceof ZodError) {
       const details: Record<string, string[]> = {};
@@ -116,11 +118,31 @@ export function registerErrorHandler(app: FastifyInstance) {
         message: isDevelopment() ? error.message : 'An unexpected error occurred',
       },
     });
+  };
+
+  app.setErrorHandler((error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
+    const sent = respond(error, request, reply);
+    // [OBS-1] The ONE HTTP capture site: 5xx = our fault → the error tracker;
+    // 4xx is the caller's problem and stays out. Decided on the status this
+    // handler just SET, not the thrown error's own statusCode — a ZodError
+    // (400) or a Prisma not-found (404) has none. Route TEMPLATE, never the
+    // raw URL: /track/:token must not leak its token [REPORT-013 F-013-04].
+    if (reply.statusCode >= 500) {
+      try {
+        captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
+      } catch {
+        // The tracker must never break the error response already on its way.
+      }
+    }
+    return sent;
   });
 
   // 404 handler. Echo only the path — never the query string (reflected
   // attacker input has no business in responses) — and cap the length.
-  app.setNotFoundHandler((request, reply) => {
+  // A path no route matched is behind the same rate limiter as every route:
+  // the limiter's per-route hook never runs for it, so without this a caller
+  // could send unmatched requests without any ceiling.
+  app.setNotFoundHandler({ preHandler: notFoundRateLimit(app) }, (request, reply) => {
     const path = request.url.split('?')[0]!.slice(0, 200);
     reply.status(404).send({
       success: false,
@@ -130,4 +152,22 @@ export function registerErrorHandler(app: FastifyInstance) {
       },
     });
   });
+}
+
+/**
+ * The limiter's own pre-handler for the not-found handler, resolved on the
+ * first unmatched request: app.ts registers the error handler BEFORE the
+ * rate-limit plugin, so `app.rateLimit` does not exist yet when the not-found
+ * handler is set. An app with no limiter registered (a bare test app) answers
+ * the plain 404.
+ */
+function notFoundRateLimit(app: FastifyInstance) {
+  let limiter: ReturnType<FastifyInstance['rateLimit']> | null = null;
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (!limiter) {
+      if (!app.hasDecorator('rateLimit')) return;
+      limiter = app.rateLimit();
+    }
+    await limiter.call(app, request, reply);
+  };
 }

@@ -6,9 +6,10 @@ import { AppError } from '../utils/errors';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 
 // The founder's question, answered as tests: when one person books a time,
-// nobody else can hold the same time — not by UI politeness but by the live
-// partial unique (bookings_item_slot_live_key). And the slot they took stops
-// being OFFERED to everyone else.
+// nobody else can hold the same time — not by UI politeness but by the
+// business's lock and overlap rule, and for a one-at-a-time business the
+// database's exclusion (bookings_vendor_one_at_a_time) [BOOK-S1]. And the slot
+// they took stops being OFFERED to everyone else.
 
 const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
 
@@ -108,7 +109,8 @@ describe('one slot, one person — the exclusivity law', () => {
 
     const first = await svc.reserveSlot(item.id, a.id, slot);
     await expect(svc.reserveSlot(item.id, b.id, slot)).rejects.toThrow('just taken');
-    await svc.cancelBooking(first.id, a.id);
+    // [BOOK-S2] A bare booking has no order to cancel through (the dead BookingService.cancelBooking is gone): the row is cancelled as the coupling seam would.
+    await prisma.booking.update({ where: { id: first.id }, data: { status: 'CANCELLED' } });
     const second = await svc.reserveSlot(item.id, b.id, slot);
     expect(second.customerId).toBe(b.id);
   });

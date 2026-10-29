@@ -17,6 +17,16 @@ import { VERTICAL_TINT } from '../../../mobile/src/kit/vertical-tint';
  * modules keeps one token authority until the package manifest can be wired by
  * the integration owner. No colour or layout value is duplicated here.
  */
+/**
+ * [WEB-REDESIGN] The two typefaces of the brand (packages/ui §Type), as the web
+ * names them. The files are self-hosted under public/fonts (OFL, with their
+ * licences) because the site's CSP allows fonts from 'self' only.
+ */
+export const webFont = {
+  display: 'Bricolage Grotesque',
+  body: 'Hanken Grotesk',
+} as const;
+
 type SwiftCssVariables = CSSProperties & Record<`--${string}`, string | number>;
 type StorefrontVertical = 'food' | 'groceries' | 'shops' | 'services';
 
@@ -49,6 +59,9 @@ export const swiftDesignVariables: SwiftCssVariables = {
   '--swift-ink': color.text.primary,
   '--swift-muted': color.text.secondary,
   '--swift-muted-soft': color.text.muted,
+  // [WEB-LAUNCH-CHECK F2] Grey text on the soft-pink panel (--swift-subtle):
+  // the plain grey is 4.32:1 there; this one step darker is 5.0:1 (WCAG AA 4.5:1).
+  '--swift-muted-on-subtle': '#6E6262',
   '--swift-canvas': color.surface.subtle,
   '--swift-card': color.surface.base,
   '--swift-sunken': color.surface.sunken,
@@ -123,6 +136,24 @@ export const swiftDesignVariables: SwiftCssVariables = {
   '--swift-leading-num-l': px(typeScale.numL.lineHeight),
   '--swift-type-num-m': px(typeScale.numM.fontSize),
   '--swift-leading-num-m': px(typeScale.numM.lineHeight),
+
+  '--swift-radius-sheet': px(radius.sheet),
+
+  // [WEB-REDESIGN] The web faces. React Native names one family per weight
+  // ('Bricolage', 'HankenSemiBold'…); the browser names the family once and
+  // picks the weight, so the site's @font-face (app/globals.css) declares both:
+  // these two for new markup, and the per-weight names above for the rest.
+  '--swift-face-display': `'${webFont.display}'`,
+  '--swift-face-body': `'${webFont.body}'`,
+
+  '--swift-soft-success': color.soft.success,
+  '--swift-soft-warning': color.soft.warning,
+  '--swift-soft-danger': color.soft.danger,
+  '--swift-soft-info': color.soft.info,
+  '--swift-red-100': color.brand[100],
+  '--swift-ink-pressed': color.dark.pressed,
+  '--swift-skeleton': color.skeleton.base,
+  '--swift-skeleton-highlight': color.skeleton.highlight,
 
   '--swift-elevation-card': elevation.card.boxShadow,
   '--swift-elevation-raised': elevation.raised.boxShadow,

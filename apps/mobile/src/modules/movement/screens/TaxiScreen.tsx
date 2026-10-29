@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
+import { ROAD_ROUTING_UNAVAILABLE_COPY } from '../../../lib/roadRouting';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,11 +14,11 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
-import { fareBreakdownOf, liveWaiting, waitingDisclosure } from '../../../lib/taxiWaiting';
+import { fareBreakdownOf, liveWaiting, waitingDisclosure, waitingEcho } from '../../../lib/taxiWaiting';
 import { AddStopRow, RideItinerary, RouteLegs, StopNumber, StopRows, WaitingCard, oneFareLine } from '../TaxiStops';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
@@ -33,12 +34,11 @@ import { safetyApi, type RideClass, type RideRequestBody, type TierEstimate } fr
 import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
-import { openExternal } from '../../../lib/openExternal';
-import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
+import { CallParty } from '../../../components/CallParty';
+import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
-import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
-import { taxiDoorFor } from '../../../lib/taxiDoors';
+import { noDriverView } from '../../../lib/taxiNoDriver';
 import { TaxiSignedOut } from '../TaxiSignedOut';
 import { signInForTaxi } from '../taxiEntry';
 
@@ -384,9 +384,13 @@ function TaxiBooking({ navigation }: any) {
       : `You can add up to ${maxStops} ${maxStops === 1 ? 'stop' : 'stops'} now, so we removed the last ${dropped === 1 ? 'one' : dropped}. Check your trip before you book.`);
   }, [pickedStops.length, maxStops]);
 
-  const { data: estimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
+  const { data: quotedEstimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
   const estimateErrorBody = (estimateError as any)?.response?.data?.error;
   const estimateErrorCode: string | undefined = estimateErrorBody?.code;
+  const routingUnavailable = estimateErrorCode === 'ROUTE_UNAVAILABLE';
+  // React Query can retain a prior price after a failed refresh. A road
+  // refusal makes that price unavailable for booking until a fresh quote lands.
+  const estimate = routingUnavailable ? undefined : quotedEstimate;
   // The switch moved under a quote: re-read how many stops this server takes.
   useEffect(() => {
     if (estimateErrorCode === 'MULTI_STOP_UNAVAILABLE' || estimateErrorCode === 'TOO_MANY_STOPS') void capabilities.refetch();
@@ -414,6 +418,8 @@ function TaxiBooking({ navigation }: any) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
         <LoadingBlock />
+        {/* [BUG-GUARDS C4] A slow ride read is no trap: Back stays on screen while it loads. */}
+        <FloatingBack navigation={navigation} insets={insets} />
       </View>
     );
   }
@@ -460,21 +466,21 @@ function TaxiBooking({ navigation }: any) {
   const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
   // A refusal about stops is said in the app's own short words; every other
   // refusal keeps the server's message, as before.
-  const errMsg = stopRefusalCopy(errBody?.error?.code, errBody?.error?.details) ?? errBody?.error?.message ?? errBody?.message;
-  const estimateStopCopy = stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
+  const errMsg = stops.length === 0 && errBody?.error?.code === 'ROUTE_UNAVAILABLE'
+    ? ROAD_ROUTING_UNAVAILABLE_COPY
+    : stopRefusalCopy(errBody?.error?.code, errBody?.error?.details) ?? errBody?.error?.message ?? errBody?.message;
+  const estimateStopCopy = stops.length === 0 && routingUnavailable
+    ? ROAD_ROUTING_UNAVAILABLE_COPY
+    : stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
-  // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  // [E27] The profile photo is asked for here, not at sign-in: the same door.
-  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
-  const needsL2 = door === 'identity';
-  const needsSelfie = door === 'selfie';
+  // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] A ride needs no ID (and, since 16 Oct, no
+  // photo), so the screen opens no ID door: the server no longer refuses a ride for it.
   // Joining the queue passes the same account gates as a request (the route
-  // and the queue share one authority boundary), so its refusal must show,
-  // with the same doors — never a silent tap.
+  // and the queue share one authority boundary), so its refusal must show —
+  // never a silent tap.
   const queueErrBody = (joinQueue.error as any)?.response?.data;
   const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
-  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -499,15 +505,21 @@ function TaxiBooking({ navigation }: any) {
         }
       : null;
 
-  // [TAXI multi-stop] The request body: today's exactly when there are no
-  // stops; with stops, the stops in the passenger's order and the fare of the
-  // chosen class from the quote of exactly this itinerary (the server checks it).
+  // [TAXI multi-stop · PRICE-LOCK] The request body carries the fare of the
+  // chosen class from the quote on screen, so the server books only at the
+  // fare the passenger saw (409 FARE_CHANGED refetches the quote otherwise).
+  // With stops, the stops too, in the passenger's order; a ride with stops is
+  // never sent without its fare.
+  // [TAXI waiting charge · quote proof] With the fare, the waiting terms shown
+  // beside it (waitingTerms below), so the server books the terms the passenger saw.
   const requestPayload = (): RideRequestBody | null => {
     const base = tripPayload();
     if (!base) return null;
-    if (stops.length === 0) return base;
+    const echo = waitingEcho(estimate);
+    const quote = (fare: number) => ({ expectedFare: fare, ...(echo ? { waiting: echo } : {}) });
+    if (stops.length === 0) return selectedTier ? { ...base, ...quote(selectedTier.fare) } : base;
     if (!selectedTier) return null;
-    return { ...base, stops: stopsWire, expectedFare: selectedTier.fare };
+    return { ...base, stops: stopsWire, ...quote(selectedTier.fare) };
   };
 
   const onRequest = () => {
@@ -698,7 +710,7 @@ function TaxiBooking({ navigation }: any) {
                     </T>
                   ) : (
                     <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                      Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                      Fare estimate · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                     </T>
                   )}
                   {waitingTerms ? (
@@ -733,22 +745,6 @@ function TaxiBooking({ navigation }: any) {
               {errMsg}
             </T>
           ) : null}
-          {needsL2 ? (
-            <PillButton
-              label="Verify your ID — takes a minute"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('IdentityVerification')}
-            />
-          ) : null}
-          {needsSelfie ? (
-            <PillButton
-              label="Add your photo — your driver sees it"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('Selfie')}
-            />
-          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -778,11 +774,13 @@ function TaxiBooking({ navigation }: any) {
             // 5.5A — the flagship fix: real counts, a queue, no apology.
             <Card style={{ marginTop: space.lg }}>
               <T variant="title">
-                {(counts?.online ?? 0) === 0
-                  ? 'No drivers online right now'
-                  : (counts?.busy ?? 0) >= (counts?.online ?? 0)
-                    ? 'All drivers are busy'
-                    : 'No eligible driver available for this request'}
+                {!counts
+                  ? 'No eligible driver available for this request'
+                  : counts.online === 0
+                    ? 'No drivers online right now'
+                    : counts.busy >= counts.online
+                      ? 'All drivers are busy'
+                      : 'No eligible driver available for this request'}
               </T>
               {counts ? (
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
@@ -793,20 +791,28 @@ function TaxiBooking({ navigation }: any) {
                 label="Join the queue"
                 style={{ marginTop: space.md }}
                 loading={joinQueue.isPending}
-                disabled={!tripPayload() || stops.length > 0}
+                // [PRICE-LOCK · row 448] Like Request, Join needs the fare on screen:
+                // nobody joins the line without seeing what they pay (the join
+                // carries it as expectedFare, and the queue books only at it).
+                disabled={!tripPayload() || !selectedTier || stops.length > 0}
                 onPress={() => {
                   const payload = tripPayload();
                   // [TAXI multi-stop] The queue never holds stops (v1): a trip
                   // with stops is not silently queued without them.
-                  if (payload && stops.length === 0) {
+                  if (payload && selectedTier && stops.length === 0) {
                     if (!pickupOverride && pickup) setPickupOverride(pickup);
-                    joinQueue.mutate(payload);
+                    joinQueue.mutate({ ...payload, expectedFare: selectedTier.fare });
                   }
                 }}
               />
               {!tripPayload() ? (
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
+                </T>
+              ) : null}
+              {tripPayload() && !selectedTier && stops.length === 0 ? (
+                <T variant="caption" tone="muted" center testID="taxi-queue-needs-fare" style={{ marginTop: space.sm }}>
+                  You join the line at the fare you see — waiting for the fare.
                 </T>
               ) : null}
               {stops.length > 0 ? (
@@ -818,22 +824,6 @@ function TaxiBooking({ navigation }: any) {
                 <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
                   {queueErrMsg}
                 </T>
-              ) : null}
-              {queueDoor === 'selfie' ? (
-                <PillButton
-                  label="Add your photo — your driver sees it"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('Selfie')}
-                />
-              ) : null}
-              {queueDoor === 'identity' ? (
-                <PillButton
-                  label="Verify your ID — takes a minute"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('IdentityVerification')}
-                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}
@@ -1087,15 +1077,19 @@ function AssignedRideCard({
             </View>
           ) : <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>New on Swift</T>}
         </View>
-        {driver.user?.phone ? (
-          <PillButton
-            label="Call"
-            variant="soft"
-            size="md"
-            icon="phone"
-            onPress={() => void openExternal(`tel:${driver.user.phone}`, "Couldn't start the call — dial your driver directly.")}
-          />
-        ) : null}
+        {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+        <CallParty orderId={ride?.id} target="driver" phone={driver.user?.phone} dialFailText="Couldn't start the call — dial your driver directly.">
+          {(call) => (
+            <PillButton
+              label={call.label}
+              variant="soft"
+              size="md"
+              icon="phone"
+              disabled={call.busy}
+              onPress={call.onPress}
+            />
+          )}
+        </CallParty>
       </View>
 
       {showStartCode ? (
@@ -1109,9 +1103,10 @@ function AssignedRideCard({
 
       <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginTop: space.lg, paddingTop: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color.border.subtle }}>
         <View style={{ flex: 1 }}>
-          <T variant="micro" tone="faint">Fare · cash</T>
+          <T variant="micro" tone="faint">Fare</T>
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Paid straight to the driver: cash or MMG, no in-app pay link. */}
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-            Pay the driver directly.
+            Pay the driver cash or MMG at drop-off.
           </T>
         </View>
         <Money amount={fare} size="l" />
@@ -1147,9 +1142,6 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   // Without this the rider sits on the "Contacting drivers…" spinner forever.
   const [exhausted, setExhausted] = useState(false);
   const [sosConfirm, setSosConfirm] = useState(false);
-  const sos = useRideSos();
-  // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
-  const sosCountry = useAuthStore((st) => st.countryCode);
   // Named in the share so a relative knows whose ride they are watching.
   const myFirstName = useAuthStore((st) => st.user?.firstName ?? null);
   const riderLoc = useLocationStore();
@@ -1239,6 +1231,12 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
       s.emit('order:unsubscribe', { orderId: ride.id });
     };
   }, [d?.id, navigation, ride?.id]);
+  // [#2022 review S3-1] A driver landing on the ride ends the empty search the
+  // live event spoke about: if that driver later drops it, the new search is
+  // judged on its own (the server's noDriverFound counts only searches since).
+  useEffect(() => {
+    if (d?.id) setExhausted(false);
+  }, [d?.id]);
 
   // THE CHECK-IN CARD MUST SURVIVE A CLOSED APP.
   //
@@ -1283,10 +1281,19 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
 
   // Ticking clock so the "is the fix stale?" check re-evaluates without a new
   // event — a DEAD feed sends nothing, so only a timer can notice the silence.
+  // [TAXI-FLOW 22 Oct] Only while a driver's feed exists: the staleness check
+  // is its one reader, and ticking before that re-rendered the whole ride
+  // screen — map included — every 3 s for nothing while the rider waited.
+  const feedLive = lastFixAt != null;
   useEffect(() => {
+    if (!feedLive) return;
+    setNowTs(Date.now());
     const t = setInterval(() => setNowTs(Date.now()), 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [feedLive]);
+  // The honest "nobody has taken it yet" card: the server's facts on a
+  // reopened app, the live socket event while open (taxiNoDriver.ts).
+  const noDriver = noDriverView(ride, exhausted, nowTs, { rematching });
 
   const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
   const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);
@@ -1382,7 +1389,16 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   const showStartCode = !!d
     && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
     && !pinVerified;
-  const canCancelRide = !pinVerified
+  // [owner #50] The server's verdict decides (`canCancel` on the ride read):
+  // free while no driver has accepted, inside the free-cancel window after acceptance (one minute, owner ruling 22 Oct;
+  // the server's FREE_CANCEL_WINDOW_MIN decides), or when
+  // the driver is very late — otherwise the passenger contacts the driver. A
+  // server that does not say yet leaves the old status rule in charge.
+  const serverAllowsCancel = typeof ride.canCancel === 'boolean' ? ride.canCancel : true;
+  const cancelUnavailableMessage: string | null = !serverAllowsCancel && typeof ride.cancelUnavailable?.message === 'string'
+    ? ride.cancelUnavailable.message
+    : null;
+  const canCancelRide = serverAllowsCancel && !pinVerified
     && ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status);
 
   useEffect(() => {
@@ -1406,6 +1422,13 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   // the old text carried now lives on that page, where it can be taken back.
   // The link outlives this render, so the sharer can be shown what they gave
   // away — and can take it back — rather than the app forgetting immediately.
+  const shareOwner = useAuthStore((st) => st.user?.id);
+  const sharesKey = ['trip-shares', shareOwner, ride.id];
+  const ownedShares = useQuery({
+    queryKey: sharesKey,
+    queryFn: async () => (await safetyApi.tripShares(ride.id)).data.data as Array<{ id: string; expiresAt: string }>,
+    refetchInterval: 30_000,
+  });
   const [activeShare, setActiveShare] = useState<MintedShare | null>(null);
   const [shareError, setShareError] = useState<string | null>(null);
   const shareMutation = useMutation({
@@ -1425,9 +1448,9 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   });
 
   const revokeMutation = useMutation({
-    mutationFn: (token: string) => safetyApi.revokeTripShare(token),
-    onSuccess: () => { setActiveShare(null); setShareError(null); },
-    onError: () => setShareError('We could not stop the link. Try again — it expires on its own either way.'),
+    mutationFn: () => safetyApi.revokeAllTripShares(ride.id),
+    onSuccess: () => { setActiveShare(null); setShareError(null); void queryClient.invalidateQueries({ queryKey: sharesKey }); },
+    onError: () => setShareError('We could not stop sharing. Try again.'),
   });
 
   const shareTrip = () => {
@@ -1435,6 +1458,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
     shareMutation.mutate(undefined, {
       onSuccess: (minted) => {
         setActiveShare(minted);
+        void queryClient.invalidateQueries({ queryKey: sharesKey });
         Share.share({ message: shareMessage(minted, myFirstName) }).catch(() => {});
       },
     });
@@ -1595,21 +1619,21 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               </T>
               <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
                 {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
-                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash to the driver
+                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · pay the driver cash or MMG at drop-off
                 {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
               </T>
             </>
           )}
 
-          {d ? null : exhausted ? (
-            /* Terminal dead state — honest, not an endless spinner. */
+          {d ? null : noDriver ? (
+            /* Dead state — honest, not an endless spinner. */
             <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
               <IconChip icon="alert-circle" size={52} tone="error" />
               <T variant="body" weight="semibold" center style={{ marginTop: space.md }}>
-                No driver available right now
+                {noDriver.title}
               </T>
               <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
-                No driver accepted this request. You can keep waiting or cancel.
+                {noDriver.body}
               </T>
             </View>
           ) : (
@@ -1665,19 +1689,30 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               />
             ) : null}
           </View>
+          {/* [owner #50] One minute after the driver accepted (owner 22 Oct; was five), the passenger contacts the
+              driver — the server's own words; the driver card above has the call. */}
+          {cancelUnavailableMessage && !pinVerified ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{cancelUnavailableMessage}</T>
+          ) : null}
 
           {/* [S-16] What the sharer gave away, and the way back.
               A live location link with no stated end is one a person forgets
               they created — so the window and the stop control sit together,
               because they answer the same worry. */}
-          {activeShare ? (
+          {activeShare || ownedShares.data?.length ? (
             <View style={{ marginTop: space.md, gap: space.sm }}>
-              <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T>
+              {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T> : null}
+              {ownedShares.data?.length ? (
+                <T variant="caption" tone="muted">
+                  {ownedShares.data.length === 1 ? '1 live link for this ride.' : `${ownedShares.data.length} live links for this ride.`}
+                </T>
+              ) : null}
               <PillButton
-                label="Stop sharing"
+                label="Stop all sharing"
                 variant="outline"
                 loading={revokeMutation.isPending}
-                onPress={() => revokeMutation.mutate(activeShare.token)}
+                disabled={shareMutation.isPending}
+                onPress={() => revokeMutation.mutate()}
               />
             </View>
           ) : null}
@@ -1694,13 +1729,16 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
           Cancel this ride?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {/* [owner #50] Never a fee, and never a "free" the app authored itself
+              (DS1141 S1): the server's own words when it gives them. */}
           {d
             ? arrived
-              ? 'Your driver has arrived. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+              ? 'Your driver has arrived. Cancelling frees your driver for other rides.'
               : status === 'DRIVER_EN_ROUTE'
-                ? 'Your driver is already on the way. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
-                : 'Your driver accepted the ride. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+                ? 'Your driver is already on the way. Cancelling frees your driver for other rides.'
+                : 'Your driver accepted the ride. Cancelling frees your driver for other rides.'
             : 'We’ll stop looking for a driver.'}
+          {typeof ride.cancellationMessage === 'string' ? ` ${ride.cancellationMessage}` : ''}
         </T>
         {cancelRideError ? (
           <T variant="body" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
@@ -1720,17 +1758,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               {
                 onSuccess: (result: any) => {
                   const message = typeof result?.message === 'string' ? result.message : 'Ride cancelled.';
-                  const fee = typeof result?.cancellationFee === 'number' && Number.isFinite(result.cancellationFee)
-                    ? result.cancellationFee
-                    : null;
-                  toast.show(
-                    message,
-                    fee == null
-                      ? 'Cancellation confirmed.'
-                      : fee > 0
-                        ? `A ${money(fee)} cancellation fee was recorded. Swift does not collect ride money.`
-                        : 'No cancellation fee was recorded.',
-                  );
+                  toast.show(message, 'Cancellation confirmed.');
                   setConfirmCancel(false);
                 },
                 onError: (error: any) => {
@@ -1760,58 +1788,32 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
         />
       </PopupCard>
 
-      {/* SOS confirm — a deliberate two-step so it isn't triggered by accident,
-          then records the incident + pages ops AND dials local emergency. */}
-      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
-        <IconChip icon="alert-triangle" size={56} tone="error" />
-        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Get emergency help?
-        </PopupTitle>
-        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {emergencyDialCopy(previewEmergencyDial(sosCountry))} Swift also saves the alert and any available location on this trip’s record. Use only in a real emergency.
-        </T>
-        <PillButton
-          label="Yes — get help now"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          loading={sos.isPending}
-          onPress={() => {
-            setSosConfirm(false);
-            // 911 is THE action — dial first, never behind anything else. Swift
-            // records evidence; it is not an emergency responder and the copy
-            // must never imply a staffed safety desk [liability shield].
-            // [MOB-018] The market's emergency number, not a hard-coded 911: a
-            // verified number dials at once, an unverified candidate dials on this
-            // explicit tap (the popup named it), no number means the manual sheet.
-            const emergency = currentMarketDial('police');
-            if (emergency.kind !== 'manual') void openExternal(telUrl(emergency.number), `Couldn't start the call — dial ${emergency.number} directly.`);
-            // [F-028-08] Only a GRANTED fix may speak for the passenger.
-            // The old existence check preferred persisted coordinates over
-            // the LIVE driver position, so after a permission refusal an SOS
-            // could page ops with wherever the phone last was — on the one
-            // payload where a wrong location sends help to the wrong place.
-            // Stale-but-granted beats nothing; live driver beats stale rider;
-            // an honest "unknown" beats both when that is the truth.
-            const riderFix = grantedLocationFix(riderLoc.latitude, riderLoc.longitude, riderLoc.status);
-            const coords = riderFix
-              ? { lat: riderFix.latitude, lng: riderFix.longitude }
-              : freshDriverLoc
-                ? { lat: freshDriverLoc.latitude, lng: freshDriverLoc.longitude }
-                : undefined;
-            sos.mutate(
-              { id: ride.id, coords },
-              {
-                onError: () => {
-                  toast.error(
-                    'Swift could not save the SOS alert',
-                    'The emergency call was still started. Tell the 911 operator where you are.',
-                  );
-                },
-              },
-            );
-          }}
-        />
-        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
-      </PopupCard>
+      {/* SOS — the one SOS ceremony every surface uses [AUD-L5b-009]: a
+          deliberate two-step that dials the market's emergency number first,
+          stays up through the raise and shows the SERVER's answer, says loudly
+          when Swift was NOT alerted (with a retry and the emergency call), and
+          once pressed is never hidden by a stray tap outside. The ride keeps
+          its own immediate route, /rides/:id/sos. A ride with no id names no
+          record: no SOS is sent, and the emergency call is offered instead. */}
+      <SosCeremony
+        visible={sosConfirm}
+        onClose={() => setSosConfirm(false)}
+        context={{ rideId: ride?.id ?? '' }}
+        recordNoun="trip"
+        getCoords={() => {
+          // [F-028-08] Only a GRANTED fix may speak for the passenger.
+          // Stale-but-granted beats nothing; the live driver position beats a
+          // refused rider fix; an honest "unknown" beats both when that is the
+          // truth — on the one payload where a wrong location sends help to
+          // the wrong place.
+          const riderFix = grantedLocationFix(riderLoc.latitude, riderLoc.longitude, riderLoc.status);
+          return riderFix
+            ? { lat: riderFix.latitude, lng: riderFix.longitude }
+            : freshDriverLoc
+              ? { lat: freshDriverLoc.latitude, lng: freshDriverLoc.longitude }
+              : undefined;
+        }}
+      />
 
       {/* "This isn't my driver" [safety spec / rides 5.7]: wrong person or
           car at the kerb — don't get in. The server releases the ride,

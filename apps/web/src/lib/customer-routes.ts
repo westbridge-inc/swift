@@ -49,17 +49,28 @@ const RULES: RouteRule[] = [
   { match: exact('/order/browse'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/order/search'), public: true, tab: 'home', parent: HOME_PATH },
   { match: under('/order/vendor'), public: true, tab: 'home', parent: HOME_PATH },
+  // [W6] A store's one page (the old address above sends here, permanently).
+  { match: under('/store'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/explore'), public: true, tab: 'home', parent: HOME_PATH },
-  // Taxi on the web is an explanation and an app link — booking stays off.
+  // Taxi on the web: a fare estimate (signed in) and an app link — booking stays in the app.
   { match: exact('/taxi'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/market'), public: true, tab: 'market', parent: null },
   {
-    match: exact('/cart'), public: false, tab: 'cart', parent: HOME_PATH,
+    match: exact('/cart'), public: true, tab: 'cart', parent: HOME_PATH,
     door: { title: 'Sign in to start a cart', body: 'Your basket lives on your account, so it follows you between devices.' },
   },
+  // [W4] The one checkout. A guest may open it: they see their browser basket
+  // and sign in at Place order.
+  { match: exact('/checkout'), public: true, tab: 'cart', parent: HOME_PATH },
   {
     match: exact('/account'), public: false, tab: 'profile', parent: null,
     door: { title: 'You’re browsing as a guest', body: 'Sign in to see your orders and your delivery addresses.' },
+  },
+  {
+    // [WEB-REDESIGN] Account's own pages (addresses, details, favourites, help,
+    // safety) light Profile and go back to Account. Private, like Account.
+    match: under('/account'), public: false, tab: 'profile', parent: '/account',
+    door: { title: 'Sign in to your account', body: 'Sign in to see your orders, addresses and favourites.' },
   },
   {
     match: exact('/orders'), public: false, tab: 'profile', parent: '/account',
@@ -93,4 +104,9 @@ export function signInPath(returnPath: string): string {
 /** The sign-up page, with the same return. */
 export function signUpPath(returnPath: string): string {
   return `/signup?next=${encodeURIComponent(returnPath)}`;
+}
+
+/** [W6] A store's one page, by its name; the old id address only for a card the server sent without one. */
+export function storeHref(v: { id: string; slug?: string | null }): string {
+  return v.slug ? `/store/${encodeURIComponent(v.slug)}` : `/order/vendor/${encodeURIComponent(v.id)}`;
 }

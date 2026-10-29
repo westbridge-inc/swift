@@ -7,7 +7,9 @@ import {
 import { Section } from '@/components/site';
 import { OrderOnTheWeb } from '@/components/order-on-the-web';
 import { BrowserOrderingNote } from '@/components/browser-ordering-note';
-import { launch, showAppStoreBadges, SITE_ORIGIN } from '@/site.config';
+import { AppStoreLinks } from '@/components/app-store-links';
+import { launch, SITE_ORIGIN } from '@/site.config';
+import { CANCEL_FREE_SHORT } from '@/lib/cancel-policy-copy';
 
 /**
  * [SITE-1.1 Part 2] Every claim on this page reads from the launch config.
@@ -31,7 +33,8 @@ const VERTICALS = [
   { icon: ShoppingBasket, label: 'Groceries', blurb: 'Supermarkets, shelf-picked', key: 'groceries' as const },
   { icon: Store, label: 'Shops', blurb: 'Local stores at your door', key: 'shops' as const },
   { icon: Car, label: 'Rides', blurb: 'PIN-verified taxis in the mobile app', key: 'rides' as const },
-  { icon: Package, label: 'Parcels', blurb: 'Anything, across town', key: 'courier' as const },
+  // [#1754 · Terms ¶9(h) · Mover §4] Parcels carry goods only: letters, documents and mail are refused.
+  { icon: Package, label: 'Parcels', blurb: 'Goods across town, never letters or mail', key: 'courier' as const },
   { icon: Wrench, label: 'Trades', blurb: 'Quoted, booked, paid on completion', key: 'services' as const },
 ];
 
@@ -44,7 +47,8 @@ const HOW = [
   {
     icon: ClipboardCheck,
     title: 'Change your mind, free',
-    body: 'After you order there is a window where the store has not been told yet. Cancelling inside it costs nothing, and the app shows the clock counting down.',
+    // [Terms 2026-10-15 §7 · review S3-1 on #1732] the rule, not a window: never a fee
+    body: CANCEL_FREE_SHORT,
   },
   {
     icon: MapPinned,
@@ -56,8 +60,10 @@ const HOW = [
 const PROMISES = [
   {
     icon: BadgePercent,
-    title: 'Zero commission, ever',
-    body: 'Businesses and movers pay one flat weekly fee and keep 100% of every sale, fare and tip. No percentage taken, no hidden cut, and no introductory rate that expires.',
+    // [Legal research A12 · Terms ¶11 · GUARDRAILS §8] Only what the Terms say: a flat weekly fee and no commission on
+    // orders. No forever promise and no "no introductory rate" (new partners get a free trial; a fee change is announced first).
+    title: 'No commission on orders',
+    body: 'Businesses and movers pay one flat weekly fee and keep 100% of every sale, fare and tip. Swift takes no percentage.',
   },
   {
     icon: Banknote,
@@ -66,8 +72,9 @@ const PROMISES = [
   },
   {
     icon: ShieldCheck,
-    title: 'Verified people, honest orders',
-    body: 'ID-verified partners, a six-digit code before a ride starts, and an emergency button that dials 911. Insurance is read off the policy, not ticked by an operator.',
+    // [R7 · GUARDRAILS §7(4)] A person on our team checks partners' documents (Terms ¶17); nothing is "read off" by a machine.
+    title: 'Checked partners, honest orders',
+    body: 'Partners’ documents checked by a person on our team, a six-digit code before a ride starts, and an emergency button that dials 911.',
   },
 ];
 
@@ -91,7 +98,7 @@ export default function WelcomePage() {
                 launch config says works. No dead paths, no coming-soon buttons
                 dressed as live ones. [Item 7] Which is decided per site: the
                 pre-launch switch closes ordering on the public site only. */}
-            <OrderOnTheWeb className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]" />
+            <OrderOnTheWeb className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]" />
             <Link
               href="/vendors"
               className="rounded-full border border-[var(--swift-border-strong)] px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"
@@ -106,14 +113,13 @@ export default function WelcomePage() {
             </Link>
           </div>
 
-          {/* No store badges until an app exists. Saying so plainly reads as
-              confidence; a dead badge reads as carelessness — and is a review flag. */}
-          {!showAppStoreBadges && (
-            <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              <BrowserOrderingNote open="Order from stores in your phone's browser, tracking included." /> Taxi rides
-              require the Swift mobile app.
-            </p>
-          )}
+          <p className="mt-6 text-sm text-[var(--swift-muted)]">
+            <BrowserOrderingNote open="Order from stores in your phone's browser, tracking included." /> Taxi rides
+            require the Swift mobile app.
+          </p>
+          {/* [G11] No store link until the apps are live in both stores. A dead
+              link reads as carelessness — and is a review flag. */}
+          <AppStoreLinks className="mt-4" />
         </div>
       </Section>
 
@@ -122,7 +128,7 @@ export default function WelcomePage() {
         <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {VERTICALS.filter((v) => launch.verticals[v.key] !== 'soon').map(
             ({ icon: Icon, label, blurb }) => (
-              <li key={label} className="rounded-2xl bg-white p-6 shadow-sm">
+              <li key={label} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
                 <Icon className="h-6 w-6 text-[var(--swift-red)]" aria-hidden />
                 <h3 className="mt-4 font-bold">{label}</h3>
                 <p className="mt-1 text-sm text-[var(--swift-muted)]">{blurb}</p>
@@ -157,7 +163,7 @@ export default function WelcomePage() {
         <h2 className="text-2xl font-bold tracking-tight md:text-3xl">Why it works this way</h2>
         <ul className="mt-8 grid gap-4 md:grid-cols-3">
           {PROMISES.map(({ icon: Icon, title, body }) => (
-            <li key={title} className="rounded-2xl bg-white p-6 shadow-sm">
+            <li key={title} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
               <Icon className="h-6 w-6 text-[var(--swift-red)]" aria-hidden />
               <h3 className="mt-4 font-bold">{title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-[var(--swift-muted)]">{body}</p>
@@ -167,7 +173,7 @@ export default function WelcomePage() {
       </Section>
 
       <Section>
-        <div className="rounded-3xl bg-[var(--swift-red)] px-8 py-12 text-white md:px-14 md:py-16">
+        <div className="rounded-3xl bg-[var(--swift-red)] px-8 py-12 text-[var(--swift-white)] md:px-14 md:py-16">
           <h2 className="max-w-2xl text-3xl font-extrabold leading-tight tracking-tight md:text-4xl">
             Run a business? The commission line simply is not there.
           </h2>
@@ -178,13 +184,13 @@ export default function WelcomePage() {
           <div className="mt-8 flex flex-wrap gap-3">
             <Link
               href="/vendors"
-              className="rounded-full bg-white px-6 py-3 font-semibold text-[var(--swift-red)] transition-opacity hover:opacity-90"
+              className="rounded-full bg-[var(--swift-card)] px-6 py-3 font-semibold text-[var(--swift-red)] transition-opacity hover:opacity-90"
             >
               See what you get
             </Link>
             <Link
               href="/pricing"
-              className="rounded-full border border-white/40 px-6 py-3 font-semibold text-white transition-colors hover:bg-white/10"
+              className="rounded-full border border-white/40 px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-white/10"
             >
               What it costs
             </Link>

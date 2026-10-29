@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef } from 'react';
-import { AccessibilityInfo, Alert, Animated, ScrollView, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, Alert, Animated, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, fontSize, motion, radius, space } from '@swift/ui';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money, moneyExact } from '../../../lib/money';
@@ -12,12 +13,16 @@ import { useMutation } from '@tanstack/react-query';
 import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import { weeksCovered } from '../../../lib/billing';
+import { feeStatusOf, type FeeSubscription } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../../../stores/authStore';
 import {
+  cashInHandThisWeek,
   earningLabel,
   earningRows,
   earningsWindowTotal,
@@ -233,23 +238,12 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
   const status = serverText(source['status'])?.toUpperCase();
   const isTrial = source['isTrialActive'] === true;
   const isGrace = source['isInGracePeriod'] === true;
-  const pill = isTrial
-    ? { label: 'Free trial', tone: 'info' as const }
-    : isGrace
-      ? { label: 'Grace period', tone: 'warning' as const }
-      : status === 'ACTIVE'
-        ? { label: 'Active', tone: 'success' as const }
-        : status === 'PAST_DUE'
-          ? { label: 'Past due', tone: 'warning' as const }
-          : status === 'SUSPENDED' || status === 'CHURNED'
-            ? { label: status === 'SUSPENDED' ? 'Suspended' : 'Churned', tone: 'error' as const }
-        : status
-          ? { label: status.replace(/_/g, ' ').toLowerCase(), tone: 'neutral' as const }
-          : undefined;
+  // [FEE-STATUS · owner 25 Oct] The pill and the line come from where the fee stands (the API's
+  // feeStatus): a card read "Active · next bill 13 Oct" on 25 October. Never the code, never "Active"
+  // or a next bill on a date that has passed. [UI-SWEEP U73] the words, never the code.
+  const feeStatus = status ? feeStatusOf(source as unknown as FeeSubscription) : null;
+  const pill = feeStatus ? feeStatusPill(feeStatus.state) : undefined;
   const rate = serverNumber(source['weeklyFeeGyd'] ?? source['customRate'] ?? source['weeklyRate']);
-  const trialEnd = serverDate(source['trialEndDate']);
-  const graceEnd = serverDate(source['gracePeriodEnd']);
-  const nextBill = serverDate(source['nextBillingDate']);
   const needsAttention = isGrace || status === 'PAST_DUE' || status === 'SUSPENDED' || status === 'CHURNED';
 
   return (
@@ -258,29 +252,14 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
         <T variant="heading">Your weekly fee</T>
         {pill ? <TonePill label={pill.label} tone={pill.tone} /> : null}
       </View>
-      {isTrial && trialEnd ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Trial ends {dateLabel(trialEnd)}
-        </T>
-      ) : null}
-      {isGrace && graceEnd ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Pay by {dateLabel(graceEnd)} to keep going online
-        </T>
-      ) : null}
-      {rate != null || nextBill ? (
+      {rate != null ? (
         <View style={{ flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', gap: space.xs, marginTop: space.sm }}>
-          {rate != null ? <T variant="numM">{money(rate)}</T> : null}
-          {rate != null ? (
-            <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
-          ) : null}
-          {nextBill ? (
-            <T variant="caption" tone="muted">
-              {rate != null ? '· next bill ' : 'Next bill '}{dateLabel(nextBill)}
-            </T>
-          ) : null}
+          <T variant="numM">{money(rate)}</T>
+          <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
         </View>
       ) : null}
+      {feeStatus ? <T variant="label" tone="muted" style={{ marginTop: space.sm }} testID="earnings-fee-status">{feeStatus.headline}</T> : null}
+      {feeStatus?.detail ? <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeStatus.detail}</T> : null}
       <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
         The flat fee is Swift&apos;s only charge — every fare stays yours.
       </T>
@@ -291,33 +270,44 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
 
 function EarningsTools({
   sub,
-  onTopUp,
+  onPayFee,
   onStatement,
   statementLoading,
   statementError,
 }: {
   sub: unknown;
-  onTopUp: () => void;
+  onPayFee: () => void;
   onStatement: () => void;
   statementLoading: boolean;
   statementError: boolean;
 }) {
   const source = serverRecord(sub);
-  const wallet = serverNumber(source?.['walletBalanceGyd']);
+  // [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money paid
+  // before its week starts is shown as the next weekly fee being paid, never
+  // "paid ahead" or a count of weeks; the action is "Pay weekly fee". Swift
+  // holds no money for anyone: this is Swift's own fee, paid early.
+  const paidAhead = serverNumber(source?.['walletBalanceGyd']);
+  const showPaidAhead = paidAhead != null && paidAhead > 0;
+  const weeks = weeksCovered(paidAhead, serverNumber(source?.['weeklyFeeGyd'] ?? source?.['customRate'] ?? source?.['weeklyRate']));
   return (
     <Card style={{ marginTop: space.md }}>
-      {wallet != null ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-          <T variant="micro" tone="muted">WALLET BALANCE</T>
-          <T variant="numM">{money(wallet)}</T>
+      {showPaidAhead ? (
+        <View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <T variant="micro" tone="muted">PAID TOWARD YOUR WEEKLY FEE</T>
+            <T variant="numM">{money(paidAhead)}</T>
+          </View>
+          {weeks >= 1 ? (
+            <T variant="caption" tone="muted">Your next weekly fee is already paid</T>
+          ) : null}
         </View>
       ) : null}
       {source ? (
         <PillButton
-          label="Top up"
+          label="Pay weekly fee"
           size="md"
-          onPress={onTopUp}
-          style={{ marginTop: wallet != null ? space.md : undefined }}
+          onPress={onPayFee}
+          style={{ marginTop: showPaidAhead ? space.md : undefined }}
         />
       ) : null}
       <PillButton
@@ -386,6 +376,8 @@ export function EarningsScreen({ navigation }: any) {
   const { kind } = mover;
   const summaryQ = useEarningsSummary<unknown>(kind);
   const historyQ = useEarnings<unknown>(kind);
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
@@ -435,6 +427,8 @@ export function EarningsScreen({ navigation }: any) {
   const allTimeDetail = isDriver
     ? countDetail(allTimeJobs, 'trip', 'trips')
     : countDetail(allTimeJobs, 'job', 'jobs');
+  // [Board 13a "CASH COLLECTED"] The server's figure; undefined (older API) leaves the tile out.
+  const cashThisWeek = cashInHandThisWeek(summaryQ.data);
 
   return (
     <Screen>
@@ -458,7 +452,11 @@ export function EarningsScreen({ navigation }: any) {
         // earned nothing" when the request simply failed.
         <ErrorState message="We couldn't load your earnings. Check your connection and try again." onRetry={() => summaryQ.refetch()} />
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
+        >
           <EarningsHero
             total={earningsWindowTotal(summaryQ.data, 'thisWeek', 'week')}
             facts={weekFacts}
@@ -481,7 +479,18 @@ export function EarningsScreen({ navigation }: any) {
               total={earningsWindowTotal(summaryQ.data, 'allTime')}
               sub={allTimeDetail}
             />
+            {cashThisWeek != null ? (
+              <StatTile label="CASH COLLECTED" total={cashThisWeek} sub="This week" />
+            ) : null}
           </View>
+          {/* [REVIEW-F #2117 S3-1] The tile's sub is one line, so what the figure means sits under the row, whole. */}
+          {cashThisWeek != null ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              {isDriver
+                ? 'Cash collected this week: the fares passengers paid you in cash.'
+                : 'Cash collected this week, after paying stores for the goods.'}
+            </T>
+          ) : null}
 
           {breakdown ? (
             <Card style={{ marginTop: space.md }}>
@@ -526,7 +535,7 @@ export function EarningsScreen({ navigation }: any) {
 
           <EarningsTools
             sub={subQ.data}
-            onTopUp={() => navigation?.navigate?.('WeeklyFee')}
+            onPayFee={() => navigation?.navigate?.('WeeklyFee')}
             onStatement={() => statement.mutate()}
             statementLoading={statement.isPending}
             statementError={statement.isError}
@@ -567,7 +576,7 @@ export function EarningsScreen({ navigation }: any) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.surface.sunken, padding: space.md, marginTop: space.lg }}>
             <MaterialCommunityIcons name="calendar-check" size={fontSize.base} color={color.text.secondary} />
             <T variant="caption" weight="semibold" tone="muted" style={{ flex: 1 }}>
-              You keep every cent — Swift only charges the flat weekly fee. No commission, ever.
+              You keep every cent — Swift only charges the flat weekly fee. No commission on orders.
             </T>
           </View>
         </ScrollView>

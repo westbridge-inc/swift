@@ -29,6 +29,16 @@ export const loggerRedactConfig = {
   paths: [
     // Authentication-store failure logs include a raw target outside `req`.
     'url',
+    // [M013] pino's `*.key` matches ONLY a nested key, so a credential logged
+    // at the top level (`log.warn({ token }, …)`) needs its own bare entry.
+    // A bare `code` is NOT listed: top-level codes are error classifications
+    // (ride queue, MMG result codes) and stay readable; `*.code` below and
+    // `req.body.code` keep a submitted code out.
+    'password', 'passwordHash', 'refreshToken', 'accessToken', 'token',
+    'otp', 'pin', 'ridePin', 'pickupCode', 'cardNumber', 'cvc', 'mmgPassword', 'mkey', 'msecret',
+    // A sign-in link or a raw header is a credential wherever it sits.
+    'signInUrl', '*.signInUrl', 'magicLink', '*.magicLink',
+    'authorization', '*.authorization', 'cookie', '*.cookie',
     'req.headers.authorization',
     'req.headers.cookie',
     '*.password',

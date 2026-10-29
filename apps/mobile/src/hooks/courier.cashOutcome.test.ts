@@ -115,7 +115,7 @@ describe('the screen', () => {
     expect(record).toContain("else riderAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });");
     const capture = body(SCREEN, 'const captureCourierProof', 'const markDelivered');
     expect(capture).toContain("async (outcome?: 'paid' | FailedOutcome)");
-    expect(capture).toContain('{ orderId: job.id, uri: shot.assets[0].uri, outcome, authSession: owner ?? undefined }');
+    expect(capture).toContain('{ orderId: job.id, uri: captured.uri, outcome, authSession: owner ?? undefined }');
   });
   it('the courier branch precedes the generic cash door, so a courier never reaches the bare handover', () => {
     const courierDoor = SCREEN.indexOf(') : isCourier ? (');
@@ -123,7 +123,7 @@ describe('the screen', () => {
     expect(courierDoor).toBeGreaterThan(-1);
     expect(mmgDoor).toBeGreaterThan(courierDoor);
     // The generic cash door's tap is the rider's handover; it lives after the courier branch.
-    const cashTap = SCREEN.indexOf("riderAct.mutate({ id: job.id, action: 'handover', pin }");
+    const cashTap = SCREEN.indexOf("riderAct.mutate({ id: job.id, action: 'handover', ...fields");
     expect(cashTap).toBeGreaterThan(mmgDoor);
     // The already-paid courier door sends the photo alone.
     expect(SCREEN).toContain("bigButton('Capture proof & deliver', () => captureCourierProof(), { loading: courierProof.isPending, disabled: busy })");

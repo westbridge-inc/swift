@@ -14,6 +14,8 @@ import { socketPlugin } from '../plugins/socket';
 import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { REAL_PNG } from './helpers/real-image';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [E17] Courier return-to-sender after custody is no longer "call support only"
@@ -75,7 +77,7 @@ async function makeCourierOrder(customerId: string, riderId: string, status: Ord
   });
 }
 
-const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 function multipartReturnBody(lat: string, lng: string, content: Buffer, mime = 'image/png') {
   const boundary = `----swift${nanoid(8)}`;
@@ -281,7 +283,7 @@ describe('[E17] courier return-to-sender after custody', () => {
     expect(early.json().error.code).toBe('NOT_IN_CUSTODY');
 
     // In custody but no return started yet: the proof must be refused.
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'ARRIVED' } });
+    await walkOrderStatus(app.prisma, order.id, 'ARRIVED');
     const before = await postReturnProof(`/api/v1/courier/order/${order.id}/return-proof`, moverUser.token);
     expect(before.statusCode).toBe(409);
     expect(before.json().error.code).toBe('NOT_RETURNING');

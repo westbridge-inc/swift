@@ -2,13 +2,18 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { sendBookingReminders } from '../modules/services/services.service';
+import { jobReminderDedupeKey, reminderDayWord, sendBookingReminders } from '../modules/services/services.service';
+import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // Booking accept/decline + reminders (master plan §4.3). Failure paths first:
@@ -69,8 +74,18 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
   });
+}
+
+async function commandState(id: string) {
+  const job = await app.prisma.serviceJob.findUniqueOrThrow({ where: { id } });
+  return {
+    expectedUpdatedAt: job.updatedAt.toISOString(),
+    expectedScheduledFor: job.scheduledFor?.toISOString(),
+    expectedQuoteAmount: Number(job.quoteAmount),
+  };
 }
 
 let customer: { userId: string; token: string };
@@ -127,7 +142,10 @@ afterAll(async () => {
 describe('Provider accepts or declines the slot (§4.3)', () => {
   it('scheduling notifies the provider and awaits their confirmation', async () => {
     const when = new Date(Date.now() + 2 * DAY).toISOString();
-    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: when }, customer.token);
+    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: when,
+      ...await commandState(jobId),
+    }, customer.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.providerConfirmedAt).toBeNull();
 
@@ -138,12 +156,12 @@ describe('Provider accepts or declines the slot (§4.3)', () => {
   });
 
   it('the customer cannot confirm on behalf of the provider', async () => {
-    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, {}, customer.token);
+    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), customer.token);
     expect(res.statusCode).toBe(403);
   });
 
   it('declining returns the job to QUOTED with the slot cleared — the customer rebooks', async () => {
-    const declined = await inject('POST', `/api/v1/services/jobs/${jobId}/decline-slot`, {}, providerUser.token);
+    const declined = await inject('POST', `/api/v1/services/jobs/${jobId}/decline-slot`, await commandState(jobId), providerUser.token);
     expect(declined.statusCode).toBe(200);
     expect(declined.json().data.status).toBe('QUOTED');
     expect(declined.json().data.scheduledFor).toBeNull();
@@ -155,10 +173,13 @@ describe('Provider accepts or declines the slot (§4.3)', () => {
 
     // Rebook + confirm this time
     const when = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
-    const rebook = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: when }, customer.token);
+    const rebook = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: when,
+      ...await commandState(jobId),
+    }, customer.token);
     expect(rebook.statusCode).toBe(200);
 
-    const confirmed = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, {}, providerUser.token);
+    const confirmed = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), providerUser.token);
     expect(confirmed.statusCode).toBe(200);
     expect(confirmed.json().data.providerConfirmedAt).toBeTruthy();
 
@@ -177,19 +198,66 @@ describe('Reminders — once per side inside 24h', () => {
       });
     };
 
+    // [REVIEW-F S4 on #2188] The exact title this sweep must give: the slot's Guyana day against the sweep's own
+    // clock (captured just before it runs), never a list of acceptable words.
+    const { scheduledFor } = await app.prisma.serviceJob.findUniqueOrThrow({ where: { id: jobId }, select: { scheduledFor: true } });
+    const sweepNow = new Date();
+    const title = `Booking ${reminderDayWord(scheduledFor!, sweepNow)}`;
+
     // The sweep is global (other test files may hold their own bookings), so
     // assert on THIS job's two parties rather than the return total.
     await sendBookingReminders(app.prisma, notify);
     const afterFirst = await app.prisma.notification.count({
-      where: { userId: { in: [customer.userId, providerUser.userId] }, title: 'Booking tomorrow' },
+      where: { userId: { in: [customer.userId, providerUser.userId] }, title },
     });
     expect(afterFirst).toBe(2); // customer + provider, once each
 
     await sendBookingReminders(app.prisma, notify);
     const afterSecond = await app.prisma.notification.count({
-      where: { userId: { in: [customer.userId, providerUser.userId] }, title: 'Booking tomorrow' },
+      where: { userId: { in: [customer.userId, providerUser.userId] }, title: { startsWith: 'Booking ' }, data: { path: ['kind'], equals: 'booking_reminder' } },
     });
     expect(afterSecond).toBe(2); // dedupe holds
+  });
+
+  // [REVIEW-G S4-1 + S4-2 on #2188] Composed as the booking-reminders worker composes it (sendIfNew, ORDER_UPDATE),
+  // on real Postgres. Two runs that both pass the "already reminded?" read before either sends leave ONE reminder
+  // per person (the job's per-person dedupe key), and the runs count only what they newly sent.
+  it('two overlapping sweeps remind each side of a job once, and count only real sends', async () => {
+    const cust = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const proUser = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const pro = await app.prisma.serviceProvider.create({ data: { userId: proUser.userId, trade: 'Painter', isVerified: true } });
+    const job = await app.prisma.serviceJob.create({
+      data: {
+        customerId: cust.userId, providerId: pro.id, description: 'Paint the front gallery, two coats',
+        status: 'SCHEDULED', quoteAmount: 15000, scheduledFor: new Date(Date.now() + 9 * 60 * 60 * 1000), providerConfirmedAt: new Date(),
+      },
+    });
+    const notifications = new NotificationService(app.prisma, app.io);
+    const parties = new Set([cust.userId, proUser.userId]);
+    let looked = 0;
+    let release!: () => void;
+    const bothLooked = new Promise<void>((resolve) => { release = resolve; });
+    const tick = () => sendBookingReminders(app.prisma, async (n) => {
+      if (!parties.has(n.userId) || n.data['refId'] !== job.id) return false; // another suite's party: not this test's send
+      if (n.userId === cust.userId) {
+        looked += 1;
+        if (looked === 2) release();
+        await Promise.race([bothLooked, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+      }
+      return notifications.sendIfNew({ ...n, type: 'ORDER_UPDATE' });
+    });
+    const counts = await Promise.all([tick(), tick()]);
+    const later = await tick();
+
+    const rows = await app.prisma.notification.findMany({
+      where: { userId: { in: [...parties] }, data: { path: ['refId'], equals: job.id } },
+      select: { userId: true, dedupeKey: true },
+    });
+    expect(rows.filter((r) => r.userId === cust.userId)).toEqual([{ userId: cust.userId, dedupeKey: jobReminderDedupeKey(job.id) }]);
+    expect(rows.filter((r) => r.userId === proUser.userId)).toEqual([{ userId: proUser.userId, dedupeKey: jobReminderDedupeKey(job.id) }]);
+    // Two people reminded, so two sends counted across the overlapping runs — never four — and none later.
+    expect(counts[0]! + counts[1]!).toBe(2);
+    expect(later).toBe(0);
   });
 
   it('an unconfirmed slot never reminds', async () => {
@@ -217,7 +285,7 @@ describe('Reminders — once per side inside 24h', () => {
     };
     await sendBookingReminders(app.prisma, notify);
     const notes = await app.prisma.notification.count({
-      where: { userId: { in: [other.userId, provider2User.userId] }, title: 'Booking tomorrow' },
+      where: { userId: { in: [other.userId, provider2User.userId] }, data: { path: ['kind'], equals: 'booking_reminder' } },
     });
     expect(notes).toBe(0); // unconfirmed → silent
   });

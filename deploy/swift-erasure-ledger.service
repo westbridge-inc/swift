@@ -1,0 +1,26 @@
+[Unit]
+Description=Swift off-site erasure ledger (ship each erasure's entry, encrypted to the owner's key)
+# [Off-site erasure ledger] Every erasure writes its ledger entry in its own transaction; this unit
+# sends the unshipped ones to the off-site backup bucket within about a minute. The API pages the
+# platform when an entry is still unshipped after 10 minutes, and deploy/doctor.sh FAILs.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=swift-deploy
+Group=swift-deploy
+SupplementaryGroups=docker
+WorkingDirectory=/opt/swift
+# Settings only (deploy/.env holds no secret). [SEC-BACKUP F1] The storage keys are the backup
+# store's (/etc/credstore.encrypted/swift-backup, never materialized for the containers), exactly as
+# swift-backup.service loads them; never the API's AWS_* pair. The container-only *_FILE paths from
+# deploy/.env are unset so the credential directory wins (as in swift-backup.service).
+EnvironmentFile=/opt/swift/deploy/.env
+LoadCredentialEncrypted=BACKUP_AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_ACCESS_KEY_ID.cred
+LoadCredentialEncrypted=BACKUP_AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_SECRET_ACCESS_KEY.cred
+LoadCredentialEncrypted=BACKUP_KEY_SOURCE:/etc/credstore.encrypted/swift-backup/BACKUP_KEY_SOURCE.cred
+UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE BACKUP_AWS_ACCESS_KEY_ID_FILE BACKUP_AWS_SECRET_ACCESS_KEY_FILE BACKUP_KEY_SOURCE_FILE
+ExecStart=/opt/swift/deploy/erasure-ledger-ship.sh --project swift
+# A hung run must not silence every later minute.
+TimeoutStartSec=5min

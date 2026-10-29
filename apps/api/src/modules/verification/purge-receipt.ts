@@ -9,8 +9,10 @@
  * receipt: callers decide what that means (the reaper leaves the row due and
  * retries; erasure records the failure and files the storage orphan).
  */
-import type { Prisma } from '@prisma/client';
+import { identityReviewOpenFor } from './investigation-hold-core';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { resolveVerificationObject, type VerificationObjectReference, type VerificationObjectStore } from './object-authority';
 
 export type ProbeResult = 'CONFIRMED_ABSENT' | 'FAILED';
@@ -29,9 +31,10 @@ function isMissingObject(error: unknown): boolean {
   return e?.code === 'ENOENT' || e?.name === 'NoSuchKey' || e?.name === 'NotFound';
 }
 
-/** Delete the bytes, shred the key, then PROBE — a real read attempt against each store. */
-export async function shredAndProbe(prisma: VerificationObjectStore, storage: StorageProvider, ref: VerificationObjectReference): Promise<PurgeEvidence> {
-  const meta = await resolveVerificationObject(prisma, ref);
+type ObjectMeta = Awaited<ReturnType<typeof resolveVerificationObject>>;
+
+/** Delete the bytes, shred the key (if still there), then PROBE — a real read attempt against each store. */
+async function destroyAndProbe(prisma: VerificationObjectStore, storage: StorageProvider, ref: VerificationObjectReference, meta: ObjectMeta): Promise<PurgeEvidence> {
   const { fileKey } = ref;
   const storeLocations = [`storage:${fileKey}`, `encrypted_object:${fileKey}`];
   const sha256 = Buffer.from(meta.sha256, 'hex');
@@ -46,12 +49,64 @@ export async function shredAndProbe(prisma: VerificationObjectStore, storage: St
   await storage.delete(fileKey).catch(() => undefined);
   // Crypto-shred (spec §5.5): the wrapped DEK goes even if the bytes linger —
   // a ciphertext without its key is unrecoverable from any backup.
-  await prisma.encryptedObject.updateMany({ where: { fileKey, createdBy: ref.userId }, data: { wrappedDek: null, shreddedAt: new Date() } });
+  await prisma.encryptedObject.updateMany({ where: { fileKey, createdBy: ref.userId, wrappedDek: { not: null } }, data: { wrappedDek: null, shreddedAt: new Date() } });
   // The probe. Both must hold: the bytes are unreadable AND the key is gone.
   const absent = await storage.getObject(fileKey).then(() => false).catch(isMissingObject);
   const keyGone = await prisma.encryptedObject.findUnique({ where: { fileKey }, select: { wrappedDek: true } })
     .then((row) => row !== null && row.wrappedDek === null).catch(() => false);
   return { sha256, bytesDeleted, storeLocations, probe: absent && keyGone ? 'CONFIRMED_ABSENT' : 'FAILED' };
+}
+
+/** Delete the bytes, shred the key, then PROBE — a real read attempt against each store. */
+export async function shredAndProbe(prisma: VerificationObjectStore, storage: StorageProvider, ref: VerificationObjectReference): Promise<PurgeEvidence> {
+  return destroyAndProbe(prisma, storage, ref, await resolveVerificationObject(prisma, ref));
+}
+
+/**
+ * [Row 243 · DOC-INV-14 · GUARDRAILS §2] A legal hold always beats a purge.
+ *
+ * The destruction is decided and DONE in one short database transaction under the person's
+ * row lock: the document must still be unheld, and the object is crypto-shredded right there
+ * (DEK gone, shreddedAt set) — without its key the ciphertext is unrecoverable from any copy.
+ * Placing a hold takes the same lock (legal-hold.ts placeDocLegalHoldIn), so a hold either
+ * committed first (nothing is destroyed: null), or comes after and finds the object already
+ * shredded and does not claim it (a hold never resurrects bytes). The storage delete and the
+ * probe run AFTER the lock is released, on bytes that are already unreadable: no storage call
+ * ever runs under a lock, so a stalled store cannot outlive the transaction and let a hold in
+ * before the destruction lands. A missing person row is never a pass: no lock, no destruction.
+ * `still` narrows what "still purgeable" means for the caller (retention due, image not purged).
+ */
+export async function shredUnlessHeld(
+  db: Pick<PrismaClient, '$transaction'> & VerificationObjectStore,
+  storage: StorageProvider,
+  ref: VerificationObjectReference & { documentId: string },
+  still: Prisma.VerificationDocumentWhereInput = {},
+): Promise<PurgeEvidence | null> {
+  const meta = await db.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    const person = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "users" WHERE "id" = ${ref.userId} FOR UPDATE /* verification-document-purge-authority */
+    `;
+    if (person.length !== 1) return null;
+    const live = await tx.verificationDocument.findMany({
+      where: { id: ref.documentId, userId: ref.userId, legalHoldId: null, ...still }, select: { id: true },
+    });
+    if (!live.some((d) => d.id === ref.documentId)) return null;
+    // [SEC-PII · COORD] Backstop under the person's lock: an identity review open on their LIVE group chain keeps the
+    // bytes even before its hold reaches them (the daily sweep holds every member; a member who joined since waits here).
+    if (await identityReviewOpenFor(tx, ref.userId)) return null;
+    // A purge that shredded this key and then could not finish (store unreachable, probe failed)
+    // left the person's own envelope keyless: finish destroying it rather than strand it.
+    const prior = await tx.encryptedObject.findUnique({ where: { fileKey: ref.fileKey } });
+    if (prior && prior.createdBy === ref.userId && prior.shreddedAt !== null && prior.wrappedDek === null) return prior;
+    const object = await resolveVerificationObject(tx, ref);
+    await tx.encryptedObject.updateMany({
+      where: { fileKey: ref.fileKey, createdBy: ref.userId }, data: { wrappedDek: null, shreddedAt: new Date() },
+    });
+    return object;
+  });
+  if (!meta) return null;
+  return destroyAndProbe(db, storage, ref, meta);
 }
 
 export interface ReceiptInput {

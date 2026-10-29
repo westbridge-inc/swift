@@ -138,7 +138,8 @@ export class AdServingService {
       where: {
         placementId, weekStart: week, status: 'CONFIRMED',
         city: { in: [city, '*'] },
-        campaign: { status: 'LIVE' },
+        // [SEC-TRUST F6] Only an APPROVED advertiser's campaigns serve (a suspended one never does).
+        campaign: { status: 'LIVE', advertiser: { status: 'APPROVED' } },
       },
       include: {
         campaign: {

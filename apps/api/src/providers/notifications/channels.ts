@@ -8,9 +8,12 @@
 import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
+import { ResendEmailProvider } from './resend-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
 import { sealReviewChannels } from './review-seal';
 import { guardNonProductionSms } from './sms-recipient-allowlist';
+import { SMS_REF_HANDOFF_SUPPRESSED } from './sms-outcome';
+import { expoErrorClass, httpFailureReason, recordPushFailure, recordPushFailureClasses } from './push-outcome';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -40,14 +43,30 @@ export interface PushOptions {
   /** high = delivered at once, even to a dozing Android; normal = the
    *  platform may hold it for its next batch. */
   priority: 'high' | 'normal';
-  /** 'default' plays the device notification sound; absent = silent. */
-  sound?: 'default';
+  /** 'default' plays the device notification sound; absent = silent. The
+   *  job ring's tone file (JOB_RING_SOUND) is set only for a device whose
+   *  app bundles it (alert-class.ts pushOptionsForDevice). */
+  sound?: 'default' | 'swift_job_ring.wav';
+  /** [RINGER] The Android channel to post to. Absent = the app's default
+   *  channel; set only for a device whose app created the channel. */
+  channelId?: 'job_offers';
+  /** [RINGER] iOS: time-sensitive breaks through a Focus the user allows it
+   *  in. Set only for a device whose app has the entitlement. */
+  interruptionLevel?: 'time-sensitive';
   /** Ceiling, in seconds, on how long an undelivered push may be held. */
   ttlSeconds?: number;
   /** Epoch ms after which the push means nothing (an offer expired, a
    *  response window closed). It is never sent at or after this moment, its
    *  ttl never reaches past it, and it is never retried past it. */
   deadlineMs?: number;
+  /** [DRILL-STORM] A push that REPLACES the last one sent under the same key
+   *  (Expo collapseId: iOS apns-collapse-id replaces the shown notification,
+   *  FCM collapse_key coalesces in transit). Set from the payload's
+   *  collapseKey (alert-class.ts); the operating system does the work, so it
+   *  needs no app change. */
+  collapseId?: string;
+  /** [DRILL-STORM] Android: replaces a notification already shown under the same tag (Expo `tag`). */
+  tag?: string;
 }
 
 /** The options a push gets when a caller passes none: the standard class. */
@@ -118,7 +137,7 @@ let seq = 0;
 class DevSms implements SmsProvider {
   readonly supportsHandoff = true;
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
-    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
     devChannelLog.push({ channel: 'sms', to, body, at: new Date() });
     return { ref: `dev_sms_${++seq}` };
   }
@@ -195,7 +214,7 @@ class TwilioSmsProvider implements SmsProvider {
   }
 
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
-    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
     // Bound the WHOLE call, body read included: a hung Twilio must not hang
     // the login request or the ops page behind it. Abort releases the
@@ -253,11 +272,13 @@ class TwilioSmsProvider implements SmsProvider {
  * One Expo push message. The field names are Expo's documented push API
  * (docs.expo.dev/push-notifications/sending-notifications): `priority` is
  * default | normal | high, `sound` is iOS-only (default plays the device
- * sound, omitted plays none), `ttl` is seconds. Expo also documents
- * `channelId` (Android) and `interruptionLevel` (iOS); neither is sent. The
- * installed builds only create the default channel, and time-sensitive needs
- * an entitlement they do not have, so both wait for the new build (loud
- * alerts 3/4).
+ * sound, a file name with its extension plays that sound bundled in the app,
+ * omitted plays none), `ttl` is seconds, `channelId` is the Android channel
+ * and `interruptionLevel` the iOS level. [RINGER] The last two, and the
+ * bundled tone, are present only when the options carry them, which only
+ * pushOptionsForDevice does, for a device whose app has the job ring: builds
+ * 9-11 create only the default channel and have no time-sensitive
+ * entitlement, so their message is exactly what it was.
  */
 function expoMessage(
   to: string,
@@ -274,6 +295,10 @@ function expoMessage(
     data,
     priority: options.priority,
     ...(options.sound ? { sound: options.sound } : {}),
+    ...(options.channelId ? { channelId: options.channelId } : {}),
+    ...(options.interruptionLevel ? { interruptionLevel: options.interruptionLevel } : {}),
+    ...(options.collapseId ? { collapseId: options.collapseId } : {}),
+    ...(options.tag ? { tag: options.tag } : {}),
     ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
   };
 }
@@ -288,11 +313,27 @@ function expoMessage(
 export class ExpoPushProvider implements PushProvider {
   readonly supportsHandoff = true;
   private static CHUNK = 100; // Expo's documented max messages per request
+  private static RECEIPT_CHUNK = 1000; // Expo's documented max ids per receipt request
   private url = process.env['EXPO_PUSH_URL'] ?? 'https://exp.host/--/api/v2/push/send';
+  // The receipts endpoint sits beside the send endpoint (same host, same API).
+  private receiptsUrl = /\/send$/.test(this.url) ? this.url.replace(/\/send$/, '/getReceipts') : 'https://exp.host/--/api/v2/push/getReceipts';
+  /** [STORE-ALERT] How long after a send its receipts are read (null = never).
+   *  Receipts carry the failures APNs/FCM report after Expo accepted the
+   *  message — InvalidCredentials (the store's push key), DeviceNotRegistered —
+   *  which no ticket shows. In-process and best-effort: it only logs and
+   *  counts, so a restart that drops a pending check loses a diagnostic, never
+   *  a notification. */
+  private readonly receiptCheckDelayMs: number | null;
+
+  constructor(options: { receiptCheckDelayMs?: number | null } = {}) {
+    this.receiptCheckDelayMs = options.receiptCheckDelayMs ?? null;
+  }
 
   async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH): Promise<{ sent: number; invalidTokens?: string[] }> {
     let sent = 0;
     const invalidTokens: string[] = [];
+    const receiptIds: string[] = [];
+    const kind = data?.['kind'];
     if (options.handoff) {
       for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
         const result = await options.handoff(`chunk:${i / ExpoPushProvider.CHUNK}`, () => this.sendPush(
@@ -310,13 +351,14 @@ export class ExpoPushProvider implements PushProvider {
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
       const controller = new AbortController();
       const timeoutMs = pushProviderTimeoutMs();
-      type Tickets = { data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }> };
+      type Tickets = { data?: Array<{ status: 'ok' | 'error'; id?: string; details?: { error?: string } }> };
       // The deadline includes reading both success and error bodies. Abort
       // releases the connection; the rejection also bounds adapters that do
       // not settle when their signal is aborted.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
+          recordPushFailure('request', 'timeout', chunk.length, { kind });
           reject(new Error(`Expo push request failed: timed out after ${timeoutMs}ms`));
           controller.abort();
         }, timeoutMs);
@@ -335,9 +377,12 @@ export class ExpoPushProvider implements PushProvider {
                 signal: controller.signal,
               });
             } catch (error) {
+              // An abort is the deadline above, already recorded as a timeout.
+              if (!controller.signal.aborted) recordPushFailure('request', 'network', chunk.length, { kind });
               throw new Error(`Expo push request failed: ${(error as Error).message}`);
             }
             if (!res.ok) {
+              recordPushFailure('request', httpFailureReason(res.status), chunk.length, { kind });
               const detail = await res.text().catch(() => '');
               throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
             }
@@ -349,18 +394,89 @@ export class ExpoPushProvider implements PushProvider {
       } finally {
         clearTimeout(timer);
       }
-      (payload.data ?? []).forEach((ticket, idx) => {
-        if (ticket.status === 'ok') {
+      const tickets = Array.isArray(payload?.data) ? payload.data : [];
+      const refused: unknown[] = [];
+      tickets.forEach((ticket, idx) => {
+        if (ticket?.status === 'ok') {
           sent += 1;
-        } else if (ticket.details?.error === 'DeviceNotRegistered') {
+          if (typeof ticket.id === 'string' && ticket.id) receiptIds.push(ticket.id);
+          return;
+        }
+        // [STORE-ALERT] Every refused ticket is recorded by its error class;
+        // only DeviceNotRegistered also retires the token.
+        refused.push(ticket?.details?.error);
+        if (ticket?.details?.error === 'DeviceNotRegistered') {
           const token = chunk[idx];
           if (token) invalidTokens.push(token);
         }
       });
+      recordPushFailureClasses('ticket', refused, { kind });
+      // A ticket list shorter than the chunk: those messages have no answer.
+      recordPushFailure('request', 'bad_response', chunk.length - tickets.length, { kind });
+    }
+
+    if (receiptIds.length > 0 && this.receiptCheckDelayMs != null) {
+      const ids = receiptIds.slice();
+      const timer = setTimeout(() => { void this.checkReceipts(ids, { kind }); }, this.receiptCheckDelayMs);
+      timer.unref?.();
     }
 
     return { sent, ...(invalidTokens.length ? { invalidTokens } : {}) };
   }
+
+  /** [STORE-ALERT] Read the receipts of accepted tickets and record every
+   *  failure by its class (InvalidCredentials = the app's push credentials,
+   *  DeviceNotRegistered = an uninstalled app, ...). Ids Expo does not know
+   *  yet are skipped. Never throws; returns the classes it saw, for tests. */
+  async checkReceipts(ids: string[], context: { kind?: unknown } = {}): Promise<{ ok: number; failed: string[] }> {
+    let ok = 0;
+    const failed: string[] = [];
+    for (let i = 0; i < ids.length; i += ExpoPushProvider.RECEIPT_CHUNK) {
+      const chunk = ids.slice(i, i + ExpoPushProvider.RECEIPT_CHUNK);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), pushProviderTimeoutMs());
+      timer.unref?.();
+      try {
+        const res = await fetch(this.receiptsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ ids: chunk }),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          recordPushFailure('receipt', httpFailureReason(res.status), chunk.length, context);
+          continue;
+        }
+        const body = await res.json() as { data?: Record<string, { status?: string; details?: { error?: string } } | undefined> };
+        const receipts = body?.data && typeof body.data === 'object' ? body.data : {};
+        const errors: unknown[] = [];
+        for (const id of chunk) {
+          const receipt = receipts[id];
+          if (!receipt) continue; // not ready yet
+          if (receipt.status === 'ok') ok += 1;
+          else errors.push(receipt.details?.error);
+        }
+        recordPushFailureClasses('receipt', errors, context);
+        failed.push(...errors.map(expoErrorClass));
+      } catch {
+        recordPushFailure('receipt', controller.signal.aborted ? 'timeout' : 'network', chunk.length, context);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return { ok, failed };
+  }
+}
+
+/** [STORE-ALERT] Receipt check delay for the production Expo adapter:
+ *  EXPO_PUSH_RECEIPT_DELAY_MS (default 60 s); 0 or a negative value turns the
+ *  check off. */
+export function expoReceiptCheckDelayMs(): number | null {
+  const raw = process.env['EXPO_PUSH_RECEIPT_DELAY_MS'];
+  if (raw === undefined || raw.trim() === '') return 60_000;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return 60_000;
+  return value > 0 ? value : null;
 }
 
 /** Push selection is orthogonal to SMS (PUSH_PROVIDER=dev | expo). */
@@ -385,7 +501,7 @@ export function getPushProvider(): PushProvider {
       }
       return new DevPush();
     case 'expo':
-      return new ExpoPushProvider();
+      return new ExpoPushProvider({ receiptCheckDelayMs: expoReceiptCheckDelayMs() });
     default:
       throw new Error(`Unknown PUSH_PROVIDER: ${provider}`);
   }
@@ -432,8 +548,10 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
 /**
  * Email is chosen on its own axis: `EMAIL_PROVIDER=smtp` sends through the
  * founder's mailbox (GoDaddy / Microsoft 365 over SMTP, see smtp-email.ts);
- * unset or `dev` keeps DevEmail, which REFUSES in production so a missing
- * sender is loud at the first send rather than silent forever.
+ * `EMAIL_PROVIDER=resend` sends over HTTPS through Resend's email API
+ * (resend-email.ts; the droplets cannot reach SMTP); unset or `dev` keeps
+ * DevEmail, which REFUSES in production so a missing sender is loud at the
+ * first send rather than silent forever.
  */
 function getEmailProvider(): EmailProvider {
   const provider = process.env['EMAIL_PROVIDER'] ?? 'dev';
@@ -442,6 +560,8 @@ function getEmailProvider(): EmailProvider {
       return new DevEmail();
     case 'smtp':
       return new SmtpEmailProvider();
+    case 'resend':
+      return new ResendEmailProvider();
     default:
       throw new Error(`Unknown EMAIL_PROVIDER: ${provider}`);
   }

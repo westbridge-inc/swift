@@ -29,32 +29,31 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
-
-// Next's compiler inlines NEXT_PUBLIC_* only for this exact dot-form lookup;
-// the ambient member makes that syntax type-safe under
-// noPropertyAccessFromIndexSignature (the lib/browser-api-origin.ts pattern).
-/* eslint-disable no-unused-vars */
-declare global {
-  namespace NodeJS {
-    interface ProcessEnv {
-      NEXT_PUBLIC_WEB_ORDERING?: string;
-    }
-  }
-}
-/* eslint-enable no-unused-vars */
+import { OPERATOR } from './legal/generated';
+import { launch } from './site.launch';
 
 export const site = {
-  /** Exact D&B spelling. Appears on /about, /contact and every footer. */
-  legalEntityName: 'Westbridge Inc.',
+  // [Owner 15 Oct 2026 · legal research A11, R2] The company's identity has ONE source, shared with the Terms
+  // and the Privacy Policy: apps/api/src/modules/legal/operator.ts, through the legal:sync snapshot. To change
+  // a fact, change it there (a legal-text change: new LEGAL_VERSION) and run legal:sync.
 
-  /** Exact D&B address, one line. Apple matches this against the D&B record. */
-  address: 'Lot 165 New Trafalgar Building Waterloo Street Georgetown Guyana',
+  /** The operator's legal name. Appears on /about, /contact and every footer. */
+  legalEntityName: OPERATOR.name,
+
+  /** Registration number of the company (Guyana). */
+  registrationNo: OPERATOR.registrationNo,
+
+  /** The registered address, one line. */
+  address: `${OPERATOR.registeredAddress}, ${OPERATOR.registeredIn}`,
 
   /** The number the founder actually answers. Apple may call it. */
-  phone: '+592 7163534',
+  phone: OPERATOR.phone,
 
   /** Support inbox. Already live on the domain's mail — do not change. */
-  supportEmail: 'support@swiftgy.com',
+  supportEmail: OPERATOR.supportEmail,
+
+  /** [Owner 15 Oct 2026] When support answers, and what to do in an emergency. No page may promise faster. */
+  supportHours: 'Monday to Saturday, 8:00–20:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
 
   /** Canonical apex host. www 301s here; AASA resolves here with no redirect.
    *  Declared in site.domain.ts so next.config can read it without tripping
@@ -86,53 +85,9 @@ export const site = {
 
 export { SITE_ORIGIN };
 
-// ── Launch truth ───────────────────────────────────────────────────────────
-//  Every availability claim on the site reads from here, so the marketing copy
-//  can never drift ahead of what actually works. Apple and Google both treat a
-//  dead call-to-action as a review flag, and a "Download on the App Store"
-//  badge before the app exists is the fastest way to fail.
-//
-//  Flip a vertical to 'live' only when a customer in that market can complete
-//  the flow end to end today.
-
-export type LaunchState = 'live' | 'waitlist' | 'soon';
-
-export const launch = {
-  /** Where the product actually operates. Add a market only when it is real. */
-  markets: ['Georgetown, Guyana'] as const,
-
-  /** [Item 7] THE pre-launch switch: may the PUBLIC site (swiftgy.com and
-   *  www) take orders? Set per deployment at build time —
-   *  NEXT_PUBLIC_WEB_ORDERING=live once ordering has launched there; anything
-   *  else, or nothing, keeps the public site behind the "Launching soon" front
-   *  door (src/middleware.ts). It governs the public hosts only: staging, a
-   *  preview or a local run keeps the full marketplace from the same build
-   *  (src/lib/web-ordering.ts). The native apps do not exist yet. */
-  webOrdering: (process.env.NEXT_PUBLIC_WEB_ORDERING === 'live' ? 'live' : 'soon') as LaunchState,
-  iosApp: 'soon' as LaunchState,
-  androidApp: 'soon' as LaunchState,
-
-  verticals: {
-    food: 'live' as LaunchState,
-    groceries: 'live' as LaunchState,
-    shops: 'live' as LaunchState,
-    rides: 'live' as LaunchState,
-    courier: 'live' as LaunchState,
-    services: 'live' as LaunchState,
-  },
-
-  /** [Q36] Visa and Mastercard, through the bank's card gateway, for Swift's
-   *  OWN charges — the weekly partner fee, and advertising a business chooses
-   *  to buy. Orders are never paid by card: the
-   *  API accepts only cash or the store's own MMG for an order. Flip to 'live'
-   *  only when a partner can pay the weekly fee by card end to end; until then
-   *  every card mark on the site says "coming soon". */
-  cardPayments: 'soon' as LaunchState,
-} as const;
-
-/** True only when a real, installable app exists in that store. Gates the
- *  store badges — see AC-10. There is deliberately no way to force a badge on. */
-export const showAppStoreBadges = launch.iosApp === 'live' || launch.androidApp === 'live';
+// ── Launch truth: src/site.launch.ts (re-exported here) ─────────────────────
+export { launch };
+export type { LaunchState } from './site.launch';
 
 // ── The deploy gate ────────────────────────────────────────────────────────
 //  [SITE-1.1 Part 3] "the build FAILS if any {{...}} token remains."

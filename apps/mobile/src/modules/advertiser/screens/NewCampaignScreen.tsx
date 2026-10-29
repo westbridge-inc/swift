@@ -8,6 +8,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, LoadingBlock, PillButton, T } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { useAdPlacements, useAdAvailability, useMyAdvertisers } from '../../../hooks/advertiser';
 import { adsApi } from '../../../services/api';
 import { errorMessage } from '../../../lib/apiError';
@@ -195,7 +196,8 @@ export function NewCampaignScreen() {
     <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
       {/* Header + step dots */}
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.xl, paddingVertical: space.md }}>
-        <Pressable onPress={() => (step === 1 ? navigation.goBack() : setStep((s) => (s === 5 ? 4 : s === 4 ? 2 : 1) as Step))} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <Pressable onPress={() => (step === 1 ? navigation.goBack() : setStep((s) => (s === 5 ? 4 : s === 4 ? 2 : 1) as Step))} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(22)}>
           <Feather name="arrow-left" size={22} color={color.text.primary} />
         </Pressable>
         <T variant="heading" style={{ marginLeft: space.lg, flex: 1 }}>

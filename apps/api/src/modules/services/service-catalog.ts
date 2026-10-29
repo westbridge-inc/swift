@@ -1,12 +1,15 @@
 import type { QualificationType } from '@prisma/client';
 import type { ServiceCatalog, ServiceCategory } from '@swift/types';
 import { AppError } from '../../utils/errors';
+import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
+import { SERVICE_DOCUMENT_WORDS } from '../verification/doc-registry';
 
 // ---------------------------------------------------------------------------
 // Services vertical (spec §4.6). Trust is risk-tiered: verify hard where someone
 // could be physically harmed. Every provider needs ID + police clearance; a
 // trade qualification is an optional "Certified" badge. Providers without one
-// can still join, shown transparently as "self-skilled".
+// can still join, shown transparently as "self-skilled". A trade the law
+// licenses also needs that licence before it goes live (SERVICE_TRADE_LAUNCH_FLOOR).
 // ---------------------------------------------------------------------------
 
 export const SERVICE_TRADE_CATALOG = {
@@ -43,8 +46,9 @@ export const SERVICE_TRADE_CATALOG = {
     label: 'Appliance & electronics repair', riskTier: 'LOW',
     aliases: ['appliance repair', 'electronics repair', 'appliance and electronics repair'],
   },
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI licence, the electrician's risk group
   solar_generator_inverter_installer: {
-    label: 'Solar / generator / inverter installer', riskTier: 'LOW',
+    label: 'Solar / generator / inverter installer', riskTier: 'HIGH',
     aliases: ['solar installer', 'generator installer', 'inverter installer', 'solar generator inverter installer'],
   },
   tiler: { label: 'Tiler', riskTier: 'LOW', aliases: ['tiler', 'tiling', 'tile installer'] },
@@ -109,10 +113,25 @@ export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
 // A category with an unresolved policy topic must never inherit the generic
 // base checklist and become live with identity documents alone. Opening one
 // requires a reviewed country checklist and an enforceable evidence path.
+// [TRADES · owner 13 Oct 2026, decisions 23 + 40] Trades opened with their
+// reviewed checklists (ops/platform-config SERVICE_TRADE_LAUNCH_FLOOR).
+// The lawyer stays held until counsel confirms it: lawyers may not advertise
+// their services, and a platform paid by a lawyer for bringing them clients may
+// itself commit an offence.
+// [R15 · owner 15 Oct 2026, research A9/D9] The trades whose licensing the
+// research marks UNSURE stay held too: gas fitters, the barber group (barber,
+// hairdresser, salon, nail technician, makeup artist) and accountants. Opened
+// with their documents: pest control (the Board's operator licence) and chefs
+// and caterers (this year's food handler's certificate).
+// [owner 16 Oct 2026] The heavy-equipment operator is held again: the licence
+// rules for its machines are not confirmed. Tutors and photographers stay open
+// (their home visits need the police clearance).
+// [ROLE-DOCS · owner ruling 21 Oct 2026 "not clear = held" · PR 3] The AC & refrigeration technician (NOAU
+// retrofitter licences exist; their legal basis was not found) and the mover (a goods vehicle for reward needs the
+// MVRTA s.87 goods licence: a counsel item) are held until their rules are confirmed.
 const PENDING_CATEGORIES = new Set<ServiceTradeId>([
-  'gas_fitter', 'pest_control', 'heavy_equipment_operator', 'chef', 'caterer',
-  'barber', 'hairdresser', 'tutor',
-  'salon', 'nail_technician', 'makeup_artist', 'photographer', 'lawyer', 'accountant',
+  'lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant',
+  'heavy_equipment_operator', 'ac_refrigeration', 'mover',
 ]);
 
 export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
@@ -130,7 +149,34 @@ function categoryGroup(trade: ServiceTradeId): ServiceCategory['group'] {
   return 'HOME_AND_TRADES';
 }
 
+/** [TRADES] What a trade must also know before signing up, in plain words. */
+const TRADE_NOTES: Partial<Record<ServiceTradeId, readonly string[]>> = {
+  tutor: ['The police clearance is always required: tutors work with children.'],
+  // [R15] Drone work is held (research A9: the GCAA rules are not confirmed).
+  photographer: ['Drone or aerial work is not offered on Swift yet. A profile that offers it cannot be saved.'],
+  // [R15 · research D9] The food handler's certificate is issued yearly by the Mayor and City Council of
+  // Georgetown; the rules outside Georgetown are not confirmed, so these trades are Georgetown only for now.
+  chef: ['Georgetown only for now. Your food handler’s certificate must be this year’s, from the Mayor and City Council of Georgetown. It is checked again every January.'],
+  caterer: ['Georgetown only for now. Your food handler’s certificate and eating-house registration must be this year’s, from the Mayor and City Council of Georgetown. They are checked again every January.'],
+  pest_control: ['Your Pesticides and Toxic Chemicals Control Board licence is checked again every January.'],
+  // [ROLE-DOCS · REVIEW-G #2053 S4-4] the electrician's GEI licence is now a floor (ops/platform-config), so its
+  // catalogue entry lists its documents like the solar installer's, with the same yearly re-check (R16)
+  electrician: ['Your GEI electrical licence is checked again every January.'],
+  // [ROLE-DOCS · PR 3] the same yearly re-check as an electrician's GEI licence (R16)
+  solar_generator_inverter_installer: ['Your GEI electrical licence is checked again every January.'],
+};
+
 function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] {
+  const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade];
+  if (floor) {
+    // [TRADES] An opened trade lists exactly what it must show, then what it may add.
+    const optional = DEFAULT_DOCUMENT_CHECKLISTS[`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}_OPTIONAL`] ?? [];
+    return [
+      ...floor.map((docType) => ({ key: `DOC_${docType.toUpperCase()}`, label: SERVICE_DOCUMENT_WORDS[docType] ?? docType, status: 'COUNTRY_CHECKLIST' as const })),
+      ...optional.map((docType) => ({ key: `OPTIONAL_${docType.toUpperCase()}`, label: `If it applies to you: ${SERVICE_DOCUMENT_WORDS[docType] ?? docType}`, status: 'COUNTRY_CHECKLIST' as const })),
+      ...(TRADE_NOTES[trade] ?? []).map((label, i) => ({ key: `NOTE_${trade.toUpperCase()}_${i + 1}`, label, status: 'COUNTRY_CHECKLIST' as const })),
+    ];
+  }
   const documents: ServiceCategory['documents'] = [{
     key: 'SERVICE_PROVIDER',
     label: 'Identity and any background checks required by your country checklist',
@@ -143,20 +189,20 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
   // These are review topics, not invented legal requirements or upload gates.
   // The live verification checklist remains the authority for actual uploads.
   const pending: Partial<Record<ServiceTradeId, string>> = {
+    lawyer: 'Right to practise and current professional standing',
+    // [R15] held until their licensing rules are confirmed
+    gas_fitter: 'Gas work competency and applicable licence requirements',
     barber: 'Premises registration and hygiene requirements for barbering',
     hairdresser: 'Premises registration and hygiene requirements for hairdressing',
     salon: 'Beauty service scope, premises and hygiene requirements',
     nail_technician: 'Nail service scope, hygiene and premises requirements',
     makeup_artist: 'Makeup service scope and hygiene requirements',
-    tutor: 'Qualifications and safeguarding for work with children',
-    photographer: 'Portfolio rights and safeguarding where children are involved',
-    lawyer: 'Right to practise and current professional standing',
     accountant: 'Professional credentials and authority for the services offered',
-    chef: 'Food handling and premises requirements',
-    caterer: 'Food handling and premises requirements',
-    gas_fitter: 'Gas work competency and applicable licence requirements',
-    pest_control: 'Chemical handling and applicable licence requirements',
+    // [owner 16 Oct] held until the licence rules for its machines are confirmed
     heavy_equipment_operator: 'Equipment competency and applicable licence requirements',
+    // [ROLE-DOCS · owner 21 Oct] held until their licence rules are confirmed
+    ac_refrigeration: 'Refrigerant handling and applicable licence requirements',
+    mover: 'Goods vehicle licence requirements for moving goods for payment',
   };
   if (pending[trade]) documents.push({
     key: `POLICY_${trade.toUpperCase()}`, label: pending[trade]!, status: 'POLICY_REVIEW_REQUIRED',
@@ -198,15 +244,93 @@ export function tradeRiskTier(trade: string): 'HIGH' | 'LOW' {
   return canonical ? SERVICE_TRADE_CATALOG[canonical].riskTier : 'HIGH';
 }
 
+/**
+ * [R7 · GUARDRAILS §7(4) · owner 15 Oct 2026] The browse guidance says only what a person on our team checked: every
+ * listed provider's ID and current police clearance (isProviderVerified lists no one else), and a licence only where a
+ * person checked it (the provider row then carries `licenceCheckedOn`). Never "police-cleared" or "background-checked",
+ * never a promise of "licensed (Certified)" providers the platform cannot show.
+ */
 export function riskGuidance(trade: string): string {
   return tradeRiskTier(trade) === 'HIGH'
-    ? 'Higher-risk work — we strongly recommend choosing a licensed (Certified) provider. Certified providers are shown first.'
-    : 'Every provider is ID-verified and police-cleared — choose by ratings and reviews.';
+    ? 'Higher-risk work — every provider here has their ID and a current police clearance on file, checked by a person on our team. A licence shows on a provider only after a person on our team checked it, and those providers are listed first.'
+    : 'Every provider here has their ID and a current police clearance on file, checked by a person on our team — choose by ratings and reviews.';
+}
+
+// ---------------------------------------------------------------------------
+// [TRADES · GUARDRAILS §8] Profile wording. Cooking gas (LPG) and fuel are never
+// sold, refilled or delivered through Swift (Petroleum and Petroleum Products
+// Regulations: a GEA licence is required, with prison and forfeiture of the
+// vehicle). A protected professional title is shown only by the trade whose
+// checklist proves it (ICAG Act s.25; lawyers are held; medicines are banned).
+// ---------------------------------------------------------------------------
+
+// Supply verbs (every tense, and the people who do it), and the gas or fuel they
+// would act on. A word naming an appliance, a fitting, a part or a filling station
+// right after the fuel word ("gas stove", "gas point", "fuel pump", "diesel engine",
+// "gas station") is the trade's ordinary work or a place, never fuel. [DS1130, DS1132]
+// A keyword rule is a first line, not a proof: reports and moderation stay the backstop.
+const SUPPLY = String.raw`(?:sell(?:s|ing|ers?)?|sold|sales?|refill(?:s|ed|ing|ers?)?|top(?:s|ped)?[\s-]?ups?|topping[\s-]up|deliver(?:s|ed|y|ies|ing|ers?)?|suppl(?:y|ies|ied|ying|iers?)|provid(?:e|es|ed|ing|ers?)|distribut(?:e|es|ed|ing|ion|ors?)|stock(?:s|ed|ing|ists?)?|retail(?:s|ed|ing|ers?)?|wholesal(?:e|ers?|ing)|exchang(?:e|es|ed|ing)|swap(?:s|ped|ping)?|transport(?:s|ed|ing|ers?)?|carr(?:y|ies|ied|ying|iers?)|fill(?:s|ed|ing)?|dealers?|vendors?|depots?)`;
+const GAS_PARTS = String.raw`(?:stoves?|cookers?|ovens?|ranges?|hobs?|appliances?|lines?|pipes?|piping|leaks?|regulators?|hoses?|fittings?|fitters?|burners?|heaters?|dryers?|grills?|connections?|installations?|valves?|meters?|detectors?|safety|boilers?|fireplaces?|points?|outlets?|stations?|pumps?)\b`;
+const FUEL_PARTS = String.raw`(?:efficient|lines?|pumps?|filters?|injectors?|injection|tanks?|systems?|gauges?|caps?|economy|savings?|consumption|doors?|hoses?|rails?|engines?|motors?|vehicles?|cars?|generators?|trucks?|mechanics?|lamps?|stoves?|heaters?|stations?)\b`;
+const NOT_PART = (parts: string) => String.raw`(?![\s-]*${parts})`;
+const FUEL_WORDS = String.raw`(?:lpg|cooking\s+gas|gas)${NOT_PART(GAS_PARTS)}|gas\s+bottles?|cylinders?|propane|butane|(?:fuel|gasoline|petrol|diesel|kerosene)${NOT_PART(FUEL_PARTS)}`;
+const GAP = String.raw`\W+(?:\w+\W+){0,2}`;
+const supplyPattern = (fuel: string) => new RegExp(String.raw`\b${SUPPLY}${GAP}(?:${fuel})\b|\b(?:${fuel})${GAP}${SUPPLY}\b`, 'i');
+const FUEL_SUPPLY = supplyPattern(FUEL_WORDS);
+/** Short sale phrases with no supply verb: "LPG available", "order your gas", "get your LPG here",
+ *  "LPG here, call us", "diesel by the gallon". Narrow on purpose: "gas repairs available", "get your
+ *  gas checked" and "we fix gas here" are the repair work itself. [DS1133, DS1134] */
+const FUEL_SALE = new RegExp([
+  String.raw`\b(?:${FUEL_WORDS})\s+(?:(?:is|are)\s+)?(?:now\s+)?available\b`,
+  String.raw`\bgas\s+tanks?\s+(?:(?:is|are)\s+)?(?:now\s+)?available\b`,
+  String.raw`\b(?:order|buy)\s+your\s+(?:${FUEL_WORDS})\b`,
+  String.raw`\b(?:order|buy|get)\s+(?:your\s+)?(?:${FUEL_WORDS})\s+(?:here|from\s+us|today|now|delivered|refilled)\b`,
+  // "LPG here" only where a phrase starts (not "we fix gas here")
+  String.raw`(?:^|[\n.!?;:,–—-]\s*)(?:${FUEL_WORDS})\s+here\b`,
+  String.raw`\b(?:${FUEL_WORDS})\s+by\s+the\s+(?:gallon|litre|liter|pound|lb|cylinder|tank|drum|barrel|bottle)s?\b`,
+].join('|'), 'i');
+/** A gas fitter's "tank" is a gas tank — unless it is a water, septic or fish tank. */
+const GAS_FITTER_SUPPLY = supplyPattern(String.raw`${FUEL_WORDS}|(?<!\b(?:water|septic|fish)\s)tanks?`);
+const ACCOUNTANT_TITLES = /\b(?:chartered\s+accountants?|certified\s+(?:public\s+)?accountants?|cpa|acca)\b/i;
+// Lawyers are held (Code of Conduct advertising rule; touting): no profile offers legal work.
+const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barristers?|solicitors?|lawyers?|paralegals?|legal\s+(?:advice|services?|representation|counsel|drafting|aid)|pharmacists?|druggists?)\b|(?<!powers?[\s-]+of[\s-]+)\battorneys?\b/i;
+
+/** Refuse profile wording Swift must never publish for a service provider. */
+export function assertProviderProfileWording(trade: ServiceTradeId, bio: string | null | undefined): void {
+  if (!bio) return;
+  // A disclaimer ("we do not sell gas") is refused too: reading negations is how "we don't only sell
+  // gas, we deliver it" would slip through, and the catalogue already says it is not allowed.
+  if ((trade === 'gas_fitter' ? GAS_FITTER_SUPPLY : FUEL_SUPPLY).test(bio) || FUEL_SALE.test(bio)) {
+    throw new AppError(400, 'PROHIBITED_SERVICE_WORDING', 'Swift does not allow selling, refilling or delivering cooking gas (LPG) or fuel, so a profile does not mention it, even to say you do not. Describe the installation or repair work you do.');
+  }
+  if (NEVER_TITLES.test(bio) || (trade !== 'accountant' && ACCOUNTANT_TITLES.test(bio))) {
+    throw new AppError(400, 'PROTECTED_TITLE', 'Your profile uses a professional title that this service on Swift does not check. Remove the title from your profile.');
+  }
+  // [R15 · research A9] Drone and aerial work is held for every trade until the GCAA rules are confirmed.
+  if (profileOffersDroneWork(bio)) {
+    throw new AppError(400, 'DRONE_WORK_HELD', 'Swift does not offer drone or aerial work yet. Remove it from your profile to continue.');
+  }
+}
+
+const DRONE_WORDS = String.raw`(?:drones?|aerial|uavs?|quad[\s-]?copters?|fpv)`;
+/** "No drone work", "we avoid drone jobs", "doesn't fly drones", "drone-free", "drone work not offered":
+ *  a provider who says they do not fly. A negation elsewhere in the sentence does not count — when
+ *  unsure, the profile is treated as offering it. [DS1132] */
+const NOT_JUST = String.raw`(?!\s+(?:just|only)\b)`; // "not just drone work" is drone work
+const NEGATOR = String.raw`(?:no|not${NOT_JUST}|never|without|avoid(?:s|ing)?|(?:do|does|did)\s+not${NOT_JUST}|(?:don|doesn|didn)['’]?t${NOT_JUST})`;
+const NO_DRONE = new RegExp(String.raw`\b${NEGATOR}\s+(?:\w+\s+){0,2}?${DRONE_WORDS}\b|\b${DRONE_WORDS}[\s-]*free\b|\b${DRONE_WORDS}(?:\s+\w+){0,2}\s+not\s+(?:offered|available|provided|done)\b`, 'gi');
+const DRONE = new RegExp(String.raw`\b${DRONE_WORDS}\b`, 'i');
+
+/** [R15] A profile offering drone or aerial work is refused (held), and a stored one is never verified (services.service). */
+export function profileOffersDroneWork(bio: string | null | undefined): boolean {
+  return !!bio && DRONE.test(bio.replace(NO_DRONE, ' '));
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.
- * GEI is specifically an electrician credential; generic qualifications still
- * require a trusted reviewer and remain bound to their submitted trade. */
-export function qualificationTypeMatchesTrade(type: QualificationType, trade: ServiceTradeId): boolean {
-  return type !== 'GEI_LICENCE' || trade === 'electrician';
+ * Generic qualifications still require a trusted reviewer and remain bound to
+ * their submitted trade. [ROLE-DOCS · owner 21 Oct 2026] A GEI_LICENCE
+ * qualification badges nothing, for any trade: the electrician's GEI licence is
+ * the required checklist document, never a second, optional copy. */
+export function qualificationTypeMatchesTrade(type: QualificationType, _trade: ServiceTradeId): boolean {
+  return type !== 'GEI_LICENCE';
 }

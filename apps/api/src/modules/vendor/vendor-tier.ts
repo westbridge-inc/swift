@@ -17,11 +17,13 @@
  * written to bound.
  */
 import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
+import { validExpiryOr } from '../verification/document-validity';
 import type { Prisma, PrismaClient, Vendor, VendorTier } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import type { CountryConfigService } from '../country/country-config.service';
 import { REGISTRATION_DOC_TYPES } from '../verification/doc-registry';
 import { vendorVisibleFilter } from '../order/hold-visibility';
+import { ownerWallSystem } from '../../lib/owner-rls';
 export { REGISTRATION_DOC_TYPES };
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -117,7 +119,7 @@ export function assertPromotable(vendor: Pick<Vendor, 'name' | 'tier'>): void {
 /** THE definition of "registered": a VALID, unexpired registration record for the owner. One reader for promotion and for the declaration route. */
 export async function validRegistrationRecord(db: Db, ownerUserId: string, now = new Date()): Promise<{ id: string; docType: string } | null> {
   return db.documentRecord.findFirst({
-    where: { accountId: ownerUserId, docType: { in: [...REGISTRATION_DOC_TYPES] }, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+    where: { accountId: ownerUserId, docType: { in: [...REGISTRATION_DOC_TYPES] }, status: 'VALID', OR: validExpiryOr('expiresOn', now) },
     select: { id: true, docType: true },
   });
 }
@@ -166,10 +168,11 @@ export async function nudgeOwnerOnce(
 ): Promise<boolean> {
   if (!verdict.nudge) return false;
   const dayStart = startOfGuyanaDay(guyanaDayKey(now));
-  const already = await db.notification.findFirst({
+  // [item 20] The store owner's nudge, looked up from a customer's checkout: the named capability under the owner wall.
+  const already = await ownerWallSystem('vendor-tier:nudged-today', () => db.notification.findFirst({
     where: { data: { path: ['kind'], equals: 'vendor_tier_nudge' }, AND: [{ data: { path: ['vendorId'], equals: vendor.id } }], createdAt: { gte: dayStart } },
     select: { id: true },
-  });
+  }));
   if (already) return false;
   const owner = await db.vendorOwner.findUnique({ where: { id: vendor.ownerId }, select: { userId: true } });
   if (!owner) return false;

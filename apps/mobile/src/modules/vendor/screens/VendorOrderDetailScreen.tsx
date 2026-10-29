@@ -3,14 +3,25 @@ import React, { useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
+import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
+import { HANDOVER_WORDS, handoverNeedsNoCode, withHandoverSteps } from '../storeHandover';
+import { mmgDisputePaused } from '../order-dispute';
+import { RiderHandoverLine } from '../RiderHandoverLine';
+import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
-import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
+import { orderPaymentLine } from '../storeWords';
+import { storeTimelineLabel } from '../../../lib/orderStatus';
+import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, usePendingPickLines, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
+import { storeSwapWaitText } from '../../orders/substitutionCopy';
 import { toast } from '../../../kit/toast';
 import { parsePartyCaseView, partyCaseWorthShowing, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
 import { money } from '../../../lib/money';
-import { openExternal } from '../../../lib/openExternal';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
+import type { CallTarget } from '../../../lib/callBridge';
 import {
   FulfillmentTag,
   GUTTER,
@@ -19,8 +30,8 @@ import {
   fmtClock,
   fmtWhen,
   formatSlot,
+  MmgDisputeNotice,
   orderActions,
-  prettyStatus,
 } from '../shared';
 import { deliveryOwnerView } from './delivery-owner';
 
@@ -46,7 +57,7 @@ function TimelineRow({ entry, last }: { entry: any; last: boolean }) {
       <View style={{ flex: 1, paddingBottom: last ? 0 : space.md }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <T variant="label" weight="semibold">
-            {prettyStatus(entry.status)}
+            {storeTimelineLabel(entry.status)}
           </T>
           <T variant="caption" tone="muted">
             {fmtWhen(entry.createdAt)}
@@ -68,12 +79,17 @@ function ContactCard({
   name,
   phone,
   lines,
+  orderId,
+  target,
 }: {
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   title: string;
   name: string;
   phone?: string;
   lines?: (string | null | undefined)[];
+  /** [O-1] The order and the party, so "Call via Swift" can connect the call while the bridge is on. */
+  orderId?: string;
+  target: CallTarget;
 }) {
   return (
     <Card style={{ marginBottom: space.md }}>
@@ -89,9 +105,10 @@ function ContactCard({
             {name}
           </T>
         </View>
-        {phone ? (
-          <PillButton label="Call" variant="soft" size="sm" onPress={() => void openExternal(`tel:${phone}`, "Couldn't start the call — dial the customer directly.")} />
-        ) : null}
+        {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this screen). */}
+        <CallParty orderId={orderId} target={target} phone={phone} dialFailText={`Couldn't start the call — dial the ${title.toLowerCase()} directly.`}>
+          {(call) => <PillButton label={call.label} variant="soft" size="sm" disabled={call.busy} onPress={call.onPress} />}
+        </CallParty>
       </View>
       {(lines ?? []).filter(Boolean).map((l, i) => (
         <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: i === 0 ? space.md : 4 }}>
@@ -105,15 +122,27 @@ function ContactCard({
   );
 }
 
-export function VendorOrderDetailScreen({ navigation, route }: any) {
+export function VendorOrderDetailScreen(props: any) {
+  // [UI-SWEEP U10 S3-1] A tap to a screen already in the stack goes back to
+  // it (navigate + pop), and a push for another order while this screen is
+  // open re-uses it too: React Navigation hands the SAME mounted screen the
+  // new order. Everything below is order-local (the typed collection code,
+  // the Reject / Confirm delivered popups, the swap picker), so a new order
+  // id is a new screen: order A's half-done hand-over can never act on B.
+  return <VendorOrderDetailBody key={props.route?.params?.orderId ?? ''} {...props} />;
+}
+
+function VendorOrderDetailBody({ navigation, route }: any) {
   const orderId: string | undefined = route.params?.orderId;
-  const { data: order, isLoading, isError, refetch } = useVendorOrder(orderId);
+  const { data: order, isLoading, isError, refetch, isPlaceholderData } = useVendorOrder(orderId);
   const returnReceived = useReturnReceived();
   const orderAction = useOrderAction();
   const retryDispatch = useRetryDispatch();
   const fulfillmentMode = useSetOrderFulfillmentMode();
   const [confirmReject, setConfirmReject] = useState(false);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
+  // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
+  const [lastOut, setLastOut] = useState(false);
   // [MOB-050] The counter hand-over is a ceremony, not a button: the vendor
   // TYPES what the customer reads out. The screen used to print the code and
   // send nothing, so the server (which requires it) refused every attempt and
@@ -121,6 +150,8 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const [pickupCode, setPickupCode] = useState('');
   const [subFor, setSubFor] = useState<string | null>(null);
   const picking = usePickingActions();
+  // [TAP-AUDIT] Each line's tick waits alone: a second tap on a box whose tick is still on its way sends nothing.
+  const pickPending = usePendingPickLines(orderId);
   const menu = useVendorMenu();
 
   // [MOB-050] A missing orderId is not a slow network. It used to render the
@@ -156,7 +187,9 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Shelf-pick UI: quantity-tracked store types, while the bag is still open.
   const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
-  const pickable = ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
+  // [STORE-DASH] While the screen shows the board's copy (the order's own read
+  // is on its way), the lines are read-only: a tick acts on the order's own state.
+  const pickable = !isPlaceholderData && ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const lineResolved = (l: any) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
   const openLines = pickable ? items.filter((l) => !lineResolved(l)).length : 0;
   /** Same substitutionGroup wins; otherwise same category; always in stock. */
@@ -172,10 +205,13 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const isPickup = order.fulfillment === 'PICKUP';
   const isAppt = order.fulfillment === 'APPOINTMENT';
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
-  const actions = orderActions(order);
+  // [STORE-DASH · O-2] The hand-overs ride on top of the shared steps (storeHandover).
+  const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   // [MOB-050] The one state where a counter hand-over is due.
   const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
-  const busy = orderAction.isPending;
+  // [TAP-AUDIT] The step buttons also wait while a pick tick is still on its way (a Ready sent before it lands would be
+  // refused for an unpicked line).
+  const busy = orderAction.isPending || pickPending.size > 0;
   // The log is stored newest-first; the timeline reads placed → latest.
   const timeline: any[] = [...(order.statusHistory ?? [])].reverse();
   const customerName = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
@@ -224,6 +260,16 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
             {fmtWhen(order.placedAt)}
           </T>
         </View>
+        {/* [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: say so and what happens next. */}
+        <MmgDisputeNotice order={order} />
+        {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+        {customerDeciding(order) || nothingToAccept(order) ? (
+          <View style={{ borderRadius: radius.lg, backgroundColor: color.soft.warning, padding: space.md, marginBottom: space.md }}>
+            <T variant="label" weight="semibold">
+              {customerDeciding(order) ? OUT_OF_STOCK_WORDS.deciding : OUT_OF_STOCK_WORDS.nothing}
+            </T>
+          </View>
+        ) : null}
 
         {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
             the case, and confirms when returned goods are back with it. */}
@@ -269,7 +315,19 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
             PRINT the code — which made the check prove nothing — while the action
             sent none, so the server refused every attempt.
             Same ceremony as the ride PIN on the mover side. */}
-        {isPickup && awaitingCollection ? (
+        {/* [STORE-DASH · O-2] The store's pickup code is off: the check is the name and the order number. */}
+        {/* [REVIEW-F S3-1 on #2054] Only beside the "Handed to customer" button (never on a paused order). */}
+        {isPickup && awaitingCollection && actions.some((a) => a.action === 'handed-to-customer') ? (
+          <Card style={{ marginBottom: space.md }}>
+            <T variant="caption" weight="bold" tone="muted" center>
+              HANDOVER CHECK
+            </T>
+            <T variant="body" weight="bold" center style={{ marginTop: 2 }}>
+              {HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber)}
+            </T>
+          </Card>
+        ) : null}
+        {isPickup && awaitingCollection && !handoverNeedsNoCode(order) ? (
           <Card style={{ marginBottom: space.md }}>
             <View style={{ alignItems: 'center', marginBottom: space.md }}>
               <T variant="caption" weight="bold" tone="muted">
@@ -322,7 +380,11 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
                   {pickable && !closed ? (
                     <Pressable
-                      onPress={() => !pending && picking.setPicked.mutate({ orderId: order.id, lineId: it.id, picked: !it.picked })}
+                      onPress={() => !pending && !pickPending.has(it.id) && picking.setPicked.mutate({ orderId: order.id, lineId: it.id, picked: !it.picked })}
+                      disabled={pickPending.has(it.id)}
+                      accessibilityRole="checkbox"
+                      accessibilityLabel={`Picked: ${it.quantity}× ${it.name}`}
+                      accessibilityState={{ checked: !!it.picked, busy: pickPending.has(it.id) }}
                       hitSlop={8}
                       style={{ marginRight: space.sm, marginTop: 1 }}
                     >
@@ -340,6 +402,12 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                     <T variant="label" weight="semibold" style={closed ? { textDecorationLine: 'line-through' } : undefined}>
                       {it.name}
                     </T>
+                    {/* [L09 · M026] What the customer chose, so the right item is made. */}
+                    {orderLineOptionsText(it.options) ? (
+                      <T variant="caption" weight="semibold" style={{ marginTop: 2 }}>
+                        {orderLineOptionsText(it.options)}
+                      </T>
+                    ) : null}
                     {it.specialInstructions ? (
                       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
                         “{it.specialInstructions}”
@@ -347,7 +415,13 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                     ) : null}
                     {pending ? (
                       <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 2 }}>
-                        Waiting on the customer: {it.substituteName}
+                        {/* [STORE-DASH · O-4] A removal question proposes nothing: say what was asked. */}
+                        {lineQuestion(it) === 'removal' ? OUT_OF_STOCK_WORDS.removalAsked : `Waiting on the customer: ${it.substituteName}`}
+                      </T>
+                    ) : null}
+                    {pending && storeSwapWaitText(it.substituteDecideBy, order.paymentMethod) ? (
+                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                        {storeSwapWaitText(it.substituteDecideBy, order.paymentMethod)}
                       </T>
                     ) : null}
                     {closed ? (
@@ -360,6 +434,40 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                     {money(it.totalBase)}
                   </T>
                 </View>
+                {/* [STORE-DASH · O-4] A waiting order, every store type: one tap per item asks the customer. */}
+                {lastLineStanding(order, it) ? (
+                  <View style={{ marginLeft: 64, marginTop: space.xs, gap: space.xs }}>
+                    {lastOut ? (
+                      <>
+                        <T variant="caption" weight="semibold" tone="error">{OUT_OF_STOCK_WORDS.lastAsk}</T>
+                        <View style={{ flexDirection: 'row', gap: space.sm }}>
+                          <PillButton
+                            label={OUT_OF_STOCK_WORDS.lastYes}
+                            variant="primary"
+                            size="sm"
+                            disabled={busy}
+                            onPress={() => { setLastOut(false); orderAction.mutate({ id: order.id, action: 'reject', reason: OUT_OF_STOCK_WORDS.lastReason }); }}
+                          />
+                          <PillButton label={OUT_OF_STOCK_WORDS.lastKeep} variant="soft" size="sm" disabled={busy} onPress={() => setLastOut(false)} />
+                        </View>
+                      </>
+                    ) : (
+                      <View style={{ alignSelf: 'flex-start' }}>
+                        <PillButton label={OUT_OF_STOCK_WORDS.lastButton} variant="outline" size="sm" disabled={busy} onPress={() => setLastOut(true)} />
+                      </View>
+                    )}
+                  </View>
+                ) : canMarkOutOfStock(order, it) ? (
+                  <View style={{ marginLeft: 64, marginTop: space.xs, alignSelf: 'flex-start' }}>
+                    <PillButton
+                      label={OUT_OF_STOCK_WORDS.button}
+                      variant="outline"
+                      size="sm"
+                      disabled={picking.refundLine.isPending || busy}
+                      onPress={() => picking.refundLine.mutate({ orderId: order.id, lineId: it.id })}
+                    />
+                  </View>
+                ) : null}
                 {pickable && !closed && !pending && !it.picked ? (
                   <View style={{ marginLeft: 64 }}>
                     {subFor === it.id ? (
@@ -394,6 +502,26 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                     )}
                   </View>
                 ) : null}
+                {/* [SUBSTITUTION · owner 17 Oct] The store is never stuck
+                    waiting: while the customer decides, it can take the item
+                    off instead (the server removes it, lowers the total and
+                    tells the customer). Not on MMG: its total can't change
+                    in-app, and the server refuses. */}
+                {pickable && pending && order.paymentMethod !== 'MOBILE_MONEY' ? (
+                  <View style={{ marginLeft: 64 }}>
+                    <Pressable
+                      onPress={() => picking.refundLine.mutate({ orderId: order.id, lineId: it.id })}
+                      disabled={picking.refundLine.isPending}
+                      hitSlop={6}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${it.name} instead`}
+                    >
+                      <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 4 }}>
+                        Remove item instead
+                      </T>
+                    </Pressable>
+                  </View>
+                ) : null}
               </View>
             );
           })}
@@ -409,20 +537,22 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm }}>
             <MaterialCommunityIcons name="cash" size={16} color={color.success} />
             <T variant="caption" weight="semibold" tone="muted">
-              {order.paymentMethod === 'CASH' ? 'Cash on handover — you keep 100% of the goods total.' : String(order.paymentMethod ?? '')}
+              {orderPaymentLine(order.paymentMethod)}
             </T>
           </View>
         </Card>
 
-        {/* Cancellation — reason straight off the order record */}
+        {/* Cancellation — the reason off the order record, in words: a system
+            code (NO_DRIVERS_AVAILABLE, FOOD_TOO_OLD) reads as the shared words
+            the web console uses, never as the code [UI-SWEEP U72] */}
         {s === 'CANCELLED' ? (
           <View style={{ borderRadius: radius.lg, backgroundColor: color.soft.danger, padding: space.lg, marginBottom: space.md }}>
             <T variant="label" weight="semibold" tone="error">
               Cancelled {fmtWhen(order.cancelledAt)}
             </T>
-            {order.cancellationReason ? (
+            {cancellationReasonWords(order.cancellationReason, 'store') ? (
               <T variant="label" tone="muted" style={{ marginTop: 4 }}>
-                {order.cancellationReason}
+                {cancellationReasonWords(order.cancellationReason, 'store')}
               </T>
             ) : null}
           </View>
@@ -434,6 +564,8 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           title="Customer"
           name={customerName}
           phone={order.customer?.phone}
+          orderId={order.id}
+          target="customer"
           lines={
             isAppt
               ? [formatSlot(order.appointmentSlot), apptMobile ? `You travel to: ${order.deliveryAddress}` : 'At your store']
@@ -444,7 +576,22 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
         />
 
         {/* Rider — only once dispatch has assigned one */}
-        {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} /> : null}
+        {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} orderId={order.id} target="rider" /> : null}
+        {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+        <SwiftCallNumberTip />
+        {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider". */}
+        {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside the "Handed to rider" button: never before the order is
+            ready, never on an order paused for an MMG payment review. */}
+        {actions.some((a) => a.action === 'handed-to-rider') ? (
+          <Card style={{ marginBottom: space.md }}>
+            <RiderHandoverLine rider={order.rider} />
+          </Card>
+        ) : null}
+        {order.handedToRiderAt ? (
+          <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.md }}>
+            {HANDOVER_WORDS.handedToRider}
+          </T>
+        ) : null}
 
         {/* This is status, never a local custody decision: the server rejects a
             stale switch if a rider has claimed while this screen was open. */}

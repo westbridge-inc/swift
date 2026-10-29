@@ -67,7 +67,8 @@ describe('the driver action', () => {
   it('the evidence fix falls back to a fresh position when no last-known fix exists', () => {
     const fix = body(HOOKS, 'async function evidenceFix', 'export function useDriverAction');
     expect(fix).toContain('Location.getLastKnownPositionAsync()');
-    expect(fix).toContain('Location.getCurrentPositionAsync(');
+    // [GO-LOC-1] The fresh position is the bounded Balanced -> GPS policy.
+    expect(fix).toContain('await currentDevicePosition()');
   });
 });
 
@@ -76,7 +77,9 @@ describe('the rider action', () => {
   it('the door handover rides the same seam and accepts the failed outcomes explicitly', () => {
     // [MKT-F057] The customer-held door PIN rides the same body; the failed
     // outcomes still carry no PIN.
-    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current)");
+    // [L02 · row 56] ...and the stated door cash, only when the screen supplies it
+    // (behaviour: mover.doorCash.test.ts).
+    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}), ...doorCash }, current)");
     expect(hook).toContain('evidenceFix(owner)');
   });
 });

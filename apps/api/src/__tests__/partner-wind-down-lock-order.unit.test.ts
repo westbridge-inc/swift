@@ -18,14 +18,18 @@ it('locks payer and sorted sources before winding down subscriptions and vendor 
     },
     item: { updateMany: vi.fn(async () => ({ count: 1 })) },
     vendorStaff: { deleteMany: vi.fn(async () => ({ count: 1 })) },
-    rider: { findUnique: vi.fn(async () => ({ id: 'rider-1' })) },
+    rider: { findUnique: vi.fn(async () => ({ id: 'rider-1' })), update: vi.fn(async () => ({})) },
     driver: { findUnique: vi.fn(async () => null) },
     subscription: {
       updateMany: vi.fn(async () => { writes.push('subscription'); return { count: 1 }; }),
+    },
+    // [#1848 follow-up] staged MMG link/number changes close with the cleared destinations, after the vendor rows.
+    moneySurfaceCommand: {
+      updateMany: vi.fn(async () => { writes.push('mmg-stages'); return { count: 0 }; }),
     },
   };
 
   await windDownPartner(prisma as unknown as Prisma.TransactionClient, 'user-1');
 
-  expect(writes).toEqual(['payer', 'sources', 'subscription', 'vendor']);
+  expect(writes).toEqual(['payer', 'sources', 'subscription', 'vendor', 'mmg-stages']);
 });

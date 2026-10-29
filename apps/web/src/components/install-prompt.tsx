@@ -1,8 +1,6 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import Image from 'next/image';
-import { Share, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 
 export const INSTALL_PROMPT_KEY = 'swift_web_install_prompt';
 const OFFER_WINDOW = 14 * 24 * 60 * 60_000;
@@ -12,6 +10,23 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 type Offer = 'none' | 'install' | 'ios-hint';
+
+/**
+ * The card itself is only needed once an offer is possible on Home, so its
+ * code is not in every page's first load: it is fetched then, and kept here.
+ * The offer is decided (and remembered) only once the card can show, so it is
+ * never spent unseen; nothing stands in for the card while its code arrives.
+ */
+let cardModule: typeof import('./install-prompt-card') | null = null;
+let cardLoading: Promise<typeof import('./install-prompt-card')> | null = null;
+/** Fetches the install card's code once (and again after a failed fetch). */
+export function loadInstallCard(): Promise<typeof import('./install-prompt-card')> {
+  cardLoading ??= import('./install-prompt-card').then(
+    (module) => (cardModule = module),
+    (error: unknown) => { cardLoading = null; throw error; },
+  );
+  return cardLoading;
+}
 
 export function isInstalledApp(): boolean {
   if (window.matchMedia?.('(display-mode: standalone)').matches) return true;
@@ -53,23 +68,7 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
   const [available, setAvailable] = useState(false);
   const installEvent = useRef<BeforeInstallPromptEvent | null>(null);
   const spent = useRef(false);
-  const card = useRef<HTMLElement | null>(null);
-  const [clearance, setClearance] = useState(0);
-
-  useLayoutEffect(() => {
-    const element = card.current;
-    if (!enabled || offer === 'none' || !element) return;
-    // Include wrapped Safari steps and the padding above the dock/home bar.
-    const measure = () => setClearance(element.getBoundingClientRect().height);
-    measure();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
-    observer?.observe(element, { box: 'border-box' });
-    window.addEventListener('resize', measure);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', measure);
-    };
-  }, [enabled, offer]);
+  const [cardReady, setCardReady] = useState(() => cardModule !== null);
 
   useEffect(() => {
     let interactions = 0;
@@ -109,16 +108,24 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
   }, []);
 
   useEffect(() => {
-    if (!enabled || !engaged || spent.current || isInstalledApp()) return;
+    if (!enabled || cardReady || spent.current || isInstalledApp()) return;
+    if (!available && !isIosSafari(navigator.userAgent, navigator.maxTouchPoints)) return;
+    let alive = true;
+    loadInstallCard().then(() => { if (alive) setCardReady(true); }, () => undefined);
+    return () => { alive = false; };
+  }, [enabled, available, cardReady]);
+
+  useEffect(() => {
+    if (!enabled || !engaged || !cardReady || spent.current || isInstalledApp()) return;
     const ios = isIosSafari(navigator.userAgent, navigator.maxTouchPoints);
     if ((!ios && !available) || !mayOffer(ios)) return;
     // The window starts when the offer is shown, even if the visitor leaves it open.
     if (!remember(ios ? 'ios-seen' : String(Date.now()))) return;
     spent.current = true;
     setOffer(ios ? 'ios-hint' : 'install');
-  }, [enabled, engaged, available]);
+  }, [enabled, engaged, available, cardReady]);
 
-  if (!enabled || offer === 'none') return null;
+  if (!enabled || offer === 'none' || !cardModule) return null;
 
   const dismiss = () => {
     installEvent.current = null;
@@ -130,29 +137,5 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
     if (!isInstalledApp()) void event?.prompt().catch(() => undefined);
   };
 
-  return (
-    <>
-    <div aria-hidden="true" data-install-clearance style={{ height: clearance }} />
-    <aside ref={card} aria-label="Install Swift" className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_var(--swift-dock,env(safe-area-inset-bottom)))]">
-      <div className="mx-auto max-w-md rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-3 shadow-[var(--swift-elevation-floating)]">
-        <div className="flex items-center gap-3">
-          <Image src="/icons/icon-192.png" alt="" width={44} height={44} unoptimized className="h-11 w-11 shrink-0 rounded-xl" />
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-bold">Install Swift</p>
-            <p className="text-xs text-[var(--swift-muted)]">Open Swift from your home screen.</p>
-          </div>
-          {offer === 'install' && <button type="button" onClick={install} className="rounded-full bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)]">Install</button>}
-          <button type="button" onClick={dismiss} aria-label="Dismiss" className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)]"><X className="h-4 w-4" aria-hidden /></button>
-        </div>
-        {offer === 'ios-hint' && (
-          <ol className="mt-3 list-inside list-decimal space-y-2 border-t border-[var(--swift-border)] pt-3 text-sm">
-            <li>Tap <Share aria-hidden className="inline h-4 w-4 align-[-2px]" /> <b>Share</b> in Safari.</li>
-            <li>Scroll down and choose <b>Add to Home Screen</b>.</li>
-            <li>Tap <b>Add</b>, then open the Swift icon.</li>
-          </ol>
-        )}
-      </div>
-    </aside>
-    </>
-  );
+  return <cardModule.InstallCard offer={offer} onInstall={install} onDismiss={dismiss} />;
 }

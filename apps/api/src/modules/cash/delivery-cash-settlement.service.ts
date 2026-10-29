@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import type { PrismaClient } from '@prisma/client';
 import { CashSettlementStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -60,12 +60,11 @@ function assertAttestedAmountMatches(ledger: unknown, attested: unknown): void {
 
 const SETTLEMENT_INCLUDE = {
   order: { select: { orderNumber: true } },
-  // Phones are included so the two parties can actually reach each other to make
-  // the CASH handover this ledger tracks — you can't hand someone money you owe
-  // if you can't call them. Same contact the delivery already shared between
-  // them; the ledger is scoped (each side sees only its own settlements).
-  rider: { select: { userId: true, user: { select: { firstName: true, lastName: true, phone: true } } } },
-  vendor: { select: { name: true, logoUrl: true, phone: true, owner: { select: { userId: true } } } },
+  // [O-1] No phones: no build or dashboard ever showed them, the rider's is personal
+  // and the store's is its account line. The two sides reach each other through
+  // the order (chat, and the Swift call bridge while it is live).
+  rider: { select: { userId: true, user: { select: { firstName: true, lastName: true } } } },
+  vendor: { select: { name: true, logoUrl: true, owner: { select: { userId: true } } } },
 } as const;
 
 /** Wire shape both apps render — Decimal flattened to number. */
@@ -79,8 +78,8 @@ function toWire(s: any) {
     riderConfirmedAt: s.riderConfirmedAt,
     storeConfirmedAt: s.storeConfirmedAt,
     createdAt: s.createdAt,
-    vendor: s.vendor ? { name: s.vendor.name, logoUrl: s.vendor.logoUrl, phone: s.vendor.phone ?? null } : null,
-    rider: s.rider?.user ? { name: [s.rider.user.firstName, s.rider.user.lastName].filter(Boolean).join(' '), phone: s.rider.user.phone ?? null } : null,
+    vendor: s.vendor ? { name: s.vendor.name, logoUrl: s.vendor.logoUrl } : null,
+    rider: s.rider?.user ? { name: [s.rider.user.firstName, s.rider.user.lastName].filter(Boolean).join(' ') } : null,
   };
 }
 

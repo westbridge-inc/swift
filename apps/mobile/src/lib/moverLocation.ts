@@ -1,4 +1,4 @@
-import type { DeviceLocationResolution } from './deviceLocation';
+import { settleDeviceLocation, type DeviceLocationResolution } from './deviceLocation';
 import type { AuthPrincipalBoundary } from './authSession';
 
 export type MoverKind = 'DRIVER' | 'RIDER';
@@ -275,12 +275,17 @@ export async function requestUsableMoverBackgroundPermission({
   getBackgroundPermission,
   requestBackgroundPermission,
   disclose,
+  onConsentGranted,
 }: {
   taskManagerAvailable: boolean;
   getForegroundPermission: () => Promise<{ status: string }>;
   getBackgroundPermission: () => Promise<{ status: string }>;
   requestBackgroundPermission: () => Promise<{ status: string }>;
   disclose: () => Promise<boolean>;
+  /** [R18] Told once the person accepted the disclosure AND the system sheet
+   *  granted access: the yes goes to the consent ledger. Fire-and-forget —
+   *  recording it never delays or fails going online. */
+  onConsentGranted?: () => Promise<unknown> | void;
 }) {
   // Never ask for background access when this installed binary cannot execute
   // the background task that would use it.
@@ -298,7 +303,11 @@ export async function requestUsableMoverBackgroundPermission({
     if (!(await disclose())) return false;
 
     const background = await requestBackgroundPermission();
-    return background.status === 'granted';
+    const grantedNow = background.status === 'granted';
+    if (grantedNow && onConsentGranted) {
+      try { void Promise.resolve(onConsentGranted()).catch(() => {}); } catch { /* never blocks GO */ }
+    }
+    return grantedNow;
   } catch {
     return false;
   }
@@ -308,16 +317,34 @@ export async function prepareMoverOnline({
   resolveForeground,
   requestBackground,
   getForegroundFix,
+  settleForeground = settleDeviceLocation,
   goOnline,
 }: {
   resolveForeground: () => Promise<DeviceLocationResolution>;
   requestBackground: () => Promise<boolean>;
   getForegroundFix: () => { latitude: number; longitude: number } | null;
+  /** Waits for every location check started so far to answer (bounded). */
+  settleForeground?: () => Promise<unknown>;
   goOnline: (location: { latitude: number; longitude: number }) => Promise<unknown>;
 }) {
+  // [GO-RELIABILITY] The fix GO may use is only ever the canonical one. When
+  // it is missing because a newer check is still answering (Android's
+  // permission screen and the Settings trip both resume the app, and resuming
+  // re-checks location), wait for that answer and read again instead of
+  // failing in under a second. The newer check refuses exactly what GO would:
+  // a denial, no fix within the GPS budget, a stale or inaccurate cached fix.
+  const canonicalFix = async () => {
+    const fix = getForegroundFix();
+    if (fix) return fix;
+    await settleForeground();
+    return getForegroundFix();
+  };
+
   const resolution = await resolveForeground();
-  if (resolution.status !== 'granted') return resolution;
-  if (!getForegroundFix()) return { status: 'unavailable' } as const;
+  // A denial is final. "No fix" from GO's own check is not, while a newer
+  // check is still on its way to one: the canonical answer decides.
+  if (resolution.status !== 'granted' && resolution.status !== 'unavailable') return resolution;
+  if (!(await canonicalFix())) return { status: 'unavailable' } as const;
 
   // Background access is an enhancement. A denial still permits the explicit
   // GO action with the foreground watcher active while Swift is visible.
@@ -329,8 +356,12 @@ export async function prepareMoverOnline({
   // The background permission sheet can trigger AppState work or the user can
   // revoke access in Settings. Never tell the server this mover is online
   // unless the canonical coordinator still owns a current foreground grant.
-  const authoritativeFix = getForegroundFix();
+  // Coming back from Settings re-reads the permission; GO waits for that
+  // answer and continues on it.
+  const authoritativeFix = await canonicalFix();
   if (!authoritativeFix) return { status: 'unavailable' } as const;
   await goOnline(authoritativeFix);
-  return resolution;
+  return resolution.status === 'granted'
+    ? resolution
+    : { status: 'granted' as const, ...authoritativeFix };
 }

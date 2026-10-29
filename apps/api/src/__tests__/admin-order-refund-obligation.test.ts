@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -12,7 +12,9 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { injectWithApproval } from './helpers/admin-approval';
+import { askAndApprove, injectWithApproval, seedSecondApproval } from './helpers/admin-approval';
+import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
+import { OrderService } from '../modules/order/order.service';
 
 // ---------------------------------------------------------------------------
 // [A-14] A CASH ORDER REFUND IS A PROMISE UNTIL SOMEBODY PROVES IT.
@@ -78,12 +80,13 @@ const cancel = (id: string, body: Record<string, unknown>) =>
     payload: body,
   });
 
-const settle = (id: string, body: Record<string, unknown>) =>
-  injectWithApproval(app, {
-    method: 'PUT', url: `/api/v1/admin/orders/${id}/refund-settled`,
-    headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
-    payload: body,
-  });
+const settleRequest = (id: string, body: Record<string, unknown>, approvalId?: string) => ({
+  method: 'PUT' as const, url: `/api/v1/admin/orders/${id}/refund-settled`,
+  headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json',
+    ...(approvalId ? { [APPROVAL_HEADER]: approvalId } : {}) },
+  payload: body,
+});
+const settle = (id: string, body: Record<string, unknown>) => injectWithApproval(app, settleRequest(id, body));
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -141,6 +144,32 @@ describe('[A-14] deciding to refund a cash order records an obligation, not a pa
     expect(fresh.refundSettledAt).toBeNull();
   });
 
+  it.each(['record', 'response'])('[M066] the refund %s uses an adjustment committed after the preview and before the order lock', async (projection) => {
+    const order = await makeCashOrder();
+    const transition = OrderService.prototype.transitionOrderAtomically;
+    let adjusted = false;
+    const spy = vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockImplementation(async function (this: OrderService, input) {
+      if (input.orderId === order.id) {
+        // Deterministic boundary: the route has read its preview, but the
+        // canonical transition has not acquired the order lock yet.
+        await app.prisma.order.update({ where: { id: order.id }, data: { deliveryFee: 400, totalAmount: 1400 } });
+        adjusted = true;
+      }
+      return transition.call(this, input);
+    });
+    try {
+      const response = await cancel(order.id, { reason: 'store could not fulfil', refund: true });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(adjusted).toBe(true);
+      const stored = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(Number(stored.totalAmount)).toBe(1400);
+      expect(stored.status).toBe('CANCELLED');
+      expect(stored.refundSettledAt).toBeNull();
+      if (projection === 'record') expect(Number(stored.refundOwedAmount)).toBe(1400);
+      else expect(response.json().data.refundOwed).toBe('1400');
+    } finally { spy.mockRestore(); }
+  });
+
   it('cancelling WITHOUT the refund flag records no obligation', async () => {
     const order = await makeCashOrder();
     expect((await cancel(order.id, { reason: 'duplicate', refund: false })).statusCode).toBe(200);
@@ -176,6 +205,18 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     expect(Number(fresh.refundPaidAmount)).toBe(1300);
     expect(fresh.refundSettledById).not.toBeNull();
     expect(fresh.refundSettledAt).not.toBeNull();
+  });
+
+  it('[F1 census] the settled answer carries no handover code or MMG destination snapshot', async () => {
+    const order = await owedOrder(1300);
+    // Real values: a null code serializes to nothing and would pass with the full row returned.
+    await app.prisma.order.update({ where: { id: order.id }, data: { ridePin: '246813', pickupCode: '975310', pickupCodeAttempts: 1 } });
+    const res = await settle(order.id, { reference: refFor('CASH'), amount: 1300 });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data?.status).toBe('REFUNDED');
+    for (const key of ['ridePin', 'pickupCode', 'pickupCodeAttempts', 'mmgNumberSnapshot', 'mmgPayUrlSnapshot']) {
+      expect(res.payload.includes(`"${key}"`), `refund-settled answered ${key}`).toBe(false);
+    }
   });
 
   it('a wrong amount is refused in either direction, to the cent', async () => {
@@ -248,7 +289,19 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     // settlement whose reference is not the one on the row.
     const order = await owedOrder(1300);
     const refs = Array.from({ length: 5 }, (_, i) => refFor(`CASH-R${i}`));
-    const results = await Promise.all(refs.map((reference) => settle(order.id, { reference, amount: 1300 })));
+    // [U06] One ask per act: while the first settlement ask stands, every other
+    // ask to settle this order is refused at the gate, whatever its reference...
+    const [firstRef, ...otherRefs] = refs;
+    const first = await askAndApprove(app, settleRequest(order.id, { reference: firstRef, amount: 1300 }));
+    for (const reference of otherRefs) {
+      const again = await app.inject(settleRequest(order.id, { reference, amount: 1300 }));
+      expect(again.statusCode, again.body).toBe(409);
+      expect(again.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    }
+    // ...so five approved settlers can only be approvals written before that
+    // rule. They race exactly as before: the settlement's own guard must hold.
+    const approvals = [first, ...await Promise.all(otherRefs.map((reference) => seedSecondApproval(app, first, { body: (b) => ({ ...b, reference }) })))];
+    const results = await Promise.all(refs.map((reference, i) => app.inject(settleRequest(order.id, { reference, amount: 1300 }, approvals[i]))));
 
     const ok = results.filter((r) => r.statusCode === 200);
     expect(ok).toHaveLength(1);

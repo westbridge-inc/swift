@@ -27,10 +27,16 @@ const healthy = {
   alerts: { pendingVendors: 0, pastDueSubs: 0, unassignedOrders: 0 },
 };
 
+const WAITING_KEYS = ['opsAlerts', 'supportSafety', 'supportSafetyInProgress', 'documents', 'approvals', 'paymentConfirmations', 'support',
+  'supportInProgress', 'catalogue', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'claimsAutoToPay', 'returnsToDecide',
+  'refundsOwed', 'moderation'];
+
 function handler(mode: 'ok' | 'fail') {
   return (request: ApiRequest) => {
     if (mode === 'fail') return { status: 503, body: { success: false, error: { code: 'DB_DOWN', message: 'unavailable' } } };
     if (request.url.pathname.includes('orders')) return { body: { success: true, data: [] } };
+    // [ADMIN-AUDIT S2-1] Today's queue counts: a healthy platform has every queue counted, at zero.
+    if (request.url.pathname === '/api/v1/admin/dashboard/waiting') return { body: { success: true, data: { queues: WAITING_KEYS.map((key) => ({ key, count: 0 })), notCounted: [] } } };
     return { body: { success: true, data: healthy } };
   };
 }
@@ -50,7 +56,8 @@ describe('[A-06] a failed dashboard read is never a quiet platform', () => {
     mockApi(handler('fail'));
     renderWithQuery(<DashboardPage />);
 
-    expect(await screen.findByText(/NOT an all-clear/i)).toBeTruthy();
+    // [REVIEW-F #2152 S3-1] Both reads failed here, so both say so (the alerts and the queue counts).
+    expect((await screen.findAllByText(/NOT an all-clear/i)).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/All clear — no active alerts/i)).toBeNull();
   });
 

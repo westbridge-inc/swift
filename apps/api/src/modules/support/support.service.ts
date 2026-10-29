@@ -1,5 +1,7 @@
-import type { PrismaClient, SupportCategory, SupportStatus, SupportResolution } from '@prisma/client';
-import { AppError, NotFoundError } from '../../utils/errors';
+import type { Prisma, PrismaClient, SupportCategory, SupportStatus, SupportResolution } from '@prisma/client';
+import { AppError, ForbiddenError, NotFoundError } from '../../utils/errors';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
+import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import { supportResolutionCounter } from '../../plugins/observability';
@@ -25,11 +27,27 @@ export interface CreateTicketInput {
   orderId?: string;
 }
 
+/** [item 20 · support tickets] How the admin queue reaches other people's tickets once they are owner-walled:
+ *  the named capability on the app client (the system login), inside the request's tenant boundary. */
+export interface SupportQueueWall { capability: string; client: PrismaClient }
+
 export class SupportService {
   constructor(
     private prisma: PrismaClient,
     private notifications: NotificationService,
+    private queueWall?: SupportQueueWall,
   ) {}
+
+  /** The admin queue's ticket reads and writes. Off (or a person's own service): `this.prisma`, exactly as
+   *  before, no extra filter. On: as the named capability, with the tenant boundary the admin client added
+   *  (`user.tenantId` = the request's tenant) now explicit, read before leaving the request's context. */
+  private queue<T>(run: (db: PrismaClient, scope: Prisma.SupportTicketWhereInput | null) => Promise<T>): Promise<T> {
+    const wall = this.queueWall;
+    if (!wall || !ownerRlsBindEnabled()) return run(this.prisma, null);
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    return ownerWallSystem(wall.capability, () => run(wall.client, { user: { tenantId } }));
+  }
 
   async createTicket(userId: string, input: CreateTicketInput) {
     // If it references an order, the opener must actually be on that order —
@@ -84,18 +102,34 @@ export class SupportService {
   async listForAdmin(opts: { status?: SupportStatus; page?: number; limit?: number }) {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, opts.limit ?? 20);
-    const where = opts.status ? { status: opts.status } : {};
-    const [tickets, total] = await Promise.all([
-      this.prisma.supportTicket.findMany({
-        where,
-        orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
-        skip: (page - 1) * limit,
-        take: limit,
-        include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } },
-      }),
-      this.prisma.supportTicket.count({ where }),
-    ]);
+    const status = opts.status ? { status: opts.status } : {};
+    const [tickets, total] = await this.queue((db, scope) => {
+      const where = scope ? { AND: [status, scope] } : status;
+      return Promise.all([
+        db.supportTicket.findMany({
+          where,
+          orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+          skip: (page - 1) * limit,
+          take: limit,
+          include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } },
+        }),
+        db.supportTicket.count({ where }),
+      ]);
+    });
     return { tickets, total, page, limit };
+  }
+
+  /** [ADMIN-AUDIT S2-1] Today's count of this queue: tickets not resolved yet, by the tab that lists them (Open,
+   *  In progress) and SAFETY apart. The same reads, scope and wall as listForAdmin. */
+  async waitingForAdmin(): Promise<{ safetyOpen: number; safetyInProgress: number; open: number; inProgress: number }> {
+    const unresolved: Prisma.SupportTicketWhereInput = { status: { in: ['OPEN', 'IN_PROGRESS'] } };
+    const rows = await this.queue((db, scope) => db.supportTicket.groupBy({
+      by: ['status', 'category'], where: { AND: [unresolved, ...(scope ? [scope] : [])] }, _count: { _all: true },
+    }));
+    const n = (status: SupportStatus, safety: boolean) => rows
+      .filter((r) => r.status === status && (r.category === 'SAFETY') === safety)
+      .reduce((sum, r) => sum + r._count._all, 0);
+    return { safetyOpen: n('OPEN', true), safetyInProgress: n('IN_PROGRESS', true), open: n('OPEN', false), inProgress: n('IN_PROGRESS', false) };
   }
 
   /** CONTRACT [WR-022]: `adminNote` is CUSTOMER-FACING — it is stored on the
@@ -114,7 +148,9 @@ export class SupportService {
     adminId: string,
     input: { status: SupportStatus; adminNote?: string; resolution?: SupportResolution; expectedStatus?: SupportStatus },
   ) {
-    const ticket = await this.prisma.supportTicket.findUnique({ where: { id: ticketId } });
+    const ticket = await this.queue((db, scope) => (scope
+      ? db.supportTicket.findFirst({ where: { AND: [{ id: ticketId }, scope] } })
+      : db.supportTicket.findUnique({ where: { id: ticketId } })));
     if (!ticket) throw new NotFoundError('SupportTicket', ticketId);
 
     const resolving = input.status === 'RESOLVED';
@@ -155,14 +191,14 @@ export class SupportService {
       }
     }
 
-    const updated = await this.prisma.supportTicket.update({
-      where: { id: ticketId },
+    const updated = await this.queue((db, scope) => db.supportTicket.update({
+      where: scope ? { id: ticketId, AND: [scope] } : { id: ticketId },
       data: {
         status: input.status,
         adminNote: input.adminNote ?? ticket.adminNote,
         ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
       },
-    });
+    }));
     if (resolving) {
       supportResolutionCounter.labels(ticket.category, input.resolution ?? 'UNSET').inc();
     }

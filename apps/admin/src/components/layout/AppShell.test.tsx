@@ -25,7 +25,7 @@ it('provides a mobile drawer with trapped focus and closes on Escape, overlay, a
   expect(screen.queryByRole('dialog')).toBeNull();
   await user.click(menu);
   drawer = screen.getByRole('dialog', { name: 'Navigation' });
-  await user.click(within(drawer).getByRole('link', { name: 'Verification' }));
+  await user.click(within(drawer).getByRole('link', { name: 'Documents' }));
   expect(screen.queryByRole('dialog')).toBeNull();
   await user.click(menu);
   nav.pathname = '/orders';

@@ -82,6 +82,12 @@ function snapshotFor(state: Pick<
   };
 }
 
+/** [IN-STORE-SALE] A fresh key for ONE command (an Idempotency-Key, e.g. one "Sold in store" tap): a random UUID,
+ *  so two taps never share one. Here because this module already holds the app's random source. */
+export function newCommandKey(): string {
+  return Crypto.randomUUID();
+}
+
 function createAdEventScopeId(): string {
   try {
     return Crypto.randomUUID();
@@ -137,7 +143,18 @@ async function revokeCapturedSession(session: AuthSessionSnapshot): Promise<void
   }
 }
 
+/** [row 205] The account whose session this process ended last: the owner of
+ *  a notification tapped while signed out (its push token was that account's;
+ *  logout revokes it). Memory only: never persisted, sent or shown, compared by
+ *  the tap router so a held tap replays for that account and no other. */
+let lastSignedOutUserId: string | null = null;
+
+export function getLastSignedOutUserId(): string | null {
+  return lastSignedOutUserId;
+}
+
 function finishLocalLogout(session: AuthSessionSnapshot | null): void {
+  if (session) lastSignedOutUserId = session.userId;
   if (session?.adEventScopeId) {
     // Synchronous and exact-owner: A is retired before B can become usable,
     // while a stale A cleanup can never delete a newer boundary's events.

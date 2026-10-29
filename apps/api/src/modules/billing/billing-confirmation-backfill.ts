@@ -1,6 +1,7 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
 import { BILLING_CUTOVER_KEY, BILLING_CUTOVER_VERSION, billingEffectsReady } from './billing-cutover';
 import { currentDunningClock } from './dunning-clock';
+import { SUBSCRIPTION_OWNER_JOINS_SQL, SUBSCRIPTION_PAYER_USER_ID_SQL } from '../subscription/subscription-owner';
 
 /** Operational cutover only: uses the same resolver and source mapping as the
  * runtime. It imports no billing service or provider and performs no collection,
@@ -18,9 +19,8 @@ export async function backfillBillingConfirmation(db: PrismaClient, options: {
   // cannot disappear because a paginated query happened not to join it.
   const invalid = await db.$queryRaw<Array<{ count: bigint }>>`
     SELECT count(*) FROM subscriptions s
-    LEFT JOIN riders r ON r.id=s."riderId" LEFT JOIN drivers d ON d.id=s."driverId"
-    LEFT JOIN vendors v ON v.id=s."vendorId" LEFT JOIN vendor_owners vo ON vo.id=v."ownerId"
-    LEFT JOIN users u ON u.id=COALESCE(r."userId",d."userId",vo."userId")
+    ${SUBSCRIPTION_OWNER_JOINS_SQL}
+    LEFT JOIN users u ON u.id=${SUBSCRIPTION_PAYER_USER_ID_SQL}
     WHERE num_nonnulls(s."riderId",s."driverId",s."vendorId")<>1 OR u.id IS NULL
       OR (v.id IS NOT NULL AND v."tenantId" IS DISTINCT FROM u."tenantId")`;
   if (Number(invalid[0]?.count ?? 0) > 0) throw new Error('Billing cutover has invalid or orphan subscription owners; completion remains blocked');

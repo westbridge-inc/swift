@@ -9,15 +9,20 @@ import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
 import { requestAuthContinuation, type MenuItemAddDraft } from '../../../navigation/authContinuation';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
-import { itemPhoto } from '../../../lib/images';
+import { HERO_PHOTO_WIDTH, itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { itemVatNote, storefrontVat } from '../../../lib/storeVat';
 import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
+import { listingConfirmsInstantly } from '../../../lib/appointmentBooking';
 import {
   Photo,
   Chip,
+  EmptyState,
   CircleChip,
   ErrorState,
+  Header,
   IconChip,
+  LabeledInput,
   LoadingBlock,
   Money,
   PillButton,
@@ -26,18 +31,31 @@ import {
   QtyStepper,
   SectionHeader,
   T,
+  TonePill,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { STORE_PICK } from '../../../lib/storePick';
+import { ItemDescription } from '../components/ItemDescription';
+
+/** [P35 · board 4b] "Craft & Kind · Georgetown": the store's name, and its city when it has one. */
+export function storeLine(store: { name?: string | null; city?: string | null }): string {
+  const city = store.city?.trim();
+  return city ? `${store.name ?? ''} · ${city}` : (store.name ?? '');
+}
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
 
 type Selected = Record<string, string | string[]>;
 
+/** [F4] A choice the store marked sold out is shown, but never chosen. */
+const onSale = (o: any) => o.isAvailable !== false;
+
 function defaultSelections(groups: any[]): Selected {
   const out: Selected = {};
   for (const g of groups ?? []) {
-    const defaults = (g.options ?? []).filter((o: any) => o.isDefault).map((o: any) => o.id);
+    // A sold-out default is never pre-selected: the customer chooses.
+    const defaults = (g.options ?? []).filter((o: any) => o.isDefault && onSale(o)).map((o: any) => o.id);
     if (g.maxSelect === 1) {
       if (defaults[0]) out[g.id] = defaults[0];
     } else if (defaults.length) {
@@ -77,6 +95,10 @@ export function MenuItemScreen() {
   );
   const groups: any[] = useMemo(() => item?.optionGroups ?? [], [item]);
   const [selected, setSelected] = useState<Selected>(() => addDraft?.selectedOptions ?? defaultSelections(groups));
+  // [row 70] A note for the store travels with this line (and through sign-in).
+  // Declared after the existing state so the screen's hook order is unchanged.
+  const [note, setNote] = useState(addDraft?.notes ?? '');
+  const trimmedNote = note.trim();
 
   const isBooking = item?.fulfillment === 'APPOINTMENT';
   const selectedDate = useMemo(() => {
@@ -86,6 +108,8 @@ export function MenuItemScreen() {
   const serviceMode: 'AT_BUSINESS' | 'MOBILE' | 'BOTH' = slotsQ.data?.serviceMode ?? 'AT_BUSINESS';
   const bookableWeekdays: number[] | undefined = slotsQ.data?.bookableWeekdays;
   const daySlots: string[] = useMemo(() => slotsQ.data?.slots ?? [], [slotsQ.data]);
+  // [BOOK-S6a · owner A4] Only the server's own answer (switch on + the business's setting) earns the badge.
+  const instantConfirmation = isBooking && listingConfirmsInstantly(slotsQ.data);
 
   // A slot can disappear during the 20-second freshness poll because another
   // customer won it. Never leave a now-unavailable selection armed in the
@@ -143,7 +167,7 @@ export function MenuItemScreen() {
   const onAdd = React.useCallback(() => {
     if (!isAuthenticated) {
       requestAuthContinuation({ screen: 'MenuItem', vendorId, itemId,
-        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode },
+        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode, ...(trimmedNote ? { notes: trimmedNote } : {}) },
       }, promptLogin);
       // If Auth already owns the root, promptLogin does not change its key.
       if (wantsAuth) navigation.getParent()?.navigate('Auth');
@@ -154,17 +178,20 @@ export function MenuItemScreen() {
     resumedAdd.current = true;
     if (route.params?.addAfterSignIn) navigation.setParams({ addAfterSignIn: undefined, addDraft: undefined });
     addToCart.mutate(
-      { vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined },
+      {
+        vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined,
+        ...(trimmedNote ? { specialInstructions: trimmedNote } : {}),
+      },
       {
         onSuccess: () => {
           if (isBooking && slot) {
-            setAppointment(itemId, { slotStart: slot, ...(serviceMode === 'BOTH' ? { mode: visitMode } : {}) });
+            setAppointment(itemId, { slotStart: slot, ...(serviceMode === 'BOTH' ? { mode: visitMode } : {}), ...(instantConfirmation ? { instant: true } : {}) });
           }
           setAdded(true);
         },
       },
     );
-  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
+  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, trimmedNote, promptLogin, navigation, addToCart, isBooking, serviceMode, instantConfirmation, setAppointment, route.params?.addAfterSignIn]);
   React.useEffect(() => {
     if (!route.params?.addAfterSignIn || resumedAdd.current || !isAuthenticated || !item || vendor.isLoading || vendor.isError) return;
     if (outOfStock || item.isAvailable === false || requiredUnmet || addToCart.isPending) return;
@@ -178,14 +205,33 @@ export function MenuItemScreen() {
     onAdd();
   }, [route.params?.addAfterSignIn, isAuthenticated, item, vendor.isLoading, vendor.isError, outOfStock, requiredUnmet, addToCart.isPending, selected, groups, isBooking, slot, daySlots, slotsQ.isError, slotsQ.isPending, navigation, onAdd]);
 
-  if (vendor.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (vendor.isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
   if (vendor.isError || !item) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
-        <ErrorState
-          onRetry={() => vendor.refetch()}
-          message={!item && !vendor.isError ? 'This item is no longer on the menu.' : undefined}
-        />
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        {vendor.isError ? (
+          <ErrorState onRetry={() => vendor.refetch()} />
+        ) : (
+          // The store answered and the item is gone: Retry cannot bring it back.
+          <EmptyState
+            icon="slash"
+            title="This item is no longer on the menu."
+            body="The store took it off. Pick something else from its menu."
+            // [#1915 review S4-1] Opened from Home, Market or Search, Back does not lead to the store.
+            actionLabel="Go back"
+            onAction={() => navigation.goBack()}
+          />
+        )}
       </View>
     );
   }
@@ -200,7 +246,7 @@ export function MenuItemScreen() {
         {/* Hero + floating header */}
         <View>
           <Photo
-            uri={itemPhoto(item)}
+            uri={itemPhoto(item, HERO_PHOTO_WIDTH)}
             label={item.name}
             transition={200}
             style={{ width: SCREEN_W, height: 340 }}
@@ -233,10 +279,22 @@ export function MenuItemScreen() {
           }}
         >
           <T variant="title">{item.name}</T>
+          {/* [P35 · board 4b] The store this item is sold by, where it is, and whether a person approved its papers
+              (the store row's isVerified; an older server sends nothing and the pill stays away). */}
+          {vendor.data?.name ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, marginTop: space.xs }}>
+              <T variant="caption" tone="muted" numberOfLines={1}>
+                {storeLine(vendor.data)}
+              </T>
+              {vendor.data?.isVerified === true ? <TonePill label="Verified seller" tone="success" /> : null}
+            </View>
+          ) : null}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.sm }}>
             {/* [Wave 3 audit · law 3] Money is INK, never brand — maroon is
                 reserved for the acts (the CTA below), not the numbers. */}
             <Money amount={basePrice} size="l" />
+            {/* [STORE-VAT · VAT Act s.90(2)] A person-approved VAT store's standard-rated price includes VAT and says so. */}
+            {itemVatNote(storefrontVat(vendor.data?.vat), item) ? <T variant="caption" tone="muted">{itemVatNote(storefrontVat(vendor.data?.vat), item)}</T> : null}
             {outOfStock ? (
               <View
                 style={{
@@ -284,9 +342,9 @@ export function MenuItemScreen() {
             </View>
             {item.isPopular ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Feather name="trending-up" size={14} color={color.brand[600]} />
+                <Feather name="thumbs-up" size={14} color={color.brand[600]} />
                 <T variant="label" tone="deep">
-                  Popular
+                  {STORE_PICK}
                 </T>
               </View>
             ) : null}
@@ -295,9 +353,9 @@ export function MenuItemScreen() {
           {item.description ? (
             <>
               <SectionHeader title="Description" style={{ marginTop: space['2xl'] }} />
-              <T variant="body" tone="muted" style={{ marginTop: space.md }}>
-                {item.description}
-              </T>
+              <View style={{ marginTop: space.md }}>
+                <ItemDescription text={item.description} />
+              </View>
             </>
           ) : null}
 
@@ -320,6 +378,17 @@ export function MenuItemScreen() {
                   {(g.options ?? []).map((o: any) => {
                     const on = selIds.includes(o.id);
                     const price = Number(o.additionalPrice) || 0;
+                    // [F4] Sold out: shown so the menu stays honest, but it
+                    // cannot be chosen (and the server refuses it anyway).
+                    if (!onSale(o)) {
+                      return (
+                        <Chip
+                          key={o.id}
+                          label={`${o.name} · sold out`}
+                          style={{ height: 42, paddingHorizontal: space.lg, opacity: 0.45 }}
+                        />
+                      );
+                    }
                     return (
                       <Chip
                         key={o.id}
@@ -337,6 +406,19 @@ export function MenuItemScreen() {
 
           {isBooking ? (
             <>
+              {/* [BOOK-S6a · owner A3/A4] The server says this listing confirms a cash booking at once.
+                  No badge (and no "instant" word) when it does not say so: switch off, an older server,
+                  or a business that confirms each booking itself. */}
+              {instantConfirmation ? (
+                <View style={{ marginTop: space['2xl'], gap: space.xs }}>
+                  <View style={{ flexDirection: 'row' }}>
+                    <TonePill label="Instant confirmation" tone="success" />
+                  </View>
+                  <T variant="caption" tone="muted">
+                    Pay at your appointment and your time is confirmed as soon as you book.
+                  </T>
+                </View>
+              ) : null}
               {/* Where it happens — the business's setting; BOTH lets you pick */}
               <SectionHeader title="Where" style={{ marginTop: space['2xl'] }} />
               {serviceMode === 'BOTH' ? (
@@ -452,6 +534,19 @@ export function MenuItemScreen() {
             </>
           ) : null}
 
+          {!isBooking ? (
+            <LabeledInput
+              label="Note for the store"
+              placeholder="e.g. no onions, extra pepper"
+              value={note}
+              onChangeText={setNote}
+              maxLength={500}
+              accessibilityLabel="Note for the store"
+              testID="menu-item-note"
+              containerStyle={{ marginTop: space.xl }}
+            />
+          ) : null}
+
           {addErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.lg }}>
               <Feather name="alert-circle" size={14} color={color.error} />
@@ -521,7 +616,7 @@ export function MenuItemScreen() {
             size="md"
             onPress={() => {
               setAdded(false);
-              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }));
+              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }, { pop: true }));
             }}
           />
           <PillButton label="Keep browsing" variant="soft" size="md" onPress={() => setAdded(false)} />

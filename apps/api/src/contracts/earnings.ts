@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../lib/zod';
 
 /**
  * SWIFT-080 — the mover EARNINGS response contracts.
@@ -33,6 +33,8 @@ export const earningsSummaryContract = z.object({
       thisMonth: earningsWindowContract,
       allTime: earningsWindowContract,
       pendingPayout: z.number(),
+      /** [board 13a] Cash kept from completed CASH jobs, per window (dispatch/cash-in-hand.ts). */
+      cashInHand: z.object({ today: z.number(), thisWeek: z.number(), thisMonth: z.number(), allTime: z.number() }),
     })
     .passthrough(),
 });

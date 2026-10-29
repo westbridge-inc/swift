@@ -19,8 +19,9 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 /** [SAFE-B · retained history] A filed no-show is immutable evidence kept with the people it names, so the
  *  phones live in a namespace no other suite uses or purges, unique to the run. */

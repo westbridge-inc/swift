@@ -62,7 +62,7 @@ async function status(token: string, role: string, vehicleType?: string) {
     headers: { authorization: `Bearer ${token}` },
   });
   expect(res.statusCode, res.body).toBe(200);
-  return res.json().data as { checklist: string[]; faceMatchDocTypes?: unknown };
+  return res.json().data as { checklist: string[]; optional: string[]; faceMatchDocTypes?: unknown };
 }
 
 const service = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
@@ -107,13 +107,14 @@ describe('GET /verification/status names the documents the server compares with 
     expect(business.checklist).toContain('owner_national_id');
     expect(business.faceMatchDocTypes).toEqual([]);
 
-    const rider = await status(riderToken, 'MOVER', 'MOTORCYCLE');
+    // [ROLE-DOCS · owner 21 Oct 2026] only a bicycle rider sends a national ID now (a licence holder is not asked)
+    const rider = await status(riderToken, 'MOVER', 'BICYCLE');
     expect(rider.checklist).toContain('national_id');
     expect(rider.faceMatchDocTypes).toEqual([]);
 
     for (const engine of faceEngines()) {
       expect((await service(engine).getStatus(ownerId, 'RESTAURANT')).faceMatchDocTypes, engine.engine?.name).toEqual([]);
-      expect((await service(engine).getStatus(riderId, 'MOVER', 'MOTORCYCLE')).faceMatchDocTypes, engine.engine?.name).toEqual([]);
+      expect((await service(engine).getStatus(riderId, 'MOVER', 'BICYCLE')).faceMatchDocTypes, engine.engine?.name).toEqual([]);
     }
   });
 
@@ -125,8 +126,8 @@ describe('GET /verification/status names the documents the server compares with 
       expect(business.checklist.length, 'the checklist holds more than the ID').toBeGreaterThan(1);
       expect(business.faceMatchDocTypes, engine.engine?.name).toEqual(['owner_national_id']);
 
-      const rider = await service(engine).getStatus(riderId, 'MOVER', 'MOTORCYCLE');
-      expect(rider.checklist.length).toBeGreaterThan(1);
+      const rider = await service(engine).getStatus(riderId, 'MOVER', 'BICYCLE');
+      expect(rider.checklist).toEqual(['national_id']);
       expect(rider.faceMatchDocTypes, engine.engine?.name).toEqual(['national_id']);
     }
   });
@@ -136,7 +137,7 @@ describe('GET /verification/status names the documents the server compares with 
 
     // The route's own engine in this suite is the sandbox (vitest.config pins KYC_PROVIDER=sandbox).
     expect((await status(ownerToken, 'RESTAURANT')).faceMatchDocTypes).toEqual([]);
-    expect((await status(riderToken, 'MOVER', 'MOTORCYCLE')).faceMatchDocTypes).toEqual([]);
+    expect((await status(riderToken, 'MOVER', 'BICYCLE')).faceMatchDocTypes).toEqual([]);
 
     for (const engine of [new ManualReviewKycProvider(), new SandboxKycProvider()]) {
       expect((await service(engine).getStatus(ownerId, 'RESTAURANT')).faceMatchDocTypes, engine.engine?.name).toEqual([]);

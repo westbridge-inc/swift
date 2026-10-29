@@ -125,6 +125,8 @@ describe('checkout money math', () => {
 
   it('an explicit tipAmount 0 overrides a persisted cart tip — nothing hidden rides the order or the MMG amount [REPORT-012 F-012-01]', async () => {
     process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.mmg.gy';
+    // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+    process.env['STORE_MMG_PAY_LINK'] = '1';
     await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrl: 'https://pay.mmg.gy/intg-diner' } });
     const c = await makeCustomer();
     await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);

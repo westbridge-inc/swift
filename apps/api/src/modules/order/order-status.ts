@@ -350,6 +350,29 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 export const RIDER_PICKUP_FROM = ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'] as const satisfies readonly OrderStatus[];
 
 /**
+ * [O-3 · owner 22 Oct 2026] ACCEPT IS THE START OF PREPARATION, for every store
+ * type (restaurants, groceries, retail). The store taps Accept once: the order
+ * walks PENDING → ACCEPTED → PREPARING in ONE transaction, both milestones
+ * stamped with the same instant, both rows in the status log, one push to the
+ * customer. There was a second tap ("Start preparing") that did nothing a
+ * kitchen needed.
+ *
+ * Declared HERE as a PATH over the forward machine, not as a new edge: every
+ * hop is an edge ORDER_TRANSITIONS already declares (asserted in the suite), so
+ * the database's transition guard is unchanged and a status skipping its
+ * acceptance is still refused everywhere else. The walk stops at ACCEPTED when
+ * preparation may not start yet: a booking is never prepared (BOOKING_LAW), and
+ * an MMG order waits for the store's "Paid by MMG" (the payment-first law),
+ * which then takes it the rest of the way.
+ */
+export const STORE_ACCEPT_PATH = ['ACCEPTED', 'PREPARING'] as const satisfies readonly OrderStatus[];
+
+/** The statuses from which a STORE may reject an order (the vendor reject route). Later, only Swift support cancels.
+ *  [GUARDRAILS §8 · Opus S3-6] One definition: the reject route reads it, and so does a refusal that must not tell
+ *  the store to reject when it cannot. */
+export const STORE_REJECTABLE_STATUSES = ['PENDING', 'ACCEPTED', 'PREPARING'] as const satisfies readonly OrderStatus[];
+
+/**
  * THE RELEASE EDGES. Key = the stage an order is returned to, value = the
  * pre-custody states a release may return it from.
  *

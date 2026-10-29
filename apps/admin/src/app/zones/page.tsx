@@ -1,14 +1,13 @@
 'use client';
 
 import { useState, useId, cloneElement } from 'react';
-import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchZoneFares, createZoneFare, updateZoneFare, deleteZoneFare,
   type FareZone, type ZoneFare,
 } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
-import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import { fareProblem, gyd, ZONE_FARE_MAX, ZONE_FARE_MIN } from '@/lib/zoneFares';
 
 // ---------------------------------------------------------------------------
@@ -24,28 +23,29 @@ import { fareProblem, gyd, ZONE_FARE_MAX, ZONE_FARE_MIN } from '@/lib/zoneFares'
 // ---------------------------------------------------------------------------
 
 export default function ZonesPage() {
-  const { data, isLoading, error } = useQuery({ queryKey: ['zone-fares'], queryFn: fetchZoneFares });
+  const { data, isLoading, error, refetch, isFetching } = useQuery({ queryKey: ['zone-fares'], queryFn: fetchZoneFares });
   const fares = data?.data?.fares ?? [];
   const zones = data?.data?.zones ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Taxi zones and fares</h1>
-      <p className="text-[var(--muted)] text-sm mb-6 max-w-3xl">
+    <div className="mc-page">
+      <p className="mc-muted text-sm mb-6 max-w-3xl">
         A taxi trip is priced by the market&apos;s formula. A zone can set its own rate per kilometre for trips that
         start or end there (the airports do). A fixed fare for a pair of zones replaces both for a trip from one to
         the other. Changes apply to new quotes only — a ride already requested keeps its fare — and each one needs a
         second admin&apos;s approval.
       </p>
 
+      {/* [BUG-GUARDS C3] A failed read is never "No zones yet" / "No fixed fares": the tables
+          only render once the read answered (failed-read-never-empty.census.test.ts). */}
       {error ? (
-        <p role="alert" className="text-sm mb-6" style={{ color: 'var(--bad)' }}>
-          Couldn&apos;t load the zones and fares: {(error as Error).message}
-        </p>
-      ) : null}
-
-      <ZoneTable zones={zones} loading={isLoading} />
-      <FixedFares fares={fares} zones={zones} loading={isLoading} />
+        <QueryFailed error={error} what="the zones and fares" onRetry={() => void refetch()} retrying={isFetching} className="mb-6" />
+      ) : (
+        <>
+          <ZoneTable zones={zones} loading={isLoading} />
+          <FixedFares fares={fares} zones={zones} loading={isLoading} />
+        </>
+      )}
     </div>
   );
 }
@@ -53,27 +53,27 @@ export default function ZonesPage() {
 function ZoneTable({ zones, loading }: { zones: FareZone[]; loading: boolean }) {
   return (
     <section className="mb-8">
-      <h2 className="text-lg font-semibold mb-3">Zones</h2>
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-x-auto">
-        <table className="w-full text-sm">
+      <h2 className="mc-section-title">Zones</h2>
+      <div className="mc-table-wrap overflow-x-auto">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Zone</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Market</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Taxi rate per km</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+            <tr >
+              <th className="mc-label text-left">Zone</th>
+              <th className="mc-label text-left">Market</th>
+              <th className="mc-label text-right">Taxi rate per km</th>
+              <th className="mc-label text-left">Status</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">Loading…</td></tr>
             ) : zones.length === 0 ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">No zones yet.</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">No zones yet.</td></tr>
             ) : zones.map((z) => (
-              <tr key={z.id} className="border-b border-[var(--border)]">
-                <td className="p-4 font-medium">{z.name} <span className="text-xs text-[var(--muted)] font-mono ml-1">{z.id}</span></td>
+              <tr key={z.id} >
+                <td className="p-4 font-medium">{z.name} <span className="text-xs mc-muted font-mono ml-1">{z.id}</span></td>
                 <td className="p-4">{z.countryCode}</td>
-                <td className="p-4 text-right">{z.taxiPerKm == null ? <span className="text-[var(--muted)]">market rate</span> : gyd(z.taxiPerKm)}</td>
+                <td className="p-4 text-right">{z.taxiPerKm == null ? <span className="mc-muted">market rate</span> : gyd(z.taxiPerKm)}</td>
                 <td className="p-4">{z.isActive ? 'Active' : 'Inactive'}</td>
               </tr>
             ))}
@@ -86,85 +86,78 @@ function ZoneTable({ zones, loading }: { zones: FareZone[]; loading: boolean }) 
 
 function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZone[]; loading: boolean }) {
   const qc = useQueryClient();
-  const [outcome, setOutcome] = useState<MoneyActionOutcome | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ZoneFare | null>(null);
 
-  const settled = (message: string) => {
-    setOutcome({ kind: 'done', message });
+  // [U28] A pricing change is C5: its first answer is a second admin's
+  // approval. The form used to stay open and filled after that answer, so a
+  // second "Send for approval" filed a duplicate. The panel asks why, sends,
+  // and shows every answer; once it went through OR is queued the form closes,
+  // so nothing is left to press twice. A refusal keeps the form for a fix.
+  const actions = useActionRunner(() => {
     setAdding(false);
     setEditing(null);
     void qc.invalidateQueries({ queryKey: ['zone-fares'] });
-  };
-  // A pricing change answers 202 APPROVAL_REQUIRED, which the transport THROWS:
-  // the error path is where "queued for a second admin" is recognised.
-  const failed = (e: unknown) => setOutcome(outcomeOfThrown(e));
+  });
 
-  const create = useMutation({
-    mutationFn: (v: { body: { fromZoneId: string; toZoneId: string; fare: number }; reason: string }) => createZoneFare(v.body, v.reason),
-    onSuccess: () => settled('Fixed fare added. It prices new quotes from now.'),
-    onError: failed,
+  const onDelete = (row: ZoneFare) => void actions.run({
+    title: `Remove the fixed fare ${row.fromZoneName} → ${row.toZoneName}?`,
+    body: <p>Trips between these zones are then priced by the formula and the zones&apos; rates. A second admin approves it first.</p>,
+    confirmLabel: 'Remove fixed fare',
+    submit: ({ reason }) => deleteZoneFare(row.id, { fromZoneId: row.fromZoneId, toZoneId: row.toZoneId }, reason),
+    success: () => 'Fixed fare removed. Trips between these zones price by the formula from the next quote.',
   });
-  const update = useMutation({
-    mutationFn: (v: { id: string; body: { fromZoneId: string; toZoneId: string; fare: number }; reason: string }) => updateZoneFare(v.id, v.body, v.reason),
-    onSuccess: () => settled('Fixed fare changed. It prices new quotes from now.'),
-    onError: failed,
-  });
-  const remove = useMutation({
-    mutationFn: (v: { row: ZoneFare; reason: string }) => deleteZoneFare(v.row.id, { fromZoneId: v.row.fromZoneId, toZoneId: v.row.toZoneId }, v.reason),
-    onSuccess: () => settled('Fixed fare removed. Trips between these zones price by the formula from the next quote.'),
-    onError: failed,
-  });
-  const busy = create.isPending || update.isPending || remove.isPending;
 
-  const onDelete = (row: ZoneFare) => {
-    const reason = askReason({ action: 'remove this fixed fare', subject: `${row.fromZoneName} → ${row.toZoneName}` });
-    if (!reason) return;
-    setOutcome(null);
-    remove.mutate({ row, reason });
-  };
+  const onSubmit = (body: { fromZoneId: string; toZoneId: string; fare: number }, route: string) => void actions.run({
+    title: editing ? `Change the fixed fare ${route} to ${gyd(body.fare)}?` : `Add a fixed fare ${route} of ${gyd(body.fare)}?`,
+    body: <p>It prices new quotes once it is in place. A second admin approves it first.</p>,
+    confirmLabel: editing ? 'Change fixed fare' : 'Add fixed fare',
+    submit: ({ reason }) => (editing ? updateZoneFare(editing.id, body, reason) : createZoneFare(body, reason)),
+    success: () => (editing ? 'Fixed fare changed. It prices new quotes from now.' : 'Fixed fare added. It prices new quotes from now.'),
+  });
 
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold">Fixed fares</h2>
+        <h2 className="mc-section-title mb-0">Fixed fares</h2>
         <button
-          onClick={() => { setOutcome(null); setEditing(null); setAdding(true); }}
-          disabled={busy || zones.length === 0}
-          className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-50"
+          type="button"
+          onClick={() => { actions.clear(); setEditing(null); setAdding(true); }}
+          disabled={zones.length === 0}
+          className="mc-btn mc-btn-primary"
         >
           Add fixed fare
         </button>
       </div>
 
-      {outcome && <Outcome outcome={outcome} />}
+      {actions.banner}
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-x-auto">
-        <table className="w-full text-sm">
+      <div className="mc-table-wrap overflow-x-auto">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">From</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">To</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Fare</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
+            <tr >
+              <th className="mc-label text-left">From</th>
+              <th className="mc-label text-left">To</th>
+              <th className="mc-label text-right">Fare</th>
+              <th className="mc-label text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">Loading…</td></tr>
             ) : fares.length === 0 ? (
-              <tr><td colSpan={4} className="p-8 text-center text-[var(--muted)]">No fixed fares. Every taxi trip is priced by the formula and the zones&apos; rates.</td></tr>
+              <tr><td colSpan={4} className="mc-table-empty">No fixed fares. Every taxi trip is priced by the formula and the zones&apos; rates.</td></tr>
             ) : fares.map((f) => (
-              <tr key={f.id} className="border-b border-[var(--border)]">
+              <tr key={f.id} >
                 <td className="p-4">{f.fromZoneName}</td>
-                <td className="p-4">{f.toZoneName}{f.fromZoneId === f.toZoneId ? <span className="text-xs text-[var(--muted)] ml-1">(within the zone)</span> : null}</td>
+                <td className="p-4">{f.toZoneName}{f.fromZoneId === f.toZoneId ? <span className="text-xs mc-muted ml-1">(within the zone)</span> : null}</td>
                 <td className="p-4 text-right font-medium">
                   {gyd(f.fare)}
-                  {!f.zonesActive && <span className="block text-xs text-amber-500">a zone is inactive — this prices nothing</span>}
+                  {!f.zonesActive && <span className="block text-xs mc-text-warn">a zone is inactive — this prices nothing</span>}
                 </td>
                 <td className="p-4 text-right whitespace-nowrap">
-                  <button onClick={() => { setOutcome(null); setAdding(false); setEditing(f); }} disabled={busy} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50 mr-2">Edit</button>
-                  <button onClick={() => onDelete(f)} disabled={busy} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50">Delete</button>
+                  <button type="button" onClick={() => { actions.clear(); setAdding(false); setEditing(f); }} aria-label={`Edit the fixed fare ${f.fromZoneName} to ${f.toZoneName}`} className="mc-btn mr-2">Edit</button>
+                  <button type="button" onClick={() => onDelete(f)} aria-label={`Delete the fixed fare ${f.fromZoneName} to ${f.toZoneName}`} className="mc-btn">Delete</button>
                 </td>
               </tr>
             ))}
@@ -179,25 +172,19 @@ function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZ
           key={editing ? `edit-${editing.id}` : 'add'}
           zones={zones}
           editing={editing}
-          busy={busy}
           onCancel={() => { setAdding(false); setEditing(null); }}
-          onSubmit={(body, reason) => {
-            setOutcome(null);
-            if (editing) update.mutate({ id: editing.id, body, reason });
-            else create.mutate({ body, reason });
-          }}
+          onSubmit={onSubmit}
         />
       )}
     </section>
   );
 }
 
-function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
+function FareForm({ zones, editing, onCancel, onSubmit }: {
   zones: FareZone[];
   editing: ZoneFare | null;
-  busy: boolean;
   onCancel: () => void;
-  onSubmit: (_body: { fromZoneId: string; toZoneId: string; fare: number }, _reason: string) => void;
+  onSubmit: (_body: { fromZoneId: string; toZoneId: string; fare: number }, _route: string) => void;
 }) {
   const [fromZoneId, setFrom] = useState(editing?.fromZoneId ?? '');
   const [toZoneId, setTo] = useState(editing?.toZoneId ?? '');
@@ -214,16 +201,13 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
 
   const submit = () => {
     if (problem) return;
-    const verb = editing ? 'change this fixed fare' : 'add this fixed fare';
-    const reason = askReason({ action: `${verb} to ${gyd(Number(fare))}`, subject: `${name(fromZoneId)} → ${name(toZoneId)}` });
-    if (!reason) return;
-    onSubmit({ fromZoneId, toZoneId, fare: Number(fare) }, reason);
+    onSubmit({ fromZoneId, toZoneId, fare: Number(fare) }, `${name(fromZoneId)} → ${name(toZoneId)}`);
   };
 
   return (
-    <div className="mt-4 bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 max-w-xl">
+    <div className="mt-4 bg-[var(--mc-card)] rounded-[var(--mc-radius)] border border-[var(--mc-line)] p-6 max-w-xl">
       <h3 className="font-semibold mb-1">{editing ? 'Change fixed fare' : 'New fixed fare'}</h3>
-      <p className="text-xs text-[var(--muted)] mb-4">One direction only: add the return trip as its own fare.</p>
+      <p className="text-xs mc-muted mb-4">One direction only: add the return trip as its own fare.</p>
       <div className="space-y-3">
         <Field label="From zone">
           <select value={fromZoneId} onChange={(e) => setFrom(e.target.value)} disabled={!!editing} className={inputCls}>
@@ -244,35 +228,25 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
           <input type="number" inputMode="numeric" step={1} min={ZONE_FARE_MIN} max={ZONE_FARE_MAX} value={fare} onChange={(e) => setFare(e.target.value)} className={inputCls} />
         </Field>
       </div>
-      {problem && (fromZoneId || toZoneId || fare) ? <p className="mt-3 text-xs text-amber-500">{problem}</p> : null}
+      {problem && (fromZoneId || toZoneId || fare) ? <p className="mt-3 text-xs mc-text-warn">{problem}</p> : null}
       <div className="flex justify-end gap-3 mt-5">
-        <button onClick={onCancel} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
-        <button onClick={submit} disabled={busy || !!problem} className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
-          {busy ? 'Sending…' : 'Send for approval'}
+        <button type="button" onClick={onCancel} className="mc-btn mc-btn-quiet">Cancel</button>
+        <button type="button" onClick={submit} disabled={!!problem} className="mc-btn mc-btn-primary">
+          Send for approval
         </button>
       </div>
     </div>
   );
 }
 
-function Outcome({ outcome }: { outcome: MoneyActionOutcome }) {
-  if (outcome.kind === 'error') return <p role="alert" className="text-sm mb-3" style={{ color: 'var(--bad)' }}>{outcome.message}</p>;
-  return (
-    <p role="status" className={`text-sm mb-3 ${outcome.kind === 'queued' ? 'text-amber-500' : 'text-[var(--muted)]'}`}>
-      {outcome.message}
-      {outcome.approvalId && (<> <Link href="/approvals" className="underline">Open the approvals queue</Link></>)}
-    </p>
-  );
-}
-
 const inputCls =
-  'mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-60';
+  'mc-input mt-1';
 
 function Field({ label, children }: { label: string; children: React.ReactElement<{ id?: string }> }) {
   const id = useId();
   return (
     <div>
-      <label htmlFor={id} className="text-xs text-[var(--muted)]">{label}</label>
+      <label htmlFor={id} className="mc-muted text-xs">{label}</label>
       {cloneElement(children, { id })}
     </div>
   );

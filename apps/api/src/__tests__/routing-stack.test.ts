@@ -44,12 +44,14 @@ describe('[routing] the stack is in the repository', () => {
   });
 
   it('pins every image — :latest is not a deployment', () => {
-    // Except photon, whose publisher ships no version tags. Named so the
-    // exception is a decision on the record rather than an oversight.
+    // No exception any more (#1448, 12 Oct): photon's publisher now ships
+    // version tags, and production starts it (PLACES_PROVIDER=osm), so it is
+    // pinned by version and digest like the rest.
     const images = [...COMPOSE.matchAll(/image:\s*(\S+)/g)].map((m) => m[1]!);
     expect(images.length).toBe(4);
-    const unpinned = images.filter((i) => i.endsWith(':latest'));
-    expect(unpinned).toEqual(['rtuszik/photon-docker:latest']);
+    const unpinned = images.filter((i) => i.endsWith(':latest') || !/:[^/]+$/.test(i));
+    expect(unpinned).toEqual([]);
+    expect(images.find((i) => i.startsWith('rtuszik/photon-docker:'))).toMatch(/^rtuszik\/photon-docker:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
   });
 });
 
@@ -58,7 +60,10 @@ describe('[routing] the documented URL is the one that works', () => {
     expect(COMPOSE).not.toMatch(/^\s+ports:/m);
     expect(COMPOSE).toMatch(/^ {4}name: swift-pilot-private$/m);
     expect(MAIN_COMPOSE).toMatch(/^ {4}name: swift-pilot-private$/m);
-    expect(serviceBlock(MAIN_COMPOSE, 'api')).toContain('networks: [private]');
+    // [Row 312] The API also joins the scanner's own network to reach clamd; that network is internal
+    // (no egress, no host ports), so the API still has no route out through it.
+    expect(serviceBlock(MAIN_COMPOSE, 'api')).toContain('networks: [private, scanner]');
+    expect(MAIN_COMPOSE).toMatch(/^ {2}scanner:\n {4}internal: true$/m);
     for (const name of ['osrm', 'vroom', 'photon', 'nominatim']) {
       expect(serviceBlock(COMPOSE, name), `${name} is not on the private network`).toContain('networks: [private]');
     }

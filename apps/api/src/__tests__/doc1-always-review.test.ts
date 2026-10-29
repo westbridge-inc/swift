@@ -30,7 +30,8 @@ import type { KycEngine, KycProvider, KycVerificationResult } from '../providers
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 /** BUSINESS with a declared field (the positive path), PERSONAL (always review), BUSINESS with nothing declared (SKIP ≠ PASS). */
-const BUSINESS = 'tin_certificate';
+// [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the registration is the BUSINESS example
+const BUSINESS = 'business_registration';
 const PERSONAL = 'food_handler_cert';
 const UNDECLARED = 'storefront_photo';
 const CODES = { BUSINESS: registryCode('GY', BUSINESS), PERSONAL: registryCode('GY', PERSONAL), UNDECLARED: registryCode('GY', UNDECLARED) };
@@ -116,8 +117,9 @@ describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9
     expect(alwaysReview({ bucket: 'VEHICLE', needsSpecimen: false, alwaysReview: true })).toBe(true);
     expect(alwaysReview({ bucket: 'BUSINESS', needsSpecimen: false, alwaysReview: false })).toBe(false);
     const rows = await system(() => app.prisma.docType.findMany({ where: { countryCode: 'GY', bucket: 'VEHICLE' }, select: { legacyCode: true, alwaysReview: true } }));
-    const flagged = rows.filter((r) => r.alwaysReview).map((r) => r.legacyCode);
-    expect(flagged).toEqual(['vehicle_insurance']);
+    const flagged = rows.filter((r) => r.alwaysReview).map((r) => r.legacyCode).sort();
+    // [VERIFY-DOCS · ruling 8] the certificate of fitness joins the insurance: its PRINTED date decides, so a person reads it
+    expect(flagged).toEqual(['fitness_cert', 'vehicle_insurance']);
     expect(rows.length).toBeGreaterThan(1);
   });
 

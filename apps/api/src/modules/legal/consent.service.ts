@@ -1,5 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
+import type { FOOD_HANDLER_ATTESTATION_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 
 /**
  * [DCR-1 NR-1] The consent ledger.
@@ -25,10 +26,25 @@ export type ConsentDocumentType =
   | 'marketing_consent'
   | 'location_bg_consent'
   /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
-  | 'unregistered_trader_declaration';
+  | 'unregistered_trader_declaration'
+  /** [ROLE-DOCS · owner 21 Oct 2026] "I trade under my own name" (vendor/own-name.ts; Business Names Act s.3).
+   *  The same code as its document: the registry's text names it (DOC-INV-2). */
+  | typeof OWN_NAME_DOC_TYPE
+  /** [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's "everyone who handles food here holds a current food
+   *  handler's certificate" tick, per store (vendor/food-handlers.ts). The registry's code (DOC-INV-2). */
+  | typeof FOOD_HANDLER_ATTESTATION_TYPE
+  /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
+  | 'document_processing_consent'
+  | 'customer_id_consent'
+  /** [POLICE-CLEARANCE CONSENT] a police clearance's own explicit consent (verification/police-clearance-consent.ts) */
+  | 'police_clearance_consent'
+  /** [Owner ruling 15 Oct 2026] the sign-up's "I am 18 or older" tick (auth/age-declaration.ts) */
+  | 'age_declaration'
+  /** [COORD ruling 22 Oct 2026 · row 628] the partner sign-up's "I understand the weekly fee" tick (partner/weekly-fee-ack.ts) */
+  | 'weekly_fee_acknowledgement';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
 /** 'mobile' = the RN app when the platform isn't client-attested (signup). */
-export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
+export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket' | 'sms';
 
 /** The document set each subject type must grant at account creation (INV-NR1a). */
 export const REQUIRED_CONSENTS: Record<ConsentSubjectType, ConsentDocumentType[]> = {

@@ -325,6 +325,25 @@ describe('[A-19] a decision requires the evidence', () => {
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  // [R13 · owner 15 Oct 2026, research D6] Every motor vehicle's policy must permit use for hire or reward.
+  it('a private-use policy cannot be approved: Approve stays locked and the reviewer is told to reject it', async () => {
+    const insuranceDocument = { ...baseDocument, docType: 'vehicle_insurance' };
+    mockApi(verificationHandler(() => { throw new Error('no mutation expected'); }, [insuranceDocument]));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await reviewEvidence(user, { expires: true });
+    expect(screen.getByText(/Read 'Limitations as to use': it must permit use for hire or reward/)).toBeTruthy();
+    await user.type(screen.getByPlaceholderText(/Insurer/), 'Test Insurer');
+    await user.type(screen.getByPlaceholderText('Policy number'), 'POLICY-TEST-1');
+    await user.click(screen.getByRole('checkbox', { name: /Hire class confirmed: I read the policy’s limitations as to use/ }));
+    await user.click(screen.getByRole('checkbox', { name: /Cross-checked/ }));
+    const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(false);
+    await user.selectOptions(screen.getByLabelText('Coverage class'), 'PRIVATE');
+    expect(approve.disabled).toBe(true);
+    expect(screen.getByText(/A private-use policy cannot be approved for paid work/)).toBeTruthy();
+  });
+
   it('an expiring document cannot be approved without its printed date', async () => {
     const insuranceDocument = { ...baseDocument, docType: 'vehicle_insurance' };
     mockApi(verificationHandler(() => { throw new Error('no mutation expected'); }, [insuranceDocument]));
@@ -373,7 +392,16 @@ describe('[A-19] the expiring-type list cannot drift from the server', () => {
     const clientTypes = [...local[1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!).sort();
     // the server refuses these without a date; the console must ASK for exactly
     // the same set, or it blocks the wrong documents and lets others through
-    expect(clientTypes).toEqual(serverTypes);
+    // Police clearance derives its re-check from the typed issue date, not a printed expiry.
+    const issueTypes = /ISSUE_DATE_DOC_TYPES[^=]*= new Set\(\[([^\]]*)\]\)/.exec(api);
+    if (!issueTypes) throw new Error('ISSUE_DATE_DOC_TYPES not found');
+    const issued = [...issueTypes[1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect(clientTypes).toEqual(serverTypes.filter((type) => !issued.includes(type)));
+    expect(page).toContain("selected?.reviewerTypes?.includes('issuedOn')");
+    expect(page).toContain('Issue date printed on the document');
+    // [R15] A licence or food certificate checked every January asks for its YEAR, never a printed date.
+    expect(page).toContain("selected?.reviewerTypes?.includes('certificateYear')");
+    expect(page).toContain('Year printed on the certificate');
   });
 });
 
@@ -637,5 +665,22 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(2));
     expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[1]![1]?.body)).reasonCode).toBe('WRONG_PLATE_CLASS');
+  });
+});
+
+// [STORE-VAT · owner O-5] A store's GRA VAT certificate is decided in Store VAT (the reviewer types the number, the
+// registered name and the date it shows); the server refuses it at this door, so the Review Center offers no decision.
+describe('[STORE-VAT] a VAT certificate in the Review Center', () => {
+  it('offers no Approve or Reject (not even by key), only the way to Store VAT', async () => {
+    const vatDocument = { ...baseDocument, docType: 'vat_registration_certificate', role: 'VENDOR_OWNER' };
+    mockApi(verificationHandler(() => { throw new Error('no decision may be sent from here'); }, [vatDocument]));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open Store VAT' }).getAttribute('href')).toBe('/store-vat');
+    await user.keyboard('a');
+    await user.keyboard('r');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

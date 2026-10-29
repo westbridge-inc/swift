@@ -25,6 +25,7 @@ const fx = vi.hoisted(() => ({
     emit: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; off: ReturnType<typeof vi.fn>;
   }>,
 }));
+vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react-native', async () => {
   const R = await import('react');
   const View = ({ children }: any) => R.createElement('div', null, typeof children === 'function' ? children({ pressed: false }) : children);
@@ -96,13 +97,17 @@ vi.mock('../../kit/controls', () => ({ BrandSwitch: () => null }));
 vi.mock('../../kit/toast', () => ({ toast: { show: vi.fn(), error: vi.fn(), success: vi.fn() } }));
 vi.mock('../../lib/clipboard', () => ({ copyText: vi.fn() }));
 vi.mock('../../lib/analytics', () => ({ track: vi.fn() }));
-vi.mock('../../lib/images', () => ({ mediaUrl: () => null }));
+vi.mock('../../lib/images', () => ({ mediaUrl: () => null, storePhotoUrl: () => null }));
 vi.mock('../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: () => null }));
 vi.mock('../../components/onboarding/WentLive', () => ({ useWentLive: () => ({}), WentLivePopup: () => null }));
 vi.mock('../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: () => null }));
 vi.mock('../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: () => null }));
+vi.mock('../../components/MmgNumberCard', () => ({ MmgNumberCard: () => null }));
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
+vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
+vi.mock('./StoreVatSection', () => ({ StoreVatSection: () => null })); // [STORE-VAT] a child section, stubbed like its siblings
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));
+vi.mock('../../components/StorePhotosCard', () => ({ StorePhotosCard: () => null }));
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStopControl: () => null }));
 vi.mock('../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn }) }));
 vi.mock('../../hooks/verification', () => ({ useVerificationStatus: () => ({}) }));
@@ -284,6 +289,16 @@ describe('SX383 real navigation container and vendor handoffs', () => {
     expect(newInput.value).toBe('08:00');
   });
 
+  it('[DELETION-INTEGRITY] the Account row opens personal data and closure in the real navigator', async () => {
+    await mount(); await openAccount();
+    expect(host.querySelector('personaldatascreen')).toBeNull();
+    await act(async () => button('Personal data & account closure').click());
+    const route = navigation.getCurrentRoute()!;
+    expect(route.name).toBe('PersonalData');
+    expect(route.params).toEqual({ closureRequest: true });
+    expect(host.querySelector('personaldatascreen')).not.toBeNull();
+  });
+
   it.each([
     ['Replace code', '/vendor/qr/regenerate', false], ['Turn off', '/vendor/qr/deactivate', false],
     ['Replace code', '/vendor/qr/regenerate', true], ['Turn off', '/vendor/qr/deactivate', true],
@@ -308,6 +323,10 @@ describe('SX383 real navigation container and vendor handoffs', () => {
 const profile = { myRole: 'OWNER', vendors: ['store-A', 'store-B'].map(id => ({ id, name: id, status: 'ACTIVE', vendorType: 'RESTAURANT' })) };
 const response = (data: Record<string, unknown>) => ({ notification: { request: { content: { data } } } });
 async function settleRouter() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); }); }
+/** [SPEED · flaky under load on main d431fb05] The router reaches the fee lookup through dynamic
+ *  imports; on a busy machine that takes longer than settleRouter's fixed 300 ms. Wait for the
+ *  condition itself (same assertion, then asserted again as before) instead of guessing a time. */
+async function until(check: () => void) { await act(async () => { await vi.waitFor(check, { timeout: 10_000, interval: 20 }); }); }
 
 describe('DS390 real cold notification router and delayed profile', () => {
   it('retains the authorized order destination after the first profile selects a store', async () => {
@@ -329,8 +348,76 @@ describe('DS390 real cold notification router and delayed profile', () => {
       expect(fx.order).toHaveBeenCalledWith('order-B', expect.objectContaining({ userId: 'owner' }), expect.any(String));
     } finally { uninstall(); }
   });
+  // [S4] The store's copy of a store appointment's 24h reminder, exactly as the API sends it: the
+  // booking's order on the order desk of the store that owns it (never the marketplace jobs list).
+  it('a store appointment reminder opens the booking\'s order on the store that owns it', async () => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-B', vendorId: 'store-B' } } });
+    fx.cold = response({ kind: 'appointment_reminder', bookingId: 'booking-B', orderId: 'order-B', audience: 'business' });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      expect(navigation.getCurrentRoute()?.params).toEqual({ orderId: 'order-B' });
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
+    } finally { uninstall(); }
+  });
+  // [BOOK-FU2] The store's copy of a moved appointment (the customer moved it), exactly as the API sends it:
+  // the booking's order on the order desk of the store that owns it (never the marketplace jobs list).
+  it('a moved appointment opens the booking\'s order on the store that owns it', async () => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-B', vendorId: 'store-B' } } });
+    fx.cold = response({ kind: 'appointment_moved', bookingId: 'booking-B2', orderId: 'order-B', audience: 'business' });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      expect(navigation.getCurrentRoute()?.params).toEqual({ orderId: 'order-B' });
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
+    } finally { uninstall(); }
+  });
 });
 
+
+describe('[UI-SWEEP U10] a warm tap to a screen already in the stack goes BACK to it', () => {
+  const vendorRoots = () => navigation.getRootState().routes.filter((r) => r.name === 'VendorRoot').length;
+  it.each(['VendorMyQr', 'VendorOrderHistory'] as const)('from %s, a same-store Account tap leaves ONE business home and ONE new-order listener', async (above) => {
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await mount();
+      await act(async () => navigation.navigate(above));
+      expect(navigation.getCurrentRoute()?.name).toBe(above);
+      const socket = fx.sockets.at(-1)!;
+      expect(socket.listeners.get('order:new')?.size).toBe(1);
+      await act(async () => fx.listener!(response({ kind: 'store_pin_moved', vendorId: 'store-A' })));
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('Account');
+      expect(vendorRoots(), 'the stack went back to its business home; no second copy').toBe(1);
+      expect(navigation.getRootState().routes.map((r) => r.name)).toEqual(['VendorRoot']);
+      expect(socket.listeners.get('order:new')?.size, 'one live layer: the alarm sounds once').toBe(1);
+    } finally { uninstall(); }
+  });
+  it('a destination NOT in the stack is still pushed on top', async () => {
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await mount();
+      await act(async () => navigation.navigate('VendorMyQr'));
+      await act(async () => fx.listener!(response({ kind: 'vendor_tier_nudge', vendorId: 'store-A' })));
+      await settleRouter();
+      expect(navigation.getRootState().routes.map((r) => r.name)).toEqual(['VendorRoot', 'VendorMyQr', 'VendorTier']);
+    } finally { uninstall(); }
+  });
+});
 
 describe('DS390 vendor routing authority boundaries', () => {
   it.each([
@@ -342,6 +429,10 @@ describe('DS390 vendor routing authority boundaries', () => {
     [{ kind: 'mmg_link_change_applied', actor: 'VENDOR' }, 'Account', 'store-A'],
     [{ kind: 'mmg_link_change_cancelled', actor: 'VENDOR' }, 'Account', 'store-A'],
     [{ kind: 'booking_rescheduled', audience: 'business', bookingId: 'booking-A' }, 'Schedule', 'store-A'],
+    // [S4] A store appointment's reminder for a booking with no order on file: the Schedule agenda.
+    [{ kind: 'appointment_reminder', audience: 'business', bookingId: 'booking-A' }, 'Schedule', 'store-A'],
+    // [BOOK-FU2] A moved appointment for a booking with no order on file: the Schedule agenda.
+    [{ kind: 'appointment_moved', audience: 'business', bookingId: 'booking-A2' }, 'Schedule', 'store-A'],
   ] as const)('delivers cold %j after delayed initial selection', async (data, screen, store) => {
     fx.realProfile = true;
     useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
@@ -569,6 +660,7 @@ describe('R3 cold fee notification and the automatic first store (AX449 #2)', ()
     try {
       await act(async () => { await Promise.resolve(); });
       await mount(); flushPendingNavigation(); await settleRouter();
+      await until(() => { expect(subscriptionReady, 'the fee lookup is in flight').toBeTypeOf('function'); expect(profileReady, 'the shell profile is in flight').toBeTypeOf('function'); });
       expect(subscriptionReady, 'the fee lookup is in flight').toBeTypeOf('function');
       expect(profileReady, 'the shell profile is in flight').toBeTypeOf('function');
       expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
@@ -600,6 +692,7 @@ describe('R3 cold fee notification and the automatic first store (AX449 #2)', ()
     try {
       await act(async () => { await Promise.resolve(); });
       await mount(); flushPendingNavigation(); await settleRouter();
+      await until(() => { expect(subscriptionReady).toBeTypeOf('function'); expect(profileReady).toBeTypeOf('function'); });
       expect(subscriptionReady).toBeTypeOf('function');
       if (change === 'explicit') await act(async () => useStoreSwitcher.getState().setSelectedStore('store-A'));
       else {

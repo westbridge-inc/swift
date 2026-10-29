@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { billingEffectsReady } from './billing-cutover';
-import { ACTIVE_CONFIRMATION_STATES, confirmationSources, currentDunningClock, type ConfirmationSource } from './dunning-clock';
+import { ACTIVE_CONFIRMATION_STATES, confirmationSources, currentDunningClock, feeReversalOpenInTx, lateCardApprovalHeldInTx, type ConfirmationSource } from './dunning-clock';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 
 export type FeePaymentDecision =
@@ -22,6 +22,9 @@ export async function lockFeePaymentDecision(
   const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
   if (clock.dueAt.getTime() !== sub.nextBillingDate.getTime()) return blocked('BILLING_REVIEW_REQUIRED');
   const holds = await tx.paymentConfirmationHold.findMany({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
+  if (await lateCardApprovalHeldInTx(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId])) return blocked('PAYMENT_CONFIRMING');
+  // [MMG REVERSAL] A payment being returned: no new payment beside it until MMG settles it.
+  if (await feeReversalOpenInTx(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId])) return blocked('PAYMENT_CONFIRMING');
   if (!replay) return holds.length || clock.pausedAt ? blocked('PAYMENT_CONFIRMING') : allow;
   const own = holds.find((hold) => Object.entries(replay).every(([field, id]) => hold[field as keyof typeof hold] === id));
   if (!own || own.subscriptionId !== subscriptionId || own.sourceEpoch !== clock.epoch || own.status !== 'ACTIVE'
@@ -46,10 +49,26 @@ export async function readFeePaymentDecision(db: PrismaClient, subscriptionId: s
         || clock.tenantId !== authority.mover.tenantId || clock.authorityRevision !== authority.mover.revision))) return blocked('BILLING_REVIEW_REQUIRED');
     if (clock.pausedAt || await tx.paymentConfirmationHold.count({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } } })) return blocked('PAYMENT_CONFIRMING');
     const { sources } = await confirmationSources(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId]);
-    for (const source of sources) {
-      const hold = await tx.paymentConfirmationHold.findFirst({ where: source.source });
-      if (!hold || hold.clockId !== clock.id || ACTIVE_CONFIRMATION_STATES.includes(hold.status)) return blocked('PAYMENT_CONFIRMING');
-    }
+    // [MMG reopen · review F3] THE per-source filter, shared with the reopen grant.
+    if ((await unresolvedConfirmationSources(tx, sources, clock.id, 1)).length) return blocked('PAYMENT_CONFIRMING');
+    if (await feeReversalOpenInTx(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId])) return blocked('PAYMENT_CONFIRMING');
     return allow;
   });
+}
+
+/** THE per-source filter over the confirmation census (`confirmationSources`
+ * lists resolved history too): a source is still unresolved on this clock
+ * unless its hold is on this clock AND no longer active. A late provider
+ * approval held for a person, no hold, another clock's hold or an active hold
+ * all count. Read-only; `limit` stops early. */
+export async function unresolvedConfirmationSources<T extends { source: ConfirmationSource; reason?: string }>(
+  tx: Prisma.TransactionClient, sources: readonly T[], clockId: string, limit = Infinity,
+): Promise<T[]> {
+  const unresolved: T[] = [];
+  for (const source of sources) {
+    if (unresolved.length >= limit) break;
+    const hold = await tx.paymentConfirmationHold.findFirst({ where: source.source });
+    if (source.reason === 'LATE_PROVIDER_APPROVAL' || !hold || hold.clockId !== clockId || ACTIVE_CONFIRMATION_STATES.includes(hold.status)) unresolved.push(source);
+  }
+  return unresolved;
 }

@@ -29,5 +29,8 @@ describe('partner checkout surface census', () => {
   });
   it('the mobile and web state machines cannot drift', () => {
     expect(source('src/lib/weeklyFee.ts')).toBe(source('../web/src/lib/weekly-fee.ts'));
+    expect(source('src/lib/weeklyFeeReopen.ts')).toBe(source('../web/src/lib/weekly-fee-reopen.ts'));
+    // [FEE-STATUS · REVIEW-F S4-1] The fee status words, shared the same way.
+    expect(source('src/lib/fee-status.ts')).toBe(source('../web/src/lib/fee-status.ts'));
   });
 });

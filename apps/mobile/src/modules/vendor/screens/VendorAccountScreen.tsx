@@ -22,11 +22,19 @@ import {
   TonePill,
 } from '../../../kit';
 import { BrandSwitch } from '../../../kit/controls';
-import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../shared';
+import { DAY_LABELS, GUTTER, InlineInput, prettyVendorType } from '../shared';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { MmgNumberCard } from '../../../components/MmgNumberCard';
+import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { RefundRuleCard } from '../../../components/RefundRuleCard';
+import { BookingCapacityCard, storedBookingCapacity } from '../../../components/BookingCapacityCard';
+import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import { StoreVatSection } from '../StoreVatSection';
+import { StorePhotosCard } from '../../../components/StorePhotosCard';
+import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
 import { useVerificationStatus } from '../../../hooks/verification';
@@ -52,6 +60,8 @@ import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
+import { feeStatusOf } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
 import { useAuthStore } from '../../../stores/authStore';
@@ -105,6 +115,26 @@ export function VendorAccountScreen() {
     },
     onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
   });
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG NUMBER replaces the pay link:
+  // the same step-up, the same staged cool-off with the old number live, the same one-tap cancel.
+  const [mmgNumberError, setMmgNumberError] = useState<string | null>(null);
+  const updateMmgNumber = guardVendorOperation((mmgNumber: string | null) => vendorApi.updateProfile({ mmgNumber }));
+  const saveMmgNumber = useVendorMutation({
+    mutationFn: stepUp.withStepUp((mmgNumber: string | null) => updateMmgNumber(mmgNumber)),
+    onMutate: () => setMmgNumberError(null),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    onError: (e: unknown) => {
+      if (!isStepUpDismissed(e)) setMmgNumberError(serverMessage(e, 'That number could not be saved. Check it and try again.'));
+    },
+  });
+  const cancelPendingMmgNumber = useVendorMutation({
+    mutationFn: () => vendorApi.cancelPendingMmgNumber(),
+    onSuccess: () => {
+      toast.success('Change cancelled', 'Your current number stays. Other devices were signed out.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
+  });
   // The server owns what a publishable number is (a complete +592 subscriber
   // line), so a rejection is surfaced in ITS words rather than re-guessed here —
   // two opinions about a valid number is how a shopkeeper gets told their own
@@ -121,6 +151,35 @@ export function VendorAccountScreen() {
       e?.response?.data?.error?.message ?? 'That number could not be saved. Check it and try again.',
     ),
   });
+
+  // [R3 · CAA s.70(3)] The store's own refund rule (owner only); the server's refusal is shown in its words.
+  const [refundRuleError, setRefundRuleError] = useState<string | null>(null);
+  const saveRefundRule = useVendorMutation({
+    mutationFn: (refundRule: string | null) => vendorApi.updateProfile({ refundRule }),
+    onMutate: () => setRefundRuleError(null),
+    onSuccess: () => {
+      setRefundRuleError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setRefundRuleError(
+      e?.response?.data?.error?.message ?? 'That refund rule could not be saved. Check it and try again.',
+    ),
+  });
+
+  // [BOOK-S5a · owner C1] A Services business's "how many bookings at once"; the server's refusal in its words.
+  const [capacityError, setCapacityError] = useState<string | null>(null);
+  const saveCapacity = useVendorMutation({
+    mutationFn: (bookingCapacity: number) => vendorApi.updateProfile({ bookingCapacity }),
+    onMutate: () => setCapacityError(null),
+    onSuccess: () => {
+      setCapacityError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setCapacityError(
+      e?.response?.data?.error?.message ?? 'That could not be saved. Check your connection and try again.',
+    ),
+  });
+  const bookingCapacity = store?.vendorType === 'SERVICE' ? storedBookingCapacity(store) : null;
 
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
@@ -152,8 +211,12 @@ export function VendorAccountScreen() {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Store identity */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
-          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+          <View style={{ width: 56, height: 56, borderRadius: 28, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+            {storePhotoUrl(store?.logoUrl, 160) ? (
+              <Image source={{ uri: storePhotoUrl(store?.logoUrl, 160)! }} style={{ width: 56, height: 56 }} contentFit="cover" accessibilityLabel="Store logo" />
+            ) : (
+              <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+            )}
           </View>
           <View style={{ flex: 1 }}>
             <T variant="heading" numberOfLines={1}>
@@ -166,8 +229,13 @@ export function VendorAccountScreen() {
           </View>
         </Card>
 
+        {/* [IMAGES-E2E] The store's own logo and cover (managers): uploaded, redrawn without camera data. */}
+        {isManager && store && !samplePreview ? <StorePhotosCard store={store} /> : null}
+
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
+          <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
+          <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
           {guestSample ? (
             <SettingsRow
@@ -187,6 +255,20 @@ export function VendorAccountScreen() {
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} setBilling={setBilling} /> : null}
 
         {isManager ? (
+          <MmgNumberCard
+            value={store?.mmgNumber}
+            pending={store?.mmgNumberPending ? { number: store.mmgNumberPending, applyAt: store.mmgNumberApplyAt ?? null } : null}
+            saving={saveMmgNumber.isPending}
+            cancelling={cancelPendingMmgNumber.isPending}
+            error={mmgNumberError}
+            readOnly={!isOwner}
+            onSave={(n) => saveMmgNumber.mutate(n)}
+            onCancelPending={isOwner ? () => cancelPendingMmgNumber.mutate() : undefined}
+          />
+        ) : null}
+
+        {/* [PAYMENT-SIMPLIFY] The old pay link only while the server's STORE_MMG_PAY_LINK switch is on. */}
+        {isManager && store?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="store"
             value={store?.mmgPayUrl}
@@ -209,10 +291,32 @@ export function VendorAccountScreen() {
           />
         ) : null}
 
-        {/* A guest's sample store has no pin to move: the save needs a real account. */}
-        {isManager && !guestSample && store ? <StoreLocationCard store={store} /> : null}
+        {isOwner ? (
+          <RefundRuleCard
+            value={store?.refundRule}
+            saving={saveRefundRule.isPending}
+            error={refundRuleError}
+            onSave={(rule) => saveRefundRule.mutate(rule)}
+          />
+        ) : null}
 
-        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
+        {/* [BOOK-S5a] Services only, and only when the server sends the setting (an older server does not). */}
+        {isManager && bookingCapacity != null ? (
+          <BookingCapacityCard
+            value={bookingCapacity}
+            saving={saveCapacity.isPending}
+            error={capacityError}
+            onSave={(n) => saveCapacity.mutate(n)}
+          />
+        ) : null}
+
+        {/* A guest's sample store has no pin to move: the save needs a real account. */}
+        {isOwner && !guestSample && store ? <StoreLocationCard store={store} /> : null}
+
+        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} storeName={store?.name} /> : null}
+
+        {/* [STORE-VAT · owner O-5] The business's VAT registration is the owner's to give; a sample store has none. */}
+        {isOwner && !samplePreview && store ? <StoreVatSection style={{ marginBottom: space.lg }} /> : null}
 
         {isManager ? <StoreQrCard /> : null}
 
@@ -305,8 +409,8 @@ export function VendorAccountScreen() {
  * [Q8] Where the store is on the map: the pin riders and customers are sent to.
  * There was no way to change it after sign-up, when it had been the phone's
  * position. The same picker as List-your-business moves it, saved through
- * PUT /vendor/profile: manager and up, like the rest of the store's details,
- * and the server holds a moved pin to the same market rule as a new store.
+ * PUT /vendor/profile: owner only, and the server holds a moved pin to the
+ * same market rule as a new store.
  */
 function StoreLocationCard({ store }: { store: any }) {
   const qc = useQueryClient();
@@ -361,33 +465,25 @@ function StoreLocationCard({ store }: { store: any }) {
  * expiry — an approved document re-opens for upload inside its 30-day renewal
  * window, and an expired one explains exactly why commerce stopped.
  */
-function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
+function VendorDocumentsSection({ vendorType, storeName }: { vendorType: string; storeName?: string | null }) {
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(vendorType);
   return (
     <View style={{ marginBottom: space.lg }}>
-      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={storeName} />
     </View>
   );
 }
 
 function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string; setBilling: any }) {
   const navigation = useNavigation<any>();
-  const pill = !sub
-    ? { label: 'Inactive', tone: 'brand' as const }
-    : sub.isTrialActive
-      ? { label: 'Free trial', tone: 'brand' as const }
-      : sub.isInGracePeriod
-        ? { label: 'Grace period', tone: 'warning' as const }
-        : sub.status === 'ACTIVE'
-          ? { label: 'Active', tone: 'success' as const }
-          : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
-  const subLine = !sub
+  // [FEE-STATUS · owner 25 Oct] Where the fee stands, in the API's words (feeStatusOf): this row read
+  // "next bill 13 Oct" + "Active" on 25 October. Never the code, never a passed date as a next bill.
+  const feeStatus = sub ? feeStatusOf(sub) : null;
+  const pill = feeStatus ? feeStatusPill(feeStatus.state) : { label: 'Inactive', tone: 'brand' as const };
+  const rate = `${money(sub?.weeklyFeeGyd ?? sub?.customRate ?? sub?.weeklyRate)}/week`;
+  const subLine = !feeStatus
     ? 'Not active yet'
-    : sub.isTrialActive && sub.trialEndDate
-      ? `Trial ends ${fmtDate(sub.trialEndDate)} · then ${money(sub.weeklyRate)}/week`
-      : sub.isInGracePeriod && sub.gracePeriodEnd
-        ? `Weekly fee due by ${fmtDate(sub.gracePeriodEnd)}`
-        : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`;
+    : feeStatus.state === 'TRIAL' ? `${feeStatus.headline} · then ${rate}` : `${rate} · ${feeStatus.headline}`;
   return (
     <>
       <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
@@ -406,6 +502,10 @@ function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string
       <BillingStopControl
         sub={sub}
         who="store"
+        // [OWNER 21 Oct] This screen stacks its cards with marginBottom: the
+        // control keeps the same section gap below it, never flush on the
+        // "Your MMG number" card.
+        style={{ marginTop: 0, marginBottom: space.lg }}
         pending={setBilling.isPending}
         onStop={() => setBilling.mutate({ method: 'NONE' })}
         onResume={() =>
@@ -549,7 +649,14 @@ function PromosSection() {
             </View>
           );
         })}
-        {promos.length === 0 && !promosQ.isLoading ? (
+        {promosQ.isError && promos.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your promo codes.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => promosQ.refetch()} />
+          </View>
+        ) : promos.length === 0 && !promosQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No codes yet — run your first promotion and it shows on your storefront.
           </T>
@@ -694,7 +801,14 @@ function StaffSection() {
             </Pressable>
           </View>
         ))}
-        {members.length === 0 && !staffQ.isLoading ? (
+        {staffQ.isError && members.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your team.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => staffQ.refetch()} />
+          </View>
+        ) : members.length === 0 && !staffQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No team members yet — add your manager or floor staff by phone.
           </T>
@@ -720,8 +834,9 @@ function StaffSection() {
           onPress={submit}
         />
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-          Tap a role pill to switch Manager ↔ Staff.
+          Tap a role to switch between Manager and Staff.
         </T>
+        <WithdrawStaffInvites />
       </Card>
 
       {stepUp.sheet}
@@ -736,7 +851,9 @@ function StaffSection() {
         <PillButton
           label="Remove"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={removeStaff.isPending}
           onPress={() => {
+            if (removeStaff.isPending) return;
             const id = removing!.id;
             setRemoving(null);
             removeStaff.mutate(id);

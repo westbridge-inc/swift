@@ -1,8 +1,12 @@
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, TRADE_LICENCE_DOC_TYPES } from '../verification/doc-registry';
+import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { formatGuyanaTime } from '../../utils/guyana-day';
+import { assertUsersMayContact } from '../moderation/user-block.service';
+import { formatGuyanaTime, guyanaDayKey } from '../../utils/guyana-day';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 /** The verification projection is used both on the root client and inside
  * profile-save transactions. Keep the contract narrow enough that the same
@@ -12,6 +16,7 @@ type ProviderVerificationDb = PrismaClient | Prisma.TransactionClient;
 import {
   canonicalServiceTrade,
   isServiceCategoryOperational,
+  profileOffersDroneWork,
   type ServiceTradeId,
 } from './service-catalog';
 export {
@@ -24,6 +29,43 @@ export {
   qualificationTypeMatchesTrade,
   type ServiceTradeId,
 } from './service-catalog';
+/** [S4 · REVIEW-F S3-1] The day a reminder names, from the Guyana calendar
+ * days of the slot and of the sweep: the sweep runs hourly over the next 24
+ * hours, so a slot later TODAY is reminded at once and must not read
+ * "tomorrow". Anything else (never, inside a 24 h window) reads "coming up". */
+export function reminderDayWord(slot: Date, now: Date): 'today' | 'tomorrow' | 'coming up' {
+  const slotDay = guyanaDayKey(slot);
+  if (slotDay === guyanaDayKey(now)) return 'today';
+  const [y, m, d] = guyanaDayKey(now).split('-').map(Number);
+  const nextDay = new Date(Date.UTC(y!, m! - 1, d! + 1)).toISOString().slice(0, 10);
+  return slotDay === nextDay ? 'tomorrow' : 'coming up';
+}
+
+/** The once-per-booking-per-person key (Notification's per-user dedupe key):
+ * the unique index refuses a second reminder for the same booking to the same
+ * person, even from a retried or overlapping sweep. */
+export function appointmentReminderDedupeKey(bookingId: string): string {
+  return `appointment-reminder:${bookingId}`;
+}
+
+/** [REVIEW-G S4-1 on #2188] The same once-per-person key for a service job's reminder. */
+export function jobReminderDedupeKey(jobId: string): string {
+  return `job-reminder:${jobId}`;
+}
+
+/** A reminder handed to the delivery seam. `audience` and `dedupeKey` ride
+ * into NotificationService.send unchanged (the booking-reminders worker spreads
+ * this object into it). The seam answers `false` when nothing new was sent (the
+ * person's dedupe key already held this reminder); that is not counted. */
+export type BookingReminder = {
+  userId: string;
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+  audience?: 'customer' | 'business';
+  dedupeKey?: string;
+};
+
 /**
  * Booking reminders (master plan §4.3): both sides get ONE nudge in the 24h
  * before a confirmed slot. Covers service jobs (provider-confirmed) and
@@ -32,23 +74,28 @@ export {
  */
 export async function sendBookingReminders(
   prisma: PrismaClient,
-  notify: (n: { userId: string; title: string; body: string; data: Record<string, unknown> }) => Promise<void>,
+  notify: (n: BookingReminder) => Promise<unknown>,
 ): Promise<number> {
   const now = new Date();
   const soon = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   let sent = 0;
 
-  const alreadyReminded = async (userId: string, kind: string, refId: string) => {
-    const existing = await prisma.notification.findFirst({
+  /** Has this person already had a reminder naming this id, as any of the
+   *  kinds in `sentAs` (each names the id under its own field)? */
+  const alreadyReminded = async (userId: string, sentAs: Array<{ kind: string; idKey: string }>, id: string) => {
+    // [item 20] A customer's or provider's reminder, looked up by the reminder job: the named capability under the owner wall.
+    const existing = await ownerWallSystem('services:already-reminded', () => prisma.notification.findFirst({
       where: {
         userId,
-        AND: [
-          { data: { path: ['kind'], equals: kind } },
-          { data: { path: ['refId'], equals: refId } },
-        ],
+        OR: sentAs.map(({ kind, idKey }) => ({
+          AND: [
+            { data: { path: ['kind'], equals: kind } },
+            { data: { path: [idKey], equals: id } },
+          ],
+        })),
       },
       select: { id: true },
-    });
+    }));
     return existing !== null;
   };
 
@@ -67,37 +114,55 @@ export async function sendBookingReminders(
       [job.customerId, `Your ${job.provider.trade.toLowerCase()} is booked for ${when}. Cash on completion.`],
       [job.provider.userId, `You have a job booked for ${when}. Check the details in your jobs list.`],
     ] as Array<[string, string]>) {
-      if (await alreadyReminded(userId, 'booking_reminder', job.id)) continue;
-      await notify({
+      if (await alreadyReminded(userId, [{ kind: 'booking_reminder', idKey: 'refId' }], job.id)) continue;
+      const delivered = await notify({
         userId,
-        title: 'Booking tomorrow',
+        title: `Booking ${reminderDayWord(job.scheduledFor!, now)}`,
         body,
+        dedupeKey: jobReminderDedupeKey(job.id),
         data: { kind: 'booking_reminder', refId: job.id },
       });
-      sent += 1;
+      if (delivered !== false) sent += 1;
     }
   }
 
   // Appointment bookings (goods/services listings with slots): confirmed ones
   // starting within 24h remind the customer and the store owner.
+  // [S4 · BOOK-MEASURE R5] Sent as appointment_reminder, NOT a `booking_`
+  // kind: every phone build (9, 11, 12) routes the whole `booking_` prefix to
+  // ServiceJobs, the marketplace jobs list, which never shows a store booking.
+  // Each copy names the booking's order and whose copy it is, so those same
+  // frozen builds land it through the order branches they already have: the
+  // business on its order desk (audience business + orderId), the customer on
+  // the booking's own order screen (orderId). A booking reminded before this
+  // kind existed (booking_reminder + refId = the booking) is not reminded
+  // again, and one person is reminded once per booking whichever side they are.
   const bookings = await prisma.booking.findMany({
     where: { status: 'CONFIRMED', slotStart: { gt: now, lte: soon } },
     include: { item: { select: { name: true, vendor: { select: { name: true, owner: { select: { userId: true } } } } } } },
   });
   for (const b of bookings) {
     const when = formatGuyanaTime(b.slotStart, { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
-    for (const [userId, body] of [
-      [b.customerId, `${b.item.name} at ${b.item.vendor.name} is booked for ${when}.`],
-      [b.item.vendor.owner.userId, `${b.item.name} appointment coming up ${when}.`],
-    ] as Array<[string, string]>) {
-      if (await alreadyReminded(userId, 'booking_reminder', b.id)) continue;
-      await notify({
+    const weekday = formatGuyanaTime(b.slotStart, { weekday: 'short' }, 'en-US');
+    const time = formatGuyanaTime(b.slotStart, { hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
+    for (const [userId, audience, body] of [
+      [b.customerId, 'customer', `${b.item.name} at ${b.item.vendor.name} is booked for ${when}.`],
+      [b.item.vendor.owner.userId, 'business', `${b.item.name} appointment on ${weekday} at ${time}.`],
+    ] as Array<[string, 'customer' | 'business', string]>) {
+      // A person who is both sides finds the copy just sent under the same booking and is skipped.
+      if (await alreadyReminded(userId, [
+        { kind: 'appointment_reminder', idKey: 'bookingId' },
+        { kind: 'booking_reminder', idKey: 'refId' },
+      ], b.id)) continue;
+      const delivered = await notify({
         userId,
-        title: 'Appointment tomorrow',
+        title: `Appointment ${reminderDayWord(b.slotStart, now)}`,
         body,
-        data: { kind: 'booking_reminder', refId: b.id },
+        audience,
+        dedupeKey: appointmentReminderDedupeKey(b.id),
+        data: { kind: 'appointment_reminder', bookingId: b.id, ...(b.orderId ? { orderId: b.orderId } : {}) },
       });
-      sent += 1;
+      if (delivered !== false) sent += 1;
     }
   }
 
@@ -110,24 +175,70 @@ function tradeChecklistKey(trade: ServiceTradeId): string {
 }
 
 /**
+ * The provider's country checklists: the code defaults under the stored JSON,
+ * as every other checklist reader merges them (a list added in code exists on a
+ * deployed row before any reseed; an edited stored list still wins). No country
+ * row means no checklist — never another market's defaults.
+ */
+async function providerLists(prisma: ProviderVerificationDb, userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  if (!user) return null;
+  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
+  if (!config) return null;
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists as Record<string, string[]>) ?? {}) };
+  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true, bio: true } });
+  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
+  if (!trade || !isServiceCategoryOperational(trade)) return null;
+  // [R15 · research A9] Drone and aerial work is held: a stored profile that offers it (saved before
+  // the profile check, or by any other writer) has no checklist, so it is never verified or listed.
+  if (profileOffersDroneWork(provider?.bio ?? null)) return null;
+  return { lists, trade };
+}
+
+/**
  * The full document checklist a provider must satisfy: the SERVICE_PROVIDER
  * base (identity + character) PLUS any trade-mandated extension from
  * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
- * In Guyana that is exactly one trade: electrical work is illegal without a
- * GEI Electrical Contractor Licence, so electricians carry
- * `gei_electrical_licence` as a GATE, never a badge.
+ * Electrical work is illegal without a GEI Electrical Contractor Licence, so
+ * electricians carry `gei_electrical_licence` as a GATE. [ROLE-DOCS · PR 3] Once a
+ * person has approved it, it is also the licence line ("Licence on file, checked
+ * on [date]", requiredLicenceCheckedOn) — never a badge of its own.
+ *
+ * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
+ * floor (identity, police clearance and its own licences), which no stored
+ * edit can remove. A profile that offers drone or aerial work has no
+ * checklist at all (held, R15). The provider gate reads the lists and the floor
+ * here, never the DOC-1 registry facade (registryChecklist); a change that
+ * moves providers onto the registry must carry SERVICE_TRADE_LAUNCH_FLOOR too.
  */
 export async function providerChecklist(prisma: ProviderVerificationDb, userId: string): Promise<string[]> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  if (!user) return [];
-  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
-  const lists = (config?.documentChecklists as Record<string, string[]>) ?? {};
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
   const base = lists['SERVICE_PROVIDER'] ?? [];
-  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true } });
-  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
-  if (!trade || !isServiceCategoryOperational(trade)) return [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
-  return [...new Set([...base, ...extra])];
+  const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade] ?? [];
+  return [...new Set([...base, ...extra, ...floor])].filter((docType) => !isNeverAcceptedDocType(docType));
+}
+
+/**
+ * [TRADES] Documents a provider MAY add — the base `SERVICE_PROVIDER_OPTIONAL`
+ * list and their trade's `_OPTIONAL` list — never one their checklist already
+ * requires. Display and upload only: no gate reads it.
+ */
+export async function providerOptionalDocuments(
+  prisma: ProviderVerificationDb,
+  userId: string,
+  required: readonly string[],
+): Promise<string[]> {
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
+  const optional = [
+    ...(lists[`SERVICE_PROVIDER${OPTIONAL_LIST_SUFFIX}`] ?? []),
+    ...(lists[`${tradeChecklistKey(trade)}${OPTIONAL_LIST_SUFFIX}`] ?? []),
+  ];
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }
 
 /**
@@ -154,6 +265,53 @@ export async function isProviderVerified(
   const approved = await approvedEvidenceFor(prisma, userId, checklist, now);
   const have = new Set(approved.map((d) => d.docType));
   return checklist.every((docType) => have.has(docType));
+}
+
+/** [ROLE-DOCS · PR 3] The trade licences (a registry fact, DOC-INV-2: verification/doc-registry). */
+export { TRADE_LICENCE_DOC_TYPES };
+
+/** The licences among a checklist, in checklist order. */
+export function tradeLicencesOf(checklist: readonly string[]): string[] {
+  return checklist.filter((docType) => TRADE_LICENCE_DOC_TYPES.has(docType));
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · R7 · GUARDRAILS §7(4)] "Licence on file, checked on [date]" from the licence the provider's trade
+ * REQUIRES: the latest day a PERSON approved one, or null. Fail closed: every licence the checklist names must be
+ * approved and current under THE evidence rule, each by a person — the approver must be a user of Swift, never an
+ * engine marker ('system', 'kyc:auto', 'auto:…'). An engine's approval still lets the provider work (the gate reads the
+ * record) but is never shown as a licence a person checked.
+ */
+export async function requiredLicenceCheckedOn(prisma: ProviderVerificationDb, userId: string, now = new Date()): Promise<Date | null> {
+  return (await requiredLicenceStatus(prisma, userId, now)).checkedOn;
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] Whether the provider's trade REQUIRES a licence, and the day a person checked
+ * it (requiredLicenceCheckedOn). A trade that requires a licence is never "self-skilled": with no person's check the
+ * line reads "No trade credential shown", never "Self-skilled".
+ */
+export async function requiredLicenceStatus(
+  prisma: ProviderVerificationDb, userId: string, now = new Date(),
+): Promise<{ required: boolean; checkedOn: Date | null }> {
+  const licences = tradeLicencesOf(await providerChecklist(prisma, userId));
+  if (licences.length === 0) return { required: false, checkedOn: null };
+  return { required: true, checkedOn: await personCheckedOn(prisma, userId, licences, now) };
+}
+
+async function personCheckedOn(prisma: ProviderVerificationDb, userId: string, licences: string[], now: Date): Promise<Date | null> {
+  const rows = (await approvedEvidenceFor(prisma, userId, licences, now)).filter((row) => row.userId === userId);
+  const approvers = [...new Set(rows.map((row) => row.approvedBy).filter((by) => !/^(system$|kyc:|auto:|engine:)/.test(by)))];
+  const people = approvers.length === 0
+    ? new Set<string>()
+    : new Set((await prisma.user.findMany({ where: { id: { in: approvers } }, select: { id: true } })).map((u) => u.id));
+  let latest: Date | null = null;
+  for (const docType of licences) {
+    const checked = rows.filter((row) => row.docType === docType && people.has(row.approvedBy));
+    if (checked.length === 0) return null;
+    for (const row of checked) if (!latest || row.approvedAt > latest) latest = row.approvedAt;
+  }
+  return latest;
 }
 
 /** Optional observation seam for deterministic concurrency certification.
@@ -189,11 +347,13 @@ export async function projectProviderVerificationLocked(
           trade,
           status: 'VERIFIED',
           verifiedAt: { not: null },
-          ...(trade === 'electrician' ? {} : { type: { not: 'GEI_LICENCE' } }),
+          // [ROLE-DOCS · owner 21 Oct 2026] a GEI_LICENCE qualification counts for no trade (qualificationTypeMatchesTrade)
+          type: { not: 'GEI_LICENCE' },
         },
       })
     : 0;
-  const selfSkilled = matchingQualificationCount === 0;
+  // [ROLE-DOCS · PR 3 · REVIEW-F #2053 S4-2] A trade that requires a licence is never "self-skilled".
+  const selfSkilled = matchingQualificationCount === 0 && !(await requiredLicenceStatus(tx, userId)).required;
 
   await observer?.afterSnapshot?.({
     providerId: provider.id,
@@ -336,6 +496,11 @@ export function decodeProviderCursor(
   return (claims as ProviderCursorClaims).afterId;
 }
 
+/** How long an unanswered request counts as "the same request" when the
+ *  customer sends it again (a lost response, a second tap). Longer than any
+ *  client timeout plus a re-tap; far shorter than a real second ask. */
+export const SERVICE_JOB_RETRY_WINDOW_MS = 10 * 60 * 1000;
+
 export interface ServiceJobAuthorityObserver {
   /** Test-only observation seam. Production does not provide an observer. */
   afterAuthorityChecked?: (snapshot: Readonly<{
@@ -401,6 +566,10 @@ export async function createServiceJobWithLiveAuthority(
     if (provider.userId === input.customerId) {
       throw new AppError(400, 'SELF_JOB', 'You cannot hire yourself');
     }
+    // [SEC-TRUST F2] A block in EITHER direction ends contact (user-block.service): no job, no chat room and
+    // no notice across it. Read after both User rows are locked — a block takes the same two locks — so a
+    // block that committed first is seen here. One neutral answer whichever side blocked.
+    await assertUsersMayContact(tx, input.tenantId, input.customerId, provider.userId);
 
     const trade = canonicalServiceTrade(provider.trade);
     const verified = providerUser.status === 'ACTIVE' && trade
@@ -415,6 +584,30 @@ export async function createServiceJobWithLiveAuthority(
       providerUserId: provider.userId,
       trade,
     });
+
+    // [C2 server] A RETRIED REQUEST IS THE SAME REQUEST. The phone sends no
+    // Idempotency-Key here (builds 9/11 cannot be changed), so a response lost
+    // on a slow network, or a second tap, used to mint a second REQUESTED job
+    // and a second chat room for the same ask. The natural key is the ask
+    // itself: this customer, this provider, the same words and photos, still
+    // unanswered (REQUESTED), asked moments ago. The customer's User row is
+    // locked FOR UPDATE above, so two copies of one request run one after the
+    // other and the second one sees the first. It gets the first job back —
+    // same job, same room, and no second notice to the provider.
+    const earlier = await tx.serviceJob.findFirst({
+      where: {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        providerId: provider.id,
+        description: input.description,
+        photos: { equals: input.photos },
+        status: 'REQUESTED',
+        chatRoomId: { not: null },
+        createdAt: { gte: new Date(Date.now() - SERVICE_JOB_RETRY_WINDOW_MS) },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (earlier) return { job: earlier, created: false as const };
 
     const job = await tx.serviceJob.create({
       data: {
@@ -439,6 +632,7 @@ export async function createServiceJobWithLiveAuthority(
         },
       },
     });
-    return tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    const linked = await tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    return { job: linked, created: true as const };
   });
 }

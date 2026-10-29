@@ -83,7 +83,8 @@ describe('[DOC-1 P1-2] every new submission writes a subject and a link', () => 
   it('a business document names ONE business subject per owner (OWNER link); a personal document names the person (SELF link); each is reused', async () => {
     const u = await person(1);
     const reg = await submit(u, 'RESTAURANT', 'business_registration');
-    const tin = await submit(u, 'RESTAURANT', 'tin_certificate');
+    // [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the restaurant licence is the second business document
+    const tin = await submit(u, 'RESTAURANT', 'gra_restaurant_licence');
     const id1 = (await docOf(reg.id)).subjectId!; const id2 = (await docOf(tin.id)).subjectId!;
     expect(id1).toBeTruthy(); expect(id2).toBe(id1);
     const biz = await subjectOf(id1);
@@ -116,6 +117,10 @@ describe('[DOC-1 P1-2] every new submission writes a subject and a link', () => 
     expect((await docOf(reg.id)).subjectId).toBe(vid);
     const links = (await subjectOf(vid)).links.map((l) => [l.accountId, l.relation]).sort();
     expect(links).toEqual([[a, 'ASSIGNED_DRIVER'], [b, 'ASSIGNED_DRIVER']].sort());
+    // [SEC-TRUST F9] a registered the vehicle, but its link is PENDING too until a person approves
+    // (a paper of its own, or the assignment).
+    expect(await linkedAccountIds(app.prisma, vid)).toEqual([]);
+    expect((await system(() => service.approveVehicleAssignment(a))).approved).toBe(1);
     // [High #9 · DS109] b's cross-account link is PENDING — it names the same vehicle but
     // propagates none of its evidence until the admin approves the assignment.
     expect((await linkedAccountIds(app.prisma, vid)).sort()).toEqual([a].sort());
@@ -138,7 +143,7 @@ describe('[DOC-1 P1-2] every new submission writes a subject and a link', () => 
     const root = await system(() => app.prisma.subject.create({ data: { kind: 'BUSINESS', countryCode: 'GY', createdById: u } }));
     await system(() => app.prisma.subject.update({ where: { id: first!.subjectId }, data: { mergedIntoId: root.id } }));
     expect(await system(() => rootSubjectId(app.prisma, first!.subjectId))).toBe(root.id);
-    const again = await system(() => resolveSubject(app.prisma, { userId: u, countryCode: 'GY', docType: 'tin_certificate', tenantId: 'swift-default' }));
+    const again = await system(() => resolveSubject(app.prisma, { userId: u, countryCode: 'GY', docType: 'gra_restaurant_licence', tenantId: 'swift-default' }));
     expect(again!.subjectId).toBe(root.id);
   });
 

@@ -2,6 +2,7 @@ import { identityAuthority, requireIdentityAuthority, lockIdentityAuthority } fr
 import type { PrismaClient, Prisma } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import { log } from '../../utils/logger';
+import { subscriptionsPaidBy } from '../subscription/subscription-owner';
 
 // The trial entitlement law (trial-integrity spec §3): a free trial belongs to
 // a HUMAN (identity cluster), per role, per tenant — never to an account.
@@ -60,11 +61,7 @@ export class TrialEntitlementService {
     const debt = await this.prisma.subscription.findFirst({
       where: {
         status: { in: ['PAST_DUE', 'SUSPENDED', 'CHURNED'] },
-        OR: [
-          { rider: { userId: { in: memberIds } } },
-          { driver: { userId: { in: memberIds } } },
-          { vendor: { owner: { userId: { in: memberIds } } } },
-        ],
+        ...subscriptionsPaidBy({ in: memberIds }),
       },
       select: { id: true },
     });

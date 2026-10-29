@@ -139,9 +139,9 @@ export async function resolveSubject(
     // [High #9 · DS109] Reusing a subject ANOTHER account registered is a PENDING
     // assignment: the submission names the durable vehicle, but its evidence does not
     // propagate to this account until an admin approves the link (approveVehicleAssignment).
-    // The registering account is the verified owner of record and keeps an approved link.
+    // An existing approved link stays approved; a closed or pending link requires fresh review even for the registrant.
     const owned = existing.subject.createdById === input.userId;
-    return { subjectId, kind, relation, linkId: await ensureLink(db, input.userId, subjectId, relation, input.tenantId, owned ? new Date() : null), created: false, owned };
+    return { subjectId, kind, relation, linkId: await ensureLink(db, input.userId, subjectId, relation, input.tenantId, null), created: false, owned };
   }
   const subject = await db.subject.create({ data: { kind, countryCode: input.countryCode, createdById: input.userId, tenantId: input.tenantId } });
   await db.vehicleProfile.create({ data: {
@@ -149,7 +149,37 @@ export async function resolveSubject(
     make: profile.vehicleMake ?? null, model: profile.vehicleModel ?? null, year: profile.vehicleYear ?? null, colour: profile.vehicleColor ?? null,
     registeredById: input.userId,
   } });
-  return { subjectId: subject.id, kind, relation, linkId: await ensureLink(db, input.userId, subject.id, relation, input.tenantId, new Date()), created: true, owned: true };
+  // [SEC-TRUST F9] The first account to name a plate registers the vehicle, but its link starts PENDING like
+  // every other assignment: naming a plate proves nothing. It is approved only when a PERSON approves one of
+  // this account's own papers for this vehicle (the reviewer's decision in transitionPendingDocument), and it
+  // is closed when a submission is rejected while it is still pending.
+  return { subjectId: subject.id, kind, relation, linkId: await ensureLink(db, input.userId, subject.id, relation, input.tenantId, null), created: true, owned: true };
+}
+
+/**
+ * [SEC-TRUST F9] A person approved one of the registrant's own papers for this vehicle: its open
+ * ASSIGNED_DRIVER link is approved (a pending one promoted, or — when a rejection closed it — a new
+ * approved one opened). The caller has already proven the account registered the subject and still
+ * carries its plate.
+ */
+export async function approveRegistrantLink(db: Db, accountId: string, subjectId: string, tenantId: string, approvedAt: Date): Promise<string> {
+  return ensureLink(db, accountId, subjectId, 'ASSIGNED_DRIVER', tenantId, approvedAt);
+}
+
+/** An approval written by an engine ('system', 'kyc:auto', 'auto:…'), never by a person. */
+const ENGINE_APPROVER = /^(system$|kyc:|auto:|engine:)/;
+
+/**
+ * [SEC-TRUST F9] Has a PERSON ever approved one of this account's own papers for this vehicle subject
+ * (a kept record, whatever its later lapse, except a revoked one)? The registrant's link stands on that
+ * alone; another account's approved papers for the same vehicle never stand in for it.
+ */
+export async function personApprovedOwnVehiclePaper(db: Db, accountId: string, subjectId: string): Promise<boolean> {
+  const rows = await db.documentRecord.findMany({
+    where: { accountId, subjectId, status: { not: 'REVOKED' } },
+    select: { approvedBy: true },
+  });
+  return rows.some((row) => !ENGINE_APPROVER.test(row.approvedBy));
 }
 
 /**

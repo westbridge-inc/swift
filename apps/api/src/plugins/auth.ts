@@ -2,14 +2,18 @@ import fp from 'fastify-plugin';
 import { reviewGate } from '../modules/review/gate';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { TenantKind } from '@prisma/client';
-import { enterTenant } from './prisma';
+import type { TenantKind, UserRole } from '@prisma/client';
+import { enterOwner, enterTenant } from './prisma';
+import { runWithTenant } from './tenant-context';
+import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { AuthService } from '../modules/auth/auth.service';
 import {
   hasPrivilegedSessionAssurance,
   requiresPrivilegedSessionAssurance,
 } from '../modules/auth/session-assurance';
 import { adoptCookieCredential, bearerOrCookieToken } from '../modules/auth/browser-session';
+import { refuseUnexpectedPrincipal } from '../modules/auth/expected-principal';
+import { AppError } from '../utils/errors';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -25,6 +29,11 @@ declare module 'fastify' {
     /** [REVIEW-PARTNER] The authenticated caller's tenant KIND, read with the session
      *  (null for a guest). The store-review fiction's money refusals key on it. */
     tenantKind: TenantKind | null;
+    /** [ADMIN-ROLE] The roles the authenticated account HOLDS (users.roles),
+     *  read with the session on every request (null for a guest). Console
+     *  authority is decided from these (auth/console-role.ts), never from
+     *  `user.role`, which is the app's active mode. */
+    heldRoles: readonly UserRole[] | null;
   }
 }
 
@@ -77,9 +86,44 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   app.decorateRequest('authSessionId', null);
   app.decorateRequest('authCredentialSource', null);
   app.decorateRequest('tenantKind', null);
+  app.decorateRequest('heldRoles', null);
   const authService = new AuthService(app);
 
-  app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
+  /**
+   * [L04 · R1 · OTA-016] The session behind an access token, and its account.
+   * Sessions carry no tenant and are not walled, so the session row is read
+   * directly; the account's tenant is not known until then, and the users
+   * table IS walled per tenant: the one pre-auth identity capability answers
+   * which account and which tenant, and the account is then read BOUND to
+   * that tenant. Null when the token has no live session or account (a
+   * verdict, not an outage).
+   */
+  async function readSessionPrincipal(token: string) {
+    const session = await app.prisma.session.findUnique({
+      where: { token },
+      select: { id: true, userId: true, expiresAt: true, authMethod: true },
+    });
+    if (!session) return null;
+    const identity = await resolveIdentityById(app.prisma, session.userId);
+    if (!identity) return null;
+    const user = await runWithTenant(identity.tenantId, () => app.prisma.user.findUnique({
+      where: { id: identity.id },
+      select: {
+        id: true,
+        tenantId: true,
+        tenant: { select: { kind: true } },
+        status: true,
+        roles: true,
+        activeRole: true,
+      },
+    }));
+    return user ? { id: session.id, expiresAt: session.expiresAt, authMethod: session.authMethod, user } : null;
+  }
+  /** The assurance logout, in the session's own tenant. */
+  const logoutInTenant = (session: { id: string; user: { id: string; tenantId: string } }) =>
+    runWithTenant(session.user.tenantId, () => authService.logout(session.id, session.user.id));
+
+  app.decorate('authenticate', async (request: FastifyRequest, _reply: FastifyReply) => {
     let reviewTenant = false;
     try {
       const credentialSource = adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
@@ -89,24 +133,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       // Logout/reset delete sessions, which kills the access token immediately.
       // [A-01 / W-01] a Bearer header, or — for a browser client from an allowed origin — the HttpOnly access cookie
       const token = bearerOrCookieToken(request);
-      const session = await app.prisma.session.findUnique({
-        where: { token },
-        select: {
-          id: true,
-          expiresAt: true,
-          authMethod: true,
-          user: {
-            select: {
-              id: true,
-              tenantId: true,
-              tenant: { select: { kind: true } },
-              status: true,
-              roles: true,
-              activeRole: true,
-            },
-          },
-        },
-      });
+      const session = await readSessionPrincipal(token);
       if (
         !session
         || session.expiresAt < new Date()
@@ -125,26 +152,35 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
         && !hasPrivilegedSessionAssurance(session.authMethod)
       ) {
-        await authService.logout(session.id, session.user.id);
+        await logoutInTenant(session);
         throw new AuthRefused('Privileged session assurance is insufficient');
       }
       // The JWT role is a short-lived transport hint, never current authority.
       // Role switching intentionally keeps the session alive, so reconcile the
       // principal from the locked database model on every protected request.
       request.user.role = session.user.activeRole;
+      request.heldRoles = session.user.roles;
       request.authSessionId = session.id;
       request.authCredentialSource = credentialSource;
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
       // every tenant-owned query downstream is scoped to it.
       enterTenant(session.user.tenantId);
+      // [item 20] and to the person it acts for (the owner wall's binding).
+      enterOwner(session.user.id);
       // [R048-003] and on the request itself, so a route can name the caller's tenant without depending on async-context propagation
       request.tenantId = session.user.tenantId;
       request.tenantKind = session.user.tenant.kind;
       reviewTenant = session.user.tenant.kind === 'REVIEW';
     } catch (err) {
+      // [AUTH-FIX S2-3] A refused request carries NO identity onward: jwtVerify
+      // may already have set request.user from a token that verified (a
+      // signed-out session, a suspended account), so it is cleared here.
+      (request as { user?: unknown }).user = undefined;
+      request.tenantId = null;
       request.authSessionId = null;
       request.authCredentialSource = null;
       request.tenantKind = null;
+      request.heldRoles = null;
       // [F-250] "I could not REACH the session store" is not "your token is
       // invalid". The bare catch here reported every infrastructure failure —
       // a saturated connection pool, an unreachable database — as UNAUTHORIZED,
@@ -159,20 +195,25 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       //     they are told their session is invalid at the worst possible moment.
       // A verdict we actually reached is 401. Anything else is 503 and is
       // LOUD, because it is an outage, not a login problem.
+      // [AUTH-FIX S2-3] The refusal is THROWN, never sent and returned. A
+      // hook that sends and returns lets Fastify run the next hook and the
+      // handler whenever the response has not ended yet: an async onSend
+      // still writing, or a caller that hung up mid-response. A thrown error
+      // stops the request in every case; the error handler writes the same
+      // status and body.
       if (isCredentialVerdict(err)) {
-        reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
-        return;
+        throw new AppError(401, 'UNAUTHORIZED', 'Invalid or expired token');
       }
       request.log.error({ err, url: request.url }, '[F-250] could not verify the session — reporting 503, NOT 401');
-      reply.status(503).send({
-        success: false,
-        error: { code: 'AUTH_UNAVAILABLE', message: 'We could not verify your session right now. Please try again in a moment — you have not been signed out.' },
-      });
-      return;
+      throw new AppError(503, 'AUTH_UNAVAILABLE', 'We could not verify your session right now. Please try again in a moment — you have not been signed out.');
     }
     // [STA-1 DL-9] Outside the try: a dead review session is a 410 through the
     // normal error path — never a 401, never a 503.
     if (reviewTenant) await reviewGate(app.prisma, request);
+    // [Row 225 · AUTH-PIN] A write from a page that expected another account
+    // (a tab left open while someone else signed in) is refused, never applied
+    // to the account the shared cookie now names. No header: unchanged.
+    refuseUnexpectedPrincipal(request, request.user.userId);
   });
 
   // Optional auth for public-but-personalizable routes (browsing). Attaches the
@@ -184,24 +225,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const credentialSource = adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
       const token = bearerOrCookieToken(request);
-      const session = await app.prisma.session.findUnique({
-        where: { token },
-        select: {
-          id: true,
-          expiresAt: true,
-          authMethod: true,
-          user: {
-            select: {
-              id: true,
-              tenantId: true,
-              tenant: { select: { kind: true } },
-              status: true,
-              roles: true,
-              activeRole: true,
-            },
-          },
-        },
-      });
+      const session = await readSessionPrincipal(token);
       if (
         !session ||
         session.expiresAt < new Date() ||
@@ -212,20 +236,24 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       ) {
         request.authSessionId = null;
         request.authCredentialSource = null;
+        request.heldRoles = null;
         (request as { user?: unknown }).user = undefined;
       } else if (
         requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
         && !hasPrivilegedSessionAssurance(session.authMethod)
       ) {
-        await authService.logout(session.id, session.user.id);
+        await logoutInTenant(session);
         request.authSessionId = null;
         request.authCredentialSource = null;
+        request.heldRoles = null;
         (request as { user?: unknown }).user = undefined;
       } else {
         request.user.role = session.user.activeRole;
+        request.heldRoles = session.user.roles;
         request.authSessionId = session.id;
         request.authCredentialSource = credentialSource;
         enterTenant(session.user.tenantId);
+        enterOwner(session.user.id);
         request.tenantId = session.user.tenantId;
         request.tenantKind = session.user.tenant.kind;
         reviewTenant = session.user.tenant.kind === 'REVIEW';
@@ -241,10 +269,14 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       }
       request.authSessionId = null;
       request.authCredentialSource = null;
+      request.heldRoles = null;
       (request as { user?: unknown }).user = undefined;
     }
     // [STA-1 DL-9] A reviewer whose session died is told so even on a public
     // surface — production data is never the fallback.
     if (reviewTenant) await reviewGate(app.prisma, request);
+    // [Row 225 · AUTH-PIN] The same binding for a guest-capable write: a page
+    // that expected account A must not write as B, nor as a guest.
+    refuseUnexpectedPrincipal(request, request.authSessionId ? request.user.userId : null);
   });
 });

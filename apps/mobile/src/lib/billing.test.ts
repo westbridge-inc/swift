@@ -4,7 +4,7 @@ import {
   isBehind,
   isBlocked,
   shortDate,
-  walletLine,
+  feePaidAheadLine,
   weeklyFeeGyd,
   weeksCovered,
   payScreenState,
@@ -15,6 +15,7 @@ import {
   isPlanPaused,
   billingStoppedLine,
   resumeBillingMethod,
+  stopBillingConfirmBody,
 } from './billing';
 
 describe('billingPhase', () => {
@@ -81,6 +82,23 @@ describe('[E12] a paused plan says how to come back, not a date already past', (
   });
 });
 
+describe('[FEE-STATUS] the Stop weekly billing confirm never says "keeps working until" a passed date', () => {
+  const now = Date.parse('2026-10-25T16:52:00Z');
+  it('a period still ahead keeps working until its end', () => {
+    expect(stopBillingConfirmBody({ status: 'ACTIVE', currentPeriodEnd: '2026-10-30T12:00:00Z' }, 'store', now))
+      .toBe('Your store keeps working until 30 Oct. After that, the store stops receiving work and no more weekly fees are charged. You can resume billing anytime.');
+  });
+  it('a period that has ended says work stops when billing stops (the owner\'s store: ended 14 Oct)', () => {
+    const body = stopBillingConfirmBody({ status: 'ACTIVE', currentPeriodEnd: '2026-10-14T00:26:00Z' }, 'store', now);
+    expect(body).toBe('The week you paid for has ended, so your store stops receiving work as soon as you stop billing. No more weekly fees are charged. You can resume billing anytime.');
+    expect(body).not.toMatch(/until 1[34] Oct/);
+  });
+  it('a suspended plan keeps its own words; a missing end names the period', () => {
+    expect(stopBillingConfirmBody({ status: 'SUSPENDED' }, 'driver', now)).toMatch(/^Your driver is already paused\./);
+    expect(stopBillingConfirmBody({ status: 'ACTIVE' }, 'rider', now)).toMatch(/keeps working until the end of the current period\./);
+  });
+});
+
 describe('isBillingStopped / resumeBillingMethod [E12]', () => {
   it('reads the server autoRenew flag and never invents a stop', () => {
     expect(isBillingStopped({ autoRenew: false, status: 'ACTIVE' })).toBe(true);
@@ -125,19 +143,25 @@ describe('weeksCovered', () => {
   });
 });
 
-describe('walletLine', () => {
-  it('is null when nothing is banked', () => {
-    expect(walletLine(0, 12000)).toBeNull();
-    expect(walletLine(null, 12000)).toBeNull();
+// [OWNER RULING 8 Oct, NO "WALLET"] weekly fees paid before they are due are
+// [owner #62] One week at a time: "Next weekly fee already paid", never "paid ahead",
+// never a count of weeks; and never a wallet, a balance or "banked".
+describe('feePaidAheadLine', () => {
+  it('is null when nothing is paid ahead', () => {
+    expect(feePaidAheadLine(0, 12000)).toBeNull();
+    expect(feePaidAheadLine(null, 12000)).toBeNull();
   });
 
-  it('adds a coverage clause when the fee is known', () => {
-    expect(walletLine(24000, 12000)).toBe('$24,000 banked · covers 2 weeks');
-    expect(walletLine(12000, 12000)).toBe('$12,000 banked · covers 1 week');
+  it('says the next weekly fee is paid when a whole week is received, and never counts weeks', () => {
+    expect(feePaidAheadLine(12000, 12000)).toBe('Next weekly fee already paid');
+    // weeks paid ahead before owner #62 (staging only) are honoured, but never shown as several weeks
+    expect(feePaidAheadLine(24000, 12000)).toBe('Next weekly fee already paid');
+    expect(feePaidAheadLine(30000, 12000)).toBe('Next weekly fee already paid');
   });
 
-  it('drops the coverage clause when the fee is unknown', () => {
-    expect(walletLine(5000, 0)).toBe('$5,000 banked');
+  it('names the amount when it covers less than a week, or the fee is unknown', () => {
+    expect(feePaidAheadLine(5000, 12000)).toBe('$5,000 paid toward your next weekly fee');
+    expect(feePaidAheadLine(5000, 0)).toBe('$5,000 paid toward your weekly fee');
   });
 });
 
@@ -247,6 +271,32 @@ describe('payScreenState — the four bands', () => {
     expect(s.extra).toContain('receipts');
     expect(s.extra).toContain('earnings');
     expect(s.extra).toContain('Orders already in the kitchen still go out');
+  });
+
+  it('[BILLING-REANCHOR] paused: the paused days are not charged, and no paid-through date already past is shown', () => {
+    for (const status of ['SUSPENDED', 'CHURNED']) {
+      const s = payScreenState(
+        { status, weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: iso(-12), nextBillingDate: iso(-12) },
+        NOW,
+      );
+      // No pause moment sent: no date is guessed, and the week is not overstated.
+      expect(s.covers).toBe('Covers 1 week, counting the days you traded before the pause · the days orders were paused are not charged');
+      expect(s.covers).not.toMatch(/through|Jul|Aug/);
+    }
+  });
+
+  it('[REVIEW-M #1832 S3-3] paused: names the next bill date paying now gives (due date + time paused + 7 days)', () => {
+    // Due 12 days ago, paused 2 days after that (the grace they traded in), paying now.
+    const due = new Date(NOW.getTime() - 12 * 86_400_000);
+    const paused = new Date(due.getTime() + 2 * 86_400_000);
+    const s = payScreenState(
+      { status: 'SUSPENDED', weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: due.toISOString(), nextBillingDate: due.toISOString(), suspendedAt: paused.toISOString() },
+      NOW,
+    );
+    // The week bought starts 2 days before now: the next bill is 5 days from now, not 7.
+    const next = shortDate(new Date(NOW.getTime() + 5 * 86_400_000).toISOString());
+    expect(s.covers).toBe(`Covers 1 week · next bill ${next} · the days orders were paused are not charged`);
+    expect(shortDate(new Date(NOW.getTime() + 7 * 86_400_000).toISOString())).not.toBe(next);
   });
 
   it('never prints a paid-through date the server did not send', () => {

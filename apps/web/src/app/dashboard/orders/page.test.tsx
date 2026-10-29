@@ -1,9 +1,9 @@
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import type { UserEvent } from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import OrdersPage from './page';
 import { mockApi, renderWithQuery, stubAudioContext, type ApiRequest } from '@/test/test-utils';
-import { wireVendorOrder, wireVendorOrderDetail } from '@/test/vendor-wire-fixtures';
+import { wireVendorOrder, wireVendorOrderDetail, wireOrderLine } from '@/test/vendor-wire-fixtures';
 
 /**
  * S0 — the web vendor order board rendered the letters "$NaN" where a vendor's
@@ -88,7 +88,11 @@ describe('vendor order board — money is never invented', () => {
     await dismissTakeover(user);
     expect(row.textContent).toContain('9:00 AM');
     await user.click(row);
-    expect(await screen.findAllByText(/Appointment:.*9:00 AM/)).toHaveLength(2);
+    // [STORE-DASH] Wait for the window itself (its code arrives as a separate part): findAll returned as
+    // soon as the CARD's line was there, so under load the count read 1. Same two places asserted.
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByText(/Appointment:.*9:00 AM/)).toBeTruthy();
+    expect(screen.getAllByText(/Appointment:.*9:00 AM/)).toHaveLength(2);
     expect(screen.queryByText('20 min prep')).toBeNull();
   });
 
@@ -100,14 +104,15 @@ describe('vendor order board — money is never invented', () => {
     await dismissTakeover(user);
 
     // The list row: `totalAmount` arrived as the STRING "4500.00".
-    expect(row.textContent).toContain(`GY$${(4500).toLocaleString()}`);
+    expect(row.textContent).toContain(`$${(4500).toLocaleString()}`);
+    expect(row.textContent).not.toContain('GY$');
 
     // The detail pane: order total plus each line total (`totalCustomer`).
     await user.click(row);
-    await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
-    expect(screen.getByText(`GY$${(4500).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`GY$${(3000).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`GY$${(1000).toLocaleString()}`)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('Cash on handover — you keep 100% of the goods total.')).toBeTruthy());
+    expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText(`$${(4500).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`$${(3000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`$${(1000).toLocaleString()}`)).toBeTruthy();
 
     // The headline guarantee: the letters N-a-N reach no part of this page.
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
@@ -129,13 +134,32 @@ describe('vendor order board — money is never invented', () => {
     expect(row.textContent ?? '').not.toMatch(/NaN/);
   });
 
+  it('keeps a long status on one line in the order window; the title side gives way instead', async () => {
+    // At 390 px "READY FOR PICKUP" wrapped onto three lines and became a round blob.
+    mockApi(boardHandler([wireVendorOrder({ status: 'READY_FOR_PICKUP' })], wireVendorOrderDetail({ status: 'READY_FOR_PICKUP' })));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    // The board card's chip stays on one line too.
+    expect(within(row).getByText('Ready').className.split(' ')).toEqual(expect.arrayContaining(['whitespace-nowrap']));
+    await user.click(row);
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    const chip = await within(dialog).findByText('Ready');
+    expect(chip.className.split(' ')).toEqual(expect.arrayContaining(['whitespace-nowrap']));
+    // The chip and the close button never shrink; the order number and customer line do.
+    const actions = chip.parentElement!;
+    expect(actions.className.split(' ')).toEqual(expect.arrayContaining(['shrink-0']));
+    const title = actions.previousElementSibling as HTMLElement;
+    expect(title.textContent).toContain('#SW-1001');
+    expect(title.className.split(' ')).toEqual(expect.arrayContaining(['min-w-0', 'flex-1']));
+  });
+
   it('never leaks the pickup code, and still tells the store a code is collected', async () => {
     const pickupBoard = wireVendorOrder({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
     const pickupDetail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
     mockApi(boardHandler([pickupBoard], pickupDetail));
     const { user } = renderWithQuery(<OrdersPage />);
 
-    await user.click(await screen.findByRole('button', { name: /Ready \/ handoff/ }));
+    await screen.findByRole('region', { name: 'Ready / handoff orders' });
     await user.click(await rowFor('SW-1001'));
 
     // HND-003: the hint is driven by `fulfillment`, a field the API DOES send.
@@ -164,10 +188,12 @@ describe('vendor order board — money is never invented', () => {
     expect(screen.getByText(/Ring the bell twice/)).toBeTruthy();
   });
 
-  it('renders an empty bucket without inventing a figure', async () => {
+  it('renders an empty board without inventing a figure', async () => {
     mockApi(boardHandler([], wireVendorOrderDetail()));
     renderWithQuery(<OrdersPage />);
-    await screen.findByText(/Nothing in/);
+    // Nothing open: the app's quiet board (PR A) instead of three empty lanes.
+    expect(await screen.findByText('You are all caught up')).toBeTruthy();
+    expect(screen.getByText('No active orders shown')).toBeTruthy();
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 });
@@ -184,8 +210,7 @@ describe('delivery owner controls', () => {
     });
     const fetchMock = mockApi(deliveryOwnerHandler(detail));
     const { user } = renderWithQuery(<OrdersPage />);
-    const bucket = detail.status === 'PENDING' ? /New/ : /Ready \/ handoff/;
-    await user.click(await screen.findByRole('button', { name: bucket }));
+    await screen.findByRole('region', { name: detail.status === 'PENDING' ? 'New orders' : 'Ready / handoff orders' });
     await user.click(await rowFor('SW-1001'));
     await screen.findByRole('region', { name: 'Delivery owner' });
     return { user, fetchMock };
@@ -208,14 +233,15 @@ describe('delivery owner controls', () => {
   it('names vendor self-delivery and never offers a rider retry for it', async () => {
     await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
     expect(screen.getByText('Your store delivers this order')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Search for a rider again/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Search for a rider again|Find a rider/i })).toBeNull();
     expect(screen.getByRole('button', { name: 'Get a Swift rider' })).toBeTruthy();
   });
 
   it('requires an explicit handoff confirmation before closing a self-delivery', async () => {
     const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
 
-    await user.click(screen.getByRole('button', { name: 'Confirm delivered' }));
+    // The card offers "Confirm delivered" too, and opens this same window for it.
+    await user.click(within(screen.getByRole('dialog', { name: 'Order details' })).getByRole('button', { name: 'Confirm delivered' }));
     expect(screen.getByRole('dialog', { name: 'Confirm store delivery' })).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/delivered'))).toBe(false);
 
@@ -259,7 +285,7 @@ describe('delivery owner controls', () => {
     const detail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
     mockApi(deliveryOwnerHandler(detail));
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /Ready \/ handoff/ }));
+    await screen.findByRole('region', { name: 'Ready / handoff orders' });
     await user.click(await rowFor('SW-1001'));
     expect(screen.queryByRole('region', { name: 'Delivery owner' })).toBeNull();
     expect(screen.getByText(/Customer collects with a pickup code/)).toBeTruthy();
@@ -285,7 +311,7 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     const row = await rowFor('SW-1001');
     await dismissTakeover(user);
     await user.click(row);
-    await waitFor(() => expect(screen.getByText('Total (MMG)')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('MMG — the customer pays your store’s MMG account.')).toBeTruthy());
     return { user, fetchMock };
   }
 
@@ -293,16 +319,52 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     'offers no attest button on a %s payment, and says why',
     async (paymentStatus) => {
       const { fetchMock } = await openMmgDetail(paymentStatus);
-      expect(screen.queryByRole('button', { name: /received in my MMG/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /^Paid by MMG$/i })).toBeNull();
       // and the screen is not silent about it
-      expect(screen.getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      // Said in the order window — and on the card, as in the app (VendorOrderCard payBlockedReason).
+      expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      expect(within(screen.getByRole('article', { name: 'Order SW-1001' })).getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
       expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
     },
   );
 
+  it('[row 52] staff at the order\'s store get no attest button, only who can confirm', async () => {
+    const over = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: false };
+    const fetchMock = mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await waitFor(() => expect(screen.getByText('MMG — the customer pays your store’s MMG account.')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /^Paid by MMG$/i })).toBeNull();
+    expect(screen.queryByLabelText(/MMG transaction reference/i)).toBeNull();
+    // Said in the order window, and on the card as in the app (VendorOrderCard).
+    expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
+    expect(within(row.closest('article')!).getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
+  });
+
+  // [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes cancels: the store sees when.
+  it("shows the server's cancel-at line beside the Paid by MMG button", async () => {
+    const line = 'Cancels automatically at 3:45 PM unless you mark it "Paid by MMG".';
+    const over = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', mmgPayBy: '2026-10-18T19:45:00.000Z', mmgPayByLine: line };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    // [STORE-DASH] The card's MMG step now carries the same name; the window's button is the one that sends.
+    const dialog = screen.getByRole('dialog', { name: 'Order details' });
+    await within(dialog).findByRole('button', { name: /^Paid by MMG$/i });
+    expect(within(dialog).getByText(line)).toBeTruthy();
+  });
+
   it('offers it on a PENDING payment, names the amount, and will not send without a reference', async () => {
     const { user, fetchMock } = await openMmgDetail('PENDING');
-    const button = await screen.findByRole('button', { name: /received in my MMG/i });
+    // [STORE-DASH] The card's MMG step now carries the same name; the window's button is the one that sends.
+    const button = await within(screen.getByRole('dialog', { name: 'Order details' })).findByRole('button', { name: /^Paid by MMG$/i });
+    // [PAYMENT-SIMPLIFY] The button says only "Paid by MMG"; the amount is named beside it.
+    expect(screen.getByText(/^Tap when .*\d.* is in your MMG account\.$/)).toBeTruthy();
     expect((button as HTMLButtonElement).disabled).toBe(true); // no reference yet
     await user.click(button);
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
@@ -343,8 +405,8 @@ describe('[W-27] removing a line is not a refund', () => {
     const o = shelf(over);
     mockApi(boardHandler([wireVendorOrder(o)], wireVendorOrderDetail(o)));
     const { user } = renderWithQuery(<OrdersPage />);
-    // A PREPARING order lives in the "In progress" lane; the board opens on New.
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    // Preparing is now visible beside New and Ready; no filter click is needed.
+    await screen.findByRole('region', { name: 'Preparing orders' });
     const row = await rowFor('SW-1001');
     await dismissTakeover(user);
     await user.click(row);
@@ -410,14 +472,15 @@ describe('[E10] rejecting an order always carries a reason', () => {
     const row = await rowFor('SW-1001');
     await dismissTakeover(user);
     await user.click(row);
-    await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Cash on handover — you keep 100% of the goods total.')).toBeTruthy());
     return { user, fetchMock };
   }
 
   it('the Reject button opens a reason panel and sends nothing until a preset is chosen', async () => {
     const { user, fetchMock } = await openPendingDetail();
 
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    // The order's own Reject, inside its detail dialog (the takeover has one too).
+    await user.click(within(screen.getByRole('dialog', { name: 'Order details' })).getByRole('button', { name: 'Reject' }));
     expect(screen.getByRole('dialog', { name: 'Confirm order rejection' })).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
 
@@ -436,7 +499,7 @@ describe('[E10] rejecting an order always carries a reason', () => {
     const row = await rowFor('SW-1001');
     await dismissTakeover(user);
     await user.click(row);
-    await user.click(await screen.findByRole('button', { name: 'Decline' }));
+    await user.click(await within(await screen.findByRole('dialog', { name: 'Order details' })).findByRole('button', { name: 'Decline' }));
 
     expect(screen.getByRole('dialog', { name: 'Confirm booking decline' })).toBeTruthy();
     expect(screen.getByText('Decline this booking?')).toBeTruthy();
@@ -452,7 +515,8 @@ describe('[E10] rejecting an order always carries a reason', () => {
   it('"Keep it" closes the panel without rejecting', async () => {
     const { user, fetchMock } = await openPendingDetail();
 
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    // The order's own Reject, inside its detail dialog (the takeover has one too).
+    await user.click(within(screen.getByRole('dialog', { name: 'Order details' })).getByRole('button', { name: 'Reject' }));
     await user.click(screen.getByRole('button', { name: 'Keep it' }));
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm order rejection' })).toBeNull());
@@ -471,9 +535,12 @@ describe('order detail stays dismissible while its request settles', () => {
       throw new Error(`Unexpected request: ${request.url}`);
     });
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await screen.findByRole('region', { name: 'Preparing orders' });
     await user.click(await rowFor('SW-1001'));
-    await screen.findByText('Loading…');
+    // [STORE-DASH] The window opens at once on the board's copy while its own read is still out.
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByText('#SW-1001')).toBeTruthy();
+    expect(within(dialog).queryByText('Loading…')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Close order detail' }));
     expect(screen.queryByRole('button', { name: 'Close order detail' })).toBeNull();
   });
@@ -492,11 +559,427 @@ describe('order detail stays dismissible while its request settles', () => {
       throw new Error(`Unexpected request: ${request.url}`);
     });
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await screen.findByRole('region', { name: 'Preparing orders' });
     await user.click(await rowFor('SW-1001'));
     await screen.findByText(/Could not load this order/);
     await user.click(screen.getByRole('button', { name: 'Retry order detail' }));
-    await screen.findByText('Total (Cash)');
+    await screen.findByText('Cash on handover — you keep 100% of the goods total.');
     expect(attempts).toBe(2);
+  });
+});
+
+// The API substitution vocabulary comes from the persisted line, not the order state.
+describe('store picking uses the server substitution status', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  async function openLine(subStatus: string, picked = false) {
+    const detail = wireVendorOrderDetail({
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false },
+      status: 'PREPARING',
+      items: [wireOrderLine({ subStatus, picked, substituteName: 'Replacement rice' })],
+    });
+    mockApi(boardHandler([detail], detail));
+    const { user, queryClient } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Cash on handover — you keep 100% of the goods total.');
+    return { user, queryClient, detail };
+  }
+
+  it('shows a PENDING swap and disables picking or proposing another swap', async () => {
+    await openLine('PENDING');
+    expect(screen.getByText('Waiting on customer: Replacement rice')).toBeTruthy();
+    expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+  });
+
+  it('a pending proposal on another device closes an already-open substitute panel', async () => {
+    const { user, queryClient, detail } = await openLine('NONE');
+    await user.click(screen.getByRole('button', { name: 'Out of stock?' }));
+    expect(screen.getByRole('button', { name: 'No substitute — remove line' })).toBeTruthy();
+    const pending = { ...detail, items: [wireOrderLine({ subStatus: 'PENDING', substituteName: 'Replacement rice' })] };
+    mockApi(boardHandler([pending], pending));
+    await queryClient.invalidateQueries({ predicate: (query) => query.queryKey.includes('order') });
+    await screen.findByText('Waiting on customer: Replacement rice');
+    expect(screen.queryByRole('button', { name: 'No substitute — remove line' })).toBeNull();
+  });
+
+  it('an APPROVED swap is picked and no longer waits on the customer', async () => {
+    await openLine('APPROVED', true);
+    expect(screen.queryByText(/Waiting on customer/)).toBeNull();
+    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText('All picked ✓')).toBeTruthy();
+  });
+
+  it.each(['REFUNDED', 'REJECTED'])('%s lines cannot be picked or proposed again', async (status) => {
+    await openLine(status);
+    expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+    expect(screen.getByText('Nothing left to hand over — cancel this order')).toBeTruthy();
+  });
+});
+
+
+describe('pending and approved line removal remains available', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it.each(['PENDING', 'APPROVED'])('%s allows removal but never offers a second proposal', async (subStatus) => {
+    const detail = wireVendorOrderDetail({
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false }, status: 'PREPARING',
+      items: [wireOrderLine({ subStatus, picked: false, substituteName: 'Replacement rice' })],
+    });
+    const handler = boardHandler([detail], detail);
+    const fetchMock = mockApi((request) => {
+      if (request.method === 'POST' && request.url.pathname.endsWith('/refund-line')) {
+        return { body: { success: true, data: {} } };
+      }
+      return handler(request);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Cash on handover — you keep 100% of the goods total.');
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+    if (subStatus === 'PENDING') {
+      expect(screen.getByText('Shelf picking — 1 waiting on customer')).toBeTruthy();
+      expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    } else {
+      expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(false);
+    }
+    await user.click(screen.getByRole('button', { name: 'Remove unavailable line' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).includes('/refund-line') && init?.method === 'POST')).toBe(true));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/substitute'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Independent review of #1601 (11 Oct), S2-1: React Query keeps the last good
+// data when a refresh fails but flags the error, and the board polls every 10 s.
+// One failed poll used to take every card off the screen until the next good
+// one. Main kept the known orders visible under the "Couldn't load" banner;
+// the kitchen still needs its ticket rail during a mobile-data blip.
+// ---------------------------------------------------------------------------
+describe('a failed refresh does not empty the board', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('keeps the loaded orders on the board, under the error, after one failed poll', async () => {
+    let fail = false;
+    const order = wireVendorOrder({ status: 'PREPARING' });
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders') {
+        return fail ? { status: 503, body: { success: false, error: { message: 'Service unavailable' } } } : { body: { success: true, data: [order], meta: { total: 1 } } };
+      }
+      return { status: 404, body: { success: false } };
+    });
+    const { queryClient } = renderWithQuery(<OrdersPage />);
+    await rowFor('SW-1001');
+    fail = true;
+    await act(async () => { await queryClient.refetchQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes('"orders"') }); });
+    expect(await screen.findByText(/Couldn.t load your orders/)).toBeTruthy();
+    // The card is still there, and still in its lane.
+    expect(within(screen.getByRole('region', { name: 'Preparing orders' })).getByText('#SW-1001')).toBeTruthy();
+    // An outage is never drawn as an empty lane.
+    expect(screen.queryByText('Nothing here right now')).toBeNull();
+  });
+});
+
+// Review S3-1: the order window is a modal dialog, so Tab stays inside it, and
+// closing it returns focus to the order's card even after the order moved lanes.
+describe('the order window keeps focus inside, and returns it to the card', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('cycles Tab and Shift+Tab inside the dialog', async () => {
+    mockApi(boardHandler([wireVendorOrder({ status: 'PREPARING' })], wireVendorOrderDetail({ status: 'PREPARING' })));
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    await within(dialog).findByRole('button', { name: 'Ready for delivery' });
+    const close = within(dialog).getByRole('button', { name: 'Close order detail' });
+    await waitFor(() => expect(document.activeElement).toBe(close));
+    await user.tab({ shift: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(close);
+    const last = document.activeElement;
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('returns focus to the order\'s card after an action moved it to another lane', async () => {
+    let status = 'PREPARING';
+    mockApi((request) => {
+      const { method, url } = request;
+      if (method === 'GET' && url.pathname === '/api/v1/vendor/orders') return { body: { success: true, data: [wireVendorOrder({ status })], meta: { total: 1 } } };
+      if (method === 'GET' && url.pathname.startsWith('/api/v1/vendor/orders/')) return { body: { success: true, data: wireVendorOrderDetail({ status }) } };
+      if (method === 'PUT' && url.pathname.endsWith('/ready')) { status = 'READY_FOR_PICKUP'; return { body: { success: true } }; }
+      if (method === 'GET' && url.pathname === '/api/v1/vendor/items') return { body: { success: true, data: [] } };
+      return { status: 404, body: { success: false } };
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Ready for delivery' }));
+    const ready = await screen.findByRole('region', { name: 'Ready / handoff orders' });
+    await waitFor(() => expect(within(ready).getAllByText('#SW-1001').length).toBe(1));
+    await user.click(within(dialog).getByRole('button', { name: 'Close order detail' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Order details' })).toBeNull());
+    const card = within(ready).getByText('#SW-1001').closest('button');
+    expect(document.activeElement).toBe(card);
+  });
+});
+
+// Review S3-5: the third lane also holds orders a rider has claimed that may
+// still be cooking, so it carries main's truthful name, not a bare "Ready".
+describe('the third lane says what it holds', () => {
+  beforeEach(() => { stubAudioContext(); });
+  it('is called "Ready / handoff" and holds rider-claimed orders', async () => {
+    mockApi(boardHandler([wireVendorOrder({ status: 'RIDER_ASSIGNED' })], wireVendorOrderDetail({ status: 'RIDER_ASSIGNED' })));
+    renderWithQuery(<OrdersPage />);
+    const lane = await screen.findByRole('region', { name: 'Ready / handoff orders' });
+    expect(within(lane).getByRole('heading', { name: 'Ready / handoff' })).toBeTruthy();
+    expect(await within(lane).findByText('#SW-1001')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Ready' })).toBeNull();
+  });
+});
+
+// [Item 10 · S1-6] A direct-MMG order the customer and the store disagree
+// about is paused until Swift support resolves it: the server refuses every
+// forward step (409 MMG_CLAIM_MISMATCH). The web board says so, as the phone
+// does, and offers no forward button that can only fail.
+describe('disputed MMG orders pause the web dashboard', () => {
+  beforeEach(() => { stubAudioContext(); });
+  it.each([
+    ['PENDING', 'DELIVERY', 'PLATFORM_RIDER'],
+    ['ACCEPTED', 'DELIVERY', 'PLATFORM_RIDER'],
+    ['PREPARING', 'DELIVERY', 'PLATFORM_RIDER'],
+    ['READY_FOR_PICKUP', 'PICKUP', 'PICKUP'],
+    ['READY_FOR_PICKUP', 'DELIVERY', 'VENDOR_DELIVERY'],
+    ['READY_FOR_PICKUP', 'DELIVERY', 'PLATFORM_RIDER'],
+  ])('%s %s %s shows the pause and withholds forward work', async (status, fulfillment, fulfillmentMode) => {
+    const over = {
+      status, fulfillment, fulfillmentMode,
+      paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: true,
+      mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z',
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: true },
+    };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    // A disputed new order raises no takeover asking to accept it.
+    expect(screen.queryByText(/View later/)).toBeNull();
+    const row = await rowFor('SW-1001');
+    expect(row.textContent).toContain('Payment under review — order paused');
+    await user.click(row);
+    await screen.findByText('MMG — the customer pays your store’s MMG account.');
+    // The order window. (Its card on the board says the same and withholds the
+    // same buttons: the forward-button checks below cover the whole screen.)
+    const dialog = screen.getByRole('dialog', { name: 'Order details' });
+    // The phone's own words (order-dispute.ts). A dispute can be a reference
+    // mismatch where the customer says they DID pay, so the notice never says
+    // the customer is disputing the payment (review S4-1).
+    expect(within(dialog).getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
+    expect(screen.queryByText(/customer disputes/i)).toBeNull();
+    for (const name of ['Accept', 'Start preparing', 'Ready for delivery', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'Find a rider', 'We’ll deliver', 'Get a Swift rider']) {
+      expect(screen.queryByRole('button', { name }), name).toBeNull();
+    }
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Paid by MMG$/ })).toBeNull();
+    // Declining stays where it was: the server allows it.
+    if (status === 'PENDING') expect(within(dialog).getByRole('button', { name: 'Reject' })).toBeTruthy();
+  });
+
+  it('control: the same order without a dispute keeps its forward buttons', async () => {
+    const over = { status: 'ACCEPTED', fulfillment: 'DELIVERY', fulfillmentMode: 'PLATFORM_RIDER', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    expect(row.textContent).not.toContain('order paused');
+    await user.click(row);
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByRole('button', { name: 'Start preparing' })).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U02 / U25 / U45] The store's order window, as on the phone
+// (VendorOrderDetailScreen). U02: a store that delivers itself could not see
+// the delivery address or call the customer, although the reply carries both.
+// U25: no money breakdown, no cancel reason, no timeline, no quoted prep time,
+// and no way to close a return. U45: chips printed status codes
+// ("READY FOR PICKUP"). Synthetic people and places only.
+// ---------------------------------------------------------------------------
+
+function detailHandler(detail: Record<string, unknown>, onPost?: (_request: ApiRequest) => unknown) {
+  return (request: ApiRequest) => {
+    if (request.method === 'POST' && onPost) return { body: { success: true, data: onPost(request) } };
+    return boardHandler([wireVendorOrder(detail)], wireVendorOrderDetail(detail))(request);
+  };
+}
+
+/** The order's card, on the main board or behind the lane button that holds it (Done, Out for delivery…). */
+async function rowAnywhere(user: UserEvent) {
+  const laneWithIt = () => screen.queryAllByRole('button', { name: / · 1$/ })[0] ?? null;
+  await waitFor(() => expect(screen.queryByText('#SW-1001') ?? laneWithIt()).toBeTruthy());
+  if (!screen.queryByText('#SW-1001')) await user.click(laneWithIt()!);
+  return rowFor('SW-1001');
+}
+
+async function openWindow(detail: Record<string, unknown>, onPost?: (_request: ApiRequest) => unknown) {
+  mockApi(detailHandler(detail, onPost));
+  const rendered = renderWithQuery(<OrdersPage />);
+  const row = await rowAnywhere(rendered.user);
+  await rendered.user.click(row);
+  const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+  await within(dialog).findByRole('region', { name: 'Customer' });
+  return { ...rendered, dialog };
+}
+
+describe('[U02] the order window finds and calls the customer', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('a delivery shows the customer, a Call link, the address and the note', async () => {
+    const { dialog } = await openWindow({ status: 'ACCEPTED', fulfillmentMode: 'VENDOR_DELIVERY' });
+    const card = within(dialog).getByRole('region', { name: 'Customer' });
+    expect(within(card).getByText('Test Customer')).toBeTruthy();
+    const call = within(card).getByRole('link', { name: 'Call Test Customer' });
+    expect(call.getAttribute('href')).toBe('tel:+5920000000');
+    expect(call.className.split(' ')).toContain('min-h-11');
+    expect(within(card).getByText('1 Test Road')).toBeTruthy();
+    expect(within(card).getByText('Ring the bell twice')).toBeTruthy();
+    // It wraps instead of pushing Call off a 360 px window.
+    expect((call.parentElement as HTMLElement).className.split(' ')).toEqual(expect.arrayContaining(['flex-wrap']));
+  });
+
+  it('a pickup says the customer collects at the counter', async () => {
+    const { dialog } = await openWindow({ status: 'ACCEPTED', fulfillment: 'PICKUP', deliveryAddress: null });
+    expect(within(within(dialog).getByRole('region', { name: 'Customer' })).getByText('Collects at the counter')).toBeTruthy();
+  });
+
+  it('a booking names the slot and where it happens', async () => {
+    const { dialog } = await openWindow({
+      status: 'ACCEPTED', fulfillment: 'APPOINTMENT', appointmentSlot: '2026-10-20T13:00:00.000Z',
+      deliveryAddress: '2 Sample Street', pickupAddress: '9 Shop Lane',
+    });
+    const card = within(dialog).getByRole('region', { name: 'Customer' });
+    expect(within(card).getByText('You travel to: 2 Sample Street')).toBeTruthy();
+  });
+
+  it('a phone the server withheld is no Call link, never a broken one', async () => {
+    const { dialog } = await openWindow({ status: 'DELIVERED', customer: { id: 'customer-1', firstName: 'Test', lastName: 'Customer', phone: null } });
+    const card = within(dialog).getByRole('region', { name: 'Customer' });
+    expect(within(card).queryByRole('link')).toBeNull();
+  });
+});
+
+describe('[U25] the order window carries what the phone shows', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('the money card: items, the rider\'s delivery fee, a tip and a promo, what the customer pays, and how', async () => {
+    const { dialog } = await openWindow({ status: 'ACCEPTED', tipAmount: '200.00', discount: '300.00', totalAmount: '4400.00' });
+    const card = within(dialog).getByRole('region', { name: 'Payment' });
+    const text = card.textContent ?? '';
+    expect(text).toContain(`Items$${(4000).toLocaleString()}`);
+    expect(text).toContain(`Delivery fee (rider’s)$${(500).toLocaleString()}`);
+    expect(text).toContain(`Tip$${(200).toLocaleString()}`);
+    expect(text).toContain(`Promo discount-$${(300).toLocaleString()}`);
+    expect(text).toContain(`Customer pays$${(4400).toLocaleString()}`);
+    expect(text).toContain('Cash on handover — you keep 100% of the goods total.');
+  });
+
+  it('a card order never reads as cash on handover', async () => {
+    const { dialog } = await openWindow({ status: 'ACCEPTED', paymentMethod: 'CARD' });
+    expect(within(dialog).getByRole('region', { name: 'Payment' }).textContent).not.toMatch(/Cash on handover/);
+  });
+
+  it('a cancelled order says when and why', async () => {
+    const { dialog } = await openWindow({ status: 'CANCELLED', cancelledAt: '2026-10-19T14:05:00.000Z', cancellationReason: 'Customer changed their mind' });
+    const card = within(dialog).getByRole('region', { name: 'Cancellation' });
+    expect(card.textContent).toContain('Cancelled 19 Oct, 10:05 am');
+    expect(within(card).getByText('Customer changed their mind')).toBeTruthy();
+  });
+
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] A code the server writes reads as words; an unknown code never shows.
+  it('a cancellation code the server writes reads as words, never as the code', async () => {
+    const { dialog } = await openWindow({ status: 'CANCELLED', cancelledAt: '2026-10-19T14:05:00.000Z', cancellationReason: 'FOOD_TOO_OLD' });
+    const card = within(dialog).getByRole('region', { name: 'Cancellation' });
+    expect(card.textContent).toContain('Too old to deliver: the order was ready but no rider could be found in time.');
+    expect(card.textContent).not.toContain('FOOD_TOO_OLD');
+  });
+
+  it('a cancellation code this build does not know reads as a neutral line, never the code', async () => {
+    const { dialog } = await openWindow({ status: 'CANCELLED', cancelledAt: '2026-10-19T14:05:00.000Z', cancellationReason: 'SOME_NEW_CODE' });
+    const card = within(dialog).getByRole('region', { name: 'Cancellation' });
+    expect(within(card).getByText('No further details are available.')).toBeTruthy();
+    expect(card.textContent).not.toMatch(/SOME_NEW_CODE|some new code/i);
+  });
+
+  it('the timeline runs oldest first in words, and the quoted prep time is beside it', async () => {
+    const { dialog } = await openWindow({
+      status: 'READY_FOR_PICKUP', estimatedPrepTime: 20,
+      acceptedAt: '2026-10-19T14:00:00.000Z', readyAt: '2026-10-19T14:18:00.000Z',
+      statusHistory: [
+        { status: 'READY_FOR_PICKUP', createdAt: '2026-10-19T14:18:00.000Z', note: null },
+        { status: 'ACCEPTED', createdAt: '2026-10-19T14:00:00.000Z', note: 'Accepted on the web' },
+      ],
+    });
+    const timeline = within(dialog).getByRole('region', { name: 'Timeline' });
+    const items = within(timeline).getAllByRole('listitem').map((li) => li.textContent ?? '');
+    expect(items[0]).toMatch(/^Accepted/);
+    expect(items[0]).toContain('Accepted on the web');
+    expect(items[1]).toMatch(/^Ready/);
+    expect(timeline.textContent).not.toMatch(/READY_FOR_PICKUP|READY FOR PICKUP/);
+    expect(within(dialog).getByText('Quoted prep time: 20 min · actual 18 min (ready 10:18 AM)')).toBeTruthy();
+  });
+
+  it('a return on its way back: the store confirms the goods are back with it', async () => {
+    const posts: string[] = [];
+    const { dialog, user } = await openWindow({
+      status: 'RETURNING', pickedUpAt: '2026-10-19T14:20:00.000Z', riderId: 'rider-1',
+      custodyRecovery: { caseId: 'case-1', state: 'RETURN_REQUIRED', open: true, headline: 'The order is coming back to you', body: 'The rider is bringing the goods back.' },
+    }, (request) => { posts.push(request.url.pathname); return { orderId: 'order-live', caseId: 'case-1', state: 'RETURNED' }; });
+    const card = within(dialog).getByRole('region', { name: 'Delivery recovery' });
+    expect(within(card).getByText('The order is coming back to you')).toBeTruthy();
+    await user.click(within(card).getByRole('button', { name: 'The order is back with us' }));
+    await waitFor(() => expect(posts).toContain('/api/v1/vendor/orders/order-live/recovery/return-received'));
+  });
+
+  it('a courier parcel never offers the store the return', async () => {
+    const { dialog } = await openWindow({
+      status: 'RETURNING', orderType: 'COURIER', pickedUpAt: '2026-10-19T14:20:00.000Z', riderId: 'rider-1',
+      custodyRecovery: { caseId: 'case-1', state: 'RETURN_REQUIRED', open: true, headline: 'The parcel is going back', body: 'It returns to its sender.' },
+    });
+    expect(within(dialog).queryByRole('button', { name: 'The order is back with us' })).toBeNull();
+  });
+});
+
+describe('[U45] statuses read as words, never as codes', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it.each([
+    ['READY_FOR_PICKUP', 'Ready'],
+    ['RIDER_EN_ROUTE_PICKUP', 'Rider en route'],
+    ['RIDER_ARRIVED_PICKUP', 'Rider at counter'],
+    ['EN_ROUTE_DELIVERY', 'Out for delivery'],
+  ])('%s reads "%s" on the board and in the window', async (status, words) => {
+    mockApi(boardHandler([wireVendorOrder({ status })], wireVendorOrderDetail({ status })));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowAnywhere(user);
+    expect(within(row).getByText(words)).toBeTruthy();
+    expect(row.textContent).not.toMatch(/[A-Z]{2,}_[A-Z]|EN ROUTE PICKUP|FOR PICKUP/);
+    await user.click(row);
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findAllByText(words)).not.toHaveLength(0);
+  });
+
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] An unknown status is a neutral line, never the code made to look like words.
+  it('a status this build does not know reads "Status unavailable", never the code', async () => {
+    const { dialog } = await openWindow({
+      status: 'PREPARING',
+      statusHistory: [
+        { status: 'SOME_NEW_STATUS', createdAt: '2026-10-19T14:10:00.000Z', note: null },
+        { status: 'ACCEPTED', createdAt: '2026-10-19T14:00:00.000Z', note: null },
+      ],
+    });
+    expect(within(dialog).getByText('Status unavailable')).toBeTruthy();
+    expect(dialog.textContent).not.toMatch(/SOME_NEW_STATUS|some new status/i);
   });
 });

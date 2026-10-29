@@ -16,6 +16,7 @@ import {
   T,
   TonePill,
 } from '../../../kit';
+import { ProviderPortfolioCard } from '../../../components/ProviderPortfolioCard';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import {
   useSaveServiceProvider,
@@ -24,6 +25,7 @@ import {
 } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { useServiceCatalog } from '../useServiceCatalog';
+import { licenceLabel } from '../licenceLabel';
 import { customerServiceCategories, providerVerificationPresentation, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
 import {
   enterServiceProvider,
@@ -36,6 +38,9 @@ interface ProviderProfile {
   bio?: string | null;
   isVerified: boolean;
   certified?: boolean;
+  /** [R7] the latest day a person checked a licence (from /me; older servers omit it = no label) */
+  licenceCheckedOn?: string | null;
+  portfolioPhotos?: string[];
 }
 
 function ProviderProfileForm({
@@ -159,7 +164,10 @@ function ProviderDashboard({
               label={presentation.label}
               tone={presentation.live ? 'success' : 'neutral'}
             />
-            {provider.certified ? <TonePill label="Certified" tone="success" /> : null}
+            {/* [R7 · REVIEW-F #2053 S3-1] the same words the customer reads: "Licence on file, checked on [date]" */}
+            {licenceLabel(provider.licenceCheckedOn) ? (
+              <TonePill label={licenceLabel(provider.licenceCheckedOn)!} tone="neutral" />
+            ) : null}
           </View>
           <T variant="label" tone="muted" style={{ marginTop: 4 }}>
             {presentation.description}
@@ -205,6 +213,8 @@ function ProviderDashboard({
           onRetry={statusQuery.refetch}
         />
       </View>
+
+      <ProviderPortfolioCard photos={provider.portfolioPhotos ?? []} />
 
       <Card style={{ backgroundColor: color.brand[50] }}>
         <T variant="label" weight="semibold" tone="deep">

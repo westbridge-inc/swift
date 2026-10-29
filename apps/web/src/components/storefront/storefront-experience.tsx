@@ -1,63 +1,60 @@
 'use client';
 
-import Image from 'next/image';
-import { formatAmount, parseAmount } from '@/lib/money';
+import { formatAmount } from '@/lib/money';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { QueryClientContext } from '@tanstack/react-query';
 import {
-  Banknote,
   Clock3,
-  ImageIcon,
-  MapPin,
   Minus,
   Plus,
-  ShoppingBag,
-  ShoppingBasket,
-  Star,
-  Store,
-  UtensilsCrossed,
-  Wrench,
   X,
-  type LucideIcon,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
-import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
   addToCart,
-  checkoutAttemptSignature,
-  cartQuoteFingerprint,
-  checkout,
-  clearCart,
-  clearCheckoutAttempt,
-  getAddresses,
   getCart,
   getPublicStorefront,
   getPublicVendor,
-  persistCheckoutAttempt,
   readCheckoutAttempt,
   removeCartLine,
-  setCartAddress,
-  updateCartLine,
   type Cart,
-  type CheckoutAttempt,
   type MenuItem,
   type OptionGroup,
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
-import { storefrontVertical, storefrontVerticalVariables } from '@/lib/design-tokens';
+import { LIVE_MENU_MAX_AGE_MS, type ServerStoreMenu } from '@/lib/browse-keys';
+import {
+  OptionSelectionError,
+  basePrice,
+  fromPrice,
+  isPlainLine,
+  opensChoices,
+  requiredChoiceSoldOut,
+  requiredCount,
+  selectionPrice,
+  validateSelectedOptions,
+} from '@/lib/menu-options';
+import { useOptionalCustomerSession } from '@/components/customer-session';
+import { useOrderingContext } from '@/components/ordering-context';
+import { MODE_LOCKED } from '@/lib/ordering-mode-lock';
+import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
+import { guestCart } from '@/lib/basket-projection';
+import { useGuestBasket } from '@/lib/basket-state';
+import { Photo } from '@/components/order-ui';
+import Image from 'next/image';
+import { photo } from '@/lib/media';
+import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
+import { SellerInfo } from './seller-info';
+import { AddPlusGlyph } from '@/components/add-plus';
+import { STORE_PICK } from '@/lib/store-pick';
+import type { CartTaps, CartTapsIO } from '@/lib/cart-taps';
 
-type Address = {
-  id: string;
-  label: string;
-  addressLine1: string;
-  city: string;
-  isDefault?: boolean;
-};
-
-type DisplayItem = MenuItem & {
+export type DisplayItem = MenuItem & {
   description?: string;
   unit?: string | null;
   isPopular?: boolean;
@@ -71,7 +68,38 @@ type DisplayVendor = VendorDetail & {
   acceptingOrders: boolean;
 };
 
-const CATALOG_REFRESH_MS = 30_000;
+/**
+ * How often an open store page re-reads the live store and menu in the
+ * background. [PERF #2] Only while the page is on screen: a hidden page reads
+ * nothing, and coming back after longer than this reads at once. Every Add
+ * and every checkout is re-checked by the API whatever this copy says.
+ */
+export const CATALOG_REFRESH_MS = LIVE_MENU_MAX_AGE_MS;
+
+/** [PERF #2] Server renders whose live menu this browser has already shown. */
+const shownServerMenus = new Set<string>();
+const noSubscription = () => () => {};
+
+/**
+ * [W6] An item's sheet (choices, quantity, Add) is only needed after a tap or
+ * a link that names an item, so its code is not in the store page's first
+ * load. In the browser it is fetched as soon as this page's own code has run
+ * (after the first-load JavaScript, never before it) and kept here, so a tap
+ * opens the sheet at once. A sheet asked for before its code has arrived
+ * opens as soon as it does; nothing stands in for it meanwhile.
+ */
+let itemSheetModule: typeof import('./item-sheet') | null = null;
+let itemSheetLoading: Promise<typeof import('./item-sheet')> | null = null;
+/** Fetches the item sheet's code once (and again after a failed fetch). */
+export function loadItemSheet(): Promise<typeof import('./item-sheet')> {
+  itemSheetLoading ??= import('./item-sheet').then(
+    (module) => (itemSheetModule = module),
+    (error: unknown) => { itemSheetLoading = null; throw error; },
+  );
+  return itemSheetLoading;
+}
+if (typeof window !== 'undefined') void loadItemSheet().catch(() => undefined);
+const ITEM_SHEET_UNAVAILABLE = 'Swift could not open this item. Check your connection and try again.';
 
 // `value || 0` used to turn NaN (a missing/unparsable server figure) into
 // "GY$0" — an INVENTED zero, indistinguishable from a real one and the worst
@@ -79,21 +107,9 @@ const CATALOG_REFRESH_MS = 30_000;
 // 0 still renders "GY$0". Same guarantee as `money()` on the vendor side.
 // [W-13] One parser, one em-dash. `null` now reaches here from itemPrice and
 // optionPrice — a price the server never sent, which must never render as free.
-const gyMoney = (value: unknown) => formatAmount(value, 'GY$');
-
-const verticalLabel: Record<ReturnType<typeof storefrontVertical>, string> = {
-  food: 'Food',
-  groceries: 'Groceries',
-  shops: 'Shops',
-  services: 'Services',
-};
-
-const verticalIcon: Record<ReturnType<typeof storefrontVertical>, LucideIcon> = {
-  food: UtensilsCrossed,
-  groceries: ShoppingBasket,
-  shops: Store,
-  services: Wrench,
-};
+// [WEB-REDESIGN] Customer prices read like the rest of the app (and the phone
+// app): `$2,500`, in Guyana dollars as the footer states.
+const gyMoney = (value: unknown) => formatAmount(value, '$');
 
 function publicCatalog(store: StorefrontDetail): DisplayVendor {
   return {
@@ -118,6 +134,7 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
     categories: store.categories.map((category) => ({
       id: category.id,
       name: category.name,
+      imageUrl: category.imageUrl ?? null,
       items: category.items.map((item) => ({
         ...item,
         description: item.description ?? undefined,
@@ -128,51 +145,136 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
   };
 }
 
+/** The store copy merged with the live menu: the menu (choices, availability,
+ *  open and accepting) wins; the store copy keeps its address and minimum. */
+function liveCatalog(store: StorefrontDetail, vendor: VendorDetail): DisplayVendor {
+  const fromStore = publicCatalog(store);
+  return {
+    ...fromStore,
+    ...(vendor as DisplayVendor),
+    addressLine1: fromStore.addressLine1,
+    minOrderAmount: fromStore.minOrderAmount,
+  };
+}
+
 // [W-13] A price the server did not send used to become ZERO here, so a broken
 // item rendered as free and could still be added to a cart and ordered. An
 // unparseable price is now null: the item shows an em-dash and cannot be added.
-function itemPrice(item: DisplayItem): number | null {
-  return parseAmount(item.customerPrice ?? item.basePrice);
-}
-
-function optionPrice(item: DisplayItem, selected: Record<string, string[]>): number | null {
-  const base = itemPrice(item);
-  if (base === null) return null;
-  let total = base;
-  for (const group of item.optionGroups ?? []) {
-    for (const optionId of selected[group.id] ?? []) {
-      const option = group.options.find((candidate) => candidate.id === optionId);
-      // an option whose surcharge is unreadable poisons the line the same way
-      const extra = option ? parseAmount(option.additionalPrice ?? 0) : 0;
-      if (extra === null) return null;
-      total += extra;
-    }
-  }
-  return total;
-}
+// [W6] Every figure on this page comes from lib/menu-options, which prices a
+// selection with the API's own resolver and judges it with the API's own
+// validator (the same one cart add, cart update and checkout run).
+const itemPrice = (item: DisplayItem): number | null => basePrice(item);
+const optionPrice = (item: DisplayItem, selected: Record<string, string[]>): number | null => selectionPrice(item, selected);
 
 function selectedDefaults(groups: OptionGroup[]): Record<string, string[]> {
   return Object.fromEntries(
     groups.map((group) => [
       group.id,
       group.options
-        .filter((option) => option.isAvailable && option.isDefault)
+        .filter((option) => option.isAvailable !== false && option.isDefault)
         .slice(0, group.maxSelect)
         .map((option) => option.id),
     ]),
   );
 }
 
-function optionGuidance(group: OptionGroup): string {
-  const minimum = group.isRequired ? Math.max(1, group.minSelect) : group.minSelect;
-  if (group.maxSelect <= 1) return minimum > 0 ? 'Choose 1' : 'Optional';
-  if (minimum === group.maxSelect) return `Choose ${group.maxSelect}`;
-  if (minimum > 0) return `Choose ${minimum}–${group.maxSelect}`;
-  return `Choose up to ${group.maxSelect}`;
+/** What the person is told when the validator refuses their choices. */
+function choiceProblem(item: DisplayItem, error: unknown): { message: string; groupId: string | null } {
+  if (!(error instanceof OptionSelectionError)) return { message: 'These choices have changed. Close this panel and check the menu again.', groupId: null };
+  const group = (item.optionGroups ?? []).find((candidate) => candidate.name === error.groupName) ?? null;
+  if (error.reason === 'OPTION_REQUIRED' && group) {
+    if (!group.options.some((option) => option.isAvailable !== false)) return { message: `“${group.name}” is sold out right now.`, groupId: group.id };
+    const needed = Math.max(requiredCount(group), group.minSelect, 1);
+    return { message: `Choose ${needed === 1 ? 'an option' : `${needed} options`} for ${group.name}.`, groupId: group.id };
+  }
+  if (error.reason === 'OPTION_UNAVAILABLE' || error.reason === 'OPTION_LIMIT') return { message: `${error.message}.`, groupId: group?.id ?? null };
+  return { message: 'These choices have changed. Close this panel and check the menu again.', groupId: group?.id ?? null };
 }
 
-export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
+/** The menu section the person is reading: the last whose heading has passed the chips. */
+function useActiveSection(ids: string[]): [string | null, (_id: string) => void] {
+  const [active, setActive] = useState<string | null>(ids[0] ?? null);
+  const key = ids.join('|');
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return;
+    const visible = new Map<string, boolean>();
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) visible.set(entry.target.id.replace(/^section-/, ''), entry.isIntersecting);
+      const first = key.split('|').find((id) => visible.get(id));
+      if (first) setActive(first);
+    }, { rootMargin: '-120px 0px -55% 0px' });
+    for (const id of key.split('|')) {
+      const node = document.getElementById(`section-${id}`);
+      if (node) observer.observe(node);
+    }
+    return () => observer.disconnect();
+  }, [key]);
+  return [active, setActive];
+}
+
+/**
+ * [#1590] A menu photo that fails to load falls back to the same pictogram
+ * tile as an item without one; keyed by its address, it tries again when the
+ * live menu sends a new one.
+ */
+/**
+ * [IMAGES-E2E PR5 · COORD GO 21 Oct, owner rule "business pictures must reach customers"]
+ * A menu section's own photo above its heading, as on the phone. Only a photo Swift keeps is
+ * drawn (photo() picks the bounded /media route and its ladder loader for those alone); no
+ * photo, an outside address or a photo that fails to load draws nothing: today's heading.
+ */
+function SectionPhoto({ imageUrl, first = false }: { imageUrl?: string | null; first?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  const media = failed ? null : photo(imageUrl);
+  if (!media?.loader) return null;
+  return (
+    <span className={styles.sectionPhoto}>
+      {/* [REVIEW-F S4-2 on #1973] The first section can sit above the fold: its photo loads at once; the rest lazily. */}
+      <Image {...media} alt="" fill sizes="(min-width: 760px) 640px, 100vw" loading={first ? 'eager' : 'lazy'} className="object-cover" onError={() => setFailed(true)} />
+    </span>
+  );
+}
+
+function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string | null | undefined }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <Photo
+      src={failed ? null : item.imageUrl}
+      alt={item.name}
+      vendorType={vendorType}
+      sizes="96px"
+      iconSize={26}
+      className={styles.itemImage}
+      dim={!item.isAvailable}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+let cartTapsModule: Promise<typeof import('@/lib/cart-taps')> | null = null;
+/** [TAP-AUDIT] The store page's cart-tap engine, fetched once (again after a failed fetch). */
+export function loadCartTaps() {
+  cartTapsModule ??= import('@/lib/cart-taps').catch((error: unknown) => { cartTapsModule = null; throw error; });
+  return cartTapsModule;
+}
+
+/**
+ * `verticalStyle` is the store's vertical tint, worked out on the server
+ * (storefront-page.tsx) so the design-token tables stay out of the page's
+ * first-load JavaScript.
+ */
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null }) {
   const router = useRouter();
+  // [W6] The store page lives inside the customer app's frame (rail, dock,
+  // session). Its session can renew an expired access cookie before sending a
+  // guest to sign in, and its cart count is refreshed after every change made
+  // here. Rendered on its own (tests), both are simply absent.
+  const shellSession = useOptionalCustomerSession();
+  const shellStatus = shellSession?.status;
+  // [W5] Delivery or pickup — the one ordering context the checkout reads.
+  const { mode: orderingMode, setMode: setOrderingMode } = useOrderingContext();
+  const guestBasket = useGuestBasket();
+  const shellQueries = useContext(QueryClientContext);
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
   const diningNoticeDismissed = dismissedDiningStore === store.id;
   const diningNoticeStorageKey = `swift:dining-notice:${store.id}`;
@@ -185,36 +287,66 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     }
   }, [fromQr, store.id, diningNoticeStorageKey]);
   const menu = useRef<HTMLDivElement | null>(null);
-  const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
-  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+  // [PERF #2] A page that arrives with the server's recent live menu starts
+  // ready to order from it. While React adopts the HTML the server just drew
+  // for this visit, the menu is taken as the server judged it (at most
+  // LIVE_MENU_MAX_AGE_MS old). A page drawn in the browser instead may be a
+  // kept copy (Back/Forward, a load made earlier): its menu counts once per
+  // server render, and only while it is at most LIVE_MENU_MAX_AGE_MS old by
+  // this phone's clock. Otherwise the page reads the live menu before Add
+  // works, as before.
+  const adoptingServerHtml = useSyncExternalStore(noSubscription, () => false, () => true);
+  const [serverMenu] = useState<ServerStoreMenu | null>(() => {
+    if (!liveMenu || liveMenu.vendor.id !== store.id || shownServerMenus.has(liveMenu.renderId)) return null;
+    return adoptingServerHtml || Date.now() - liveMenu.at <= LIVE_MENU_MAX_AGE_MS ? liveMenu : null;
+  });
+  const [catalog, setCatalog] = useState<DisplayVendor>(() => (serverMenu ? liveCatalog(store, serverMenu.vendor) : publicCatalog(store)));
+  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>(serverMenu ? 'ready' : 'loading');
   const [catalogCheckedAt, setCatalogCheckedAt] = useState<Date | null>(null);
   const [signedIn, setSignedIn] = useState(false);
+  // [Row 109] Until the server has answered (the shell says "checking", or this page's
+  // own probe is out) the basket is neither the guest's nor the customer's: it says it
+  // is checking, shows no guest copy and takes no adds — no signed-out flash.
+  const [sessionKnown, setSessionKnown] = useState(false);
   const [cart, setCart] = useState<Cart | null>(null);
-  const [addresses, setAddresses] = useState<Address[]>([]);
-  const [addressId, setAddressId] = useState('');
   const [loadingCart, setLoadingCart] = useState(false);
   const [cartHydrated, setCartHydrated] = useState(false);
   const [cartLoadVersion, setCartLoadVersion] = useState(0);
-  const [busyItem, setBusyItem] = useState<string | null>(null);
-  const [quotingAddress, setQuotingAddress] = useState(false);
-  const [placingOrder, setPlacingOrder] = useState(false);
-  const [confirmingClear, setConfirmingClear] = useState(false);
+  useEffect(() => { if (!signedIn && sessionKnown) setCart(guestCart(guestBasket)); }, [signedIn, sessionKnown, guestBasket]);
+  useEffect(() => {
+    const changed = () => setCartLoadVersion(v => v + 1);
+    window.addEventListener('swift-guest-merged', changed);
+    return () => window.removeEventListener('swift-guest-merged', changed);
+  }, []);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; added: boolean } | null>(null);
   const [floatingError, setFloatingError] = useState<string | null>(null);
   const [modalItem, setModalItem] = useState<DisplayItem | null>(null);
+  const [itemQuantity, setItemQuantity] = useState(1);
+  const deepLinkOpened = useRef(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [, setItemSheetLoaded] = useState(() => itemSheetModule !== null);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
-  const mutationBusy = useRef(false);
-  const addressBusy = useRef(false);
-  const placingOrderNow = useRef(false);
-  const checkoutKey = useRef<CheckoutAttempt | null>(null);
-  const modal = useRef<HTMLElement | null>(null);
-  const modalCloseButton = useRef<HTMLButtonElement | null>(null);
+  const restoringSession = useRef(false);
   const modalReturnFocus = useRef<HTMLElement | null>(null);
-  const clearConfirmButton = useRef<HTMLButtonElement | null>(null);
-  const clearReturnFocus = useRef<HTMLButtonElement | null>(null);
   const railHeading = useRef<HTMLHeadingElement | null>(null);
+  const orderPanel = useRef<HTMLElement | null>(null);
+  const page = useRef<HTMLDivElement | null>(null);
+  const orderDock = useRef<HTMLAnchorElement | null>(null);
+  // Keep the dock out of the way until the browser confirms the panel is off screen.
+  const [checkoutVisible, setCheckoutVisible] = useState(true);
+
+  useEffect(() => {
+    if (!orderPanel.current || typeof IntersectionObserver === 'undefined') return;
+    // One callback can carry several crossings, oldest first; only the newest says where the panel is now.
+    const observer = new IntersectionObserver((entries) => {
+      const latest = entries[entries.length - 1];
+      if (latest) setCheckoutVisible(latest.isIntersecting);
+    }, { threshold: 0 });
+    observer.observe(orderPanel.current);
+    return () => observer.disconnect();
+  }, []);
+
 
   const closeOptions = useCallback(() => {
     clearStorefrontContinuation();
@@ -223,33 +355,54 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     window.requestAnimationFrame(() => modalReturnFocus.current?.focus());
   }, []);
 
-  const refreshCart = useCallback(async () => {
-    const next = await getCart();
-    setCart(next);
-    return next;
+  /** The rail's and the dock's cart count are the shell's read of the same server cart. */
+  const refreshShellCart = useCallback(() => {
+    void shellQueries?.invalidateQueries({ queryKey: ['customer', 'cart'] });
+  }, [shellQueries]);
+
+  // [TAP-AUDIT] The cart a tap starts from: the newest this page has (a read lands here before the next render).
+  const cartNow = useRef(cart);
+  cartNow.current = cart;
+  const checkoutAfterTaps = useRef(false);
+  const tapIO = useRef<CartTapsIO | null>(null);
+  const [, redrawTaps] = useState(0);
+  // [TAP-AUDIT] One engine for the page's cart changes (lib/cart-taps): the number moves at the tap, only that item
+  // waits, taps add up, and the cart is read once nothing is out. Its code arrives after the page (fetched as soon as
+  // the visitor is signed in); a tap before it waits for it, never dropped.
+  const tapEngine = useRef<CartTaps | null>(null);
+  // [REVIEW-M #2146 S3-1] Changes made before the code has arrived ([item, step]; 0 for a change that is not a + or −):
+  // counted as out (Checkout waits, the dock defers), and a + or − already moves its number. Each is handed to the
+  // engine when it arrives (or said, if the code cannot be fetched).
+  const early = useRef<Array<[string, number]>>([]);
+  const withTaps = useCallback((run: (_engine: CartTaps) => unknown, id = '', step = 0) => {
+    if (tapEngine.current) { run(tapEngine.current); return; }
+    const mark: [string, number] = [id, step];
+    const queue = early.current;
+    queue.push(mark);
+    redrawTaps((n) => n + 1);
+    void loadCartTaps().then((m) => run(tapEngine.current ??= m.cartTaps(() => tapIO.current!)), () => tapIO.current?.failed(null)).finally(() => {
+      queue.splice(queue.indexOf(mark), 1);
+      redrawTaps((n) => n + 1);
+    });
   }, []);
 
   useEffect(() => {
     let alive = true;
     let catalogRefreshInFlight = false;
-    setCatalogState('loading');
+    // [PERF #2] When the menu this page holds was read (or last tried), by this phone's clock.
+    let lastRead = 0;
 
     const refreshCatalog = async () => {
       if (catalogRefreshInFlight) return;
       catalogRefreshInFlight = true;
+      lastRead = Date.now();
       try {
         const [liveStore, vendor] = await Promise.all([
           getPublicStorefront(store.slug),
           getPublicVendor(store.id),
         ]);
         if (!alive) return;
-        const liveCatalog = publicCatalog(liveStore);
-        setCatalog({
-          ...liveCatalog,
-          ...(vendor as DisplayVendor),
-          addressLine1: liveCatalog.addressLine1,
-          minOrderAmount: liveCatalog.minOrderAmount,
-        });
+        setCatalog(liveCatalog(liveStore, vendor));
         setCatalogState('ready');
         setCatalogCheckedAt(new Date());
       } catch {
@@ -258,34 +411,61 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
         catalogRefreshInFlight = false;
       }
     };
-    void refreshCatalog();
-    const catalogTimer = window.setInterval(() => void refreshCatalog(), CATALOG_REFRESH_MS);
+    const onScreen = () => document.visibilityState !== 'hidden';
+    const tick = () => { if (onScreen()) void refreshCatalog(); };
+    let catalogTimer: number | undefined;
+    let firstTick: number | undefined;
+    if (serverMenu) {
+      // The server's read is this page's first: the next is due when it is
+      // LIVE_MENU_MAX_AGE_MS old (the older of the two clocks' estimates).
+      shownServerMenus.add(serverMenu.renderId);
+      const age = Math.min(LIVE_MENU_MAX_AGE_MS, Math.max(serverMenu.ageMs, Date.now() - serverMenu.at));
+      lastRead = Date.now() - age;
+      setCatalogCheckedAt(new Date(lastRead));
+      firstTick = window.setTimeout(() => {
+        tick();
+        catalogTimer = window.setInterval(tick, CATALOG_REFRESH_MS);
+      }, CATALOG_REFRESH_MS - age);
+    } else {
+      setCatalogState('loading');
+      void refreshCatalog();
+      catalogTimer = window.setInterval(tick, CATALOG_REFRESH_MS);
+    }
+    const onVisibility = () => { if (onScreen() && Date.now() - lastRead >= CATALOG_REFRESH_MS) void refreshCatalog(); };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      alive = false;
+      window.clearTimeout(firstTick);
+      window.clearInterval(catalogTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [store.id, store.slug, serverMenu]);
+
+  useEffect(() => {
+    let alive = true;
 
     // [W-01] Signed-in is the server's answer about an HttpOnly cookie, not a
     // token this script can read. Start signed-OUT, ask, and hydrate the cart
     // only once the server has attested — so a signed-out visitor never fires
-    // the two authenticated loads, exactly as the token check used to prevent.
+    // the authenticated cart load, exactly as the token check used to prevent.
     setSignedIn(false);
-    void sessionProbe().then((session) => {
-      if (!alive || !session.ok) return;
+    setSessionKnown(false);
+    if (shellStatus === 'checking') return () => { alive = false; };
+    void (shellStatus !== undefined ? Promise.resolve({ ok: shellStatus === 'signed-in' }) : sessionProbe()).then((session) => {
+      if (!alive) return;
+      setSessionKnown(true);
+      if (!session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);
       setCartHydrated(false);
-      return Promise.all([
-        getCart({ redirectOnExpired: false }),
-        getAddresses({ redirectOnExpired: false }),
-      ])
-        .then(([nextCart, nextAddresses]) => {
+      // [W4] The store page shows the cart; the one checkout page prices the
+      // delivery or pickup and places the order, so no address is read here.
+      return getCart({ redirectOnExpired: false })
+        .then((nextCart) => {
           if (!alive) return;
-          const typedAddresses = nextAddresses as Address[];
           setCart(nextCart);
-          setAddresses(typedAddresses);
           setCartHydrated(true);
-          const selected =
-            typedAddresses.find((address) => address.id === nextCart.deliveryAddress?.id) ??
-            typedAddresses.find((address) => address.isDefault) ??
-            typedAddresses[0];
-          setAddressId(selected?.id ?? '');
         })
         .catch((loadError) => {
           if (!alive) return;
@@ -295,7 +475,6 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
           if (loadError instanceof ApiRequestError && loadError.status === 401) {
             setSignedIn(false);
             setCart(null);
-            setAddresses([]);
             setCartHydrated(false);
             return;
           }
@@ -308,115 +487,61 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
     return () => {
       alive = false;
-      window.clearInterval(catalogTimer);
     };
-  }, [cartLoadVersion, store.id, store.slug]);
-
-  useEffect(() => {
-    if (!modalItem) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    window.requestAnimationFrame(() => modalCloseButton.current?.focus());
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeOptions();
-        return;
-      }
-      if (event.key !== 'Tab' || !modal.current) return;
-      const focusable = Array.from(
-        modal.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [href], select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'),
-      );
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [closeOptions, modalItem]);
+  }, [cartLoadVersion, store.id, store.slug, shellStatus, shellSession?.scope, shellSession?.epoch]);
 
   const storeAcceptsOrders = catalog.isCurrentlyOpen && catalog.acceptingOrders;
   const catalogVerified = catalogState === 'ready';
   const orderable = storeAcceptsOrders && catalogVerified;
   const cartItems = cart?.items ?? [];
-  const cartHydrationPending = signedIn && !cartHydrated;
+  const cartHydrationPending = !sessionKnown || (signedIn && !cartHydrated);
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
+  useEffect(() => {
+    const dock = orderDock.current;
+    if (!dock) return;
+    const measure = () => {
+      const height = dock.getBoundingClientRect().height;
+      // Retain the last visible height when hidden, including wrapped/zoomed text.
+      if (height > 0) page.current?.style.setProperty('--swift-order-dock-height', `${height}px`);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    return () => observer.disconnect();
+    // The dock also hides while an item's sheet is open: measure it again when it comes back.
+  }, [itemCount, checkoutVisible, modalItem]);
   const fallbackSubtotal = cartItems.reduce(
     (sum, line) => sum + Number(line.customerPrice ?? 0) * line.quantity,
     0,
   );
   const subtotal = Number(cart?.subtotalCustomer ?? cart?.subtotal ?? fallbackSubtotal);
-  const deliveryFee = typeof cart?.deliveryFee === 'number' ? cart.deliveryFee : null;
-  const discount = Number(cart?.discount ?? 0);
-  const riderTip = Number(cart?.tipAmount ?? 0);
-  const total = Number(cart?.totalAmount ?? subtotal + (deliveryFee ?? 0) - discount + riderTip);
-  const meetsMinimum = cart?.meetsMinimum ?? true;
-  const minimumShortfall = Math.max(0, Number(cart?.minimumOrderAmount ?? 0) - subtotal);
-  const selectedAddress = addresses.find((address) => address.id === addressId);
   const storeLabel = [catalog.addressLine1, catalog.city].filter(Boolean).join(', ');
-  const currentVertical = storefrontVertical(catalog.vendorType);
-  const VerticalIcon = verticalIcon[currentVertical];
   const categoryItems = catalog.categories.flatMap((category) => category.items as DisplayItem[]);
-  const itemsById = new Map(categoryItems.map((item) => [item.id, item]));
   const catalogItemIds = new Set(categoryItems.map((item) => item.id));
   const cartVendorMismatch = cartItems.length > 0 && cart?.vendor?.id !== catalog.id;
   const lineNeedsReview = (line: Cart['items'][number]) => !catalogItemIds.has(line.itemId) || line.isAvailable === false;
-  const cartHasUnverifiedLines = cartItems.some(lineNeedsReview);
-  const cartNeedsReview = cartVendorMismatch || cartHasUnverifiedLines;
-  const cartFulfillmentModes = new Set(
-    cartItems.map((line) => itemsById.get(line.itemId)?.fulfillment).filter((value): value is string => Boolean(value)),
-  );
-  const cartHasAppointment = cartFulfillmentModes.has('APPOINTMENT');
-  const cartHasPickup = cartFulfillmentModes.has('PICKUP');
-  const cartHasMixedFulfillment = cartFulfillmentModes.size > 1;
-  const cartHasUnknownFulfillment = cartItems.some((line) => {
-    const mode = itemsById.get(line.itemId)?.fulfillment;
-    return mode !== 'DELIVERY' && mode !== 'PICKUP' && mode !== 'APPOINTMENT';
-  });
-  const fulfillmentNeedsReview = cartHasPickup || cartHasMixedFulfillment || cartHasUnknownFulfillment;
-  const deliveryDistance = Number(cart?.deliveryDistanceKm ?? cart?.vendor?.distanceKm);
-  const deliveryRadius = Number(cart?.vendor?.deliveryRadius);
-  const cartOutOfRange = cartItems.length > 0
-    && cartFulfillmentModes.size === 1
-    && cartFulfillmentModes.has('DELIVERY')
-    && Number.isFinite(deliveryDistance)
-    && Number.isFinite(deliveryRadius)
-    && deliveryDistance > deliveryRadius;
-  const cashPromoBlocked = cartItems.length > 0
-    && discount > 0
-    && cartFulfillmentModes.size === 1
-    && cartFulfillmentModes.has('DELIVERY');
-  const directCheckoutBlocked = !catalogVerified || cartNeedsReview || cartHasAppointment || fulfillmentNeedsReview || cartOutOfRange || cashPromoBlocked;
-  const menuFulfillmentModes = new Set(categoryItems.map((item) => item.fulfillment).filter(Boolean));
-  const storePickupOnly = menuFulfillmentModes.size === 1 && menuFulfillmentModes.has('PICKUP');
-  const storeAppointmentOnly = menuFulfillmentModes.size === 1 && menuFulfillmentModes.has('APPOINTMENT');
-  const needsDeliveryAddress = cartItems.length > 0
-    ? cartFulfillmentModes.has('DELIVERY') && !cartHasMixedFulfillment
-    : !storePickupOnly && !storeAppointmentOnly;
-  const pickupContext = cartItems.length > 0 ? cartHasPickup && !cartHasMixedFulfillment : storePickupOnly;
-  const appointmentContext = cartItems.length > 0 ? cartHasAppointment && !cartHasMixedFulfillment : storeAppointmentOnly;
-  const hasDestinationQuote = cartItems.length === 0
-    || !needsDeliveryAddress
-    || Boolean(addressId && cart?.deliveryAddress?.id === addressId);
-  const orderAmountLabel = hasDestinationQuote ? gyMoney(total) : 'Quote needed';
+  // [W4] The rail shows what is in the basket; prices, fees and the total are
+  // the checkout's (the server's quote, for delivery or pickup).
+  const basketLabel = gyMoney(subtotal);
+  const sections = catalog.categories.filter((category) => category.items.length > 0);
+  const [activeSection, setActiveSection] = useActiveSection(sections.map((category) => category.id));
 
   const quantities = new Map<string, number>();
   for (const line of cartItems) quantities.set(line.itemId, (quantities.get(line.itemId) ?? 0) + line.quantity);
+  /**
+   * [W6] The line the row's "−" takes one from: the item's plain line (no
+   * choice, no note), which is exactly what "+" adds, and only while it is
+   * the item's ONLY configuration in the order. Otherwise null: the row shows
+   * no "−", and the order panel's × removes a chosen line by name.
+   */
+  const stepperLine = (itemId: string) => {
+    const lines = cartItems.filter((line) => line.itemId === itemId);
+    return lines.length > 0 && lines.every(isPlainLine) ? lines.at(-1)! : null;
+  };
 
-  const showNotice = (message: string) => {
-    setNotice(message);
+  const showNotice = (message: string, added = false) => {
+    setNotice({ message, added });
     window.setTimeout(() => setNotice(null), 2600);
   };
 
@@ -425,75 +550,141 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     window.setTimeout(() => setFloatingError(null), 4200);
   };
 
-  const resetCheckoutAttempt = () => {
-    checkoutKey.current = null;
-    clearCheckoutAttempt();
-  };
-
+  // An order the checkout sent but could not confirm keeps this cart frozen
+  // until that same order is retried or confirmed on the checkout page.
   const cartMutationLockedByCheckout = () => {
-    const pending = checkoutKey.current ?? readCheckoutAttempt();
-    if (!pending) return false;
-    checkoutKey.current = pending;
+    if (!readCheckoutAttempt()) return false;
     const message = 'A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.';
     setError(message);
     showFloatingError(message);
     return true;
   };
 
-  const closeClearConfirmation = () => {
-    setConfirmingClear(false);
-    window.requestAnimationFrame(() => clearReturnFocus.current?.focus());
+  /**
+   * [W4] Every order is placed on the one checkout page. A guest signs in at
+   * Place order: an expired access cookie is renewed first, so a returning
+   * customer is never sent to sign in for nothing, and the code brings them
+   * straight to the checkout, where the browser basket is uploaded.
+   */
+  const goToCheckout = () => {
+    if (signedIn) { router.push('/checkout'); return; }
+    if (restoringSession.current) return;
+    restoringSession.current = true;
+    const toSignIn = () => router.push(`/login?next=${encodeURIComponent('/checkout')}`);
+    void (shellSession?.ensureSignedIn() ?? Promise.resolve(false)).then((restored) => {
+      restoringSession.current = false;
+      if (restored) router.push('/checkout');
+      else toSignIn();
+    }, () => {
+      restoringSession.current = false;
+      toSignIn();
+    });
   };
 
-  const requireCustomerSession = () => {
-    if (signedIn) return true;
-    router.push(`/login?next=${encodeURIComponent(returnPath)}`);
-    return false;
-  };
-
-  const mutateItem = async (itemId: string, work: () => Promise<unknown>, message?: string) => {
-    if (mutationBusy.current || placingOrderNow.current || cartHydrationPending || cartMutationLockedByCheckout()) return;
-    mutationBusy.current = true;
-    resetCheckoutAttempt();
-    setBusyItem(itemId);
-    setError(null);
-    try {
-      await work();
-      await refreshCart();
-      if (message) showNotice(message);
-    } catch (mutationError) {
+  tapIO.current = {
+    vendorId: catalog.id,
+    show: (next) => { cartNow.current = next; setCart(next); refreshShellCart(); },
+    changed: () => redrawTaps((n) => n + 1),
+    failed: (mutationError) => {
       const message = mutationError instanceof Error ? mutationError.message : 'Could not update your order.';
+      checkoutAfterTaps.current = false;
       setError(message);
       showFloatingError(message);
-    } finally {
-      mutationBusy.current = false;
-      setBusyItem(null);
-    }
+    },
+    added: (name) => showNotice(`${name} added to your order.`, true),
+  };
+  const taps = tapEngine.current;
+  const cartBusyNow = () => early.current.length > 0 || !!tapEngine.current?.pending();
+  const tapsPending = cartBusyNow();
+  const tapBusy = (itemId: string) => !!taps?.busy(itemId);
+  // Fetched as soon as the visitor is signed in (a failed fetch is tried again by the first tap, which says why).
+  useEffect(() => {
+    if (!signedIn) return;
+    let alive = true;
+    let engine: CartTaps | null = null;
+    void loadCartTaps().then((m) => {
+      engine = (tapEngine.current ??= m.cartTaps(() => tapIO.current!));
+      if (alive) { engine.live(true); redrawTaps((n) => n + 1); }
+    }, () => {});
+    return () => { alive = false; engine?.live(false); };
+  }, [signedIn]);
+  // [TAP-AUDIT] The dock's Checkout tapped while a change is still out goes once it has landed (never to a stale cart).
+  useEffect(() => {
+    if (tapsPending || !checkoutAfterTaps.current) return;
+    checkoutAfterTaps.current = false;
+    router.push('/checkout');
+  }, [tapsPending, router]);
+
+  /** A + or − on a row (signed in): the number moves now; the engine tells the server. */
+  const tapItem = (item: DisplayItem, step: 1 | -1) => {
+    setError(null);
+    withTaps((engine) => engine.tap(item.id, item.name, step, cartNow.current), item.id, step);
+  };
+
+  /** A change that is not a tap (an add with choices, a ×): only that item waits for it. */
+  const changeItem = (itemId: string, name: string, work: () => Promise<unknown>, message: string, added = false) => {
+    if (cartHydrationPending || cartMutationLockedByCheckout()) return;
+    setError(null);
+    withTaps((engine) => engine.hold(itemId, name, work).then((done) => { if (done) showNotice(message, added); }));
+  };
+
+  const openOptions = (item: DisplayItem, trigger?: HTMLElement) => {
+    modalReturnFocus.current = trigger ?? null;
+    setSelectedOptions(selectedDefaults(item.optionGroups ?? []));
+    setItemQuantity(1);
+    setModalError(null);
+    setModalItem(item);
+  };
+
+  const addLocal = async (item: DisplayItem, quantity: number, selectedOptions: Record<string, string | string[]>) => {
+    try {
+      const { addGuestLine, clearGuestBasket } = await import('@/lib/basket');
+      const unitPrice = selectionPrice(item, Object.fromEntries(Object.entries(selectedOptions).map(([k, v]) => [k, typeof v === 'string' ? [v] : v])));
+      if (unitPrice === null) throw new Error('Check the live item price before adding it.');
+      const result = addGuestLine({ vendorId: catalog.id, storeSlug: store.slug, vendorName: catalog.name, itemId: item.id,
+        name: item.name, quantity, unitPrice, selectedOptions, fulfillment: item.fulfillment, returnPath });
+      if (result === 'DIFFERENT_STORE') {
+        if (window.confirm('Your basket is from another store. Replace it with this store’s basket?')) {
+          clearGuestBasket(); await addLocal(item, quantity, selectedOptions);
+        }
+        return;
+      }
+      if (result === 'QUANTITY_LIMIT') throw new Error('You can add up to 99 of one item and choice.');
+      showNotice(`${item.name} added to your order.`, true);
+    } catch (e) { setError((e as Error).message); }
   };
 
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
-    if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: selectedDefaults(item.optionGroups ?? []), returnPath });
-    }
-    if (!requireCustomerSession() || !orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
-    const groups = item.optionGroups ?? [];
-    if (groups.length > 0) {
-      modalReturnFocus.current = trigger ?? null;
-      setModalItem(item);
-      setModalError(null);
-      setSelectedOptions(selectedDefaults(groups));
+    if (!orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
+    // [W6] One tap adds an item that needs no choice; an item with a required
+    // choice, or one the store pre-selects, opens its options instead.
+    if (opensChoices(item)) {
+      openOptions(item, trigger);
       return;
     }
-    const existing = cartItems.find((line) => line.itemId === item.id);
-    void mutateItem(
-      item.id,
-      () =>
-        existing
-          ? updateCartLine(existing.id, existing.quantity + 1)
-          : addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 }),
-      `${item.name} added to your order.`,
-    );
+    if (!signedIn) { addLocal(item, 1, {}); return; }
+    // Add sends the complete base selection to the server.
+    tapItem(item, 1);
   };
+
+  // [W6] `?item=` (Home's popular rail, the Market, a shared link) opens that
+  // item's sheet once the live menu is verified — it never adds anything.
+  // [PERF #2] And once the page knows who is visiting: the live menu can now
+  // arrive with the page, before the session answer, and adds wait for that
+  // answer [Row 109], so the sheet opens when its Add can work (and goes to a
+  // signed-in person's saved cart, never this browser's basket).
+  useEffect(() => {
+    if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready' || !sessionKnown) return;
+    deepLinkOpened.current = true;
+    const item = catalog.categories.flatMap(category => category.items).find(item => item.id === initialItemId);
+    // A closed or paused store opens nothing: its Add could only refuse.
+    if (item?.isAvailable && item.fulfillment === 'DELIVERY' && catalog.isCurrentlyOpen && catalog.acceptingOrders) {
+      setSelectedOptions(selectedDefaults(item.optionGroups ?? []));
+      setItemQuantity(1);
+      setModalError(null);
+      setModalItem(item);
+    }
+  }, [initialItemId, catalogState, catalog, sessionKnown]);
 
   useEffect(() => {
     if (!signedIn || !cartHydrated || catalogState !== 'ready') return;
@@ -511,19 +702,48 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       (intent.selectedOptions[group.id] ?? []).filter(id => group.options.some(option => option.id === id && option.isAvailable)).slice(0, group.maxSelect),
     ]));
     setSelectedOptions(choices);
+    setItemQuantity(intent.quantity ?? 1);
     setModalError(null);
     setModalItem(item);
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
 
-  const subtractItem = (item: DisplayItem) => {
-    if (!requireCustomerSession()) return;
-    const matching = cartItems.filter((line) => line.itemId === item.id);
-    const line = matching.at(-1);
-    if (!line) return;
-    void mutateItem(
-      item.id,
-      () => (line.quantity <= 1 ? removeCartLine(line.id) : updateCartLine(line.id, line.quantity - 1)),
-    );
+  // [W6] A sheet asked for before its code has arrived opens when it does. If
+  // the code cannot be fetched, the customer is told instead of a tap doing
+  // nothing (and the next tap fetches it again).
+  useEffect(() => {
+    if (!modalItem) return;
+    // The code can land after the render that opened the sheet (a link or the
+    // return from sign-in open it from an effect) but before this effect:
+    // render again so the sheet shows now, not at the next unrelated update.
+    if (itemSheetModule) { setItemSheetLoaded(true); return; }
+    let alive = true;
+    loadItemSheet().then(() => {
+      if (!alive) return;
+      setItemSheetLoaded(true);
+      // An earlier failed fetch is no longer news once the sheet opens.
+      setError((current) => (current === ITEM_SHEET_UNAVAILABLE ? null : current));
+      setFloatingError((current) => (current === ITEM_SHEET_UNAVAILABLE ? null : current));
+    }, () => {
+      if (!alive) return;
+      setModalItem(null);
+      setError(ITEM_SHEET_UNAVAILABLE);
+      setFloatingError(ITEM_SHEET_UNAVAILABLE);
+      window.setTimeout(() => setFloatingError(null), 4200);
+    });
+    return () => { alive = false; };
+  }, [modalItem]);
+
+  const subtractItem = async (item: DisplayItem) => {
+    // [W6] The row's "−" takes one from the item's plain line only (what "+"
+    // adds) — in a guest's browser basket exactly as in a saved cart.
+    if (!signedIn) {
+      const line = stepperLine(item.id);
+      if (!line) return;
+      try { const { changeGuestQuantity } = await import('@/lib/basket'); changeGuestQuantity(line.id, line.quantity - 1); } catch (e) { setError((e as Error).message); }
+      return;
+    }
+    if (cartHydrationPending || cartMutationLockedByCheckout()) return;
+    tapItem(item, -1);
   };
 
   const chooseOption = (group: OptionGroup, optionId: string) => {
@@ -547,293 +767,84 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
   const confirmOptions = () => {
     if (!modalItem) return;
-    if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, returnPath });
-      requireCustomerSession();
-      return;
-    }
+    if (cartHydrationPending) { setModalError('Your cart is still loading. Keep this item open and try again.'); return; }
     const liveItem = categoryItems.find((item) => item.id === modalItem.id);
     if (!orderable || !liveItem?.isAvailable || liveItem.fulfillment !== 'DELIVERY' || optionPrice(liveItem, selectedOptions) === null) {
       setModalError('This item is no longer verified as orderable on the live menu. Close this panel and check the menu again.');
       return;
     }
-    for (const [groupId, ids] of Object.entries(selectedOptions)) {
-      const group = liveItem.optionGroups?.find(group => group.id === groupId);
-      if (ids.length && (!group || ids.length > group.maxSelect || ids.some(id => !group.options.some(option => option.id === id && option.isAvailable)))) {
-        setModalError('These choices have changed. Close this panel and check the menu again.');
-        return;
+    // [W6] Required choices block the Add: the API's own validator (the one
+    // cart add, cart update and checkout run) must accept the selection first.
+    let selected: Record<string, string | string[]>;
+    try {
+      const validated = validateSelectedOptions(liveItem, selectedOptions).selection;
+      // The shape the apps send: one id for a pick-one group, a list otherwise.
+      selected = Object.fromEntries(Object.entries(validated).map(([groupId, ids]) => {
+        const single = (liveItem.optionGroups?.find(group => group.id === groupId)?.maxSelect ?? 1) <= 1;
+        return [groupId, single && Array.isArray(ids) ? ids[0]! : ids];
+      }));
+    } catch (choiceError) {
+      const problem = choiceProblem(liveItem, choiceError);
+      setModalError(problem.message);
+      if (problem.groupId) {
+        window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`[data-option-group="${problem.groupId}"] input:not(:disabled)`)?.focus());
       }
+      return;
     }
-    for (const group of liveItem.optionGroups ?? []) {
-      const minimum = group.isRequired ? Math.max(1, group.minSelect) : group.minSelect;
-      if ((selectedOptions[group.id] ?? []).length < minimum) {
-        setModalError(`Choose ${minimum === 1 ? 'an option' : `${minimum} options`} for ${group.name}.`);
-        return;
-      }
-    }
-    const selected: Record<string, string | string[]> = {};
-    for (const group of modalItem.optionGroups ?? []) {
-      const values = selectedOptions[group.id] ?? [];
-      if (values.length > 0) selected[group.id] = group.maxSelect <= 1 ? values[0]! : values;
+    if (!signedIn) {
+      addLocal(liveItem, itemQuantity, selected); closeOptions(); return;
     }
     const item = modalItem;
+    const quantity = itemQuantity;
     closeOptions();
-    void mutateItem(
+    changeItem(
       item.id,
-      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1, selectedOptions: selected }),
+      item.name,
+      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity, selectedOptions: selected }),
       `${item.name} added to your order.`,
+      true,
     );
   };
 
-  const changeAddress = async (nextAddressId: string) => {
-    if (addressBusy.current || mutationBusy.current || placingOrderNow.current || cartMutationLockedByCheckout()) return;
-    addressBusy.current = true;
-    resetCheckoutAttempt();
-    const previousAddressId = addressId;
-    setQuotingAddress(true);
-    setAddressId(nextAddressId);
-    setError(null);
-    try {
-      await setCartAddress(nextAddressId);
-      await refreshCart();
-    } catch (addressError) {
-      setAddressId(previousAddressId);
-      setError(addressError instanceof Error ? addressError.message : 'Could not quote delivery to that address.');
-    } finally {
-      addressBusy.current = false;
-      setQuotingAddress(false);
-    }
-  };
-
-  const clearSavedCart = async () => {
-    if (mutationBusy.current || placingOrderNow.current || cartMutationLockedByCheckout()) return;
-    mutationBusy.current = true;
-    resetCheckoutAttempt();
-    setBusyItem('saved-cart');
-    setError(null);
-    try {
-      await clearCart();
-      await refreshCart();
-      setConfirmingClear(false);
-      showNotice('Saved cart cleared. Start a fresh order from this store.');
-      window.requestAnimationFrame(() => railHeading.current?.focus());
-    } catch (clearError) {
-      setError(clearError instanceof Error ? clearError.message : 'Could not clear the saved cart.');
-    } finally {
-      mutationBusy.current = false;
-      setBusyItem(null);
-    }
-  };
-
-  const placeOrder = async () => {
-    if (
-      placingOrderNow.current ||
-      mutationBusy.current ||
-      addressBusy.current ||
-      !requireCustomerSession() ||
-      !cartHydrated ||
-      !cart ||
-      !cartItems.length ||
-      !orderable ||
-      directCheckoutBlocked
-    ) return;
-    if (needsDeliveryAddress && !addressId) {
-      setError('Add a delivery address before placing this order.');
-      return;
-    }
-    placingOrderNow.current = true;
-    setPlacingOrder(true);
-    setError(null);
-    try {
-      const latestCart = await refreshCart();
-      if (!latestCart.items.length) {
-        resetCheckoutAttempt();
-        router.push('/orders');
-        return;
-      }
-      const quotedCart = needsDeliveryAddress ? await setCartAddress(addressId) : latestCart;
-      setCart(quotedCart);
-      if (quotedCart.vendor?.id !== catalog.id) {
-        setError('The server quote is no longer tied to this store. Checkout stays locked so no mixed-store order is placed.');
-        return;
-      }
-      if (quotedCart.vendor.isCurrentlyOpen === false || quotedCart.vendor.acceptingOrders === false) {
-        setError(quotedCart.vendor.isCurrentlyOpen === false
-          ? 'This store is closed now. No order was placed; checkout stays locked until it reopens.'
-          : 'This store has paused orders. No order was placed; checkout stays locked until it resumes.');
-        return;
-      }
-      if (quotedCart.items.some((line) => !catalogItemIds.has(line.itemId) || line.isAvailable === false || line.fulfillment !== 'DELIVERY')) {
-        setError('A saved listing changed or no longer belongs to this live delivery menu. Checkout is locked until the cart is reviewed.');
-        return;
-      }
-      if (Number(quotedCart.discount ?? 0) > 0) {
-        setError('The server does not allow this discounted cart to use cash delivery. Clear the saved cart and promotion before starting again.');
-        return;
-      }
-      const quotedDistance = Number(quotedCart.deliveryDistanceKm ?? quotedCart.vendor.distanceKm);
-      const quotedRadius = Number(quotedCart.vendor.deliveryRadius);
-      if (Number.isFinite(quotedDistance) && Number.isFinite(quotedRadius) && quotedDistance > quotedRadius) {
-        setError(`This address is ${quotedDistance.toFixed(1)} km from the store, outside its ${quotedRadius.toFixed(1)} km delivery radius. Choose another address.`);
-        return;
-      }
-      if (quotedCart.meetsMinimum === false) {
-        setError('The refreshed server quote is below this store’s minimum. Add more items before ordering.');
-        return;
-      }
-      const body = {
-        paymentMethod: 'CASH' as const,
-        tipAmount: riderTip,
-        ...(quotedCart.promoCode?.code ? { promoCode: quotedCart.promoCode.code } : {}),
-      };
-      const signature = checkoutAttemptSignature(quotedCart, body);
-      const attempt = checkoutKey.current ?? readCheckoutAttempt();
-      if (attempt && attempt.signature !== signature) {
-        checkoutKey.current = attempt;
-        setError('An earlier checkout attempt still has an unresolved server outcome. Check Orders before changing or placing this cart; Swift will not create a second attempt with a new key.');
-        return;
-      }
-      checkoutKey.current = attempt;
-      const retryKey = attempt?.key ?? null;
-      if (!retryKey && cartQuoteFingerprint(quotedCart) !== cartQuoteFingerprint(cart)) {
-        const refreshedTotal = typeof quotedCart.totalAmount === 'number'
-          ? gyMoney(quotedCart.totalAmount)
-          : 'a new server total';
-        setError(`Swift refreshed this order to ${refreshedTotal}. Review the new server total, then place the order again.`);
-        return;
-      }
-      const idempotencyKey = retryKey ?? crypto.randomUUID();
-      checkoutKey.current = { signature, key: idempotencyKey };
-      persistCheckoutAttempt(checkoutKey.current);
-      const result = await checkout(body, idempotencyKey);
-      resetCheckoutAttempt();
-      const orderId = result.order?.id ?? result.orders?.[0]?.id;
-      router.push(orderId ? `/orders/${orderId}` : '/orders');
-    } catch (checkoutError) {
-      const message = checkoutError instanceof Error ? checkoutError.message : 'Could not place this order.';
-      if (/selfie|profile photo/i.test(message)) {
-        resetCheckoutAttempt();
-        router.push(`/selfie?next=${encodeURIComponent(returnPath)}`);
-        return;
-      }
-      const definiteRejection = checkoutError instanceof ApiRequestError
-        && checkoutError.status >= 400
-        && checkoutError.status < 500
-        && checkoutError.code !== 'DUPLICATE_REQUEST';
-      try {
-        const reconciledCart = await refreshCart();
-        if (reconciledCart.items.length === 0) {
-          resetCheckoutAttempt();
-          router.push('/orders');
-          return;
-        }
-        if (definiteRejection) resetCheckoutAttempt();
-      } catch {
-        // Preserve the key when the cart cannot confirm whether an order was
-        // committed. Retrying that same key is the only duplicate-safe action.
-      }
-      setError(message);
-    } finally {
-      placingOrderNow.current = false;
-      setPlacingOrder(false);
-    }
-  };
+  const minutes = catalog.etaMin ? `About ${catalog.etaMin} min` : `${catalog.estimatedPrepTime} min prep`;
+  const rating = catalog.displayRating !== null ? `${catalog.displayRating.toFixed(1)} ${catalog.ratingBucket}`.trim() : 'No ratings yet';
+  const storeMeta = [catalog.cuisineTypes?.[0], storeLabel, rating].filter(Boolean).join(' · ');
+  const modalUnitPrice = modalItem ? optionPrice(modalItem, selectedOptions) : null;
 
   return (
-    <main className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
-      <header className={styles.topbar}>
-        <div className={styles.topbarInner}>
-          <div className={styles.brandGroup}>
-            <div className={styles.storeBrand}>
-              <a href="#store-name" className={styles.brandHome}>{catalog.name}</a>
-              <Link href="/" className={styles.poweredBy}>powered by Swift</Link>
+    <div ref={page} className={styles.page} style={verticalStyle}>
+      <div className={styles.content}>
+        <section className={styles.storeHead} aria-labelledby="store-name">
+          {!fromQr ? (
+            <Photo
+              src={catalog.coverImageUrl}
+              alt={`${catalog.name} storefront`}
+              vendorType={catalog.vendorType}
+              sizes="(min-width: 760px) 900px, 100vw"
+              priority
+              iconSize={44}
+              className={styles.cover}
+            />
+          ) : null}
+          <div className={styles.titleRow}>
+            <div className={styles.titleCopy}>
+              <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
+              {storeMeta ? <p className={styles.storeMeta}>{storeMeta}</p> : null}
             </div>
-            {!fromQr ? <span className={styles.verticalChip}>
-              <VerticalIcon size={18} aria-hidden="true" />
-              <span>{verticalLabel[currentVertical]}</span>
-            </span> : null}
-          </div>
-          <nav className={styles.topActions} aria-label="Order navigation">
-            <Link href={signedIn ? '/orders' : `/login?next=${encodeURIComponent('/orders')}`} className={styles.topLink}>
-              Orders
-            </Link>
-            <a
-              href="#checkout"
-              className={styles.cartLink}
-              aria-label={itemCount > 0 && directCheckoutBlocked ? `Your order, ${itemCount} items, review required` : `Your order, ${itemCount} items, ${orderAmountLabel}`}
-            >
-              <ShoppingBag size={18} aria-hidden="true" />
-              {cartHydrationPending ? 'Loading order…' : itemCount > 0 && directCheckoutBlocked ? `${itemCount} · Review` : `${itemCount} · ${orderAmountLabel}`}
-            </a>
-          </nav>
-        </div>
-      </header>
-
-      {!fromQr && catalog.coverImageUrl ? (
-        <div className={styles.hero}>
-          <Image
-            src={catalog.coverImageUrl}
-            alt={`${catalog.name} storefront`}
-            fill
-            priority
-            unoptimized
-            className={styles.heroImage}
-          />
-        </div>
-      ) : null}
-
-      <div className={`${styles.content} ${!fromQr && catalog.coverImageUrl ? styles.withHero : ''}`}>
-        <section className={styles.storeCard} aria-labelledby="store-name">
-          {catalog.logoUrl ? (
-            <span className={styles.logo}>
-              <Image src={catalog.logoUrl} alt="" fill unoptimized className={styles.logoImage} />
-            </span>
-          ) : (
-            <span className={styles.logoFallback} aria-hidden="true">
-              {catalog.name.slice(0, 1).toUpperCase()}
-            </span>
-          )}
-          <div>
-            <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
-            <p className={styles.eyebrow}>
-              {[catalog.addressLine1, catalog.cuisineTypes?.[0] ?? catalog.vendorType].filter(Boolean).join(' · ')}
-            </p>
-            <div className={styles.meta}>
-              {/* [M-D6] displayRating is null below the rating-display floor,
-                  which is a different thing from having no ratings — but both
-                  mean "we will not put a number on this yet", and the honest
-                  copy already here says exactly that. */}
-              {catalog.displayRating !== null ? (
-                <span className={styles.metaItem}>
-                  <Star size={16} className={styles.star} fill="currentColor" aria-hidden="true" />
-                  {catalog.displayRating.toFixed(1)} {catalog.ratingBucket}
-                </span>
-              ) : (
-                <span>No ratings yet</span>
-              )}
-              <span className={styles.metaItem}>
-                <Clock3 size={16} aria-hidden="true" />
-                {catalog.etaMin ? `About ${catalog.etaMin} min` : `${catalog.estimatedPrepTime} min prep`}
-              </span>
-              {storeLabel ? (
-                <span className={styles.metaItem}>
-                  <MapPin size={16} aria-hidden="true" />
-                  {storeLabel}
-                </span>
-              ) : null}
-              {Number(catalog.minOrderAmount ?? 0) > 0 ? (
-                <span>Minimum {gyMoney(Number(catalog.minOrderAmount))}</span>
-              ) : null}
-            </div>
-          </div>
-          <div className={styles.statusRow} aria-label="Store status">
-            <span className={`${styles.status} ${catalog.isCurrentlyOpen ? styles.statusOpen : styles.statusClosed}`}>
-              {catalog.isCurrentlyOpen ? 'Open' : 'Closed'}
-            </span>
-            {!catalog.acceptingOrders ? (
-              <span className={`${styles.status} ${styles.statusPaused}`}>Orders paused</span>
+            {shellQueries ? (
+              <StoreActions vendorId={catalog.id} slug={catalog.slug} name={catalog.name} onMessage={(message) => showNotice(message)} />
             ) : null}
           </div>
+          <ul className={styles.facts} aria-label="Store status">
+            <li className={`${styles.fact} ${catalog.isCurrentlyOpen ? styles.factOpen : styles.factClosed}`}>
+              {catalog.isCurrentlyOpen ? 'Open' : 'Closed'}
+            </li>
+            {!catalog.acceptingOrders ? <li className={`${styles.fact} ${styles.factPaused}`}>Orders paused</li> : null}
+            <li className={styles.fact}><Clock3 size={14} aria-hidden="true" />{minutes}</li>
+            {Number(catalog.minOrderAmount ?? 0) > 0 ? (
+              <li className={styles.fact}>Minimum {gyMoney(Number(catalog.minOrderAmount))}</li>
+            ) : null}
+          </ul>
         </section>
 
         {fromQr ? (
@@ -862,8 +873,16 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
         {catalog.description ? <p className={styles.description}>{catalog.description}</p> : null}
 
-        {catalogState === 'ready' && catalogCheckedAt ? (
-          <p className={styles.menuFreshness}>Live menu checked at {catalogCheckedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</p>
+        {/* [PERF #2] A page that arrives with the live menu draws this line in
+            the server's HTML too (the time follows once the phone's clock
+            shows it), so it never pushes the whole menu down after the page
+            appears (a layout shift of 0.2 on a 100-item store). */}
+        {catalogState === 'ready' ? (
+          <p className={styles.menuFreshness}>
+            {catalogCheckedAt
+              ? `Live menu checked at ${catalogCheckedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
+              : 'Live menu checked'}
+          </p>
         ) : null}
 
         {catalogState !== 'ready' ? (
@@ -877,10 +896,16 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
           </p>
         ) : null}
 
-        {catalog.categories.length > 0 ? (
+        {sections.length > 0 ? (
           <nav className={styles.categoryNav} aria-label="Menu sections">
-            {catalog.categories.map((category) => (
-              <a key={category.id} href={`#section-${category.id}`} className={styles.categoryLink}>
+            {sections.map((category) => (
+              <a
+                key={category.id}
+                href={`#section-${category.id}`}
+                className={styles.categoryLink}
+                aria-current={activeSection === category.id ? 'true' : undefined}
+                onClick={() => setActiveSection(category.id)}
+              >
                 {category.name}
               </a>
             ))}
@@ -894,107 +919,124 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                 This store has no orderable menu items right now. Check again later.
               </p>
             ) : null}
-            {catalog.categories.map((category) => (
+            {sections.map((category, index) => (
               <section key={category.id} id={`section-${category.id}`} className={styles.section}>
+                <SectionPhoto imageUrl={category.imageUrl} first={index === 0} />
                 <h2 className={styles.sectionTitle}>{category.name}</h2>
                 <div className={styles.rows}>
                   {(category.items as DisplayItem[]).map((item) => {
-                    const quantity = quantities.get(item.id) ?? 0;
+                    // [TAP-AUDIT] The tapped number while the item's taps are on their way; the server's otherwise.
+                    const quantity = taps ? taps.shown(item.id, quantities.get(item.id) ?? 0) : Math.max(0, early.current.reduce((n, [id, by]) => (id === item.id ? n + by : n), quantities.get(item.id) ?? 0));
                     const fulfillmentVerified = item.fulfillment === 'DELIVERY' || item.fulfillment === 'PICKUP' || item.fulfillment === 'APPOINTMENT';
                     // [W-13] A price Swift cannot read is not an orderable item. It used
                     // to become GY$0 and stay addable, so a broken row shipped as free.
                     const priced = itemPrice(item) !== null;
                     const available = item.isAvailable && orderable && item.fulfillment === 'DELIVERY' && priced;
+                    const choices = opensChoices(item);
+                    const optional = !choices && (item.optionGroups?.length ?? 0) > 0;
+                    const from = choices ? fromPrice(item) : null;
+                    const choiceSoldOut = choices && item.isAvailable && requiredChoiceSoldOut(item);
+                    // A + or − only for an item whose lines are all plain (none yet counts: its first add is on its way).
+                    const stepper = quantity > 0 && cartItems.filter((line) => line.itemId === item.id).every(isPlainLine);
+                    const tapHeld = cartHydrationPending || !!taps?.blocked(item.id);
                     return (
                       <article
                         key={item.id}
                         className={`${styles.menuRow} ${!item.isAvailable ? styles.menuRowUnavailable : ''}`}
                       >
+                        {quantity > 0 ? (
+                          <span className={styles.qtyBadge}>
+                            <span aria-hidden="true">{quantity}</span>
+                            <span className="sr-only">{quantity} in your order</span>
+                          </span>
+                        ) : null}
                         <div className={styles.itemCopy}>
-                          <div className={styles.priceRow}>
-                            <h3 className={styles.itemName}>{item.name}</h3>
-                            <span className={styles.itemPrice}>{gyMoney(itemPrice(item))}</span>
-                          </div>
+                          <h3 className={styles.itemName}>{item.name}</h3>
                           {item.description ? <p className={styles.itemDescription}>{item.description}</p> : null}
                           <div className={styles.itemMeta}>
-                            {item.isPopular ? <span className={styles.popular}>Popular</span> : null}
+                            {item.isPopular ? <span className={styles.popular}>{STORE_PICK}</span> : null}
                             {item.unit ? <span className={styles.unit}>per {item.unit}</span> : null}
-                            {!item.isAvailable ? <span className={styles.soldOut}>Sold out</span> : null}
+                            {!item.isAvailable || choiceSoldOut ? <span className={styles.soldOut}>Sold out</span> : null}
                             {item.isAvailable && !priced ? (
                               <span className={styles.soldOut}>Price unavailable</span>
                             ) : null}
+                            {optional && available ? (
+                              <button
+                                type="button"
+                                className={styles.textButton}
+                                onClick={(event) => openOptions(item, event.currentTarget)}
+                                disabled={cartHydrationPending || tapBusy(item.id)}
+                                aria-label={`Choose options for ${item.name}`}
+                              >
+                                Customise
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className={styles.itemFoot}>
+                            <span className={styles.itemPrice}>
+                              {choices && from !== null ? <span className={styles.fromLabel}>From</span> : null}
+                              <span>{gyMoney(choices ? from : itemPrice(item))}</span>
+                            </span>
+                            {!fulfillmentVerified ? (
+                              <span className={styles.unavailableAction}>Ordering unavailable</span>
+                            ) : item.fulfillment === 'PICKUP' ? (
+                              <span className={styles.unavailableAction}>Pickup checkout unavailable</span>
+                            ) : item.fulfillment === 'APPOINTMENT' ? (
+                              <span className={styles.unavailableAction}>Appointment checkout unavailable</span>
+                            ) : choices ? (
+                              <button
+                                type="button"
+                                className={styles.chooseButton}
+                                onClick={(event) => addItem(item, event.currentTarget)}
+                                disabled={cartHydrationPending || tapBusy(item.id) || !available}
+                                aria-label={quantity > 0 ? `Customize another ${item.name}; ${quantity} currently in your order` : `Choose options for ${item.name}`}
+                              >
+                                Choose
+                              </button>
+                            ) : stepper ? (
+                              <div className={styles.quantity} aria-label={`${item.name} quantity`}>
+                                <button
+                                  type="button"
+                                  className={styles.quantityButton}
+                                  onClick={() => subtractItem(item)}
+                                  disabled={tapHeld}
+                                  aria-label={`Remove one ${item.name}`}
+                                >
+                                  <Minus size={18} aria-hidden="true" />
+                                </button>
+                                <span className={styles.quantityCount} aria-live="polite">{quantity}</span>
+                                <button
+                                  type="button"
+                                  className={styles.quantityButton}
+                                  onClick={(event) => addItem(item, event.currentTarget)}
+                                  disabled={tapHeld || !available}
+                                  aria-label={`Add another ${item.name}`}
+                                >
+                                  <Plus size={18} aria-hidden="true" />
+                                </button>
+                              </div>
+                            ) : item.isAvailable ? (
+                              <button
+                                type="button"
+                                className={styles.addButton}
+                                onClick={(event) => addItem(item, event.currentTarget)}
+                                disabled={tapHeld || !available}
+                                aria-label={!fulfillmentVerified
+                                  ? `${item.name} unavailable because fulfilment could not be verified`
+                                  : storeAcceptsOrders && !catalogVerified
+                                  ? `${item.name} unavailable until menu choices are verified`
+                                  : orderable
+                                    ? quantity > 0 ? `Add another ${item.name}` : `Add ${item.name}`
+                                    : !catalog.isCurrentlyOpen
+                                      ? `${item.name} unavailable while the store is closed`
+                                      : `${item.name} unavailable while the store has paused orders`}
+                              >
+                                <AddPlusGlyph />
+                              </button>
+                            ) : null}
                           </div>
                         </div>
-
-                        {!fulfillmentVerified ? (
-                          <span className={styles.unavailableAction}>Ordering unavailable</span>
-                        ) : item.fulfillment === 'PICKUP' ? (
-                          <span className={styles.unavailableAction}>Pickup checkout unavailable</span>
-                        ) : item.fulfillment === 'APPOINTMENT' ? (
-                          <span className={styles.unavailableAction}>Appointment checkout unavailable</span>
-                        ) : (item.optionGroups?.length ?? 0) > 0 ? (
-                          <button
-                            type="button"
-                            className={styles.bookButton}
-                            onClick={(event) => addItem(item, event.currentTarget)}
-                            disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
-                            aria-label={quantity > 0 ? `Customize another ${item.name}; ${quantity} currently in your order` : `Choose options for ${item.name}`}
-                          >
-                            {quantity > 0 ? `${quantity} · Add another` : 'Choose'}
-                          </button>
-                        ) : quantity > 0 ? (
-                          <div className={styles.quantity} aria-label={`${item.name} quantity`}>
-                            <button
-                              type="button"
-                              className={styles.quantityButton}
-                              onClick={() => subtractItem(item)}
-                              disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder}
-                              aria-label={`Remove one ${item.name}`}
-                            >
-                              <Minus size={18} aria-hidden="true" />
-                            </button>
-                            <span className={styles.quantityCount} aria-live="polite">{quantity}</span>
-                            <button
-                              type="button"
-                              className={styles.quantityButton}
-                              onClick={(event) => addItem(item, event.currentTarget)}
-                              disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
-                              aria-label={`Add another ${item.name}`}
-                            >
-                              <Plus size={18} aria-hidden="true" />
-                            </button>
-                          </div>
-                        ) : item.isAvailable ? (
-                          <button
-                            type="button"
-                            className={styles.addButton}
-                            onClick={(event) => addItem(item, event.currentTarget)}
-                            disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
-                            aria-label={!fulfillmentVerified
-                              ? `${item.name} unavailable because fulfilment could not be verified`
-                              : storeAcceptsOrders && !catalogVerified
-                              ? `${item.name} unavailable until menu choices are verified`
-                              : orderable
-                                ? `Add ${item.name}`
-                                : !catalog.isCurrentlyOpen
-                                  ? `${item.name} unavailable while the store is closed`
-                                  : `${item.name} unavailable while the store has paused orders`}
-                          >
-                            <Plus size={20} aria-hidden="true" />
-                          </button>
-                        ) : (
-                          <span className={styles.soldOut}>Sold out</span>
-                        )}
-
-                        {item.imageUrl ? (
-                          <span className={styles.itemImage}>
-                            <Image src={item.imageUrl} alt={item.name} fill unoptimized className={styles.itemImageAsset} />
-                          </span>
-                        ) : (
-                          <span className={styles.itemImageFallback} aria-hidden="true">
-                            <ImageIcon size={24} />
-                          </span>
-                        )}
+                        <ItemPhoto key={item.imageUrl ?? ''} item={item} vendorType={catalog.vendorType} />
                       </article>
                     );
                   })}
@@ -1003,18 +1045,22 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
             ))}
           </div>
 
-          <aside id="checkout" className={styles.rail} aria-label="Your order and checkout">
+          <aside ref={orderPanel} id="checkout" className={styles.rail} aria-label="Your order and checkout">
             <div className={styles.railHeader}>
-              <p className={styles.railEyebrow}>
-                Your order{selectedAddress ? ` · delivery to ${selectedAddress.label}` : ''}
-              </p>
-              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
+              <p className={styles.railEyebrow}>Your order</p>
+              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}><span className="sr-only">Your order, </span>{cartVendorMismatch ? 'Your saved cart' : catalog.name}</h2>
             </div>
 
             <div className={styles.railBody}>
-              {cartItems.length === 0 ? (
+              <FulfilmentChoice name="store-fulfilment" value={orderingMode} onChange={(mode) => setError(setOrderingMode(mode) ? null : MODE_LOCKED)} />
+              {orderingMode === 'PICKUP' ? (
+                <p className={styles.railNote}>Pickup from {storeLabel || catalog.name} · No delivery fee</p>
+              ) : null}
+              {!sessionKnown ? (
+                <p className={styles.emptyRail} role="status" aria-busy="true">Checking your basket…</p>
+              ) : cartItems.length === 0 ? (
                 <p className={styles.emptyRail}>
-                  {signedIn ? 'Add a menu item to start your order.' : 'Sign in with your phone to order here on the web. No app install needed.'}
+                  {signedIn ? 'Add a menu item to start your order.' : 'Add a menu item to start your order. No account needed to fill your basket.'}
                 </p>
               ) : (
                 <>
@@ -1036,8 +1082,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                           <button
                             type="button"
                             className={styles.removeLineButton}
-                            disabled={busyItem !== null || quotingAddress || placingOrder}
-                            onClick={() => void mutateItem(line.itemId, () => removeCartLine(line.id), `${line.name} removed.`)}
+                            disabled={tapBusy(line.itemId)}
+                            onClick={() => { if (!signedIn) { try { void import('@/lib/basket').then(({ changeGuestQuantity }) => changeGuestQuantity(line.id, 0)).catch(e => setError(e.message)); } catch (e) { setError((e as Error).message); } } else changeItem(line.itemId, line.name, () => removeCartLine(line.id), `${line.name} removed.`); }}
                             aria-label={`Remove ${line.name}${line.selectedOptionNames?.length ? ` with ${line.selectedOptionNames.join(', ')}` : ''} from your order`}
                           >
                             <X size={16} aria-hidden="true" />
@@ -1046,133 +1092,19 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                       );
                     })}
                   </div>
-                  {!directCheckoutBlocked ? <div className={styles.breakdown}>
-                    <div className={styles.railLine}>
-                      <span className={styles.railLineName}>Items</span>
-                      <span className={styles.railPrice}>{gyMoney(subtotal)}</span>
-                    </div>
-                    <div className={styles.railLine}>
-                      <span className={styles.railLineName}>Delivery fee</span>
-                      <span className={styles.railPrice}>
-                        {!hasDestinationQuote || deliveryFee == null ? 'Choose an address for a quote' : gyMoney(deliveryFee)}
-                      </span>
-                    </div>
-                    {discount > 0 ? (
-                      <div className={styles.railLine}>
-                        <span className={styles.railLineName}>Discount</span>
-                        <span className={styles.railPrice}>−{gyMoney(discount)}</span>
-                      </div>
-                    ) : null}
-                    {riderTip > 0 ? (
-                      <div className={styles.railLine}>
-                        <span className={styles.railLineName}>Rider tip</span>
-                        <span className={styles.railPrice}>{gyMoney(riderTip)}</span>
-                      </div>
-                    ) : null}
+                  <div className={styles.breakdown}>
                     <div className={styles.totalLine}>
-                      <span>Total</span>
-                      <span className={styles.totalPrice}>{orderAmountLabel}</span>
+                      <span>{signedIn ? 'Items' : 'Items (estimate)'}</span>
+                      <span className={styles.totalPrice}>{basketLabel}</span>
                     </div>
-                  </div> : null}
+                  </div>
+                  {cartVendorMismatch ? (
+                    <p className={styles.reviewNotice} role="note">
+                      Your saved cart has items from another store. Review it at checkout: finish or clear that order before ordering here.
+                    </p>
+                  ) : null}
                 </>
               )}
-
-              {itemCount > 0 && directCheckoutBlocked ? (
-                <div className={styles.reviewNotice} role={catalogState === 'unavailable' ? 'alert' : 'note'}>
-                  <p>
-                    {!catalogVerified
-                      ? catalogState === 'loading'
-                        ? 'Swift is still checking this menu’s required choices. Checkout stays locked until that server catalog is ready.'
-                        : 'Swift could not verify this menu’s required choices. Checkout stays locked so no incomplete order is placed.'
-                      : cartVendorMismatch
-                        ? 'This saved cart is tied to another store quote. Swift cannot safely re-price its remaining items as this store without starting a fresh cart.'
-                        : cartHasUnverifiedLines
-                          ? 'Remove each item marked Needs review. Swift will not show or submit a total that includes an unavailable or unverified line.'
-                          : cartOutOfRange
-                            ? `This address is ${deliveryDistance.toFixed(1)} km from the store, outside its ${deliveryRadius.toFixed(1)} km delivery radius. Choose another saved address before ordering.`
-                          : cashPromoBlocked
-                            ? 'This saved cart has a delivery discount, but the server does not allow discounted cash delivery. Swift cannot remove only the promotion on the web yet; clear this cart to start again without it.'
-                          : cartHasUnknownFulfillment
-                            ? 'Swift could not verify how one of these items is fulfilled. Checkout stays locked until the live catalog provides that server truth.'
-                          : cartHasMixedFulfillment
-                            ? 'This cart mixes delivery and pickup items. The web API cannot provide one truthful pre-order quote for both modes.'
-                            : cartHasPickup
-                              ? 'This is a pickup order. Swift supports pickup server-side, but this web API does not provide its final pre-order pickup quote yet.'
-                              : cartHasAppointment
-                                ? 'Appointment checkout is not available on the web yet. Remove that line to continue with a delivery order.'
-                                : 'Swift cannot verify this saved cart for direct checkout.'}
-                  </p>
-                  {catalogVerified && (cartVendorMismatch || cashPromoBlocked) ? (
-                    confirmingClear ? (
-                      <div className={styles.clearActions}>
-                        <button ref={clearConfirmButton} type="button" className={styles.primaryButton} disabled={busyItem !== null} onClick={() => void clearSavedCart()}>
-                          Clear saved cart
-                        </button>
-                        <button type="button" className={styles.secondaryButton} disabled={busyItem !== null} onClick={closeClearConfirmation}>
-                          Keep saved items
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        className={styles.secondaryButton}
-                        onClick={(event) => {
-                          clearReturnFocus.current = event.currentTarget;
-                          setConfirmingClear(true);
-                          window.requestAnimationFrame(() => clearConfirmButton.current?.focus());
-                        }}
-                      >
-                        {cashPromoBlocked ? 'Start again without this promotion' : 'Start a fresh cart from this store'}
-                      </button>
-                    )
-                  ) : null}
-                </div>
-              ) : null}
-
-              {signedIn && cartItems.length > 0 && needsDeliveryAddress ? (
-                <div className={styles.field}>
-                  <label htmlFor="delivery-address" className={styles.microLabel}>Delivery address</label>
-                  {addresses.length > 0 ? (
-                    <select
-                      id="delivery-address"
-                      className={styles.select}
-                      value={addressId}
-                      disabled={quotingAddress || busyItem !== null || placingOrder}
-                      onChange={(event) => void changeAddress(event.target.value)}
-                    >
-                      {addresses.map((address) => (
-                        <option key={address.id} value={address.id}>
-                          {address.label} — {address.addressLine1}, {address.city}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <Link href="/cart" className={styles.secondaryButton}>Add a delivery address</Link>
-                  )}
-                </div>
-              ) : null}
-
-              <div className={styles.cashTruth}>
-                <Banknote size={22} aria-hidden="true" />
-                <div>
-                  <p className={styles.cashTitle}>
-                    {pickupContext ? 'Cash at pickup' : appointmentContext ? 'Pay the business directly' : 'Cash at the door'}
-                  </p>
-                  <p className={styles.cashCopy}>
-                    {pickupContext
-                      ? 'Pay the business when you collect. Swift does not hold your money.'
-                      : appointmentContext
-                        ? 'Payment goes directly to the business for your appointment. Swift does not hold your money.'
-                        : cartHasMixedFulfillment || cartHasUnknownFulfillment
-                          ? 'Swift does not hold order money. A single cash total is unavailable until the fulfilment mix is resolved.'
-                        : cartItems.length > 0 && !directCheckoutBlocked && hasDestinationQuote
-                      ? `Pay the rider ${gyMoney(total)} when your order arrives. Swift does not hold your money.`
-                      : hasDestinationQuote
-                        ? 'Pay the rider in cash when your order arrives. Swift does not hold your money.'
-                        : 'Choose a delivery address for a real cash quote. Swift does not hold your money.'}
-                  </p>
-                </div>
-              </div>
 
               {error ? (
                 <div className={styles.alert} role="alert">
@@ -1187,135 +1119,78 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
             </div>
 
             <div className={styles.railFooter}>
-              {!signedIn ? (
+              {!signedIn && sessionKnown ? (
                 <>
-                  <Link
-                    href={`/login?next=${encodeURIComponent(returnPath)}`}
-                    className={styles.primaryButton}
-                  >
-                    Sign in to order
-                  </Link>
+                  <button type="button" disabled={!itemCount} onClick={goToCheckout} className={styles.primaryButton}>Place order</button>
+                  <p className={styles.guestCopy}>Sign in with your phone at Place order. We then price your basket, delivery or pickup, and the total.</p>
                   <p className={styles.guestCopy}>
                     New to Swift?{' '}
-                    <Link href={`/signup?next=${encodeURIComponent(returnPath)}`}>Create your web account</Link>.
+                    <Link href={`/signup?next=${encodeURIComponent('/checkout')}`}>Create your web account</Link>.
                   </p>
                 </>
-              ) : cartItems.length === 0 ? (
-                <button type="button" className={styles.primaryButton} disabled>Add an item to continue</button>
-              ) : directCheckoutBlocked ? (
-                <span className={styles.blockedCheckout}>Resolve the saved order above to continue</span>
               ) : (
                 <button
                   type="button"
                   className={styles.primaryButton}
-                  onClick={() => void placeOrder()}
-                  disabled={placingOrder || busyItem !== null || quotingAddress || (needsDeliveryAddress && !addressId) || !orderable || !meetsMinimum}
+                  onClick={goToCheckout}
+                  disabled={!itemCount || tapsPending || cartHydrationPending}
                 >
-                  {placingOrder
-                    ? 'Placing order…'
-                    : !orderable
-                      ? 'Store is not taking orders'
-                      : !meetsMinimum
-                        ? `Add ${gyMoney(minimumShortfall)} to reach the minimum`
-                        : 'Place cash order'}
+                  {itemCount ? `Checkout · ${basketLabel}` : 'Add an item to continue'}
                 </button>
               )}
               <p className={styles.railNote}>
-                Menu and checkout prices come from Swift’s server. After you order, any server-set hold and live tracking follow.
+                We confirm delivery or pickup, the fee and the total at checkout.
               </p>
             </div>
           </aside>
         </div>
+
+        {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule, from the server render. */}
+        {store.seller ? <SellerInfo seller={store.seller} /> : null}
       </div>
 
-      {itemCount > 0 ? (
-        <a href="#checkout" className={styles.mobileDock}>
-          <span>View your order · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
-          <span className={styles.mobileTotal}>{directCheckoutBlocked ? 'Review' : orderAmountLabel}</span>
-        </a>
+      {itemCount > 0 && !modalItem && !checkoutVisible ? (
+        // [W4] One tap to the one checkout — never a jump to a panel the
+        // phone's bars could cover. [#1590] Hidden while the order panel (with
+        // its own Checkout button) is on screen; measured for the page's bottom space.
+        <Link
+          ref={orderDock}
+          href="/checkout"
+          className={styles.mobileDock}
+          onClick={(event) => { if (cartBusyNow()) { event.preventDefault(); checkoutAfterTaps.current = true; } }}
+        >
+          <span>Checkout · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
+          <span className={styles.mobileTotal}>{basketLabel}</span>
+        </Link>
       ) : null}
 
-      {modalItem ? (
-        <div
-          className={styles.scrim}
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target) closeOptions();
-          }}
-        >
-          <section
-            ref={modal}
-            className={styles.modal}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="menu-options-title"
-            aria-describedby={modalError ? 'menu-options-error' : undefined}
-          >
-            <div className={styles.modalHeader}>
-              <div>
-                <h2 id="menu-options-title" className={styles.modalTitle}>{modalItem.name}</h2>
-                {modalItem.description ? <p className={styles.modalDescription}>{modalItem.description}</p> : null}
-              </div>
-              <button ref={modalCloseButton} type="button" className={styles.closeButton} onClick={closeOptions} aria-label="Close item options">
-                <X size={20} aria-hidden="true" />
-              </button>
-            </div>
+      {modalItem && itemSheetModule ? (
+        <itemSheetModule.ItemSheet
+          item={modalItem}
+          // [P35 · board 4b] The server's verdict: a person approved the store's documents and they are still
+          // current (public storefront isVerified, seller-verified.ts). An older API sends nothing: no pill.
+          seller={{ name: store.name, city: store.city, verified: store.isVerified === true }}
+          vendorType={catalog.vendorType}
+          selectedOptions={selectedOptions}
+          onChoose={chooseOption}
+          quantity={itemQuantity}
+          onQuantity={setItemQuantity}
+          error={modalError}
+          busy={tapBusy(modalItem.id)}
+          cartLoading={cartHydrationPending}
+          unitPrice={modalUnitPrice}
+          onConfirm={confirmOptions}
+          onClose={closeOptions}
+        />
+      ) : null}
 
-            {modalError ? <p id="menu-options-error" className={styles.modalAlert} role="alert">{modalError}</p> : null}
-
-            <div className={styles.options}>
-              {(modalItem.optionGroups ?? []).map((group) => {
-                const selectedCount = (selectedOptions[group.id] ?? []).length;
-                const multiLimitReached = group.maxSelect > 1 && selectedCount >= group.maxSelect;
-                return (
-                  <fieldset key={group.id} className={styles.optionGroup}>
-                    <legend className={styles.optionHeading}>
-                      <span className={styles.optionTitle}>{group.name}</span>
-                      <span className={styles.optionMeta}>
-                        {group.isRequired ? <span className={styles.required}>Required</span> : null}
-                        <span className={styles.optionGuidance}>{optionGuidance(group)}</span>
-                      </span>
-                    </legend>
-                    {group.options.filter((option) => option.isAvailable).map((option) => {
-                      const checked = (selectedOptions[group.id] ?? []).includes(option.id);
-                      const single = group.maxSelect <= 1;
-                      const clearableSingle = single && !group.isRequired && group.minSelect === 0;
-                      const blockedByLimit = multiLimitReached && !checked;
-                      return (
-                        <label key={option.id} className={`${styles.optionLabel} ${blockedByLimit ? styles.optionLabelDisabled : ''}`}>
-                          <span className={styles.optionChoice}>
-                            <input
-                              type={single && !clearableSingle ? 'radio' : 'checkbox'}
-                              name={group.id}
-                              checked={checked}
-                              disabled={blockedByLimit}
-                              onChange={() => chooseOption(group, option.id)}
-                            />
-                            {option.name}
-                          </span>
-                          {Number(option.additionalPrice) > 0 ? (
-                            <span className={styles.optionPrice}>+{gyMoney(Number(option.additionalPrice))}</span>
-                          ) : null}
-                        </label>
-                      );
-                    })}
-                  </fieldset>
-                );
-              })}
-            </div>
-
-            <div className={styles.modalFooter}>
-              <span className={styles.modalPrice}>{gyMoney(optionPrice(modalItem, selectedOptions))}</span>
-              <button type="button" className={styles.primaryButton} disabled={busyItem !== null} onClick={confirmOptions}>
-                Add to order
-              </button>
-            </div>
-          </section>
+      {notice ? (
+        <div className={styles.notice} role="status">
+          <span>{notice.message}</span>
+          {notice.added ? <Link href="/checkout" className={styles.noticeLink}>Checkout</Link> : null}
         </div>
       ) : null}
-
-      {notice ? <p className={styles.notice} role="status">{notice}</p> : null}
       {floatingError ? <p className={styles.errorNotice} role="alert">{floatingError}</p> : null}
-    </main>
+    </div>
   );
 }

@@ -9,6 +9,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { AuthService } from '../modules/auth/auth.service';
+import { testPhone } from './helpers/fixture-ids';
 
 type RedisBackedAdapter = {
   pubClient: Redis;
@@ -112,7 +113,7 @@ describe('production Socket.IO Redis adapter', () => {
   it('is subscription-ready before serving and evicts a socket on a peer node', async () => {
     const user = await first.prisma.user.create({
       data: {
-        phone: `+59283${nanoid(7)}`,
+        phone: testPhone(),
         firstName: 'Redis',
         lastName: 'Socket',
         roles: ['CUSTOMER'],

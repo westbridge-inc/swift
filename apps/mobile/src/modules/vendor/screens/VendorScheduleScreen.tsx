@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
 import { useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { color, space } from '@swift/ui';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Feather } from '@expo/vector-icons';
 import {
   Card,
@@ -25,27 +26,55 @@ import {
   useVendorBookingExceptions,
   useCreateBookingException,
   useDeleteBookingException,
+  useVendorMenu,
   type VendorBooking,
   type VendorBookingException,
 } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
+import { errorMessage } from '../../../lib/apiError';
+import { touchTarget } from '../../../kit/touch-target';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
+import { MoveBookingSheet, bookingMovable } from '../MoveBookingSheet';
 
-function AppointmentCard({ b }: { b: VendorBooking }) {
+/** [UI-SWEEP, REVIEW-F 07:08Z] A booking's words. This is BookingStatus
+ *  (RESERVED, CONFIRMED, COMPLETED, CANCELLED), its own vocabulary, not an
+ *  order's. GET /vendor/bookings drops only CANCELLED, so a COMPLETED
+ *  appointment is served, and it used to read 'Reserved'. A status this build
+ *  was not taught (newer server, older OTA) says so, never a guess. */
+export function bookingStatusPill(status: string): { label: string; tone: 'success' | 'neutral' } {
+  switch (status) {
+    case 'RESERVED': return { label: 'Reserved', tone: 'neutral' };
+    case 'CONFIRMED': return { label: 'Confirmed', tone: 'success' };
+    case 'COMPLETED': return { label: 'Completed', tone: 'neutral' };
+    case 'CANCELLED': return { label: 'Cancelled', tone: 'neutral' };
+    default: return { label: 'Status unavailable', tone: 'neutral' };
+  }
+}
+
+function AppointmentCard({ b, onMove }: { b: VendorBooking; onMove?: () => void }) {
+  const pill = bookingStatusPill(b.status);
   return (
-    <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
-      <View style={{ alignItems: 'center', minWidth: 60 }}>
-        <T variant="body" weight="bold">{formatAppointmentClock(b.slotStart)}</T>
-        <T variant="caption" tone="muted">{formatAppointmentClock(b.slotEnd)}</T>
+    <Card style={{ marginBottom: space.sm }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+        <View style={{ alignItems: 'center', minWidth: 60 }}>
+          <T variant="body" weight="bold">{formatAppointmentClock(b.slotStart)}</T>
+          <T variant="caption" tone="muted">{formatAppointmentClock(b.slotEnd)}</T>
+        </View>
+        <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: color.border.subtle }} />
+        <View style={{ flex: 1 }}>
+          <T variant="body" weight="semibold" numberOfLines={1}>{b.serviceName}</T>
+          <T variant="caption" tone="muted" numberOfLines={1}>
+            {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
+          </T>
+        </View>
+        <TonePill tone={pill.tone} label={pill.label} />
       </View>
-      <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: color.border.subtle }} />
-      <View style={{ flex: 1 }}>
-        <T variant="body" weight="semibold" numberOfLines={1}>{b.serviceName}</T>
-        <T variant="caption" tone="muted" numberOfLines={1}>
-          {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
-        </T>
-      </View>
-      <TonePill tone={b.status === 'CONFIRMED' ? 'success' : 'neutral'} label={b.status === 'CONFIRMED' ? 'Confirmed' : 'Reserved'} />
+      {/* [BOOK-S5a · owner B2] Move it to another free time of the same service. */}
+      {onMove ? (
+        <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: space.sm }}>
+          <LinkText label="Move" onPress={onMove} />
+        </View>
+      ) : null}
     </Card>
   );
 }
@@ -58,6 +87,11 @@ function AppointmentCard({ b }: { b: VendorBooking }) {
 export function VendorScheduleScreen({ navigation }: any) {
   const q = useVendorBookings();
   const exceptionsQ = useVendorBookingExceptions();
+  // [UI-SWEEP, REVIEW-F 07:08Z] Names a one-listing block. A label only: when
+  // the menu is not loaded the block says 'One listing', never the whole store.
+  const menuQ = useVendorMenu();
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => Promise.all([q.refetch(), exceptionsQ.refetch()]));
   const createBlock = useCreateBookingException();
   const deleteBlock = useDeleteBookingException();
   const [dayKey, setDayKey] = useState(() => appointmentDayKey(new Date()));
@@ -66,6 +100,7 @@ export function VendorScheduleScreen({ navigation }: any) {
   const [blockStart, setBlockStart] = useState('13:00');
   const [blockEnd, setBlockEnd] = useState('17:00');
   const [blockReason, setBlockReason] = useState('');
+  const [moving, setMoving] = useState<VendorBooking | null>(null);
 
   const rows: VendorBooking[] = q.data ?? [];
   const exceptions: VendorBookingException[] = exceptionsQ.data ?? [];
@@ -83,6 +118,9 @@ export function VendorScheduleScreen({ navigation }: any) {
   const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
   const blockValid = fullDay || (HHMM.test(blockStart) && HHMM.test(blockEnd) && blockStart < blockEnd);
 
+  // [UI-SWEEP, web #2013 twin] The popup closes only when the block is saved.
+  // It used to close on ANY answer, so a refused block vanished without a
+  // word and the provider believed the afternoon was blocked.
   const submitBlock = () => {
     createBlock.mutate(
       {
@@ -90,13 +128,33 @@ export function VendorScheduleScreen({ navigation }: any) {
         ...(fullDay ? {} : { start: blockStart, end: blockEnd }),
         ...(blockReason.trim() ? { reason: blockReason.trim() } : {}),
       },
-      { onSettled: () => setBlocking(false) },
+      { onSuccess: () => setBlocking(false) },
     );
+  };
+  const openBlocking = () => {
+    createBlock.reset();
+    setBlocking(true);
+  };
+  const blockWhen = (e: VendorBookingException) => (e.start ? `${e.start}–${e.end}` : 'all day');
+  // [UI-SWEEP, REVIEW-F 07:08Z] A block with an itemId closes ONE listing; it
+  // used to read 'Blocked · all day', as if the whole store were closed.
+  const listingNames = new Map<string, string>();
+  for (const c of (menuQ.data ?? []) as Array<{ items?: Array<{ id: string; name: string }> }>) {
+    for (const it of c.items ?? []) listingNames.set(it.id, it.name);
+  }
+  const blockListing = (e: VendorBookingException) => (e.itemId ? listingNames.get(e.itemId) ?? null : null);
+  const blockTitle = (e: VendorBookingException) => {
+    if (!e.itemId) return `Blocked · ${blockWhen(e)}`;
+    return `${blockListing(e) ?? 'One listing'} blocked · ${blockWhen(e)}`;
+  };
+  const blockSpoken = (e: VendorBookingException) => {
+    if (!e.itemId) return blockWhen(e);
+    return `${blockListing(e) ?? 'one listing'}, ${blockWhen(e)}`;
   };
 
   return (
     <Screen>
-      <SubHeader title="Schedule" navigation={navigation} hideBack action={{ label: 'Block time', onPress: () => setBlocking(true) }} />
+      <SubHeader title="Schedule" navigation={navigation} hideBack action={{ label: 'Block time', onPress: openBlocking }} />
       <View style={{ paddingHorizontal: GUTTER, marginBottom: space.md }}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm }}>
           {strip.map((d) => (
@@ -108,8 +166,22 @@ export function VendorScheduleScreen({ navigation }: any) {
         <LoadingBlock />
       ) : q.isError ? (
         <ErrorState message="We couldn't load your schedule. Check your connection and try again." onRetry={() => q.refetch()} />
+      ) : exceptionsQ.isError ? (
+        // [UI-SWEEP, web #2013 twin] Failure first: a failed blocked-time read
+        // never reads as "No bookings this day" (the day may be blocked).
+        <ErrorState message="We couldn't load your blocked time. Check your connection and try again." onRetry={() => exceptionsQ.refetch()} />
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
+        >
+          {deleteBlock.isError ? (
+            // [UI-SWEEP, web #2013 twin] A refused unblock is said, never silent.
+            <T variant="caption" tone="error" style={{ marginBottom: space.sm }}>
+              {errorMessage(deleteBlock.error, 'Couldn’t remove that block. Try again.')}
+            </T>
+          ) : null}
           {dayBlocks.map((e) => (
             <Card
               key={e.id}
@@ -121,7 +193,7 @@ export function VendorScheduleScreen({ navigation }: any) {
               <Feather name="slash" size={16} color={color.text.muted} />
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="semibold">
-                  {e.start ? `Blocked · ${e.start}–${e.end}` : 'Blocked · all day'}
+                  {blockTitle(e)}
                 </T>
                 {e.reason ? (
                   <T variant="caption" tone="muted" numberOfLines={1}>
@@ -129,7 +201,15 @@ export function VendorScheduleScreen({ navigation }: any) {
                   </T>
                 ) : null}
               </View>
-              <Pressable onPress={() => deleteBlock.mutate(e.id)} hitSlop={10} accessibilityLabel="Remove block">
+              <Pressable
+                onPress={() => deleteBlock.mutate(e.id)}
+                disabled={deleteBlock.isPending}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel={`Remove block, ${blockSpoken(e)}`}
+                accessibilityState={{ disabled: deleteBlock.isPending }}
+                style={touchTarget(18)}
+              >
                 {({ pressed }) => <Feather name="x" size={18} color={color.text.muted} style={{ opacity: pressed ? 0.5 : 1 }} />}
               </Pressable>
             </Card>
@@ -141,10 +221,13 @@ export function VendorScheduleScreen({ navigation }: any) {
               body="Your open hours are visible to customers — reservations land here."
             />
           ) : (
-            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} />)
+            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} />)
           )}
         </ScrollView>
       )}
+
+      {/* Mounted only while a booking is being moved (its free-times read runs only then). */}
+      {moving ? <MoveBookingSheet booking={moving} onClose={() => setMoving(null)} /> : null}
 
       {/* Block time — two taps for a funeral afternoon. */}
       <PopupCard visible={blocking} onClose={() => setBlocking(false)}>
@@ -171,6 +254,12 @@ export function VendorScheduleScreen({ navigation }: any) {
         <View style={{ alignSelf: 'stretch', marginBottom: space.lg }}>
           <LabeledInput label="Note (only you see this)" value={blockReason} onChangeText={setBlockReason} placeholder="Optional" />
         </View>
+        {createBlock.isError ? (
+          // [UI-SWEEP, web #2013 twin] The refusal stays on screen with the form.
+          <T variant="caption" tone="error" center style={{ alignSelf: 'stretch', marginBottom: space.md }}>
+            {errorMessage(createBlock.error, 'Couldn’t block that time. Try again.')}
+          </T>
+        ) : null}
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
           label={blockValid ? 'Block time' : 'Times must be HH:MM, start before end'}

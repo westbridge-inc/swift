@@ -1,4 +1,5 @@
 import { Prisma, type MoverRole, type OrderStatus, type UserRole, type UserStatus } from '@prisma/client';
+import { revokeUserDevices } from '../lib/owner-rls';
 import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -20,6 +21,7 @@ import {
 } from './rides/passenger-custody';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
 import { disconnectUserSockets } from '../utils/socket-revocation';
+import { consoleRoleOf } from './auth/console-role';
 
 /**
  * Serialize every server-side role-authority transition on the User row.
@@ -603,7 +605,9 @@ export type UserStatusRestriction = 'SUSPENDED' | 'BANNED';
 
 /** The pure rule. `transitionUserStatusAuthority` applies it inside the
  *  transaction with the actor's role read from the database, never from the
- *  request, so a caller cannot feed it a stale or forged role. Acting on your
+ *  request, so a caller cannot feed it a stale or forged role. [ADMIN-ROLE]
+ *  That role is the admin role the actor HOLDS (users.roles), never the phone
+ *  app's active mode; an actor holding none acts at no rank. Acting on your
  *  own account is refused by the same comparison: your own highest role is
  *  never below the role you act under. */
 export function assertAccountActionAuthority(
@@ -629,6 +633,20 @@ export interface UserStatusTransitionAuditEvidence {
   ipAddress?: string;
   userAgent?: string;
 }
+
+/**
+ * [Row 90] What a status transition hands back to its caller — and so what the
+ * admin suspend/unsuspend/ban/unban routes answer with. Never the whole User
+ * row: that carries the password hash, OTP and recovery material, phone, email
+ * and other personal data an operator's browser has no reason to receive.
+ */
+export const ACCOUNT_STATUS_RESULT_SELECT = {
+  id: true,
+  status: true,
+  roles: true,
+  activeRole: true,
+  updatedAt: true,
+} as const;
 
 export interface UserStatusTransitionOptions {
   /** For an ACTIVE target: the restriction being lifted. SUSPENDED (an
@@ -656,10 +674,10 @@ export async function transitionUserStatusAuthority(
     if (auditEvidence) {
       const actor = await tx.user.findUnique({
         where: { id: auditEvidence.actorUserId },
-        select: { activeRole: true },
+        select: { roles: true },
       });
       if (!actor) throw new ForbiddenError('Acting account not found');
-      assertAccountActionAuthority({ role: actor.activeRole }, { roles: authority.roles }, { targetStatus, lifts });
+      assertAccountActionAuthority({ role: consoleRoleOf(actor.roles) ?? '' }, { roles: authority.roles }, { targetStatus, lifts });
     }
 
     if (targetStatus === 'SUSPENDED') {
@@ -734,16 +752,15 @@ export async function transitionUserStatusAuthority(
     const updated = await tx.user.update({
       where: { id: userId },
       data: { status: targetStatus },
+      select: ACCOUNT_STATUS_RESULT_SELECT,
     });
     if (targetStatus === 'BANNED') {
       await tx.session.deleteMany({ where: { userId } });
       // A ban is a global security revocation, not merely an API-session
       // deletion. Silence every registered device in the same commit so an
       // already-issued push token cannot keep receiving account/order data.
-      await tx.deviceToken.updateMany({
-        where: { userId, isActive: true },
-        data: { isActive: false },
-      });
+      // [item 20] An admin's ban acts for someone else: the narrow action, never a write the owner wall would empty.
+      await revokeUserDevices(tx, userId);
     }
 
     if (auditEvidence) {

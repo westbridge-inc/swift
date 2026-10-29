@@ -1,7 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { getChannels } from '../providers/notifications/channels';
+import { ResendEmailProvider } from '../providers/notifications/resend-email';
 
 /**
  * NO SILENT PROVIDERS — the email half.
@@ -157,6 +158,22 @@ describe('the production branch now has a real email provider, chosen by config'
       expect(() => getChannels()).toThrow(/EMAIL_PROVIDER=smtp needs .*SMTP_HOST/);
     } finally {
       restoreEnv('EMAIL_PROVIDER', prev.p); restoreEnv('SMTP_HOST', prev.h);
+    }
+  });
+  // [EMAIL-HTTPS 27 Oct] Email over HTTPS: the same loud construction error, and once set up it is Resend's adapter.
+  it('EMAIL_PROVIDER=resend without its key fails at construction, naming what is missing; with it, the email is the Resend adapter', async () => {
+    const prev = { p: process.env['EMAIL_PROVIDER'], k: process.env['RESEND_API_KEY'], f: process.env['EMAIL_FROM'] };
+    process.env['EMAIL_PROVIDER'] = 'resend'; delete process.env['RESEND_API_KEY']; process.env['EMAIL_FROM'] = 'Swift <no-reply@swiftgy.com>';
+    try {
+      expect(() => getChannels()).toThrow(/EMAIL_PROVIDER=resend needs RESEND_API_KEY/);
+      process.env['RESEND_API_KEY'] = 're_synthetic_key_for_tests_only';
+      const sent = vi.spyOn(ResendEmailProvider.prototype, 'sendEmail').mockResolvedValue({ ref: 'resend-id-1' });
+      // The review seal looks the address up first; an unknown address is a real person's, so it goes.
+      await expect(getChannels().email.sendEmail('nobody-known@example.gy', 's', 'b')).resolves.toEqual({ ref: 'resend-id-1' });
+      expect(sent).toHaveBeenCalledTimes(1);
+      sent.mockRestore();
+    } finally {
+      restoreEnv('EMAIL_PROVIDER', prev.p); restoreEnv('RESEND_API_KEY', prev.k); restoreEnv('EMAIL_FROM', prev.f);
     }
   });
 });

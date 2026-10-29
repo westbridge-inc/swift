@@ -45,7 +45,7 @@ const add = (token: string, phoneE164: string, extra: Record<string, unknown> = 
 /** Pull the code out of the most recent confirmation SMS to a number. */
 function codeFor(phone: string): string {
   const sms = [...devChannelLog].reverse().find((e) => e.channel === 'sms' && e.to === phone);
-  const m = sms?.body.match(/code (\d{6})/);
+  const m = sms?.body.match(/[Cc]ode (\d{6})/);
   if (!m) throw new Error(`no confirmation SMS for ${phone}`);
   return m[1]!;
 }
@@ -89,7 +89,14 @@ describe('emergency contacts', () => {
     expect(sms).toBeTruthy();
     expect(sms!.body).toContain('emergency contact');
     expect(sms!.body).toContain('Alea'); // the owner's first name, so the contact knows who added them
-    expect(sms!.body).toMatch(/code \d{6}/);
+    expect(sms!.body).toMatch(/[Cc]ode \d{6}/);
+    // [R20 · research B10] the FIRST text to a number Swift did not get from its
+    // owner names the controller, the one purpose, and how to have it removed —
+    // word for word the research's text.
+    const code = codeFor(phone);
+    expect(sms!.body).toBe(
+      `Alea added you as their emergency contact on Swift (Westbridge Inc.). We use your number only for their safety alerts. Code ${code}. Not expected? Ignore this; to remove your number: privacy@swiftgy.com.`,
+    );
   });
 
   it('the relayed code verifies the number; a wrong code is rejected', async () => {

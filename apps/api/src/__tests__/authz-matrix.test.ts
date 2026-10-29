@@ -23,8 +23,11 @@ import { adsRoutes } from '../modules/ads/ads.routes';
 import { placesRoutes } from '../modules/places/places.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { servicesRoutes } from '../modules/services/services.routes';
+import { serviceCatalogRoutes } from '../modules/services/service-catalog.routes';
+import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
+import { callsRoutes } from '../modules/calls/calls.routes';
 import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,7 @@ async function buildTestApp() {
   // future missing gate this control cannot catch.
   await server.register(searchRoutes, { prefix: '/api/v1' });
   await server.register(chatRoutes, { prefix: '/api/v1/chat' });
+  await server.register(moderationRoutes, { prefix: '/api/v1' });
   await server.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await server.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await server.register(safetyRoutes, { prefix: '/api/v1/safety' });
@@ -76,15 +80,23 @@ async function buildTestApp() {
   await server.register(placesRoutes, { prefix: '/api/v1/places' });
   await server.register(courierRoutes, { prefix: '/api/v1/courier' });
   await server.register(servicesRoutes, { prefix: '/api/v1/services' });
+  await server.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
+  await server.register(callsRoutes, { prefix: '/api/v1/calls' });
   await server.ready();
   return server;
 }
 
+// [AUD-L7-008] This suite runs the app in development mode; the worker must
+// get its own mode back afterwards. Registered first, so it runs LAST (after
+// the teardown below unstubs).
+const NODE_ENV_AT_LOAD = process.env['NODE_ENV'];
+afterAll(() => { expect(process.env['NODE_ENV']).toBe(NODE_ENV_AT_LOAD); });
+
 beforeAll(async () => {
   vi.stubEnv('ADS_ENABLED', '1');
-  process.env['NODE_ENV'] = 'development';
+  vi.stubEnv('NODE_ENV', 'development'); // restored by vi.unstubAllEnvs() in afterAll
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   app = await buildTestApp();
@@ -132,6 +144,14 @@ interface PrefixSpec {
 }
 
 const MATRIX: PrefixSpec[] = [
+  // [T1 · row 300] Mounted before but never swept. Any signed-in person may act
+  // as a customer (a vendor owner orders food) and any may be an advertiser, so
+  // both are multi-role: the unauthenticated sweep applies to every route.
+  { prefix: '/api/v1/customer/', wrongRoles: [] },
+  { prefix: '/api/v1/ads/', wrongRoles: [] },
+  // moderationRoutes (app.ts, prefix /api/v1): reporting and blocking, any signed-in person.
+  { prefix: '/api/v1/reports', wrongRoles: [] },
+  { prefix: '/api/v1/blocks', wrongRoles: [] },
   { prefix: '/api/v1/vendor/', wrongRoles: ['customer', 'mover'] },
   { prefix: '/api/v1/rider/', wrongRoles: ['customer', 'vendor'] },
   { prefix: '/api/v1/driver/', wrongRoles: ['customer', 'vendor'] },
@@ -143,6 +163,8 @@ const MATRIX: PrefixSpec[] = [
   // unauthenticated sweep still applies to every route.
   { prefix: '/api/v1/search/', wrongRoles: [] },
   { prefix: '/api/v1/chat/', wrongRoles: [] },
+  // [O-1] The call bridge: any party to an order (customer, mover, store) may ask Swift to connect a call.
+  { prefix: '/api/v1/calls/', wrongRoles: [] },
   { prefix: '/api/v1/verification/', wrongRoles: [] },
   { prefix: '/api/v1/rides/', wrongRoles: [] },
   // SOS is raiseable by any authenticated actor (passenger/driver/rider), so
@@ -188,7 +210,49 @@ const PUBLIC_BY_DESIGN = new Set([
   // account — the 128-bit CSPRNG token IS the credential; it grants only the
   // narrow public payload and dies at trip end + grace (or revocation).
   'GET /api/v1/safety/public/trip/:token',
+  // [WEB-TAXI] Trip Guardian's texted answer link: a passenger no push reached
+  // answers the waiting check-in without signing in — the one-time secret of
+  // ONE ask IS the credential; it answers only that check, misses are one 404.
+  'POST /api/v1/safety/public/checkin',
+  // [T1] Guest browse (customer.routes.ts PUBLIC_BROWSE, the same four URLs):
+  // optional auth by design, the public catalogue a guest may look around.
+  'GET /api/v1/customer/home',
+  'GET /api/v1/customer/vendors',
+  'GET /api/v1/customer/vendors/:id',
+  'GET /api/v1/customer/vendors/:id/reviews',
+  // [T1] The global service taxonomy (service-catalog.routes.ts): identical for
+  // every caller, no provider or account data.
+  'GET /api/v1/services/catalog',
 ]);
+
+/** [T1 · row 300] Ops-only routes INSIDE multi-role prefixes. Their prefix sweep
+ *  above runs no wrong-role check (any signed-in person may raise an SOS), so
+ *  each of these is gated only in its handler. Every one must refuse a
+ *  customer, a store owner and a mover before any lookup or body parsing. */
+const OPS_ONLY_IN_MULTI_ROLE = [
+  'GET /api/v1/safety/ops-alerts',
+  'POST /api/v1/safety/ops-alerts/:id/ack',
+  'POST /api/v1/safety/ops-alerts/drill',
+  'GET /api/v1/safety/sos',
+  'POST /api/v1/safety/sos/:id/ack',
+  'POST /api/v1/safety/sos/:id/resolve',
+  'POST /api/v1/safety/incidents/ops',
+  'POST /api/v1/safety/incidents/:id/merge',
+  'GET /api/v1/safety/incidents',
+  'POST /api/v1/safety/incidents/:id/ack',
+  'POST /api/v1/safety/incidents/:id/investigate',
+  'POST /api/v1/safety/incidents/:id/close',
+  'POST /api/v1/safety/incidents/:id/escalate-police',
+  'POST /api/v1/safety/incidents/:id/lift-interim',
+  'POST /api/v1/safety/incidents/:id/shadow-restrict',
+  'POST /api/v1/safety/incidents/:id/decide',
+  'GET /api/v1/safety/evidence',
+  'POST /api/v1/safety/evidence/:id/view',
+  'POST /api/v1/safety/evidence/:id/seal',
+  'POST /api/v1/safety/evidence/:id/legal-hold',
+  'POST /api/v1/safety/evidence/:id/export',
+  'GET /api/v1/safety/guardian',
+] as const;
 
 describe('authz matrix — every role-prefixed route rejects outsiders', () => {
   it('collected a non-trivial route table', () => {
@@ -230,6 +294,25 @@ describe('authz matrix — every role-prefixed route rejects outsiders', () => {
   }
 });
 
+describe('[T1] ops-only routes inside multi-role prefixes refuse every non-ops role', () => {
+  it('every declared ops-only route exists (the list cannot go stale)', () => {
+    const live = new Set(routeTable.map((r) => `${r.method} ${r.url}`));
+    expect(OPS_ONLY_IN_MULTI_ROLE.filter((route) => !live.has(route))).toEqual([]);
+  });
+
+  for (const role of ['customer', 'vendor', 'mover']) {
+    it(`a ${role} token is refused on every ops-only route`, async () => {
+      const offenders: string[] = [];
+      for (const route of OPS_ONLY_IN_MULTI_ROLE) {
+        const [method, url] = route.split(' ') as [string, string];
+        const res = await fire(method, url, tokens[role]);
+        if (!REJECTED.includes(res.statusCode)) offenders.push(`${route} -> ${res.statusCode}`);
+      }
+      expect(offenders, offenders.join('\n')).toEqual([]);
+    });
+  }
+});
+
 describe('Suspended accounts are cut off immediately', () => {
   it('a suspended user cannot use a live access token and cannot refresh', async () => {
     // Self-contained: create a fresh ACTIVE customer + a live session directly.
@@ -265,74 +348,90 @@ describe('Suspended accounts are cut off immediately', () => {
 });
 
 // ---------------------------------------------------------------------------
-// SWIFT-092 — server↔matrix prefix drift guard. buildTestApp() must mirror
-// server.ts's route registration: any /api/v1 prefix server.ts mounts but this
-// suite never enrolls is a prefix whose future missing authz gate this control
-// cannot catch. Fail the build the moment a new prefix is added to server.ts
-// without either enrolling it in buildTestApp() or exempting it (unauthenticated
-// by design). This is the drift guard the AUD-D3-02 comment above assumes.
+// SWIFT-092 → [T1 · row 300] composition-root ↔ matrix drift guard, by PLUGIN.
+// buildTestApp() must mirror app.ts's route registration. The old guard
+// compared URL prefixes, so a second plugin under a prefix the matrix already
+// sweeps passed unseen (moderationRoutes under /api/v1, serviceCatalogRoutes
+// under /api/v1/services). It now compares route plugins by name and prefix:
+// a plugin app.ts mounts and this suite neither mounts at the same prefix nor
+// exempts (unauthenticated by design, with the reason written below) fails.
 // ---------------------------------------------------------------------------
 
-/** /api/v1 prefixes registered in server.ts that are neither mounted in the
- *  test app nor explicitly exempt. Pure, so the guard itself is unit-testable. */
-function unmountedApiPrefixes(serverPrefixes: string[], mountedUrls: string[], exempt: Set<string>): string[] {
-  return serverPrefixes.filter((p) => {
-    if (exempt.has(p)) return false;
-    return !mountedUrls.some((u) => u === p || u.startsWith(p + '/'));
-  });
+/** "plugin@prefix" for every route plugin a source registers, with or without a prefix. */
+function routePluginMounts(source: string): string[] {
+  const mounts = new Set<string>();
+  for (const m of source.matchAll(/\.register\(\s*([A-Za-z_$][\w$]*)\s*(?:,\s*\{\s*prefix:\s*'([^']*)'\s*\})?\s*\)/g)) {
+    if (m[1]!.endsWith('Routes')) mounts.add(`${m[1]}@${m[2] ?? ''}`);
+  }
+  return [...mounts].sort();
 }
 
-describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
+/** Route plugins the composition root mounts that the matrix neither mounts (same plugin, same
+ *  prefix) nor exempts by name. Pure, so the guard itself is unit-testable. */
+function unmountedRoutePlugins(appMounts: string[], testMounts: string[], exempt: Set<string>): string[] {
+  const mounted = new Set(testMounts);
+  return appMounts.filter((mount) => !mounted.has(mount) && !exempt.has(mount.split('@')[0]!));
+}
+
+describe('composition root ↔ matrix drift guard, by plugin [SWIFT-092 · T1]', () => {
   // Unauthenticated by design — outside the authz matrix on purpose.
-  // /billing/mmg is machine-to-machine (MMG's biller network calls it):
+  // agentCashRoutes (/billing/mmg) is machine-to-machine (MMG's biller network calls it):
   // HMAC-over-raw-body auth, 503 dark until configured — proven in
   // agent-cash-channels.test.ts (401 only for signatures, per SO-6).
-  // /attribution is pre-auth by nature (web install taps + the app's first
+  // attributionRoutes is pre-auth by nature (web install taps + the app's first
   // launch, before any session exists): per-IP rate-limited, server-derived
   // everything, single-candidate-or-Home — proven in qr-attribution.test.ts.
-  // /discovery is the guest-facing category rail (flag-gated read-only
+  // discoveryRoutes is the guest-facing category rail (flag-gated read-only
   // aggregates — no user data; browsing needs no session by design).
-  // /market is the same posture one step further in [MKT G1]: the catalogue a
-  // shopper browses BEFORE they have an account, which is the entire point of
-  // a marketplace tab. It is read-only, carries no user data, and every row it
-  // can return is already public — the query goes through VISIBLE_VENDOR_REL
-  // and `isAvailable`, so it can only surface goods an anonymous visitor could
-  // already see on a store page. Requiring a session here would mean asking
-  // someone to sign up before they can see what is for sale.
-  // /billing/mmg-checkout is MMG's reply path [mmg checkout 3/6]: the web
-  // return page (no session survives MMG's cross-site redirect) and MMG's own
-  // servers post an encrypted reply token there. The token is opened with the
-  // merchant key and only prompts the server's own MMG lookup; the answer is
-  // one of four states with no amount, name or reference. Rate-limited,
-  // body-capped, inert with the flag off — proven in mmg-checkout-routes.test.ts.
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/billing/mmg-checkout', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
+  // marketRoutes is the same posture one step further in [MKT G1]: the catalogue a
+  // shopper browses BEFORE they have an account. It is read-only, carries no user
+  // data, and every row it can return is already public — the query goes through
+  // VISIBLE_VENDOR_REL and `isAvailable`.
+  // mmgCheckoutPublicRoutes is MMG's reply path [mmg checkout 3/6]: the web return
+  // page and MMG's own servers post an encrypted reply token there; it only prompts
+  // the server's own MMG lookup and answers one of four states — proven in
+  // mmg-checkout-routes.test.ts.
+  // cardRailPublicRoutes is the card provider's return path [PT-2]: written down as
+  // evidence, prompts only the server's own question to the provider — proven in
+  // card-rail-routes.test.ts.
+  // publicRoutes / qrPublicRoutes (/api/v1/public) and qrResolverRoutes (the printed
+  // QR short links) are public pages by name: QR resolution and public profile reads.
+  // legalRoutes (/legal) serves the published legal pages.
+  // smsInboundRoutes (/api/v1/sms) is the SMS provider calling with a texted reply [R22]:
+  // machine-to-machine, HMAC-signed by the provider and refused (403) unsigned, 503 dark
+  // until configured; it only ever withdraws marketing consent — proven in marketing-stop.test.ts.
+  // callVoiceRoutes (/api/v1/calls/voice) is the voice provider calling back during a Swift-bridged
+  // call [O-1]: machine-to-machine, signed by the provider over the exact URL and refused (403)
+  // unsigned, 503 until configured; a call back to Swift's number only hears 'call from the app' —
+  // proven in call-bridge.test.ts.
+  // testControlRoutes exists only in isolated load builds; production never registers it.
+  const EXEMPT_PLUGINS = new Set([
+    'agentCashRoutes', 'attributionRoutes', 'discoveryRoutes', 'marketRoutes', 'mmgCheckoutPublicRoutes',
+    'cardRailPublicRoutes', 'publicRoutes', 'qrPublicRoutes', 'qrResolverRoutes', 'legalRoutes', 'testControlRoutes',
+    'smsInboundRoutes', 'callVoiceRoutes',
+  ]);
 
-  it('flags a server prefix the matrix never mounts (red-first)', () => {
-    // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.
-    const missing = unmountedApiPrefixes(
-      ['/api/v1/customer', '/api/v1/loyalty'],
-      ['/api/v1/customer/profile', '/api/v1/customer/orders'],
-      EXEMPT,
+  it('flags a route plugin the matrix never mounts, even under a prefix it already sweeps (red-first)', () => {
+    // The old prefix guard passed this: /api/v1 was "mounted" by searchRoutes.
+    const missing = unmountedRoutePlugins(
+      ['customerRoutes@/api/v1/customer', 'searchRoutes@/api/v1', 'moderationRoutes@/api/v1', 'loyaltyRoutes@/api/v1/loyalty'],
+      ['customerRoutes@/api/v1/customer', 'searchRoutes@/api/v1'],
+      new Set(),
     );
-    expect(missing).toEqual(['/api/v1/loyalty']);
+    expect(missing).toEqual(['moderationRoutes@/api/v1', 'loyaltyRoutes@/api/v1/loyalty']);
+    // The same plugin mounted at another prefix is not the same mount.
+    expect(unmountedRoutePlugins(['chatRoutes@/api/v1/chat'], ['chatRoutes@/api/v1/messages'], new Set())).toEqual(['chatRoutes@/api/v1/chat']);
   });
 
-  it('every /api/v1 prefix the composition root (app.ts) registers is enrolled here (or exempt)', () => {
-    // The composition root moved to src/app.ts (server.ts only boots it); the
-    // prefixes are registered there.
-    const serverSrc = readFileSync(resolve(process.cwd(), 'src/app.ts'), 'utf8');
-    const serverPrefixes = [...new Set([...serverSrc.matchAll(/prefix:\s*'(\/api\/v1[^']*)'/g)].map((m) => m[1]!))];
+  it('every route plugin the composition root (app.ts) registers is mounted here at the same prefix (or exempt)', () => {
+    const appMounts = routePluginMounts(readFileSync(resolve(process.cwd(), 'src/app.ts'), 'utf8'));
+    const testMounts = routePluginMounts(readFileSync(resolve(process.cwd(), 'src/__tests__/authz-matrix.test.ts'), 'utf8'));
     // Sanity: the parse actually found the registrations (guards against a regex/path break).
-    expect(serverPrefixes.length).toBeGreaterThan(10);
-
-    const mountedUrls = routeTable.map((r) => r.url);
-    const missing = unmountedApiPrefixes(serverPrefixes, mountedUrls, EXEMPT);
-    if (missing.length) {
-      throw new Error(
-        `server.ts registers /api/v1 prefixes with no authz-matrix enrollment: ${missing.join(', ')}. ` +
-          `Enroll them in buildTestApp() so their gates are tested, or add to EXEMPT if unauthenticated by design.`,
-      );
-    }
-    expect(missing).toEqual([]);
+    expect(appMounts.length).toBeGreaterThan(25);
+    expect(testMounts).toEqual(expect.arrayContaining(['adminRoutes@/api/v1/admin', 'safetyRoutes@/api/v1/safety']));
+    // Every exemption still names a plugin app.ts mounts (an exemption cannot outlive its plugin).
+    const appPlugins = new Set(appMounts.map((mount) => mount.split('@')[0]));
+    expect([...EXEMPT_PLUGINS].filter((name) => !appPlugins.has(name))).toEqual([]);
+    expect(unmountedRoutePlugins(appMounts, testMounts, EXEMPT_PLUGINS)).toEqual([]);
   });
 });

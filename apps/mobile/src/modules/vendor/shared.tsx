@@ -7,7 +7,10 @@ import { T, TonePill, PillButton, useLogoutConfirm } from '../../kit';
 import { money } from '../../lib/money';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
+import { MMG_DISPUTE_NOTICE, mmgDisputePaused, withoutForwardWorkWhilePaused } from './order-dispute';
+import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from './storeOrderRules';
 import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
+import { storeStatusLabel } from '../../lib/orderStatus';
 
 export const GUTTER = space['2xl'];
 
@@ -19,27 +22,41 @@ export function prettyVendorType(t?: string) {
 
 // ─── Order helpers ───────────────────────────────────────────────────────────
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 /** Statuses where a rider owns the status lane; kitchen progress then rides
  *  the preparingAt/readyAt timestamps (see the vendor prep routes). */
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
 export function orderActions(order: any): { label: string; action: VendorOrderActionKind }[] {
+  // [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: no forward button
+  // that the server refuses on every tap (order-dispute.ts).
+  return withoutForwardWorkWhilePaused(order, statusActions(order));
+}
+
+function statusActions(order: any): { label: string; action: VendorOrderActionKind }[] {
   const s = (order?.status || '').toUpperCase();
   const isPickup = order?.fulfillment === 'PICKUP';
   const isAppt = order?.fulfillment === 'APPOINTMENT';
-  if (s === 'PENDING' || s === 'PLACED')
+  if (s === 'PENDING' || s === 'PLACED') {
+    // [STORE-DASH · O-4] While the customer answers an "Out of stock" question, or once every item
+    // came off, the store cannot accept (the server refuses: CUSTOMER_DECIDING / NOTHING_TO_ACCEPT).
+    if (customerDeciding(order) || nothingToAccept(order)) return [{ label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
     return [{ label: 'Accept', action: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
+  }
   // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
   if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
+  // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order moves only after "Paid by MMG" (the server
+  // refuses Start preparing with MMG_PAYMENT_PENDING), so that is its one step, on the card's MMG block.
+  if ((s === 'ACCEPTED' || s === 'CONFIRMED') && mmgAwaitingPayment(order)) return [];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
-  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
+  // [STORE-DASH · owner 22 Oct 2026] The button names the next step in the owner's words: ready for pickup or for delivery.
+  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Ready for delivery', action: 'ready' }];
   // A rider claimed the order before the kitchen tapped anything (the normal
   // case when movers are close) — the buttons keep working via timestamps.
   if (COURIER_ACTIVE.includes(s)) {
     if (!order?.preparingAt) return [{ label: 'Start preparing', action: 'preparing' }];
-    if (!order?.readyAt) return [{ label: 'Mark ready', action: 'ready' }];
+    if (!order?.readyAt) return [{ label: 'Ready for delivery', action: 'ready' }];
     return [];
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
@@ -54,6 +71,24 @@ export function orderActions(order: any): { label: string; action: VendorOrderAc
     riderPresent: Boolean(order?.rider),
   })) return [{ label: 'Confirm delivered', action: 'delivered' }];
   return [];
+}
+
+/** [NO-DEAD-ENDS · S1-6] The paused state, said where the store works the order. */
+export function MmgDisputeNotice({ order }: { order: any }) {
+  if (!mmgDisputePaused(order)) return null;
+  return (
+    <View
+      testID="vendor-mmg-dispute-notice"
+      accessibilityRole="alert"
+      style={{ flexDirection: 'row', gap: space.sm, alignItems: 'flex-start', marginTop: space.sm, padding: space.md, borderRadius: radius.lg, backgroundColor: color.soft.warning }}
+    >
+      <MaterialCommunityIcons name="pause-circle-outline" size={16} color={color.warning} style={{ marginTop: 1 }} />
+      <View style={{ flex: 1 }}>
+        <T variant="label" weight="semibold">{MMG_DISPUTE_NOTICE.title}</T>
+        <T variant="caption" tone="muted" style={{ marginTop: 2 }}>{MMG_DISPUTE_NOTICE.body}</T>
+      </View>
+    </View>
+  );
 }
 
 export function timeAgo(iso?: string) {
@@ -99,11 +134,6 @@ export function formatSlot(iso?: string) {
   return formatAppointmentSlot(iso);
 }
 
-export function prettyStatus(status?: string) {
-  const s = (status || '').replace(/_/g, ' ').toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 /**
  * The board's THREE deliberate pill treatments. An order walking the lane is
  * the one thing a vendor reads across the room, so each stage owns a different
@@ -140,20 +170,19 @@ function BoardPill({ label, treatment }: { label: string; treatment: keyof typeo
   );
 }
 
-/** Order status pill — "New" pops in solid brand; the rest are soft tints. */
+/** Order status pill — "New" pops in solid brand; the rest are soft tints.
+ *  [UI-SWEEP U72] Every label is the store's word from lib/orderStatus (the
+ *  map the web console shares), never the code; the pill keeps only its ink. */
 export function OrderStatusPill({ status }: { status: string }) {
   const s = (status || '').toUpperCase();
-  if (s === 'PENDING' || s === 'PLACED') return <BoardPill label="New" treatment="now" />;
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return <BoardPill label="Accepted" treatment="inHand" />;
-  if (s === 'PREPARING') return <BoardPill label="Preparing" treatment="inHand" />;
-  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <BoardPill label="Ready" treatment="done" />;
-  if (s === 'RIDER_ASSIGNED') return <TonePill label="Rider assigned" tone="brand" />;
-  if (s === 'RIDER_EN_ROUTE_PICKUP') return <TonePill label="Rider en route" tone="brand" />;
-  if (s === 'RIDER_ARRIVED_PICKUP') return <TonePill label="Rider at counter" tone="brand" />;
-  if (s === 'PICKED_UP' || s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED') return <TonePill label="Out for delivery" tone="neutral" />;
-  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={prettyStatus(s)} tone="success" />;
-  if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" />;
-  return <TonePill label={s.replace(/_/g, ' ').toLowerCase()} tone="neutral" />;
+  const label = storeStatusLabel(s);
+  if (s === 'PENDING' || s === 'PLACED') return <BoardPill label={label} treatment="now" />;
+  if (s === 'ACCEPTED' || s === 'CONFIRMED' || s === 'PREPARING') return <BoardPill label={label} treatment="inHand" />;
+  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <BoardPill label={label} treatment="done" />;
+  if (s === 'RIDER_ASSIGNED' || s === 'RIDER_EN_ROUTE_PICKUP' || s === 'RIDER_ARRIVED_PICKUP') return <TonePill label={label} tone="brand" />;
+  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={label} tone="success" />;
+  if (s === 'CANCELLED') return <TonePill label={label} tone="error" />;
+  return <TonePill label={label} tone="neutral" />;
 }
 
 /** Small soft tag beside the order number (Takeaway / Appointment). */
@@ -735,7 +764,8 @@ export function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => voi
   const behind = !blocked && (sub.isInGracePeriod || status === 'PAST_DUE');
   if (!blocked && !behind) return null;
   const due = numericFact(sub.amountDueGyd);
-  const deadline = sub.gracePeriodEnd ? fmtDate(sub.gracePeriodEnd) : null;
+  // [FEE-STATUS] A grace deadline that has passed is never a "due by" date.
+  const deadline = sub.gracePeriodEnd && new Date(sub.gracePeriodEnd).getTime() > Date.now() ? fmtDate(sub.gracePeriodEnd) : null;
 
   return (
     <View

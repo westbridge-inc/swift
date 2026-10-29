@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Receipt } from 'lucide-react';
 import type {
   MmgCheckoutCreditedPeriod,
@@ -12,7 +12,15 @@ import type {
   MmgCheckoutSupportStatus,
   MmgCheckoutTimelineEntry,
 } from '@swift/types';
-import { fetchMmgCheckout, fetchMmgCheckouts } from '@/lib/api';
+import {
+  checkMmgFeeReversal, fetchMmgCheckout, fetchMmgCheckouts, fetchMmgFeeReversal, resolveMmgFeeReversal, reverseMmgFeePayment,
+  type MmgFeeReversalRow, type MmgFeeReversalView,
+} from '@/lib/api';
+import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { REASON_MIN } from '@/lib/reason-rules';
+import Link from 'next/link';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 /**
  * [MMG support lookup] Find a partner's MMG weekly-fee payment.
@@ -22,7 +30,8 @@ import { fetchMmgCheckout, fetchMmgCheckouts } from '@/lib/api';
  * partner's phone. The server matches it EXACTLY and records every search and
  * every opened payment. This page shows only what the server answered: no row
  * is drawn before it arrives, and an error is shown as an error, never as
- * "nothing found". Confirming or reversing a held payment is not here yet.
+ * "nothing found". Confirming a held payment is not here yet. A confirmed
+ * payment can be RETURNED in full through MMG [MMG REVERSAL · owner #11].
  */
 const SEARCH_HINT = 'Swift reference, MMG transaction ID, MMG reference or partner phone';
 
@@ -30,12 +39,12 @@ const STATUS_WORDS: Record<MmgCheckoutSupportStatus, string> = {
   OPEN: 'Open', CONFIRMING: 'Confirming', CONFIRMED: 'Confirmed', NOT_PAID: 'Not paid', EXPIRED: 'Expired', HELD: 'Held for review',
 };
 const STATUS_TONE: Record<MmgCheckoutSupportStatus, string> = {
-  OPEN: 'bg-sky-500/15 text-sky-400',
-  CONFIRMING: 'bg-amber-500/15 text-amber-400',
-  CONFIRMED: 'bg-emerald-500/15 text-emerald-400',
-  NOT_PAID: 'bg-white/10 text-[var(--muted)]',
-  EXPIRED: 'bg-white/10 text-[var(--muted)]',
-  HELD: 'bg-red-500/15 text-red-400',
+  OPEN: 'bg-[var(--mc-info-soft)] mc-text-info',
+  CONFIRMING: 'bg-[var(--mc-warn-soft)] mc-text-warn',
+  CONFIRMED: 'bg-[var(--mc-good-soft)] mc-text-good',
+  NOT_PAID: 'bg-[var(--mc-surface)] mc-muted',
+  EXPIRED: 'bg-[var(--mc-surface)] mc-muted',
+  HELD: 'bg-[var(--mc-bad-soft)] mc-text-bad',
 };
 const MATCH_WORDS: Record<MmgCheckoutSupportMatch, string> = {
   SWIFT_REFERENCE: 'Swift reference',
@@ -53,19 +62,43 @@ const RESULT_WORDS: Record<string, string> = {
 const WINDOW_WORDS: Record<NonNullable<MmgCheckoutTimelineEntry['windowCheck']>, string> = {
   INSIDE: 'Inside the checkout window',
   OUTSIDE: 'Outside the checkout window',
-  AFTER_REPLY: "After MMG's first reply: MMG's time may not match the zone setting",
+  AFTER_REPLY: "After MMG's first reply: MMG's time may not match the zone setting, or it is another payment",
   UNREADABLE: "MMG's date could not be read",
+  NOT_IN_HISTORY: "Not in MMG's transaction history",
+  AMBIGUOUS: "More than one record in MMG's transaction history",
+  DISAGREES: "MMG's transaction history record does not match the checkout",
+  UNAVAILABLE: "MMG's transaction history could not be read in full",
 };
-const SOURCE_WORDS: Record<MmgCheckoutTimelineEntry['source'], string> = { RETURN: 'Reply (return page)', NOTIFY: 'Reply (MMG server)', LOOKUP: 'MMG lookup' };
+const SOURCE_WORDS: Record<MmgCheckoutTimelineEntry['source'], string> = { RETURN: 'Reply (return page)', NOTIFY: 'Reply (MMG server)', LOOKUP: 'MMG lookup', HISTORY: 'MMG transaction history' };
 const PLATFORM_WORDS: Record<string, string> = { ios: 'iPhone app', android: 'Android app', web: 'Website', unknown: 'Unknown' };
 
 const gyd = (amount: number) => `GY$${amount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 /** Guyana time, always: support and partners speak in it. */
 const when = (iso: string | null) => (iso
-  ? new Date(iso).toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  ? gyDateTime(iso)
   : '—');
-const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' }) : '—');
+const day = (iso: string | null) => (iso ? gyDate(iso) : '—');
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : 'Something went wrong.');
+
+/**
+ * [U07] A return (or a held return's resolution) is a money action: its first
+ * answer is a second admin's approval. Once it is queued — or the server says
+ * an earlier ask for it is still waiting — the form is LOCKED: every further
+ * press used to file another approval for the same payment.
+ */
+function isQueuedAnswer(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === 'APPROVAL_REQUIRED' || code === 'APPROVAL_ALREADY_OPEN';
+}
+
+function WaitingForApproval() {
+  return (
+    <p role="status" className="mc-muted text-xs">
+      Sent for a second admin&apos;s approval. Nothing has changed yet. Once approved, execute it from{' '}
+      <Link href="/approvals" className="underline">Approvals</Link>. Do not ask again.
+    </p>
+  );
+}
 
 function StatusPill({ status }: { status: MmgCheckoutSupportStatus }) {
   return <span className={`px-2.5 py-1 rounded-full text-xs whitespace-nowrap ${STATUS_TONE[status]}`}>{STATUS_WORDS[status]}</span>;
@@ -75,7 +108,7 @@ function StatusPill({ status }: { status: MmgCheckoutSupportStatus }) {
 function Id({ value, empty, wrap = false }: { value: string | null; empty: string; wrap?: boolean }) {
   return value
     ? <span className={`font-mono text-xs ${wrap ? 'break-all' : 'whitespace-nowrap'}`}>{value}</span>
-    : <span className="text-[var(--muted)] text-xs whitespace-nowrap">{empty}</span>;
+    : <span className="mc-muted text-xs whitespace-nowrap">{empty}</span>;
 }
 
 type Applied = { q: string; status: MmgCheckoutSupportStatus | ''; run: number };
@@ -85,6 +118,10 @@ export default function MmgPaymentsPage() {
   const [status, setStatus] = useState<MmgCheckoutSupportStatus | ''>('');
   const [applied, setApplied] = useState<Applied>({ q: '', status: '', run: 0 });
   const [openId, setOpenId] = useState<string | null>(null);
+  useEffect(() => {
+    const checkout = new URLSearchParams(window.location.search).get('checkout');
+    if (checkout && /^[A-Za-z0-9_-]{1,64}$/.test(checkout)) setOpenId(checkout);
+  }, []);
 
   const list = useInfiniteQuery({
     queryKey: ['mmg-checkouts', applied.q, applied.status, applied.run],
@@ -104,9 +141,8 @@ export default function MmgPaymentsPage() {
   };
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">MMG payments</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
+    <div className="mc-page">
+      <p className="mc-muted text-sm mb-6">
         Find a partner&apos;s MMG weekly-fee payment by any reference they or MMG can quote. Every search and every opened payment is recorded.
       </p>
 
@@ -118,43 +154,43 @@ export default function MmgPaymentsPage() {
           onChange={(event) => setQ(event.target.value)}
           placeholder={SEARCH_HINT}
           maxLength={64}
-          className="flex-1 bg-[var(--panel)] border border-[var(--border)] rounded-lg px-4 py-2.5 text-sm placeholder:text-[var(--muted)]"
+          className="mc-input flex-1"
         />
         <select
           aria-label="Status"
           value={status}
           onChange={(event) => setStatus(event.target.value as MmgCheckoutSupportStatus | '')}
-          className="bg-[var(--panel)] border border-[var(--border)] rounded-lg px-3 py-2.5 text-sm"
+          className="bg-[var(--mc-card)] border border-[var(--mc-line)] rounded-lg px-3 py-2.5 text-sm"
         >
           <option value="">All statuses</option>
           {(Object.keys(STATUS_WORDS) as MmgCheckoutSupportStatus[]).map((s) => <option key={s} value={s}>{STATUS_WORDS[s]}</option>)}
         </select>
-        <button type="submit" className="px-5 py-2.5 rounded-lg bg-[var(--accent)] text-white text-sm font-semibold">Search</button>
+        <button type="submit" className="mc-btn mc-btn-primary">Search</button>
       </form>
 
-      <section aria-label="Payments" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden mb-6">
+      <section aria-label="Payments" className="bg-[var(--mc-card)] rounded-[var(--mc-radius)] border border-[var(--mc-line)] overflow-hidden mb-6">
         {list.isPending ? (
-          <p role="status" className="p-12 text-center text-[var(--muted)] text-sm">Searching…</p>
+          <p role="status" className="p-12 text-center mc-muted text-sm">Searching…</p>
         ) : list.isError && !list.data ? (
-          <div role="alert" className="p-6 text-sm text-red-400">Could not load MMG payments: {messageOf(list.error)}</div>
+          <div role="alert" className="p-6 text-sm mc-text-bad">Could not load MMG payments: {messageOf(list.error)}</div>
         ) : rows.length === 0 ? (
           <div className="p-12 flex flex-col items-center text-center">
-            <Receipt size={40} className="text-[var(--muted)] mb-3" />
-            <p className="text-sm text-[var(--muted)]">{applied.q ? 'No MMG payment matches that exactly.' : 'No MMG payments yet.'}</p>
+            <Receipt size={40} className="mc-muted mb-3" />
+            <p className="text-sm mc-muted">{applied.q ? 'No MMG payment matches that exactly.' : 'No MMG payments yet.'}</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-[var(--muted)] text-xs">
+            <table className="mc-table mc-table-auto">
+              <thead className="text-left mc-muted text-xs">
                 <tr>
                   {['Created', 'Swift reference', 'MMG transaction ID', 'MMG reference', 'Amount', 'Status', 'Partner', applied.q ? 'Matched by' : null, '']
                     .filter((h): h is string => h !== null)
                     .map((h) => <th key={h || 'open'} scope="col" className="px-4 py-3 font-medium">{h}</th>)}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[var(--border)]">
+              <tbody className="divide-y divide-[var(--mc-line)]">
                 {rows.map((row) => (
-                  <tr key={row.id} className={openId === row.id ? 'bg-white/5' : undefined}>
+                  <tr key={row.id} className={openId === row.id ? 'bg-[var(--mc-surface)]' : undefined}>
                     <td className="px-4 py-3 whitespace-nowrap">{when(row.createdAt)}</td>
                     <td className="px-4 py-3"><Id value={row.swiftReference} empty="—" /></td>
                     <td className="px-4 py-3"><Id value={row.mmgTransactionId} empty="Not confirmed" /></td>
@@ -163,7 +199,7 @@ export default function MmgPaymentsPage() {
                     <td className="px-4 py-3"><StatusPill status={row.status} /></td>
                     <td className="px-4 py-3">
                       <p className="whitespace-nowrap">{row.partner.displayName ?? '—'}</p>
-                      <p className="text-xs text-[var(--muted)] whitespace-nowrap">{KIND_WORDS[row.partner.kind]}{row.partner.maskedPhone ? ` · ${row.partner.maskedPhone}` : ''}</p>
+                      <p className="text-xs mc-muted whitespace-nowrap">{KIND_WORDS[row.partner.kind]}{row.partner.maskedPhone ? ` · ${row.partner.maskedPhone}` : ''}</p>
                     </td>
                     {applied.q ? <td className="px-4 py-3 text-xs">{row.matchedBy.map((m) => MATCH_WORDS[m]).join(', ')}</td> : null}
                     <td className="px-4 py-3">
@@ -171,7 +207,7 @@ export default function MmgPaymentsPage() {
                         type="button"
                         onClick={() => setOpenId(row.id)}
                         aria-label={`Open payment ${row.swiftReference}`}
-                        className="text-xs underline text-[var(--accent)]"
+                        className="text-xs underline text-[var(--mc-accent)]"
                       >
                         Open
                       </button>
@@ -181,13 +217,13 @@ export default function MmgPaymentsPage() {
               </tbody>
             </table>
             {list.hasNextPage ? (
-              <div className="p-4 border-t border-[var(--border)]">
+              <div className="p-4 border-t border-[var(--mc-line)]">
                 <button type="button" disabled={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()} className="text-sm underline disabled:opacity-50">
                   {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
                 </button>
               </div>
             ) : null}
-            {list.isFetchNextPageError ? <p role="alert" className="px-4 pb-4 text-sm text-red-400">Could not load more: {messageOf(list.error)}</p> : null}
+            {list.isFetchNextPageError ? <p role="alert" className="px-4 pb-4 text-sm mc-text-bad">Could not load more: {messageOf(list.error)}</p> : null}
           </div>
         )}
       </section>
@@ -208,14 +244,14 @@ function Detail({ id }: { id: string }) {
   useEffect(() => {
     if (detail.data) panel.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
   }, [detail.data]);
-  if (detail.isPending) return <p role="status" className="text-sm text-[var(--muted)]">Opening the payment…</p>;
-  if (detail.isError) return <div role="alert" className="text-sm text-red-400">Could not open this payment: {messageOf(detail.error)}</div>;
+  if (detail.isPending) return <p role="status" className="text-sm mc-muted">Opening the payment…</p>;
+  if (detail.isError) return <div role="alert" className="text-sm mc-text-bad">Could not open this payment: {messageOf(detail.error)}</div>;
   const d: MmgCheckoutSupportDetail = detail.data.data;
   return (
-    <section ref={panel} aria-label="Payment detail" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 space-y-6 scroll-mt-6">
+    <section ref={panel} aria-label="Payment detail" className="bg-[var(--mc-card)] rounded-[var(--mc-radius)] border border-[var(--mc-line)] p-6 space-y-6 scroll-mt-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs text-[var(--muted)]">Swift reference</p>
+          <p className="mc-muted text-xs">Swift reference</p>
           <h2 className="font-mono text-base break-all">{d.swiftReference}</h2>
         </div>
         <StatusPill status={d.status} />
@@ -235,6 +271,7 @@ function Detail({ id }: { id: string }) {
             {d.reason ? <Field label="Reason (operators only)"><span className="font-mono text-xs">{d.reason}</span></Field> : null}
           </dl>
           {d.creditedPeriod ? <Credited period={d.creditedPeriod} /> : null}
+          {d.status === 'CONFIRMED' ? <ReturnPanel checkoutId={d.id} amount={d.amount} currencyCode={d.currencyCode} /> : null}
         </div>
         <Timeline entries={d.timeline} truncated={d.timelineTruncated} />
       </div>
@@ -245,7 +282,7 @@ function Detail({ id }: { id: string }) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <dt className="text-xs text-[var(--muted)]">{label}</dt>
+      <dt className="mc-muted text-xs">{label}</dt>
       <dd className="mt-0.5">{children}</dd>
     </div>
   );
@@ -258,10 +295,10 @@ function Credited({ period }: { period: MmgCheckoutCreditedPeriod }) {
       ? 'Credited; being applied to the weekly fee.'
       : 'Credited and kept toward the next weekly fee.';
   return (
-    <div className="rounded-lg border border-[var(--border)] p-4 text-sm">
-      <p className="text-xs text-[var(--muted)] mb-1">Credited period</p>
+    <div className="rounded-lg border border-[var(--mc-line)] p-4 text-sm">
+      <p className="text-xs mc-muted mb-1">Credited period</p>
       <p>{line}</p>
-      {period.receiptNumber ? <p className="text-xs text-[var(--muted)] mt-1">Receipt {period.receiptNumber}</p> : null}
+      {period.receiptNumber ? <p className="text-xs mc-muted mt-1">Receipt {period.receiptNumber}</p> : null}
     </div>
   );
 }
@@ -269,15 +306,15 @@ function Credited({ period }: { period: MmgCheckoutCreditedPeriod }) {
 function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[]; truncated: boolean }) {
   return (
     <div>
-      <h3 className="text-xs font-semibold tracking-widest text-[var(--muted)] mb-2">TIMELINE</h3>
+      <h3 className="text-xs font-semibold tracking-widest mc-muted mb-2">TIMELINE</h3>
       {entries.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">MMG has not replied, and Swift has not looked this payment up yet.</p>
+        <p className="text-sm mc-muted">MMG has not replied, and Swift has not looked this payment up yet.</p>
       ) : (
         <ol className="space-y-3">
           {entries.map((e, i) => (
-            <li key={`${e.at}-${i}`} className="border-l-2 border-[var(--border)] pl-3 text-sm">
-              <p className="font-medium">{SOURCE_WORDS[e.source]} <span className="text-[var(--muted)] font-normal">· {when(e.at)}</span></p>
-              <p className="text-xs text-[var(--muted)] mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+            <li key={`${e.at}-${i}`} className="border-l-2 border-[var(--mc-line)] pl-3 text-sm">
+              <p className="font-medium">{SOURCE_WORDS[e.source]} <span className="mc-muted font-normal">· {when(e.at)}</span></p>
+              <p className="text-xs mc-muted mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
                 {e.resultCode !== null ? <span>Result code {e.resultCode} ({RESULT_WORDS[e.resultCode] ?? 'undocumented'})</span> : null}
                 {e.transactionStatus ? <span>MMG status: {e.transactionStatus}</span> : null}
                 {e.amount ? <span>Amount: {e.amount} {e.currency ?? ''}</span> : null}
@@ -290,7 +327,216 @@ function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[];
           ))}
         </ol>
       )}
-      {truncated ? <p className="text-xs text-[var(--muted)] mt-2">Showing the first records only.</p> : null}
+      {truncated ? <p className="text-xs mc-muted mt-2">Showing the first records only.</p> : null}
     </div>
+  );
+}
+
+/** [MMG REVERSAL] Where a return of this payment stands, in plain words. */
+const RETURN_STATE_WORDS: Record<MmgFeeReversalRow['state'], string> = {
+  SENDING: 'Asking MMG to return it',
+  SENT: "MMG accepted; waiting for MMG's confirmation",
+  REVERSED: 'Returned through MMG to the account it was paid from',
+  FAILED: 'MMG refused; nothing changed',
+  HELD: 'Held for a person',
+};
+const HELD_WORDS: Record<string, string> = {
+  NO_ANSWER_FROM_MMG: 'MMG did not answer, and its records do not show a return yet',
+  MMG_SAYS_ALREADY_REVERSED: 'MMG says it was already returned, but its records still show the payment',
+  MMG_REFUSED_LOOKUP_UNCLEAR: "MMG refused, and its records could not be read clearly",
+  NOT_PROVEN_IN_TIME: 'MMG accepted, but has not confirmed the return within a day',
+  WALLET_NO_LONGER_HOLDS_IT: 'MMG returned it, but this payment has already paid for a week of the partner\'s fee',
+};
+
+/**
+ * [MMG REVERSAL · owner #11] Return a whole weekly-fee payment to the partner
+ * through MMG. MMG returns in full only, so the admin types the whole amount.
+ * The server asks for a second admin first (or the owner's solo approval);
+ * only MMG's own records then move the partner's fee balance. Anything unclear
+ * is held for a person, here, with "Check with MMG".
+ */
+function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string; amount: number; currencyCode: string }) {
+  const qc = useQueryClient();
+  const [reason, setReason] = useState('');
+  const [typed, setTyped] = useState('');
+  const view = useQuery({ queryKey: ['mmg-fee-reversal', checkoutId], queryFn: () => fetchMmgFeeReversal(checkoutId), refetchOnWindowFocus: false });
+  const refresh = () => qc.invalidateQueries({ queryKey: ['mmg-fee-reversal', checkoutId] });
+  const ask = useMutation({ mutationFn: () => reverseMmgFeePayment(checkoutId, Number(typed), reason.trim()), onSettled: refresh });
+  // Two presses in one frame both see isPending false: the ref is set at once.
+  const sending = useRef(false);
+  const check = useMutation({ mutationFn: (id: string) => checkMmgFeeReversal(id), onSettled: refresh });
+  const v = view.data?.data as MmgFeeReversalView | undefined;
+  // A failed read is said out loud: hiding the panel would hide a return that is held for a person.
+  if (view.isError) {
+    return (
+      <section aria-label="Return this payment" className="rounded-lg border border-[var(--mc-line)] p-4 space-y-3 text-sm">
+        <h3 className="font-semibold">Return this payment to the partner</h3>
+        <QueryFailed error={view.error} what="the return status of this payment" onRetry={() => void view.refetch()} retrying={view.isFetching} />
+      </section>
+    );
+  }
+  // Only the server's own answer is shown: anything else is not this panel's.
+  if (!v || typeof v !== 'object' || typeof v.canReverse !== 'boolean' || !Array.isArray(v.reversals)) return null;
+  const amountOk = typed.trim() !== '' && Number(typed) === amount;
+  const reasonOk = reason.trim().length >= REASON_MIN;
+  const queued = isQueuedAnswer(ask.error);
+
+  return (
+    <section aria-label="Return this payment" className="rounded-lg border border-[var(--mc-line)] p-4 space-y-3 text-sm">
+      <h3 className="font-semibold">Return this payment to the partner</h3>
+      {v.reversals.map((r) => (
+        <div key={r.id} className="rounded-md bg-[var(--mc-card)] p-3 space-y-1">
+          <p className="font-semibold">{RETURN_STATE_WORDS[r.state]}</p>
+          <p className="mc-muted text-xs">{gyd(r.amount)} {r.currencyCode} · asked {when(r.sentAt)}{r.reversedAt ? ` · returned ${when(r.reversedAt)}` : ''}</p>
+          {r.heldReason ? <p className="text-xs mc-text-warn">{HELD_WORDS[r.heldReason] ?? r.heldReason}. Check the MMG statement before anything else.</p> : null}
+          {r.resolution ? <p className="mc-muted text-xs">{RESOLUTION_WORDS[r.resolution] ?? r.resolution}</p> : null}
+          {r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING' ? (
+            <button
+              type="button"
+              disabled={check.isPending}
+              onClick={() => check.mutate(r.id)}
+              className="rounded-lg border border-[var(--mc-line)] px-3 py-1 text-xs disabled:opacity-40"
+            >
+              {check.isPending ? 'Checking…' : 'Check with MMG'}
+            </button>
+          ) : null}
+        </div>
+      ))}
+      {check.error ? <MutationError error={check.error} label="MMG could not be checked" /> : null}
+      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} heldReason={r.heldReason} lookupStatus={r.lookupStatus} onDone={refresh} />)}
+      {!v.switchedOn ? (
+        <p className="mc-muted text-xs">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
+      ) : !v.canReverse ? (
+        v.refusal && !v.reversals.some((r) => r.state === 'REVERSED' || r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING')
+          ? <p className="mc-muted text-xs">{v.refusal.message}</p>
+          : null
+      ) : (
+        <form
+          className="space-y-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!amountOk || !reasonOk || queued || sending.current) return;
+            sending.current = true;
+            ask.mutate(undefined, { onSettled: () => { sending.current = false; } });
+          }}
+        >
+          <p className="mc-muted text-xs">
+            MMG returns the whole payment ({gyd(amount)} {currencyCode}) to the partner&apos;s MMG account, and Swift deducts it from
+            what the partner has paid toward weekly fees once MMG confirms. A second admin must approve it first.
+          </p>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={2}
+            maxLength={500}
+            disabled={queued}
+            aria-label="Why it is being returned"
+            placeholder="Why it is being returned (for example: paid this week twice). Required."
+            className="mc-input"
+          />
+          <label className="mc-field">
+            Type the whole amount to confirm
+            <input
+              value={typed}
+              onChange={(e) => setTyped(e.target.value.replace(/[^0-9]/g, ''))}
+              inputMode="numeric"
+              disabled={queued}
+              aria-label="Amount to return"
+              className="mt-1 block w-40 rounded-lg border border-[var(--mc-line)] bg-[var(--mc-card)] px-2 py-1.5 text-sm"
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={ask.isPending || queued || !amountOk || !reasonOk}
+            className="mc-btn mc-btn-primary"
+          >
+            {ask.isPending ? 'Sending…' : queued ? 'Waiting for approval' : 'Return this payment'}
+          </button>
+          {queued ? <WaitingForApproval />
+            : ask.error ? <MutationError error={ask.error} label="The return did not start" /> : null}
+        </form>
+      )}
+    </section>
+  );
+}
+
+const RESOLUTION_WORDS: Record<string, string> = {
+  NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
+  RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after its money had been used. Whatever the weekly-fee payments still held of it was taken out once; the rest of that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
+};
+
+/**
+ * [DS1112] A HELD return, closed by a person on MMG's evidence. A money action:
+ * the first answer is a second admin's approval. The server reads MMG's records
+ * again and refuses anything they do not show.
+ */
+function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversalId: string; heldReason: string | null; lookupStatus?: string | null; onDone: () => void }) {
+  const [outcome, setOutcome] = useState<'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED'>('NOT_RETURNED');
+  // [DS1115] Only where MMG returned money that had already paid for a week.
+  const moneyUsed = (heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
+  // [Opus delta S3-N1] MMG's records no longer find the payment: no return can be booked, and it
+  // cannot be "not returned" either; a person closes it on MMG's reversal reference.
+  const paymentNotFound = !moneyUsed && lookupStatus === 'PAYMENT_NOT_FOUND';
+  const [reference, setReference] = useState('');
+  const [reason, setReason] = useState('');
+  const resolve = useMutation({ mutationFn: () => resolveMmgFeeReversal(reversalId, outcome, reference.trim(), reason.trim()), onSettled: onDone });
+  const sending = useRef(false);
+  const ok = reference.trim().length >= 3 && reason.trim().length >= REASON_MIN;
+  const queued = isQueuedAnswer(resolve.error);
+  return (
+    <form
+      aria-label="Resolve the held return"
+      className="space-y-2 rounded-md border border-[var(--mc-line)] p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!ok || queued || sending.current) return;
+        sending.current = true;
+        resolve.mutate(undefined, { onSettled: () => { sending.current = false; } });
+      }}
+    >
+      <fieldset disabled={queued} className="space-y-2">
+      <p className="text-xs font-semibold">Resolve it from the MMG statement</p>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'NOT_RETURNED'} onChange={() => setOutcome('NOT_RETURNED')} />
+        MMG shows the payment was not returned
+      </label>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED'} onChange={() => setOutcome('RETURNED')} />
+        MMG shows it was returned (enter MMG&apos;s reversal reference)
+      </label>
+      {moneyUsed ? (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
+          MMG returned it, but the money had already paid for a week (close it: whatever the weekly-fee payments still hold of it is taken out once, and the rest of that week&apos;s fee is owed again; finance collects it)
+        </label>
+      ) : paymentNotFound ? (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
+          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: whatever the partner&apos;s weekly-fee payments still hold of it is deducted once, and only the rest of that week&apos;s fee is owed again)
+        </label>
+      ) : null}
+      <input
+        value={reference}
+        onChange={(e) => setReference(e.target.value)}
+        aria-label="MMG reference"
+        placeholder={outcome === 'NOT_RETURNED' ? 'The MMG statement line or reference' : "MMG's reversal reference"}
+        className="block w-full rounded-lg border border-[var(--mc-line)] bg-[var(--mc-card)] px-2 py-1.5 text-sm"
+      />
+      <textarea
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        rows={2}
+        aria-label="Why"
+        placeholder="What you checked. Required."
+        className="mc-input"
+      />
+      <button type="submit" disabled={resolve.isPending || queued || !ok} className="rounded-lg border border-[var(--mc-line)] px-3 py-1 text-xs disabled:opacity-40">
+        {resolve.isPending ? 'Sending…' : queued ? 'Waiting for approval' : 'Send for approval'}
+      </button>
+      </fieldset>
+      {queued ? <WaitingForApproval />
+        : resolve.error ? <MutationError error={resolve.error} label="The return was not resolved" /> : null}
+    </form>
   );
 }

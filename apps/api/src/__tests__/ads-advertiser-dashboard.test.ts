@@ -42,7 +42,7 @@ async function makeUser(roles: 'CUSTOMER'[] = ['CUSTOMER']) {
 async function seedAdvertiser(ownerUserId: string) {
   const a = await app.prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000004', createdByUserId: ownerUserId, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER' } });
+  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER', acceptedAt: new Date() } });
   return a;
 }
 
@@ -150,7 +150,7 @@ describe('§14.2/§14.5 member-gated reads', () => {
 });
 
 describe('§14.6 team', () => {
-  it('OWNER adds a MANAGER by phone; MANAGER cannot add; unknown phone 404', async () => {
+  it('OWNER adds a MANAGER by phone; MANAGER cannot add; an unknown phone gets the same reply as a known one [row 55]', async () => {
     const owner = await makeUser();
     const manager = await makeUser();
     const analyst = await makeUser();
@@ -160,6 +160,10 @@ describe('§14.6 team', () => {
     const added = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: managerPhone, role: 'MANAGER' }, owner.token);
     expect(added.statusCode).toBe(200);
     expect(added.json().data.role).toBe('MANAGER');
+
+    // [SWITCHES · ads security] An add is an invitation: the person accepts it before they are a member.
+    expect((await get(`/api/v1/ads/advertiser/${a.id}/members`, manager.token)).statusCode).toBe(404);
+    expect((await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, manager.token)).statusCode).toBe(200);
 
     // The new MANAGER can read the team…
     const list = await get(`/api/v1/ads/advertiser/${a.id}/members`, manager.token);
@@ -171,7 +175,11 @@ describe('§14.6 team', () => {
     const denied = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: analystPhone, role: 'ANALYST' }, manager.token);
     expect(denied.statusCode).toBe(403);
 
-    const unknown = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: '+5926999999', role: 'ANALYST' }, owner.token);
-    expect(unknown.statusCode).toBe(404);
+    // [Row 55] No "no account" 404 and no user id: a known and an unknown
+    // number answer byte-identically, so the add is not a phone lookup.
+    const unknown = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: '+5926999999', role: 'MANAGER' }, owner.token);
+    expect(unknown.statusCode).toBe(200);
+    expect(unknown.body).toBe(added.body);
+    expect(added.body).not.toContain(manager.userId);
   });
 });

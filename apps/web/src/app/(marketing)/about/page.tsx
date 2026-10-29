@@ -65,8 +65,7 @@ export default function AboutPage() {
               Most delivery platforms take a percentage of every sale. Swift does not, and it is not
               a promotion that expires. Businesses and movers pay one flat weekly subscription and
               keep <b className="font-semibold text-[var(--swift-ink)]">100%</b> of every sale, fare
-              and tip. Apart from advertising a business can choose to buy, the subscription is the entire
-              business model — there is no commission line,
+              and tip. The subscription is the entire business model — there is no commission line,
               no service fee taken from a driver, and no markup added to a customer&apos;s bill.
             </p>
             <p>
@@ -106,8 +105,7 @@ export default function AboutPage() {
             <h3 className="mt-7 text-lg font-bold text-[var(--swift-ink)]">What {site.tradeName} charges</h3>
             <p className="mt-2 text-[var(--swift-muted)]">
               Businesses, riders and drivers pay {site.tradeName} a flat weekly fee for the software, in advance,
-              after a free trial. A business can also choose to buy advertising on {site.tradeName}, under separate
-              advertising terms. There is no commission on any sale, fare or tip, and nothing is added to a
+              after a free trial. There is no commission on any sale, fare or tip, and nothing is added to a
               customer&apos;s bill. The current weekly fee for each kind of partner is on the{' '}
               <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/pricing">
                 pricing page
@@ -121,7 +119,7 @@ export default function AboutPage() {
               site to state. All read from site.config, so no page can drift. */}
           <section
             aria-labelledby="company-facts"
-            className="mt-10 rounded-2xl border border-[var(--swift-border)] bg-white p-6"
+            className="mt-10 sw-card p-6"
           >
             <h2 id="company-facts" className="text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
               Company facts
@@ -133,6 +131,8 @@ export default function AboutPage() {
               </dd>
               <dt className="font-semibold text-[var(--swift-ink)]">Operated by</dt>
               <dd>{site.legalEntityName}</dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Registration no.</dt>
+              <dd>{site.registrationNo}</dd>
               <dt className="font-semibold text-[var(--swift-ink)]">Registered and located in</dt>
               <dd>
                 {site.registeredCity}, {site.country}

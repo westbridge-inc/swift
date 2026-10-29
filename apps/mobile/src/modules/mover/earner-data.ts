@@ -61,6 +61,14 @@ export function earningsWindowTotal(
   return serverNumber(window ? window['total'] : raw);
 }
 
+/** [Board 13a "CASH COLLECTED" · owner 25 Oct] The cash kept from cash jobs this week: the server's
+ *  `cashInHand.thisWeek` (door cash minus what the mover paid stores; a ride's cash fare). Undefined when the server
+ *  did not send it (an older API) or sent junk, so the tile is left out rather than showing a guessed 0. */
+export function cashInHandThisWeek(summary: unknown): number | undefined {
+  const cash = serverRecord(serverRecord(summary)?.['cashInHand']);
+  return cash ? serverNumber(cash['thisWeek']) : undefined;
+}
+
 export function earningRows(payload: unknown): WireRecord[] {
   if (Array.isArray(payload)) return serverRecords(payload);
   const source = serverRecord(payload);
@@ -128,9 +136,8 @@ const EARNING_LABELS: Record<string, string> = {
 export function earningLabel(value: unknown): string | undefined {
   const type = serverText(value)?.toUpperCase();
   if (!type) return undefined;
-  if (EARNING_LABELS[type]) return EARNING_LABELS[type];
-  const words = type.replace(/_/g, ' ').toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  // [UI-SWEEP U73] A kind of earning this file has not been taught: words, never the code.
+  return EARNING_LABELS[type] ?? 'Other earning';
 }
 
 export function isCompletedStatus(value: unknown): boolean {

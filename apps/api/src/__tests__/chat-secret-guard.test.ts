@@ -10,6 +10,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { chatRoutes } from '../modules/chat/chat.routes';
 import { digitRun, mediaUrlCarriesSecret, normaliseDigits, redactOrderSecrets, SECRET_REDACTION } from '../modules/chat/secret-guard';
+import { orderSocketFixture } from './helpers/order-socket-fixture';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [F-027-12] The handover secret must never travel over chat.
@@ -50,7 +52,7 @@ beforeAll(async () => {
   const mk = async (n: string) =>
     app.prisma.user.create({
       data: {
-        phone: `+59263${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: n, lastName: 'Guard',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true,
@@ -283,9 +285,10 @@ describe('the send path never stores, broadcasts or pushes a live code', () => {
 
   it('the stored row, the socket payload and the push body are all redacted, and the sender is told why', async () => {
     const emitted: Array<Record<string, unknown>> = [];
-    const emitSpy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
-      emit: (_event: string, payload: Record<string, unknown>) => { emitted.push({ room, ...payload }); },
-    })) as never);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { tenantId: true } });
+    const detach = orderSocketFixture(app.io, { id: orderId, tenantId: order.tenantId, customerId: otherId }, (event, payload) => {
+      if (event === 'chat:message') emitted.push(payload as Record<string, unknown>);
+    }, `chat:${roomId}`);
     const sendSpy = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('notif-id');
     try {
       const res = await send(`hey the code is ${RIDE_PIN}, mark it done`);
@@ -302,15 +305,22 @@ describe('the send path never stores, broadcasts or pushes a live code', () => {
 
       // 3. the socket broadcast
       expect(emitted).toHaveLength(1);
+      expect(emitted[0]!['roomId']).toBe(roomId);
       expect(String(emitted[0]!['message'])).not.toContain(RIDE_PIN);
+      expect(String(emitted[0]!['message'])).toContain(SECRET_REDACTION);
 
-      // 4. the PUSH body — the lock screen the invariant names
-      expect(sendSpy).toHaveBeenCalledTimes(1);
-      const pushed = sendSpy.mock.calls[0]![0] as { body: string; userId: string };
+      // 4. the PUSH body — the lock screen the invariant names: ONE chat push, to the other party
+      const sent = sendSpy.mock.calls.map(([n]) => n as { type: string; title: string; body: string; userId: string });
+      const chatPushes = sent.filter((n) => n.type === 'CHAT_MESSAGE');
+      expect(chatPushes).toHaveLength(1);
+      const pushed = chatPushes[0]!;
       expect(pushed.userId).toBe(otherId);
       expect(pushed.body).not.toContain(RIDE_PIN);
+      // [F18] The PIN was rotated, so its holder gets the one other notice: no PIN, no chat text.
+      expect(sent.filter((n) => n.type !== 'CHAT_MESSAGE').map((n) => [n.userId, n.title])).toEqual([[userId, 'Your ride PIN has changed']]);
+      for (const n of sent) expect(JSON.stringify(n)).not.toContain(RIDE_PIN);
     } finally {
-      emitSpy.mockRestore();
+      detach();
       sendSpy.mockRestore();
     }
   });

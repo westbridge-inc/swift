@@ -6,7 +6,7 @@ import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
 import { getChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
-import { reviewCredentialFor, reviewCodeMatches, REVIEW_CODE_TTL } from '../review/credentials';
+import { reviewCredentialFor, reviewCodeMatches, reserveReviewAttempt, REVIEW_CODE_TTL } from '../review/credentials';
 
 /**
  * [ALG-34] Step-up: "confirm it's you" for an EXISTING session, before a
@@ -60,6 +60,8 @@ async function assertNotLocked(redis: Redis, userId: string): Promise<void> {
 
 /** [REVIEW-PARTNER · DL-6] Armed by a step-up "send" for a store-review login (the account's own bucket). */
 export const reviewStepUpKey = (userId: string) => `stepup:review:${userId}`;
+/** [SEC-TRUST F12] The review step-up code's attempt budget (outlives one window, like the sign-in's). */
+export const reviewStepUpTriesKey = (userId: string) => `stepup:review-tries:${userId}`;
 
 /**
  * [REVIEW-PARTNER · DL-6] The account's store-review credential, when it is
@@ -136,9 +138,14 @@ async function verifyReviewStepUp(app: FastifyInstance, userId: string, code: st
   const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, tenantId: true } });
   const credential = user ? await reviewStepUpCredential(app, user) : null;
   if (!credential) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
+  // [SEC-TRUST F12] Like the review sign-in: one place of five is taken atomically before the code is
+  // compared, so simultaneous guesses cannot all be compared before the failure counter below moves.
+  const tries = reviewStepUpTriesKey(userId);
+  if (!(await reserveReviewAttempt(app.redis, tries))) return { valid: false, reason: 'Too many attempts. Request a new OTP.' };
   if (!reviewCodeMatches(credential, code)) return { valid: false, reason: 'Invalid OTP code' };
   const consumed = Number(await app.redis.eval(CONSUME_REVIEW_WINDOW, 1, key, generation));
   if (consumed !== 1) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
+  await app.redis.del(tries);
   return { valid: true };
 }
 
@@ -169,11 +176,43 @@ export async function hasStepUp(redis: Redis, sessionId: string): Promise<boolea
  * The gate a money surface calls first. 403 STEP_UP_REQUIRED tells the client
  * exactly how to earn it, so the screen can run the code sheet and retry.
  */
-export async function requireStepUp(app: FastifyInstance, request: { user: { userId: string }; authSessionId: string | null }): Promise<void> {
+export async function requireStepUp(app: FastifyInstance, request: { user: { userId: string }; authSessionId: string | null }, options: { consume?: boolean } = {}): Promise<void> {
   const sessionId = request.authSessionId;
   if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
-  if (await hasStepUp(app.redis, sessionId)) return;
+  // Credential changes consume the proof BEFORE the write. Redis DEL is
+  // atomic: concurrent changes cannot both spend the same proof. A failed
+  // database change requires fresh proof; we never restore spent authority.
+  const confirmed = options.consume
+    ? (await app.redis.del(stepUpKey(sessionId))) === 1
+    : await hasStepUp(app.redis, sessionId);
+  if (confirmed) return;
   throw new AppError(403, 'STEP_UP_REQUIRED', 'Confirm it’s you first — we’ll text a code to the phone on this account.', {
     stepUp: { send: 'POST /auth/step-up', verify: 'POST /auth/step-up/verify', validForSeconds: STEP_UP_TTL_S },
   });
 }
+
+/**
+ * [DELETION-INTEGRITY · coordinator ruling 2026-10-05, Q3b] Account deletion
+ * and closure requests only: a session that an OTP sign-in created within the
+ * step-up window already carries what a step-up proves — a code reached the
+ * phone on the account, on THIS session, minutes ago. App builds without the
+ * step-up sheet (and a store reviewer who just signed in with a code) can
+ * therefore still delete. Any older session, or one not created by an OTP
+ * sign-in, still needs the step-up. Refresh rotation keeps createdAt, so a
+ * refreshed session never looks fresh.
+ */
+export async function requireRecentOtpOrStepUp(
+  app: FastifyInstance,
+  request: { user: { userId: string }; authSessionId: string | null },
+): Promise<void> {
+  const sessionId = request.authSessionId;
+  if (sessionId) {
+    const session = await app.prisma.session.findUnique({
+      where: { id: sessionId }, select: { userId: true, authMethod: true, createdAt: true },
+    });
+    if (session && session.userId === request.user.userId && session.authMethod === 'OTP'
+      && Date.now() - session.createdAt.getTime() <= STEP_UP_TTL_S * 1000) return;
+  }
+  await requireStepUp(app, request);
+}
+

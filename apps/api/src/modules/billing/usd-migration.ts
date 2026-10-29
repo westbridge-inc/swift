@@ -1,4 +1,5 @@
 import type { OnAudit } from '../../lib/audit-writer';
+import { activePriceBook, bookAt } from './price-book';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -7,6 +8,7 @@ import { log } from '../../utils/logger';
 import { usdMigrationFlipsCounter, usdMigrationHeldGauge } from '../../plugins/observability';
 import { weeklyFeeAmount } from './subscription-fee';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
+import { payerUserIdOf, subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 // System 2 Part 13/20 — migration of existing local-priced subscriptions.
 // The founder picks a mode per tenant at enable time:
@@ -40,7 +42,7 @@ async function userIdFor(prisma: PrismaClient, subId: string): Promise<string | 
       vendor: { select: { owner: { select: { userId: true } } } },
     },
   });
-  return sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null;
+  return payerUserIdOf(sub);
 }
 
 /** MODE A preview — the founder's approval table: every active sub, its
@@ -53,9 +55,8 @@ export async function previewModeA(prisma: PrismaClient) {
   const rate = await resolveRateForRun(prisma, currency);
   if (!rate) return { error: 'NO_FX_RATE', rows: [] as unknown[] };
 
-  const entries = await prisma.priceBookEntry.findMany({ where: { active: true } });
-  const book = new Map<string, number>();
-  for (const e of entries) book.set(`${e.role}|${e.tier ?? ''}`, Number(e.amountUsd));
+  // [F2] The book in force now (a scheduled price is not yet a price).
+  const book = bookAt(await activePriceBook(prisma), new Date());
 
   const subs = await prisma.subscription.findMany({
     where: { status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] } },
@@ -124,13 +125,7 @@ export async function enactModeA(prisma: PrismaClient, io: Server): Promise<{ no
 
 /** [M-15] A subscription belongs to the tenant of the vendor, rider or driver
  *  that holds it. The migration's every read and write is scoped by this. */
-export const subscriptionTenantWhere = (tenantId: string) => ({
-  OR: [
-    { vendor: { tenantId }, riderId: null, driverId: null },
-    { rider: { user: { tenantId } }, vendorId: null, driverId: null },
-    { driver: { user: { tenantId } }, vendorId: null, riderId: null },
-  ],
-});
+export { subscriptionTenantWhere };
 
 export const modeBKey = (subscriptionId: string, phase: 't30' | 't7' | 'freeze' | 'flip') => `usdmigB:${subscriptionId}:${phase}`;
 
@@ -310,7 +305,7 @@ export async function sweepModeB(
       out.alerts += 1;
       await notifyAdmins(prisma, notifications, {
         tenantId: tenant.tenantId,
-        title: '💱 USD migration: payers held at their old rate — notice proof missing',
+        title: 'USD migration: payers held at their old rate — notice proof missing',
         body: `${heldHere} grandfathered payer(s) passed the sunset without both T−30 and T−7 notices verifiably delivered. They stay pinned at the rate they were promised until the notices are delivered; nothing was flipped for them.`,
         data: { kind: 'billing_invariants', alert: 'usd-migration-notice-proof', held: heldHere },
       }).catch(() => {});

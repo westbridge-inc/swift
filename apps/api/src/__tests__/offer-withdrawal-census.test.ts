@@ -40,20 +40,25 @@ const CANCELLING_WRITERS: Record<string, string> = {
     'the customer cancel: its own locked transaction (refund policy, float, mover release), then the withdrawal once it commits',
   'modules/dispatch/dispatch.service.ts#publishExhaustion':
     'the taxi released after TAXI_WAIT_LIMIT_MIN with no driver: a compare-and-set, so a card a re-sweep installed meanwhile is withdrawn after it',
-  'modules/dispatch/rescue.ts#settleTooOldOrder':
-    'the food-age cutoff: a compare-and-set by the system, then the card withdrawn as a pair before the rest of the search memory is dropped',
 };
 
 /** Order writes the scan cannot read a status from, each reviewed. */
 const REVIEWED_WRITERS: Record<string, string> = {
+  'modules/rides/driver-pickup.ts#advanceDriverPickup':
+    'Assignment-bound pickup advances only to DRIVER_EN_ROUTE or DRIVER_ARRIVED, with arrival time; its two typed route callers never cancel.',
   'modules/order/order.service.ts#stageCanonicalOrderTransition':
     'THE SEAM: status is input.target. Its caller transitionOrderAtomically withdraws after every operational cancellation (asserted below).',
   'modules/chat/chat-authority.ts#rotateLeakedRidePin': 'rotates the ride PIN (freshRidePinReset); never touches status.',
   'modules/order/mmg-claim.service.ts#recordCustomerMmgClaim': 'MMG claim facts and revision only; never the order status.',
   'modules/order/mmg-claim.service.ts#resolveMmgClaimDisagreement': 'MMG claim resolution and paymentStatus only; never the order status.',
   'modules/vendor/vendor.routes.ts#recordPrepProgress': 'kitchen milestone timestamps while a rider owns the status lane; never the status.',
+  'modules/handover/handover-decision.ts#verifyHandoverDecision':
+    'counts one handover-code comparison (pickupCodeAttempts or ridePinAttempts increment) under the order lock; never the status.',
   'modules/dispatch/delivery-watchdog.ts#reopenPreCustodyLeg':
     'reopens a released leg to its kitchen stage (releaseStageFor: ACCEPTED, PREPARING or READY_FOR_PICKUP); never CANCELLED.',
+  // [STORE-VAT · owner O-5]
+  'modules/store-vat/order-vat.ts#recomputeOrderVat':
+    'writes only the VAT the order froze (orderVatAmountFields: vatAmount, vatBase and the goods by class); never the status.',
 };
 
 const ORDER_WRITE = /(^|\.)order\.(update|updateMany|upsert)$/;
@@ -192,6 +197,27 @@ describe('[DISPATCH 1/3 · B4] every cancellation withdraws the live offer card 
     expect(guard?.expression.getText(sf)).toMatch(/^isCancellationTerminalization\(committed\.sourceStatus, input\.target\)$/);
   });
 
+  it('[OF-09] the cutoff cancels through the seam inside its own transaction, and withdraws the card after that commit', () => {
+    const file = 'modules/dispatch/rescue.ts';
+    const sf = ts.createSourceFile(file, readFileSync(join(SRC, file), 'utf8'), ts.ScriptTarget.Latest, true);
+    let node: ts.FunctionDeclaration | undefined;
+    const find = (n: ts.Node) => {
+      if (!node && ts.isFunctionDeclaration(n) && n.name?.getText(sf) === 'settleTooOldOrder') node = n;
+      ts.forEachChild(n, find);
+    };
+    find(sf);
+    if (!node) throw new Error(`${file}: no function settleTooOldOrder`);
+    const committing = calls(node, sf, 'deps.prisma.$transaction');
+    expect(committing, 'the cutoff commits in one transaction').toHaveLength(1);
+    const staged = calls(node, sf, 'orders.stageCanonicalOrderTransition');
+    expect(staged, 'the cancellation is the canonical seam, staged in that transaction').toHaveLength(1);
+    expect(staged[0]!.getStart(sf)).toBeGreaterThan(committing[0]!.getStart(sf));
+    expect(staged[0]!.getEnd()).toBeLessThan(committing[0]!.getEnd());
+    const withdrawals = calls(node, sf, POINT);
+    expect(withdrawals.length, 'the card is withdrawn').toBeGreaterThanOrEqual(1);
+    expect(withdrawals[0]!.getStart(sf), 'after the commit, never inside it').toBeGreaterThan(committing[0]!.getEnd());
+  });
+
   it('the seam helper goes through the one point', () => {
     const { node, sf } = method('modules/order/order.service.ts', 'withdrawLiveOffer');
     expect(calls(node, sf, POINT)).toHaveLength(1);
@@ -211,7 +237,13 @@ describe('[DISPATCH 1/3 · B4] every cancellation withdraws the live offer card 
       visit(sf);
     }
     expect(built.length, 'the scan found the composition roots').toBeGreaterThanOrEqual(10);
-    for (const line of built) expect(line, 'pass the app/job Redis as the fifth argument').toMatch(/: (app|ctx)\.redis$/);
+    for (const line of built) {
+      // [OF-09] The rescue cutoff builds its seam from its deps: RescueDeps.redis
+      // IS the job's Redis (queue.ts passes ctx.redis) or the dispatch
+      // service's app Redis — the one offer store.
+      if (line === 'modules/dispatch/rescue.ts: deps.redis') continue;
+      expect(line, 'pass the app/job Redis as the fifth argument').toMatch(/: (app|ctx)\.redis$/);
+    }
   });
 
   it('no raw SQL writes an order to CANCELLED', () => {

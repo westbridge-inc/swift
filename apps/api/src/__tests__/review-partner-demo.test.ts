@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 /**
  * [REVIEW-PARTNER · lane row 53] The store-review fiction's demo RIDER and taxi
  * DRIVER: two logins an App Store / Play reviewer uses to reach the partner
@@ -40,18 +41,19 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { moverPushRequired } from '../modules/notification/mover-push-authority';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { devChannelLog } from '../providers/notifications/channels';
 import { provisionReviewTenant, reviewStatus } from '../modules/review/provision';
 import { seedReviewContentPack, planReviewContentPack, reviewContentPackFacts } from '../modules/review/content-pack';
-import { seedReviewPartners, REVIEW_PACK_PARTNERS, REVIEW_PACK_REVIEWER, partnerPortraitUrl } from '../modules/review/partner-pack';
+import { seedReviewPartners, REVIEW_PACK_PARTNERS, REVIEW_PACK_REVIEWER, partnerPortraitUrl, packPartnerDocuments } from '../modules/review/partner-pack';
 import { REVIEW_DEMO_NO_ORDERS, REVIEW_DEMO_NO_BOOKINGS_MESSAGE, REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { hasStepUp, reviewStepUpKey } from '../modules/auth/step-up';
 import { hashReviewCode } from '../modules/review/credentials';
 import { PACK_IMAGE_WIDTH, PACK_IMAGE_HEIGHT } from '../modules/review/pack-image';
-import { CountryConfigService } from '../modules/country/country-config.service';
 import { commitReviewFixtureDocument } from '../modules/verification/verification.service';
+import { HIRE_SPLIT_STARTED_KEY } from '../modules/verification/hire-permit-grace';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adsRoutes } from '../modules/ads/ads.routes';
@@ -59,6 +61,8 @@ import { servicesRoutes } from '../modules/services/services.routes';
 import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
+import { CountryConfigService } from '../modules/country/country-config.service';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 /** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
  *  behind that switch, so it is graded with advertising switched on. */
@@ -70,7 +74,7 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REVIEW = `review-partner-${RUN}`;
 const PRODUCTION = 'swift-default';
 const UPLOAD_DIR = `/tmp/review-partner-test-uploads-${RUN}`;
@@ -80,7 +84,7 @@ const SPOT = { lat: 6.3107, lng: -57.5321 };
 const NEAR = { lat: SPOT.lat + 0.0027, lng: SPOT.lng };
 const DAY = 86_400_000;
 /** Production fixture phones: +59200064 + 4 digits of this run (a range no other suite uses). */
-const prodPhoneBase = `+59200064${String(Math.floor(Math.random() * 90) + 10)}`;
+const prodPhoneBase = testPhone();
 
 let app: FastifyInstance;
 let dispatch: DispatchService;
@@ -98,6 +102,9 @@ let prodSeq = 0;
 /** The country's mover checklists for the pack's two vehicles — the lists the go-online gate reads. */
 let riderChecklist: string[] = [];
 let driverChecklist: string[] = [];
+/** [VERIFY-DOCS] what each vehicle REQUIRES (the app's checklist); the pack partners present these plus an identity document. */
+let riderRequired: string[] = [];
+let driverRequired: string[] = [];
 
 const auth = (token: string, extra: Record<string, string> = {}) => ({ authorization: `Bearer ${token}`, ...extra });
 const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: auth(token) });
@@ -157,9 +164,11 @@ beforeAll(async () => {
   registerPublicUploads(app, UPLOAD_DIR);
   await app.ready();
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
-  const countries = new CountryConfigService(app.prisma);
-  riderChecklist = await system(() => countries.getMoverChecklist('GY', REVIEW_PACK_PARTNERS.RIDER.vehicleType));
-  driverChecklist = await system(() => countries.getMoverChecklist('GY', REVIEW_PACK_PARTNERS.DRIVER.vehicleType));
+  // [VERIFY-DOCS] what each pack partner presents: its vehicle's required documents plus the optional identity document
+  riderChecklist = await system(() => packPartnerDocuments(app.prisma, 'GY', REVIEW_PACK_PARTNERS.RIDER.vehicleType));
+  driverChecklist = await system(() => packPartnerDocuments(app.prisma, 'GY', REVIEW_PACK_PARTNERS.DRIVER.vehicleType));
+  riderRequired = await system(() => new CountryConfigService(app.prisma).getMoverChecklist('GY', REVIEW_PACK_PARTNERS.RIDER.vehicleType));
+  driverRequired = await system(() => new CountryConfigService(app.prisma).getMoverChecklist('GY', REVIEW_PACK_PARTNERS.DRIVER.vehicleType));
 
   // The operator's command: the tenant, a session, and three logins.
   const provisioned = await system(() => provisionReviewTenant(app.prisma, { slug: REVIEW, phonePrefix: '+59200093' }));
@@ -273,8 +282,15 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     expect(first.state).toBe('PRESENT');
     expect(first.partners).toMatchObject({ RIDER: { credentials: 1, ready: 1 }, DRIVER: { credentials: 1, ready: 1 }, profiles: 2 });
     // GY: a motorbike rider's checklist (identity, police, licence, registration, insurance) and a taxi's (+ hire permit, plate, car photos, fitness).
-    expect(riderChecklist).toEqual(expect.arrayContaining(['national_id', 'police_clearance', 'vehicle_insurance']));
-    expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_permit']));
+    // [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] a motorbike rider proves identity by the licence.
+    // [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] no vehicle partner is offered a second ID any more, so the
+    // pack partner presents none (it keeps the L2 it always had: partner-pack.ts); no police clearance.
+    expect(riderChecklist).toEqual(expect.arrayContaining(['drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
+    expect(riderChecklist).not.toContain('national_id');
+    expect(riderChecklist).not.toContain('police_clearance');
+    expect(driverChecklist).not.toContain('national_id');
+    // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+    expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence']));
     expect(first.partnerDocumentsCommitted).toBe(riderChecklist.length + driverChecklist.length);
     const again = await system(() => seedReviewContentPack(app.prisma, { slug: REVIEW }));
     expect([again.state, again.partnerDocumentsCommitted]).toEqual(['PRESENT', 0]);
@@ -320,7 +336,8 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
 
   it('a lapsed document is renewed by re-seeding (the newer fixture supersedes it) and a drifted vehicle heals back to the pack', async () => {
     await system(async () => {
-      const lapsed = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: review.riderUserId, docType: 'police_clearance', state: 'COMMITTED' } });
+      // [VERIFY-DOCS] police clearance is optional for movers, so the pack does not present one: the licence lapses instead
+      const lapsed = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: review.riderUserId, docType: 'drivers_licence', state: 'COMMITTED' } });
       await app.prisma.verificationDocument.update({ where: { id: lapsed.id }, data: { state: 'EXPIRED' } });
       await app.prisma.rider.update({ where: { id: review.riderId }, data: { vehicleType: 'BICYCLE' } });
     });
@@ -329,9 +346,48 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     expect([healed.state, healed.partnerDocumentsCommitted]).toEqual(['PRESENT', 1]);
     await system(async () => {
       expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: review.riderId } })).vehicleType).toBe('MOTORCYCLE');
-      const police = await app.prisma.verificationDocument.findMany({ where: { userId: review.riderUserId, docType: 'police_clearance' }, include: { record: true } });
+      const police = await app.prisma.verificationDocument.findMany({ where: { userId: review.riderUserId, docType: 'drivers_licence' }, include: { record: true } });
       expect(police.map((d) => d.record?.status).sort()).toEqual(['EXPIRED', 'VALID']);
     });
+  });
+
+  // [Opus 13 Oct · #1546 S3-1] STAGING is what Apple reviews. A pack seeded before the hire-car permit split
+  // holds the old permit; during the 60-day window that permit counts as both new licences, so a re-seed must
+  // still commit the two real licences, or the review taxi goes offline the day the window closes.
+  it('a pack holding only the old hire-car permit gets both real licences on re-seed while the 60-day window is open, and stays ready after it closes', async () => {
+    const DAY = 86_400_000;
+    const prior = await system(() => app.prisma.platformConfig.findUnique({ where: { key: HIRE_SPLIT_STARTED_KEY } }));
+    const splitStarted = (daysAgo: number) => system(() => app.prisma.platformConfig.upsert({
+      where: { key: HIRE_SPLIT_STARTED_KEY },
+      create: { key: HIRE_SPLIT_STARTED_KEY, value: { startedAt: new Date(Date.now() - daysAgo * DAY).toISOString() } },
+      update: { value: { startedAt: new Date(Date.now() - daysAgo * DAY).toISOString() } },
+    }));
+    const licences = ['hire_car_driver_licence', 'hire_car_vehicle_licence'];
+    try {
+      await splitStarted(1);
+      await system(async () => {
+        // The state of a pack seeded before the split: the two licences absent, the old permit approved and current.
+        await app.prisma.verificationDocument.updateMany({ where: { userId: review.driverUserId, docType: { in: licences }, state: 'COMMITTED' }, data: { state: 'EXPIRED' } });
+        await commitReviewFixtureDocument(app.prisma, { userId: review.driverUserId, docType: 'hire_car_permit', expiresAt: new Date(Date.now() + 300 * DAY),
+          reviewedBy: REVIEW_PACK_REVIEWER, reviewedAt: new Date(), reviewNote: 'Review fixture: the permit a pack held before the split' });
+      });
+      const reseeded = await system(() => seedReviewContentPack(app.prisma, { slug: REVIEW }));
+      expect(reseeded.partnerDocumentsCommitted).toBe(2);
+      await system(async () => {
+        const held = await app.prisma.verificationDocument.findMany({ where: { userId: review.driverUserId, docType: { in: licences }, state: 'COMMITTED' }, include: { record: true } });
+        expect(held.map((d) => [d.docType, d.record?.status]).sort()).toEqual([['hire_car_driver_licence', 'VALID'], ['hire_car_vehicle_licence', 'VALID']]);
+      });
+      // Day 61: the window has closed, the review taxi still holds every document it needs.
+      await splitStarted(61);
+      const after = await system(() => reviewContentPackFacts(app.prisma, REVIEW));
+      expect(after.state).toBe('PRESENT');
+      expect(after.partners).toMatchObject({ DRIVER: { ready: 1 } });
+    } finally {
+      await system(async () => {
+        if (prior === null) await app.prisma.platformConfig.deleteMany({ where: { key: HIRE_SPLIT_STARTED_KEY } });
+        else await app.prisma.platformConfig.update({ where: { key: HIRE_SPLIT_STARTED_KEY }, data: { value: prior.value as never } });
+      });
+    }
   });
 
   it('the profile photo is DRAWN from the pack — a real PNG on the public avatars route; any other name is a 404', async () => {
@@ -482,13 +538,18 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   it('the app reads both partners as verified: every checklist type approved, nothing missing', async () => {
     const r = (await get('/api/v1/verification/status?role=MOVER', tokens.rider)).json().data;
     expect([r.roleVerified, r.missing, r.vehicleType]).toEqual([true, [], 'MOTORCYCLE']);
-    expect([...r.checklist].sort()).toEqual([...riderChecklist].sort());
+    expect([...r.checklist].sort()).toEqual([...riderRequired].sort());
     const d = (await get('/api/v1/verification/status?role=MOVER', tokens.driver)).json().data;
     expect([d.roleVerified, d.missing, d.vehicleType]).toEqual([true, [], 'CAR']);
-    expect([...d.checklist].sort()).toEqual([...driverChecklist].sort());
+    expect([...d.checklist].sort()).toEqual([...driverRequired].sort());
   });
 
   it('the rider goes online, streams location, sees an honestly EMPTY board and no offer, and goes offline', async () => {
+    // The reviewer's phone never granted notifications: no push token. GO
+    // still works, because the push rule is a server switch that is off.
+    expect(moverPushRequired()).toBe(false);
+    const riderUserId = app.jwt.verify<{ userId: string }>(tokens.rider).userId;
+    expect(await system(() => app.prisma.deviceToken.count({ where: { userId: riderUserId } }))).toBe(0);
     const on = await post('/api/v1/rider/go-online', tokens.rider, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(on.statusCode, on.body).toBe(200);
     expect(on.json().data).toEqual({ isOnline: true, isAvailable: true });
@@ -505,6 +566,9 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   });
 
   it('the taxi driver goes online with NO weekly plan (the fiction holds none), streams location, sees an EMPTY board, and goes offline', async () => {
+    expect(moverPushRequired()).toBe(false);
+    const driverUserId = app.jwt.verify<{ userId: string }>(tokens.driver).userId;
+    expect(await system(() => app.prisma.deviceToken.count({ where: { userId: driverUserId } }))).toBe(0);
     const on = await post('/api/v1/driver/go-online', tokens.driver, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(on.statusCode, on.body).toBe(200);
     expect(on.json().data.isOnline).toBe(true);
@@ -710,6 +774,7 @@ describe('[REVIEW-PARTNER · DL-5 / DL-6] no money and no SMS for a review partn
       await system(() => app.prisma.reviewCredential.deleteMany({ where: { id: trapId } }));
       await app.redis.del(`stepup:fail:${prod.driverUserId}`);
     }
+    await system(() => currentTaxiSplitDocuments(app.prisma, prod.driverUserId));
     // The fee exemption is the fiction's only: a verified production taxi without a plan stays off the road.
     await system(async () => {
       await app.prisma.driver.update({ where: { id: prod.driverId }, data: { isOnline: false, locationSessionId: null } });

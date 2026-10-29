@@ -20,7 +20,7 @@ import {
 // added as new items (the old import), but it can never update anything.
 // ---------------------------------------------------------------------------
 
-type AddResult = { imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }> };
+type AddResult = Awaited<ReturnType<typeof confirmImport>>;
 type Problem = { code: string; message: string; stores: string[]; headers: string[]; mapping: Partial<Record<ImportField, string>> };
 
 const FIELD_LABELS: Array<[ImportField, string]> = [
@@ -180,7 +180,7 @@ export default function ImportPage() {
   return (
     <div className="max-w-5xl space-y-6">
       <div>
-        <h1 className="text-2xl font-extrabold">Import or update your items</h1>
+        <h1 className="sw-title">Import or update your items</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           Upload the file your till exports, as CSV or Excel. Swift matches each row to your items by its item code (SKU):
           items you already have are updated, new codes are added. You see every change first. Nothing is saved until you
@@ -191,7 +191,7 @@ export default function ImportPage() {
       <div className="flex flex-wrap gap-3">
         <button
           onClick={downloadTemplate}
-          className="flex items-center gap-2 rounded-lg border border-black/10 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-[var(--swift-subtle)]"
+          className="flex items-center gap-2 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 py-2.5 text-sm font-semibold hover:bg-[var(--swift-subtle)]"
         >
           <Download className="h-4 w-4" /> Download the template
         </button>
@@ -219,13 +219,13 @@ export default function ImportPage() {
       {error && <p role="alert" className="rounded-xl bg-[var(--swift-red)]/5 p-4 text-sm text-[var(--swift-red)]">{error}</p>}
 
       {problem?.code === 'CHOOSE_TILL_STORE' && (
-        <section className="rounded-2xl border border-black/5 bg-white p-6">
+        <section className="sw-card p-6">
           <p className="font-bold">This file has more than one till store.</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">Choose the till store that is this Swift store. Only its prices and stock are used.</p>
           <div className="mt-3 flex flex-wrap gap-2">
             {problem.stores.map((s) => (
               <button key={s} onClick={() => reread({ ...choice, tillStore: s })}
-                className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
+                className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
                 {s}
               </button>
             ))}
@@ -234,7 +234,7 @@ export default function ImportPage() {
       )}
 
       {problem && problem.code !== 'CHOOSE_TILL_STORE' && (
-        <section className="rounded-2xl border border-black/5 bg-white p-6">
+        <section className="sw-card p-6">
           <p className="font-bold">Swift could not find all the columns it needs.</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">{problem.message}</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
@@ -242,7 +242,7 @@ export default function ImportPage() {
           </p>
           {sourceCsv && (
             <button onClick={() => readAsNew.mutate()} disabled={readAsNew.isPending}
-              className="mt-3 rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)] disabled:opacity-50">
+              className="mt-3 rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)] disabled:opacity-50">
               My file has no item codes: add every row as a new item
             </button>
           )}
@@ -250,7 +250,7 @@ export default function ImportPage() {
       )}
 
       {fileName && headers.length > 0 && !result && !addResult && (
-        <section className="rounded-2xl border border-black/5 bg-white p-6">
+        <section className="sw-card p-6">
           <p className="flex items-center gap-2 font-bold">
             <FileSpreadsheet className="h-5 w-5 text-[var(--swift-red)]" />
             {fileName}{reading?.profile && reading.profile.id !== 'generic' ? ` — read as a ${reading.profile.label}` : ''}
@@ -265,7 +265,7 @@ export default function ImportPage() {
                 <span className="block font-semibold">{label}</span>
                 <select
                   aria-label={label}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-white px-2 py-1.5"
+                  className="mt-1 w-full rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-2 py-1.5"
                   value={mapping[field] ?? ''}
                   disabled={!sourceCsv || busy}
                   onChange={(e) => chooseColumn(field, e.target.value)}
@@ -297,7 +297,7 @@ export default function ImportPage() {
       {result && <SyncResultPanel result={result} />}
 
       {addReading && (
-        <section className="rounded-2xl border border-black/5 bg-white p-6">
+        <section className="sw-card p-6">
           <p className="font-bold">{plural(addReading.rowCount, 'row')} ready to add as new items</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             Without item codes, a later file cannot update these items. Uploading this file again would add them again.
@@ -313,8 +313,35 @@ export default function ImportPage() {
       )}
 
       {addResult && (
-        <section className="rounded-2xl border border-black/5 bg-white p-6">
-          <p className="text-lg font-extrabold text-green-700">{plural(addResult.imported, 'item')} added</p>
+        <section className="sw-card p-6">
+          <p className="sw-heading text-green-700">{plural(addResult.imported, 'item')} added</p>
+          {(addResult.waitingForCheckCount ?? 0) > 0 && (
+            <>
+              <p className="mt-2 text-sm font-semibold text-amber-700">
+                {addResult.waitingForCheckCount} waiting for a quick check — hidden from customers until Swift checks them:
+              </p>
+              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
+                {(addResult.waitingForCheck ?? []).map((w) => (
+                  <li key={w.row}>Row {w.row}: {w.name}</li>
+                ))}
+                {(addResult.waitingForCheckCount ?? 0) > (addResult.waitingForCheck ?? []).length && (
+                  <li>…and {(addResult.waitingForCheckCount ?? 0) - (addResult.waitingForCheck ?? []).length} more</li>
+                )}
+              </ul>
+            </>
+          )}
+          {(addResult.notesCount ?? 0) > 0 && (
+            <>
+              <p className="mt-2 text-sm font-semibold text-amber-700">
+                {addResult.notesCount === 1 ? '1 row was' : `${addResult.notesCount} rows were`} imported without a photo. Photos are uploaded, never imported: add them on each item.
+              </p>
+              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
+                {(addResult.notes ?? []).map((n) => (
+                  <li key={n.row}>Row {n.row}: {n.note}</li>
+                ))}
+              </ul>
+            </>
+          )}
           {addResult.failedCount > 0 && (
             <>
               <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{plural(addResult.failedCount, 'row')} not added:</p>
@@ -353,9 +380,9 @@ function SyncPreviewPanel({ preview, missing, busy, nothingToApply, onMissing, o
 }) {
   const t = preview.totals;
   return (
-    <section aria-label="Preview" className="space-y-5 rounded-2xl border border-black/5 bg-white p-6">
+    <section aria-label="Preview" className="space-y-5 sw-card p-6">
       <div>
-        <h2 className="text-lg font-extrabold">What will change in {preview.storeName}</h2>
+        <h2 className="sw-heading">What will change in {preview.storeName}</h2>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           {plural(t.rows, 'row')} read. {plural(t.stockChanges, 'stock count')} and {plural(t.priceChanges, 'price')} change,{' '}
           {plural(t.newItems, 'new item')}, {t.unchanged.toLocaleString()} already up to date, {plural(t.needsAttention, 'row')} need attention.
@@ -372,14 +399,14 @@ function SyncPreviewPanel({ preview, missing, busy, nothingToApply, onMissing, o
       {preview.changes.length > 0 && (
         <div>
           <h3 className="font-bold">Changes to your items</h3>
-          <div className="mt-2 overflow-x-auto rounded-xl border border-black/5">
+          <div className="mt-2 overflow-x-auto rounded-xl border border-[var(--swift-border)]">
             <table className="w-full text-sm">
-              <thead className="bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
+              <thead className="bg-[var(--swift-subtle)] text-left text-xs text-[var(--swift-muted)]">
                 <tr><th className="px-3 py-2">Item</th><th className="px-3 py-2">Stock</th><th className="px-3 py-2">Price</th><th className="px-3 py-2">Sold out</th></tr>
               </thead>
               <tbody>
                 {preview.changes.map((c) => (
-                  <tr key={c.itemId} className="border-t border-black/5 align-top">
+                  <tr key={c.itemId} className="border-t border-[var(--swift-border)] align-top">
                     <td className="px-3 py-2">
                       <span className="font-semibold">{c.name}</span>
                       <span className="block text-xs text-[var(--swift-muted)]">SKU {c.sku}</span>
@@ -472,8 +499,8 @@ function SyncResultPanel({ result }: { result: SyncResult }) {
   const t = result.totals;
   const prices = result.changes.filter((c) => c.price);
   return (
-    <section aria-label="Result" className="rounded-2xl border border-black/5 bg-white p-6">
-      <p className="text-lg font-extrabold text-green-700">Done. Your items are updated.</p>
+    <section aria-label="Result" className="sw-card p-6">
+      <p className="sw-heading text-green-700">Done. Your items are updated.</p>
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
         {plural(t.stockChanges, 'stock count')} and {plural(t.priceChanges, 'price')} changed, {plural(t.newItems, 'item')} added
         {t.switchedOffMissing > 0 ? `, ${plural(t.switchedOffMissing, 'missing item')} marked sold out` : ''}.

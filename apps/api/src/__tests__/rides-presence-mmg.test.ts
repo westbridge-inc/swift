@@ -9,6 +9,8 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { walkOrderStatus } from './helpers/order-status-walk';
+import { coarsePoint, PRIVATE_POINT_SNAP_DEG } from '../modules/dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // Presence (5.1/6.2): coarse, capped, hailable-only, jittered — never exact,
@@ -64,6 +66,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
+  // [PAYMENT-SIMPLIFY] These cases cover the driver link's ON path, kept dormant behind DRIVER_MMG_PAY_LINK.
+  process.env['DRIVER_MMG_PAY_LINK'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -127,6 +131,61 @@ describe('GET /rides/presence', () => {
   });
 });
 
+describe('[F17] presence carries nothing a passenger can undo with a driver id', () => {
+  it('every car is a point of the shared coarse grid, and two cars parked together are the same point whoever drives them', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const parked = { lat: 6.8031, lng: -58.1571 };
+    await makeDriver({ at: parked });
+    await makeDriver({ at: parked });
+
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/rides/presence?lat=${GT.lat}&lng=${GT.lng}`,
+      headers: { authorization: `Bearer ${c.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const cars: { lat: number; lng: number }[] = res.json().data.cars;
+    expect(cars.length).toBeGreaterThanOrEqual(2);
+    const onGrid = (v: number) => Math.abs(v / PRIVATE_POINT_SNAP_DEG - Math.round(v / PRIVATE_POINT_SNAP_DEG)) < 1e-6;
+    for (const car of cars) {
+      expect(onGrid(car.lat) && onGrid(car.lng), `off-grid presence point ${car.lat},${car.lng}`).toBe(true);
+    }
+    // No per-driver component: both parked cars land on the parked spot's own cell.
+    const cell = coarsePoint(parked.lat, parked.lng)!;
+    expect(cars.filter((car) => car.lat === cell.lat && car.lng === cell.lng).length).toBe(2);
+  });
+});
+
+describe('[F17 · REVIEW-M S3-1] the presence radius decides on the cell, never on the true position', () => {
+  it('walking the query point across the radius edge finds the grid cell, not the parked car', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // Far from every other fixture here, so this lone car is the only one the walk can see.
+    const truth = { lat: 7.41237, lng: -58.98431 };
+    await makeDriver({ at: truth });
+    const cell = coarsePoint(truth.lat, truth.lng)!;
+    const seen = async (lat: number, lng: number) => {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/rides/presence?lat=${lat}&lng=${lng}`, headers: { authorization: `Bearer ${c.token}` } });
+      expect(res.statusCode, res.body).toBe(200);
+      return (res.json().data.cars as unknown[]).length > 0;
+    };
+    // Binary-search the north and south edges of visibility along the cell's own meridian.
+    const edge = async (outward: number) => {
+      let inside = truth.lat;
+      let outside = truth.lat + outward;
+      for (let i = 0; i < 40; i += 1) {
+        const mid = (inside + outside) / 2;
+        if (await seen(mid, cell.lng)) inside = mid; else outside = mid;
+      }
+      return inside;
+    };
+    const recoveredLat = ((await edge(0.2)) + (await edge(-0.2))) / 2;
+    const metres = (dLat: number) => Math.abs(dLat) * 111_195;
+    // The walk recovers the cell (what the map already shows), not the car inside it.
+    expect(metres(recoveredLat - cell.lat)).toBeLessThan(2);
+    expect(metres(cell.lat - truth.lat)).toBeGreaterThan(50); // this fixture's car sits well inside its cell
+    expect(metres(recoveredLat - truth.lat)).toBeGreaterThan(10);
+  });
+});
+
 describe('MMG pay-link exposure (trip-end surface only)', () => {
   it('hides the link before the trip and reveals it in progress and on the receipt', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -151,7 +210,7 @@ describe('MMG pay-link exposure (trip-end surface only)', () => {
     expect(before.json().data.driver.mmgPayUrl).toBeNull();
 
     // Underway: the link rides along for the post-trip sheet.
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'RIDE_IN_PROGRESS' } });
+    await walkOrderStatus(app.prisma, order.id, 'RIDE_IN_PROGRESS');
     const during = await active(c.token);
     expect(during.json().data.driver.mmgPayUrl).toBe('https://pay.example.com/pay/driver-1');
 
@@ -162,9 +221,20 @@ describe('MMG pay-link exposure (trip-end surface only)', () => {
     });
     expect(receipt.json().data.driver.mmgPayUrl).toBe('https://pay.example.com/pay/driver-1');
 
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'PENDING', driverId: d.driverId } });
+    // [row 264] A delivered ride never goes back to PENDING (the database refuses it):
+    // the matching-phase fetch is of a second ride, born PENDING.
+    const matchingOrder = await app.prisma.order.create({
+      data: {
+        orderNumber: `PM-MATCH-${seq}`, orderType: 'TAXI', customerId: c.userId, driverId: d.driverId,
+        status: 'PENDING',
+        pickupAddress: 'A', pickupLat: GT.lat, pickupLng: GT.lng,
+        deliveryAddress: 'B', deliveryLat: 6.8143, deliveryLng: -58.1443,
+        subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500,
+        deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+      } as never,
+    });
     const matching = await app.inject({
-      method: 'GET', url: `/api/v1/rides/${order.id}`, headers: { authorization: `Bearer ${c.token}` },
+      method: 'GET', url: `/api/v1/rides/${matchingOrder.id}`, headers: { authorization: `Bearer ${c.token}` },
     });
     expect(matching.json().data.driver.mmgPayUrl).toBeNull();
   });

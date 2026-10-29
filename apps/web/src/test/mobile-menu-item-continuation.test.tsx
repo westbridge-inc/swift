@@ -17,7 +17,7 @@ vi.mock('../../../mobile/src/hooks/customer', () => ({
   useItemSlots: () => state.slots,
 }));
 vi.mock('../../../mobile/src/stores/bookingStore', () => ({ useBookingStore: (select: any) => select({ setAppointment: vi.fn() }) }));
-vi.mock('../../../mobile/src/lib/images', () => ({ itemPhoto: () => null }));
+vi.mock('../../../mobile/src/lib/images', () => ({ itemPhoto: () => null, HERO_PHOTO_WIDTH: 1280 }));
 vi.mock('../../../mobile/src/kit/after-dismiss', () => ({ afterDismiss: (fn: () => void) => fn() }));
 vi.mock('../../../mobile/node_modules/react-native', () => ({ Dimensions: { get: () => ({ width: 390 }) }, ScrollView: ({ children }: any) => <div>{children}</div>, View: ({ children }: any) => <div>{children}</div> }));
 vi.mock('../../../mobile/node_modules/@expo/vector-icons', () => ({ Feather: () => null }));
@@ -29,6 +29,7 @@ vi.mock('../../../mobile/node_modules/@react-navigation/native', () => ({
 vi.mock('../../../mobile/src/kit', () => ({
   Photo: () => null, Money: () => null, IconChip: () => null,
   LoadingBlock: () => <div>Loading item</div>, ErrorState: () => <div>Item unavailable</div>,
+  Header: () => <button>Back</button>, EmptyState: ({ title }: any) => <div>{title}</div>,
   T: ({ children }: any) => <span>{children}</span>,
   SectionHeader: ({ title }: any) => <h2>{title}</h2>,
   PopupCard: ({ children, visible }: any) => visible ? <div>{children}</div> : null,
@@ -37,6 +38,7 @@ vi.mock('../../../mobile/src/kit', () => ({
   CircleChip: ({ label, onPress }: any) => <button onClick={onPress}>{label}</button>,
   PillButton: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
   QtyStepper: ({ value, onInc }: any) => <button onClick={onInc}>Quantity {value}</button>,
+  LabeledInput: ({ label, value, onChangeText }: any) => <input aria-label={label} value={value} onChange={(e) => onChangeText(e.target.value)} />,
 }));
 
 const item = { id: 'roti', name: 'Roti', basePrice: 800, stockQuantity: null, isAvailable: true, optionGroups: [
@@ -127,4 +129,50 @@ describe('guest item Add survives sign-in on the scanned store', () => {
     expect(state.params['addAfterSignIn']).toBeUndefined();
   });
 
+
+  it('[row 70] a signed-in Add sends the item note; an empty note sends none', () => {
+    state.auth.isAuthenticated = true;
+    render(<MenuItemScreen />);
+    fireEvent.change(screen.getByLabelText('Note for the store'), { target: { value: '  No onions  ' } });
+    fireEvent.click(screen.getByRole('button', { name: /Add to cart/ }));
+    expect(state.mutate).toHaveBeenCalledExactlyOnceWith(
+      { vendorId: 'scanned-store', itemId: 'roti', quantity: 1, selectedOptions: { filling: 'pumpkin' }, specialInstructions: 'No onions' },
+      expect.any(Object),
+    );
+  });
+
+  it('[row 70] the item note survives sign-in with the rest of the draft', async () => {
+    render(<MenuItemScreen />);
+    fireEvent.change(screen.getByLabelText('Note for the store'), { target: { value: 'Extra pepper' } });
+    fireEvent.click(screen.getByRole('button', { name: /Add to cart/ }));
+    const deliver = vi.fn((_destination: AuthContinuationDestination) => true);
+    expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent: 'customer' }, deliver)).toBe('delivered');
+    expect(deliver.mock.calls[0]![0]).toMatchObject({ addDraft: { notes: 'Extra pepper' } });
+  });
+});
+
+describe('[F4] the phone never chooses a sold-out option', () => {
+  const soldOutDefault = { ...item, optionGroups: [{ ...item.optionGroups[0]!, options: [
+    { id: 'pumpkin', name: 'Pumpkin', isDefault: true, isAvailable: false },
+    { id: 'chickpea', name: 'Chickpea', isAvailable: true },
+  ] }] };
+
+  it('a sold-out default is shown as sold out, is not pre-selected and cannot be tapped; the customer chooses', () => {
+    state.auth.isAuthenticated = true;
+    state.vendor = { ...vendor, data: { ...vendor.data, categories: [{ items: [soldOutDefault] }] } };
+    render(<MenuItemScreen />);
+    const soldOut = screen.getByRole('button', { name: 'Pumpkin · sold out' });
+    expect(soldOut.getAttribute('aria-pressed')).not.toBe('true');
+    fireEvent.click(soldOut);
+    expect(soldOut.getAttribute('aria-pressed')).not.toBe('true');
+    expect((screen.getByRole('button', { name: 'Choose required options' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(state.mutate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Chickpea/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add to cart/ }));
+    expect(state.mutate).toHaveBeenCalledExactlyOnceWith(
+      { vendorId: 'scanned-store', itemId: 'roti', quantity: 1, selectedOptions: { filling: 'chickpea' } },
+      expect.any(Object),
+    );
+  });
 });

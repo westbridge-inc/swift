@@ -29,13 +29,31 @@ export const getRiderProfile = () => absentOrThrow<Record<string, unknown>>(apiF
 export const getDriverProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile'));
 
 // ── Earnings ────────────────────────────────────────────────────────────────
-export const getRiderSummary = () => absentOrThrow<{
+/** Today / this week / this month / all time, each { total, count } — the SAME shape on the rider and the driver
+ *  route (driver.routes SWIFT-080), the one the phone's Earnings screen reads. */
+export interface EarningsSummary {
   today: { total: number; count: number };
   thisWeek: { total: number; count: number };
   thisMonth: { total: number; count: number };
   allTime: { total: number; count: number };
   pendingPayout: number;
-}>(apiFetch('/api/v1/rider/earnings/summary'));
+  /** [Board 13a "CASH COLLECTED"] The cash kept from cash jobs per window (api dispatch/cash-in-hand.ts). Absent from
+   *  an older API, so optional and never defaulted to 0. */
+  cashInHand?: { today: unknown; thisWeek: unknown; thisMonth: unknown; allTime: unknown };
+}
+export const getRiderSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/rider/earnings/summary'));
+/** [P36 · board 13d / W3] A taxi driver's office shows the same four windows as the phone (it showed all-time only). */
+export const getDriverSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/driver/earnings/summary'));
+
+/** [P36 · board 13d "Download statement"] The phone's earnings statement: the server mints a short-lived signed
+ *  path (?link=1) that opens without the session, the same link the phone's in-app browser opens. */
+export const getEarningsStatementPath = (role: 'rider' | 'driver') =>
+  apiFetch(`/api/v1/${role}/earnings/statement?link=1`).then((r) => {
+    const path = (r.data as { path?: unknown } | null | undefined)?.path;
+    // [REVIEW-G #2113 S4-1] A path on Swift's API only: '//host' would be protocol-relative under an empty origin.
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error('Statement link missing from the response.');
+    return path;
+  });
 
 export const getRiderEarnings = (page = 1) =>
   apiFetch(`/api/v1/rider/earnings?page=${page}&limit=25`).then((r) => ({
@@ -80,7 +98,8 @@ export const cancelPendingMmgPayUrl = () =>
 // ── Documents (verification) ────────────────────────────────────────────────
 export interface DocStatus {
   checklist: string[];
-  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string }>;
+  // [REPLACE-PENDING] `replaced`: this copy replaced an earlier one that was still waiting for review.
+  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string; replaced?: boolean }>;
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;
@@ -99,6 +118,7 @@ export const uploadVerificationFile = (file: File) => {
 export const submitVerificationDocument = (docType: string, fileUrl: string) =>
   apiFetch('/api/v1/verification/documents', {
     method: 'POST',
-    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5)
-    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
+    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5); [R17] the API records that
+    // tick in the consent ledger, anchored to the box's exact words (document_v1)
+    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });

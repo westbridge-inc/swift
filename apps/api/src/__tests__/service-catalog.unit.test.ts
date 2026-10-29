@@ -24,12 +24,23 @@ describe('service catalogue authority', () => {
     }
   });
 
-  it.each(['barbering', 'hair stylist', 'tutoring'])('keeps the %s alias canonical but held until its checks exist', (alias) => {
+  // [TRADES · 13 Oct; R15 · 15 Oct 2026] tutoring opened with its checks (service-trades-launch tests); barbering
+  // and hair stay held (research A9: UNSURE), with the lawyer.
+  it.each(['barbering', 'hair stylist', 'attorney at law'])('keeps the %s alias canonical but held until its checks exist', (alias) => {
     const trade = canonicalServiceTrade(alias)!;
     expect(trade).not.toBeNull();
     expect(() => requireCanonicalServiceTrade(alias)).toThrow('not accepting profiles or requests yet');
     const category = publicServiceCatalog().categories.find((entry) => entry.id === trade)!;
     expect(category.quoteRequestsEnabled).toBe(false);
+    expect(category.modes).toEqual(['QUOTE_JOB']);
+    expect(category.appointmentsEnabled).toBe(false);
+  });
+
+  it.each(['tutoring'])('accepts the %s alias now that its checks exist', (alias) => {
+    const trade = canonicalServiceTrade(alias)!;
+    expect(requireCanonicalServiceTrade(alias)).toBe(trade);
+    const category = publicServiceCatalog().categories.find((entry) => entry.id === trade)!;
+    expect(category.quoteRequestsEnabled).toBe(true);
     expect(category.modes).toEqual(['QUOTE_JOB']);
     expect(category.appointmentsEnabled).toBe(false);
   });
@@ -73,19 +84,24 @@ describe('service catalogue authority', () => {
     const documents = (id: string) => catalog.categories.find((entry) => entry.id === id)!.documents;
     expect(documents('barber').some((doc) => doc.label.includes('hygiene'))).toBe(true);
     expect(documents('lawyer').some((doc) => doc.label.includes('Right to practise'))).toBe(true);
-    expect(documents('tutor').some((doc) => doc.label.includes('safeguarding'))).toBe(true);
+    expect(documents('tutor').some((doc) => doc.label.includes('tutors work with children'))).toBe(true);
     expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'barber')).toBe(false);
-    expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'electrician')).toBe(true);
+    // [ROLE-DOCS · owner 21 Oct 2026] a GEI_LICENCE qualification badges no trade, electrician included:
+    // the GEI licence is the electrician's required checklist document
+    expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'electrician')).toBe(false);
+    expect(qualificationTypeMatchesTrade('CVQ', 'electrician')).toBe(true);
     expect(catalog.categories.every((category) => !category.appointmentsEnabled)).toBe(true);
   });
 
   it('holds every category with an unresolved policy topic at profile, request, and document gates', async () => {
     const held = publicServiceCatalog().categories.filter((category) =>
       category.documents.some((document) => document.status === 'POLICY_REVIEW_REQUIRED'));
+    // [TRADES · 13 Oct; R15 · 15 Oct 2026] pest control, chef, caterer, tutor and photographer opened with
+    // their checks; the trades the research marks UNSURE stay held with the lawyer, and [owner 16 Oct] the
+    // heavy-equipment operator is held again (licence rules unconfirmed); [ROLE-DOCS · owner 21 Oct] the AC &
+    // refrigeration technician and the mover are held (not clear = held).
     expect(held.map((category) => category.id)).toEqual([
-      'gas_fitter', 'pest_control', 'heavy_equipment_operator', 'chef', 'caterer',
-      'barber', 'hairdresser', 'tutor', 'salon', 'nail_technician', 'makeup_artist',
-      'photographer', 'lawyer', 'accountant',
+      'gas_fitter', 'ac_refrigeration', 'heavy_equipment_operator', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant', 'mover',
     ]);
     for (const category of held) {
       expect(category.quoteRequestsEnabled, category.id).toBe(false);

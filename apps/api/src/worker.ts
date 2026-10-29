@@ -11,14 +11,14 @@
  * unchanged — the API keeps running its own workers.
  *
  * Socket emits from jobs reach user/vendor/order rooms through the Socket.IO
- * Redis adapter (production), exactly like the in-process topology; the local
+ * Redis adapter (production, loadtest/staging, development: see
+ * utils/worker-socket-adapter.ts), exactly like the in-process topology; the local
  * io instance here is a broadcast-only handle with no HTTP listener.
  */
 // FIRST: secrets delivered as files (NAME_FILE) become NAME in this process
 // before any module below can read process.env. Keep this import on top.
 import './boot/secret-files';
 import Redis from 'ioredis';
-import { PrismaClient } from '@prisma/client';
 import { Server } from 'socket.io';
 import { pino } from 'pino';
 import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
@@ -28,7 +28,12 @@ import { initSentry } from './plugins/observability';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
-import { isProduction } from './utils/runtime-mode';
+import { setAppLogger } from './utils/logger';
+import { attachWorkerSocketAdapter } from './utils/worker-socket-adapter';
+import { createScopedProcessClient } from './plugins/prisma';
+import { attestTenantWallAtBoot } from './boot/tenant-wall';
+import { attestSystemLoginAtBoot } from './boot/system-login';
+import { assertDeploymentIdentityMatchesMode } from './utils/deployment-identity';
 
 async function main() {
   assertSafeBootConfig();
@@ -39,6 +44,10 @@ async function main() {
   initSentry();
 
   const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info', redact: loggerRedactConfig, serializers: loggerSerializers });
+  // [M013] Deep services log through utils/logger's log(), which is console
+  // until a process hands it a logger (app.ts does for the API). Without this
+  // every log() line inside a job printed raw error text with no redaction.
+  setAppLogger(log);
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
     maxRetriesPerRequest: null,
   });
@@ -47,8 +56,16 @@ async function main() {
   // on pool_timeout the moment it got busy — money jobs included. Sized here at
   // the construction seam so a deploy that supplies its own DATABASE_URL (the
   // real ones do) still gets it. See utils/db-pool.ts.
-  const prisma = new PrismaClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
+  //
+  // [MASTER-075] The SAME construction as the API's client (tenant scoping,
+  // append-only evidence, system-transaction routing) — never a raw client.
+  const prisma = createScopedProcessClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
   redis.on('error', (err) => log.error({ err }, 'Worker Redis connection error'));
+  // [S3-L1] Only on a database of this process's own kind (its
+  // deployment_identity), before any job runs; a refusal exits 1 (below).
+  await assertDeploymentIdentityMatchesMode(prisma);
+  // [Row 312 · COORD 22 Oct] The rescan job's payload failures start the same shared cool-down the API reads.
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(redis)); }
 
   const io = new Server();
   const adapterConns: Redis[] = [];
@@ -121,23 +138,18 @@ async function main() {
   });
 
   try {
+    // [MASTER-075] The worker serves Swift's data like the API does, so it
+    // attests the tenant wall the same way — and refuses the same postures —
+    // before a single job runs. [L04 · R1] Under the enforced wall, system
+    // jobs (SOS escalation among them) read through the system login, so it
+    // must be reachable and a bypass member too. Both, always, in this order
+    // (system-login-boot.test.ts gates it).
+    await attestTenantWallAtBoot(prisma, log);
+    await attestSystemLoginAtBoot(prisma, log);
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
-    if (isProduction()) {
-      const { createAdapter } = await import('@socket.io/redis-adapter');
-      const pub = redis.duplicate();
-      const sub = redis.duplicate();
-      adapterConns.push(pub, sub);
-      for (const [kind, connection] of [['publish', pub], ['subscribe', sub]] as const) {
-        connection.on('error', (err) => log.error({ err, kind }, 'Socket.IO Redis adapter error'));
-      }
-      await withTimeout(
-        Promise.all(adapterConns.map((connection) => connection.ping())),
-        startupTimeoutMs,
-        'Socket.IO Redis adapter startup',
-      );
-      io.adapter(createAdapter(pub, sub));
-    }
+    // Production, loadtest (staging) and development: job emits reach the API's sockets through Redis.
+    await attachWorkerSocketAdapter({ io, redis, log, startupTimeoutMs }, adapterConns);
 
     runtime = await initializeJobRuntime({ prisma, io, redis, log }, { runWorkers: true });
     log.info(

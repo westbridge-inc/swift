@@ -15,6 +15,7 @@
 // provision.ts.
 
 import { randomBytes } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import { signupOrLogin, login, FIXTURE_PNG, upload, POST, type Session } from './client.js';
 
 export interface Handle { id: string; phone: string; session: Session; lat: number; lng: number }
@@ -31,7 +32,7 @@ export interface Roster {
 const CUSTOMERS = [
   { id: 'C1', phone: '+5920401001', first: 'Aria', lat: 6.8125, lng: -58.1500 },
   { id: 'C2', phone: '+5920401002', first: 'Ben', lat: 6.8060, lng: -58.1585 },
-  { id: 'C3', phone: '+5920401003', first: 'Cleo', lat: 6.8230, lng: -58.1420 }, // L1 tier-gate testbed
+  { id: 'C3', phone: '+5920401003', first: 'Cleo', lat: 6.8230, lng: -58.1420 }, // L1 (no ID on file) testbed: no ID gate since 24 Oct 2026
   { id: 'C4', phone: '+5920401004', first: 'Dev', lat: 6.8045, lng: -58.1633 },
   { id: 'C5', phone: '+5920401005', first: 'Esi', lat: 6.7980, lng: -58.1570 },
   { id: 'C6', phone: '+5920401006', first: 'Femi', lat: 6.8150, lng: -58.1445 },
@@ -69,9 +70,18 @@ export function fixturePhones(): string[] {
   ];
 }
 
-/** Selfie bytes unique per account: a valid PNG header, then an ignored trailer. */
+/** Photo bytes unique per call: the real 1×1 PNG with a tEXt chunk (valid
+ *  length and CRC) carrying the label just after IHDR. A trailer after IEND is
+ *  NOT used: the storage seam walks every chunk and the label is metadata it
+ *  strips, so the stored photo is the plain image. */
 export function uniquePng(label: string): Buffer {
-  return Buffer.concat([FIXTURE_PNG, Buffer.from(`\n${label}:${randomBytes(8).toString('hex')}`)]);
+  const data = Buffer.from(`Comment\0${label}:${randomBytes(8).toString('hex')}`, 'latin1');
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from('tEXt', 'ascii'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body) >>> 0, 0);
+  return Buffer.concat([FIXTURE_PNG.subarray(0, 33), len, body, crc, FIXTURE_PNG.subarray(33)]);
 }
 
 async function selfie(session: Session, label: string): Promise<boolean> {

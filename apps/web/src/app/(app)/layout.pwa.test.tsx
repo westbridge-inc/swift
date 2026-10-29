@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
+import { loadInstallCard } from '@/components/install-prompt';
 import CartPage from './cart/page';
 import * as api from '@/lib/customer';
 
@@ -30,6 +31,10 @@ function installEvent() {
 
 const card = () => screen.queryByRole('complementary', { name: 'Install Swift' });
 
+// [PWA-1] As once an offer is possible on Home: the card's code has arrived
+// (install-prompt-loading.test.tsx covers an offer that comes before it).
+beforeAll(() => loadInstallCard());
+
 beforeEach(() => {
   state.pathname = '/';
   state.principal = 'c1';
@@ -43,12 +48,14 @@ describe('[PWA-1] the customer shell, installed', () => {
     await screen.findByText('Home page');
     fireEvent.click(screen.getByText('Home page'));
     fireEvent.click(screen.getByText('Home page'));
-    expect(container.querySelector('header')?.className).toContain('pt-[env(safe-area-inset-top)]');
-    expect(screen.getByRole('navigation', { name: 'Swift tabs' }).className).toContain('pb-[env(safe-area-inset-bottom)]');
+    // [WEB-REDESIGN] Phones have no top bar: the page itself starts below the
+    // status bar, and so does the side rail from 760 px.
     const main = container.querySelector('main')?.className ?? '';
-    expect(main).toContain('env(safe-area-inset-bottom)');
-    // On phones the page ends above the dock (3.5rem) and the home bar.
-    expect(main).toContain('pb-[calc(5rem_+_env(safe-area-inset-bottom))]');
+    expect(main).toContain('pt-[env(safe-area-inset-top)]');
+    expect(container.querySelector('header')?.className).toContain('env(safe-area-inset-top)');
+    expect(screen.getByRole('navigation', { name: 'Swift tabs' }).className).toContain('pb-[env(safe-area-inset-bottom)]');
+    // On phones the page ends above the dock and the home bar (--swift-dock).
+    expect(main).toContain('pb-[calc(var(--swift-dock)_+_40px)]');
   });
 
   it('catches the install event on another page, and offers it once Home is reached', async () => {
@@ -86,11 +93,11 @@ describe('[PWA-1] the customer shell, installed', () => {
     fireEvent.click(screen.getByText('Home page'));
     act(() => { window.dispatchEvent(installEvent()); });
     expect(card()?.className).toContain('var(--swift-dock');
-    // The shell says how tall the dock is: the dock plus the home bar on
-    // phones, the home bar alone from md up.
+    // The shell says how tall the dock is: the dock (60 px, the design's) plus
+    // the home bar on phones, the home bar alone from 760 px up.
     const shell = container.querySelector('.swift-app')?.className ?? '';
-    expect(shell).toContain('[--swift-dock:calc(3.5rem_+_env(safe-area-inset-bottom))]');
-    expect(shell).toContain('md:[--swift-dock:env(safe-area-inset-bottom)]');
+    expect(shell).toContain('[--swift-dock:calc(60px_+_env(safe-area-inset-bottom))]');
+    expect(shell).toContain('wide:[--swift-dock:env(safe-area-inset-bottom)]');
     const clearance = container.querySelector('[data-install-clearance]');
     expect(clearance?.parentElement).toBe(container.querySelector('.swift-app'));
     expect(container.querySelector('main')!.compareDocumentPosition(clearance!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -118,14 +125,15 @@ describe('[PWA-1] the customer shell, installed', () => {
     vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
     render(<AppLayout><CartPage /></AppLayout>);
     fireEvent.click(await screen.findByRole('button', { name: 'Add a delivery address' }));
-    const address = screen.getByRole('textbox', { name: 'Search the delivery destination' }) as HTMLInputElement;
+    // The address form (a pin on the map, then its fields) loads on demand.
+    const address = await screen.findByRole('textbox', { name: 'Street address' }) as HTMLInputElement;
     fireEvent.change(address, { target: { value: 'Test destination, Georgetown' } });
     act(() => { window.dispatchEvent(new Event('offline')); });
     expect(screen.getByText('You’re offline.')).toBeTruthy();
     act(() => { window.dispatchEvent(new Event('online')); });
     expect(reload).not.toHaveBeenCalled();
     expect(screen.queryByText('You’re offline.')).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'Search the delivery destination' })).toBe(address);
+    expect(screen.getByRole('textbox', { name: 'Street address' })).toBe(address);
     expect(address.value).toBe('Test destination, Georgetown');
   });
 });

@@ -149,6 +149,28 @@ class JourneysIsolationChecker(unittest.TestCase):
         model["services"]["journeys"]["network_mode"] = "host"
         self.assert_refused(model, "journeys uses the host network", "--require-journeys")
 
+    def test_the_private_api_may_join_the_internal_scanner_network_and_nothing_else(self):
+        # [Row 312 · COORD 21 Oct] clamd sits on its own internal network shared only with the API;
+        # the private instance IS the API (it scans its uploads), so it may join that one network.
+        model = rendered_model()
+        model["networks"]["scanner"] = {"name": "swift_scanner", "internal": True}
+        model["services"]["api-journeys"]["networks"] = {"private": None, "scanner": None}
+        result = check(model, "--require-journeys")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # ... only while it has no route out,
+        model["networks"]["scanner"] = {"name": "swift_scanner"}
+        self.assert_refused(model, "api-journeys must be attached to swift-pilot-private only", "--require-journeys")
+        # ... never in place of the private network,
+        model = rendered_model()
+        model["networks"]["scanner"] = {"name": "swift_scanner", "internal": True}
+        model["services"]["api-journeys"]["networks"] = {"scanner": None}
+        self.assert_refused(model, "api-journeys must be attached to swift-pilot-private only", "--require-journeys")
+        # ... and never for the runner.
+        model = rendered_model()
+        model["networks"]["scanner"] = {"name": "swift_scanner", "internal": True}
+        model["services"]["journeys"]["networks"] = {"private": None, "scanner": None}
+        self.assert_refused(model, "journeys must be attached to swift-pilot-private only", "--require-journeys")
+
     def test_refuses_a_non_external_private_network(self):
         model = rendered_model()
         model["networks"]["private"] = {"name": "swift-pilot-private"}
@@ -222,7 +244,7 @@ class JourneysIsolationChecker(unittest.TestCase):
 class PilotUpRefusesAnUnsafeOverride(unittest.TestCase):
     """verify_private_ports, extracted from pilot-up.sh and run against a fake `docker`."""
 
-    def run_verify(self, base_model, journeys_model, with_override=True):
+    def run_verify(self, base_model, journeys_model, with_override=True, pilot_env="staging", compose_extra="", caddyfile_text=None):
         source = (DEPLOY / "pilot-up.sh").read_text()
         body = source[source.index("verify_private_ports() {"):source.index("\nverify_private_ports\n")]
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,16 +252,22 @@ class PilotUpRefusesAnUnsafeOverride(unittest.TestCase):
             here = tmp / "deploy"
             here.mkdir()
             shutil.copy(CHECKER, here / CHECKER.name)
-            shutil.copy(CADDYFILE, here / "Caddyfile")
+            if caddyfile_text is None:
+                shutil.copy(CADDYFILE, here / "Caddyfile")
+            else:
+                (here / "Caddyfile").write_text(caddyfile_text)
             if with_override:
                 (here / "docker-compose.journeys.yml").write_text("# fixture\n")
             (tmp / "base.json").write_text(json.dumps(base_model))
             (tmp / "journeys.json").write_text(json.dumps(journeys_model))
             routing = {"services": {"osrm": {"image": "osrm"}}}
             (tmp / "routing.json").write_text(json.dumps(routing))
+            calls = tmp / "calls"
+            calls.write_text("")
             fake = tmp / "docker"
             fake.write_text(
                 "#!/bin/sh\n"
+                f'echo "docker $*" >> "{calls}"\n'
                 f'case "$*" in *docker-compose.journeys.yml*) cat "{tmp}/journeys.json";;\n'
                 f'  *docker-compose.routing.yml*) cat "{tmp}/routing.json";;\n'
                 f'  *) cat "{tmp}/base.json";; esac\n'
@@ -248,13 +276,24 @@ class PilotUpRefusesAnUnsafeOverride(unittest.TestCase):
             script = (
                 "set -euo pipefail\n"
                 f'HERE="{here}"\n'
-                'COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")\n'
+                f'PILOT_ENV="{pilot_env}"\n'
+                f'COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml"{compose_extra})\n'
                 'ROUTING=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.routing.yml")\n'
                 'die() { echo "FATAL: $*" >&2; exit 1; }\n'
                 f"{body}\nverify_private_ports\necho VERIFIED\n"
             )
             env = {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}"}
-            return subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=20)
+            result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=20)
+            result.calls = calls.read_text()
+            return result
+
+    def production_journeys_model(self):
+        """What the override renders on a production host: api-journeys extends
+        the public api, so it inherits NODE_ENV=production."""
+        model = rendered_model()
+        for name in ("api", "worker", "api-journeys"):
+            model["services"][name]["environment"]["NODE_ENV"] = "production"
+        return model
 
     def public_only(self):
         model = rendered_model()
@@ -281,6 +320,109 @@ class PilotUpRefusesAnUnsafeOverride(unittest.TestCase):
         result = self.run_verify(base, rendered_model(), with_override=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("public API isolation failed", result.stderr)
+
+
+    # [PROD-PATH] Production never hosts journeys. The override always exists
+    # in the repository, and on a production host its api-journeys inherits
+    # NODE_ENV=production, so --require-journeys could never pass there and
+    # production could never stand up (found at the 14 Oct stand-up).
+    def production_public(self):
+        model = self.public_only()
+        for name in ("api", "worker"):
+            model["services"][name]["environment"]["NODE_ENV"] = "production"
+        return model
+
+    def test_production_with_the_override_in_the_repo_passes_and_never_renders_it(self):
+        result = self.run_verify(self.production_public(), self.production_journeys_model(), pilot_env="production")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("VERIFIED", result.stdout)
+        self.assertNotIn("docker-compose.journeys.yml", result.calls)
+        self.assertNotIn("--profile journeys", result.calls)
+
+    def test_staging_still_verifies_the_override_and_refuses_a_bad_one(self):
+        ok = self.run_verify(self.public_only(), rendered_model(), pilot_env="staging")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("docker-compose.journeys.yml --profile journeys config --format json", ok.calls)
+        bad = self.run_verify(self.public_only(), self.production_journeys_model(), pilot_env="staging")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("journeys override isolation failed", bad.stderr)
+        self.assertIn("NODE_ENV=loadtest", bad.stderr)
+
+    def test_production_refuses_a_stack_that_holds_a_journey_service(self):
+        for name in ("api-journeys", "journeys"):
+            base = self.production_public()
+            base["services"][name] = self.production_journeys_model()["services"][name]
+            result = self.run_verify(base, self.production_journeys_model(), pilot_env="production")
+            self.assertNotEqual(result.returncode, 0, name)
+            self.assertIn("production journeys exclusion failed", result.stderr, name)
+            self.assertIn("production never hosts journeys", result.stderr, name)
+
+    def test_production_refuses_a_compose_command_that_names_the_override_or_its_profile(self):
+        for extra in (" --profile journeys", ' -f "$HERE/docker-compose.journeys.yml"'):
+            result = self.run_verify(self.production_public(), rendered_model(), pilot_env="production", compose_extra=extra)
+            self.assertNotEqual(result.returncode, 0, extra)
+            self.assertIn("production never hosts journeys", result.stderr, extra)
+            self.assertNotIn("VERIFIED", result.stdout, extra)
+
+    def test_production_refuses_a_caddyfile_that_routes_to_a_journey_service(self):
+        caddy = CADDYFILE.read_text() + "\njourneys.example.invalid {\n\treverse_proxy api-journeys:3000\n}\n"
+        result = self.run_verify(self.production_public(), rendered_model(), pilot_env="production", caddyfile_text=caddy)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("production journeys exclusion failed", result.stderr)
+
+    def test_production_still_refuses_a_public_api_with_a_test_switch(self):
+        for switch in ("DEV_OTP_BYPASS", "TEST_CONTROL_ENABLED"):
+            base = self.production_public()
+            base["services"]["api"]["environment"][switch] = "1"
+            result = self.run_verify(base, rendered_model(), pilot_env="production")
+            self.assertNotEqual(result.returncode, 0, switch)
+            self.assertIn(f"api carries {switch}", result.stderr, switch)
+            self.assertNotIn("VERIFIED", result.stdout, switch)
+
+
+class CheckerForbidsJourneys(unittest.TestCase):
+    """verify-journeys-isolation.py --forbid-journeys, the production check."""
+
+    def run_checker(self, model, *flags, caddyfile=CADDYFILE):
+        return subprocess.run(["python3", str(CHECKER), str(caddyfile), *flags], input=json.dumps(model), text=True, capture_output=True, timeout=10)
+
+    def public_model(self):
+        model = rendered_model()
+        for name in ("api-journeys", "journeys"):
+            del model["services"][name]
+        return model
+
+    def test_a_public_stack_passes(self):
+        result = self.run_checker(self.public_model(), "--forbid-journeys")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no journey service or route", result.stdout)
+
+    def test_either_journey_service_is_refused(self):
+        for name in ("api-journeys", "journeys"):
+            model = self.public_model()
+            model["services"][name] = rendered_model()["services"][name]
+            result = self.run_checker(model, "--forbid-journeys")
+            self.assertEqual(result.returncode, 1, name)
+            self.assertIn(f"{name} is in this configuration; production never hosts journeys", result.stderr)
+
+    def test_a_route_to_a_journey_service_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caddy = Path(tmp) / "Caddyfile"
+            caddy.write_text(CADDYFILE.read_text() + "\nx.example.invalid {\n\treverse_proxy journeys:3000\n}\n")
+            result = self.run_checker(self.public_model(), "--forbid-journeys", caddyfile=caddy)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the Caddyfile routes to a journey service", result.stderr)
+
+    def test_the_public_switches_are_still_refused(self):
+        model = self.public_model()
+        model["services"]["worker"]["environment"]["TEST_CONTROL_ENABLED"] = "1"
+        result = self.run_checker(model, "--forbid-journeys")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("worker carries TEST_CONTROL_ENABLED", result.stderr)
+
+    def test_require_and_forbid_together_are_refused(self):
+        result = self.run_checker(self.public_model(), "--forbid-journeys", "--require-journeys")
+        self.assertEqual(result.returncode, 2)
 
 
 class JourneysComposeText(unittest.TestCase):

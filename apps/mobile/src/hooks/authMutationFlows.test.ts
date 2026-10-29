@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 const mocks = vi.hoisted(() => ({
+  prepareImage: vi.fn(async (file: { uri: string; name: string; type: string }) => file),
   BoundaryError: class TestAuthSessionBoundaryError extends Error {},
   current: null as AuthSessionSnapshot | null,
   user: null as any,
@@ -16,9 +17,11 @@ const mocks = vi.hoisted(() => ({
   currentPosition: vi.fn(),
   uploadVerification: vi.fn(),
   submitDocument: vi.fn(),
+  withdrawPoliceClearance: vi.fn(),
   submitIdentity: vi.fn(),
   becomePartner: vi.fn(),
   changeVehicle: vi.fn(),
+  signOwnName: vi.fn(),
   uploadCourierProof: vi.fn(),
   confirmCourierProof: vi.fn(),
   uploadCourierPickupProof: vi.fn(),
@@ -26,6 +29,11 @@ const mocks = vi.hoisted(() => ({
   primeNotifications: vi.fn(),
   track: vi.fn(),
 }));
+
+vi.mock('../lib/uploadImage', () => ({ prepareUploadImage: mocks.prepareImage }));
+// The courier hook keeps each parcel's Idempotency-Key in device storage
+// (lib/courierRequestAttemptStore); this suite runs without the native MMKV.
+vi.mock('../lib/storage', () => ({ zustandStorage: { getItem: () => null, setItem() {}, removeItem() {} } }));
 
 const accountA: AuthSessionSnapshot = {
   generation: 1,
@@ -93,8 +101,10 @@ vi.mock('../services/api', () => ({
     upload: mocks.uploadVerification,
     submitDocument: mocks.submitDocument,
     submitIdentity: mocks.submitIdentity,
+    withdrawPoliceClearance: mocks.withdrawPoliceClearance,
   },
   partnerApi: { become: mocks.becomePartner, changeVehicle: mocks.changeVehicle },
+  vendorApi: { signOwnName: mocks.signOwnName },
   courierApi: {
     uploadProof: mocks.uploadCourierProof,
     proof: mocks.confirmCourierProof,
@@ -150,7 +160,7 @@ import {
   useSelectMoverKind,
   useUploadVehiclePhoto,
 } from './mover';
-import { useBecomePartner, useChangeVehicle, useUploadDocument } from './verification';
+import { useBecomePartner, useChangeVehicle, useUploadDocument, useWithdrawPoliceClearance } from './verification';
 import { useCourierPickupProof, useCourierProof } from './courier';
 
 function deferred<T>() {
@@ -299,12 +309,64 @@ describe('multi-step authenticated mutation ownership', () => {
       docType: 'GOVERNMENT_ID',
       file: { uri: 'file://id.jpg', name: 'id.jpg', type: 'image/jpeg' },
     });
-    expect(mocks.uploadVerification).toHaveBeenCalledWith(expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadVerification).toHaveBeenCalledWith(expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/private/a-id.jpg' } } });
 
     await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
     expect(mocks.submitDocument).not.toHaveBeenCalled();
+  });
+
+  it('[DOC-CONSENT S4] a document upload tells the API how its consent was given, and names nothing when the screen did not say', async () => {
+    mocks.uploadVerification.mockResolvedValue({ data: { data: { url: '/private/doc.jpg' } } });
+    mocks.submitDocument.mockResolvedValue({ data: { data: { id: 'doc-1' } } });
+    const mutation = useUploadDocument('MOVER') as unknown as CapturedMutation<{
+      docType: string;
+      file: { uri: string; name: string; type: string };
+      consentVia?: 'checkbox' | 'record' | 'prompt';
+    }>;
+    const file = { uri: 'file://licence.jpg', name: 'licence.jpg', type: 'image/jpeg' };
+    for (const consentVia of ['checkbox', 'record', 'prompt'] as const) {
+      mocks.submitDocument.mockClear();
+      await mutation.mutationFn({ docType: 'drivers_licence', file, consentVia });
+      expect(mocks.submitDocument).toHaveBeenCalledWith(expect.objectContaining({ consentTick: 'document_v1', consentVia }), expect.anything());
+    }
+    mocks.submitDocument.mockClear();
+    await mutation.mutationFn({ docType: 'drivers_licence', file });
+    expect(mocks.submitDocument.mock.calls[0]![0]).not.toHaveProperty('consentVia');
+  });
+
+  it('[POLICE-CLEARANCE CONSENT] a police clearance sends its own tick and the words\' version, never the document tick', async () => {
+    mocks.uploadVerification.mockResolvedValue({ data: { data: { url: '/private/pc.jpg' } } });
+    mocks.submitDocument.mockResolvedValue({ data: { data: { id: 'pc-1' } } });
+    const mutation = useUploadDocument('MOVER') as unknown as CapturedMutation<{
+      docType: string; file: { uri: string; name: string; type: string }; consent?: { tick: 'police_clearance_v1'; version: string };
+    }>;
+    await mutation.mutationFn({ docType: 'police_clearance', file: { uri: 'file://pc.jpg', name: 'pc.jpg', type: 'image/jpeg' }, consent: { tick: 'police_clearance_v1', version: 'taxi-v1-30d' } });
+    const body = mocks.submitDocument.mock.calls[0]![0];
+    expect(body).toMatchObject({ docType: 'police_clearance', consentTick: 'police_clearance_v1', consentVersion: 'taxi-v1-30d' });
+  });
+
+  it('[DOC-CONSENT S4 · REVIEW-F] a consent the API refused (no longer on record, or changed words) re-reads the checklist; other failures do not', () => {
+    const mutation = useUploadDocument('MOVER') as unknown as { onError?: (error: unknown) => void };
+    const refused = (code: string) => ({ response: { data: { error: { code } } } });
+    mutation.onError?.(refused('CONSENT_NOT_ON_RECORD'));
+    mutation.onError?.(refused('CONSENT_WORDS_CHANGED'));
+    expect(mocks.invalidateQueries).toHaveBeenCalledTimes(2);
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['verification', 'MOVER'] });
+    mocks.invalidateQueries.mockClear();
+    mutation.onError?.(refused('BAD_TYPE'));
+    mutation.onError?.(new Error('offline'));
+    expect(mocks.invalidateQueries).not.toHaveBeenCalled();
+  });
+
+  it('[POLICE-CLEARANCE CONSENT] withdrawing asks the API for this checklist, as the signed-in account, and refreshes the checklist', async () => {
+    // [REVIEW-F #2111 S3-1] The API's answer as it is: what a legal hold kept and what storage has not confirmed yet.
+    mocks.withdrawPoliceClearance.mockResolvedValue({ data: { data: { withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 } } });
+    const mutation = useWithdrawPoliceClearance('MOVER') as unknown as CapturedMutation<void, { withdrawn: number; keptForLegalHold: number; deletionPending: number }>;
+    await expect(mutation.mutationFn(undefined)).resolves.toEqual({ withdrawn: 1, keptForLegalHold: 1, deletionPending: 0 });
+    expect(mocks.withdrawPoliceClearance).toHaveBeenCalledWith('MOVER', accountA);
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['verification', 'MOVER'] });
   });
 
   it('rejects a delayed A document picker before uploading as B', async () => {
@@ -349,7 +411,7 @@ describe('multi-step authenticated mutation ownership', () => {
     }>;
 
     const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://proof.jpg' });
-    expect(mocks.uploadCourierProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/private/a-proof.jpg' } } });
 
@@ -382,7 +444,7 @@ describe('multi-step authenticated mutation ownership', () => {
     const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
 
     await expect(mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' })).resolves.toEqual({ status: 'PICKED_UP' });
-    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     expect(mocks.confirmCourierPickupProof).toHaveBeenCalledWith(
       'order-a',
       { proofPhotoUrl: '/uploads/courier-proof/order-a/pickup/a.jpg', gps: { lat: 6.81, lng: -58.155 } },
@@ -396,7 +458,7 @@ describe('multi-step authenticated mutation ownership', () => {
     const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
 
     const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
-    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
 
@@ -610,6 +672,55 @@ describe('business form draft follows the durable store-creation result', () => 
     await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
     expect(store.getState().owner).toEqual({ userId: accountB.userId, generation: accountB.generation });
     expect(store.getState().draft).toMatchObject({ name: 'B Barbers', type: 'SERVICE' });
+  });
+
+  // [ROLE-DOCS · owner 21 Oct 2026 · #2046] The owner ticked the own-name declaration before the store existed. It is
+  // signed from this durable result, never from the screen's per-call callback: creating the store swaps the navigator,
+  // and a callback on an unmounted screen never runs.
+  const ownNameRequest = { ...vendorRequest, business: { ...vendorRequest.business, nameBasis: 'OWN_NAME' as const } };
+  const created = { data: { data: { roles: ['CUSTOMER', 'VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } } };
+
+  it('a store under the owner’s own name signs the declaration once the store exists', async () => {
+    const become = deferred<any>();
+    mocks.becomePartner.mockReturnValue(become.promise);
+    mocks.signOwnName.mockResolvedValue({ data: { data: { signed: true } } });
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof ownNameRequest>;
+
+    const result = mutation.mutationFn(ownNameRequest);
+    expect(mocks.signOwnName).not.toHaveBeenCalled(); // no store yet, nothing to sign for
+    become.resolve(created);
+    await result;
+
+    expect(mocks.signOwnName).toHaveBeenCalledTimes(1);
+  });
+
+  it('a registered name signs nothing; a failed signature never fails the store (Documents offers it again)', async () => {
+    mocks.becomePartner.mockResolvedValue(created);
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof ownNameRequest>;
+    await mutation.mutationFn({ ...vendorRequest, business: { ...vendorRequest.business, nameBasis: 'REGISTERED' } } as never);
+    expect(mocks.signOwnName).not.toHaveBeenCalled();
+
+    const store = await drafts();
+    store.getState().clear();
+    store.getState().update(accountA, typedForm);
+    mocks.signOwnName.mockRejectedValue(Object.assign(new Error('Service unavailable'), { response: { status: 503 } }));
+    await expect(mutation.mutationFn(ownNameRequest)).resolves.toBeDefined();
+    expect(mocks.signOwnName).toHaveBeenCalledTimes(1);
+    expect(store.getState().owner).toBeNull(); // the store exists: its form is done all the same
+  });
+
+  it('a late A result never signs the declaration as B', async () => {
+    const become = deferred<any>();
+    mocks.becomePartner.mockReturnValue(become.promise);
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof ownNameRequest>;
+
+    const result = mutation.mutationFn(ownNameRequest);
+    mocks.current = { ...accountB };
+    mocks.user = { id: accountB.userId, firstName: 'Account', lastName: 'B' };
+    become.resolve(created);
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.signOwnName).not.toHaveBeenCalled();
   });
 
   it('a driver application leaves the business form alone', async () => {

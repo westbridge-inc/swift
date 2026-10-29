@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestPasswordResetOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { nanoid } from 'nanoid';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -29,6 +30,9 @@ const REFRESH_LOGOUT_WIN_PHONE = '+5920003341';
 const REFRESH_ROTATE_WIN_PHONE = '+5920003342';
 const REFRESH_PUSH_OWNER_PHONE = '+5920003343';
 const ROLE_AUTHORITY_PHONE = '+5920003344';
+const ROLE_AUTHORITY_ADMIN_PHONE = '+5920003345';
+const ROLE_AUTHORITY_ADMIN_MOVER_PHONE = '+5920003346';
+const ROLE_AUTHORITY_PLAIN_MOVER_PHONE = '+5920003347';
 const PASSWORD = 'correct-horse-battery';
 
 let app: FastifyInstance;
@@ -47,6 +51,9 @@ async function cleanupUsers() {
           REFRESH_ROTATE_WIN_PHONE,
           REFRESH_PUSH_OWNER_PHONE,
           ROLE_AUTHORITY_PHONE,
+          ROLE_AUTHORITY_ADMIN_PHONE,
+          ROLE_AUTHORITY_ADMIN_MOVER_PHONE,
+          ROLE_AUTHORITY_PLAIN_MOVER_PHONE,
         ],
       },
     },
@@ -80,6 +87,9 @@ beforeAll(async () => {
     REFRESH_ROTATE_WIN_PHONE,
     REFRESH_PUSH_OWNER_PHONE,
     ROLE_AUTHORITY_PHONE,
+    ROLE_AUTHORITY_ADMIN_PHONE,
+    ROLE_AUTHORITY_ADMIN_MOVER_PHONE,
+    ROLE_AUTHORITY_PLAIN_MOVER_PHONE,
   ]) {
     await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_hr:${phone}`, `otp_attempt:${phone}`, `otp_verified:${phone}`);
   }
@@ -206,7 +216,9 @@ describe('Signup — OTP mandatory, role + country aware', () => {
     expect(body.data.user.countryCode).toBe('GY');
     expect(body.data.tokens.accessToken).toBeDefined();
     expect(body.data.onboarding.next).toBe('VERIFICATION');
-    expect(body.data.onboarding.requiredDocuments).toContain('national_id');
+    // [VERIFY-DOCS] The MOVER base list from config: nothing is required of every vehicle (identity
+    // comes with the vehicle chosen next — the licence, or the national ID on a bicycle).
+    expect(body.data.onboarding.requiredDocuments).toEqual([]);
   });
 
   it('signs up a VENDOR: vendor owner record + setup onboarding', async () => {
@@ -240,9 +252,14 @@ describe('Email + password login with lockout', () => {
     moverToken = login.json().data.tokens.accessToken;
   });
 
-  it('sets a password (authenticated)', async () => {
+  it('sets a password (authenticated, with a fresh step-up on this session)', async () => {
+    // [L04 · MASTER-003] A password change needs a step-up on THIS session
+    // (refusal without one is graded in auth-credentials.test.ts) and replaces
+    // this session's tokens; the suite carries on with the new access token.
+    await grantStepUp(app, moverToken);
     const res = await inject('POST', '/api/v1/auth/password/set', { password: PASSWORD }, moverToken);
     expect(res.statusCode).toBe(200);
+    moverToken = res.json().data.tokens.accessToken;
   });
 
   it('logs in with phone + password', async () => {
@@ -268,7 +285,7 @@ describe('Email + password login with lockout', () => {
     expect(wrong.json().error.code).toBe(unknown.json().error.code);
   });
 
-  it('locks the account after 5 failures — even the right password is refused', async () => {
+  it('five failures from one address lock password sign-in from that address — even the right password is refused', async () => {
     for (let i = 0; i < 5; i++) {
       const attempt = await inject('POST', '/api/v1/auth/password/login', {
         phone: MOVER_PHONE,
@@ -721,7 +738,13 @@ describe('Role-crossing authorization', () => {
     expect(res.json().success).toBe(false);
   });
 
-  it('uses current server role immediately after SUPER_ADMIN switches to customer', async () => {
+  // [ADMIN-ROLE · launch item, 25 Oct 2026] Console authority is the admin role the
+  // account HOLDS, never the phone app's mode: switching the SUPER_ADMIN's app into
+  // customer mode no longer locks the console (it did, with no way back). The
+  // property this case guards is unchanged and now tested on the role itself: the
+  // still-live token's SUPER_ADMIN claim is never authority, so removing the role
+  // refuses the very next protected request, with the session still alive.
+  it('uses the current server-held role on every request: a switch to customer mode keeps the console, removing SUPER_ADMIN refuses the still-live token at once', async () => {
     const user = await app.prisma.user.create({
       data: {
         phone: ROLE_AUTHORITY_PHONE,
@@ -762,11 +785,81 @@ describe('Role-crossing authorization', () => {
     expect(switched.statusCode).toBe(200);
     expect(switched.json().data.activeRole).toBe('CUSTOMER');
 
-    // The same still-live token contains SUPER_ADMIN, but its stale claim is
-    // no longer authority for the very next protected request.
+    // The app's mode is not authority: the account still holds SUPER_ADMIN.
+    const stillAdmin = await inject('GET', '/api/v1/admin/dashboard/overview', undefined, token);
+    expect(stillAdmin.statusCode).toBe(200);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { activeRole: true } })).activeRole).toBe('CUSTOMER');
+
+    // The role is: removed in the database, the same still-live token (its
+    // claim still says SUPER_ADMIN) is no longer authority for the very next
+    // protected request.
+    await app.prisma.user.update({ where: { id: user.id }, data: { roles: { set: ['CUSTOMER'] } } });
     const after = await inject('GET', '/api/v1/admin/dashboard/overview', undefined, token);
     expect(after.statusCode).toBe(403);
     expect(await app.prisma.session.findUnique({ where: { id: session.id } })).not.toBeNull();
+  });
+
+  /** An account written directly, with a live OTP session (the shape the case above uses). */
+  async function directAccount(phone: string, roles: Array<'SUPER_ADMIN' | 'ADMIN' | 'CUSTOMER' | 'MOVER' | 'RIDER'>, activeRole: typeof roles[number]) {
+    const user = await app.prisma.user.create({
+      data: {
+        phone, firstName: 'Role', lastName: 'Crossing', roles, activeRole,
+        lastMoverRole: activeRole === 'RIDER' ? 'RIDER' : null,
+        status: 'ACTIVE', isPhoneVerified: true,
+      },
+    });
+    const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
+    await app.prisma.session.create({
+      data: {
+        userId: user.id, token, refreshToken: nanoid(64), authMethod: 'OTP',
+        deviceId: 'role-authority-test', deviceType: 'test', expiresAt: new Date(Date.now() + 60 * 60_000),
+      },
+    });
+    return { userId: user.id, token };
+  }
+
+  it('[ADMIN-ROLE] an ADMIN whose held role is removed is refused on the very next /admin request, even with the row left in admin mode', async () => {
+    const admin = await directAccount(ROLE_AUTHORITY_ADMIN_PHONE, ['ADMIN', 'CUSTOMER'], 'ADMIN');
+    expect((await inject('GET', '/api/v1/admin/dashboard/overview', undefined, admin.token)).statusCode).toBe(200);
+    await app.prisma.user.update({ where: { id: admin.userId }, data: { roles: { set: ['CUSTOMER'] } } });
+    const after = await inject('GET', '/api/v1/admin/dashboard/overview', undefined, admin.token);
+    expect(after.statusCode).toBe(403);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: admin.userId }, select: { activeRole: true } })).activeRole).toBe('ADMIN');
+  });
+
+  it('[ADMIN-ROLE] a plain mover never reaches /admin, in mover mode or after switching to customer', async () => {
+    const mover = await directAccount(ROLE_AUTHORITY_PLAIN_MOVER_PHONE, ['MOVER', 'CUSTOMER', 'RIDER'], 'RIDER');
+    expect((await inject('GET', '/api/v1/admin/dashboard/overview', undefined, mover.token)).statusCode).toBe(403);
+    const switched = await inject('POST', '/api/v1/customer/switch-role', { role: 'CUSTOMER' }, mover.token);
+    expect(switched.statusCode).toBe(200);
+    expect((await inject('GET', '/api/v1/admin/dashboard/overview', undefined, mover.token)).statusCode).toBe(403);
+  });
+
+  it('[ADMIN-ROLE] the app side still follows the ACTIVE role: a SUPER_ADMIN who also rides switches to customer (supply retired, profile in customer mode) and back to mover, with the console open throughout', async () => {
+    const both = await directAccount(ROLE_AUTHORITY_ADMIN_MOVER_PHONE, ['SUPER_ADMIN', 'CUSTOMER', 'MOVER', 'RIDER'], 'RIDER');
+    const rider = await app.prisma.rider.create({
+      data: {
+        userId: both.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true,
+        isOnline: true, locationSessionId: syntheticLocationOwner('auth-accounts'), isAvailable: true,
+      },
+    });
+    expect((await inject('GET', '/api/v1/admin/dashboard/overview', undefined, both.token)).statusCode).toBe(200);
+
+    const toCustomer = await inject('POST', '/api/v1/customer/switch-role', { role: 'CUSTOMER' }, both.token);
+    expect(toCustomer.statusCode).toBe(200);
+    const retired = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } });
+    expect({ online: retired.isOnline, available: retired.isAvailable }).toEqual({ online: false, available: false });
+    const asCustomer = await inject('GET', '/api/v1/customer/profile', undefined, both.token);
+    expect(asCustomer.statusCode).toBe(200);
+    expect(asCustomer.json().data).toMatchObject({ role: 'CUSTOMER', activeRole: 'CUSTOMER' });
+    expect((await inject('GET', '/api/v1/admin/dashboard/overview', undefined, both.token)).statusCode).toBe(200);
+
+    const toMover = await inject('POST', '/api/v1/customer/switch-role', { role: 'MOVER' }, both.token);
+    expect(toMover.statusCode).toBe(200);
+    expect(toMover.json().data.activeRole).toBe('RIDER');
+    const asRider = await inject('GET', '/api/v1/customer/profile', undefined, both.token);
+    expect(asRider.json().data).toMatchObject({ role: 'RIDER', activeRole: 'RIDER' });
+    expect((await inject('GET', '/api/v1/admin/dashboard/overview', undefined, both.token)).statusCode).toBe(200);
   });
 
   it('a customer cannot read vendor data', async () => {

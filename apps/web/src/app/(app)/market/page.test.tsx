@@ -2,11 +2,12 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import AppLayout from '../layout';
-import MarketPage from './page';
+import { MarketScreen as MarketPage } from './market-screen';
 
+const nav = vi.hoisted(() => ({ query: '' }));
 vi.mock('next/navigation', () => ({
   usePathname: () => '/market',
-  useSearchParams: () => new URLSearchParams(''),
+  useSearchParams: () => new URLSearchParams(nav.query),
   useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
 }));
 
@@ -21,6 +22,7 @@ const item = (id: string, name: string) => ({ id, name, basePrice: 2500, imageUr
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
   visible = true;
+  nav.query = '';
   fetchMock = mockApi(({ url }) => {
     if (url.pathname === '/api/v1/auth/me') return { status: 401, body: { success: false } };
     if (url.pathname === '/api/v1/market/depth') return { body: { success: true, data: { visible, items: visible ? 400 : 20, vendors: visible ? 6 : 1 } } };
@@ -50,7 +52,7 @@ describe('[Q7b] Market', () => {
     render(<AppLayout><MarketPage /></AppLayout>);
     const hammer = await screen.findByRole('link', { name: /Claw hammer/ });
     expect(hammer.getAttribute('href')).toBe('/order/vendor/v9?item=m1');
-    expect(hammer.textContent).toMatch(/GY\$2,500/);
+    expect(hammer.textContent).toMatch(/\$2,500/);
     expect(hammer.textContent).toMatch(/City Hardware/);
     // Only goods categories are offered as chips.
     const chips = await screen.findByRole('navigation', { name: 'Market categories' });
@@ -65,5 +67,24 @@ describe('[Q7b] Market', () => {
     render(<AppLayout><MarketPage /></AppLayout>);
     expect(await screen.findByText(/The market opens once enough stores list their goods/)).toBeTruthy();
     expect(requested('/api/v1/market/items')).toHaveLength(0);
+  });
+});
+
+// [P35 · board 4a] As the phone's Market: the shelf is newest-first and called "New arrivals"; a category names
+// itself and "See all" goes back to everything.
+describe('[P35 · board 4a] the shelf', () => {
+  it('"New arrivals", read newest-first, with no See all', async () => {
+    render(<AppLayout><MarketPage /></AppLayout>);
+    expect(await screen.findByRole('heading', { name: 'New arrivals' })).toBeTruthy();
+    await screen.findByRole('link', { name: /Claw hammer/ });
+    expect(requested('/api/v1/market/items').map((url) => url.searchParams.get('sort'))).toEqual(['new']);
+    expect(screen.queryByRole('link', { name: 'See all' })).toBeNull();
+  });
+
+  it('a category: its own name, and See all back to the whole market', async () => {
+    nav.query = 'category=tools';
+    render(<AppLayout><MarketPage /></AppLayout>);
+    expect(await screen.findByRole('heading', { name: 'Tools' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'See all' }).getAttribute('href')).toBe('/market');
   });
 });

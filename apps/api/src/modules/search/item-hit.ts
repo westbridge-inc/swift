@@ -1,3 +1,4 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { docId } from './search-scope';
 /**
  * `ItemHit` — THE shape an item takes when it is listed outside its own store.
@@ -38,6 +39,11 @@ export type ItemHit = {
    *  means; a client that computed its own would drift the moment two clients
    *  picked different windows. See `NEW_ITEM_WINDOW_DAYS`. */
   isNew: boolean;
+  /** Is the item's STORE open right now? Search shows closed stores and their
+   *  dishes too (owner ruling 13 Oct), marked closed — the item can be looked
+   *  at, not ordered until the store opens (checkout refuses VENDOR_CLOSED).
+   *  Read live from the database on every path; the index copy is never trusted. */
+  vendorIsCurrentlyOpen: boolean;
 };
 
 /**
@@ -61,7 +67,7 @@ export const ITEM_HIT_SELECT = {
   imageUrl: true,
   createdAt: true,
   vendorId: true,
-  vendor: { select: { name: true } },
+  vendor: { select: { name: true, isCurrentlyOpen: true } },
   category: { select: { name: true } },
 } as const;
 
@@ -72,7 +78,7 @@ type ItemHitRow = {
   imageUrl: string | null;
   createdAt: Date;
   vendorId: string;
-  vendor: { name: string } | null;
+  vendor: { name: string; isCurrentlyOpen: boolean } | null;
   category: { name: string } | null;
 };
 
@@ -92,11 +98,13 @@ export function toItemHit(row: ItemHitRow): ItemHit {
     id: row.id,
     name: row.name,
     basePrice: Number(row.basePrice),
-    imageUrl: row.imageUrl,
+    imageUrl: servedPhotoAddress(row.imageUrl), // [IMAGES-E2E PR4] never an outside host
     vendorId: row.vendorId,
     vendorName: row.vendor?.name ?? '',
     categoryName: row.category?.name ?? null,
     isNew: Date.now() - new Date(row.createdAt).getTime() < NEW_ITEM_WINDOW_MS,
+    // a missing store reads as closed: degraded data only makes a surface more conservative [L6]
+    vendorIsCurrentlyOpen: row.vendor?.isCurrentlyOpen === true,
   };
 }
 
@@ -134,6 +142,9 @@ export type ItemSearchDoc = {
   allergens: string[];
   totalOrdered: number;
   categories: string[];
+  /** The store's open state at the last sync. A COPY: the search route
+   *  replaces it with the live value before anything is served. */
+  vendorIsCurrentlyOpen: boolean;
 };
 
 type ItemDocRow = {
@@ -141,7 +152,7 @@ type ItemDocRow = {
   name: string;
   description: string | null;
   vendorId: string;
-  vendor: { name: string; tenantId: string };
+  vendor: { name: string; tenantId: string; isCurrentlyOpen: boolean };
   category: { name: string };
   basePrice: unknown;
   imageUrl: string | null;
@@ -168,7 +179,7 @@ export function toItemSearchDoc(row: ItemDocRow, categories: string[]): ItemSear
     vendorName: row.vendor.name,
     categoryName: row.category.name,
     basePrice: Number(row.basePrice),
-    imageUrl: row.imageUrl,
+    imageUrl: servedPhotoAddress(row.imageUrl),
     createdAt: new Date(row.createdAt).getTime(),
     isAvailable: row.isAvailable,
     isPopular: row.isPopular,
@@ -176,6 +187,7 @@ export function toItemSearchDoc(row: ItemDocRow, categories: string[]): ItemSear
     allergens: row.allergens,
     totalOrdered: row.totalOrdered,
     categories,
+    vendorIsCurrentlyOpen: row.vendor.isCurrentlyOpen,
   };
 }
 
@@ -195,10 +207,14 @@ export function itemHitFromSearchDoc(h: Record<string, unknown>): ItemHit {
     id: String(h['entityId'] ?? h['id']),
     name: String(h['name']),
     basePrice: Number(h['basePrice'] ?? 0),
-    imageUrl: (h['imageUrl'] as string | null) ?? null,
+    // An older search document may still carry an outside address: never handed out.
+    imageUrl: servedPhotoAddress(h['imageUrl'] as string | null),
     vendorId: String(h['vendorId']),
     vendorName: String(h['vendorName'] ?? ''),
     categoryName: (h['categoryName'] as string | null) ?? null,
     isNew: created != null && Date.now() - created < NEW_ITEM_WINDOW_MS,
+    // a document indexed before this field existed reads as closed (never a guess);
+    // the search route overwrites it with the live state in any case
+    vendorIsCurrentlyOpen: h['vendorIsCurrentlyOpen'] === true,
   };
 }

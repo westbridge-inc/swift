@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type MutateOptions } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type MutateOptions, type QueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { checkoutFailureOutcome, recordCheckoutOutcome, settleUnresolvedIntent, stableBodyHash, type CheckoutObservation, type CheckoutPrincipal, type ReceiptProbe } from '../lib/checkoutAttempt';
@@ -386,16 +386,26 @@ export function useFavorites<T = any>() {
   return useQuery<T>({ queryKey: ['customer', 'favorites'], queryFn: () => unwrap<T>(customerApi.getFavorites()) });
 }
 
+/** [TAP-AUDIT 27 Oct] The store page's heart fills (or empties) at the tap: the store's own read takes the new state at
+ *  once and goes back if the server refuses. The store page is NOT downloaded again for a heart (it carries the whole
+ *  menu); the lists that show hearts (favourites, Home, store lists) are re-read as before. */
+const withFavorite = (vendor: unknown, isFavorite: boolean) => (vendor && typeof vendor === 'object' ? { ...(vendor as object), isFavorite } : vendor);
 export function useToggleFavorite() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ vendorId, isFavorite }: { vendorId: string; isFavorite: boolean }) =>
       unwrap(isFavorite ? customerApi.removeFavorite(vendorId) : customerApi.addFavorite(vendorId)),
+    onMutate: async ({ vendorId, isFavorite }) => {
+      await qc.cancelQueries({ queryKey: customerKeys.vendor(vendorId), exact: true });
+      qc.setQueryData(customerKeys.vendor(vendorId), (v: unknown) => withFavorite(v, !isFavorite));
+    },
+    onError: (_e, { vendorId, isFavorite }) => {
+      qc.setQueryData(customerKeys.vendor(vendorId), (v: unknown) => withFavorite(v, isFavorite));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['customer', 'favorites'] });
       qc.invalidateQueries({ queryKey: ['customer', 'home'] });
       qc.invalidateQueries({ queryKey: ['customer', 'vendors'] });
-      qc.invalidateQueries({ queryKey: ['customer', 'vendor'] });
     },
   });
 }
@@ -442,9 +452,14 @@ export function useOrdersInfinite() {
  */
 const LIVE_ORDERS_LIMIT = 50;
 
-export function useLiveOrders() {
+/** [row 5] `poll` (the activity screen passes POLL.customerLiveOrders while it
+ *  is on screen and the app is in front): re-ask on that cadence, but only
+ *  while something is in progress — an empty live list has nothing to follow,
+ *  and a new order arrives through the cart's own invalidation. */
+export function useLiveOrders(poll?: () => number) {
   return useQuery({
     queryKey: [...customerKeys.orders, 'live'],
+    refetchInterval: poll ? (query) => ((query.state.data?.items.length ?? 0) > 0 ? poll() : false) : false,
     queryFn: async () => {
       const res = await customerApi.getOrders(1, { live: true, limit: LIVE_ORDERS_LIMIT });
       const body = res?.data ?? {};
@@ -463,6 +478,20 @@ export function useOrder<T = OrderProjection>(id: string, refetchInterval?: numb
     enabled: !!id,
     refetchInterval,
   });
+}
+
+/** [row 5 · ANDROID-QA] One fresh read of an order for a decision the customer
+ *  is about to make (cancel). It goes straight to the server instead of through
+ *  the screen's shared query: there, any background refresh (a socket reconnect,
+ *  a status event, the hold timer) cancels a read already in flight and the
+ *  tap waits for that newer read instead, which on a slow line can time out:
+ *  the first cancel tap failed although its own read answered. The fresh
+ *  answer is then written into the cache so the screen shows it too. Throws
+ *  when the read fails. */
+export async function readOrderFresh<T = OrderProjection>(qc: QueryClient, id: string): Promise<T> {
+  const data = await unwrap<T>(customerApi.getOrder(id));
+  qc.setQueryData(customerKeys.order(id), data);
+  return data;
 }
 
 export type RatingTagSets = Record<string, { positive: Array<{ slug: string; label: string }>; negative: Array<{ slug: string; label: string }> }>;
@@ -932,12 +961,39 @@ export function useTipOrder(orderId: string) {
 }
 
 /** Approve/reject the store's out-of-stock substitution, live (§5.3). */
-export function useDecideSubstitution(orderId: string) {
+type SubstitutionDecision = { orderId: string; lineId: string; approve: boolean };
+
+export function useDecideSubstitution() {
+  const qc = useQueryClient();
+  // [review of #1565 S2] The order is part of the decision, never the render's
+  // closure: a screen React Navigation reuses for another order (opened from a
+  // notification while the request is in flight) must refresh the order the
+  // decision was for, not the one now on screen. Same rule as useClaimMmgPayment.
+  return useMutation({
+    // A 409 means the swap moved on (the store withdrew it, or another device
+    // decided first): show the line as it is now instead of a stale card.
+    onError: (error: { response?: { status?: number } } | null | undefined, { orderId }: SubstitutionDecision) => {
+      if (error?.response?.status === 409) return qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
+      return undefined;
+    },
+    mutationFn: ({ orderId, lineId, approve }: SubstitutionDecision) =>
+      customerApi.decideSubstitution(orderId, lineId, approve),
+    // [L09 · M028] The order screen reads customerKeys.order(id); refreshing
+    // any other key left it showing the old proposal after a decision. The
+    // order is the decision's own (#1707), never the render's.
+    onSuccess: (_data: unknown, { orderId }: SubstitutionDecision) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
+  });
+}
+
+/** [BOOK-S6a · owner B2] Move an appointment to another free time of the same service. The order
+ *  is part of the request (never the render's closure), and it is read again whatever the outcome:
+ *  a timeout can mean the move landed, and a refusal (taken time, cut-off) shows the booking as it is. */
+export function useRescheduleBooking() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
-      customerApi.decideSubstitution(orderId, lineId, approve),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
+    mutationFn: ({ bookingId, newSlotStart }: { orderId: string; bookingId: string; newSlotStart: string }) =>
+      unwrap(customerApi.rescheduleBooking(bookingId, newSlotStart)),
+    onSettled: (_data, _error, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }
 

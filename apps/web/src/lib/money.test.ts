@@ -101,13 +101,15 @@ describe('[W-13] formatting never invents a figure', () => {
     expect(money(undefined)).toBe(MONEY_UNKNOWN);
     expect(money(null)).toBe(MONEY_UNKNOWN);
     expect(money(NaN)).toBe(MONEY_UNKNOWN);
-    expect(money(0)).toBe('GY$0'); // free is still free
-    expect(money('4000.00')).toBe('GY$4,000');
+    // [WEB-REDESIGN] Customer prices read like the phone app's: `$4,000`.
+    expect(money(0)).toBe('$0'); // free is still free
+    expect(money('4000.00')).toBe('$4,000');
   });
 
-  it('the vendor and customer formatters share the GY$ presentation', () => {
+  it('the vendor and customer formatters print the same figure the same way ($, as in the phone app; the footer says Prices in GYD)', () => {
     expect(vendorMoney(undefined)).toBe(MONEY_UNKNOWN);
-    expect(vendorMoney('4500.00')).toBe('GY$4,500');
+    expect(vendorMoney('4500.00')).toBe('$4,500');
+    expect(money('4500.00')).toBe('$4,500');
     expect(vendorMoney('4500.00')).toBe(money('4500.00'));
     expect(toAmount('4500.00')).toBe(4500);
     expect(toAmount('')).toBeNull();
@@ -118,7 +120,9 @@ describe('[W-13] the surfaces that spent money use it', () => {
   const source = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 
   it('the storefront refuses to price, and refuses to sell, an item whose price it cannot read', () => {
-    const storefront = source('src/components/storefront/storefront-experience.tsx');
+    // [W6] The store page reads an item's price through lib/menu-options.
+    const storefront = source('src/components/storefront/storefront-experience.tsx') + source('src/lib/menu-options.ts')
+      + source('src/components/storefront/item-sheet.tsx');
     // the old shape: a missing price coerced to zero
     expect(storefront).not.toMatch(/Number\(item\.customerPrice \?\? item\.basePrice \?\? 0\)/);
     expect(storefront).toMatch(/parseAmount\(item\.customerPrice \?\? item\.basePrice\)/);
@@ -126,10 +130,16 @@ describe('[W-13] the surfaces that spent money use it', () => {
     expect(storefront).toMatch(/const priced = itemPrice\(item\) !== null;/);
     expect(storefront).toMatch(/&& priced;/);
     expect(storefront).toMatch(/Price unavailable/);
+    // [W6] The item sheet (its own file, loaded after the page) never prices
+    // a choice it cannot read: it says so instead.
+    const sheet = source('src/components/storefront/item-sheet.tsx');
+    expect(sheet).toMatch(/const extra = parseAmount\(option\.additionalPrice\);/);
+    expect(sheet).toMatch(/extra === null \? \(\n\s*<span className=\{styles\.optionPrice\}>Price unavailable<\/span>/);
   });
 
   it('the cart computes its total from parsed parts and locks checkout when it cannot', () => {
-    const cart = source('src/app/(app)/cart/page.tsx');
+    // [W4] The one checkout (the cart and /checkout both render it).
+    const cart = source('src/components/checkout/checkout.tsx');
     // the old shape: raw arithmetic across wire values
     expect(cart).not.toMatch(/serverSubtotal \+ deliveryFee - discount \+ tip/);
     expect(cart).toMatch(/sumAmounts\(/);
@@ -145,7 +155,7 @@ describe('[W-13] the surfaces that spent money use it', () => {
     const vendor = source('src/lib/vendor-api.ts');
     const customer = source('src/lib/customer.ts');
     expect(vendor).toMatch(/return parseAmount\(value\);/);
-    expect(customer).toMatch(/formatMoney\(n\)/);
+    expect(customer).toMatch(/formatAmount\(n, '\$'\)/);
     // the permissive one is gone — checked on CODE, not on the comment that
     // quotes it (a census that matches its own documentation proves nothing)
     const code = customer.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');

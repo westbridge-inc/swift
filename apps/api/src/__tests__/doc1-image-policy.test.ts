@@ -13,6 +13,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { createHash } from 'node:crypto';
+import type { PrismaClient } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
@@ -42,6 +43,12 @@ let service: VerificationService;
 const users: string[] = [];
 const activated: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-image-policy-test');
+/** [R24] The sweep also purges every partner's personal image 30 days after its decision, so in
+ *  the shared test database it may only ever see this suite's documents: the counts below are
+ *  this suite's, not whatever another suite left behind. */
+const scoped = (): PrismaClient => app.prisma.$extends({ query: { verificationDocument: { async findMany({ args, query }) {
+  return query({ ...args, where: { AND: [args.where ?? {}, { userId: { in: [...users] } }] } });
+} } } }) as unknown as PrismaClient;
 
 async function owner(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
@@ -130,12 +137,12 @@ describe('[DOC-1 P1-3] the bucket drives the image policy', () => {
     const held = await committed(u4, PERSONAL, { legalHoldId: hold.id }); await extractedOk(held.id);
 
     // inactive type: nothing happens
-    const before = await system(() => applyImagePolicy(app.prisma, service));
+    const before = await system(() => applyImagePolicy(scoped(), service));
     expect((await docOf(target.id)).imagePurgedAt).toBeNull();
     expect(before.purged).toBe(0);
 
     await activate(PERSONAL);
-    const run = await system(() => applyImagePolicy(app.prisma, service));
+    const run = await system(() => applyImagePolicy(scoped(), service));
     expect(run.purged).toBeGreaterThanOrEqual(1);
     expect(await docOf(target.id)).toMatchObject({ purgedAt: null, fileUrl: '', state: 'COMMITTED' });
     expect((await docOf(target.id)).imagePurgedAt).not.toBeNull();
@@ -145,7 +152,7 @@ describe('[DOC-1 P1-3] the bucket drives the image policy', () => {
     expect(await system(() => service.isVerifiedForList(u, [PERSONAL]))).toBe(true);
     for (const d of [unextracted, partial, business, held]) expect((await docOf(d.id)).imagePurgedAt, d.docType).toBeNull();
 
-    const again = await system(() => applyImagePolicy(app.prisma, service));
+    const again = await system(() => applyImagePolicy(scoped(), service));
     expect(again.purged).toBe(0);
   });
 });

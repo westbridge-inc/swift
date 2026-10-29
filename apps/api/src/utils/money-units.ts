@@ -25,8 +25,9 @@ export interface MoneyColumn {
   unit: MoneyUnit;
 }
 
-/** The regex the census applies to a Decimal field's name to call it money-ish. */
-export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding/i;
+/** The regex the census applies to a Decimal field's name to call it money-ish. [STORE-VAT] `vat` and `goods`: a store's
+ *  VAT and its goods by VAT class are money (Order.vatBase / vatStandardGoods / vatExemptGoods match no other word). */
+export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding|vat|goods/i;
 
 export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'AdBooking', field: 'amount', unit: 'MAJOR_2DP' },
@@ -64,6 +65,11 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   // handed back. Same unit as the order total the obligation is taken from.
   { model: 'Order', field: 'refundOwedAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
+  // [L02 · row 34] The cash a mover stated they took at the door, and how far
+  // short of the total a handover was made. Same unit as the order total.
+  { model: 'Order', field: 'doorCashCollectedAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'doorCashShortfallAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'doorCashReturnAmount', unit: 'MAJOR_WHOLE' },
   // [E02] The MMG refund rail: what the store attested it received (the cap),
   // what it owes back, what it says it sent, and the MMG fee Swift pays back.
   // Same unit as the order total every one of them is taken from.
@@ -80,6 +86,7 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'DepositConfirmation', field: 'depositedGyd', unit: 'MAJOR_2DP' },
   { model: 'Earning', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FeeReceipt', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'FeeReceiptAllocation', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FxRate', field: 'rate', unit: 'FX_RATE' },
   { model: 'Item', field: 'basePrice', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },
@@ -87,6 +94,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'MmgAgentPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
   // [MMG checkout 2/6] What a partner was asked to pay on the MMG page: whole GYD.
   { model: 'MmgCheckoutIntent', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [MMG REVERSAL] A returned payment: always the whole checkout amount.
+  { model: 'MmgFeeReversal', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Option', field: 'additionalPrice', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'deliveryFee', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'discount', unit: 'MAJOR_WHOLE' },
@@ -101,6 +110,12 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Order', field: 'taxiFareTotal', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'tipAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'totalAmount', unit: 'MAJOR_WHOLE' },
+  // [STORE-VAT · owner O-5] The VAT included in a VAT store's goods and the goods by class: whole GYD, like the goods.
+  { model: 'Order', field: 'vatAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatBase', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatExemptGoods', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatStandardGoods', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatZeroRatedGoods', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'basePrice', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'markedUpPrice', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'markupAmount', unit: 'MAJOR_WHOLE' },
@@ -129,10 +144,17 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'PromoTerms', field: 'minOrderAmount', unit: 'MAJOR_WHOLE' },
   { model: 'ProviderPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'ReimbursementClaim', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [TAXI waiting charge] The ride's waiting terms (per full block) and the charge frozen at
+  // completion. Same unit as the order total the charge is added to.
+  { model: 'TaxiRideWaiting', field: 'chargePerBlock', unit: 'MAJOR_WHOLE' },
+  { model: 'TaxiRideWaiting', field: 'waitingCharge', unit: 'MAJOR_WHOLE' },
   // [DOC-1 §31.4 · P31-1] The loss-protection reserve line: signed entries, 2 dp (a percentage of revenue).
   { model: 'RlpReserveEntry', field: 'amount', unit: 'MAJOR_2DP' },
   { model: 'ReturnRequest', field: 'refundAmount', unit: 'MAJOR_WHOLE' },
   { model: 'ReturnRequest', field: 'refundInferredAmount', unit: 'MAJOR_WHOLE' },
+  // [PRICE-LOCK · row 448] The fare a queued passenger was shown at join: the scan
+  // books only at it (whole units, CHECKed whole and non-negative).
+  { model: 'RideQueueEntry', field: 'quotedFare', unit: 'MAJOR_WHOLE' },
   { model: 'Rider', field: 'committedFloat', unit: 'MAJOR_WHOLE' },
   { model: 'Rider', field: 'floatLimit', unit: 'MAJOR_WHOLE' },
   { model: 'RunStop', field: 'cashToCollect', unit: 'MAJOR_WHOLE' },

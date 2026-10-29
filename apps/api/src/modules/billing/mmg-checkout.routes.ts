@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { MmgCheckoutIntent, Prisma, PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { runAsSystem } from '../../plugins/tenant-context';
@@ -16,8 +16,10 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
-import { clientPlatform, feePayActions, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { clientPlatform, feePayActions, mmgCheckoutLive, mmgReopenSwitchedOn, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { readReopenableMmgCheckout, type ReopenableMmgCheckout } from './mmg-checkout-reopen';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
+import { FEE_SELLER } from './fee-seller';
 import { readFeePaymentDecision } from './fee-payment-authority';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import {
@@ -30,15 +32,18 @@ import {
   replyCodeClass,
   resultCodeOf,
 } from './mmg-checkout-reply';
+import { ReplyGateBusyError } from './mmg-reply-gate';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout ROUTES [mmg checkout 3/6] — MMG-CHECKOUT-API.md
 // sections 2-6, the contract the phone and web fee pages already call.
 //
 //   POST /api/v1/{vendor|rider|driver}/subscription/mmg-checkout      start one
+//   POST /api/v1/{vendor|rider|driver}/subscription/mmg-checkout/:ref/reopen
+//                                        Back to MMG's page: that ref only
 //   GET  /api/v1/{vendor|rider|driver}/subscription/mmg-checkout/:ref follow it
 //   GET  /api/v1/{family}/subscription   gains payActions, latestMmgCheckout,
-//                                        recentCheckouts (feeCheckoutPayload)
+//                                        recentCheckouts, reopenableMmgCheckout (feeCheckoutPayload)
 //   POST /api/v1/billing/mmg-checkout/return   the web return page forwards
 //                                              MMG's reply here (success AND
 //                                              failure arrive on one URL)
@@ -69,6 +74,8 @@ export const MMG_CHECKOUT_NOTIFY_RATE = { max: 60, timeWindow: '1 minute' } as c
 export const MMG_CHECKOUT_RETURN_BODY_LIMIT = 96 * 1024;
 /** The contract: JSON or a form of up to 16 KB. */
 export const MMG_CHECKOUT_NOTIFY_BODY_LIMIT = 16 * 1024;
+/** [SEC-DOS F8] How long a sender (the return page, MMG's notify) is told to wait when too many replies are waiting to be opened. */
+export const RETURN_BUSY_RETRY_SECONDS = 1;
 /** Everything the return page may render (its `words`); the API never answers more. */
 export const RETURN_STATES = ['CONFIRMED', 'CONFIRMING', 'NOT_PAID', 'UNKNOWN'] as const satisfies readonly ReturnState[];
 
@@ -116,13 +123,14 @@ export function mmgCheckoutRuntimeOf(app: FastifyInstance): MmgCheckoutRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// The subscription payload's three new fields (section 3).
+// The subscription payload's additive checkout fields (section 3).
 // ---------------------------------------------------------------------------
 
 export interface FeeCheckoutPayload {
   payActions: PayAction[];
   latestMmgCheckout: CheckoutView | null;
   recentCheckouts: CheckoutView[];
+  reopenableMmgCheckout: ReopenableMmgCheckout | null;
 }
 
 function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionStatus): CheckoutView {
@@ -137,6 +145,8 @@ function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionSt
     subscriptionStatus,
     // [MMG support lookup] The partner's receipt: our reference always, MMG's once CONFIRMED.
     ...partnerReceiptIds(row),
+    // [Owner 15 Oct 2026 · ruling #63] and who sold the weekly fee: Swift's operator.
+    seller: FEE_SELLER,
   };
 }
 
@@ -174,7 +184,7 @@ async function payActionsFor(
 }
 
 export interface PartnerCheckoutRoutes {
-  /** The three fields GET /subscription gains, for this family's own subscription. */
+  /** Additive checkout fields GET /subscription gains, for this family's own subscription. */
   feePayload: (sub: Subscription, headers: Record<string, unknown>, now?: Date) => Promise<FeeCheckoutPayload>;
 }
 
@@ -192,15 +202,40 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
   let runtime: MmgCheckoutRuntime | null = null;
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
+  /** [MMG reopen] THE grant for one ref, read-only: the reopen switch and the
+   *  Pay rule for this platform (configured, payable), a production payer, and
+   *  readReopenableMmgCheckout. The payload shows it; the reopen POST asks it
+   *  again for the ref it names before any page goes out. */
+  const reopenGrant = async (sub: Subscription, platform: ClientPlatform, ref: string, now: Date): Promise<ReopenableMmgCheckout | null> => {
+    if (!(await mmgReopenSwitchedOn(app.prisma, platform))) return null;
+    if (!(await mmgCheckoutLive(app.prisma, sub, platform, rt().checkout))) return null;
+    if (!(await payerIsProduction(app.prisma, sub.id))) return null;
+    const grant = await readReopenableMmgCheckout(app.prisma, sub.id, ref, now);
+    return grant?.ref === ref ? grant : null;
+  };
+
   const feePayload = async (sub: Subscription, headers: Record<string, unknown>, now: Date = new Date()): Promise<FeeCheckoutPayload> => {
-    if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [] };
+    if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [], reopenableMmgCheckout: null };
     const [payActions, rows] = await Promise.all([
       payActionsFor(app.prisma, sub, clientPlatform(headers), rt().checkout),
-      app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: sub.id }, orderBy: { createdAt: 'desc' }, take: RECENT_CHECKOUTS }),
+      app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: sub.id }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: RECENT_CHECKOUTS }),
     ]);
     const recentCheckouts = rows.map((row) => checkoutView(row, sub.status));
     const latestMmgCheckout = recentCheckouts.find((c) => Date.parse(c.createdAt) >= now.getTime() - LATEST_WINDOW_MS) ?? null;
-    return { payActions, latestMmgCheckout, recentCheckouts };
+    let reopenableMmgCheckout: ReopenableMmgCheckout | null = null;
+    if (latestMmgCheckout?.status === 'OPEN') {
+      try {
+        reopenableMmgCheckout = await reopenGrant(sub, clientPlatform(headers), latestMmgCheckout.ref, now);
+      } catch (err) {
+        // [review F4] A failed read offers no reopen; the fee page itself still loads.
+        const code = (err as { code?: unknown } | null)?.code;
+        log().error(
+          { subscriptionId: sub.id, errorName: err instanceof Error ? err.name : typeof err, errorCode: typeof code === 'string' ? code : null },
+          '[MMG checkout] the reopen grant could not be read; no reopen is offered',
+        );
+      }
+    }
+    return { payActions, latestMmgCheckout, recentCheckouts, reopenableMmgCheckout };
   };
 
   /** POST …/subscription/mmg-checkout — the server prices it; the body is ignored. */
@@ -220,6 +255,32 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
       clientKey: request.headers['idempotency-key'],
     });
     return reply.status(created ? 201 : 200).send({ success: true, data: checkout });
+  });
+
+  /** [MMG reopen · review F1] POST …/subscription/mmg-checkout/:ref/reopen —
+   *  "Back to MMG's page" for the ONE checkout it names. It can only hand back
+   *  that checkout's page, while the reopen grant still holds: it never reaches
+   *  the start route's create branch. Anything else is 409 CHECKOUT_NOT_REOPENABLE. */
+  app.post<{ Params: { ref: string } }>('/subscription/mmg-checkout/:ref/reopen', { preHandler: [app.authenticate], config: { rateLimit: { ...MMG_CHECKOUT_START_RATE, ...rateLimited } } }, async (request, reply) => {
+    const sub = await options.subscriptionFor(request);
+    if (!sub) throw new AppError(404, 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription to pay.');
+    if (!mmgCheckoutEnabled()) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    if (!(await payerIsProduction(app.prisma, sub.id))) {
+      throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    }
+    const ref = request.params.ref;
+    if (!REF_SHAPE.test(ref)) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
+    const now = new Date();
+    const platform = clientPlatform(request.headers);
+    const checkout = await rt().service.reopenCheckout({
+      subscriptionId: sub.id,
+      userId: request.user.userId,
+      ref,
+      clientKey: request.headers['idempotency-key'],
+      granted: async () => (await reopenGrant(sub, platform, ref, now)) !== null,
+      now,
+    });
+    return reply.status(200).send({ success: true, data: checkout });
   });
 
   /** GET …/subscription/mmg-checkout/:ref — one answer, 404, for an unknown ref and for another partner's. */
@@ -297,28 +358,48 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
   /** The web return page forwards MMG's reply, from either registered URL, with the path as `outcome`. */
-  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request, reply) => {
     const body = returnBody.parse(request.body ?? {});
     if (!mmgCheckoutEnabled()) return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     if (ambiguousToken(body.params)) {
       log().warn({ source: 'RETURN' }, '[MMG checkout] a reply token arrived more than once; refused as UNKNOWN');
       return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     }
-    const state = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params });
-    return { success: true, data: { state } };
+    try {
+      const state = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params, from: request.ip });
+      return { success: true, data: { state } };
+    } catch (err) {
+      if (!(err instanceof ReplyGateBusyError)) throw err;
+      // [SEC-DOS F8] Too many replies waiting to be opened: retryable, and says nothing about the payment.
+      mmgCheckoutEventsCounter.labels('reply_busy').inc();
+      reply.header('retry-after', RETURN_BUSY_RETRY_SECONDS);
+      throw new AppError(503, 'TRY_AGAIN', 'Too many payment replies are being checked right now. Try again in a moment.', { retryAfterSeconds: RETURN_BUSY_RETRY_SECONDS });
+    }
   });
 
-  /** MMG's own servers, if MMG calls one: JSON or a form, always 200, never a word about any account. */
-  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request) => {
+  /** MMG's own servers, if MMG calls one: JSON or a form, 200 and never a word about any account; a
+   *  503 TRY_AGAIN only when too many replies wait to be opened, so the sender redelivers it. */
+  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request, reply) => {
     if (mmgCheckoutEnabled()) {
       const params = notifyParams(request.body, request.query);
       if (ambiguousToken(params)) {
         log().warn({ source: 'NOTIFY' }, '[MMG checkout] a reply token arrived more than once; ignored');
         return { success: true };
       }
-      await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params }).catch((err) => {
+      let busy = false;
+      await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params, from: request.ip }).catch((err) => {
+        if (err instanceof ReplyGateBusyError) {
+          busy = true;
+          return;
+        }
         log().error({ err }, '[MMG checkout] a notify could not be processed; the poll will look again');
       });
+      if (busy) {
+        // [SEC-DOS F8] Never dropped silently: retryable, and says nothing about the payment.
+        mmgCheckoutEventsCounter.labels('reply_busy').inc();
+        reply.header('retry-after', RETURN_BUSY_RETRY_SECONDS);
+        throw new AppError(503, 'TRY_AGAIN', 'Too many payment replies are being checked right now. Try again in a moment.', { retryAfterSeconds: RETURN_BUSY_RETRY_SECONDS });
+      }
     }
     return { success: true };
   });
@@ -339,7 +420,7 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
 async function observeReply(
   app: FastifyInstance,
   runtime: MmgCheckoutRuntime,
-  input: { source: 'RETURN' | 'NOTIFY'; outcome: string; params: unknown },
+  input: { source: 'RETURN' | 'NOTIFY'; outcome: string; params: unknown; from: string },
 ): Promise<ReturnState> {
   let provider: MmgCheckoutProvider | null = null;
   try {
@@ -347,13 +428,15 @@ async function observeReply(
   } catch {
     provider = null;
   }
-  const reply = provider && provider.driver !== 'disabled' ? openReply(provider, input.params) : null;
+  // [SEC-DOS F8] Opened ONCE, here, from the token field only and under the
+  // reply gate; the service is handed the opened reply and never opens it again.
+  const reply = provider && provider.driver !== 'disabled' ? await openReply(provider, input.params, `${input.source}:${input.from}`) : null;
   const code = reply ? resultCodeOf(reply) : null;
   if (reply && replyCodeClass(code) === 'ALERT') {
     await alertOnRefusedRequest(app, runtime, { source: input.source, outcome: input.outcome, reply, code: code as string });
     return 'UNKNOWN';
   }
-  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params });
+  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params, opened: { reply } });
 }
 
 /** [I9] Written down first, under the checkout's own tenant when the reply names one of ours; then the page. */

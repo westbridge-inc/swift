@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from '../helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -55,11 +56,12 @@ import { plantGeorgetownPair, GEORGETOWN_PAIR_FARE } from '../helpers/zone-fare-
 // georgetown-south, whose fixed fare of 2000 GYD this suite plants for itself
 // (helpers/zone-fare-fixture: the seed stopped planting it in October 2026).
 //
-// NOT asserted here (reported with probes, no contract yet): G3-F4 the taxi
-// assignment notice is the delivery copy ("Rider On The Way!", RIDER_ASSIGNED),
-// and a direct accept sends "Driver Found!" beside it; G3-F6 a fare-collected retry under a
-// NEW idempotency key re-sends "Ride Complete". (G3-F5, a pre-pickup cancel re-offering
-// the ride to that same driver, is fixed and asserted in TAXI-02.) E19 (no arrival location gate)
+// NOT asserted here (reported with probes, no contract yet): G3-F6 a fare-collected retry under a
+// NEW idempotency key re-sends "Ride Complete". (G3-F4, the taxi assignment notice sent as the
+// delivery copy beside a direct accept's "Driver Found!", is fixed and asserted in TAXI-02 and
+// the race below: one "Driver Found!" naming the car and plate, from either entrance.)
+// (G3-F5, a pre-pickup cancel re-offering the ride to that same driver, is fixed and
+// asserted in TAXI-02.) E19 (no arrival location gate)
 // has no agreed contract — the arrival assertions here hold either way.
 // ---------------------------------------------------------------------------
 
@@ -123,7 +125,7 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
       vehicleModel: 'Allion',
       vehicleYear: 2020,
       vehicleColor: 'Silver',
-      licensePlate: `G3T-${seq}`,
+      licensePlate: `HG3T-${seq}`, // [owner 11 Oct] a taxi plate is H-series
       driverLicenseUrl: 'storage://gold3/dl.jpg',
       vehicleInsuranceUrl: 'storage://gold3/ins.jpg',
       documentsVerified: true,
@@ -141,10 +143,11 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * DAY), nextBillingDate: new Date(Date.now() + 7 * DAY),
     },
   }));
+  await sys(() => currentTaxiSplitDocuments(app.prisma, u.userId));
   drivers.push({ driverId: driver.id, token: u.token });
   const go = await call('POST', '/api/v1/driver/go-online', u.token, { latitude: fix.lat, longitude: fix.lng });
   expect(go.statusCode, go.body).toBe(200);
-  return { ...u, driverId: driver.id, plate: `G3T-${seq}` };
+  return { ...u, driverId: driver.id, plate: `HG3T-${seq}` };
 }
 
 /** Retire this file's free supply through the real route after each test. */
@@ -416,16 +419,28 @@ describe('GOLD-3 · TAXI-01 — ride request + queue', () => {
     expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(1);
   });
 
-  it('an L1 customer is refused on request and on queue join, and nothing is written', async () => {
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] This case used to prove an L1 customer was
+  // refused (403 ID_VERIFICATION_REQUIRED) on both paths with nothing written. A taxi ride no longer needs the
+  // customer's ID on file, so the same account now books, and another L1 account waits in the queue.
+  it('an L1 customer (no ID on file) books on request and joins the queue, never asked for an ID', async () => {
     const l1 = await makeUser('Leo', ['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1' });
     const req = await call('POST', '/api/v1/rides/request', l1.token, TRIP);
-    expect(req.statusCode).toBe(403);
-    expect(req.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    const join = await call('POST', '/api/v1/rides/queue/join', l1.token, TRIP);
-    expect(join.statusCode).toBe(403);
-    expect(join.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    expect(await sys(() => app.prisma.order.count({ where: { customerId: l1.userId } }))).toBe(0);
-    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1.userId } }))).toBe(0);
+    expect(req.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(req.statusCode, req.body).toBe(201);
+    const ride = req.json().data.ride as { id: string };
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: l1.userId, orderType: 'TAXI', status: 'PENDING' } }))).toBe(1);
+    // Nobody is on the map: the passenger withdraws the request, so no later case meets this ride.
+    const cancel = await call('POST', `/api/v1/rides/${ride.id}/cancel`, l1.token, {});
+    expect(cancel.statusCode, cancel.body).toBe(200);
+
+    const l1q = await makeUser('Lea', ['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1' });
+    const join = await call('POST', '/api/v1/rides/queue/join', l1q.token, TRIP);
+    expect(join.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(join.statusCode, join.body).toBe(201);
+    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1q.userId, status: 'WAITING' } }))).toBe(1);
+    const leave = await call('POST', '/api/v1/rides/queue/leave', l1q.token, {});
+    expect(leave.statusCode, leave.body).toBe(200);
+    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1q.userId, status: 'WAITING' } }))).toBe(0);
   });
 });
 
@@ -444,10 +459,16 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     expect({ available: (await driverRow(driver.driverId)).isAvailable, pointer: (await driverRow(driver.driverId)).currentRideId })
       .toEqual({ available: false, pointer: ride.id });
     // The passenger heard about THIS ride, naming their driver.
-    const heard = await sys(() => app.prisma.notification.findMany({ where: { userId: customer.userId }, select: { body: true, data: true } }));
+    const heard = await sys(() => app.prisma.notification.findMany({ where: { userId: customer.userId }, select: { title: true, body: true, data: true } }));
     expect(heard).toHaveLength(1);
     expect((heard[0]!.data as { orderId?: string }).orderId).toBe(ride.id);
     expect(heard[0]!.body).toContain('Deo');
+    // [73 · owner ruling, DS759] The offer-card accept is the common taxi entrance: its push is the taxi
+    // "Driver Found!" naming the car and plate, tagged so a tap opens the ride (never the delivery copy).
+    expect(heard[0]!.title).toBe('Driver Found!');
+    expect(heard[0]!.body).toContain('Silver Toyota Allion');
+    expect(heard[0]!.body).toContain(driver.plate);
+    expect(heard[0]!.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer', status: 'DRIVER_ASSIGNED' });
 
     const enRoute = await call('PUT', `/api/v1/driver/rides/${ride.id}/en-route`, driver.token, {});
     expect(enRoute.statusCode, enRoute.body).toBe(200);
@@ -512,6 +533,14 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     const order = await orderRow(ride.id);
     expect({ status: order.status, driver: order.driverId }).toEqual({ status: 'DRIVER_ASSIGNED', driver: winner.driverId });
     expect((await logs(ride.id)).filter((l) => l.status === 'DRIVER_ASSIGNED')).toHaveLength(1);
+    // [73 · owner ruling] The rider's "Driver Found!" push names the car and its plate: checking the
+    // plate before getting in is a safety step, and the push goes only to this rider about their driver.
+    const found = await sys(() => app.prisma.notification.findFirst({ where: { userId: customer.userId, title: 'Driver Found!' } }));
+    expect(found?.body).toContain('Silver Toyota Allion');
+    expect(found?.body).toContain(winner.plate);
+    expect(found?.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer', status: 'DRIVER_ASSIGNED' });
+    // One assignment push, not the delivery copy beside it [formerly probe G3-F4].
+    expect((await sys(() => app.prisma.notification.findMany({ where: { userId: customer.userId }, select: { title: true } }))).map((n) => n.title)).toEqual(['Driver Found!']);
     expect({ pointer: (await driverRow(winner.driverId)).currentRideId, available: (await driverRow(winner.driverId)).isAvailable })
       .toEqual({ pointer: ride.id, available: false });
     expect({ pointer: (await driverRow(other.driverId)).currentRideId, available: (await driverRow(other.driverId)).isAvailable })

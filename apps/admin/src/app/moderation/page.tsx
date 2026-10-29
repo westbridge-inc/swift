@@ -11,7 +11,10 @@ import {
   resolveRatingReport,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useAskReason } from '@/components/mc/ReasonDialog';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { humanise, label } from '@/lib/labels';
+import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // STORE-001 — the reviewer's side of moderation.
@@ -43,11 +46,11 @@ const REPORT_STATUSES = ['PENDING', 'REVIEWING', 'ACTIONED', 'DISMISSED'] as con
 
 /** CSAE is not one reason among eight. It goes to the top and it looks it. */
 function reasonClass(reason: string) {
-  if (reason === 'CSAE') return 'bg-red-600 text-white font-semibold';
+  if (reason === 'CSAE') return 'mc-badge mc-badge-alarm';
   if (reason === 'VIOLENCE' || reason === 'HATE_SPEECH' || reason === 'SEXUAL_CONTENT') {
-    return 'bg-red-500/20 text-red-400';
+    return 'mc-badge mc-tone-bad';
   }
-  return 'bg-yellow-500/20 text-yellow-400';
+  return 'mc-badge mc-tone-warn';
 }
 
 function targetSummary(report: any): string {
@@ -61,12 +64,18 @@ function targetSummary(report: any): string {
   return report.targetId;
 }
 
+const when = (iso: string) => gyDateTime(iso);
+
 export default function ModerationPage() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>('content');
   const [status, setStatus] = useState<(typeof REPORT_STATUSES)[number]>('PENDING');
   const [note, setNote] = useState('');
   const [activeId, setActiveId] = useState<string | null>(null);
+  // The reason is asked in the in-page panel (never a browser prompt); the
+  // decision itself still runs once (buttons are disabled while it runs) and a
+  // refusal is shown above the list.
+  const ask = useAskReason();
   const [mutationError, setMutationError] = useState<unknown>(null);
 
   const reports = useQuery({
@@ -123,82 +132,82 @@ export default function ModerationPage() {
 
   const busy = decideReport.isPending || decideRatingReport.isPending || decideHeld.isPending;
 
-  const TABS: { key: Tab; label: string; count: number }[] = [
-    { key: 'content', label: 'Reported content', count: pendingTotal ?? contentRows.length },
-    { key: 'reviews', label: 'Reported reviews', count: ratingReports.length },
-    { key: 'held', label: 'Held reviews', count: heldReviews.length },
+  // A count is shown only once its read succeeded: a failed or pending read is '—', never 0.
+  const TABS: { key: Tab; label: string; count: number | '—' }[] = [
+    { key: 'content', label: 'Reported content', count: reports.isSuccess ? pendingTotal ?? contentRows.length : '—' },
+    { key: 'reviews', label: 'Reported reviews', count: ratings.isSuccess ? ratingReports.length : '—' },
+    { key: 'held', label: 'Held reviews', count: ratings.isSuccess ? heldReviews.length : '—' },
   ];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-2">Moderation</h1>
-      <p className="text-[var(--muted)] mb-6 text-sm">
+    <div className="mc-page">
+      <p className="mc-muted mb-4">
         Everything customers have flagged, plus the reviews the profanity filter is holding back.
         Reports are worked oldest first so nothing rots at the back of the queue.
       </p>
 
-      <div className="flex gap-2 mb-4">
+      <div className="mc-tabs" role="group" aria-label="Queue">
         {TABS.map((t) => (
           <button
             key={t.key}
+            type="button"
+            aria-pressed={tab === t.key}
             onClick={() => { setTab(t.key); setActiveId(null); setMutationError(null); }}
-            className={`px-3 py-1.5 rounded-lg text-xs ${
-              tab === t.key
-                ? 'bg-[var(--accent)] text-white'
-                : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
-            }`}
+            className="mc-tab"
           >
             {t.label} ({t.count})
           </button>
         ))}
       </div>
 
-      {mutationError ? <MutationError error={mutationError} label="moderation decision" /> : null}
+      {mutationError ? <div className="mb-4"><MutationError error={mutationError} label="moderation decision" /></div> : null}
 
       {tab === 'content' ? (
         <div>
-          <div className="flex gap-2 mb-3">
+          <div className="mc-tabs mc-tabs-sub" role="group" aria-label="Report status">
             {REPORT_STATUSES.map((s) => (
               <button
                 key={s}
+                type="button"
+                aria-pressed={status === s}
                 onClick={() => { setStatus(s); setActiveId(null); }}
-                className={`px-3 py-1 rounded-lg text-[11px] ${
-                  status === s ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
-                }`}
+                className="mc-tab"
               >
-                {s}
+                {label('ReportStatus', s)}
               </button>
             ))}
           </div>
-          <p className="text-[var(--muted)] text-xs mb-3">
+          <p className="mc-muted text-xs mb-3">
             Recording a decision here does <strong>not</strong> remove the content. Enforcement —
             taking down a review, suspending a store, banning a user — runs through that thing&apos;s
             own admin page. This is the record of what was decided and by whom.
           </p>
 
           {reports.isLoading ? (
-            <p className="text-[var(--muted)] text-sm">Loading…</p>
+            <div className="mc-loading" aria-busy="true">Loading…</div>
+          ) : reports.isError ? (
+            <QueryFailed error={reports.error} what="the reported content" onRetry={() => void reports.refetch()} retrying={reports.isFetching} />
           ) : contentRows.length === 0 ? (
-            <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
+            <div className="mc-empty">
               Nothing {status.toLowerCase()}.
             </div>
           ) : (
-            <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
+            <div className="mc-list">
               {contentRows.map((r) => (
-                <div key={r.id} className="p-4">
+                <div key={r.id} className="mc-card">
                   <div className="flex items-start gap-3">
-                    <span className={`px-2 py-0.5 rounded text-[11px] ${reasonClass(r.reason)}`}>{r.reason}</span>
-                    <span className="text-[11px] text-[var(--muted)]">{r.targetType}</span>
-                    <span className="text-[11px] text-[var(--muted)] ml-auto">
-                      {new Date(r.createdAt).toLocaleString()}
+                    <span className={reasonClass(r.reason)}>{humanise(r.reason)}</span>
+                    <span className="mc-muted text-xs">{humanise(r.targetType)}</span>
+                    <span className="text-xs mc-muted ml-auto">
+                      {when(r.createdAt)}
                     </span>
                   </div>
-                  <p className="text-sm mt-2">{targetSummary(r)}</p>
+                  <p className="mt-2">{targetSummary(r)}</p>
                   {r.detail ? (
-                    <p className="text-xs text-[var(--muted)] mt-1">Reporter said: {r.detail}</p>
+                    <p className="text-xs mc-muted mt-1">Reporter said: {r.detail}</p>
                   ) : null}
                   {!r.target ? (
-                    <p className="text-xs text-[var(--muted)] mt-1">
+                    <p className="text-xs mc-muted mt-1">
                       The reported content no longer exists — it may already have been removed.
                     </p>
                   ) : null}
@@ -210,7 +219,8 @@ export default function ModerationPage() {
                           value={note}
                           onChange={(e) => setNote(e.target.value)}
                           placeholder="What did you decide, and why? (optional, kept on the record)"
-                          className="w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+                          aria-label="Decision note"
+                          className="mc-input"
                           rows={2}
                         />
                         {r.reason === 'CSAE' ? (
@@ -223,30 +233,30 @@ export default function ModerationPage() {
                           <CsaeCase
                             busy={busy}
                             proposedBy={r.dismissProposedBy ?? null}
-                            onAction={(csae) => { const reason = askReason({ action: 'record this child-safety enforcement' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason, csae }); }}
-                            onProposeDismiss={(disposition) => { const reason = askReason({ action: 'propose dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', reason, csae: { disposition } }); }}
-                            onConfirmDismiss={(disposition) => { const reason = askReason({ action: 'confirm dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason, csae: { disposition } }); }}
+                            onAction={async (csae) => { const reason = await ask({ action: 'record this child-safety enforcement' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason, csae }); }}
+                            onProposeDismiss={async (disposition) => { const reason = await ask({ action: 'propose dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', reason, csae: { disposition } }); }}
+                            onConfirmDismiss={async (disposition) => { const reason = await ask({ action: 'confirm dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason, csae: { disposition } }); }}
                           />
                         ) : (
-                        <div className="flex gap-2">
+                        <div className="mc-actions mt-0">
                           <button
                             disabled={busy}
-                            onClick={() => { const reason = askReason({ action: 'record this report as actioned' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason }); }}
-                            className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
+                            onClick={async () => { const reason = await ask({ action: 'record this report as actioned' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason }); }}
+                            className="mc-btn mc-btn-danger"
                           >
                             Record as actioned
                           </button>
                           <button
                             disabled={busy}
-                            onClick={() => { const reason = askReason({ action: 'dismiss this report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason }); }}
-                            className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+                            onClick={async () => { const reason = await ask({ action: 'dismiss this report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason }); }}
+                            className="mc-btn"
                           >
                             Dismiss
                           </button>
                           <button
                             disabled={busy}
                             onClick={() => { setActiveId(null); setNote(''); }}
-                            className="px-3 py-1.5 rounded-lg text-xs text-[var(--muted)]"
+                            className="mc-btn mc-btn-quiet"
                           >
                             Cancel
                           </button>
@@ -254,19 +264,19 @@ export default function ModerationPage() {
                         )}
                       </div>
                     ) : (
-                      <div className="flex gap-2 mt-3">
+                      <div className="mc-actions">
                         <button
                           disabled={busy}
                           onClick={() => { setActiveId(r.id); setNote(''); setMutationError(null); }}
-                          className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
+                          className="mc-btn mc-btn-primary"
                         >
                           Decide
                         </button>
                         {r.status === 'PENDING' ? (
                         <button
                           disabled={busy}
-                          onClick={() => { const reason = askReason({ action: 'claim this report for review' }); if (reason) decideReport.mutate({ id: r.id, next: 'REVIEWING', reason }); }}
-                            className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+                          onClick={async () => { const reason = await ask({ action: 'claim this report for review' }); if (reason) decideReport.mutate({ id: r.id, next: 'REVIEWING', reason }); }}
+                            className="mc-btn"
                           >
                             Claim (reviewing)
                           </button>
@@ -274,8 +284,8 @@ export default function ModerationPage() {
                       </div>
                     )
                   ) : (
-                    <p className="text-xs text-[var(--muted)] mt-2">
-                      {r.status}
+                    <p className="text-xs mc-muted mt-2">
+                      {label('ReportStatus', r.status)}
                       {r.resolutionNote ? ` — ${r.resolutionNote}` : ''}
                     </p>
                   )}
@@ -288,43 +298,45 @@ export default function ModerationPage() {
 
       {tab === 'reviews' ? (
         <div>
-          <p className="text-[var(--muted)] text-xs mb-3">
+          <p className="mc-muted text-xs mb-3">
             Upholding one of these <strong>removes the review</strong>, tells its author why, and
             re-levels the store&apos;s average — which is what dispatch reads. Dismissing leaves it
             published.
           </p>
           {ratings.isLoading ? (
-            <p className="text-[var(--muted)] text-sm">Loading…</p>
+            <div className="mc-loading" aria-busy="true">Loading…</div>
+          ) : ratings.isError ? (
+            <QueryFailed error={ratings.error} what="the reported reviews" onRetry={() => void ratings.refetch()} retrying={ratings.isFetching} />
           ) : ratingReports.length === 0 ? (
-            <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
+            <div className="mc-empty">
               No reported reviews waiting.
             </div>
           ) : (
-            <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
+            <div className="mc-list">
               {ratingReports.map((r) => (
-                <div key={r.id} className="p-4">
+                <div key={r.id} className="mc-card">
                   <div className="flex items-start gap-3">
-                    <span className="px-2 py-0.5 rounded text-[11px] bg-yellow-500/20 text-yellow-400">{r.reason}</span>
-                    <span className="text-[11px] text-[var(--muted)] ml-auto">
-                      {new Date(r.createdAt).toLocaleString()}
+                    <span className="mc-badge mc-tone-warn">{humanise(r.reason)}</span>
+                    <span className="text-xs mc-muted ml-auto">
+                      {when(r.createdAt)}
                     </span>
                   </div>
-                  <p className="text-sm mt-2">
+                  <p className="mt-2">
                     {r.rating ? (r.rating.comment || `${r.rating.score}★ review, no text`) : 'Review already gone'}
                   </p>
-                  {r.note ? <p className="text-xs text-[var(--muted)] mt-1">Reporter said: {r.note}</p> : null}
-                  <div className="flex gap-2 mt-3">
+                  {r.note ? <p className="text-xs mc-muted mt-1">Reporter said: {r.note}</p> : null}
+                  <div className="mc-actions">
                     <button
                       disabled={busy || !r.rating}
-                      onClick={() => { const reason = askReason({ action: 'uphold this report and remove the review' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'uphold', reason }); }}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
+                      onClick={async () => { const reason = await ask({ action: 'uphold this report and remove the review' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'uphold', reason }); }}
+                      className="mc-btn mc-btn-danger"
                     >
                       Uphold &amp; remove review
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'dismiss this review report' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'dismiss', reason }); }}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+                      onClick={async () => { const reason = await ask({ action: 'dismiss this review report' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'dismiss', reason }); }}
+                      className="mc-btn"
                     >
                       Dismiss
                     </button>
@@ -338,49 +350,51 @@ export default function ModerationPage() {
 
       {tab === 'held' ? (
         <div>
-          <p className="text-[var(--muted)] text-xs mb-3">
+          <p className="mc-muted text-xs mb-3">
             The profanity filter caught these and <strong>withheld them from the storefront</strong>.
             A held review is invisible to everyone until someone decides — so an honest review left
             sitting here is quietly suppressed.
           </p>
           {ratings.isLoading ? (
-            <p className="text-[var(--muted)] text-sm">Loading…</p>
+            <div className="mc-loading" aria-busy="true">Loading…</div>
+          ) : ratings.isError ? (
+            <QueryFailed error={ratings.error} what="the held reviews" onRetry={() => void ratings.refetch()} retrying={ratings.isFetching} />
           ) : heldReviews.length === 0 ? (
-            <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
+            <div className="mc-empty">
               Nothing is being held.
             </div>
           ) : (
-            <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
+            <div className="mc-list">
               {heldReviews.map((h) => (
-                <div key={h.id} className="p-4">
+                <div key={h.id} className="mc-card">
                   <div className="flex items-start gap-3">
-                    <span className="px-2 py-0.5 rounded text-[11px] bg-[var(--bg)] border border-[var(--border)]">
+                    <span className="mc-badge mc-numbers">
                       {h.score}★
                     </span>
-                    <span className="text-[11px] text-[var(--muted)] ml-auto">
-                      {new Date(h.createdAt).toLocaleString()}
+                    <span className="text-xs mc-muted ml-auto">
+                      {when(h.createdAt)}
                     </span>
                   </div>
-                  <p className="text-sm mt-2">{h.comment || 'No text'}</p>
-                  <div className="flex gap-2 mt-3">
+                  <p className="mt-2">{h.comment || 'No text'}</p>
+                  <div className="mc-actions">
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'publish this held review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'publish', reason }); }}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
+                      onClick={async () => { const reason = await ask({ action: 'publish this held review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'publish', reason }); }}
+                      className="mc-btn mc-btn-primary"
                     >
                       Publish it
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'remove this review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'remove', reason }); }}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
+                      onClick={async () => { const reason = await ask({ action: 'remove this review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'remove', reason }); }}
+                      className="mc-btn mc-btn-danger"
                     >
                       Remove
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'exclude this review from the rating' }); if (reason) decideHeld.mutate({ id: h.id, action: 'exclude', reason }); }}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+                      onClick={async () => { const reason = await ask({ action: 'exclude this review from the rating' }); if (reason) decideHeld.mutate({ id: h.id, action: 'exclude', reason }); }}
+                      className="mc-btn"
                     >
                       Exclude from average
                     </button>
@@ -423,30 +437,30 @@ function CsaeCase({ busy, proposedBy, onAction, onProposeDismiss, onConfirmDismi
   const reported = authorityRef.trim().length > 0;
 
   return (
-    <div className="space-y-3 border border-red-500/30 rounded-lg p-3 bg-red-500/5">
-      <p className="text-xs text-red-300 font-medium">Child safety — this closes as a case, not a click</p>
+    <div className="space-y-3 rounded-[var(--mc-radius-sm)] border border-[rgb(185_28_28/30%)] bg-[var(--mc-bad-soft)] p-3">
+      <p className="mc-text-bad font-semibold">Child safety — this closes as a case, not a click</p>
 
-      <label className="block text-xs text-[var(--muted)]">
+      <label className="mc-field">
         What was enforced (the content removed, or the account actioned)
         <input
           value={enforcementRef}
           onChange={(e) => setEnforcementRef(e.target.value)}
           placeholder="user:banned:… or rating:removed:…"
-          className="mt-1 w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+          className="mc-input mt-1"
         />
       </label>
 
-      <label className="block text-xs text-[var(--muted)]">
+      <label className="mc-field">
         Report made to an authority or child-protection body (optional — leave blank if none was made yet)
         <input
           value={authorityRef}
           onChange={(e) => setAuthorityRef(e.target.value)}
           placeholder="NCMEC-2026-00417"
-          className="mt-1 w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+          className="mc-input mt-1"
         />
       </label>
 
-      <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
+      <label className="mc-check">
         <input type="checkbox" checked={preserved} onChange={(e) => setPreserved(e.target.checked)} />
         The evidence needed for those reports has been preserved
       </label>
@@ -460,19 +474,19 @@ function CsaeCase({ busy, proposedBy, onAction, onProposeDismiss, onConfirmDismi
             ...(reported ? { authorityRef: authorityRef.trim() } : {}),
             evidencePreserved: true,
           })}
-          className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
+          className="mc-btn mc-btn-danger"
         >
           Record as actioned
         </button>
       </div>
 
-      <div className="border-t border-[var(--border)] pt-3 space-y-2">
-        <label className="block text-xs text-[var(--muted)]">
+      <div className="border-t border-[var(--mc-line)] pt-3 space-y-2">
+        <label className="mc-field">
           Or dismiss — which needs a second reviewer
           <select
             value={dismissReason}
             onChange={(e) => setDismissReason(e.target.value as CsaeDisposition)}
-            className="mt-1 w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+            className="mc-input mt-1"
           >
             <option value="NO_VIOLATION">Reviewed against the policy — not a violation</option>
             <option value="DUPLICATE">Already covered by another open case</option>
@@ -480,13 +494,13 @@ function CsaeCase({ busy, proposedBy, onAction, onProposeDismiss, onConfirmDismi
         </label>
         {proposedBy ? (
           <>
-            <p className="text-xs text-amber-400">
+            <p className="text-xs mc-text-warn">
               A dismissal has been proposed. A different reviewer confirms it — if that is not you, leave it.
             </p>
             <button
               disabled={busy}
               onClick={() => onConfirmDismiss(dismissReason)}
-              className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+              className="mc-btn"
             >
               Confirm dismissal (second reviewer)
             </button>
@@ -495,7 +509,7 @@ function CsaeCase({ busy, proposedBy, onAction, onProposeDismiss, onConfirmDismi
           <button
             disabled={busy}
             onClick={() => onProposeDismiss(dismissReason)}
-            className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+            className="mc-btn"
           >
             Propose dismissal
           </button>

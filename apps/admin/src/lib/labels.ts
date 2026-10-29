@@ -51,7 +51,7 @@ export const ENUM_LABELS = {
     DELIVERY: 'Delivery', APPOINTMENT: 'Appointment', PICKUP: 'Customer pickup',
   },
   PaymentMethod: {
-    CASH: 'Cash', MOBILE_MONEY: 'MMG', BANK_TRANSFER: 'Bank transfer', CARD: 'Card', WALLET: 'Wallet',
+    CASH: 'Cash', MOBILE_MONEY: 'MMG', BANK_TRANSFER: 'Bank transfer', CARD: 'Card', WALLET: 'Not in use',
   },
   PaymentStatus: {
     PENDING: 'Not paid yet', AUTHORIZED: 'Authorised', CAPTURED: 'Paid',
@@ -79,9 +79,10 @@ export const ENUM_LABELS = {
   },
   BillingEventType: {
     CHARGE_ATTEMPT: 'Weekly fee charge started', CHARGE_ATTEMPT_RECLAIMED: 'Stalled charge restarted',
-    CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Prepaid top-up',
+    CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Weekly fee received early', PREPAID_REVERSAL: 'Fee payment returned by MMG',
     SUSPENDED: 'Suspended for an unpaid fee', REINSTATED: 'Reinstated', REMINDER: 'Reminder sent',
     TIER_CHANGE: 'Plan changed', CHURNED: 'Left Swift',
+    PREPAID_REFUND_RESERVED: 'Credit set aside for a refund', PREPAID_REFUND: 'Refund paid back', PREPAID_REFUND_RELEASED: 'Refund set-aside returned to credit',
   },
   EarningType: {
     DELIVERY_FEE: 'Delivery fee', COURIER_FEE: 'Courier fee', TAXI_FARE: 'Taxi fare', TIP: 'Tip',
@@ -155,7 +156,7 @@ export type EnumName = keyof typeof ENUM_LABELS;
 /** "SOMETHING_NEW" → "Something new". The floor for a value this map has not
  *  been taught yet: never the raw enum (labels.test.ts keeps it unreachable
  *  for the enums above). */
-function humanise(value: string): string {
+export function humanise(value: string): string {
   const words = value.toLowerCase().replaceAll('_', ' ').trim();
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : '—';
 }

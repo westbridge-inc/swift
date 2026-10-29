@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { CartPaymentCapabilities, MmgDirectPaymentAction } from '@swift/types';
 import {
   cartPaymentOptions,
+  checkoutPaymentFields,
   checkoutPaymentMethod,
+  mmgOffered,
   normalizeCartPaymentCapabilities,
   paymentActionForCheckout,
   placedOrderConfirmationCopy,
@@ -98,5 +100,74 @@ describe('post-checkout MMG action and confirmation copy', () => {
     expect(cashCopy).toContain('pay cash at handover');
     expect(cashCopy).toContain('Swift never holds the order money');
     expect(cashCopy).not.toContain('MMG');
+  });
+});
+
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG to the store's NUMBER (build 12 + web). The old link rail is off on
+// the server (builds 9-11 see cash only); the number rail is read from `mmgStoreNumber`, preferred over the link,
+// and the checkout tells the server which rail it chose.
+describe('[PAYMENT-SIMPLIFY] MMG to the store number', () => {
+  const numberCaps = (available: boolean) => normalizeCartPaymentCapabilities({
+    scope: 'scope-n',
+    cash: { available: true, fundsFlow: 'DIRECT_AT_HANDOVER' },
+    mmg: { available: false, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', unavailableReason: 'PAY_LINKS_OFF' },
+    mmgStoreNumber: { available, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', payTo: 'STORE_NUMBER', shownWhen: 'STORE_ACCEPTS', unavailableReason: available ? null : 'VENDOR_NOT_CONFIGURED' },
+  });
+
+  it('offers MMG from the number rail alone, with the after-acceptance wording', () => {
+    const caps = numberCaps(true);
+    expect(caps.mmg.available).toBe(false);
+    const options = cartPaymentOptions(caps, { appointmentOnly: false, pickup: false });
+    expect(options.map((o) => o.key)).toEqual(['CASH', 'MMG']);
+    expect(options[1]!.sub).toBe('When the business accepts, your order shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG. Swift never holds the money.');
+  });
+
+  it('a chosen MMG checks out to the number, and says so', () => {
+    const caps = numberCaps(true);
+    const selection = selectCartPaymentMethod('MMG', caps);
+    expect(selection.method).toBe('MMG');
+    expect(checkoutPaymentFields(selection, caps)).toEqual({ paymentMethod: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER' });
+    expect(checkoutPaymentFields(selectCartPaymentMethod('CASH', caps), caps)).toEqual({ paymentMethod: 'CASH' });
+  });
+
+  it('no number (or an older server without the field): cash only, a stale MMG choice degrades', () => {
+    for (const caps of [numberCaps(false), capabilities('scope-n', false)]) {
+      expect(mmgOffered(caps)).toBe(false);
+      expect(cartPaymentOptions(caps, { appointmentOnly: false, pickup: false }).map((o) => o.key)).toEqual(['CASH']);
+      expect(checkoutPaymentFields({ method: 'MMG', scope: 'scope-n' }, caps)).toEqual({ paymentMethod: 'CASH' });
+    }
+  });
+
+  it('a malformed number capability is not an offer', () => {
+    const caps = normalizeCartPaymentCapabilities({
+      scope: 'scope-x', mmg: { available: false },
+      mmgStoreNumber: { available: true, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', payTo: 'LINK' },
+    });
+    expect(mmgOffered(caps)).toBe(false);
+  });
+
+  it('the old link rail, when a server still offers it, checks out without the number marker', () => {
+    const caps = capabilities('scope-l', true);
+    expect(checkoutPaymentFields(selectCartPaymentMethod('MMG', caps), caps)).toEqual({ paymentMethod: 'MOBILE_MONEY' });
+  });
+
+  it('the confirmation says the number comes on the order once the business accepts', () => {
+    expect(placedOrderConfirmationCopy({ appointment: false, pickup: false, held: false, submittedMethod: 'MOBILE_MONEY', paymentAction: null, mmgPayTo: 'STORE_NUMBER' }))
+      .toBe('When the business accepts, your order screen shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.');
+  });
+});
+
+// [BOOK-S6a] A booking the checkout answer came back ACCEPTED for is confirmed now, not "when the business accepts".
+describe('[BOOK-S6a] the booking confirmation copy follows the answer', () => {
+  const base = { appointment: true, pickup: false, held: false, submittedMethod: 'CASH' as const, paymentAction: null };
+  it('confirmed', () => {
+    const copy = placedOrderConfirmationCopy({ ...base, appointmentConfirmed: true });
+    expect(copy).toBe('Your time is confirmed — pay cash directly to the business when the service is done.');
+    expect(copy).not.toContain('accepts');
+  });
+  it('a request, or no answer about it, keeps the request words', () => {
+    for (const appointmentConfirmed of [false, undefined]) {
+      expect(placedOrderConfirmationCopy({ ...base, appointmentConfirmed })).toBe('Your time is confirmed when the business accepts — pay cash directly to them when the service is done.');
+    }
   });
 });
