@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -38,7 +38,6 @@ import { wordFreeTag } from './helpers/fixture-ids';
 const DAY = 24 * 60 * 60 * 1000;
 const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
 const PUBLISHED = '+5926007788';
-const KIND = 'vendor_needs_public_phone';
 
 let app: FastifyInstance;
 let svc: VerificationService;
@@ -91,18 +90,7 @@ async function makeStore(ownerUserId: string, over: { status?: 'PENDING_APPROVAL
 }
 
 const storeRow = (id: string) => app.prisma.vendor.findUniqueOrThrow({ where: { id }, select: { status: true, isVerified: true, acceptingOrders: true } });
-const notices = (userId: string) => app.prisma.notification.findMany({ where: { userId, data: { path: ['kind'], equals: KIND } } });
 
-function inject(method: 'GET' | 'PUT', url: string, token: string, vendorId: string, payload?: unknown) {
-  return app.inject({
-    method, url,
-    ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
-    headers: {
-      ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
-      authorization: `Bearer ${token}`, 'x-vendor-id': vendorId,
-    },
-  });
-}
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
