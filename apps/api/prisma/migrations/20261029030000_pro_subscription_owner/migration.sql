@@ -9,6 +9,9 @@
 -- existing rider, driver and store subscription it answers exactly as before (rollback.sql restores
 -- the previous text). Stamp 20261029030000: after #2208 (20261029010000) and before #1505's re-date.
 
+-- [REVIEW-G #2216 S4-1] Like its siblings: wait at most 10 seconds for a lock, never queue the billing tables.
+SET lock_timeout = '10s';
+
 -- Prisma-modelled part (schema.prisma: Subscription.serviceProviderId, SubscriptionType.INDEPENDENT_PRO).
 -- AlterEnum. The new value is never used as a constant in this migration's own transaction. IF NOT EXISTS:
 -- PostgreSQL cannot drop an enum value, so after a rollback the value is still there and a re-run must pass.
