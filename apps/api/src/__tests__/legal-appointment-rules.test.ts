@@ -8,6 +8,7 @@ import { CUSTOMER_RESCHEDULE_BEFORE_MIN, RESCHEDULE_WINDOW_CLOSED_CODE, RESCHEDU
 import {
   APPOINTMENT_FREE_CANCEL_BEFORE_MIN,
   FREE_CANCEL_WINDOW_MIN,
+  VERY_LATE_AFTER_MIN,
   cancellationVerdict,
   freeCancellationExpiresAt,
   type CancellationSnapshot,
@@ -56,7 +57,7 @@ describe('[BOOK-S7] the code numbers the words name', () => {
 describe('[BOOK-S7] Terms section 7 states the appointment rule the server applies, true with the switch on or off', () => {
   it('names the cutoff from the constants, only while instant appointment booking is switched on', () => {
     expect(TERMS_S7).toContain(
-      `While Swift's instant appointment booking is switched on, an appointment the Business has confirmed (by accepting it, or automatically when you booked it) can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${WORD[FREE_CANCEL_WINDOW_MIN]} minute after it was confirmed, instead of the ${WORD[FREE_CANCEL_WINDOW_MIN]} minute above;`,
+      `While Swift's instant appointment booking is switched on, an appointment the Business or provider has confirmed (by accepting it, or automatically when you booked it) can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${WORD[FREE_CANCEL_WINDOW_MIN]} minute after it was confirmed, instead of the ${WORD[FREE_CANCEL_WINDOW_MIN]} minute above;`,
     );
     // The hours appear only inside the switched-on sentence (its cancel clause and its move clause): never as an
     // unconditional promise.
@@ -66,8 +67,8 @@ describe('[BOOK-S7] Terms section 7 states the appointment rule the server appli
     expect(sentences[0]).toMatch(/^While Swift's instant appointment booking is switched on,/);
   });
 
-  it('the move (reschedule): only where the app offers it, until the same number of hours before the start; then contact the Business', () => {
-    expect(TERMS_S7).toContain(`where the app offers it, you can also move it to another free time of the same service until ${HOURS} hours before it starts. After that, contact the Business to change or cancel it.`);
+  it('the move (reschedule): only where the app offers it, until the same number of hours before the start; then contact the Business or provider', () => {
+    expect(TERMS_S7).toContain(`where the app offers it, you can also move it to another free time of the same service until ${HOURS} hours before it starts. After that, contact the Business or provider to change or cancel it.`);
     expect(TERMS_S7).toContain('The Business can also move your appointment, and you are told in the app when it does.');
   });
 
@@ -84,13 +85,69 @@ describe('[BOOK-S7] Terms section 7 states the appointment rule the server appli
 
 describe('[BOOK-S7] the refunds page and both FAQ answers say the same rule, from the same numbers', () => {
   it('refunds page', () => {
-    expect(REFUNDS).toContain(`appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed.`);
-    expect(REFUNDS).toContain(`Where the app offers it, you can also move it to another free time of the same service until ${HOURS} hours before it starts. After that, contact the business to change or cancel it.`);
+    expect(REFUNDS).toContain(`appointment booking is switched on, an appointment the business or provider has confirmed can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed.`);
+    expect(REFUNDS).toContain(`Where the app offers it, you can also move it to another free time of the same service until ${HOURS} hours before it starts. After that, contact the business or provider to change or cancel it.`);
     expect(REFUNDS).toContain(`and for ${FREE_CANCEL_WINDOW_MIN} minute after a driver, rider or provider accepts them.`);
   });
 
   it.each([['web FAQ', WEB_FAQ], ['app FAQ', APP_FAQ]])('%s', (_name, text) => {
-    expect(text).toContain(`While instant appointment booking is switched on, an appointment the business has confirmed can be cancelled free until ${HOURS} hours before it starts (and always for ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed); after that, contact the business.`);
+    expect(text).toContain(`While instant appointment booking is switched on, an appointment the business or provider has confirmed can be cancelled free until ${HOURS} hours before it starts (and always for ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed); after that, contact the business or provider.`);
+    expect(text).toContain('Any other service job can be cancelled free until it is booked.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [TERMS · owner 29 Oct 2026 15:50Z · LEGAL_VERSION 2026-10-29, non-material] A TIME BOOKED FROM A PRO'S LIST.
+//
+// Book-a-pro (services/pro-booking.routes.ts, behind INSTANT_BOOKING) books a service job from an individual
+// provider's list of services, confirmed at booking. Its cancel is order/cancel-policy.ts serviceJobCancelVerdict:
+// while the switch is on, free until APPOINTMENT_FREE_CANCEL_BEFORE_MIN before the start (never less than
+// FREE_CANCEL_WINDOW_MIN after it was confirmed), then refused ("contact the provider"); free again once the pro has
+// not started it VERY_LATE_AFTER_MIN after the start. The customer's move stops at the same cut-off
+// (CUSTOMER_RESCHEDULE_BEFORE_MIN); the pro may move it at any time and the customer gets a notice. With the switch off
+// every such job keeps the quote job's rule (refused once booked), which the last sentence states. Those behaviours
+// are pinned on the code by the book-a-pro tests (pro-booking.unit.test.ts, pro-booking.test.ts); here the words are
+// held to the same constants, and every pro promise is held inside a switched-on sentence.
+// ---------------------------------------------------------------------------
+
+const sentencesOf = (text: string) => text.split(/(?<=\.)\s/);
+
+describe('[TERMS 2026-10-29] Terms section 7: a time booked from a provider\'s list of services follows the appointment rule', () => {
+  it('the late-provider number the words name is the code\'s', () => {
+    expect(VERY_LATE_AFTER_MIN).toBe(30);
+    expect(CUSTOMER_RESCHEDULE_BEFORE_MIN).toBe(APPOINTMENT_FREE_CANCEL_BEFORE_MIN);
+  });
+
+  it('an appointment includes a time booked from an individual service provider\'s list of services', () => {
+    expect(TERMS_S7).toContain("An appointment is a time you book from a Business's listing or from an individual service provider's list of services.");
+  });
+
+  it('the provider\'s move and the late-provider free cancel, only while instant appointment booking is switched on', () => {
+    expect(TERMS_S7).toContain(
+      `While instant appointment booking is switched on, a provider can also move an appointment booked from their list of services, and you are told in the app when they do; if the provider has not started it ${VERY_LATE_AFTER_MIN} minutes after its start time, you can still cancel it free in the app.`,
+    );
+    // The minutes appear once, only inside that switched-on sentence: never as an unconditional promise.
+    expect(TERMS_S7.match(/\d+ minutes?/g)).toEqual([`${VERY_LATE_AFTER_MIN} minutes`]);
+    const late = sentencesOf(TERMS_S7).filter((x) => x.includes(`${VERY_LATE_AFTER_MIN} minutes`));
+    expect(late).toHaveLength(1);
+    expect(late[0]).toMatch(/^While instant appointment booking is switched on,/);
+    // Every sentence that names a provider's list of services, apart from the definition, is a switched-on sentence.
+    for (const x of sentencesOf(TERMS_S7).filter((y) => y.includes('list of services') && !y.startsWith('An appointment is'))) {
+      expect(x).toMatch(/^While (Swift's )?instant appointment booking is switched on,/);
+    }
+  });
+
+  it('every other service job keeps the request rule: free until booked, then contact the provider (true with the switch off)', () => {
+    expect(TERMS_S7).toContain('Any other service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');
+    expect(TERMS_S7).not.toContain('A service job request can be cancelled free');
+  });
+
+  it('the refunds page says the same, from the same numbers', () => {
+    expect(REFUNDS).toContain("(a time you book from a business&apos;s listing or from a provider&apos;s list of services)");
+    expect(REFUNDS).toContain(
+      `While instant appointment booking is switched on, a provider can also move an appointment booked from their list of services, and you are told in the app when they do; if the provider has not started it ${VERY_LATE_AFTER_MIN} minutes after its start time, you can still cancel it free in the app.`,
+    );
+    expect(REFUNDS).toContain('<b>Any other service job</b> (a local pro you hired through the app) can be cancelled free in the app while it is a request, until the job is booked. Once it is booked, contact the provider to change or cancel it.');
   });
 });
 
@@ -211,7 +268,7 @@ describe('[BOOK-S7 · B2] the customer\'s move stops where the Terms say (switch
   it('the move rule uses the hours the Terms name, and its refusal sends the customer to the business', () => {
     expect(CUSTOMER_RESCHEDULE_BEFORE_MIN).toBe(APPOINTMENT_FREE_CANCEL_BEFORE_MIN);
     expect(RESCHEDULE_WINDOW_CLOSED_MESSAGE).toBe(`This booking can no longer be moved in the app: it starts in less than ${HOURS} hours. Contact the provider to change it.`);
-    expect(TERMS_S7).toContain(`until ${CUSTOMER_RESCHEDULE_BEFORE_MIN / 60} hours before it starts. After that, contact the Business to change or cancel it.`);
+    expect(TERMS_S7).toContain(`until ${CUSTOMER_RESCHEDULE_BEFORE_MIN / 60} hours before it starts. After that, contact the Business or provider to change or cancel it.`);
   });
 
   it('inside the last 2 hours: 409 in those words, and nothing is written', async () => {

@@ -319,12 +319,14 @@ describe('GET/POST /auth/legal-acceptance', () => {
   // [BOOK-FU2 · owner B3 · MATERIAL] Served now as 2026-10-28.1 ("Customer didn't come": Terms s.6, Privacy s.6):
   // everyone below it is asked once, with the no-show summary after anything else they missed; after the tick,
   // nobody is asked again.
-  it('[2026-10-28.1 material, served] people are asked once, with exactly what changed materially since they accepted', async () => {
+  // [TERMS · owner 29 Oct] Served now as 2026-10-29 (non-material: Terms s.7 pro appointments): the same people are
+  // asked with the same summaries as at 2026-10-28.1, and a person at 2026-10-28.1 is not asked.
+  it('[2026-10-28.1 material, served under 2026-10-29] people are asked once, with exactly what changed materially since they accepted', async () => {
     const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
     const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
     const v281 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-28.1')!.summary;
-    expect(LEGAL_VERSION).toBe('2026-10-28.1');
+    expect(LEGAL_VERSION).toBe('2026-10-29');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
     for (const [accepted, summary] of [
       ['2026-10-17', [...v21, ...v251, ...v27, ...v281]], ['2026-10-18', [...v21, ...v251, ...v27, ...v281]], ['2026-10-21', [...v251, ...v27, ...v281]], ['2026-10-25', [...v251, ...v27, ...v281]],
@@ -336,6 +338,9 @@ describe('GET/POST /auth/legal-acceptance', () => {
       expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: LEGAL_VERSION, needsAcceptance: false, summary: [] });
     }
     expect(v281.join(' ')).toContain('no fee and no strike');
+    // A person at 2026-10-28.1 is not asked.
+    const atV281 = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-28.1');
+    expect((await call('GET', atV281.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: '2026-10-28.1', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {
