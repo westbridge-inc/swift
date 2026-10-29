@@ -25,6 +25,9 @@ const COPIES: Array<{ name: string; pattern: RegExp }> = [
   { name: 'SQL 3-way owner join', pattern: /LEFT\s+JOIN\s+"?riders"?[\s\S]{0,300}?LEFT\s+JOIN\s+"?drivers"?[\s\S]{0,300}?LEFT\s+JOIN\s+"?vendors"?/i },
   // SQL: the payer column picked from the joined owners.
   { name: 'SQL payer COALESCE', pattern: /COALESCE\(\s*r\."userId"\s*,\s*d\."userId"/ },
+  // Prisma: "every subscription this person pays" (rider, driver, store owner). [REVIEW-X #2191 S3-1]
+  // An order's participant filter starts with the customer and is not this rule.
+  { name: 'Prisma paid-by filter', pattern: /OR:\s*\[\s*\{\s*rider:\s*\{\s*userId\b[\s\S]{0,120}?\{\s*driver:\s*\{\s*userId\b[\s\S]{0,120}?\{\s*vendor:\s*\{\s*owner:\s*\{\s*userId/ },
   // Prisma: the one-owner tenant scope.
   { name: 'Prisma one-owner tenant scope', pattern: /vendor:\s*\{\s*tenantId\s*\},\s*riderId:\s*null,\s*driverId:\s*null/ },
 ];
@@ -73,6 +76,11 @@ describe('one subscription payer resolver (source-scan gate)', () => {
       .toEqual(['SQL 3-way owner join']);
     expect(hit('JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")')).toEqual(['SQL payer COALESCE']);
     expect(hit("{ vendor: { tenantId }, riderId: null, driverId: null },")).toEqual(['Prisma one-owner tenant scope']);
+    expect(hit('where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },')).toEqual(['Prisma paid-by filter']);
+    expect(hit('OR: [\n  { rider: { userId: { in: memberIds } } },\n  { driver: { userId: { in: memberIds } } },\n  { vendor: { owner: { userId: { in: memberIds } } } },\n]')).toEqual(['Prisma paid-by filter']);
+    // An order's participants (customer first) and a mover-only filter are not the payer rule.
+    expect(hit('OR: [{ customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }]')).toEqual([]);
+    expect(hit('where: { OR: [{ rider: { userId: payer.userId } }, { driver: { userId: payer.userId } }] }')).toEqual([]);
     // A mover-only lookup (riders + drivers, no store) is not the three-owner rule.
     expect(hit('LEFT JOIN "riders" r ON r."id" = s."riderId"\n LEFT JOIN "drivers" d ON d."id" = s."driverId"\n WHERE r."userId" = $1')).toEqual([]);
     // An order's counterparty is not a subscription payer.
