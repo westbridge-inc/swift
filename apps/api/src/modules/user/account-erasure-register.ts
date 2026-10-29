@@ -118,6 +118,8 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'AdRefundIntent.requestedByUserId': "settlement history of the advertiser's refunds (Privacy Policy §6)",
   'ChatRoomParticipant.userId': "order-scoped chat is kept with its order's record (Privacy Policy §6)",
   'ChatMessage.senderId': "order-scoped chat is kept with its order's record (Privacy Policy §6)",
+  // [BOOK-FU2 · owner B3] Who at the business recorded that a customer did not come: kept with the order's record.
+  'AppointmentNoShow.recordedByUserId': "a missed-appointment record (which booking, when and who at the business recorded it) is kept with its order's record (Privacy Policy §6)",
   'Rating.raterId': 'the score stays in the other side\'s standing; the erasure strips the written comment and reply',
   'Rating.rateeId': 'the score stays in the other side\'s standing; the erasure strips the written comment and reply',
   'ItemFeedback.raterUserId': "a thumbs verdict on an item of a kept order (no text): it stays in the item's standing, like a rating's score",

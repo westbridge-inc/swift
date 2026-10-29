@@ -178,7 +178,8 @@ describe('one version for the whole batch', () => {
   // [EMAIL-HTTPS · COORD 27 Oct, material] Resend delivers Swift's emails (Privacy s.5) as 2026-10-27.
   // [BOOK-S7 · owner 28 Oct, non-material pending the owner] appointment rules (Terms s.5-s.7, Privacy s.6, Business
   // Agreement s.5) as 2026-10-28 (legal-appointment-rules.test.ts).
-  it('is 2026-10-28', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-28');
+  // [BOOK-FU2 · owner B3, material] "Customer didn't come" (Terms s.6, Privacy s.6) as 2026-10-28.1.
+  it('is 2026-10-28.1', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-28.1');
   });
 });

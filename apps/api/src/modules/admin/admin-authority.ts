@@ -260,6 +260,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /users/:id': c('C1', 'user.read'),
   'GET /users/:id/phone': c('C1', 'user.contact.read'),
   'GET /users/:id/risk': c('C1', 'user.risk.read'),
+  // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
+  'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),

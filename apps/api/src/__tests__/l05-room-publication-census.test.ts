@@ -75,6 +75,7 @@ describe('sensitive room publication census', () => {
     // + the OF-33 no-show release back to dispatch (pickup-overdue.ts, through the gate).
     // + [O-4] the out-of-stock question asked before acceptance, and the free cancel when the only
     //   item left gets no answer (picking.service, both through the gate).
-    expect(orderPublishers).toBe(51);
+    // + [BOOK-FU2 · owner B3] "Customer didn't come": the appointment closed by its business (vendor no-show, through the gate).
+    expect(orderPublishers).toBe(52);
   });
 });

@@ -89,14 +89,16 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
   // [POLICE-CLEARANCE CONSENT] 2026-10-25.2 (non-material) is served on top: the newest material version stays 2026-10-25.1.
   // [EMAIL-HTTPS] 2026-10-27 (material: Resend delivers the emails) is served on top and is now the newest material version.
   // [BOOK-S7] 2026-10-28 (non-material pending the owner: appointment rules) is served on top: the newest material version stays 2026-10-27.
-  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-28 (newest material: 2026-10-27, email)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-28');
+  // [BOOK-FU2] 2026-10-28.1 (material: "Customer didn't come") is served on top and is now the newest material version.
+  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-28.1 (newest material: no-show record)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-28.1');
     expect(materialVersion('2026-10-25')).toBe('2026-10-21');
     expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-27');
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
+    expect(materialVersion('2026-10-28')).toBe('2026-10-27');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-21');
-    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-3), 'newest last').toEqual(['2026-10-21', '2026-10-25.1', '2026-10-27']);
+    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-4), 'newest last').toEqual(['2026-10-21', '2026-10-25.1', '2026-10-27', '2026-10-28.1']);
   });
 
   it('the summary names both changes', () => {

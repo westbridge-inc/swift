@@ -131,6 +131,8 @@ export const TENANT_TABLES = [
   'taxi_ride_waiting',
   // [O-1] A Swift call-bridge attempt on an order, walled like the order.
   'call_sessions',
+  // [BOOK-FU2 · owner B3] "Customer didn't come": the business's record on an appointment order, walled like the order.
+  'appointment_no_shows',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -324,6 +326,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'taxi_ride_waiting', trigger: 'taxi_ride_waiting_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [O-1] one hop: a call-bridge attempt inherits the tenant of the order it is about (the same shape)
   { table: 'call_sessions', trigger: 'call_sessions_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [BOOK-FU2 · owner B3] one hop: a missed-appointment record inherits the tenant of its order (the same shape)
+  { table: 'appointment_no_shows', trigger: 'appointment_no_shows_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
