@@ -374,7 +374,6 @@ const PENDING_ELSEWHERE: Record<string, string> = {
 
 /** Reviewed: a second fire is harmless or impossible. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {
-  'app/dashboard/inventory/import/page.tsx | analyze.mutate <- <input onChange>': 'A hidden file input: it fires once per file chosen in the system dialog, and the button that opens that dialog is disabled while analyze runs (disabled={analyze.isPending}).',
 };
 
 /** Calls the scanner cannot trace to a press, checked by hand. Every entry must still match an untraced call. */

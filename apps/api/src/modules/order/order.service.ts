@@ -68,7 +68,8 @@ import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
-import { applyStockMovement } from '../inventory/stock';
+import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
+import { shareTillSyncLock } from '../inventory/till-sync-lock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { newRidePin } from '../rides/ride-pin';
@@ -1533,6 +1534,16 @@ export class OrderService {
           await lockBusinessTime(tx, vendorWithSlot);
         }
       }
+      // [POS-SYNC · REVIEW-M S3-2] A store applying a till file holds its
+      // till-sync key; this checkout shares it without waiting, so it is told
+      // to try again (409) only when a sync really holds it. Checkouts share
+      // the key, so they never refuse each other, and the wait for the store's
+      // row below stays unbounded, as it always was. No lock_timeout is set.
+      for (const planVendorId of planVendorIds) {
+        if (!(await shareTillSyncLock(tx, planVendorId))) {
+          throw new AppError(409, 'STORE_BUSY', 'This store is updating its menu — try again in a moment.');
+        }
+      }
       await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
@@ -1708,6 +1719,10 @@ export class OrderService {
       //   - [M-32] per component, by funder: goods first, then (platform code
       //     only) the delivery fee, never the tip — snapshotted on the order's
       //     redemption below, so every discounted dollar names who funds it.
+      // Every tracked item this checkout will move is locked in id order first,
+      // the order every multi-item stock path uses (lockItemsInIdOrder), so a
+      // checkout and a cancellation or a till sync can never deadlock.
+      await lockItemsInIdOrder(tx, plans.flatMap((p) => p.orderItems.filter((oi) => oi.tracksStock).map((oi) => oi.itemId)));
       for (const [index, plan] of plans.entries()) {
         const sequence = await nextSequence();
         const pricedPlan = priced.perPlan[index]!;
@@ -2202,6 +2217,10 @@ export class OrderService {
     const owner = items.length > 0
       ? await db.order.findUnique({ where: { id: orderId }, select: { tenantId: true } })
       : null;
+    // [POS-SYNC] Lock the lines' items in id order before moving any of them
+    // (lockItemsInIdOrder): restocking line B then line A while a till sync
+    // held A and waited for B was a deadlock.
+    await lockItemsInIdOrder(db, items.map((oi) => (oi.subStatus === 'APPROVED' ? oi.substituteItemId : oi.itemId)));
     for (const oi of items) {
       // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
       // lines when it closed them — restocking again here doubles stock. An

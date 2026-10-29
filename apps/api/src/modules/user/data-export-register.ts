@@ -481,6 +481,7 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'SensitiveReadLog.subjectId': { reason: 'STAFF_WORK', note: 'the security log of staff who opened your sensitive records' },
   'StockAdjustment.createdBy': { reason: 'STAFF_WORK', note: 'stock changes made for a store' },
   'StockMovement.actorId': { reason: 'STAFF_WORK', note: 'stock changes made for a store' },
+  'PosImport.actorId': { reason: 'STAFF_WORK', note: 'till files you applied for a store' },
   'SupportTicket.resolvedById': { reason: 'STAFF_WORK', note: 'support tickets resolved as staff' },
   // [BOOK-FU2 · owner B3] The business's own record that its customer did not come (the customer's copy is missedAppointments).
   'AppointmentNoShow.recordedByUserId': { reason: 'STAFF_WORK', note: 'missed appointments you recorded for a business' },
