@@ -214,6 +214,38 @@ describe('[CHAINS] shared chain trial', () => {
       }
       expect(await prisma.trialGrant.count({ where: { accountId: owner.id } }), 'one grant for the whole chain').toBe(1);
     });
+
+    for (const ownTrial of ['an exception grant', 'an ordinary grant']) {
+      it(`a live ${scope} exception, the owner's own store trial (${ownTrial}) has ENDED: a new branch is billed from approval (no second grant, no crash)`, async () => {
+        const owner = await makeUser();
+        const other = await makeUser();
+        const clusterId = await sameId(owner.id, other.id);
+        if (ownTrial === 'an exception grant') {
+          // The cluster's ordinary store trial went to the other account, so the owner's own trial is the exception's.
+          const o = await makeStoreFor(other.id);
+          expect((await subscriptions.startTrialForVendor(o.vendor.id)).status).toBe('TRIAL');
+          await exception(clusterId, scope);
+        }
+        const first = await makeStoreFor(owner.id);
+        const firstSub = await subscriptions.startTrialForVendor(first.vendor.id);
+        expect(firstSub.status).toBe('TRIAL');
+        if (ownTrial === 'an ordinary grant') await exception(clusterId, scope);
+        const ownRole = ownTrial === 'an exception grant' ? `VENDOR:EX:${owner.id}` : 'VENDOR';
+        expect(await prisma.trialGrant.count({ where: { accountId: owner.id, role: ownRole, status: 'ACTIVE' } })).toBe(1);
+        // The clock passes the owner's trial end. Nothing flips a grant off ACTIVE at its end, so its row stays ACTIVE.
+        const past = new Date(Date.now() - DAY);
+        await prisma.trialGrant.updateMany({ where: { clusterId }, data: { startedAt: new Date(past.getTime() - TRIAL_DAYS * DAY), endsAt: past } });
+        await prisma.subscription.updateMany({
+          where: { vendor: { owner: { userId: { in: [owner.id, other.id] } } } },
+          data: { status: 'ACTIVE', isTrialActive: false, trialEndDate: past, currentPeriodEnd: past, nextBillingDate: past },
+        });
+        const b = await makeStoreFor(owner.id);
+        const sub = await subscriptions.startTrialForVendor(b.vendor.id);
+        expect(sub.status, 'billed from approval').toBe('ACTIVE');
+        expect(sub.isTrialActive).toBe(false);
+        expect(await prisma.trialGrant.count({ where: { accountId: owner.id } }), 'still the one grant of their own').toBe(1);
+      });
+    }
   }
 
   it('an owner whose first store trial came from a founder exception shares it with their branches too', async () => {

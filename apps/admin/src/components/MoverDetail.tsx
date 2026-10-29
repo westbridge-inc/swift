@@ -24,6 +24,7 @@ import { Truncate } from '@/components/mc/Truncate';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { billDateLabel } from '@/lib/bill-date';
+import { chargedWeeklyFee } from '@/lib/weekly-fee';
 import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
@@ -260,7 +261,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
             {sub ? (
               <dl className="mc-rows">
                 <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
-                <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
+                <Row label="Weekly fee"><span className="mc-numbers">{gyd(chargedWeeklyFee(sub))}</span></Row>
                 {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
                 {sub.nextBillingDate ? <Row label={billDateLabel(sub.nextBillingDate)}>{when(sub.nextBillingDate)}</Row> : null}
               </dl>

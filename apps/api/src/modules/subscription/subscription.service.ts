@@ -322,7 +322,17 @@ export class SubscriptionService {
     const shared = ownGrant && branchOf && 'vendorId' in entity
       ? await sharedChainTrialEnd(tx, { ownerId: branchOf.ownerId, exceptVendorId: entity.vendorId, grantEndsAt: ownGrant.endsAt, now })
       : null;
-    const fresh = decision.grant && !ownGrant;
+    // [REVIEW-M #2211 S3-2 residue] An exception gives a store trial only to an account that never held one of its
+    // own. A grant row stays ACTIVE past its end (nothing flips it), so an owner whose own trial ENDED would otherwise
+    // be granted again: a second VENDOR:EX row collides with the first (the branch could never be approved), and an
+    // ordinary ended trial would turn into a fresh 14 days. Branches added after the owner's trial pay from approval.
+    const ownEver = vendorTrialOpen && decision.reason === 'EXCEPTION_GRANT' && !ownGrant
+      ? await tx.trialGrant.findFirst({
+        where: { tenantId, accountId: human.userId, role: { in: ['VENDOR', `VENDOR:EX:${human.userId}`] } },
+        select: { id: true },
+      })
+      : null;
+    const fresh = decision.grant && !ownGrant && !ownEver;
     const trial = fresh || shared !== null;
     const end = fresh ? new Date(now.getTime() + TRIAL_DAYS * DAY_MS) : shared ?? now;
     if (!trial && !decision.grant && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
