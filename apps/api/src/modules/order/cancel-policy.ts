@@ -360,18 +360,25 @@ export function isVeryLate(order: CancellationSnapshot, now: Date = new Date()):
   return promised != null && now.getTime() >= plusMinutes(promised, veryLateAfterMin(order)).getTime();
 }
 
+/** [owner #52] A booking whose provider is very late: a store appointment's and [BOOK-P2] a pro appointment's words. */
+export const APPOINTMENT_TOO_LATE_MESSAGE = 'The provider is running very late. You can cancel the booking for free.';
+
 /** [owner #46/#50/#52] Whose lateness frees the cancel, in the customer's words. */
 function tooLateMessage(order: CancellationSnapshot): string {
-  if (order.fulfillment === 'APPOINTMENT') return 'The provider is running very late. You can cancel the booking for free.';
+  if (order.fulfillment === 'APPOINTMENT') return APPOINTMENT_TOO_LATE_MESSAGE;
   if (order.orderType === 'TAXI') return 'Your driver is running very late. You can cancel the ride for free.';
   if (order.orderType === 'COURIER') return 'Your rider is running very late. You can cancel for free.';
   return TOO_LATE_FREE_CANCEL_MESSAGE;
 }
 
+/** [BOOK-S3 · owner B1] The refusal once an appointment's free window has closed: a store
+ *  appointment's and [BOOK-P2] a pro appointment's, in the same words. */
+export const APPOINTMENT_WINDOW_CLOSED_MESSAGE = `This booking can no longer be cancelled in the app: it starts in less than ${APPOINTMENT_FREE_CANCEL_BEFORE_MIN / 60} hours. Contact the provider to change or cancel it.`;
+
 /** [owner #50] Who the customer contacts instead, in the refusal's words. */
 function windowClosedMessage(order: CancellationSnapshot): string {
   if (appointmentWindowApplies(order)) {
-    return `This booking can no longer be cancelled in the app: it starts in less than ${APPOINTMENT_FREE_CANCEL_BEFORE_MIN / 60} hours. Contact the provider to change or cancel it.`;
+    return APPOINTMENT_WINDOW_CLOSED_MESSAGE;
   }
   const closed = `the ${FREE_CANCEL_WINDOW_MIN}-minute cancellation window has passed`;
   if (order.fulfillment === 'APPOINTMENT') return `This booking can no longer be cancelled in the app: ${closed}. Contact the provider to change or cancel it.`;
@@ -487,13 +494,65 @@ export const SERVICE_JOB_STARTED_MESSAGE = 'Your provider has started this job, 
 export const SERVICE_JOB_BOOKED_CODE = 'SERVICE_JOB_BOOKED';
 export const SERVICE_JOB_BOOKED_MESSAGE = 'This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.';
 
+/** The facts a service job's cancel rule reads. */
+export type ServiceJobCancelSnapshot = {
+  status: string;
+  /** [BOOK-P2] Set on a job booked from a pro's menu (an appointment); null on a quote job. */
+  offeringId?: string | null;
+  scheduledFor?: Date | null;
+  providerConfirmedAt?: Date | null;
+};
+
+/** [BOOK-P2 · owner B1] Does the appointment rule decide this job's cancel? A job booked from a
+ *  pro's menu, with its time, while INSTANT_BOOKING is on (switch off: the quote-job rule). */
+function serviceAppointmentApplies(job: ServiceJobCancelSnapshot): job is ServiceJobCancelSnapshot & { offeringId: string; scheduledFor: Date } {
+  return job.offeringId != null && job.scheduledFor != null && instantBookingEnabled();
+}
+
+/** [BOOK-P2 · owner B1] When a booked pro appointment's free cancel ends: two hours before it
+ *  starts, never less than one minute after it was confirmed (at booking, by the pro's menu),
+ *  the store appointment's rule (`freeWindowEnd`). Null when the rule does not apply. */
+export function serviceAppointmentFreeCancelEnd(job: ServiceJobCancelSnapshot): Date | null {
+  if (!serviceAppointmentApplies(job) || job.status !== 'SCHEDULED') return null;
+  const confirmed = job.providerConfirmedAt ?? null;
+  return latest([
+    plusMinutes(job.scheduledFor, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN),
+    confirmed ? plusMinutes(confirmed, FREE_CANCEL_WINDOW_MIN) : null,
+  ]);
+}
+
 /** The customer's cancel of a service job, exactly as the Terms (§7) say: free in the app while it is a request
  *  (REQUESTED or QUOTED); once it is booked (SCHEDULED) or started (IN_PROGRESS), refused with who to contact.
- *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked. */
-export function serviceJobCancelVerdict(job: { status: string }): CancellationVerdict {
+ *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked.
+ *  [BOOK-P2 · owner B1] A job booked from a pro's menu (an appointment), while INSTANT_BOOKING is on: free
+ *  until two hours before it starts (never less than one minute after it was confirmed), then refused with
+ *  who to contact; free again once the pro is very late (`VERY_LATE_AFTER_MIN` past the start and not
+ *  started), as for a store appointment. Started: refused, as for every job. Never a fee. */
+export function serviceJobCancelVerdict(job: ServiceJobCancelSnapshot, now: Date = new Date()): CancellationVerdict {
   if (job.status === 'REQUESTED' || job.status === 'QUOTED') return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
   if (job.status === 'IN_PROGRESS') return { allowed: false, free: false, code: SERVICE_JOB_STARTED_CODE, message: SERVICE_JOB_STARTED_MESSAGE };
+  if (serviceAppointmentApplies(job) && job.status === 'SCHEDULED') {
+    const windowEnd = serviceAppointmentFreeCancelEnd(job);
+    if (windowEnd != null && now.getTime() <= windowEnd.getTime()) return { allowed: true, free: true, reason: 'IN_WINDOW' };
+    if (now.getTime() >= plusMinutes(job.scheduledFor, VERY_LATE_AFTER_MIN).getTime()) return { allowed: true, free: true, reason: 'TOO_LATE' };
+    return { allowed: false, free: false, code: CANCEL_WINDOW_CLOSED_CODE, message: APPOINTMENT_WINDOW_CLOSED_MESSAGE };
+  }
   return { allowed: false, free: false, code: SERVICE_JOB_BOOKED_CODE, message: SERVICE_JOB_BOOKED_MESSAGE };
+}
+
+/** [BOOK-P2] A pro appointment's cancel rule in the words the apps show (the customer's copy),
+ *  from the one verdict above, so a screen never offers a cancel the route then refuses. */
+export function serviceAppointmentCancelView(job: ServiceJobCancelSnapshot, now: Date = new Date()): CustomerCancelView {
+  const verdict = serviceJobCancelVerdict(job, now);
+  if (!verdict.allowed) {
+    return { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: { code: verdict.code, message: verdict.message } };
+  }
+  return {
+    canCancel: true,
+    freeCancellationExpiresAt: verdict.reason === 'IN_WINDOW' ? serviceAppointmentFreeCancelEnd(job)?.toISOString() ?? null : null,
+    cancellationMessage: verdict.reason === 'TOO_LATE' ? APPOINTMENT_TOO_LATE_MESSAGE : null,
+    cancelUnavailable: null,
+  };
 }
 
 /** [owner #46/#50/#52] The verdict in the words the apps show. */

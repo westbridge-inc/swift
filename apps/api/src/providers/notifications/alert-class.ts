@@ -94,6 +94,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'appointment_reminder',
     // [BOOK-FU2] A store appointment moved, to the other side (standard, as booking_rescheduled was before it)
     'appointment_moved',
+    // [BOOK-P2] A time booked from a pro's menu moved, to the other side (standard, like its booking_ peers)
+    'booking_moved',
     // Safety of the person receiving it (the driver confirm is a job update)
     'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
