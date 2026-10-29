@@ -323,6 +323,20 @@ const PUBLISHED: Record<
     driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
     vendor_agreement: '7a89f3321e109bd9f0082f77ea97b5457fb398b246c270b491038f3f84971ed8',
   },
+  // [BILL-PRO · owner 28 Oct 2026 Rounds A+B · COORD 29 Oct 16:13Z · MATERIAL for Providers only · DRAFT until counsel]
+  // The Business Agreement covers independent service providers: the opening names the Provider and how they accept
+  // (profile, or when the app asks), and a new section 12 (documents a person checks, the weekly services fee on
+  // MMG's checkout page in the app or on the website, never before acceptance, the trial, one fee with a Services
+  // store, the 48-hour block, and a published list of services with bookable times as the Provider's advance
+  // acceptance). Same day as 2026-10-29: the Terms keep their 2026-10-29.1 hash (BOOK-P3's s.7 sentence), the Privacy
+  // Policy and the Mover Agreement their 2026-10-29 hashes; taking out section 12 and the two opening additions
+  // reproduces the 2026-10-29 Business Agreement pin.
+  '2026-10-29.2': {
+    terms: 'd70a9288cc77e6b7ecf880ceb434e3a60f1f9065020a2360c9f43745b77455b9',
+    privacy: 'cecd2b439bd410d76e79abc48f1f15fb62316ab2e0e2b2ebbf34011edfee473a',
+    driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
+    vendor_agreement: '6cb7ec6961fe007a210a80cb052a43264fa244cc98005a35f5da5c6a01107711',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

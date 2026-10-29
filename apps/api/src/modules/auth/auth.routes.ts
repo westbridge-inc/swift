@@ -11,7 +11,7 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
 import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { consentSurfaceOf } from '../legal/consent-surface';
-import { acceptanceStatus, recordReacceptance } from '../legal/reaccept';
+import { acceptanceStatus, proAgreementState, recordReacceptance } from '../legal/reaccept';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
@@ -157,7 +157,8 @@ export async function authRoutes(app: FastifyInstance) {
   app.get('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
     const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
     if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
-    return { success: true, data: acceptanceStatus(user) };
+    // [BILL-PRO] A pro is asked for the Business Agreement that covers Providers (reaccept.ts).
+    return { success: true, data: acceptanceStatus({ ...user, pro: await proAgreementState(app.prisma, request.user.userId) }) };
   });
 
   /** [Legal research G2 · R26] POST /legal-acceptance { version, accept: true } — the fresh tick, recorded in the
@@ -172,7 +173,7 @@ export async function authRoutes(app: FastifyInstance) {
     if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
     await recordReacceptance(app.prisma, { userId: request.user.userId, roles: user.roles, hadAccepted: user.tosVersion !== null, surface: consentSurfaceOf(request), ip: request.ip });
     const after = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
-    return { success: true, data: acceptanceStatus(after ?? user) };
+    return { success: true, data: acceptanceStatus({ ...(after ?? user), pro: await proAgreementState(app.prisma, request.user.userId) }) };
   });
 
   app.post('/register', authRateLimit, async (request, reply) => {
