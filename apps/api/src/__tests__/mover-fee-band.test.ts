@@ -164,7 +164,8 @@ describe('mover fee band — what a mover is actually charged', () => {
     const seeded = gy.subscriptionTiers as unknown as SubscriptionTiers;
     expect(seeded, 'GY rate card — re-run the seed if this fails').toMatchObject({
       mover: 6000, moverHeavy: 9000, taxiDriver: 8000, serviceVendor: 8000,
-      smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000,
+      // [DEPT-PRICE · owner 29 Oct 2026] department stores 45,000 (was 60,000)
+      smallVendor: 15000, largeVendor: 20000, departmentVendor: 45000,
       largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
     });
     // No multi-store rule (owner, 13 Oct 2026): the seed writes none.
