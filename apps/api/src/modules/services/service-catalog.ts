@@ -3,6 +3,8 @@ import type { ServiceCatalog, ServiceCategory } from '@swift/types';
 import { AppError } from '../../utils/errors';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { SERVICE_DOCUMENT_WORDS } from '../verification/doc-registry';
+// [BOOK-P2] The switch reader is a pure function with no imports.
+import { instantBookingEnabled } from '../booking/instant-booking';
 
 // ---------------------------------------------------------------------------
 // Services vertical (spec §4.6). Trust is risk-tiered: verify hard where someone
@@ -138,6 +140,20 @@ export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
   return !PENDING_CATEGORIES.has(trade);
 }
 
+/** [owner C4, 28 Oct 2026] The first pro categories with a bookable menu (BOOK-P1). A trade the
+ *  catalogue holds (the barber group, 15 Oct) is never bookable, whatever this list says. */
+export const BOOKABLE_PRO_TRADES: ReadonlySet<ServiceTradeId> = new Set<ServiceTradeId>(['tutor', 'cleaner', 'photographer']);
+
+export function isProTradeBookable(trade: ServiceTradeId | null): boolean {
+  return trade !== null && BOOKABLE_PRO_TRADES.has(trade) && isServiceCategoryOperational(trade);
+}
+
+/** [BOOK-P2] Can a customer book a time from a pro's menu in this category right now? Only
+ *  while INSTANT_BOOKING is on, for an allow-listed category (owner C4) that is not held. */
+export function categoryTakesAppointments(trade: ServiceTradeId): boolean {
+  return instantBookingEnabled() && isProTradeBookable(trade);
+}
+
 const PERSONAL_CARE = new Set<ServiceTradeId>(['barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist']);
 const EVENTS = new Set<ServiceTradeId>(['chef', 'caterer', 'party_organizer', 'photographer']);
 
@@ -210,8 +226,14 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
   return documents;
 }
 
-/** This endpoint exposes intent and availability separately. It cannot enable
- * appointment checkout: slot/timezone/lifecycle repairs are still required. */
+/** This endpoint exposes intent and availability separately.
+ * [BOOK-P2] `appointmentsEnabled` (and the APPOINTMENT mode) is true only while
+ * INSTANT_BOOKING is on, for a category allow-listed for a bookable menu (owner C4:
+ * tutor, cleaner, photographer) that is not held: a customer can then book a time from
+ * a pro's menu (services/pro-booking.routes.ts). Builds 9, 11 and 12 read neither field
+ * (they keep the QUOTE_JOB mode, which every open category still has), and
+ * `availabilityMessage` stays the quote-only words those builds show: they cannot book
+ * from a menu. A build that reads `appointmentsEnabled` shows its own words. */
 export function publicServiceCatalog(): ServiceCatalog {
   return {
     version: 1,
@@ -219,9 +241,9 @@ export function publicServiceCatalog(): ServiceCatalog {
     categories: (Object.entries(SERVICE_TRADE_CATALOG) as Array<[ServiceTradeId, (typeof SERVICE_TRADE_CATALOG)[ServiceTradeId]]>)
       .map(([id, entry]) => ({
         id, label: entry.label, group: categoryGroup(id), riskTier: entry.riskTier,
-        modes: ['QUOTE_JOB'],
+        modes: categoryTakesAppointments(id) ? ['QUOTE_JOB', 'APPOINTMENT'] : ['QUOTE_JOB'],
         quoteRequestsEnabled: isServiceCategoryOperational(id),
-        appointmentsEnabled: false,
+        appointmentsEnabled: categoryTakesAppointments(id),
         availabilityMessage: !isServiceCategoryOperational(id)
           ? 'Not available yet — service-specific checks are being prepared.'
           : PERSONAL_CARE.has(id) || id === 'tutor'

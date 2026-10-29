@@ -226,6 +226,15 @@ const SCOPE: Record<string, Entry> = {
     [SERVICES_SVC, 'createServiceJobWithLiveAuthority', 'if (earlier) return { job: earlier, created: false as const };'],
     ['modules/services/services.routes.ts', H, 'if (!created) {'],
   ] },
+  // [BOOK-P2] A retried booking from a pro's menu returns the first job: the same customer, pro, service
+  // and minute, still SCHEDULED, found under the customer's booking lock and User-row lock. And the database's
+  // one-pro-one-time exclusion refuses a second live job over that time whatever the path.
+  'modules/services/pro-booking.routes.ts|POST|/jobs/book': { kind: 'order', guard: 'state', pins: [
+    ['modules/services/pro-booking.routes.ts', H, 'await lockCustomerBookings(tx, customerId);'],
+    ['modules/services/pro-booking.routes.ts', H, 'FOR UPDATE /* pro-booking-live-authority */'],
+    ['modules/services/pro-booking.routes.ts', H, "where: { customerId, providerId: provider.id, offeringId: body.offeringId, scheduledFor: start, status: 'SCHEDULED' },"],
+    ['modules/services/pro-booking.routes.ts', H, 'if (earlier) return { job: earlier, created: false, notificationIds: [] };'],
+  ] },
   // A tip after delivery is refused until a collection path exists.
   [`${CUSTOMER}|POST|/orders/:id/tip`]: { kind: 'payout', guard: 'refused', pins: [['modules/order/order.service.ts', 'addPostDeliveryTip', 'TIP_COLLECTION_UNAVAILABLE']] },
 };

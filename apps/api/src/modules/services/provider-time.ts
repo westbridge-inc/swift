@@ -44,6 +44,12 @@ export const TIME_OFF_WINDOW_CHECK = 'service_provider_time_off_window_check';
 
 /** The time a quote job (no end) holds: the minute it starts in. */
 export const QUOTE_JOB_MIN_BLOCK_MINUTES = 1;
+/** [BOOK-P2 · P1 S4-4, ruled by BOOK-P2 29 Oct 2026] What a quote job (no end) holds of the
+ *  pro's day when a customer books from the menu: two hours (provider-calendar.ts
+ *  pickerJobInterval). The pro confirms every quote-job time, so the database keeps the
+ *  minute above; a booking from the menu is confirmed by nobody, so it keeps clear of a
+ *  visit whose length was never written down. A longer visit: the pro sets time off. */
+export const QUOTE_JOB_PICKER_BLOCK_MINUTES = 120;
 /** The shortest and longest bookable service, the bounds of a listing's duration too. */
 export const MIN_OFFERING_MINUTES = 5;
 export const MAX_OFFERING_MINUTES = 600;

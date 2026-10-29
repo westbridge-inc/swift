@@ -40,6 +40,7 @@ import { executeTenantBoundServiceJobTransaction } from './service-job-transacti
 import { canonicalSlotStart } from '../booking/availability';
 import { isServiceJobExclusionViolation } from './provider-time';
 import { registerProviderBookableRoutes } from './provider-bookable.routes';
+import { registerProBookingRoutes, serviceAppointmentViewFor } from './pro-booking.routes';
 import {
   commandGeneration,
   legacyQuoteSchema,
@@ -175,6 +176,8 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   // [BOOK-P1] A provider's bookable services, weekly hours and time off (behind INSTANT_BOOKING).
   registerProviderBookableRoutes(app);
+  // [BOOK-P2] A customer books a time from a pro's menu, and either side moves it (behind INSTANT_BOOKING).
+  registerProBookingRoutes(app);
 
   // ─── Provider profile + qualifications ─────────────────────────────────
 
@@ -621,12 +624,23 @@ export async function servicesRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
-    return { success: true, data: jobs };
+    // [BOOK-P2] A job booked from a pro's menu carries the customer's appointment rules (cancel,
+    // move) while INSTANT_BOOKING is on; every other job is exactly as before (no field added).
+    const now = new Date();
+    return {
+      success: true,
+      data: jobs.map((job) => {
+        const appointment = serviceAppointmentViewFor(job, userId, now);
+        return appointment ? { ...job, appointment } : job;
+      }),
+    };
   });
 
   app.get('/jobs/:id', auth, async (request) => {
     const { id } = request.params as { id: string };
-    return { success: true, data: await jobForUser(id, request.user.userId) };
+    const job = await jobForUser(id, request.user.userId);
+    const appointment = serviceAppointmentViewFor(job, request.user.userId);
+    return { success: true, data: appointment ? { ...job, appointment } : job };
   });
 
   app.post('/jobs/:id/quote', auth, async (request) => {
@@ -950,9 +964,11 @@ export async function servicesRoutes(app: FastifyInstance) {
     // [owner #50 · coordinator rulings 14 Oct] The one cancellation rule decides
     // the customer's cancel, as the Terms (§7) say: free while the job is a
     // request, refused once it is booked or in progress (contact the provider).
+    // [BOOK-P2 · owner B1] A time booked from a pro's menu, while INSTANT_BOOKING
+    // is on: free until two hours before it starts (cancel-policy.ts).
     // The provider may still cancel a booked or started job. Never a fee.
     if (cancelledByCustomer) {
-      const verdict = serviceJobCancelVerdict(job);
+      const verdict = serviceJobCancelVerdict(job, new Date());
       if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
     }
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;

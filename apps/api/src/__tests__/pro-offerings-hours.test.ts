@@ -245,7 +245,9 @@ describe('one pro, one time: a live job holds the provider until it ends', () =>
 });
 
 describe('one engine: a pro day comes from the same calendar computation as a listing', () => {
-  it('subtracts every live job of the provider (a booked service its length, a quote job its minute) and their time off', async () => {
+  // [BOOK-P2 · P1 S4-4 ruling] For a booking from the menu a quote job holds two hours of the pro's day
+  // (QUOTE_JOB_PICKER_BLOCK_MINUTES); the database still holds its minute (the quote-flow tests above).
+  it('subtracts every live job of the provider (a booked service its length, a quote job two hours) and their time off', async () => {
     const pro = await makeProvider();
     const c = await makeUser();
     const hours = [{ dayOfWeek: WEEKDAY, start: '09:00', end: '15:00' }];
@@ -254,11 +256,11 @@ describe('one engine: a pro day comes from the same calendar computation as a li
     const quote = await quotedJob(pro, c.userId);
     await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: quote.id }, data: { status: 'SCHEDULED', scheduledFor: at(12, 30) } }));
     await runWithoutTenant(() => app.prisma.serviceProviderTimeOff.create({ data: { providerId: pro.providerId, date: new Date(Date.UTC(YY, MM - 1, DD)), start: '14:00', end: '15:00' } }));
-    // A cancelled job holds nothing: 13:00 stays free.
-    const cancelled = await bookedJob(pro, c.userId, hour, at(13));
+    // A cancelled job holds nothing: 11:00 stays free (the quote job at 12:30 holds 12:30-14:30).
+    const cancelled = await bookedJob(pro, c.userId, hour, at(11));
     await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: cancelled.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } }));
     const slots = await runWithoutTenant(() => providerDaySlots(app.prisma, { providerId: pro.providerId, weeklyHours: hours, offering: hour, date: DATE }));
-    expect(slots.map(hhmm)).toEqual(['11:00', '13:00']);
+    expect(slots.map(hhmm)).toEqual(['11:00']);
   });
 });
 

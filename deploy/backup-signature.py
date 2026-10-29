@@ -12,6 +12,7 @@ containers). Restores verify against an allowed-signers file of PUBLIC keys
 bucket cannot make a dump that verifies.
 
     backup-signature.py sign   --key KEY --object FILE --out SIG [--plain-sha256 HEX] [--created STAMP]
+                               [--prev NAME|none [--prev-sha256 HEX]]
     backup-signature.py verify --allowed-signers FILE --sig SIG --name OBJECT_NAME
                                [--object FILE] [--plain FILE] [--print]
     backup-signature.py check-trust --allowed-signers FILE
@@ -22,6 +23,12 @@ plain-sha256, or sha256 when the object itself is the plain dump). --print
 writes the verified bundle to stdout. Exit 0 verified; 3 refused (unsigned
 shape, wrong key, tampered, renamed); 4 the allowed-signers file is unusable;
 2 usage. Run with python3 -I. Uses ssh-keygen for the cryptography.
+
+[BACKUP-FU] A CHAIN, for the erasure ledger's batches: --prev names the batch
+shipped before this one and --prev-sha256 the SHA-256 of that batch's whole
+signature file, both inside the signed manifest ("prev none" anchors the
+first batch). A restore then notices a batch that is missing from the middle
+or the start of the chain. Dumps carry no prev line.
 """
 import argparse
 import hashlib
@@ -44,6 +51,8 @@ FIELDS = [
     ("sha256", re.compile(r"[0-9a-f]{64}"), True),
     ("plain-sha256", re.compile(r"[0-9a-f]{64}"), False),
     ("created", re.compile(r"[0-9]{8}T[0-9]{6}Z"), True),
+    ("prev", re.compile(r"none|[A-Za-z0-9][A-Za-z0-9._-]{0,199}"), False),
+    ("prev-sha256", re.compile(r"[0-9a-f]{64}"), False),
 ]
 
 
@@ -100,6 +109,8 @@ def parse(bundle):
     for name, _shape, required in expected:
         if required:
             raise Refused(f"the backup signature lacks its {name} line")
+    if ("prev-sha256" in fields) != (fields.get("prev", "none") != "none"):
+        raise Refused("the backup signature's prev and prev-sha256 lines do not go together")
     return manifest.encode("ascii"), fields, armor
 
 
@@ -142,6 +153,10 @@ def cmd_sign(a):
     if a.plain_sha256:
         lines.append(f"plain-sha256 {a.plain_sha256}")
     lines.append(f"created {a.created}")
+    if a.prev is not None:
+        lines.append(f"prev {a.prev}")
+        if a.prev != "none":
+            lines.append(f"prev-sha256 {a.prev_sha256}")
     manifest = ("\n".join(lines) + "\n").encode("ascii")
     parse(manifest + (BEGIN + "\nx\n" + END + "\n").encode())  # the shape restores accept
     r = subprocess.run(["ssh-keygen", "-Y", "sign", "-f", a.key, "-n", NAMESPACE], input=manifest, capture_output=True)
@@ -187,6 +202,8 @@ def main():
     s.add_argument("--out", required=True)
     s.add_argument("--plain-sha256")
     s.add_argument("--created", required=True)
+    s.add_argument("--prev")
+    s.add_argument("--prev-sha256")
     v = sub.add_parser("verify")
     v.add_argument("--allowed-signers", required=True)
     v.add_argument("--sig", required=True)
@@ -201,6 +218,10 @@ def main():
         if a.cmd == "sign":
             if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", a.created):
                 raise SystemExit("backup-signature: --created must be a UTC stamp like 20261028T091500Z")
+            if a.prev is not None and not re.fullmatch(r"none|[A-Za-z0-9][A-Za-z0-9._-]{0,199}", a.prev):
+                raise SystemExit("backup-signature: --prev must be the previous object's name, or none")
+            if (a.prev not in (None, "none")) != (a.prev_sha256 is not None) or (a.prev_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", a.prev_sha256)):
+                raise SystemExit("backup-signature: --prev NAME needs --prev-sha256 (64 lowercase hex), and only then")
             cmd_sign(a)
         elif a.cmd == "verify":
             cmd_verify(a)
