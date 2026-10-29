@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, type VendorActivationChecklist } from '@/lib/api';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, type ChainDealOutcome, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
 import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
 import type { ProhibitedClass } from '@/lib/api';
@@ -18,6 +18,7 @@ import { DataTable } from '@/components/mc/DataTable';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 import { billDateLabel } from '@/lib/bill-date';
+import { chargedWeeklyFee } from '@/lib/weekly-fee';
 import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
@@ -260,6 +261,30 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     success: () => `${v.name}'s VAT is withdrawn. New orders carry no VAT.`,
   }));
 
+  // [CHAINS · owner 29 Oct 2026] A negotiated weekly fee for every branch of this owner. It never raises a branch's fee
+  // and can only be lowered later (raising one needs the 14-day fee-change notice); a second admin approves it.
+  const deal = v.owner?.dealWeeklyRate != null ? Number(v.owner.dealWeeklyRate) : null;
+  const setDeal = async () => show(await dialog.run({
+    title: `Set a chain deal for ${ownerName || 'this owner'}?`,
+    body: (
+      <p>
+        Every branch of this owner pays this weekly fee from its next weekly fee, unless its own fee is already lower. Weeks
+        already paid keep their price. A branch with a payment being confirmed is left as it is; set the same deal again
+        later to apply it there. Branches approved later start on it. A deal can only be lowered from here. A second admin approves it.
+      </p>
+    ),
+    confirmLabel: 'Set chain deal',
+    fields: [{ kind: 'amount', name: 'weeklyRate', label: 'Weekly fee per branch (GYD)' }],
+    reason: { hint: 'Why this chain pays this fee (the agreement). Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason, values }) => setChainDeal(v.owner.id, Number(values['weeklyRate']), reason),
+    success: (res) => {
+      const rows = (res as { data?: { branches?: Array<{ outcome: ChainDealOutcome }> } })?.data?.branches ?? [];
+      const count = (o: ChainDealOutcome) => rows.filter((b) => b.outcome === o).length;
+      return `Chain deal set. ${count('APPLIED')} branch(es) changed, ${count('OWN_FEE_LOWER')} already pay less, ${count('PAYMENT_IN_FLIGHT')} waiting on a payment, ${count('NO_FEE_YET')} not live yet.`;
+    },
+  }));
+
   const toggleFeatured = async () => {
     const featuring = !v.isFeatured;
     show(await dialog.run({
@@ -354,6 +379,18 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             />
           </section>
 
+          {v.owner ? (
+            <section aria-labelledby="chain-deal" className="mc-card">
+              <h2 id="chain-deal" className="mc-label">Chain deal</h2>
+              <p className="mc-muted">
+                {deal != null
+                  ? `Every branch pays ${gyd(deal)} a week (or its own fee, if lower). Set ${when(v.owner.dealSetAt)}.`
+                  : 'No chain deal: each branch pays its own weekly fee.'}
+              </p>
+              <button type="button" className="mc-btn mt-2" onClick={setDeal}>{deal != null ? 'Lower chain deal…' : 'Set chain deal…'}</button>
+            </section>
+          ) : null}
+
           {siblings.length > 0 ? (
             <section aria-labelledby="other-stores" className="mc-card">
               <h2 id="other-stores" className="mc-label">Other stores (same owner)</h2>
@@ -391,7 +428,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             {sub ? (
               <dl className="mc-rows">
                 <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
-                <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
+                <Row label="Weekly fee"><span className="mc-numbers">{gyd(chargedWeeklyFee(sub))}</span></Row>
                 {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
                 {sub.nextBillingDate ? <Row label={billDateLabel(sub.nextBillingDate)}>{when(sub.nextBillingDate)}</Row> : null}
               </dl>

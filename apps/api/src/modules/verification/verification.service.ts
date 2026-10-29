@@ -2602,12 +2602,15 @@ export class VerificationService {
       if (before.status !== 'PENDING_APPROVAL' || before.owner.user.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
       }
-      await this.projectVendorActivation(tx, userId, { vendorId });
+      // A person is approving this store now (the admin button): a branch waiting for a person goes through.
+      await this.projectVendorActivation(tx, userId, { vendorId, personApproved: true });
       const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, suspensionSource: true, isVerified: true } });
       // [#1541] Live under billing's hold (documents approved, weekly fee unpaid: holdActivationForUnpaidFee) is
       // this activation too; the payment that clears the fee opens the store.
       const heldForFee = after.status === 'SUSPENDED' && after.suspensionSource === 'BILLING' && after.isVerified;
       if (after.status !== 'ACTIVE' && !heldForFee) throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+      // [CHAINS] The person's approval is spent: from now on the branch is projected like any store.
+      await tx.vendor.update({ where: { id: vendorId }, data: { personApprovalRequired: false } });
       await onActivated?.(tx);
     });
   }
@@ -2633,7 +2636,7 @@ export class VerificationService {
   private async projectVendorActivation(
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
-    scope: { vendorId?: string } = {},
+    scope: { vendorId?: string; personApproved?: boolean } = {},
   ): Promise<void> {
     // A root client opens the one projection transaction. A client already inside one is used as is: a Prisma
     // transaction client has no `$transaction`, and a client this service is already projecting through is
@@ -2657,7 +2660,7 @@ export class VerificationService {
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
-          select: { id: true, name: true, vendorType: true, tier: true, isVerified: true, status: true, publicPhone: true },
+          select: { id: true, name: true, vendorType: true, tier: true, isVerified: true, status: true, publicPhone: true, personApprovalRequired: true },
         },
       },
     });
@@ -2697,6 +2700,8 @@ export class VerificationService {
         await this.askForFoodHandlerTick(db, userId, vendor, goingLive);
         if (goingLive) continue;
       }
+      // [CHAINS] A branch goes live only when a person approves it (activateStore passes personApproved).
+      if (verified && vendor.personApprovalRequired && !scope.personApproved && (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL')) continue;
       if (verified) {
         // [PR1270-S2-03] This projection is the one authority that makes a
         // store live, on every path (review, auto-approval, the reconcile

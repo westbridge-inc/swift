@@ -87,7 +87,7 @@ export class TrialEntitlementService {
       // founder-approved multi-location). The FIRST trial needs no exception.
       return { grant: true, clusterId, reason: 'FIRST_TRIAL' };
     }
-    if (await this.hasLiveException(clusterId)) {
+    if (await liveExceptionCovers(this.prisma, { clusterId, accountId, role, tenantId })) {
       return { grant: true, clusterId, reason: 'EXCEPTION_GRANT' };
     }
     return existing.some((g) => g.status === 'ACTIVE')
@@ -164,12 +164,37 @@ export class TrialEntitlementService {
       throw new Error('IDENTITY_AUTHORITY_CHANGED');
     }
   }
+}
 
-  private async hasLiveException(clusterId: string): Promise<boolean> {
-    const ex = await this.prisma.exceptionGrant.findFirst({
-      where: { clusterId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+/**
+ * [CHAINS · §3.5] Does a live founder exception on this cluster authorize ONE MORE trial for this account and role?
+ * Each scope grants only what it says (a live exception used to authorize any extra trial, whatever its scope):
+ *  - FOUNDER_OVERRIDE (an overturned appeal): any role.
+ *  - MULTI_LOCATION_VENDOR (a trial per store location): store trials (role VENDOR) only.
+ *  - HOUSEHOLD (people who share a home, so a phone, a device or an address): another PERSON's first trial, i.e. an
+ *    account holding no trial of its own for the role (ordinary or exception); never the same person again.
+ *  - any other scope: nothing.
+ * The told-before preview (enforcement.ts previewTrial) asks this same question, so the two cannot disagree.
+ */
+export async function liveExceptionCovers(
+  db: Pick<PrismaClient, 'exceptionGrant' | 'trialGrant'>,
+  input: { clusterId: string; accountId: string; role: string; tenantId: string },
+  now: Date = new Date(),
+): Promise<boolean> {
+  const live = await db.exceptionGrant.findMany({
+    where: { clusterId: input.clusterId, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    select: { scope: true },
+  });
+  const scopes = new Set(live.map((ex) => ex.scope));
+  if (scopes.has('FOUNDER_OVERRIDE')) return true;
+  if (scopes.has('MULTI_LOCATION_VENDOR') && input.role === 'VENDOR') return true;
+  if (scopes.has('HOUSEHOLD')) {
+    // Any cluster: a retroactive union can leave this person's own earlier grant under a cluster id it has left.
+    const own = await db.trialGrant.findFirst({
+      where: { tenantId: input.tenantId, accountId: input.accountId, role: { in: [input.role, `${input.role}:EX:${input.accountId}`] } },
       select: { id: true },
     });
-    return !!ex;
+    if (!own) return true;
   }
+  return false;
 }

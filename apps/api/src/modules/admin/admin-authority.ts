@@ -173,7 +173,7 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
-  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
   rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },
@@ -190,6 +190,9 @@ const E = {
   orderDoorCash: { model: 'order', fields: ['status', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'doorCashReturnResolvedById'] },
   moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
+  // [CHAINS] A chain deal: the owner's negotiated weekly fee per branch, who set it and why. VendorOwner has no tenant
+  // column: walled through its user.
+  chainDeal: { model: 'vendorOwner', fields: ['dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'dealSetBy', 'dealReason'], tenantVia: ['user'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
@@ -389,6 +392,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /subscriptions': c('C1', 'subscription.read'),
   'GET /subscriptions/:id/billing-events': c('C0', 'subscription.read'),
   'PUT /subscriptions/:id/waive-fee': c('C4', 'subscription.waive', E.subscription),
+  // [CHAINS · owner 29 Oct 2026] A chain's negotiated weekly fee per branch: money, so a reason and a second person.
+  'GET /vendor-owners/:id/chain': c('C0', 'subscription.read'),
+  'PUT /vendor-owners/:id/deal-rate': c('C4', 'subscription.deal', E.chainDeal),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
   'POST /subscriptions/:id/refund-credit/set-aside': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/paid': c('C4', 'subscription.refund', E.subscription),

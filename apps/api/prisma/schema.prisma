@@ -1466,6 +1466,15 @@ model VendorOwner {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   vendors   Vendor[]
   createdAt DateTime @default(now())
+  /// [CHAINS · owner 29 Oct 2026] A weekly fee Swift negotiated with this owner for EACH of its branches (a chain
+  /// deal). Never higher than a branch's own fee: a branch whose fee is already lower keeps it. Set by a person at
+  /// Swift (dealSetBy, dealReason, dealSetAt); null = no deal (every branch pays its own tier fee). Whole units of
+  /// dealCurrencyCode (CHECKed positive and whole).
+  dealWeeklyRate   Decimal?  @db.Decimal(10, 2)
+  dealCurrencyCode String?
+  dealSetAt        DateTime?
+  dealSetBy        String?
+  dealReason       String?
 
   @@map("vendor_owners")
 }
@@ -1497,6 +1506,10 @@ model VendorStaff {
 
 model Vendor {
   id                      String                   @id @default(cuid())
+  /// [CHAINS · COORD ruling 29 Oct 2026] A branch added to an approved owner (POST /vendor/stores) waits for a PERSON
+  /// at Swift to approve it (its address and pin) before it can go live; the owner's documents are not asked again.
+  /// Cleared when a person activates it (admin approve). False for every store made any other way.
+  personApprovalRequired  Boolean                  @default(false)
   tenantId                String                   @default("swift-default")
   tenant                  Tenant                   @relation(fields: [tenantId], references: [id])
   ownerId                 String

@@ -225,7 +225,8 @@ describe('[Q10] the "still waiting" push opens the order on the store desk', () 
     const first = pushesTo(ownerDevice).at(-1)!;
     expect({ title: first.title, data: first.data, options: first.options }).toEqual({
       title: 'New Order!',
-      data: { orderId: o.orderId, orderNumber: o.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', respondBy: o.respondBy.toISOString(), audience: 'business' },
+      // [CHAINS] the store's id rides the alert so a tap opens that branch
+      data: { orderId: o.orderId, orderNumber: o.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', vendorId, respondBy: o.respondBy.toISOString(), audience: 'business' },
       options: { alertClass: 'ring_order', priority: 'high', sound: 'default', deadlineMs: o.respondBy.getTime() },
     });
 

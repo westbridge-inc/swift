@@ -867,6 +867,9 @@ export class NotificationService {
     let pushedToSomeone = false;
     const alertIds: string[] = [];
     const recipients = await this.newOrderRecipients(orderId, vendorOwnerId);
+    // [CHAINS · owner 29 Oct 2026] Which branch: named when the owner runs more than one store, and the store's id
+    // rides every alert so a tap opens that branch (the phone router switches to it once the order proves it).
+    const branch = await this.orderBranch(orderId);
     for (const userId of recipients) {
       // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
       // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
@@ -878,10 +881,11 @@ export class NotificationService {
         userId,
         type: 'ORDER_UPDATE',
         title: 'New Order!',
-        body: `Order ${orderNumber} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
+        body: `Order ${orderNumber}${branch?.named ? ` at ${branch.name}` : ''} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
         audience: 'business',
         data: {
           orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
+          ...(branch ? { vendorId: branch.vendorId } : {}),
           ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
         },
       });
@@ -893,6 +897,7 @@ export class NotificationService {
         orderNumber,
         total,
         persistent: true,
+        ...(branch ? { vendorId: branch.vendorId } : {}),
       });
       if (pushed) pushedToSomeone = true;
       if (notificationId) alertIds.push(notificationId);
@@ -984,6 +989,16 @@ export class NotificationService {
   /** [Owner ruling #15] Who a new order rings: the team of its store as read
    *  now (store-team.ts ringRecipients). A call naming an order with no store
    *  row (legacy callers) rings the named owner, as it always did. */
+  /** [CHAINS] The store an order is for, and whether its owner runs more than one (then the alert names it). */
+  private async orderBranch(orderId: string): Promise<{ vendorId: string; name: string; named: boolean } | null> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { vendor: { select: { id: true, name: true, owner: { select: { _count: { select: { vendors: true } } } } } } },
+    });
+    const vendor = order?.vendor;
+    return vendor ? { vendorId: vendor.id, name: vendor.name, named: vendor.owner._count.vendors > 1 } : null;
+  }
+
   private async newOrderRecipients(orderId: string, vendorOwnerId: string): Promise<string[]> {
     const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { vendorId: true } });
     if (!order?.vendorId) return [vendorOwnerId];

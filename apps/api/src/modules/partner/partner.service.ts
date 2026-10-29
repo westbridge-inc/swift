@@ -18,6 +18,8 @@ import {
 } from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { lockVendorActivationBilling } from '../billing/billing-access';
+import { hasActiveHold } from '../integrity/enforcement';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -92,6 +94,62 @@ function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40);
+}
+
+/** [CHAINS] The most stores one owner account runs (VENDOR_BRANCH_LIMIT, default 50; nonsense falls back). */
+export const DEFAULT_BRANCH_LIMIT = 50;
+export function branchLimit(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env['VENDOR_BRANCH_LIMIT']);
+  return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_BRANCH_LIMIT;
+}
+
+/**
+ * [CHAINS · COORD ruling 29 Oct 2026] A branch rides the owner's standing, so an owner in trouble anywhere adds none.
+ * Read under the add's locks (PartnerService.addBranch). In order, each with its own plain reason:
+ *  - OWNER_ON_HOLD: an open enforcement hold on the owner's account (enforcement.ts hasActiveHold);
+ *  - FEE_UNPAID: a store's weekly fee past due, or a store suspended or churned for it (pay first, the spirit of
+ *    DEBT_REINSTATE_FIRST);
+ *  - STORE_SUSPENDED / STORE_CLOSED: a store Swift suspended (any other reason) or closed;
+ *  - STORE_ON_HOLD: a store whose MMG checkout Swift holds (a fraud-safety hold);
+ *  - NO_ACTIVE_STORE / FIRST_STORE_NOT_APPROVED: no store is live now (documents approved once is not enough).
+ */
+type StandingStore = { name: string; status: string; isVerified: boolean; suspensionSource: string | null; mmgCheckoutHeldAt: Date | null; subscription: { status: string } | null };
+export function assertOwnerInGoodStanding(stores: readonly StandingStore[], ownerOnHold: boolean): void {
+  if (ownerOnHold) throw new AppError(403, 'OWNER_ON_HOLD', 'Your account is being checked by Swift. You can add branches once that check is finished.');
+  const unpaid = stores.find((s) => ['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(s.subscription?.status ?? '') || (s.status === 'SUSPENDED' && s.suspensionSource === 'BILLING'));
+  if (unpaid) throw new AppError(409, 'FEE_UNPAID', `Pay the weekly fee for ${unpaid.name} first. Then you can add a branch.`);
+  const suspended = stores.find((s) => s.status === 'SUSPENDED');
+  if (suspended) throw new AppError(403, 'STORE_SUSPENDED', `${suspended.name} is suspended. You can add branches once Swift reinstates it.`);
+  const closed = stores.find((s) => s.status === 'CLOSED');
+  if (closed) throw new AppError(403, 'STORE_CLOSED', `Swift closed ${closed.name}. Contact Swift before adding a branch.`);
+  const held = stores.find((s) => s.mmgCheckoutHeldAt !== null);
+  if (held) throw new AppError(403, 'STORE_ON_HOLD', `Swift is checking payments at ${held.name}. You can add branches once that check is finished.`);
+  if (!stores.some((s) => s.status === 'ACTIVE')) {
+    throw stores.some((s) => s.isVerified)
+      ? new AppError(403, 'NO_ACTIVE_STORE', 'You can add branches while one of your stores is live on Swift.')
+      : new AppError(403, 'FIRST_STORE_NOT_APPROVED', 'You can add branches once Swift has approved your first store.');
+  }
+}
+
+/** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
+async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean } = {}) {
+  return tx.vendor.create({
+    data: {
+      ownerId,
+      // [CHAINS · COORD ruling] A branch waits for a person at Swift to approve it before it can go live.
+      ...(opts.branch ? { personApprovalRequired: true } : {}),
+      name: business.name,
+      slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
+      vendorType: business.vendorType,
+      phone: business.phone,
+      addressLine1: business.addressLine1,
+      city: business.city,
+      region: business.region ?? '',
+      latitude: business.latitude,
+      longitude: business.longitude,
+      status: 'PENDING_APPROVAL',
+    },
+  });
 }
 
 export class PartnerService {
@@ -296,24 +354,97 @@ export class PartnerService {
       return { kind: 'VENDOR' as const, id: existing.id, created: false, roles: updatedRoles, targetRole: 'VENDOR_OWNER' as const };
     }
 
-    const vendor = await tx.vendor.create({
-      data: {
-        ownerId: owner.id,
-        name: business.name,
-        slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
-        vendorType: business.vendorType,
-        phone: business.phone,
-        addressLine1: business.addressLine1,
-        city: business.city,
-        region: business.region ?? '',
-        latitude: business.latitude,
-        longitude: business.longitude,
-        status: 'PENDING_APPROVAL',
-      },
-    });
+    const vendor = await createStore(tx, owner.id, business);
     const updatedRoles = await this.ensureRoles(tx, userId, roles, ['VENDOR_OWNER']);
 
     return { kind: 'VENDOR' as const, id: vendor.id, created: true, roles: updatedRoles, targetRole: 'VENDOR_OWNER' as const };
+  }
+
+  /**
+   * [CHAINS · owner 29 Oct 2026] Add a branch: one more store under the SAME owner, so one login runs the chain.
+   * The route (POST /vendor/stores) has already checked that the caller owns a store, confirmed it is them (step-up),
+   * the pin and the name. Here, in ONE transaction under the owner's account lock (so two adds at once can never pass
+   * the limit together):
+   *  - never for a demo (REVIEW) account, an account that is not ACTIVE, or an owner Swift has not approved a store
+   *    for yet: a branch rides the owner's checked identity and papers, so there must be a check to ride on;
+   *  - at most branchLimit() stores per owner;
+   *  - the weekly fee shown for THIS branch is the fee quoted now (each branch pays its own fee: owner, 29 Oct), and
+   *    the tick is recorded with the branch it is for;
+   *  - the branch is born PENDING_APPROVAL, like any store: the one activation projection makes it live when its own
+   *    checklist (published phone, food handlers tick, name basis) is met, and prices its fee then (a shared trial
+   *    while the owner's trial runs, else billed from day one: SubscriptionService.createRow).
+   */
+  async addBranch(
+    userId: string,
+    business: Business,
+    consent: { weeklyFeeAck: WeeklyFeeAck; ip?: string | null; surface: ConsentSurface },
+    env: Record<string, string | undefined> = process.env,
+  ): Promise<{ id: string; name: string; status: string; ownerId: string }> {
+    assertStorePinInMarket(business.latitude, business.longitude);
+    await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+    const created = await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string }>>`
+        SELECT u."id", u."status"::text AS "status", t."kind"::text AS "tenantKind"
+        FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+        WHERE u."id" = ${userId}
+        FOR UPDATE OF u
+      `;
+      const user = rows[0];
+      if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+      if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
+      if (user.status !== 'ACTIVE') throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot add a branch right now.');
+      // The owner's stores and their fees, locked in the settlement order (account row above, then every
+      // subscription by id), then the stores themselves: a suspension, a hold or a missed fee committed first is
+      // seen here, and one that comes second waits for this add to finish.
+      await lockVendorActivationBilling(tx, userId);
+      await tx.$queryRaw`SELECT v."id" FROM "vendors" v JOIN "vendor_owners" o ON o."id" = v."ownerId" WHERE o."userId" = ${userId} ORDER BY v."id" FOR SHARE OF v /* add-branch-owner-stores */`;
+      const owner = await tx.vendorOwner.findUnique({
+        where: { userId },
+        select: {
+          id: true,
+          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, subscription: { select: { status: true } } } },
+        },
+      });
+      if (!owner || owner.vendors.length === 0) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Set up your first store before adding a branch.');
+      assertOwnerInGoodStanding(owner.vendors, (await hasActiveHold(tx as unknown as PrismaClient, userId)).held);
+      const limit = branchLimit(env);
+      if (owner.vendors.length >= limit) {
+        throw new AppError(409, 'BRANCH_LIMIT', `An account can run up to ${limit} stores. Contact Swift to add more.`, { limit });
+      }
+      // [Row 628] The fee the owner saw is the fee for this branch now, or nothing is written (WEEKLY_FEE_CHANGED).
+      const quote = await signupQuote(tx, userId, { role: 'VENDOR', vendorType: business.vendorType });
+      assertSawQuote(consent.weeklyFeeAck, quote);
+      const vendor = await createStore(tx, owner.id, business, { branch: true });
+      await recordConsent(tx, {
+        subjectType: 'vendor_user',
+        subjectId: userId,
+        documentType: WEEKLY_FEE_ACK_TYPE,
+        version: WEEKLY_FEE_ACK_VERSION,
+        action: 'granted',
+        surface: consent.surface,
+        ip: consent.ip ?? null,
+        evidence: {
+          control: 'weekly_fee_checkbox', path: 'vendor/stores', kind: 'VENDOR_BRANCH', vendorId: vendor.id, vendorType: business.vendorType,
+          weeklyFee: { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId, action: 'VENDOR_BRANCH_ADDED', entity: 'Vendor', entityId: vendor.id,
+          changes: { ownerId: owner.id, storesBefore: owner.vendors.length, vendorType: business.vendorType },
+        },
+      });
+      return { id: vendor.id, name: vendor.name, status: vendor.status as string, ownerId: owner.id, tenantId: vendor.tenantId };
+    });
+    if (this.notifications) {
+      await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: created.tenantId,
+        title: 'New branch awaiting approval',
+        body: `${business.name} (${business.vendorType.toLowerCase()}) was added as a branch of an approved business and is waiting for its checklist.`,
+        data: { kind: 'vendor_pending', vendorId: created.id },
+      }).catch(() => {});
+    }
+    return { id: created.id, name: created.name, status: created.status, ownerId: created.ownerId };
   }
 
   /**

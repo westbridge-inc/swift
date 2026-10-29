@@ -188,6 +188,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Transaction', field: 'balanceAfter', unit: 'MAJOR_WHOLE' },
   { model: 'User', field: 'walletBalance', unit: 'MAJOR_WHOLE' },
   { model: 'Vendor', field: 'minOrderAmount', unit: 'MAJOR_WHOLE' },
+  // [CHAINS] A chain deal: a weekly fee, the unit of Subscription.customRate it is written to.
+  { model: 'VendorOwner', field: 'dealWeeklyRate', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryBaseFee', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryPerKm', unit: 'MAJOR_WHOLE' },
   // [ZONE-FARES] A zone's own taxi per-km rate: whole units of the market's

@@ -7,6 +7,8 @@
 // U18: the card printed `weeklyRate`, the LIST rate. A partner on a custom rate
 // was shown a fee they are not charged. The rate in force is payInfo's
 // `weeklyFeeGyd`, then the row's `customRate`, then the list rate.
+// [CHAINS · REVIEW-M #2211] Without payInfo's figure, the biller's rule: a
+// custom rate is charged only when it is not above the list rate (the lower).
 // U46: it printed the status code raw ("PAST_DUE"), read a `trialEndsAt` the
 // server never sends (the column is `trialEndDate`), and dated the next bill
 // from `currentPeriodEnd` (the phone reads `nextBillingDate`).
@@ -21,11 +23,12 @@ type Sub = Record<string, unknown> | null | undefined;
 /** The weekly fee actually charged, or null when the server sent no figure. */
 export function chargedWeeklyFee(sub: Sub): number | null {
   if (!sub) return null;
-  for (const value of [sub['weeklyFeeGyd'], sub['customRate'], sub['weeklyRate']]) {
-    const amount = parseAmount(value);
-    if (amount !== null) return amount;
-  }
-  return null;
+  const charged = parseAmount(sub['weeklyFeeGyd']);
+  if (charged !== null) return charged;
+  const custom = parseAmount(sub['customRate']);
+  const list = parseAmount(sub['weeklyRate']);
+  if (custom !== null && list !== null) return Math.min(custom, list);
+  return custom ?? list;
 }
 
 // [FEE-STATUS · owner 25 Oct 2026] The status word and the line say where the fee stands (the API's

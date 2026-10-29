@@ -11,6 +11,7 @@ import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { billDateLabel } from '@/lib/bill-date';
+import { chargedWeeklyFee } from '@/lib/weekly-fee';
 import { gyDate, gyDateTime } from '@/lib/dates';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
@@ -241,7 +242,7 @@ export default function SubscriptionsPage() {
                         <StatusPill value={s.status} />
                         {s.feeWaived ? <span className="ml-2 text-xs mc-text-info">fee waived</span> : null}
                       </td>
-                      <td className="p-4 text-right">{gyd(s.customRate ?? s.weeklyRate)}</td>
+                      <td className="p-4 text-right">{gyd(chargedWeeklyFee(s))}</td>
                       <td className="p-4 mc-muted">{when}</td>
                       <td className="p-4 text-right">
                         <div className="flex gap-2 justify-end">

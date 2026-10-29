@@ -246,7 +246,8 @@ describe('[#15] an OPEN store rings its whole active team', () => {
     expect(await recipientsOf(order.id)).toEqual(new Set([owner.userId, manager.userId, staff.userId]));
     const expected = {
       title: 'New Order!',
-      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', respondBy: deadline.toISOString(), audience: 'business' },
+      // [CHAINS] the store's id rides the alert so a tap opens that branch
+      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', vendorId, respondBy: deadline.toISOString(), audience: 'business' },
       options: { alertClass: 'ring_order', priority: 'high', sound: 'default', deadlineMs: deadline.getTime() },
     };
     for (const member of [owner, manager, staff]) {
