@@ -60,7 +60,7 @@ describe('updating items from a till export', () => {
       }
       if (req.url.pathname === '/api/v1/vendor/items/import/sync/confirm') {
         return {
-          body: { data: { ...previewFor('SOLD_OUT'), appliedAt: '2026-10-06T23:00:00.000Z', replayed: false } },
+          body: { data: { ...previewFor('SOLD_OUT'), appliedAt: '2026-10-06T23:00:00.000Z', replayed: false, waitingForCheck: [{ row: 4, name: 'Rum cake' }] } },
         };
       }
       throw new Error(`Unexpected request: ${req.url}`);
@@ -71,7 +71,7 @@ describe('updating items from a till export', () => {
     const panel = await screen.findByRole('region', { name: 'Preview' });
     expect(within(panel).getByText('What will change in Test Store')).toBeTruthy();
     expect(within(panel).getByText('40 → 35')).toBeTruthy();
-    expect(within(panel).getByText('GY$3,500 → GY$3,600')).toBeTruthy();
+    expect(within(panel).getByText('$3,500 → $3,600')).toBeTruthy();
     expect(within(panel).getByText('Will show as sold out')).toBeTruthy();
     expect(within(panel).getByText(/Brown Sugar/)).toBeTruthy();
     expect(within(panel).getByText(/Row 5 · Nameless: No SKU in the file\./)).toBeTruthy();
@@ -91,7 +91,10 @@ describe('updating items from a till export', () => {
     await user.click(await screen.findByRole('button', { name: 'Apply these changes' }));
     const result = await screen.findByRole('region', { name: 'Result' });
     expect(within(result).getByText('Done. Your items are updated.')).toBeTruthy();
-    expect(within(result).getByText('Rice 5kg: GY$3,500 → GY$3,600')).toBeTruthy();
+    expect(within(result).getByText('Rice 5kg: $3,500 → $3,600')).toBeTruthy();
+    // [GUARDRAILS §8] A new item a banned word holds is named, so the store knows why customers cannot see it yet.
+    expect(within(result).getByText('1 new item waiting for a quick check — hidden from customers until Swift checks it:')).toBeTruthy();
+    expect(within(result).getByText('Row 4: Rum cake')).toBeTruthy();
 
     const confirm = calls.find((c) => c.url.pathname.endsWith('/sync/confirm'))!;
     expect(bodyOf(confirm)).toEqual({

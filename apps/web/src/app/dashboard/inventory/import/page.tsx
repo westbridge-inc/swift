@@ -120,6 +120,8 @@ export default function ImportPage() {
   });
 
   async function onFile(file: File) {
+    // [C2] A file chosen while the last one is still being read waits its turn: never two reads at once.
+    if (read.isPending) return;
     reset();
     setFileName(file.name);
     setChoice({});
@@ -475,7 +477,7 @@ function SyncPreviewPanel({ preview, missing, busy, nothingToApply, onMissing, o
             </>
           )}
           {preview.notOnSku > 0 && (
-            <p className="mt-2 text-xs text-[var(--swift-muted)]">{plural(preview.notOnSku, 'item')} on Swift {preview.notOnSku === 1 ? 'has' : 'have'} no SKU, so a file never changes {preview.notOnSku === 1 ? 'it' : 'them'}.</p>
+            <p className="mt-2 text-xs text-[var(--swift-muted)]">{plural(preview.notOnSku, 'item')} on Swift {preview.notOnSku === 1 ? 'is' : 'are'} without a SKU, so a file never changes {preview.notOnSku === 1 ? 'it' : 'them'}.</p>
           )}
         </div>
       )}
