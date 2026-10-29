@@ -99,9 +99,12 @@ KEEP_INSPECT=0
 # [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
 # base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
 PROJECT=""
-# [Off-site erasure ledger] The shipped entries, decrypted by the owner on his own computer: a plain
-# JSONL file only this login can read. They join the live ledger, or stand alone in a DR restore.
+# [Off-site erasure ledger] The shipped batches, decrypted by the owner on his own computer, each beside
+# its signature, in a directory only this login can read [BACKUP-FU]. They join the live ledger, or
+# stand alone in a DR restore.
 LEDGER_FROM=""
+# [BACKUP-FU · COORD] Skip listing the bucket for the off-site ledger (only when the bucket is gone).
+LEDGER_NO_BUCKET=0
 # [SEC-BACKUP F2] The signature: the owner's explicit flag for a dump made before signing existed;
 # the drill's verified bundle (base64) and object name for the plain dump it pipes in; and
 # --fetch-signature, which prints an off-site object's verified signature.
@@ -118,7 +121,8 @@ while [ $# -gt 0 ]; do
     --fetch-signature) FETCH_SIGNATURE=1 ;;
     --signature-b64) [ $# -ge 2 ] || die "--signature-b64 needs the signature bundle"; SIGNATURE_B64="$2"; shift ;;
     --signed-object) [ $# -ge 2 ] || die "--signed-object needs the signed object's name"; SIGNED_OBJECT="$2"; shift ;;
-    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the decrypted off-site ledger file"; LEDGER_FROM="$2"; shift ;;
+    --ledger-no-bucket-check) LEDGER_NO_BUCKET=1 ;;
+    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the directory of decrypted off-site ledger batches"; LEDGER_FROM="$2"; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
     --compare-source) COMPARE_SOURCE=1 ;;
     --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
@@ -283,45 +287,264 @@ REPLAY_SQL="$HERE/restore-replay-erasures.sql"
 OFFSITE_SQL="$HERE/restore-offsite-ledger.sql"
 OFFSITE_CSV=""
 OFFSITE_NEWEST=""
-# [Off-site erasure ledger] Check the file before anything is created: readable by this login only,
-# every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to CSV
-# (one JSON value per row) in this run's private directory; prints the newest entry's time.
+# [Off-site erasure ledger · BACKUP-FU] Check the batches before anything is created. --ledger-from is
+# the DIRECTORY the owner decrypted the off-site batches into: every <batch>.jsonl (readable by this
+# login only) beside the <batch>.jsonl.gpg.sig the shipper uploaded with it. Each signed batch is
+# verified against the trusted backup signing keys (the signature, the batch's name, and the
+# decrypted batch's SHA-256 that was signed with the encrypted copy) before any line is read; one
+# that fails is refused whatever the flags, and a signature whose batch is missing is refused too
+# (the fetch or the decryption was incomplete). [COORD] The signed batches must form ONE CHAIN: each
+# names the batch before it inside its signature (the first says "prev none"), so a batch missing
+# from the start or the middle, or out of order, is refused (CHAIN_BROKEN); and when BACKUP_BUCKET
+# is set, the bucket's erasure-ledger/ prefix is listed (read-only, the backup key) and every batch
+# and signature it holds must be here, so none is missing from the end either (only
+# --ledger-no-bucket-check skips that, for a bucket that is gone; the result then says so).
+# A batch with NO signature:
+#   - whose every entry is also in a verified batch is set aside (a copy whose signature never
+#     reached the bucket: the shipper ships those entries again, signed);
+#   - otherwise is refused, unless the owner passes --allow-unsigned-legacy AND it is from before
+#     signing began (its name stamp and every entry's time before the first signed batch: the
+#     shipper's record BACKUP_FIRST_SIGNED_LEDGER_FILE, the owner's copy BACKUP_LEDGER_SIGNED_SINCE,
+#     and the oldest verified batch here, whichever is earliest). With no record at all it also
+#     needs --legacy-without-signing-record. A local file's time is its own claim (as for a local
+#     dump): the flag is the owner's explicit decision.
+# Every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to
+# CSV (one JSON value per row) in this run's private directory; prints the newest entry's time.
+FIRST_SIGNED_LEDGER_DEFAULT=/var/backups/swift/.first-signed-erasure-ledger
+ledger_signed_since() {
+  local stamp="${BACKUP_LEDGER_SIGNED_SINCE:-$(env_value BACKUP_LEDGER_SIGNED_SINCE)}" file
+  if [ -z "$stamp" ]; then
+    file="${BACKUP_FIRST_SIGNED_LEDGER_FILE:-$(env_value BACKUP_FIRST_SIGNED_LEDGER_FILE)}"
+    file="${file:-$FIRST_SIGNED_LEDGER_DEFAULT}"
+    [ -r "$file" ] && stamp="$(head -1 "$file" | tr -d '[:space:]')"
+  fi
+  [ -z "$stamp" ] && return 0
+  [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "the record of the first signed erasure ledger batch is malformed ($stamp); nothing was created"
+  printf '%s\n' "$stamp"
+}
 read_offsite_ledger() {
-  [ -f "$LEDGER_FROM" ] || die "--ledger-from: $LEDGER_FROM is not a file"
+  local inventory kind base rc since bundle
+  [ -d "$LEDGER_FROM" ] ||
+    die "--ledger-from takes the DIRECTORY of the decrypted off-site batches, each <batch>.jsonl beside its <batch>.jsonl.gpg.sig (PILOT-RUNBOOK §4): $LEDGER_FROM is not a directory; nothing was created"
   private_tmp
   OFFSITE_CSV="$TMP_DIR/offsite-ledger.csv"
-  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" <<'PY'
-import csv, json, os, re, stat, sys
-src, dst = sys.argv[1], sys.argv[2]
-if os.stat(src).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-    sys.exit("--ledger-from: the ledger file is readable by others; chmod 600 it")
+  inventory="$(python3 -I - "$LEDGER_FROM" <<'PY'
+import os, re, stat, sys
+d = sys.argv[1]
+st = os.stat(d)
+if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    sys.exit("--ledger-from: the ledger directory is open to others; chmod 700 it")
+batch = re.compile(r"(erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8})\.jsonl(\.gpg|\.gpg\.sig)?")
+plain, sigs = set(), set()
+for name in sorted(os.listdir(d)):
+    m = batch.fullmatch(name)
+    if not m:
+        sys.exit(f"--ledger-from: {name} is not an erasure ledger batch (<batch>.jsonl, .jsonl.gpg or .jsonl.gpg.sig)")
+    path = os.path.join(d, name)
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        sys.exit(f"--ledger-from: {name} is not a regular file")
+    if m.group(2) is None:
+        if os.stat(path).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            sys.exit(f"--ledger-from: {name} is readable by others; chmod 600 it")
+        plain.add(m.group(1))
+    elif m.group(2) == ".gpg.sig":
+        sigs.add(m.group(1))
+for b in sorted(sigs - plain):
+    sys.exit(f"--ledger-from: {b}.jsonl.gpg.sig is here but its decrypted batch {b}.jsonl is not: fetch and decrypt EVERY batch")
+if not plain:
+    sys.exit("--ledger-from: the ledger directory holds no decrypted batch")
+for b in sorted(plain):
+    print(("signed " if b in sigs else "unsigned ") + b)
+PY
+)" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
+  : > "$TMP_DIR/ledger-signed"; : > "$TMP_DIR/ledger-unsigned"
+  while read -r kind base; do
+    if [ "$kind" = unsigned ]; then printf '%s\n' "$base" >> "$TMP_DIR/ledger-unsigned"; continue; fi
+    rc=0
+    bundle="$(python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$LEDGER_FROM/$base.jsonl.gpg.sig" \
+      --name "$base.jsonl.gpg" --plain "$LEDGER_FROM/$base.jsonl" --print)" || rc=$?
+    case "$rc" in
+      0) ;;
+      4) die "the erasure ledger signature cannot be checked: the allowed-signers file is unusable (above); nothing was created" ;;
+      *) die "the signature of the erasure ledger batch $base was REFUSED (above): it was not shipped and signed by a Swift backup host, or it was changed. Nothing was created; --allow-unsigned-legacy does not override a signature that fails" ;;
+    esac
+    # base, created, prev (or "-": no chain line), prev-sha256 (or "-"), this signature file's SHA-256
+    printf '%s %s %s %s %s\n' "$base" "$(sed -n 's/^created \([0-9]\{8\}T[0-9]\{6\}Z\)$/\1/p' <<<"$bundle" | head -1)" \
+      "$(sed -n 's/^prev \([A-Za-z0-9._-]*\)$/\1/p' <<<"$bundle" | head -1 | grep . || echo -)" \
+      "$(sed -n 's/^prev-sha256 \([0-9a-f]\{64\}\)$/\1/p' <<<"$bundle" | head -1 | grep . || echo -)" \
+      "$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$LEDGER_FROM/$base.jsonl.gpg.sig")" >> "$TMP_DIR/ledger-signed"
+  done <<<"$inventory"
+  # [BACKUP-FU · COORD] THE CHAIN: every signed batch names the one shipped before it (inside its
+  # signature), the first one says "prev none". A batch missing from the start or the middle, or one
+  # out of order, is refused here, before anything is created. CHAIN_BROKEN.
+  python3 -I - "$TMP_DIR/ledger-signed" <<'PY' || die "--ledger-from: CHAIN_BROKEN (above): a signed erasure ledger batch is missing or out of order, so erasures would be skipped; fetch and decrypt EVERY batch. Nothing was created"
+import sys
+rows = [l.split() for l in open(sys.argv[1]).read().splitlines() if l.strip()]
+if rows:
+    have = {r[0] + ".jsonl.gpg": r for r in rows}
+    for base, _created, prev, prev_sha, _sha in rows:
+        if prev == "-":
+            sys.exit(f"CHAIN_BROKEN: {base} is signed without a link to the batch before it")
+    anchors = sorted(r[0] for r in rows if r[2] == "none")
+    if len(anchors) != 1:
+        sys.exit(f"CHAIN_BROKEN: {len(anchors)} batches here say they are the first signed batch ({', '.join(anchors) or 'none'}); there is exactly one")
+    if anchors[0] != min(r[0] for r in rows):
+        sys.exit(f"CHAIN_BROKEN: the first signed batch {anchors[0]} is not the oldest signed batch here")
+    # [REVIEW-M S4-2] One line, no fork: no two batches follow the same batch.
+    followers = {}
+    for base, _created, prev, _prev_sha, _sha in rows:
+        if prev != "none":
+            followers.setdefault(prev, []).append(base)
+    for prev, bases in sorted(followers.items()):
+        if len(bases) > 1:
+            sys.exit(f"CHAIN_BROKEN: {' and '.join(sorted(bases))} both follow {prev}: the chain forks")
+    for base, _created, prev, prev_sha, _sha in rows:
+        if prev == "none":
+            continue
+        if prev not in have:
+            sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, which is not here: a batch is missing")
+        if have[prev][4] != prev_sha:
+            sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, but the {prev}.sig here is not the one it was signed after")
+        if not have[prev][0] < base:
+            sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, which is not older: the chain is out of order")
+PY
+  # [BACKUP-FU · COORD] THE BUCKET: when it can be listed (read-only, the backup key), every batch it
+  # holds must be here, so no batch is missing from the end either.
+  LEDGER_BUCKET_NOTE="the bucket was NOT listed (--ledger-no-bucket-check or no BACKUP_BUCKET): a batch newer than the newest one here would not be noticed"
+  if [ "$LEDGER_NO_BUCKET" = 1 ]; then
+    echo "WARNING: --ledger-no-bucket-check: the off-site bucket is not listed; a batch missing from the END of the ledger cannot be noticed." >&2
+  else
+    for name in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE; do
+      if [ -z "${!name:-}" ]; then export "$name=$(env_value "$name")"; fi
+    done
+    if [ -z "${BACKUP_BUCKET:-}" ]; then
+      echo "WARNING: no BACKUP_BUCKET: the off-site bucket is not listed; a batch missing from the END of the ledger cannot be noticed." >&2
+    else
+      . "$HERE/secret-env.sh"
+      load_backup_storage_keys || die "--ledger-from: the backup key is needed to list the off-site ledger (or pass --ledger-no-bucket-check); nothing was created"
+      LISTED="$(aws_s3 "$TMP_DIR:/data" s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix "${BACKUP_PREFIX:-db}/erasure-ledger/" --query 'Contents[].Key' --output text)" ||
+        die "--ledger-from: could not list s3://$BACKUP_BUCKET/${BACKUP_PREFIX:-db}/erasure-ledger/ to prove every batch is here (pass --ledger-no-bucket-check only if the bucket is gone); nothing was created"
+      printf '%s\n' "$LISTED" > "$TMP_DIR/ledger-listed"
+      python3 -I - "$LEDGER_FROM" "$TMP_DIR/ledger-listed" <<'PY' || die "--ledger-from: the off-site bucket holds a batch that is not here (above); fetch and decrypt EVERY batch. Nothing was created"
+import os, re, sys
+d, listed = sys.argv[1], sys.argv[2]
+here = set(os.listdir(d))
+keys = open(listed).read().split()
+batch = re.compile(r"(?:.*/)?(erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8})\.jsonl\.gpg(\.sig)?")
+for key in keys:
+    m = batch.fullmatch(key)
+    if not m:
+        continue
+    need = m.group(1) + (".jsonl.gpg.sig" if m.group(2) else ".jsonl")
+    if need not in here:
+        sys.exit(f"--ledger-from: the bucket holds {m.group(0).rsplit('/', 1)[-1]}, but {need} is not here")
+PY
+      LEDGER_BUCKET_NOTE="every batch the bucket lists is here"
+      echo "off-site ledger : the bucket lists $(tr '\t ' '\n\n' <<<"$LISTED" | grep -c '\.jsonl\.gpg$' || true) batch(es); every one is here"
+      # [REVIEW-M S4-1] A batch DELETED from the bucket is not listed. With versioning on (#2186), the
+      # versions are listed too: a batch or signature whose newest version is a delete marker, or that
+      # has only old versions, is refused, named. With versioning off (or unreadable), say so.
+      VERSIONING="$(aws_s3 "$TMP_DIR:/data" s3api get-bucket-versioning --bucket "$BACKUP_BUCKET" --query Status --output text 2>/dev/null)" || VERSIONING=unknown
+      if [ "$VERSIONING" = Enabled ]; then
+        aws_s3 "$TMP_DIR:/data" s3api list-object-versions --bucket "$BACKUP_BUCKET" --prefix "${BACKUP_PREFIX:-db}/erasure-ledger/" --output json > "$TMP_DIR/ledger-versions" ||
+          die "--ledger-from: could not list the versions under s3://$BACKUP_BUCKET/${BACKUP_PREFIX:-db}/erasure-ledger/ to prove no batch was deleted (pass --ledger-no-bucket-check only if the bucket is gone); nothing was created"
+        python3 -I - "$TMP_DIR/ledger-versions" <<'PY' || die "--ledger-from: a batch was DELETED from the off-site bucket (above): its erasures would be skipped. Restore its newest version (the bucket keeps old versions), fetch it, and run again. Nothing was created"
+import json, re, sys
+raw = open(sys.argv[1]).read().strip()
+doc = json.loads(raw) if raw else {}
+batch = re.compile(r"(?:.*/)?erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8}\.jsonl\.gpg(?:\.sig)?")
+latest = {}
+for kind in ("Versions", "DeleteMarkers"):
+    for v in doc.get(kind) or []:
+        key = v.get("Key", "")
+        if not batch.fullmatch(key):
+            continue
+        latest.setdefault(key, None)
+        if v.get("IsLatest"):
+            latest[key] = kind
+for key, kind in sorted(latest.items()):
+    name = key.rsplit("/", 1)[-1]
+    if kind == "DeleteMarkers":
+        sys.exit(f"--ledger-from: {name} was deleted from the bucket (its newest version is a delete marker)")
+    if kind is None:
+        sys.exit(f"--ledger-from: {name} has only old versions in the bucket (no current one)")
+PY
+        LEDGER_BUCKET_NOTE="every batch the bucket lists is here, and none was deleted (versioning on)"
+        echo "off-site ledger : versioning is on; no batch or signature under erasure-ledger/ was deleted"
+      else
+        LEDGER_BUCKET_NOTE="every batch the bucket lists is here; versioning is not on, so a batch DELETED from the bucket would not be noticed"
+        echo "WARNING: the backup bucket's versioning is ${VERSIONING:-off}: a batch deleted from the bucket together with its signature cannot be noticed (deploy/backup-versioning.sh turns it on)." >&2
+      fi
+    fi
+  fi
+  since="$(ledger_signed_since)"
+  [ ! -s "$TMP_DIR/ledger-unsigned" ] || [ "$ALLOW_UNSIGNED" = 0 ] ||
+    echo "WARNING: --allow-unsigned-legacy: an erasure ledger batch WITHOUT a signature may be replayed onto the copy, only one from before signing began: its origin is NOT proven." >&2
+  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" "$TMP_DIR/ledger-signed" "$TMP_DIR/ledger-unsigned" "$since" "$ALLOW_UNSIGNED" "$LEGACY_NO_RECORD" <<'PY'
+import csv, json, os, re, sys
+d, dst, signed_file, unsigned_file, record, allow, no_record = sys.argv[1:8]
 kinds = {"receipts", "destroyed_keys", "retired_documents", "shredded_runs", "shredded_fields",
          "closed_accounts", "deleted_rows", "erased_rating_text", "erased_outbox_text"}
 uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 stamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?")
-newest, n = "", 0
-with open(src) as f, open(dst, "w", newline="") as out:
+def entries(base):
+    out = []
+    with open(os.path.join(d, base + ".jsonl")) as f:
+        for no, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                sys.exit(f"--ledger-from: {base}.jsonl line {no} is not JSON")
+            if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
+                    and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
+                sys.exit(f"--ledger-from: {base}.jsonl line {no} is not an erasure ledger entry")
+            out.append(e)
+    return out
+def as_stamp(created_at):
+    return re.sub(r"[-:]", "", created_at.split(".")[0]) + "Z"
+signed = [l.split() for l in open(signed_file).read().splitlines() if l.strip()]
+unsigned = [l.strip() for l in open(unsigned_file).read().splitlines() if l.strip()]
+take, ids = [], set()
+for base, *created in signed:
+    batch = entries(base)
+    take += batch
+    ids |= {e["id"] for e in batch}
+bounds = [b for b in [record] + [c[0] for _, *c in signed if c] if b]
+bound = min(bounds) if bounds else ""
+for base in unsigned:
+    batch = entries(base)
+    if batch and all(e["id"] in ids for e in batch):
+        print(f"off-site ledger : {base} has no signature; every entry in it is also in a verified batch: set aside", file=sys.stderr)
+        continue
+    if allow != "1":
+        sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature. Batches are signed; an unsigned one is refused, because anyone who can write to the backup bucket could have planted it. For a batch shipped before signing existed, the owner may pass --allow-unsigned-legacy")
+    written = base.split("-")[2]
+    if bound:
+        newest = max([written] + [as_stamp(e["createdAt"]) for e in batch])
+        if not newest < bound:
+            sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature and is from after signing began (its time {newest}, the first signed batch {bound}): not a legacy batch. Refused even with --allow-unsigned-legacy")
+        print(f"legacy check: {base} is from {newest}, before the first signed batch ({bound})", file=sys.stderr)
+    elif no_record != "1":
+        sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature, and there is no record of the first signed batch (BACKUP_FIRST_SIGNED_LEDGER_FILE) and no signed batch here: its time cannot be checked against when signing began. Set BACKUP_LEDGER_SIGNED_SINCE to the owner's recorded stamp, or, only if no batch was ever signed, add --legacy-without-signing-record as well")
+    else:
+        print(f"WARNING: --legacy-without-signing-record: no record of when erasure ledger signing began; {base} is NOT checked against it.", file=sys.stderr)
+    print(f"WARNING: REPLAYING AN UNSIGNED ERASURE LEDGER BATCH ({base}) because --allow-unsigned-legacy was given. Its origin is NOT proven.", file=sys.stderr)
+    take += batch
+if not take:
+    sys.exit("--ledger-from: the ledger directory holds no entry to replay")
+newest = ""
+with open(dst, "w", newline="") as out:
     w = csv.writer(out, lineterminator="\n")
-    for no, line in enumerate(f, 1):
-        if not line.strip():
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            sys.exit(f"--ledger-from: line {no} is not JSON")
-        if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
-                and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
-            sys.exit(f"--ledger-from: line {no} is not an erasure ledger entry")
+    for e in take:
         w.writerow([json.dumps(e)])
         newest = max(newest, e["createdAt"])
-        n += 1
-if n == 0:
-    sys.exit("--ledger-from: the ledger file holds no entry")
 print(newest)
 PY
 )" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
   [ -f "$OFFSITE_SQL" ] || die "--ledger-from: restore-offsite-ledger.sql is missing next to restore.sh"
-  echo "off-site ledger : $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
+  echo "off-site ledger : $(grep -c . "$TMP_DIR/ledger-signed") signed batch(es) verified, $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
 }
 replay_erasure_ledger() {
   local has=f names=() selects=() name="" line i script summary live_id copy_id
@@ -1023,8 +1246,8 @@ if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
   echo "quarantine: $SCRATCH lives in the throwaway instance $SCRATCH_CTR (no network); only the restore login (and the instance's superuser) can connect; no application login can"
   if [ -n "$LEDGER_FROM" ]; then
-    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)"
-    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)" >&2
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; the signed batches form one unbroken chain; $LEDGER_BUCKET_NOTE)"
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; the signed batches form one unbroken chain; $LEDGER_BUCKET_NOTE)" >&2
     echo "Anything erased after $OFFSITE_NEWEST never reached the off-site ledger and is still whole in this copy: check the erasure receipts and the ops pages for an unshipped ledger before anything from it is used. Keep it quarantined until then."
   else
     echo "NOT erasure-complete: replay the off-site ledger before use"

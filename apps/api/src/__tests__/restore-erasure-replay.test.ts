@@ -53,6 +53,27 @@ const inCopy = (scratch: string, sql: string): string =>
 const instanceExists = (scratch: string) => spawnSync(REAL_DOCKER, ['container', 'inspect', instanceOf(scratch)], { stdio: 'ignore' }).status === 0;
 /** Signed exactly as backup.sh signs a dump: <dump>.sig beside it, verified against ALLOWED. */
 const sign = (file: string) => execFileSync('python3', ['-I', join(DEPLOY, 'backup-signature.py'), 'sign', '--key', join(tmp, 'signing'), '--object', file, '--out', `${file}.sig`, '--created', '20261028T000000Z']);
+/** [BACKUP-FU] An off-site ledger directory as the owner leaves it after decrypting: the batch's
+ *  plain .jsonl beside the .jsonl.gpg.sig the shipper uploaded, signed exactly as
+ *  erasure-ledger-ship.sh signs it (over the encrypted copy, binding the plain batch's SHA-256). */
+function ledgerDir(lines: string, opts: { signed?: boolean; tamper?: boolean } = {}) {
+  const dir = mkdtempSync(join(tmp, 'offsite-ledger-'));
+  const base = 'erasure-ledger-20261028T100000Z-0b9f0c3e';
+  const plain = join(dir, `${base}.jsonl`);
+  writeFileSync(plain, lines + '\n', { mode: 0o600 });
+  if (opts.signed ?? true) {
+    const encrypted = join(dir, `${base}.jsonl.gpg`);
+    writeFileSync(encrypted, 'synthetic ciphertext');
+    execFileSync('python3', ['-I', join(DEPLOY, 'backup-signature.py'), 'sign', '--key', join(tmp, 'signing'), '--object', encrypted,
+      '--out', `${encrypted}.sig`, '--plain-sha256', createHash('sha256').update(readFileSync(plain)).digest('hex'), '--created', '20261028T100000Z',
+      // [BACKUP-FU · COORD] the first (and only) batch of the chain
+      '--prev', 'none']);
+    rmSync(encrypted);
+  }
+  if (opts.tamper) writeFileSync(plain, readFileSync(plain, 'utf8').replace(/"closed_accounts"/, '"deleted_rows"'), { mode: 0o600 });
+  chmodSync(dir, 0o700);
+  return dir;
+}
 let live: PrismaClient;
 const people = { kept: '', closed: '', doc: '', key: '', run: '', field: '' };
 
@@ -251,11 +272,14 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     const lines = psql(LIVE, `SELECT json_build_object('id', e.id, 'kind', e.kind, 'entry', e.entry,
       'createdAt', to_char(e."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS'))::text FROM erasure_ledger_entry e ORDER BY e."createdAt", e.id`);
     expect(lines).toContain('"closed_accounts"');
-    const file = join(tmp, 'offsite-ledger.jsonl');
-    writeFileSync(file, lines + '\n', { mode: 0o600 });
+    // [BACKUP-FU] the batch as shipped: signed, and verified before anything is created
+    const dir = ledgerDir(lines);
     const newest = psql(LIVE, `SELECT to_char(max("createdAt"), 'YYYY-MM-DD"T"HH24:MI:SS.MS') FROM erasure_ledger_entry`);
-    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection', '--ledger-from', file] });
+    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection', '--ledger-from', dir] });
     expect(r.status, r.stderr + r.stdout).toBe(3);
+    expect(r.stderr).toContain('signature OK: erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl.gpg was signed by the trusted backup signing key');
+    expect(r.stdout).toContain('off-site ledger : 1 signed batch(es) verified');
+    expect(r.stdout).toContain('the signed batches form one unbroken chain');
     expect(r.stdout + r.stderr).toContain(`erasure-complete up to ${newest}`);
     expect(r.stdout + r.stderr).not.toContain('RESTORE OK');
     const s = r.scratch;
@@ -270,6 +294,18 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(one(s, `SELECT phone || '|' || "firstName" FROM users WHERE id = '${people.kept}'`)).toBe('+15550000001|Keeper');
     expect(one(s, `SELECT count(*) FROM sessions WHERE "userId" = '${people.kept}'`)).toBe('1');
     expect(loginRolesThatCanConnect(s)).toBe('0');
+  });
+
+  it('[BACKUP-FU] an off-site batch that is unsigned, or changed after it was signed, is refused before any instance exists', () => {
+    const lines = psql(LIVE, `SELECT json_build_object('id', e.id, 'kind', e.kind, 'entry', e.entry,
+      'createdAt', to_char(e."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS'))::text FROM erasure_ledger_entry e ORDER BY e."createdAt", e.id`);
+    for (const [opts, says] of [[{ signed: false }, 'has NO signature'], [{ tamper: true }, 'was REFUSED']] as const) {
+      const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection', '--ledger-from', ledgerDir(lines, opts)] });
+      expect(r.status, r.stdout).not.toBe(0);
+      expect(r.stderr).toContain(says);
+      expect(r.stdout).not.toContain('scratch instance');
+      expect(instanceExists(r.scratch)).toBe(false);
+    }
   });
 
   it('every ledger entry reads tables and columns that exist in the Swift schema', () => {
