@@ -29,7 +29,7 @@ import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } fr
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
-import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
+import { appointmentBookingView, mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
 import { pickupCodeWords } from './pickup-words';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -38,6 +38,8 @@ import { lazyRetry } from '@/lib/chunk-retry';
 // says web booking is on; its code (and the map's) loads only for such a ride.
 const TaxiTripSafety = lazyRetry(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
 // [WEB-TAXI · E4] The live waiting count, only for a ride the server says is waiting.
+// [BOOK-S6b] Only a booking the server says can move (or says why not) needs the time picker.
+const BookingRescheduleCard = lazyRetry(() => import('./booking-reschedule-card').then((module) => ({ default: module.BookingRescheduleCard })));
 const TaxiWaitingCard = lazyRetry(() => import('@/components/taxi-waiting-card').then((module) => ({ default: module.TaxiWaitingCard })));
 
 const POLL_INTERVAL_MS = 8_000;
@@ -129,6 +131,9 @@ type OrderDetail = {
   /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Where to send MMG on an ACCEPTED order: the store's number and the
    *  exact total (only this customer, only until the store marks it "Paid by MMG"). Parsed, never trusted raw. */
   mmgPayment?: unknown;
+  /** [BOOK-S6a/S6b · owner B2] With INSTANT_BOOKING on: the live booking and whether it may move now
+   *  ({ id, itemId, slotStart, reschedule: { allowed, message } }). Parsed strictly, never trusted raw. */
+  appointmentBooking?: unknown;
 };
 
 type Stage = { label: string; statuses: string[] };
@@ -430,6 +435,7 @@ export default function OrderDetailPage() {
   const isTaxi = order.orderType === 'TAXI';
   const taxiCancellationUnknown = isTaxi && ['DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'].includes(order.status);
   const canOfferCancellation = Boolean(order.canCancel) && !stopped && !taxiCancellationUnknown;
+  const bookingView = order.fulfillment === 'APPOINTMENT' ? appointmentBookingView(order) : null;
   const stages = stagesFor(order);
   const currentStage = stageIndex(order.status, stages);
   const vendorName = isTaxi ? 'Swift ride' : order.vendorName ?? order.vendor?.name ?? 'the store';
@@ -903,6 +909,13 @@ export default function OrderDetailPage() {
           ) : null}
 
           {error ? <p className={styles.alert} role="alert">{error}</p> : null}
+
+          {/* [BOOK-S6b · owner B2] Change time: only what the server projected (switch off or an older server: nothing). */}
+          {!stopped && bookingView ? (
+            <Suspense fallback={null}>
+              <BookingRescheduleCard key={bookingView.bookingId} view={bookingView} onMoved={() => void load()} />
+            </Suspense>
+          ) : null}
 
           {/* [owner #46/#50] The server's reason there is no Cancel, and who to
               contact instead — the store's (or provider's) published number. */}

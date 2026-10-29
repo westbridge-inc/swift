@@ -10,9 +10,10 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
-import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { lazyRetry } from '@/lib/chunk-retry';
 import {
   addToCart,
   getCart,
@@ -99,6 +100,11 @@ export function loadItemSheet(): Promise<typeof import('./item-sheet')> {
   return itemSheetLoading;
 }
 if (typeof window !== 'undefined') void loadItemSheet().catch(() => undefined);
+
+const CHECKOUT_LOCKED = 'A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.';
+
+// [BOOK-S6b] A bookable listing's sheet (day, time, where): only a tap on Book needs it.
+const BookingSheet = lazyRetry(() => import('./booking-sheet').then((module) => ({ default: module.BookingSheet })));
 const ITEM_SHEET_UNAVAILABLE = 'Swift could not open this item. Check your connection and try again.';
 
 // `value || 0` used to turn NaN (a missing/unparsable server figure) into
@@ -327,6 +333,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const [modalError, setModalError] = useState<string | null>(null);
   const [, setItemSheetLoaded] = useState(() => itemSheetModule !== null);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
+  // [BOOK-S6b] The bookable listing whose sheet is open (the sheet owns its Book in flight).
+  const [bookingItem, setBookingItem] = useState<DisplayItem | null>(null);
   const restoringSession = useRef(false);
   const modalReturnFocus = useRef<HTMLElement | null>(null);
   const railHeading = useRef<HTMLHeadingElement | null>(null);
@@ -554,7 +562,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // until that same order is retried or confirmed on the checkout page.
   const cartMutationLockedByCheckout = () => {
     if (!readCheckoutAttempt()) return false;
-    const message = 'A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.';
+    const message = CHECKOUT_LOCKED;
     setError(message);
     showFloatingError(message);
     return true;
@@ -568,18 +576,24 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
    */
   const goToCheckout = () => {
     if (signedIn) { router.push('/checkout'); return; }
+    signInThen('/checkout', true);
+  };
+
+  /** A guest's way to `next`: an expired access cookie is renewed first (then `next` opens at once when
+   *  `goWhenRestored`), else the sign-in page brings them back there. [BOOK-S6b] shared with Book. */
+  function signInThen(next: string, goWhenRestored: boolean) {
     if (restoringSession.current) return;
     restoringSession.current = true;
-    const toSignIn = () => router.push(`/login?next=${encodeURIComponent('/checkout')}`);
+    const toSignIn = () => router.push(`/login?next=${encodeURIComponent(next)}`);
     void (shellSession?.ensureSignedIn() ?? Promise.resolve(false)).then((restored) => {
       restoringSession.current = false;
-      if (restored) router.push('/checkout');
-      else toSignIn();
+      if (!restored) toSignIn();
+      else if (goWhenRestored) router.push(next);
     }, () => {
       restoringSession.current = false;
       toSignIn();
     });
-  };
+  }
 
   tapIO.current = {
     vendorId: catalog.id,
@@ -654,6 +668,37 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     } catch (e) { setError((e as Error).message); }
   };
 
+  /**
+   * [BOOK-S6b · owner C3] Book on a bookable row opens its sheet (day, time,
+   * where). The free times are read for a signed-in customer (the slots read
+   * is the phone's, behind sign-in), so a guest signs in first and the sheet
+   * reopens on return, as an item's Add does.
+   */
+  const bookItem = (item: DisplayItem, trigger?: HTMLElement) => {
+    if (!orderable || !item.isAvailable || itemPrice(item) === null || cartHydrationPending || cartMutationLockedByCheckout()) return;
+    if (!signedIn) {
+      if (restoringSession.current) return;
+      // A renewed session reopens the sheet from the queued intent (the effect below).
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: {}, returnPath });
+      signInThen(returnPath, false);
+      return;
+    }
+    modalReturnFocus.current = trigger ?? null;
+    setBookingItem(item);
+  };
+
+  const closeBooking = () => {
+    clearStorefrontContinuation();
+    setBookingItem(null);
+    window.requestAnimationFrame(() => modalReturnFocus.current?.focus());
+  };
+
+  /** [BOOK-S6b] Whether the sheet's Book may write the cart now: the checkout lock (said by the page) or taps still out. */
+  const bookingBlocked = (): string | null => {
+    if (cartMutationLockedByCheckout()) return CHECKOUT_LOCKED;
+    return cartBusyNow() ? 'Your cart is still updating. Try again in a moment.' : null;
+  };
+
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
     if (!orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
     // [W6] One tap adds an item that needs no choice; an item with a required
@@ -691,6 +736,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     const intent = takeStorefrontContinuation(store.slug);
     if (!intent) return;
     const item = catalog.categories.flatMap(category => category.items).find(item => item.id === intent.itemId);
+    // [BOOK-S6b] A guest's Book reopens the listing's sheet after sign-in (nothing is added until they pick a time).
+    if (item?.fulfillment === 'APPOINTMENT' && catalog.isCurrentlyOpen && catalog.acceptingOrders && item.isAvailable && itemPrice(item) !== null) {
+      setBookingItem(item);
+      return;
+    }
     if (!catalog.isCurrentlyOpen || !catalog.acceptingOrders || !item?.isAvailable
       || item.fulfillment !== 'DELIVERY' || itemPrice(item) === null) {
       setError('This item is not available to order right now. Please check the menu.');
@@ -982,7 +1032,18 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                             ) : item.fulfillment === 'PICKUP' ? (
                               <span className={styles.unavailableAction}>Pickup checkout unavailable</span>
                             ) : item.fulfillment === 'APPOINTMENT' ? (
-                              <span className={styles.unavailableAction}>Appointment checkout unavailable</span>
+                              // [BOOK-S6b · owner C3] A bookable listing: pick a day and a free time, then checkout books it.
+                              item.isAvailable ? (
+                                <button
+                                  type="button"
+                                  className={styles.chooseButton}
+                                  onClick={(event) => bookItem(item, event.currentTarget)}
+                                  disabled={cartHydrationPending || !orderable || !priced}
+                                  aria-label={`Book ${item.name}`}
+                                >
+                                  Book
+                                </button>
+                              ) : null
                             ) : choices ? (
                               <button
                                 type="button"
@@ -1182,6 +1243,22 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
           onConfirm={confirmOptions}
           onClose={closeOptions}
         />
+      ) : null}
+
+      {bookingItem ? (
+        <Suspense fallback={null}>
+          <BookingSheet
+            item={bookingItem}
+            vendorName={catalog.name}
+            vendorAddress={storeLabel || null}
+            price={itemPrice(bookingItem)}
+            vendorId={catalog.id}
+            cartLines={() => cartNow.current?.items ?? []}
+            blocked={bookingBlocked}
+            onBooked={() => { refreshShellCart(); setBookingItem(null); router.push('/checkout'); }}
+            onClose={closeBooking}
+          />
+        </Suspense>
       ) : null}
 
       {notice ? (

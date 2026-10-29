@@ -257,6 +257,13 @@ describe('[BOOK-S5a] the booking settings in the item editor', () => {
     expect('instantBooking' in savedConfig()).toBe(false);
   });
 
+  it('[REVIEW-F #2196 S4-2] the minimum notice says what it measures: how close to its start a time can still be booked', async () => {
+    await openEditor(existingItem());
+    expect(shown('Minimum notice')).toBe(true);
+    expect(shown('How close to its start a customer can still book a time.')).toBe(true);
+    expect(shown('How soon before a time a customer can still book it.')).toBe(false);
+  });
+
   it('Add hours gives Monday another window after its last one', async () => {
     await openEditor(existingItem());
     // Monday is the first open day: its "Add hours" is the first one.

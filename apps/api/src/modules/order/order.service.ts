@@ -54,6 +54,7 @@ import { INSTANT_CONFIRM_CHANGED_BY, INSTANT_CONFIRM_NOTE, INSTANT_CONFIRM_PAYME
 import { businessCannotConfirmBooking, vendorOperateRefusal, type StoreRoleVerifier } from '../vendor/vendor-operate';
 import { bookingChangeForOrderTransition, syncOrderBookings } from '../booking/order-coupling';
 import { canonicalSlotStart } from '../booking/availability';
+import { assertOneAppointment, isAppointmentOnlyGroup, storeFlagsAllowCheckout } from '../booking/appointment-checkout';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, normalizeItemNote, rebuildSelectionFromSnapshot, selectionKey, validateSelectedOptions, type OptionSelection, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
@@ -1051,7 +1052,9 @@ export class OrderService {
 
     for (const { vendorId, lines: items } of groups) {
       const vendor = items[0]!.item.vendor;
-      if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
+      // [BOOK-FU3 · COORD 29 Oct] "Closed right now" does not refuse a booking-only
+      // group (a booking is for a later time); not ACTIVE or orders paused still do.
+      if (!storeFlagsAllowCheckout(vendor, isAppointmentOnlyGroup(items))) {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
       }
       // [REPORT-012 F-012-05] The derived vendor flags are not the whole
@@ -1151,6 +1154,8 @@ export class OrderService {
           throw new AppError(400, 'MIXED_FULFILLMENT', 'Book appointments separately from goods');
         }
         const only = appointmentItems[0]!;
+        // [BOOK-FU3 · money] One line, one slot, one price: quantity 2 would charge twice for one time.
+        assertOneAppointment(only.item.fulfillment, only.quantity);
         const requested = requestedSlots.get(only.itemId);
         // [L09 · M017] One slot is one instant: stray seconds never name a second slot.
         const slot = requested ? canonicalSlotStart(requested) : undefined;
@@ -1554,10 +1559,11 @@ export class OrderService {
           where: { id: planVendorId },
           select: { name: true, ownerId: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
         });
+        // [BOOK-FU3] The same split as the early check: a booking-only order is not
+        // refused for "closed right now"; every can't-operate fact still refuses it.
+        const bookingOnly = plans.find((plan) => plan.vendor.id === planVendorId)?.fulfillment === 'APPOINTMENT';
         if (
-          lockedVendor.status !== 'ACTIVE'
-          || !lockedVendor.isCurrentlyOpen
-          || !lockedVendor.acceptingOrders
+          !storeFlagsAllowCheckout(lockedVendor, bookingOnly)
           || (lockedVendor.activationValidUntil != null && lockedVendor.activationValidUntil <= now)
         ) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);

@@ -140,13 +140,18 @@ export function cartPaymentOptions(
           icon: 'smartphone',
           title: 'Pay with MMG',
           // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The number is shown only after the store accepts.
-          sub: 'When the business accepts, your order shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG. Swift never holds the money.',
+          // [BOOK-FU3 · REVIEW-F S4 #2202] A booking is a booking, never an "order".
+          sub: context.appointmentOnly
+            ? 'When the business accepts, your booking shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the booking cancels automatically. You pay the business directly in MMG. Swift never holds the money.'
+            : 'When the business accepts, your order shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG. Swift never holds the money.',
         }
       : {
           key: 'MMG',
           icon: 'smartphone',
           title: 'Pay with MMG',
-          sub: 'Pay the business directly in MMG after placing the order. Swift never holds the money.',
+          sub: context.appointmentOnly
+            ? 'Pay the business directly in MMG after booking. Swift never holds the money.'
+            : 'Pay the business directly in MMG after placing the order. Swift never holds the money.',
         },
   ];
 }
@@ -191,13 +196,19 @@ export function placedOrderConfirmationCopy(input: {
   mmgPayTo?: typeof MMG_PAY_TO_STORE_NUMBER;
 }): string {
   if (input.submittedMethod === 'MOBILE_MONEY' && input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) {
+    // [BOOK-FU3 · REVIEW-F S4 #2202] A booking is a booking, never an "order".
+    if (input.appointment) {
+      return 'When the business accepts, your booking shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the booking cancels automatically. You pay the business directly in MMG; it marks the booking paid when the money arrives. Swift never holds the money.';
+    }
     return 'When the business accepts, your order screen shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.';
   }
   if (input.submittedMethod === 'MOBILE_MONEY') {
     if (input.paymentAction) {
       return `Complete payment directly to ${input.paymentAction.recipientName} in MMG. Swift does not hold the money; the business confirms it after receipt.`;
     }
-    return 'Your MMG order was placed, but its payment link is unavailable. Do not send money to another link; open the order for the latest payment action.';
+    return input.appointment
+      ? 'Your MMG booking was placed, but its payment link is unavailable. Do not send money to another link; open the booking for the latest payment action.'
+      : 'Your MMG order was placed, but its payment link is unavailable. Do not send money to another link; open the order for the latest payment action.';
   }
   if (input.appointment && input.appointmentConfirmed === true) {
     return 'Your time is confirmed — pay cash directly to the business when the service is done.';
