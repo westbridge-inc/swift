@@ -44,6 +44,8 @@ import { instantBookingEnabled, listingConfirmsAutomatically } from '../booking/
 import { customerRescheduleVerdict } from '../booking/reschedule-policy';
 import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
+import { assertOneAppointment } from '../booking/appointment-checkout';
 import {
   publicOperatingHours,
   publicStorefrontCategory,
@@ -2070,7 +2072,9 @@ export async function customerRoutes(app: FastifyInstance) {
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
           audience: 'business',
-          data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+          // [BOOK-FU2] With the booking's order, so every released build opens the booking itself (appointment-moved.ts).
+          dedupeKey: appointmentMovedDedupeKey(result.booking.id),
+          data: appointmentMovedData(result.booking),
         }).catch(() => undefined);
       }
     }
@@ -2126,6 +2130,9 @@ export async function customerRoutes(app: FastifyInstance) {
         { itemId: item.id, available: item.stockQuantity });
     }
 
+    // [BOOK-FU3 · money] A booking line is one appointment: asking for more is a plain 400.
+    assertOneAppointment(item.fulfillment, quantity);
+
     // Validate vendor is active
     const vendor = await app.prisma.vendor.findUnique({
       where: { id: body.vendorId },
@@ -2174,7 +2181,8 @@ export async function customerRoutes(app: FastifyInstance) {
     if (existing) {
       await app.prisma.cartItem.update({
         where: { id: existing.id },
-        data: { quantity: existing.quantity + quantity },
+        // [BOOK-FU3] Re-adding the same booking never grows it past one appointment.
+        data: { quantity: item.fulfillment === 'APPOINTMENT' ? 1 : existing.quantity + quantity },
       });
     } else {
       await app.prisma.cartItem.create({
@@ -2221,8 +2229,10 @@ export async function customerRoutes(app: FastifyInstance) {
     }
     // [GUARDRAILS §8] A prohibited line cannot be grown or edited — only removed.
     if (body.quantity > 0) {
-      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true } });
+      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true, fulfillment: true } });
       await assertOrderableNow(app.prisma, [lineItem]);
+      // [BOOK-FU3 · money] A booking line stays one appointment (0 still removes it).
+      assertOneAppointment(lineItem.fulfillment, body.quantity);
     }
     // [M023] An edited selection passes the same validator as an added one.
     const editedSelection = body.selectedOptions === undefined || body.quantity <= 0

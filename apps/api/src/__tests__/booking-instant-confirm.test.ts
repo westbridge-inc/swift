@@ -615,11 +615,19 @@ describe('[BOOK-S3 · owner A4/C2] switch ON — a new bookable service starts a
 });
 
 describe('[BOOK-S3 · COORD 18:14Z] what must land before the switch goes ON is written on the switch', () => {
-  it('the dark-feature entry names the hair/beauty certificate gate, the phone popup branch, and the Terms wording', () => {
+  // [TIDY · owner 28 Oct 2026 ~23:20Z, replacing A2] Guyana has no hair or beauty shop certificate, so the switch is not
+  // gated on one. The phone popup (landed, reaches phones by an over-the-air update), the Terms (landed), the staging
+  // run and the owner's go stay written on it.
+  it('the dark-feature entry names the phone popup, the Terms, the staging run and the owner, and no certificate gate', () => {
     const entry = DARK_FEATURES.find((f) => f.setting === 'INSTANT_BOOKING');
-    expect(entry?.whileOff).toContain('hair and beauty');
-    expect(entry?.whileOff).toContain('Booking requested');
-    expect(entry?.whileOff).toContain('Terms');
+    const words = entry?.whileOff ?? '';
+    expect(words).not.toMatch(/certificate gate|person-checked yearly certificate/);
+    expect(words).toContain('No shop certificate is needed');
+    expect(words).toContain('Booking requested');
+    expect(words).toContain('over-the-air update after Apple approves build 12');
+    expect(words).toContain('Terms');
+    expect(words).toContain('staging run');
+    expect(words).toContain("the owner's go");
   });
 });
 

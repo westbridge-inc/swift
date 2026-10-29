@@ -223,6 +223,48 @@ describe('[S4] a store appointment reminder opens the booking, for the person it
   });
 });
 
+describe('[BOOK-FU2] a moved store appointment opens the booking, for the person it is about', () => {
+  // The move notice used to be booking_rescheduled. These are the copies the
+  // API sends now (booking/appointment-moved.ts): the customer moved it and the
+  // business is told, or the business moved it and the customer is told. Each
+  // names the NEW booking row the move wrote and the booking's order.
+  it('the customer opens the booking\'s order screen, the store its order desk — never the jobs list', () => {
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'customer' }))
+      .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'business' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+  });
+
+  it('a booking with no order on file still opens where it is listed: the customer\'s orders, the store\'s Schedule', () => {
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', audience: 'customer' })).toEqual({ screen: 'OrdersHistory' });
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', audience: 'business' })).toEqual({ screen: 'Schedule' });
+  });
+
+  it('an untagged copy cannot say whose it is, so it opens the app normally — never the other side\'s stack', () => {
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1' })).toBeNull();
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2' })).toBeNull();
+  });
+
+  it('is not in the booking_ family: no copy of it ever opens ServiceJobs, whichever app is open', () => {
+    for (const audience of ['customer', 'business', undefined]) {
+      for (const orderId of ['o1', undefined]) {
+        for (const intent of [undefined, 'customer', 'vendor', 'mover'] as const) {
+          const dest = destinationFor(
+            { kind: 'appointment_moved', bookingId: 'b2', ...(orderId ? { orderId } : {}), ...(audience ? { audience } : {}) },
+            intent ? () => intent : undefined,
+          );
+          expect(dest?.screen, `${String(audience)} / ${String(orderId)} / ${String(intent)}`).not.toBe('ServiceJobs');
+        }
+      }
+    }
+  });
+
+  it('a row sent before the change (booking_rescheduled) still opens where it did', () => {
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'business' })).toEqual({ screen: 'Schedule' });
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' })).toEqual({ screen: 'OrdersHistory' });
+  });
+});
+
 describe('store pushes land on the store’s order desk, never the customer screen', () => {
   it('THE vendor order alert opens that order, with its number when the payload carries one', () => {
     expect(destinationFor({ kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 'SW-1001', status: 'PENDING' }))
@@ -387,7 +429,8 @@ const CENSUS: Case[] = [
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both sides of a service JOB, 24h out (a store appointment has its own kind since S4, below)' },
   { k: 'appointment_reminder', d: { bookingId: 'b1', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [S4] their store appointment is within 24h: the booking\'s own order screen. The store copy (audience business) opens its order desk; both are tabled below' },
-  { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28: the business copy is tagged audience, the customer copy opens normally]' },
+  { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28]. [BOOK-FU2] No longer sent (appointment_moved, below): kept for inbox rows sent before it', scan: false },
+  { k: 'appointment_moved', d: { bookingId: 'b2', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [BOOK-FU2] the business moved their store appointment: the booking\'s own order screen. The store copy (audience business, the customer moved it) opens its order desk; both are tabled below' },
 
   // ── [PUSH-ROUTING] The weekly fee: every notice about a partner’s subscription opens the fee screen.
   { k: 'billing_mmg_checkout', d: { subscriptionId: 's1', ref: 'checkout-1', status: 'CONFIRMED' }, to: { screen: 'WeeklyFee', params: { ref: 'checkout-1', subscriptionId: 's1', vendorId: undefined } }, why: 'MMG-CHECKOUT-API 628c8206: server state is fetched on the weekly-fee screen' },
@@ -574,6 +617,8 @@ const CUSTOMER_COPIES: Record<string, unknown>[] = [
   { kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' },
   // [S4] A confirmed booking with no order on file (none is created that way today): their orders list.
   { kind: 'appointment_reminder', bookingId: 'b1', audience: 'customer' },
+  // [BOOK-FU2] A moved booking with no order on file (none is created that way today): their orders list.
+  { kind: 'appointment_moved', bookingId: 'b2', audience: 'customer' },
   { kind: 'verification_rejected', audience: 'customer' },
   { kind: 'verification_approved', docId: 'd1', audience: 'customer' },
   { kind: 'verification_expired', docId: 'd1', audience: 'customer' },
@@ -596,6 +641,9 @@ const STORE_COPIES: Record<string, unknown>[] = [
   // [S4] The store's copy of the appointment reminder: its order desk; with no order on file, its Schedule.
   { kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'business' },
   { kind: 'appointment_reminder', bookingId: 'b1', audience: 'business' },
+  // [BOOK-FU2] The store's copy of a moved appointment (the customer moved it): its order desk; with no order on file, its Schedule.
+  { kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'business' },
+  { kind: 'appointment_moved', bookingId: 'b2', audience: 'business' },
 ];
 
 /** [payload (+ the app that is open, as `intent`), where it lands]. */
