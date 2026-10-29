@@ -17,12 +17,41 @@ import { formatGuyanaTime, guyanaWallClockParts, instantOfGuyanaWallClock } from
 // fewer than the business's capacity (default 1) are held at every moment of
 // that span: hasRoom() is the ONE rule the picker, checkout, reservation and
 // reschedule apply.
+//
+// [BOOK-P1] ONE ENGINE FOR BOTH TRACKS. The computation takes a CALENDAR —
+// whose time it is and when it is open — not a listing: a store listing's
+// bookingConfig is one (a business's time, Track S), and a pro's weekly hours
+// with one of their services is another (a provider's time, Track P,
+// services/provider-calendar.ts). The blocks a calendar day has (a business's
+// exceptions for that listing, a pro's time off) and the time already held
+// (live bookings, live jobs) are the caller's read; the arithmetic is here,
+// once.
 // ---------------------------------------------------------------------------
 
 /** The longest gap after a booking a listing may set (vendor bookingConfig). */
 export const MAX_BUFFER_MINUTES = 240;
 /** The longest minimum notice a listing may set: 30 days. */
 export const MAX_MIN_NOTICE_MINUTES = 43_200;
+
+/**
+ * [BOOK-P1] A calendar: weekly windows in Guyana wall-clock time and the length
+ * of what is booked on it, with an optional gap after each booking and minimum
+ * notice. A listing's BookingConfig is one as it is stored; a pro's calendar is
+ * their weekly hours with one service's length (services/provider-calendar.ts).
+ */
+export interface BookingCalendar {
+  durationMinutes: number;
+  slots: ReadonlyArray<{ dayOfWeek: number; start: string; end: string }>;
+  bufferMinutes?: number;
+  minNoticeMinutes?: number;
+}
+
+/** [BOOK-P1] A blocked stretch of one calendar date that applies to the calendar
+ *  being computed: null start and end = the whole day. */
+export interface CalendarBlock {
+  start: string | null;
+  end: string | null;
+}
 
 /** [BOOK-S1] The span of the business's time one booking holds: [start, end). */
 export interface BusyInterval {
@@ -44,8 +73,8 @@ export function busyIntervalOf(slotStart: Date, slotEnd: Date, bufferMinutes: nu
   return { start: slotStart, end: new Date(slotEnd.getTime() + Math.max(0, bufferMinutes) * 60_000) };
 }
 
-/** The business's time a candidate slot on this listing would hold. */
-export function candidateInterval(slotStart: Date, config: BookingConfig): BusyInterval {
+/** The time a candidate slot on this calendar would hold (a listing: the business's). */
+export function candidateInterval(slotStart: Date, config: BookingCalendar): BusyInterval {
   return busyIntervalOf(slotStart, new Date(slotStart.getTime() + config.durationMinutes * 60_000), bufferOf(config));
 }
 
@@ -116,12 +145,12 @@ export function fmtSlotTime(d: Date): string {
 
 /** Candidate stride: a buffer widens the grid so every booking leaves its
  *  gap; defaults keep legacy listings byte-identical. */
-export function strideMinutes(config: BookingConfig): number {
+export function strideMinutes(config: BookingCalendar): number {
   return config.durationMinutes + bufferOf(config);
 }
 
-/** Does [slotMin, slotMin+duration) overlap this exception on that date? */
-function blockedByException(slotMin: number, durationMinutes: number, ex: ExceptionWindow): boolean {
+/** Does [slotMin, slotMin+duration) overlap this block on that date? */
+function blockedByException(slotMin: number, durationMinutes: number, ex: CalendarBlock): boolean {
   if (ex.start == null && ex.end == null) return true; // full day off
   const exStart = ex.start != null ? toMinutes(ex.start) : 0;
   const exEnd = ex.end != null ? toMinutes(ex.end) : 24 * 60;
@@ -129,7 +158,17 @@ function blockedByException(slotMin: number, durationMinutes: number, ex: Except
 }
 
 export function slotBlocked(slotMin: number, durationMinutes: number, itemId: string, exceptions: ExceptionWindow[]): boolean {
-  return exceptions.some((ex) => (ex.itemId === null || ex.itemId === itemId) && blockedByException(slotMin, durationMinutes, ex));
+  return calendarSlotBlocked(slotMin, durationMinutes, listingBlocks(itemId, exceptions));
+}
+
+/** [BOOK-P1] A business's exceptions that apply to one listing: its own and the whole-business ones. */
+export function listingBlocks(itemId: string, exceptions: readonly ExceptionWindow[]): CalendarBlock[] {
+  return exceptions.filter((ex) => ex.itemId === null || ex.itemId === itemId);
+}
+
+/** [BOOK-P1] Is [slotMin, slotMin+duration) inside any of the calendar's blocks on that date? */
+export function calendarSlotBlocked(slotMin: number, durationMinutes: number, blocks: readonly CalendarBlock[]): boolean {
+  return blocks.some((ex) => blockedByException(slotMin, durationMinutes, ex));
 }
 
 /**
@@ -148,7 +187,27 @@ export function computeDaySlots(opts: {
   capacity?: number;
   now: Date;
 }): Date[] {
-  const { config } = opts;
+  const { itemId, config, exceptions, ...when } = opts;
+  return computeCalendarDaySlots({ ...when, calendar: config, blocks: listingBlocks(itemId, exceptions) });
+}
+
+/**
+ * [BOOK-P1] THE day computation, for any calendar (a listing, a pro with one
+ * service): the true slot instants of one Guyana date that sit inside a
+ * window, on the stride, past the minimum notice, outside every block, with
+ * room in the time already held (`busy`, at most `capacity` at once).
+ */
+export function computeCalendarDaySlots(opts: {
+  calendar: BookingCalendar;
+  blocks: readonly CalendarBlock[];
+  year: number;
+  month: number; // 1-based
+  day: number;
+  busy: readonly BusyInterval[];
+  capacity?: number;
+  now: Date;
+}): Date[] {
+  const config = opts.calendar;
   if (!config.durationMinutes || config.durationMinutes <= 0 || !Array.isArray(config.slots)) return [];
   const stride = strideMinutes(config);
   const dayOfWeek = new Date(Date.UTC(opts.year, opts.month - 1, opts.day)).getUTCDay();
@@ -163,7 +222,7 @@ export function computeDaySlots(opts: {
     for (let t = start; t + config.durationMinutes <= end; t += stride) {
       const slot = instantOfGuyanaWallClock(new Date(Date.UTC(opts.year, opts.month - 1, opts.day, Math.floor(t / 60), t % 60)));
       if (slot <= earliest) continue;
-      if (slotBlocked(t, config.durationMinutes, opts.itemId, opts.exceptions)) continue;
+      if (calendarSlotBlocked(t, config.durationMinutes, opts.blocks)) continue;
       if (!hasRoom(candidateInterval(slot, config), opts.busy, capacity)) continue;
       out.set(slot.getTime(), slot);
     }
@@ -176,7 +235,7 @@ export function computeDaySlots(opts: {
 /** Reservation-side window check (the endpoint's twin): inside a window,
  *  aligned to the stride, honoring lead time. Exceptions are checked by the
  *  caller with slotBlocked (they need a DB read). */
-export function slotFitsConfig(slotStart: Date, config: BookingConfig, now: Date): 'OK' | 'OUTSIDE' | 'TOO_SOON' {
+export function slotFitsConfig(slotStart: Date, config: BookingCalendar, now: Date): 'OK' | 'OUTSIDE' | 'TOO_SOON' {
   const stride = strideMinutes(config);
   const local = guyanaWallClockParts(slotStart);
   const day = local.dayOfWeek;

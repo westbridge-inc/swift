@@ -37,6 +37,9 @@ import {
   transitionServiceJob,
 } from './service-job-transition';
 import { executeTenantBoundServiceJobTransaction } from './service-job-transaction';
+import { canonicalSlotStart } from '../booking/availability';
+import { isServiceJobExclusionViolation } from './provider-time';
+import { registerProviderBookableRoutes } from './provider-bookable.routes';
 import {
   commandGeneration,
   legacyQuoteSchema,
@@ -169,6 +172,9 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (!expectedScheduledFor) throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot for this job');
     return { expectedUpdatedAt, expectedScheduledFor };
   }
+
+  // [BOOK-P1] A provider's bookable services, weekly hours and time off (behind INSTANT_BOOKING).
+  registerProviderBookableRoutes(app);
 
   // ─── Provider profile + qualifications ─────────────────────────────────
 
@@ -675,7 +681,9 @@ export async function servicesRoutes(app: FastifyInstance) {
   app.post('/jobs/:id/schedule', auth, async (request) => {
     const { id } = request.params as { id: string };
     const command = readServiceJobLifecycleCommand(request, scheduleSchema, legacyScheduleSchema);
-    const { scheduledFor } = command.body;
+    // [BOOK-P1] A slot is minute-grained, as an appointment's is (canonicalSlotStart):
+    // 09:00:00 and 09:00:01 are one time, checked, stored and held as 09:00.
+    const scheduledFor = canonicalSlotStart(command.body.scheduledFor);
     const job = await jobForUser(id, request.user.userId);
     const { expectedUpdatedAt, expectedQuoteAmount } = commandGeneration(command, job);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
@@ -687,8 +695,9 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (scheduledFor.getTime() <= Date.now()) throw new AppError(400, 'SLOT_IN_PAST', 'Pick a time in the future');
     // [S0] A provider has ONE body: two customers cannot hold the same slot.
     // The judge is the partial unique index on ("providerId", "scheduledFor")
-    // for live jobs (service_job_slot_exclusivity migration) — a read-then-check
-    // would still lose a concurrent race, so the database decides and the loser
+    // for live jobs (service_job_slot_exclusivity migration), and [BOOK-P1] the
+    // exclusion over the time each live job holds (provider-time.ts) — a
+    // read-then-check would still lose a concurrent race, so the database decides and the loser
     // is turned into a real 409 instead of a stood-up customer. The write is a
     // state CAS like the quote (:quote) and confirm (:confirm) paths, so a job
     // that left QUOTED while we were reading fails cleanly rather than being
@@ -715,8 +724,10 @@ export async function servicesRoutes(app: FastifyInstance) {
       });
     }).catch((error: unknown) => {
       // The unique violation IS the double-booking answer — same translation
-      // BookingService makes for appointment slots.
-      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+      // BookingService makes for appointment slots. [BOOK-P1] So is the
+      // one-pro-one-time exclusion: another live job of this provider holds
+      // that time (a booked service runs to its end, provider-time.ts).
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002' || isServiceJobExclusionViolation(error)) {
         throw new AppError(409, 'SLOT_TAKEN', 'That time was just booked with this provider — pick another time');
       }
       throw error;
@@ -795,7 +806,8 @@ export async function servicesRoutes(app: FastifyInstance) {
           scheduledFor: expectedScheduledFor,
           providerConfirmedAt: null,
         },
-        data: { scheduledFor: null, providerConfirmedAt: null },
+        // [BOOK-P1] A job with no time holds none: its end goes with its start.
+        data: { scheduledFor: null, endsAt: null, providerConfirmedAt: null },
         action: 'SERVICE_JOB_SLOT_DECLINED',
         audit: { scheduledFor: expectedScheduledFor.toISOString() },
         notices: [{
