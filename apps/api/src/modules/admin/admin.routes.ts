@@ -110,7 +110,7 @@ import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
-import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
+import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
@@ -4407,6 +4407,38 @@ export async function adminRoutes(app: FastifyInstance) {
       }).catch((err: unknown) => request.log.error({ err, ownerId: id }, '[CHAINS] chain deal notice not delivered'));
     }
     return { success: true, data: result };
+  });
+
+  /**
+   * [CHAINS PR3 · owner 29 Oct 2026] PUT /vendor-owners/:id/brand { brandName | null, reason } — the chain's name
+   * customers see ONCE for all its branches (modules/vendor/brand: one card opening the nearest open branch that
+   * delivers to them). null ends the brand: every branch is listed on its own again. A reason (C3); the audit row
+   * records the name before and after. A name that is banned goods is refused like a store name.
+   */
+  app.put('/vendor-owners/:id/brand', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      brandName: z.string().trim().min(2).max(60).nullable(),
+      reason: z.string().trim().min(8).max(500),
+    }).parse(request.body ?? {});
+    const owner = await app.prisma.vendorOwner.findUnique({ where: { id }, select: { id: true, user: { select: { tenantId: true } }, vendors: { select: { id: true } } } });
+    if (!owner || owner.user.tenantId !== requireTenantId()) throw new NotFoundError('VendorOwner', id);
+    if (body.brandName !== null) assertNotBannedGoods([body.brandName]);
+    await app.prisma.vendorOwner.update({ where: { id }, data: { brandName: body.brandName } });
+    for (const v of owner.vendors) scheduleVendorSearchSync(app, v.id);
+    return { success: true, data: { ownerId: id, brandName: body.brandName } };
+  });
+
+  /** [CHAINS PR3] PUT /vendors/:id/brand-listing { alone, reason } — list this branch on its own card even though its
+   *  owner has a brand (a "split"), or put it back under the brand. A reason (C3). */
+  app.put('/vendors/:id/brand-listing', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ alone: z.boolean(), reason: z.string().trim().min(8).max(500) }).parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findFirst({ where: { id, tenantId: requireTenantId() }, select: { id: true } });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    await app.prisma.vendor.update({ where: { id }, data: { brandListedAlone: body.alone } });
+    scheduleVendorSearchSync(app, id);
+    return { success: true, data: { vendorId: id, brandListedAlone: body.alone } };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {

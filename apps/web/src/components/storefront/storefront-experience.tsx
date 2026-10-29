@@ -10,7 +10,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -269,7 +269,7 @@ export function loadCartTaps() {
  * (storefront-page.tsx) so the design-token tables stay out of the page's
  * first-load JavaScript.
  */
-export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null }) {
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu, branches }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null; /** [CHAINS PR3] The branch switcher, drawn on the server (no script on the page for it). */ branches?: ReactNode }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
   // session). Its session can renew an expired access cookie before sending a
@@ -891,6 +891,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               <li className={styles.fact}>Minimum {gyMoney(Number(catalog.minOrderAmount))}</li>
             ) : null}
           </ul>
+          {/* [CHAINS PR3] Another branch of the same brand, one tap away. */}
+          {branches}
         </section>
 
         {fromQr ? (

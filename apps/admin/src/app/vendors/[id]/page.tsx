@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, type ChainDealOutcome, type VendorActivationChecklist } from '@/lib/api';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, setChainBrand, setBranchListedAlone, fetchVendorChain, type ChainDealOutcome, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
 import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
 import type { ProhibitedClass } from '@/lib/api';
@@ -138,10 +138,14 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
   const store = useQuery({ queryKey: ['vendor', id], queryFn: () => fetchVendorDetail(id) });
   // [MC-PR2] The activation checklist decides what this page offers: the same verdict the approve route enforces.
   const checklist = useQuery({ queryKey: ['vendor-checklist', id], queryFn: () => fetchVendorActivationChecklist(id) });
+  // [CHAINS PR3] The owner's branches with each one's brand listing (the store record lists them without it).
+  const ownerId: string | undefined = store.data?.data?.owner?.id;
+  const chainView = useQuery({ queryKey: ['vendor-chain', ownerId], queryFn: () => fetchVendorChain(ownerId!), enabled: !!ownerId });
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['vendor', id] });
     void qc.invalidateQueries({ queryKey: ['vendor-checklist', id] });
+    void qc.invalidateQueries({ queryKey: ['vendor-chain'] });
     void qc.invalidateQueries({ queryKey: ['vendors'] });
   };
   // [FOLLOWUPS · follows O-1] The owner's and the store's numbers are masked; "Show number" is the audited read, for this page view only.
@@ -285,6 +289,44 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     },
   }));
 
+  // [CHAINS PR3 · owner 29 Oct 2026] One brand card per chain: customers see the brand ONCE, opening the branch best
+  // for them (open and delivering to them first), and can pick another branch. A reason; no money moves.
+  const brandName: string | null = v.owner?.brandName ?? null;
+  const aloneOf = (vendorId: string): boolean => chainView.data?.data?.branches.find((b) => b.vendorId === vendorId)?.brandListedAlone ?? false;
+  const setBrand = async () => show(await dialog.run({
+    title: brandName ? `Change the brand of ${ownerName || 'this owner'}?` : `Give ${ownerName || 'this owner'}'s branches one brand?`,
+    body: (
+      <p>
+        Customers see this name once for all of this owner&apos;s branches. The card opens the branch that is open and
+        delivers to them, and they can pick another branch. A branch you list on its own keeps its own card.
+      </p>
+    ),
+    confirmLabel: brandName ? 'Change brand' : 'Set brand',
+    fields: [{ kind: 'text', name: 'brandName', label: 'Brand name customers see', required: true, minLength: 2, maxLength: 60 }],
+    reason: { hint: 'Why these branches show as one brand (for example, the head office asked). Kept on the permanent record.' },
+    context,
+    submit: ({ reason, values }) => setChainBrand(v.owner.id, String(values['brandName'] ?? '').trim(), reason),
+    success: () => 'Brand set. Customers see one card for these branches.',
+  }));
+  const removeBrand = async () => show(await dialog.run({
+    title: `Remove the brand ${brandName ?? ''}?`,
+    body: <p>Every branch of this owner is listed on its own card again.</p>,
+    confirmLabel: 'Remove brand',
+    reason: { hint: 'Kept on the permanent record.' },
+    context,
+    submit: ({ reason }) => setChainBrand(v.owner.id, null, reason),
+    success: () => 'Brand removed. Each branch is listed on its own.',
+  }));
+  const toggleAlone = async (vendorId: string, name: string, alone: boolean) => show(await dialog.run({
+    title: alone ? `List ${name} on its own?` : `List ${name} under ${brandName ?? 'the brand'}?`,
+    body: <p>{alone ? 'Customers see this branch on its own card, not inside the brand card.' : 'Customers see this branch inside the brand card again.'}</p>,
+    confirmLabel: alone ? 'List on its own' : 'List under the brand',
+    reason: { hint: 'Kept on the permanent record.' },
+    context,
+    submit: ({ reason }) => setBranchListedAlone(vendorId, alone, reason),
+    success: () => (alone ? `${name} is listed on its own.` : `${name} is listed under the brand.`),
+  }));
+
   const toggleFeatured = async () => {
     const featuring = !v.isFeatured;
     show(await dialog.run({
@@ -391,16 +433,49 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             </section>
           ) : null}
 
+          {v.owner ? (
+            <section aria-labelledby="chain-brand" className="mc-card">
+              <h2 id="chain-brand" className="mc-label">Brand</h2>
+              <p className="mc-muted">
+                {brandName
+                  ? `Customers see "${brandName}" once for this owner's branches.${aloneOf(v.id) ? ' This branch is listed on its own.' : ''}`
+                  : 'No brand: each branch is listed on its own.'}
+              </p>
+              {chainView.error ? (
+                <p className="mc-muted" role="alert">
+                  Couldn&apos;t load which branches are listed on their own.{' '}
+                  <button type="button" className="mc-btn" onClick={() => void chainView.refetch()}>Try again</button>
+                </p>
+              ) : null}
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button type="button" className="mc-btn" onClick={setBrand}>{brandName ? 'Change brand…' : 'Set brand…'}</button>
+                {brandName ? <button type="button" className="mc-btn" onClick={removeBrand}>Remove brand…</button> : null}
+                {brandName ? (
+                  <button type="button" className="mc-btn" onClick={() => toggleAlone(v.id, v.name, !aloneOf(v.id))}>
+                    {aloneOf(v.id) ? 'List this branch under the brand…' : 'List this branch on its own…'}
+                  </button>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
           {siblings.length > 0 ? (
             <section aria-labelledby="other-stores" className="mc-card">
               <h2 id="other-stores" className="mc-label">Other stores (same owner)</h2>
               <ul className="grid gap-1">
                 {siblings.map((s) => (
                   <li key={s.id}>
-                    <Link href={`/vendors/${s.id}`} className="flex items-center justify-between gap-3 min-h-11 rounded-lg px-2 -mx-2 hover:bg-[var(--mc-surface)]">
-                      <Truncate text={s.name} className="font-semibold" />
-                      <StatusBadge group="VendorStatus" value={s.status} />
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link href={`/vendors/${s.id}`} className="flex flex-1 items-center justify-between gap-3 min-h-11 rounded-lg px-2 -mx-2 hover:bg-[var(--mc-surface)]">
+                        <Truncate text={s.name} className="font-semibold" />
+                        <StatusBadge group="VendorStatus" value={s.status} />
+                      </Link>
+                      {brandName ? (
+                        <button type="button" className="mc-btn" onClick={() => toggleAlone(s.id, s.name, !aloneOf(s.id))}>
+                          {aloneOf(s.id) ? 'List under the brand…' : 'List on its own…'}
+                        </button>
+                      ) : null}
+                    </div>
                   </li>
                 ))}
               </ul>

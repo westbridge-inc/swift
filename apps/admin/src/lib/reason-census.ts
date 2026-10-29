@@ -95,6 +95,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /finance/settlements/:id/process', helper: 'processSettlement', args: ['set_1', undefined] },
   { route: 'PUT /subscriptions/:id/waive-fee', helper: 'waiveSubscriptionFee', args: ['sub_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /vendor-owners/:id/deal-rate', helper: 'setChainDeal', args: ['own_1', 14000], requiredBodyKeys: ['weeklyRate', 'reason'] },
+  { route: 'PUT /vendor-owners/:id/brand', helper: 'setChainBrand', args: ['own_1', 'Royal Castle'], requiredBodyKeys: ['brandName', 'reason'] },
+  { route: 'PUT /vendors/:id/brand-listing', helper: 'setBranchListedAlone', args: ['ven_1', true], requiredBodyKeys: ['alone', 'reason'] },
   { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },
   { route: 'POST /subscriptions/:id/refund-credit/set-aside', helper: 'setAsideSubscriptionCredit', args: ['sub_1', 1000], requiredBodyKeys: ['amount'] },
   { route: 'POST /subscriptions/:id/refund-credit/paid', helper: 'recordSubscriptionRefundPaid', args: ['sub_1', 1000, 'MMG', 'REF-1', 'evt_aside_1'], requiredBodyKeys: ['amount', 'method', 'reference', 'setAsideId'] },

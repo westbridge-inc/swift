@@ -345,7 +345,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     category: 'storeOwnership', model: 'VendorOwner', by: ['userId'], key: 'id',
     // [CHAINS] The chain deal is the owner's own commercial term: its weekly fee, currency and when it was set. Who at
     // Swift set it and the staff's reason are Swift's internal record.
-    fields: ['id', 'userId', 'createdAt', 'dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt'],
+    // [CHAINS PR3] The brand name customers see for all the owner's branches is the owner's own business name.
+    fields: ['id', 'userId', 'createdAt', 'dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'brandName'],
     omit: { dealReason: 'INTERNAL_NOTE', dealSetBy: 'OTHER_PERSON' },
   },
   {
@@ -362,6 +363,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       vatReviewedBy: 'OTHER_PERSON',
       // [CHAINS] Whether a new branch still waits for a person at Swift to approve it: Swift's own bookkeeping.
       personApprovalRequired: 'SYSTEM',
+      // [CHAINS PR3] Whether Swift lists this branch on its own card: Swift's listing bookkeeping.
+      brandListedAlone: 'SYSTEM',
     },
     fields: [
       'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',

@@ -408,6 +408,22 @@ export interface ChainDealResult {
 export const setChainDeal = (ownerId: string, weeklyRate: number, reason: string): Promise<Envelope<ChainDealResult>> =>
   apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/deal-rate`, { method: 'PUT', body: JSON.stringify({ weeklyRate, reason }), reason });
 
+/** [CHAINS PR3] The chain's brand: the name customers see ONCE for all its branches (one card opening the branch best
+ *  for them). null removes it (every branch on its own card again). A stated reason; no money moves. */
+export const setChainBrand = (ownerId: string, brandName: string | null, reason: string) =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/brand`, { method: 'PUT', body: JSON.stringify({ brandName, reason }), reason });
+/** [CHAINS PR3] List one branch on its own card although its owner has a brand (true), or back under the brand. */
+export const setBranchListedAlone = (vendorId: string, alone: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${vendorId}/brand-listing`, { method: 'PUT', body: JSON.stringify({ alone, reason }), reason });
+/** [CHAINS] One owner's branches as the chain view reads them (with each branch's brand listing). */
+export interface ChainView {
+  ownerId: string;
+  brandName: string | null;
+  branches: Array<{ vendorId: string; name: string; status: string; city: string | null; brandListedAlone: boolean }>;
+}
+export const fetchVendorChain = (ownerId: string): Promise<Envelope<ChainView>> =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/chain`);
+
 export const waiveSubscriptionFee = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 // [M-08] The server REQUIRES an Idempotency-Key on a top-up: a retry after a

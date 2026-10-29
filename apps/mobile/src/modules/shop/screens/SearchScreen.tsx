@@ -28,6 +28,7 @@ import {
   T,
 } from '../../../kit';
 import { touchTarget } from '../../../kit/touch-target';
+import { brandLine, brandTitle, type BrandCard } from '../../../lib/brandCard';
 
 // Kit 57–60: idle = headline + history chips + popular rows.
 //
@@ -89,10 +90,15 @@ function ResultRow({
   wide = false,
   closed = false,
   glyph = 'shops',
+  brand,
+  place,
 }: {
   /** null ⇒ this thing genuinely has no photo; never invent one [F-264]. */
   image: string | null;
   name: string;
+  /** [CHAINS PR3] A store standing for a whole chain: the brand's name, and the branch it opens (`place`). */
+  brand?: BrandCard;
+  place?: string | null;
   meta?: React.ReactNode;
   sub?: string;
   trailing?: React.ReactNode;
@@ -101,11 +107,13 @@ function ResultRow({
   closed?: boolean;
   glyph?: React.ComponentProps<typeof Photo>['glyph'];
 }) {
+  const title = brandTitle(name, brand);
+  const branchLine = brandLine(brand, place);
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={[name, sub, closed ? 'Closed right now' : null].filter(Boolean).join('. ')}
+      accessibilityLabel={[title, branchLine, sub, closed ? 'Closed right now' : null].filter(Boolean).join('. ')}
     >
       {({ pressed }) => (
         <View
@@ -129,8 +137,13 @@ function ResultRow({
           />
           <View style={{ flex: 1, gap: 4 }}>
             <T variant="body" weight="semibold" tone={closed ? 'muted' : 'ink'} numberOfLines={1}>
-              {name}
+              {title}
             </T>
+            {branchLine ? (
+              <T variant="caption" tone="muted" numberOfLines={1}>
+                {branchLine}
+              </T>
+            ) : null}
             {meta}
             {/* A dish keeps its store's name under it when that store is closed:
                 the closed line is added, never swapped in for the name. */}
@@ -481,6 +494,8 @@ export function SearchScreen() {
                         <ResultRow
                           image={vendorPhoto(v)}
                           name={v.name}
+                          brand={v.brand}
+                          place={v.addressLine1 ?? v.city}
                           meta={<RatingMeta rating={v.displayRating ?? null} topRated={v.topRated} />}
                           wide
                           closed={v.isCurrentlyOpen === false}
@@ -530,6 +545,8 @@ export function SearchScreen() {
                   <ResultRow
                     image={vendorPhoto(v)}
                     name={v.name}
+                    brand={v.brand}
+                    place={v.addressLine1 ?? v.city}
                     meta={
                       <RatingMeta
                         rating={v.displayRating ?? null}
