@@ -9,6 +9,9 @@ import type {
 // [POS-SYNC] The import page's panels. Each one shows only after a file is
 // chosen, so the page loads them on demand (page.tsx) and its first load stays
 // small.
+//
+// [W2] The import calls ride in this module too (one on-demand piece for the page, page.tsx).
+export { automapCsv, automapXlsx, confirmImport, confirmTillSync, previewTillSync } from '@/lib/catalogue-import-api';
 
 export type AddResult = Awaited<ReturnType<typeof confirmImport>>;
 export type Problem = { code: string; message: string; stores: string[]; headers: string[]; mapping: Partial<Record<ImportField, string>> };

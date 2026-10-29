@@ -5,7 +5,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Download, Upload } from 'lucide-react';
 import { ApiRequestError, BROWSER_CLIENT, getSelectedStore } from '@/lib/auth';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
-import { isChunkLoadError, lazyRetry, retryImport } from '@/lib/chunk-retry';
+import { lazyRetry, retryImport } from '@/lib/chunk-retry';
 import type { ColumnChoice, ColumnReading, ImportField, MissingPolicy, SyncPreview, SyncResult } from '@/lib/catalogue-import-api';
 import type { AddResult, Problem } from './panels';
 
@@ -21,10 +21,14 @@ import type { AddResult, Problem } from './panels';
 // loads when a file is chosen, so the page's first load stays small.
 // ---------------------------------------------------------------------------
 
+// [W2] One on-demand piece, not two: the panels module also carries the calls (it re-exports
+// lib/catalogue-import-api.ts). Every on-demand piece adds its address to the loader that EVERY page downloads
+// first, the customer home page included.
+const panels = () => import('./panels');
+const loadCalls = retryImport(panels);
 // [REVIEW-F S4-2] The calls' code is tried once more when it fails to arrive, and a failure that remains is told in
 // plain words (never webpack's own "Loading chunk N failed" with its address).
-const importApi = retryImport(() => import('@/lib/catalogue-import-api'));
-const panels = () => import('./panels');
+const importApi = () => loadCalls().catch(() => { throw new Error(LOAD_FAILED); });
 const ProblemPanel = lazyRetry(() => panels().then((m) => ({ default: m.ProblemPanel })));
 const ColumnsPanel = lazyRetry(() => panels().then((m) => ({ default: m.ColumnsPanel })));
 const SyncPreviewPanel = lazyRetry(() => panels().then((m) => ({ default: m.SyncPreviewPanel })));
@@ -32,13 +36,17 @@ const SyncResultPanel = lazyRetry(() => panels().then((m) => ({ default: m.SyncR
 const AddReadyPanel = lazyRetry(() => panels().then((m) => ({ default: m.AddReadyPanel })));
 const AddResultPanel = lazyRetry(() => panels().then((m) => ({ default: m.AddResultPanel })));
 
-function messageOf(e: unknown): string {
-  return isChunkLoadError(e) ? 'Couldn\'t load the import tools. Check your connection and try again.' : (e as Error).message;
+const LOAD_FAILED = 'Couldn\'t load the import tools. Check your connection and try again.';
+
+/** The refusal's details when they are an object (the shared error carries them unchecked, lib/auth.ts). */
+function detailsOf(e: unknown): Record<string, unknown> {
+  const d = e instanceof ApiRequestError ? e.errorDetails : undefined;
+  return d && typeof d === 'object' && !Array.isArray(d) ? (d as Record<string, unknown>) : {};
 }
 
 function problemOf(e: unknown): Problem | null {
   if (!(e instanceof ApiRequestError) || !e.code) return null;
-  const d = e.errorDetails ?? {};
+  const d = detailsOf(e);
   const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
   const mapping = d['mapping'] && typeof d['mapping'] === 'object' ? (d['mapping'] as Partial<Record<ImportField, string>>) : {};
   return { code: e.code, message: e.message, stores: list(d['stores']), headers: list(d['headers']), mapping };
@@ -73,7 +81,7 @@ export default function ImportPage() {
         const api = await importApi();
         r = input.file ? await api.automapXlsx(input.file, mode) : await api.automapCsv(input.csv!, mode);
       } catch (e) {
-        const workbookCopy = e instanceof ApiRequestError ? e.errorDetails?.['sourceCsv'] : undefined;
+        const workbookCopy = detailsOf(e)['sourceCsv'];
         if (typeof workbookCopy === 'string') setSourceCsv(workbookCopy);
         throw e;
       }
@@ -89,7 +97,7 @@ export default function ImportPage() {
         setProblem(p);
         setError(null);
       } else {
-        setError(messageOf(e));
+        setError((e as Error).message);
       }
     },
   });
@@ -97,19 +105,19 @@ export default function ImportPage() {
   const apply = useMutation({
     mutationFn: async () => (await importApi()).confirmTillSync(reading!.normalizedCsv, preview!),
     onSuccess: (r) => { setResult(r); setPreview(null); },
-    onError: (e) => setError(messageOf(e)),
+    onError: (e) => setError((e as Error).message),
   });
 
   /** The old path: no SKU column, so every row is added as a new item. */
   const readAsNew = useMutation({
     mutationFn: async () => (await importApi()).automapCsv(sourceCsv!, { tillStore: choice.tillStore, mapping: choice.mapping }),
     onSuccess: (r) => { setAddReading(r); setProblem(null); setError(null); },
-    onError: (e) => setError(messageOf(e)),
+    onError: (e) => setError((e as Error).message),
   });
   const addAll = useMutation({
     mutationFn: async () => (await importApi()).confirmImport(addReading!.normalizedCsv),
     onSuccess: (r) => { setAddResult(r); setAddReading(null); },
-    onError: (e) => setError(messageOf(e)),
+    onError: (e) => setError((e as Error).message),
   });
 
   async function onFile(file: File) {
