@@ -93,6 +93,8 @@ COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/mo
 COPY apps/mobile/src/lib/storePick.ts apps/mobile/src/lib/storePick.ts
 # [IN-STORE-SALE] ... and the app's "Sold in store" line of taps and its words (imports nothing).
 COPY apps/mobile/src/lib/inStoreSale.ts apps/mobile/src/lib/inStoreSale.ts
+# [BOOK-S6b] Web booking says what the phone says: its booking words and outcome rules (imports nothing).
+COPY apps/mobile/src/lib/appointmentBooking.ts apps/mobile/src/lib/appointmentBooking.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

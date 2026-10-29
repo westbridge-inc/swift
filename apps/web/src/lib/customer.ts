@@ -31,20 +31,22 @@ export interface Vendor {
 export interface MenuItem { id: string; name: string; description?: string; basePrice: number; imageUrl?: string | null; isAvailable: boolean; customerPrice?: number; fulfillment?: string; optionGroups?: OptionGroup[]; }
 
 // ── Service appointments (SERVICE listings, fulfillment=APPOINTMENT) ─────────
-export interface Appointment { itemId: string; slotStart: string; mode?: 'AT_BUSINESS' | 'MOBILE'; label?: string }
-export async function getItemSlots(itemId: string, date: string): Promise<{ slots: string[]; serviceMode?: string; durationMinutes?: number }> {
-  const d = (await apiFetch(`/api/v1/customer/items/${itemId}/slots?date=${date}`)).data;
-  return Array.isArray(d) ? { slots: d } : d;
+/** GET /customer/items/:id/slots — a listing's free times on one Guyana day,
+ *  the same answer the phone's slot picker reads (customer.routes.ts). */
+export interface ItemSlots {
+  date?: string;
+  slots: string[];
+  durationMinutes?: number;
+  bookableWeekdays?: number[];
+  serviceMode?: 'AT_BUSINESS' | 'MOBILE' | 'BOTH' | string;
+  serviceRadiusKm?: number | null;
+  /** Sent only with INSTANT_BOOKING on: a cash booking of this listing is confirmed at checkout. */
+  instantConfirmation?: boolean;
 }
-const APPT_KEY = 'swift_web_appointments';
-export function getPendingAppointments(): Appointment[] {
-  try { return JSON.parse(localStorage.getItem(APPT_KEY) || '[]'); } catch { return []; }
+export async function getItemSlots(itemId: string, date: string): Promise<ItemSlots> {
+  const d = (await apiFetch(`/api/v1/customer/items/${encodeURIComponent(itemId)}/slots?date=${encodeURIComponent(date)}`)).data;
+  return Array.isArray(d) ? { slots: d } : { ...d, slots: Array.isArray(d?.slots) ? d.slots : [] };
 }
-export function savePendingAppointment(a: Appointment) {
-  const list = getPendingAppointments().filter((x) => x.itemId !== a.itemId);
-  list.push(a); localStorage.setItem(APPT_KEY, JSON.stringify(list));
-}
-export function clearPendingAppointments() { localStorage.removeItem(APPT_KEY); }
 export interface VendorDetail extends Vendor {
   description?: string;
   /** [IMAGES-E2E PR5] imageUrl: the section's own photo (a kept one; absent from an older API). */
