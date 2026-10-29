@@ -161,6 +161,8 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
     await tx.serviceProvider.updateMany({ where: { userId }, data: { bio: null, portfolioPhotos: [], weeklyHours: Prisma.DbNull } });
     // [BOOK-P1] A closed account's services are switched off: never booked again, still named by the jobs kept.
     if (provider) await tx.serviceOffering.updateMany({ where: { providerId: provider.id, active: true }, data: { active: false } });
+    // [BOOK-P1 · REVIEW-X S4-3] Dates away are the person's schedule, and no kept record names them: deleted.
+    if (provider) await tx.serviceProviderTimeOff.deleteMany({ where: { providerId: provider.id } });
     // Order totals stay. The referral link goes, and the code is retired so no one is referred to a closed account.
     const customer = await tx.customer.findUnique({ where: { userId }, select: { id: true, referralCode: true, referredBy: true } });
     if (customer && (!customer.referralCode.startsWith('retired-') || customer.referredBy !== null)) {

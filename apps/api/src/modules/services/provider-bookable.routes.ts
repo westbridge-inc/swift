@@ -23,7 +23,7 @@ import {
 // the provider's own settings, read and written only by the provider.
 //
 // Behind INSTANT_BOOKING: while it is off every route here answers 404
-// PRO_BOOKING_OFF and writes nothing, so production and staging behave exactly
+// PRO_BOOKING_OFF (before reading the body) and writes nothing, so production and staging behave exactly
 // as before. Only the first bookable categories (owner C4: tutor, cleaner,
 // photographer; a held trade never) may set them up. No customer sees any of
 // it yet: booking a pro is P2.
@@ -98,8 +98,8 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
 
   /** POST /providers/me/offerings — add a bookable service (name, length, fixed price). */
   app.post('/providers/me/offerings', auth, async (request) => {
-    const body = offeringCreateSchema.parse(request.body);
     const provider = await myProvider(request.user.userId, true);
+    const body = offeringCreateSchema.parse(request.body);
     const created = await app.prisma.$transaction(async (tx) => {
       // One writer per provider at a time, so the cap holds under concurrent adds.
       await bindTenantTransaction(tx);
@@ -118,8 +118,8 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
 
   /** PATCH /providers/me/offerings/:id — change one of my services, or switch it off or on. */
   app.patch<{ Params: { id: string } }>('/providers/me/offerings/:id', auth, async (request) => {
-    const body = offeringUpdateSchema.parse(request.body);
     const provider = await myProvider(request.user.userId, true);
+    const body = offeringUpdateSchema.parse(request.body);
     const changed = await app.prisma.serviceOffering.updateMany({
       where: { id: request.params.id, providerId: provider.id },
       data: {
@@ -136,8 +136,8 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
 
   /** PUT /providers/me/hours — my weekly hours (every day's windows, replacing what is stored). */
   app.put('/providers/me/hours', auth, async (request) => {
-    const body = weeklyHoursSchema.parse(request.body);
     const provider = await myProvider(request.user.userId, true);
+    const body = weeklyHoursSchema.parse(request.body);
     const slots = weeklyHoursForSave(body.slots);
     await app.prisma.serviceProvider.update({
       where: { id: provider.id },
@@ -148,8 +148,8 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
 
   /** POST /providers/me/time-off — a whole day off, or a window of one day. */
   app.post('/providers/me/time-off', auth, async (request) => {
-    const body = timeOffSchema.parse(request.body);
     const provider = await myProvider(request.user.userId, true);
+    const body = timeOffSchema.parse(request.body);
     const [y, m, d] = body.date.split('-').map(Number);
     const date = new Date(Date.UTC(y!, m! - 1, d!));
     const today = guyanaToday();

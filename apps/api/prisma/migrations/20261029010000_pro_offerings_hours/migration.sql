@@ -12,7 +12,10 @@
 --     moves or releases a job (unlike 20260826000000_service_job_slot_exclusivity): a person
 --     settles each pair with the provider and the customers, then the deploy runs again.
 --     Row security is switched off for its read only, so it sees every row or fails; it never
---     passes blind.
+--     passes blind. DEPLOY ROLE: service_jobs has FORCED row security, so the login that runs
+--     `prisma migrate deploy` must be able to read past it (the table owner with BYPASSRLS, or
+--     a superuser, as every earlier migration that reads a walled table needs). A login that
+--     cannot gets an error at this step and the migration stops with nothing changed.
 --  1. service_jobs."offeringId" (the booked service; null = a quote job) and "endsAt" (when the
 --     provider's time on it ends; null = the minimum block); service_providers."weeklyHours";
 --     the service_offerings and service_provider_time_off tables (Prisma-shaped, empty).

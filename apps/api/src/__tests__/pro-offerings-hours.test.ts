@@ -273,6 +273,10 @@ describe('a pro sets up bookable services, weekly hours and time off', () => {
       ['PUT', '/api/v1/services/providers/me/hours', { slots: [{ dayOfWeek: 1, start: '09:00', end: '12:00' }] }],
       ['POST', '/api/v1/services/providers/me/time-off', { date: DATE }],
       ['DELETE', '/api/v1/services/providers/me/time-off/none'],
+      // [REVIEW-X S4-5] Off is off before the body is read: a malformed body is not a 400.
+      ['POST', '/api/v1/services/providers/me/offerings', { name: 'x', durationMinutes: 1, price: -1 }],
+      ['PUT', '/api/v1/services/providers/me/hours', { slots: 'junk' }],
+      ['POST', '/api/v1/services/providers/me/time-off', { date: 'not a date' }],
     ];
     for (const [method, url, body] of calls) {
       const res = await inject(method, url, pro.token, body);
@@ -381,12 +385,13 @@ describe('the tenant wall on a pro bookable services and time off', () => {
 });
 
 describe('a closed account: its services are switched off and its hours cleared', () => {
-  it('the erasure keeps the services a kept job names, switched off, and clears the weekly hours', async () => {
+  it('the erasure keeps the services a kept job names, switched off, clears the weekly hours and deletes the time off', async () => {
     const pro = await makeProvider('tutor');
     const c = await makeUser();
     const offering = await makeOffering(pro.providerId, 60);
     await bookedJob(pro, c.userId, offering, at(10));
     await runWithoutTenant(() => app.prisma.serviceProvider.update({ where: { id: pro.providerId }, data: { weeklyHours: [{ dayOfWeek: 1, start: '09:00', end: '12:00' }] } }));
+    await runWithoutTenant(() => app.prisma.serviceProviderTimeOff.create({ data: { providerId: pro.providerId, date: new Date(Date.UTC(YY, MM - 1, DD)) } }));
     await runWithoutTenant(() => deidentifyProfiles(app.prisma, pro.userId));
     const after = await runWithoutTenant(async () => ({
       provider: await app.prisma.serviceProvider.findUniqueOrThrow({ where: { id: pro.providerId } }),
@@ -394,5 +399,6 @@ describe('a closed account: its services are switched off and its hours cleared'
     }));
     expect(after.provider.weeklyHours).toBeNull();
     expect([after.offering.active, after.offering.name]).toEqual([false, offering.name]);
+    expect(await runWithoutTenant(() => app.prisma.serviceProviderTimeOff.count({ where: { providerId: pro.providerId } }))).toBe(0);
   });
 });
