@@ -209,7 +209,8 @@ describe('[RLS-N6 / DL-4] the fiction is counted by nobody', () => {
 
   it('the stats function runs as a job would — no tenant context — and returns every figure', async () => {
     const stats = await system(() => platformStats(app.prisma, { tenantId: PRODUCTION, today: new Date(0), subscriptionScope: {} }));
-    expect(Object.keys(stats).sort()).toEqual(['activeDrivers', 'activeRiders', 'activeSubscriptions', 'activeVendors', 'pastDueSubs', 'pendingVendors', 'todayNewUsers', 'todayOrders', 'todayRevenue', 'totalOrders', 'totalUsers', 'totalVendors', 'unassignedOrders']);
+    // [RIDER-SAFE 6] + freeRiders and waitingForRider ("free riders vs waiting orders").
+    expect(Object.keys(stats).sort()).toEqual(['activeDrivers', 'activeRiders', 'activeSubscriptions', 'activeVendors', 'freeRiders', 'pastDueSubs', 'pendingVendors', 'todayNewUsers', 'todayOrders', 'todayRevenue', 'totalOrders', 'totalUsers', 'totalVendors', 'unassignedOrders', 'waitingForRider']);
     expect(stats.totalUsers).toBeGreaterThanOrEqual(1);
   });
 });

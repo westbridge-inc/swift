@@ -138,6 +138,9 @@ export interface PromiseInput {
   distanceKm: number;
   itemCount: number;
   placedAt: Date;
+  /** [RIDER-SAFE 2] The honest wait for a free rider when riders are BUSY at
+   *  checkout (dispatch/delivery-capacity.ts); 0 or absent when one is free. */
+  riderWaitSeconds?: number;
 }
 
 export async function promiseAtCheckout(prisma: PrismaClient, input: PromiseInput): Promise<PromiseResult> {
@@ -153,7 +156,11 @@ export async function promiseAtCheckout(prisma: PrismaClient, input: PromiseInpu
   const parts: Omit<PromiseParts, 'padSeconds' | 'padSource'> = {
     prepP80Seconds: prep.p80Seconds,
     prepTier: prep.tier,
-    riderToStoreSeconds: Math.max(0, Number(riderToStore.value) || 0),
+    // [RIDER-SAFE 2 · COORD ruling 29 Oct 2026] When every rider near is busy,
+    // the rider reaches the store only after one frees up: the leg is the
+    // honest wait for a free rider PLUS the usual ride to the store. The
+    // customer saw the same wait on the cart before ordering.
+    riderToStoreSeconds: Math.max(0, Number(riderToStore.value) || 0) + Math.max(0, Math.round(input.riderWaitSeconds ?? 0)),
     serviceSeconds: Math.max(0, Number(service.value) || 0),
     toCustomerSeconds,
   };

@@ -82,6 +82,7 @@ import {
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { withCounterpartPhones } from '../calls/counterpart-phone';
+import { kickWaitingOrdersNear, type KickEnqueue } from '../dispatch/supply-kick';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -308,6 +309,14 @@ export async function riderRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const dispatch = makeDispatchService(app);
+  // [RIDER-SAFE 3] A rider who comes online or hands over a bag is offered the
+  // oldest waiting order near them first: dispatch runs again for those orders
+  // now instead of at the next sweep (dispatch/supply-kick.ts).
+  const kickEnqueue: KickEnqueue = async (orderId, { jobId, priority }) => {
+    if (!app.dispatchQueue) return;
+    await app.dispatchQueue.add('dispatch-order', { orderId }, { jobId, priority, removeOnComplete: 100, removeOnFail: 50 });
+  };
+  const kickWaiting = (riderId: string) => kickWaitingOrdersNear({ prisma: app.prisma, redis: app.redis, enqueue: kickEnqueue }, riderId);
   const cashRules = new CashRulesService(
     app.prisma,
     new NotificationService(app.prisma, app.io),
@@ -776,6 +785,8 @@ export async function riderRoutes(app: FastifyInstance) {
         .releaseHeldOffer(retiredDriverId)
         .catch((error) => request.log.warn({ err: error, driverId: retiredDriverId }, 'rider GO sibling driver offer cleanup failed'));
     }
+
+    if (updated.isAvailable) await kickWaiting(rider.id);
 
     return { success: true, data: { isOnline: updated.isOnline, isAvailable: updated.isAvailable } };
   });
@@ -1662,6 +1673,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // a row for the reviewer — never a penalty, never a word to the rider.
     if (!replayed) {
       await assessCompletion({ prisma: app.prisma, redis: app.redis }, { riderId: rider.id, orderId: id, completedAt: new Date() });
+      // [RIDER-SAFE 3] Hands free: the oldest waiting order near them goes first.
+      await kickWaiting(rider.id);
     }
     return { success: true, data, replayed };
   });

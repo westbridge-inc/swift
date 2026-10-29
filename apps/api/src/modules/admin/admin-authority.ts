@@ -302,6 +302,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders': c('C1', 'order.read'),
   'GET /orders/held': c('C0', 'order.read'),
   'GET /orders/sla-breaches': c('C0', 'order.read'),
+  // [RIDER-SAFE 5] Swift's delivery pause: read it; set or lift it (a reason, audited).
+  'GET /delivery-pause': c('C0', 'order.read'),
+  'PUT /delivery-pause': c('C3', 'delivery.pause'),
   'GET /orders/:id': c('C1', 'order.read'),
   'GET /ops/live': c('C1', 'ops.live.read'),
   'POST /orders/:id/retry-dispatch': c('C2', 'order.dispatch'),
@@ -883,6 +886,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'PUT /billing/price-book': 'a versioned price book; the version register is the record',
   'PUT /billing/agent-cash-config': 'a tenant-wide settings singleton with no id in the route',
   'PUT /batching/settings': 'a tenant-wide settings singleton with no id in the route',
+  // [RIDER-SAFE 5] each write creates a new immutable AlgoConfig version row; the inline audit row names it
+  'PUT /delivery-pause': 'creates a new immutable version row of the delivery.pause switch; there is no before row to digest — the audit facts carry the new version row id, the version and both sides of the switch',
   'POST /billing/fx-rates': 'creates a rate row; there is no before state to digest',
   'POST /billing/usd-migration/mode-a': 'a fleet-wide migration over many rows, not one subject',
   'POST /billing/usd-migration/mode-b': 'a fleet-wide migration over many rows, not one subject',

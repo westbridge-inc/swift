@@ -4,9 +4,13 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { instantBookingEnabled } from '../booking/instant-booking';
 import { canonicalServiceTrade } from './services.service';
+import { providerAcceptedMenuAgreement } from './pro-menu-agreement';
+import { LIVE_SERVICE_JOB_STATUSES } from './provider-time';
+import { endOfGuyanaDay, instantOfGuyanaWallClock, startOfGuyanaDay } from '../../utils/guyana-day';
 import {
   guyanaToday,
   isProTradeBookable,
+  lockProviderTime,
   MAX_OFFERINGS_PER_PROVIDER,
   MAX_UPCOMING_TIME_OFF,
   offeringCreateSchema,
@@ -59,6 +63,17 @@ function shownOffering(o: OfferingRow) {
 
 const OFFERING_SELECT = { id: true, name: true, durationMinutes: true, price: true, active: true, createdAt: true, updatedAt: true } as const;
 
+/** The instants a time off covers: the whole Guyana day, or its window. */
+function timeOffRange(date: string, start?: string, end?: string): [Date, Date] {
+  if (!start || !end) return [startOfGuyanaDay(date), endOfGuyanaDay(date)];
+  const [y, m, d] = date.split('-').map(Number) as [number, number, number];
+  const instant = (hhmm: string) => {
+    const [hh, mm] = hhmm.split(':').map(Number) as [number, number];
+    return instantOfGuyanaWallClock(new Date(Date.UTC(y, m - 1, d, hh, mm)));
+  };
+  return [instant(start), instant(end)];
+}
+
 export function registerProviderBookableRoutes(app: FastifyInstance): void {
   const auth = { preHandler: [app.authenticate] };
   /** The caller's provider profile, with the switch and the category checked. Writes need a bookable trade. */
@@ -66,7 +81,7 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
     if (!instantBookingEnabled()) throw proBookingOff();
     const provider = await app.prisma.serviceProvider.findUnique({
       where: { userId },
-      select: { id: true, trade: true, weeklyHours: true },
+      select: { id: true, userId: true, trade: true, weeklyHours: true },
     });
     if (!provider) throw new NotFoundError('ServiceProvider');
     const bookable = isProTradeBookable(canonicalServiceTrade(provider.trade));
@@ -77,18 +92,22 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
   /** GET /providers/me/bookable — my services, weekly hours and upcoming time off. */
   app.get('/providers/me/bookable', auth, async (request) => {
     const provider = await myProvider(request.user.userId, false);
-    const [offerings, timeOff] = await Promise.all([
+    const [offerings, timeOff, agreementAccepted] = await Promise.all([
       app.prisma.serviceOffering.findMany({ where: { providerId: provider.id }, orderBy: [{ active: 'desc' }, { createdAt: 'asc' }], select: OFFERING_SELECT }),
       app.prisma.serviceProviderTimeOff.findMany({
         where: { providerId: provider.id, date: { gte: guyanaToday() } },
         orderBy: [{ date: 'asc' }, { start: 'asc' }],
         select: { id: true, date: true, start: true, end: true },
       }),
+      providerAcceptedMenuAgreement(app.prisma, provider.userId),
     ]);
     return {
       success: true,
       data: {
         bookable: provider.bookable,
+        // [BOOK-P3 · COORD 16:13Z] Customers can book this pro from the list only once they accepted
+        // the agreement with the advance-acceptance clause (pro-menu-agreement.ts).
+        agreementAccepted,
         offerings: offerings.map(shownOffering),
         weeklyHours: storedWeeklyHours(provider.weeklyHours),
         timeOff: timeOff.map((t) => ({ id: t.id, date: t.date.toISOString().slice(0, 10), start: t.start, end: t.end })),
@@ -139,9 +158,14 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
     const provider = await myProvider(request.user.userId, true);
     const body = weeklyHoursSchema.parse(request.body);
     const slots = weeklyHoursForSave(body.slots);
-    await app.prisma.serviceProvider.update({
-      where: { id: provider.id },
-      data: { weeklyHours: slots.length > 0 ? (slots as unknown as Prisma.InputJsonValue) : Prisma.DbNull },
+    await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      // [BOOK-P3 · M S4-3] Queued with the bookings and moves of this pro's time (provider-calendar.ts).
+      await lockProviderTime(tx, provider.id);
+      await tx.serviceProvider.update({
+        where: { id: provider.id },
+        data: { weeklyHours: slots.length > 0 ? (slots as unknown as Prisma.InputJsonValue) : Prisma.DbNull },
+      });
     });
     return { success: true, data: { weeklyHours: slots } };
   });
@@ -162,23 +186,37 @@ export function registerProviderBookableRoutes(app: FastifyInstance): void {
     }
     const created = await app.prisma.$transaction(async (tx) => {
       await bindTenantTransaction(tx);
+      // [BOOK-P3 · M S4-3] Queued with the bookings and moves of this pro's time: a booking checked
+      // before this commits is seen below; one checked after sees the time off.
+      await lockProviderTime(tx, provider.id);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`provider-time-off:${provider.id}`}, 0))`;
       const upcoming = await tx.serviceProviderTimeOff.count({ where: { providerId: provider.id, date: { gte: today } } });
       if (upcoming >= MAX_UPCOMING_TIME_OFF) {
         throw new AppError(409, 'TOO_MUCH_TIME_OFF', `You can set up to ${MAX_UPCOMING_TIME_OFF} times off ahead. Remove one first.`);
       }
-      return tx.serviceProviderTimeOff.create({
+      const row = await tx.serviceProviderTimeOff.create({
         data: { providerId: provider.id, date, start: body.start ?? null, end: body.end ?? null },
         select: { id: true, date: true, start: true, end: true },
       });
+      // [BOOK-P3] Time off never cancels a booking: the pro is told how many booked jobs it overlaps,
+      // to move or cancel them with their customers.
+      const [from, to] = timeOffRange(body.date, body.start, body.end);
+      const clashing = await tx.serviceJob.count({
+        where: { providerId: provider.id, status: { in: [...LIVE_SERVICE_JOB_STATUSES] }, scheduledFor: { not: null, lt: to }, OR: [{ endsAt: { gt: from } }, { endsAt: null, scheduledFor: { gte: from } }] },
+      });
+      return { ...row, clashing };
     });
-    return { success: true, data: { id: created.id, date: body.date, start: created.start, end: created.end } };
+    return { success: true, data: { id: created.id, date: body.date, start: created.start, end: created.end, clashingBookings: created.clashing } };
   });
 
   /** DELETE /providers/me/time-off/:id — take back a time off (my own only). */
   app.delete<{ Params: { id: string } }>('/providers/me/time-off/:id', auth, async (request) => {
     const provider = await myProvider(request.user.userId, true);
-    const removed = await app.prisma.serviceProviderTimeOff.deleteMany({ where: { id: request.params.id, providerId: provider.id } });
+    const removed = await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await lockProviderTime(tx, provider.id);
+      return tx.serviceProviderTimeOff.deleteMany({ where: { id: request.params.id, providerId: provider.id } });
+    });
     if (removed.count === 0) throw new NotFoundError('TimeOff', request.params.id);
     return { success: true, data: { deleted: true } };
   });

@@ -2,7 +2,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { OPERATOR, OPERATOR_ADDRESS } from '../legal/operator';
 import { formatMoney } from '../../utils/currency-amount';
 import { formatGuyanaTime } from '../../utils/guyana-day';
-import { moverUserOf } from '../subscription/subscription-owner';
+import { personUserOf } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // [OWNER LEGAL PLAN 15 Oct 2026 · R11 + R12, research T3] THE weekly-fee
@@ -98,12 +98,12 @@ export async function feeReceiptDocument(
     db.billingEvent.findUnique({ where: { id: receipt.billingEventId }, select: { currencyCode: true } }),
     db.subscription.findUnique({
       where: { id: receipt.subscriptionId },
-      select: { vendor: { select: { name: true } }, rider: { select: { user: { select: { firstName: true, lastName: true } } } }, driver: { select: { user: { select: { firstName: true, lastName: true } } } } },
+      select: { vendor: { select: { name: true } }, rider: { select: { user: { select: { firstName: true, lastName: true } } } }, driver: { select: { user: { select: { firstName: true, lastName: true } } } }, serviceProvider: { select: { user: { select: { firstName: true, lastName: true } } } } },
     }),
     settings ? settings.tin : companyTin(db),
     settings ? settings.vat : vatRegistration(db),
   ]);
-  const person = moverUserOf(sub);
+  const person = personUserOf(sub);
   const partnerName = sub?.vendor?.name ?? (person ? `${person.firstName} ${person.lastName}`.trim() : 'Partner');
   const currencyCode = event?.currencyCode ?? 'GYD';
   const amount = Number(receipt.amount);

@@ -21,7 +21,7 @@ export async function backfillBillingConfirmation(db: PrismaClient, options: {
     SELECT count(*) FROM subscriptions s
     ${SUBSCRIPTION_OWNER_JOINS_SQL}
     LEFT JOIN users u ON u.id=${SUBSCRIPTION_PAYER_USER_ID_SQL}
-    WHERE num_nonnulls(s."riderId",s."driverId",s."vendorId")<>1 OR u.id IS NULL
+    WHERE num_nonnulls(s."riderId",s."driverId",s."vendorId",s."serviceProviderId")<>1 OR u.id IS NULL
       OR (v.id IS NOT NULL AND v."tenantId" IS DISTINCT FROM u."tenantId")`;
   if (Number(invalid[0]?.count ?? 0) > 0) throw new Error('Billing cutover has invalid or orphan subscription owners; completion remains blocked');
   let cursor: string | undefined;
