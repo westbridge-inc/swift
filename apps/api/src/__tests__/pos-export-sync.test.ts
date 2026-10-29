@@ -1596,20 +1596,29 @@ describe('an item editor save that leaves the switch alone keeps a sold-out item
     expect(await itemOf(rice.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 4 });
   }, 60_000);
 
-  it('moving the switch in the editor is still the store’s own answer: on ends the till’s mark, off is the store’s own off', async () => {
+  it('moving the switch in the editor is still the store’s own answer: on ends the till’s mark and the item returns, off is the store’s own off', async () => {
     const store = await makeStore();
     const tea = await makeItem(store, 'EDT-4', 4, 300, { name: 'Tea' });
     const jam = await makeItem(store, 'EDT-5', 4, 600, { name: 'Jam' });
     await syncOk(store, csvOf(forSaleRow('EDT-4', 'Tea', '300', '4', 'false'), forSaleRow('EDT-5', 'Jam', '600', '4', 'true')));
     expect((await itemOf(tea.id)).tillOffAt).not.toBeNull();
 
+    // [REVIEW-G S4-1] Switched on in the editor: the item is back on sale and the till's mark is gone.
     expect((await edit(store, tea.id, { basePrice: 300, isAvailable: true })).statusCode).toBe(200);
     expect(await itemOf(tea.id)).toMatchObject({ isAvailable: true, tillOffAt: null, autoHiddenAt: null });
+    // Then switched off in the editor: the store's own off, which a later file with it for sale never undoes (a
+    // leftover till mark would hand it back to the engine's sold-out and a restock would put it on sale).
+    expect((await edit(store, tea.id, { basePrice: 300, isAvailable: false })).statusCode).toBe(200);
+    expect(await itemOf(tea.id)).toMatchObject({ isAvailable: false, tillOffAt: null, autoHiddenAt: null });
 
     expect((await edit(store, jam.id, { basePrice: 600, isAvailable: false })).statusCode).toBe(200);
-    const { preview: later } = await syncOk(store, csvOf(forSaleRow('EDT-4', 'Tea', '300', '4', 'true'), forSaleRow('EDT-5', 'Jam', '600', '9', 'true')));
+    const { preview: later } = await syncOk(store, csvOf(forSaleRow('EDT-4', 'Tea', '300', '7', 'true'), forSaleRow('EDT-5', 'Jam', '600', '9', 'true')));
     expect(later.changes.find((c) => c.itemId === jam.id)?.soldOut).toBe('STAYS_SWITCHED_OFF');
+    expect(later.changes.find((c) => c.itemId === tea.id)?.soldOut).toBe('STAYS_SWITCHED_OFF');
     expect(await itemOf(jam.id)).toMatchObject({ isAvailable: false, stockQuantity: 9 });
+    expect(await itemOf(tea.id)).toMatchObject({ isAvailable: false, stockQuantity: 7 });
+    await app.prisma.$transaction((tx) => unhideRestocked(tx, tea.id));
+    expect((await itemOf(tea.id)).isAvailable).toBe(false);
   }, 60_000);
 });
 
