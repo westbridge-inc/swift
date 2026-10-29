@@ -50,11 +50,11 @@ export function ProBookingScreen({ navigation, route }: any) {
   const [booked, setBooked] = useState<string | null>(null);
 
   const answer = offeringsQ.data;
-  const offerings = answer?.offerings ?? [];
+  const offerings = useMemo(() => answer?.offerings ?? [], [answer]);
   const offering = offerings.find((o) => o.id === offeringId) ?? null;
   const days = useMemo(() => bookingDays(today, DAYS_SHOWN, answer?.bookableWeekdays, answer?.horizonDays), [today, answer?.bookableWeekdays, answer?.horizonDays]);
   const slotsQ = useProSlots<{ slots?: string[] }>(providerId, offering?.id ?? '', day);
-  const times = slotsQ.data?.slots ?? [];
+  const times = useMemo(() => slotsQ.data?.slots ?? [], [slotsQ.data]);
 
   // A single service is picked for the customer; a time the server no longer lists is dropped.
   useEffect(() => {
