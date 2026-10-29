@@ -45,7 +45,13 @@ async function openWindow(view: ReturnType<typeof renderWithQuery>) {
   const later = await screen.findByText(/View later/).catch(() => null);
   if (later) await view.user.click(later);
   await view.user.click(await screen.findByText('#SW-7001', { selector: 'p' }));
-  return screen.findByRole('dialog', { name: 'Order details' });
+  const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+  // [TIDY] The window opens on the board's copy of the order; the pick list comes with the order's own read
+  // (order-detail.tsx: not while isPlaceholderData), which reaches the screen on TanStack Query's zero-delay timer.
+  // Wait for both boxes, so a test never looks for a box the window has not drawn yet.
+  await within(dialog).findByRole('checkbox', { name: 'Picked: 2× Rice' });
+  await within(dialog).findByRole('checkbox', { name: 'Picked: 2× Oil' });
+  return dialog;
 }
 const box = (dialog: HTMLElement, name: string) => within(dialog).getByRole('checkbox', { name: `Picked: 2× ${name}` }) as HTMLInputElement;
 
@@ -138,8 +144,14 @@ describe('[TAP-AUDIT] "Ask for the pickup code" moves at the tap', () => {
     const control = await screen.findByRole('switch', { name: 'Ask for the pickup code' });
     expect(control.getAttribute('aria-checked')).toBe('false');
     await act(async () => { fireEvent.click(control); });
-    expect(control.getAttribute('aria-checked'), 'the switch moves at the tap').toBe('true');
-    expect(control.hasAttribute('disabled'), 'and is locked while the request is out').toBe(true);
+    // [TIDY · main CI flake at 0a198908] The tapped state is the mutation's pending state, which TanStack Query hands
+    // to the screen on a zero-delay timer after the click; act() can return before that timer runs. So wait for it.
+    // The server's answer is still held here (release() not called), so this is still the switch before the answer.
+    await waitFor(() => {
+      expect(control.getAttribute('aria-checked'), 'the switch moves at the tap').toBe('true');
+      expect(control.hasAttribute('disabled'), 'and is locked while the request is out').toBe(true);
+    });
+    expect(served, 'the request is still out').toBe(false);
     await act(async () => { release(); });
     await waitFor(() => expect(control.hasAttribute('disabled')).toBe(false));
     expect(control.getAttribute('aria-checked')).toBe('true');
