@@ -292,6 +292,9 @@ const PENDING_ELSEWHERE: Record<string, string> = {
 const KNOWN: Record<string, string> = {
   'app/dashboard/orders/order-detail.tsx | Nothing left to hand over — cancel this order': 'Picking summary of an order that is already on screen: every line was removed. No read decides it.',
   'components/guest-basket.tsx | Your basket is empty.': 'The guest basket lives on this device (lib/basket.ts), not in a server read; it cannot fail to load.',
+  // [RIDER-SAFE 1/4]
+  'components/checkout/checkout.tsx | () => { if (live) setRiderNotice(null); }': 'A hint before ordering only: a failed rider read says nothing and blocks nothing; checkout itself decides and shows its refusal in the server\'s words.',
+  'app/dashboard/settings/kitchen-capacity-card.tsx | No limit. Set one if too many orders at once wou': 'The words for the stored setting (maxConcurrentOrders null = no limit); the card renders them only after the profile read has the store (it returns nothing on a failed read, where the page says it could not load).',
   'app/(app)/order/search/page.tsx | () => { if (sequence.current === request) setSug': 'Type-ahead suggestions only: they vanish on a failure and say nothing; the search itself reports its own failure.',
 };
 

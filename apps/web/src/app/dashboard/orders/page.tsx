@@ -16,6 +16,7 @@ import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import { getOrders, money, type VendorOrder } from '@/lib/vendor-api';
 import { preloadedPart } from '@/lib/preloaded-part';
 import { statusChip, timeAgo } from './order-chip';
+import { DeliveryStatusNotice } from '../delivery-status-notice';
 
 // [PERF · UI-FIX-WEB note 05:18Z] The order window is its own chunk, fetched as soon as this page
 // mounts and drawn without Suspense once here: the page's first load is lighter and the tap that
@@ -121,6 +122,8 @@ export default function OrdersPage() {
   const lastOrderAt = all.map((o) => o.placedAt).filter(Boolean).sort().at(-1);
   return <div className="space-y-6">
     <NewOrderTakeover orders={all} onOpenOrder={setSelected} />
+    {/* [RIDER-SAFE 4/5] Why customers cannot order delivery right now (pickup stays open). */}
+    <DeliveryStatusNotice storeId={storeId} />
     <StoreHeader store={store.data} action={<button onClick={() => orders.refetch()} className="sw-btn sw-btn-md sw-btn-outline"><RefreshCw size={16} className={orders.isFetching ? 'animate-spin' : ''} aria-hidden />Refresh</button>} />
     {manager ? <RevenuePulse newOrders={newOrders} /> : <LoadedBoard loading={orders.isLoading} unavailable={orders.isError && !orders.data} total={activeCount} newCount={newOrders.length} progressCount={activeCount - newOrders.length} />}
     <div>
