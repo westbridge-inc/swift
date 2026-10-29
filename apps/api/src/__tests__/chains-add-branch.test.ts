@@ -167,6 +167,43 @@ describe('[CHAINS] POST /vendor/stores — add a branch', () => {
     expect(await storesOf(owner.ownerId)).toHaveLength(1);
   });
 
+  // [COORD ruling 29 Oct] An owner in trouble anywhere adds no branch: each refusal says why, and nothing is written.
+  const sub = (vendorId: string, status: 'PAST_DUE' | 'SUSPENDED') => app.prisma.subscription.create({ data: {
+    vendorId, type: 'RESTAURANT', status, weeklyRate: 15000, currencyCode: 'GYD', billingMethod: 'CASH',
+    currentPeriodStart: new Date(), currentPeriodEnd: new Date(), nextBillingDate: new Date() } });
+  type Owner = Awaited<ReturnType<typeof makeOwner>>;
+  const troubles: Array<[string, string, (o: Owner) => Promise<unknown>]> = [
+    ['a sibling store Swift suspended', 'STORE_SUSPENDED', async (o) => {
+      const s = await storeFor(o.ownerId); await app.prisma.vendor.update({ where: { id: s.id }, data: { status: 'SUSPENDED', suspensionSource: 'ADMIN' } });
+    }],
+    ['a sibling store Swift closed (banned)', 'STORE_CLOSED', async (o) => {
+      const s = await storeFor(o.ownerId); await app.prisma.vendor.update({ where: { id: s.id }, data: { status: 'CLOSED' } });
+    }],
+    ['a store whose MMG checkout Swift holds', 'STORE_ON_HOLD', (o) =>
+      app.prisma.vendor.update({ where: { id: o.firstId }, data: { mmgCheckoutHeldAt: new Date(), mmgCheckoutHeldReason: 'chains test' } })],
+    ['an open enforcement hold on the owner', 'OWNER_ON_HOLD', (o) =>
+      app.prisma.enforcementAction.create({ data: { accountId: o.userId, level: 'REVIEW_FIRST', reasonCode: 'CHAINS_TEST', signalsFired: [] as never, decidedBy: 'SYSTEM' } })],
+    ['a weekly fee past due on a store', 'FEE_UNPAID', (o) => sub(o.firstId, 'PAST_DUE')],
+    ['a store billing-suspended for its fee', 'FEE_UNPAID', async (o) => {
+      const s = await storeFor(o.ownerId); await app.prisma.vendor.update({ where: { id: s.id }, data: { status: 'SUSPENDED', suspensionSource: 'BILLING' } });
+      await sub(s.id, 'SUSPENDED');
+    }],
+    ['documents approved once, but no store live now', 'NO_ACTIVE_STORE', (o) =>
+      app.prisma.vendor.update({ where: { id: o.firstId }, data: { status: 'PENDING_APPROVAL', isVerified: true } })],
+  ];
+  for (const [what, code, harm] of troubles) {
+    it(`refused with ${code}: ${what}`, async () => {
+      const owner = await makeOwner();
+      await harm(owner);
+      const before = (await storesOf(owner.ownerId)).length;
+      const res = await add(owner.token, { business: branchBody(), weeklyFeeAck: await ackFor(owner.userId) });
+      expect(res.statusCode, res.body).toBeGreaterThanOrEqual(400);
+      expect(res.json().error.code).toBe(code);
+      expect(await storesOf(owner.ownerId)).toHaveLength(before);
+      await app.prisma.enforcementAction.deleteMany({ where: { accountId: owner.userId } });
+    });
+  }
+
   it('needs a fresh "confirm it\'s you"', async () => {
     const owner = await makeOwner('ACTIVE', false);
     const res = await add(owner.token, { business: branchBody(), weeklyFeeAck: await ackFor(owner.userId) });

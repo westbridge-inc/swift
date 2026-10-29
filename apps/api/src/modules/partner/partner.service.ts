@@ -18,6 +18,8 @@ import {
 } from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { lockVendorActivationBilling } from '../billing/billing-access';
+import { hasActiveHold } from '../integrity/enforcement';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -99,6 +101,34 @@ export const DEFAULT_BRANCH_LIMIT = 50;
 export function branchLimit(env: Record<string, string | undefined> = process.env): number {
   const raw = Number(env['VENDOR_BRANCH_LIMIT']);
   return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_BRANCH_LIMIT;
+}
+
+/**
+ * [CHAINS · COORD ruling 29 Oct 2026] A branch rides the owner's standing, so an owner in trouble anywhere adds none.
+ * Read under the add's locks (PartnerService.addBranch). In order, each with its own plain reason:
+ *  - OWNER_ON_HOLD: an open enforcement hold on the owner's account (enforcement.ts hasActiveHold);
+ *  - FEE_UNPAID: a store's weekly fee past due, or a store suspended or churned for it (pay first, the spirit of
+ *    DEBT_REINSTATE_FIRST);
+ *  - STORE_SUSPENDED / STORE_CLOSED: a store Swift suspended (any other reason) or closed;
+ *  - STORE_ON_HOLD: a store whose MMG checkout Swift holds (a fraud-safety hold);
+ *  - NO_ACTIVE_STORE / FIRST_STORE_NOT_APPROVED: no store is live now (documents approved once is not enough).
+ */
+type StandingStore = { name: string; status: string; isVerified: boolean; suspensionSource: string | null; mmgCheckoutHeldAt: Date | null; subscription: { status: string } | null };
+export function assertOwnerInGoodStanding(stores: readonly StandingStore[], ownerOnHold: boolean): void {
+  if (ownerOnHold) throw new AppError(403, 'OWNER_ON_HOLD', 'Your account is being checked by Swift. You can add branches once that check is finished.');
+  const unpaid = stores.find((s) => ['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(s.subscription?.status ?? '') || (s.status === 'SUSPENDED' && s.suspensionSource === 'BILLING'));
+  if (unpaid) throw new AppError(409, 'FEE_UNPAID', `Pay the weekly fee for ${unpaid.name} first. Then you can add a branch.`);
+  const suspended = stores.find((s) => s.status === 'SUSPENDED');
+  if (suspended) throw new AppError(403, 'STORE_SUSPENDED', `${suspended.name} is suspended. You can add branches once Swift reinstates it.`);
+  const closed = stores.find((s) => s.status === 'CLOSED');
+  if (closed) throw new AppError(403, 'STORE_CLOSED', `Swift closed ${closed.name}. Contact Swift before adding a branch.`);
+  const held = stores.find((s) => s.mmgCheckoutHeldAt !== null);
+  if (held) throw new AppError(403, 'STORE_ON_HOLD', `Swift is checking payments at ${held.name}. You can add branches once that check is finished.`);
+  if (!stores.some((s) => s.status === 'ACTIVE')) {
+    throw stores.some((s) => s.isVerified)
+      ? new AppError(403, 'NO_ACTIVE_STORE', 'You can add branches while one of your stores is live on Swift.')
+      : new AppError(403, 'FIRST_STORE_NOT_APPROVED', 'You can add branches once Swift has approved your first store.');
+  }
 }
 
 /** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
@@ -361,14 +391,20 @@ export class PartnerService {
       if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
       if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
       if (user.status !== 'ACTIVE') throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot add a branch right now.');
+      // The owner's stores and their fees, locked in the settlement order (account row above, then every
+      // subscription by id), then the stores themselves: a suspension, a hold or a missed fee committed first is
+      // seen here, and one that comes second waits for this add to finish.
+      await lockVendorActivationBilling(tx, userId);
+      await tx.$queryRaw`SELECT v."id" FROM "vendors" v JOIN "vendor_owners" o ON o."id" = v."ownerId" WHERE o."userId" = ${userId} ORDER BY v."id" FOR SHARE OF v /* add-branch-owner-stores */`;
       const owner = await tx.vendorOwner.findUnique({
         where: { userId },
-        select: { id: true, vendors: { select: { id: true, status: true, isVerified: true } } },
+        select: {
+          id: true,
+          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, subscription: { select: { status: true } } } },
+        },
       });
       if (!owner || owner.vendors.length === 0) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Set up your first store before adding a branch.');
-      if (!owner.vendors.some((v) => v.isVerified || v.status === 'ACTIVE')) {
-        throw new AppError(403, 'FIRST_STORE_NOT_APPROVED', 'You can add branches once Swift has approved your first store.');
-      }
+      assertOwnerInGoodStanding(owner.vendors, (await hasActiveHold(tx as unknown as PrismaClient, userId)).held);
       const limit = branchLimit(env);
       if (owner.vendors.length >= limit) {
         throw new AppError(409, 'BRANCH_LIMIT', `An account can run up to ${limit} stores. Contact Swift to add more.`, { limit });
