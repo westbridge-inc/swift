@@ -467,3 +467,66 @@ describe('[BOOK-FU3 · COORD 29 Oct] a closed-now store still takes a booking; a
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// [BOOK-POLISH · REVIEW-M N1 on #2205] "Order again" puts a booking line back as
+// ONE appointment. An order placed before the one-appointment rule can hold a
+// booking line of 2; copying that quantity into the cart left a line every
+// checkout now refuses (a confusing 400). The reorder writes the booking line
+// at 1; goods keep the quantity they were ordered in.
+// ---------------------------------------------------------------------------
+describe('[BOOK-POLISH] order again puts a booking line back at 1', () => {
+  let pastSeq = 0;
+  /** A finished order as one placed before #2205 could be: its lines at these quantities. */
+  async function pastOrder(who: Actor, lines: Array<{ itemId: string; name: string; unit: number; quantity: number }>) {
+    pastSeq += 1;
+    const total = lines.reduce((sum, l) => sum + l.unit * l.quantity, 0);
+    return app.prisma.order.create({
+      data: {
+        orderNumber: `FU3-REORDER-${pastSeq}-${nanoid(6)}`, orderType: 'GROCERY_DELIVERY', customerId: who.userId, vendorId: shop.vendorId,
+        status: 'COMPLETED', fulfillment: 'APPOINTMENT', deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: total, subtotalMarkup: 0, subtotalCustomer: total, deliveryFee: 0, totalAmount: total, paymentMethod: 'CASH',
+        items: {
+          create: lines.map((l) => ({
+            itemId: l.itemId, name: l.name, quantity: l.quantity, basePrice: l.unit, markedUpPrice: l.unit, markupAmount: 0,
+            totalBase: l.unit * l.quantity, totalMarkup: 0, totalCustomer: l.unit * l.quantity,
+          })),
+        },
+      },
+    });
+  }
+  const reorder = (who: Actor, orderId: string) => call('POST', `/api/v1/customer/orders/${orderId}/reorder`, who.token, {});
+
+  it('a past booking line of 2: the cart gets it at 1, and that cart checks out priced once', async () => {
+    const a = await customer('Hal');
+    const past = await pastOrder(a, [{ itemId: shop.cutId, name: 'Cut', unit: 2000, quantity: 2 }]);
+    const res = await reorder(a, past.id);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ itemsAdded: 1, unavailableItems: 0 });
+    expect((await linesOf(a)).map((l) => [l.itemId, l.quantity])).toEqual([[shop.cutId, 1]]);
+    const placed = await checkout(a, shop.cutId, gy(gyDay(4), 11));
+    expect(placed.statusCode, placed.body).toBe(200);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: placed.json().data.order.id }, include: { items: true } });
+    expect(order.items.map((i) => i.quantity)).toEqual([1]);
+    expect(Number(order.subtotalCustomer)).toBe(2000);
+  });
+
+  it('goods keep their quantity; only the booking line is 1', async () => {
+    const a = await customer('Ivy');
+    const past = await pastOrder(a, [
+      { itemId: shop.cutId, name: 'Cut', unit: 2000, quantity: 3 },
+      { itemId: shop.combId, name: 'Comb', unit: 500, quantity: 3 },
+    ]);
+    const res = await reorder(a, past.id);
+    expect(res.statusCode, res.body).toBe(200);
+    const lines = await linesOf(a);
+    expect(Object.fromEntries(lines.map((l) => [l.itemId, l.quantity]))).toEqual({ [shop.cutId]: 1, [shop.combId]: 3 });
+  });
+
+  it('control: a past booking line of 1 comes back at 1', async () => {
+    const a = await customer('Jo');
+    const past = await pastOrder(a, [{ itemId: shop.cutId, name: 'Cut', unit: 2000, quantity: 1 }]);
+    expect((await reorder(a, past.id)).statusCode).toBe(200);
+    expect((await linesOf(a)).map((l) => l.quantity)).toEqual([1]);
+  });
+});

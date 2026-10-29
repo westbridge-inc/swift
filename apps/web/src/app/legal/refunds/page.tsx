@@ -22,12 +22,17 @@ import { site, launch } from '@/site.config';
  *    before it starts (reschedule-policy.ts); with it off, the 1-minute
  *    booking rule above stands. Terms §7 says the same (pinned in the API's
  *    legal-appointment-rules.test.ts).
+ *  - [TERMS · owner 29 Oct 2026] the same rule for a time booked from a
+ *    provider's list of services (book-a-pro: cancel-policy.ts
+ *    serviceJobCancelVerdict), plus the provider's move and the free cancel
+ *    once the provider is 30 minutes late and has not started; with the switch
+ *    off such a job keeps the service job rule below.
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
  * Owner ruling, 8 Oct 2026: the refund at closing. Owner #62, 14 Oct 2026: one
  * week at a time, no paying ahead (was a four-week limit).
  */
 
-const UPDATED = '28 October 2026';
+const UPDATED = '29 October 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -75,15 +80,19 @@ export default function RefundsPage() {
           You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
         </li>
         <li>
-          <b>Appointments</b> (a time you book from a business&apos;s listing): while {site.tradeName}&apos;s instant
-          appointment booking is switched on, an appointment the business has confirmed can be cancelled free in the app
-          until 2 hours before it starts, and always for at least 1 minute after it was confirmed. Where the app offers
-          it, you can also move it to another free time of the same service until 2 hours before it starts. After that,
-          contact the business to change or cancel it. The business can also move your appointment, and you are told in the app when it does.
+          <b>Appointments</b> (a time you book from a business&apos;s listing or from a provider&apos;s list of
+          services): while {site.tradeName}&apos;s instant appointment booking is switched on, an appointment the
+          business or provider has confirmed can be cancelled free in the app until 2 hours before it starts, and always
+          for at least 1 minute after it was confirmed. Where the app offers it, you can also move it to another free
+          time of the same service until 2 hours before it starts. After that, contact the business or provider to change
+          or cancel it. The business can also move your appointment, and you are told in the app when it does. While
+          instant appointment booking is switched on, a provider can also move an appointment booked from their list of
+          services, and you are told in the app when they do; if the provider has not started it 30 minutes after its
+          start time, you can still cancel it free in the app.
         </li>
         <li>
-          <b>A service job</b> (a local pro you hired through the app) can be cancelled free in the app while it is a
-          request, until the job is booked. Once it is booked, contact the provider to change or cancel it.
+          <b>Any other service job</b> (a local pro you hired through the app) can be cancelled free in the app while it
+          is a request, until the job is booked. Once it is booked, contact the provider to change or cancel it.
         </li>
         <li>
           <b>Once the order is on its way</b> (the rider has collected it, or you are in the taxi), it can no longer be
