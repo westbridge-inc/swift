@@ -221,8 +221,7 @@ describe('[RIDER-SAFE 1] the backlog is exactly the work the reconciler re-drive
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-29T17:00:00Z'));
     const stuck = stuckDispatchEligibleWhere(new Date('2026-10-29T16:57:00Z'));
-    const { updatedAt: _u, ...rest } = stuck as { updatedAt: unknown; OR: unknown[] };
-    const branch = (rest.OR as Record<string, unknown>[])[0]!;
+    const branch = ((stuck as { OR: unknown[] }).OR as Record<string, unknown>[])[0]!;
     expect(waitingForRiderWhere(new Date())).toEqual(branch);
   });
 });
