@@ -563,6 +563,9 @@ export const customerApi = {
   // Cart
   getCart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
     api.get('/customer/cart', { params: { lat, lng, ...cartQuoteParams(choices) } }),
+  // [RIDER-SAFE 1] Whether delivery from this store can be ordered now, for this basket and address.
+  getDeliveryAvailability: (vendorId: string, paymentMethod: 'CASH' | 'MOBILE_MONEY') =>
+    api.get('/customer/delivery-availability', { params: { vendorId, paymentMethod } }),
   addToCart: (data: {
     vendorId: string;
     itemId: string;
@@ -1296,6 +1299,8 @@ export const vendorApi = {
   // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
   toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
   toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
+  // [RIDER-SAFE 4/5] Whether customers can order DELIVERY from this store now, and if not, why (double-prefixed like toggle-orders).
+  deliveryStatus: () => api.get('/vendor/vendor/delivery-status'),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
@@ -1437,7 +1442,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number; bookingCapacity?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number; bookingCapacity?: number; maxConcurrentOrders?: number | null }) =>
     api.put('/vendor/profile', data),
   // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
   // redraws it without location or camera data, and serves it to customers), or taken down.

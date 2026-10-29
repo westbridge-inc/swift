@@ -35,7 +35,7 @@ vi.mock('../../../stores/vendorPreview', () => ({ useVendorPreview: (pick: (_s: 
 vi.mock('../../../hooks/vendorops', () => ({
   useVendorProfile: () => ({ stores: [], owner: { myRole: 'OWNER' } }),
   useVendorSubscription: () => ({ data: fx.sub }),
-  ...Object.fromEntries(['useVendorOrderHistory', 'useToggleOpen', 'useVendorMenu', 'useVendorQr', 'useVendorAnalytics', 'useVendorRevenue', 'useVendorOps', 'useVendorHours'].map((name) => [name, () => ({})])),
+  ...Object.fromEntries(['useVendorOrderHistory', 'useToggleOpen', 'useVendorMenu', 'useVendorQr', 'useVendorAnalytics', 'useVendorRevenue', 'useVendorOps', 'useVendorHours', 'useDeliveryStatus'].map((name) => [name, () => ({})])),
   useToggleOrders: () => fx.toggleOrders,
   useSetSelfDelivery: () => fx.selfDelivery,
   useSetRequirePickupCode: () => fx.pickupCode,

@@ -248,6 +248,16 @@ export const uploadStorePhoto = (slot: 'logo' | 'cover', file: File) => {
 export const removeStorePhoto = (slot: 'logo' | 'cover') =>
   apiFetch(`${V}/profile/${slot}`, { method: 'DELETE' }).then((r) => r.data as StorePhotoRow);
 
+/** [RIDER-SAFE 4/5] Whether customers can order DELIVERY from this store now, and if not, why (pickup stays open). */
+export type DeliveryStatus = {
+  deliveryOpen: boolean;
+  reason: 'SWIFT_PAUSED' | 'STORE_BUSY' | null;
+  waitingForRider: number;
+  backlogCap: number;
+  message: string | null;
+};
+// Registered as `/vendor/delivery-status` under the `/api/v1/vendor` prefix (double-prefixed, like toggle-orders).
+export const getDeliveryStatus = () => apiFetch(`${V}/vendor/delivery-status`).then((r) => r.data as DeliveryStatus);
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
 // NB: these two routes are registered as `/vendor/toggle-*` UNDER the

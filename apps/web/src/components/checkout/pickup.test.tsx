@@ -55,6 +55,8 @@ let mmg = false;
 let pickupQuote: () => unknown = () => pickupCart(mmg);
 let deliveryQuote: () => unknown = () => deliveryCart(mmg);
 let checkoutReply: ApiReply | null = null;
+// [RIDER-SAFE 1] The cart's rider read; null = unmocked (404), as for every case that does not set it.
+let availabilityReply: unknown = null;
 let removePromo: () => void = () => undefined;
 let fetchMock: ReturnType<typeof mockApi>;
 const ok = (data: unknown) => ({ body: { success: true, data } });
@@ -74,6 +76,7 @@ beforeEach(async () => {
   pickupQuote = () => pickupCart(mmg);
   deliveryQuote = () => deliveryCart(mmg);
   checkoutReply = null;
+  availabilityReply = null;
   removePromo = () => undefined;
   fetchMock = mockApi(({ url, method }: ApiRequest) => {
     if (url.pathname === '/api/v1/auth/me') return ok({ user: { id: 'c1' } });
@@ -87,6 +90,7 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/customer/addresses') return ok([{ id: 'a1', label: 'Home', addressLine1: 'Fixture street', city: 'Georgetown', isDefault: true }]);
     if (url.pathname === '/api/v1/customer/cart/address' && method === 'PUT') return ok({ cart: deliveryCart(mmg) });
     if (url.pathname === '/api/v1/customer/cart/promo' && method === 'DELETE') { removePromo(); return ok({ message: 'Promo removed' }); }
+    if (url.pathname === '/api/v1/customer/delivery-availability' && availabilityReply) return ok(availabilityReply);
     if (url.pathname === '/api/v1/customer/checkout' && method === 'POST') return checkoutReply ?? ok({ order: { id: 'o1' }, orders: [{ id: 'o1' }], paymentAction: null });
     return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
   });
@@ -213,6 +217,8 @@ describe('[W5] Delivery or Pickup at checkout', () => {
     const place = await screen.findByRole('button', { name: 'Place cash order · $2,100' });
     await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(place);
+    // [RIDER-SAFE] The server's own words, not a fixed sentence: it may be Swift's pause or a busy store.
+    expect(await screen.findByText('No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.')).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: 'Order for pickup instead' }));
     expect((within(await choice()).getByRole('radio', { name: /^Pickup/ }) as HTMLInputElement).checked).toBe(true);
     expect(await screen.findByRole('button', { name: 'Place pickup order · $1,800' })).toBeTruthy();
@@ -226,6 +232,40 @@ describe('[W5] Delivery or Pickup at checkout', () => {
     await choosePickup();
     expect(await screen.findByText(/unresolved server outcome/)).toBeTruthy();
     expect((within(await choice()).getByRole('radio', { name: /^Delivery/ }) as HTMLInputElement).checked).toBe(true);
+  });
+});
+
+describe('[RIDER-SAFE 1] told before ordering when riders are short', () => {
+  it('riders busy: the honest extra minutes, and delivery can still be ordered', async () => {
+    availabilityReply = { level: 'BUSY', reason: null, extraMinutes: 25, message: 'Riders are busy — about 25 min extra for delivery.', gate: true };
+    at('/checkout', <CheckoutPage />);
+    const note = await screen.findByRole('status', { name: 'Delivery right now' });
+    expect(within(note).getByText('Riders are busy — about 25 min extra for delivery.')).toBeTruthy();
+    expect(within(note).queryByRole('button')).toBeNull();
+    const place = await screen.findByRole('button', { name: 'Place cash order · $2,100' });
+    await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
+    const read = calls('GET', '/api/v1/customer/delivery-availability')[0]!;
+    expect(Object.fromEntries(new URL(String(read[0])).searchParams)).toEqual({ vendorId: 'v1', paymentMethod: 'CASH' });
+  });
+
+  it('delivery paused for this store: the reason, and pickup one tap away', async () => {
+    availabilityReply = { level: 'PAUSED', reason: 'STORE_BUSY', extraMinutes: null, message: 'Fixture Bakery has orders waiting for riders, so delivery from this store is paused for a few minutes — you can order for Pickup instead.', gate: false };
+    at('/checkout', <CheckoutPage />);
+    const note = await screen.findByRole('status', { name: 'Delivery right now' });
+    expect(within(note).getByText(/delivery from this store is paused/)).toBeTruthy();
+    fireEvent.click(within(note).getByRole('button', { name: 'Order for pickup instead' }));
+    expect((within(await choice()).getByRole('radio', { name: /^Pickup/ }) as HTMLInputElement).checked).toBe(true);
+    expect(await screen.findByRole('button', { name: 'Place pickup order · $1,800' })).toBeTruthy();
+    expect(screen.queryByRole('status', { name: 'Delivery right now' })).toBeNull();
+    expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
+  });
+
+  it('with the availability gate off a rider shortage blocks nothing, so nothing is said', async () => {
+    availabilityReply = { level: 'NONE', reason: 'NO_RIDERS', extraMinutes: null, message: 'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.', gate: false };
+    at('/checkout', <CheckoutPage />);
+    await screen.findByRole('button', { name: 'Place cash order · $2,100' });
+    await waitFor(() => expect(calls('GET', '/api/v1/customer/delivery-availability').length).toBeGreaterThan(0));
+    expect(screen.queryByRole('status', { name: 'Delivery right now' })).toBeNull();
   });
 });
 
