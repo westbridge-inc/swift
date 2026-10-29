@@ -29,7 +29,8 @@ import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } fr
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
-import { appointmentBookingView, mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
+import { appointmentBookingView } from '@/lib/booking-rules';
 import styles from './tracking.module.css';
 import { pickupCodeWords } from './pickup-words';
 import { lazyRetry } from '@/lib/chunk-retry';
