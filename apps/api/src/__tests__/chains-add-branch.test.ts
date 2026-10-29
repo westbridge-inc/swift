@@ -14,6 +14,7 @@ import { signupQuote, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-f
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { PartnerService } from '../modules/partner/partner.service';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 
 // ---------------------------------------------------------------------------
 // [CHAINS · owner 29 Oct 2026] One owner runs many branches from one login.
