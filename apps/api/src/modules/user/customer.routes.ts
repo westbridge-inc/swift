@@ -2119,8 +2119,6 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
     // [GUARDRAILS §8] A prohibited item is refused in the sold-out shape (409 ITEM_UNAVAILABLE).
     await assertOrderableNow(app.prisma, [{ id: item.id, name: item.name }]);
-    // [BOOK-FU3 · money] A booking line is one appointment: asking for more is a plain 400.
-    assertOneAppointment(item.fulfillment, quantity);
 
     // Inventory (§4.2): don't let the cart promise more than the shelf holds.
     // Checkout re-checks atomically; this is the early, friendly stop.
@@ -2131,6 +2129,9 @@ export async function customerRoutes(app: FastifyInstance) {
           : `Only ${item.stockQuantity} of ${item.name} left`,
         { itemId: item.id, available: item.stockQuantity });
     }
+
+    // [BOOK-FU3 · money] A booking line is one appointment: asking for more is a plain 400.
+    assertOneAppointment(item.fulfillment, quantity);
 
     // Validate vendor is active
     const vendor = await app.prisma.vendor.findUnique({
