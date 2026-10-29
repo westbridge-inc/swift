@@ -261,6 +261,15 @@ describe('[owner #20 · DS1323 S3] stacking weighs a bulky order by the same rul
 
 describe('[owner #20] checkout tells the customer before placing', () => {
   it('a bulky delivery with only a motorbike near is refused before anything is placed; with a car near it goes ahead', async () => {
+    // [RIDER-SAFE 1] Checkout now counts the orders already waiting near the
+    // store against the free riders. This case measures the SIZE rule, so the
+    // earlier cases' ready orders (still waiting at this store) are cleared
+    // first: the car below is free for this order alone.
+    await sys(async () => {
+      await app.prisma.rider.updateMany({ where: { id: { in: riderIds } }, data: { currentOrderId: null } });
+      await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
+      await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    });
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await sys(() => app.prisma.address.create({
       data: { userId: customer.userId, label: 'Home', addressLine1: '2 Hosororo Road', city: 'Mabaruma', region: 'Barima-Waini', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },

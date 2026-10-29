@@ -14,7 +14,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { OrderService } from '../modules/order/order.service';
-import { DispatchService, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
+import { DispatchService, FOOD_RESCAN_MS, REDISPATCH_DELAY_MS, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { walkOrderStatus } from './helpers/order-status-walk';
 
@@ -681,15 +681,29 @@ describe('dispatch exhaustion auto-retry', () => {
     expect(second.exhausted).toBe(true);
     expect(redispatches).toHaveLength(2);
 
-    // The 3rd exhaustion is TERMINAL — no further cascade, final notices sent.
+    // The 3rd exhaustion is TERMINAL for the fast cascade — no third fast
+    // retry, final notices sent. [RIDER-SAFE 3 · COORD ruling 29 Oct 2026] A
+    // food order then rides the slow lane: exactly ONE quiet re-sweep a
+    // minute on (bounded by the food-age cutoff and FOOD_SLOW_LANE_MAX_MINUTES,
+    // pinned in rider-safe-dispatch.test.ts), never another fast retry and
+    // never another "retrying" notice.
     await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
     const third = await dispatch.dispatchOrder(order.id);
     expect(third.exhausted).toBe(true);
-    expect(redispatches).toHaveLength(2); // capped — never an unbounded loop
+    expect(redispatches).toEqual([
+      { orderId: order.id, delayMs: REDISPATCH_DELAY_MS },
+      { orderId: order.id, delayMs: REDISPATCH_DELAY_MS },
+      { orderId: order.id, delayMs: FOOD_RESCAN_MS },
+    ]); // fast cascade capped at 2 — never an unbounded loop
     const final = await app.prisma.notification.findFirst({
       where: { userId: customer.userId, data: { path: ['kind'], equals: 'dispatch_exhausted' } },
     });
     expect(final).not.toBeNull();
+    const kinds = (await app.prisma.notification.findMany({ where: { userId: customer.userId }, select: { data: true } }))
+      .filter((n) => (n.data as { orderId?: string } | null)?.orderId === order.id)
+      .map((n) => (n.data as { kind?: string }).kind);
+    expect(kinds.filter((k) => k === 'dispatch_retrying')).toHaveLength(1);
+    expect(kinds.filter((k) => k === 'dispatch_exhausted')).toHaveLength(1);
     // The terminal marker persists well past the old 1h TTL (no hourly re-cascade).
     expect(await app.redis.ttl(`dispatch:exhausts:${order.id}`)).toBeGreaterThan(3600);
     await app.redis.del(`dispatch:exhausts:${order.id}`);
