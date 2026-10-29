@@ -176,6 +176,24 @@ describe('[CHAINS] a branch waits for a person', () => {
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: branchId } })).personApprovalRequired).toBe(false);
   });
 
+  it('no automatic path puts a store waiting for a person live: reconcile, reprojection or auto-approval (a branch, and any flagged store)', async () => {
+    const { owner: chainOwner, branchId } = await ownerWithLiveStore();
+    const other = await makeOwner();
+    const flagged = await makeStore(other.userId, { publicPhone: PUBLISHED });
+    await app.prisma.vendor.update({ where: { id: flagged.id }, data: { personApprovalRequired: true } });
+    await approvedDocs(other.userId);
+    for (const userId of [chainOwner.userId, other.userId]) {
+      await svc.reconcileVendorActivations();
+      await svc.reprojectVendorActivation(userId);
+      // The auto-approval path's own projection and trial start (VerificationService.afterApproval).
+      await (svc as unknown as { afterApproval: (u: string) => Promise<boolean> }).afterApproval(userId);
+    }
+    for (const id of [branchId, flagged.id]) {
+      expect(await storeRow(id), id).toEqual({ status: 'PENDING_APPROVAL', isVerified: false, acceptingOrders: false });
+      expect(await app.prisma.subscription.findFirst({ where: { vendorId: id } }), `${id}: no weekly fee`).toBeNull();
+    }
+  });
+
   it('control: a store made at sign-up still goes live by itself when its checklist completes', async () => {
     const owner = await makeOwner();
     const store = await makeStore(owner.userId, { publicPhone: PUBLISHED });
