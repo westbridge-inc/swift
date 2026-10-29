@@ -14,7 +14,9 @@ type Db = PrismaClient | Prisma.TransactionClient;
 export interface SubscriptionPayer {
   userId: string;
   tenantId: string;
-  kind: 'MOVER' | 'VENDOR';
+  /** A mover shares one fee across their rider and driver profiles; a store
+   *  and a pro (BILL-PRO) each keep their own identity and clock. */
+  kind: 'MOVER' | 'VENDOR' | 'PROVIDER';
 }
 
 export interface MoverFeeResolution {
@@ -41,7 +43,8 @@ export async function subscriptionPayer(db: Db, subscriptionId: string): Promise
 /** subscriptionPayer's rule: exactly one owner, and that owner's user. */
 function payerOfOwner(owner: SubscriptionOwner | null): SubscriptionPayer | null {
   if (!owner || owner.ownerColumns !== 1) return null;
-  return { userId: owner.userId, tenantId: owner.tenantId, kind: owner.vendorId ? 'VENDOR' : 'MOVER' };
+  const kind = owner.kind === 'VENDOR' ? 'VENDOR' : owner.kind === 'PROVIDER' ? 'PROVIDER' : 'MOVER';
+  return { userId: owner.userId, tenantId: owner.tenantId, kind };
 }
 
 /** The common lock order for activation, collection, settings and outcomes:
@@ -74,7 +77,7 @@ export async function lockMoverSources(
   return subscriptions;
 }
 
-/** Vendor subscriptions keep their separate business identity. Movers share
+/** Vendor and pro subscriptions keep their separate identity. Movers share
  * their payer lock across both profiles, including historical source rows. */
 export async function lockSubscriptionPayer(
   tx: Prisma.TransactionClient,
@@ -267,7 +270,7 @@ export async function activateMoverFeeType(tx: Prisma.TransactionClient, payer: 
 export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<{ allowed: boolean; mover: MoverFeeResolution | null }> {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
   const ready = await billingEffectsReady(tx);
-  if (payer.kind === 'VENDOR') return { allowed: ready, mover: null };
+  if (payer.kind !== 'MOVER') return { allowed: ready, mover: null };
   const mover = await lockMoverFeeAuthority(tx, payer);
   return { allowed: ready && !!mover && mover.state === 'ACTIVE' && mover.canonicalSubscriptionId === subscriptionId, mover };
 }
@@ -277,7 +280,7 @@ export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, s
 export async function readFeeCollectionAuthority(db: Db, subscriptionId: string): Promise<{ allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null }> {
   try {
     const payer = await subscriptionPayer(db, subscriptionId);
-    if (payer.kind === 'VENDOR') return { allowed: true, canonical: true, mover: null };
+    if (payer.kind !== 'MOVER') return { allowed: true, canonical: true, mover: null };
     const mover = await resolveMoverFeeAuthority(db, payer);
     const canonical = !!mover && mover.canonicalSubscriptionId === subscriptionId;
     return { allowed: canonical && mover?.state === 'ACTIVE', canonical, mover };
@@ -321,7 +324,7 @@ export async function readFeeCollectionAuthorities(db: PrismaClient, subscriptio
     const row = byId.get(id);
     const payer = row ? payerOfRow(row) : null;
     if (!payer) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
-    if (payer.kind === 'VENDOR') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
+    if (payer.kind !== 'MOVER') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
     const group = moverSubs.get(payer.userId) ?? { payer, subs: [] };
     group.subs.push(id);
     moverSubs.set(payer.userId, group);
