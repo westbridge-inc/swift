@@ -39,8 +39,6 @@ type ServiceProvider = {
   badges: string[];
   /** [R7] The day a person on our team checked this provider's licence (null = none checked). */
   licenceCheckedOn?: string | null;
-  /** [BOOK-P3] The server says this pro takes bookings from their list of services now (older servers omit it). */
-  bookableFromList?: boolean;
 };
 
 type ProviderBrowse = {
@@ -122,9 +120,7 @@ export function ServicesScreen({ navigation }: any) {
           Choose a service
         </T>
         <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
-          {providers.some((p) => p.bookableFromList === true)
-            ? 'Browse by category. Every provider accepts quote requests; some also take bookings from their list of services — tap Book to pick a time.'
-            : 'Browse by category. Available providers accept quote requests; instant appointment booking is still being prepared.'}
+          Browse by category. Available providers accept quote requests; instant appointment booking is still being prepared.
         </T>
         {/* [Wave 3 · ref 13] The reference draws trade PILLS — the kit Chip —
             not pictogram tiles. Tiles were an unrecorded invention; the
@@ -258,24 +254,12 @@ export function ServicesScreen({ navigation }: any) {
                         row — "Request", or the filled "Selected" (tap again
                         to unpick). The per-card "discuss quotes" box is gone:
                         the page subtitle says it once for everyone. */}
-                    <View style={{ gap: space.sm }}>
-                      {/* [BOOK-P3] Book a time from the pro's list, when the server says they take bookings
-                          (signed in only: a guest is asked to sign in first). */}
-                      {p.bookableFromList === true ? (
-                        <PillButton
-                          label="Book"
-                          size="sm"
-                          icon="calendar"
-                          onPress={() => (isAuthenticated ? navigation?.navigate?.('ProBooking', { providerId: p.id }) : promptLogin())}
-                        />
-                      ) : null}
-                      <PillButton
-                        label={selected ? 'Selected' : 'Request'}
-                        variant={selected ? 'primary' : 'soft'}
-                        size="sm"
-                        onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
-                      />
-                    </View>
+                    <PillButton
+                      label={selected ? 'Selected' : 'Request'}
+                      variant={selected ? 'primary' : 'soft'}
+                      size="sm"
+                      onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
+                    />
                   </View>
                   {p.bio ? (
                     <T variant="label" tone="muted" numberOfLines={2} style={{ marginTop: space.md }}>

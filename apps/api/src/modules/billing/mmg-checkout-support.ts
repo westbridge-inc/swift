@@ -204,7 +204,7 @@ export function timelineEntryOf(
 
 /** The intent columns an answer is built from. Never the sealed page or its key. */
 const ROW_SELECT = {
-  id: true, subscriptionId: true, merchantTransactionId: true, mmgTransactionId: true, providerPaymentId: true,
+  id: true, subscriptionId: true, chainOwnerId: true, merchantTransactionId: true, mmgTransactionId: true, providerPaymentId: true,
   amount: true, currencyCode: true, status: true, platform: true, candidates: true,
   createdAt: true, expiresAt: true, replyAt: true, confirmedAt: true, reason: true,
 } as const satisfies Prisma.MmgCheckoutIntentSelect;
@@ -227,6 +227,12 @@ async function intentsByLedgerReference(db: PrismaClient, tenantId: string, refe
       AND o."intentId" IS NOT NULL AND o."tenantId" = ${tenantId}
     LIMIT ${MATCH_CAP}`);
   return rows.map((row) => row.intentId);
+}
+
+/** [ENTERPRISE E1] The store owners with this phone: their "pay all my branches" checkouts name the owner. */
+async function ownersOfPhones(db: PrismaClient, tenantId: string, phones: string[]): Promise<string[]> {
+  const owners = await db.vendorOwner.findMany({ where: { user: { tenantId, phone: { in: phones } } }, select: { id: true } });
+  return owners.map((owner) => owner.id);
 }
 
 /** Every subscription the partner with this phone pays: as a rider, a driver, or a store's owner. */
@@ -278,9 +284,33 @@ async function partnersOf(db: PrismaClient, subscriptionIds: string[]): Promise<
 
 type SupportRowBase = Omit<MmgCheckoutSupportRow, 'matchedBy'>;
 
+/** [ENTERPRISE E1] A chain checkout's payer, as support may see them: the owner's branches it paid (names, bounded)
+ *  and the owner's masked phone. It pays several subscriptions, so it names none. */
+async function chainPartnersOf(db: PrismaClient, intents: IntentRow[]): Promise<Map<string, MmgCheckoutSupportPartner>> {
+  const chains = intents.filter((row) => row.chainOwnerId);
+  if (chains.length === 0) return new Map();
+  const parts = await db.mmgCheckoutPart.findMany({
+    where: { checkoutId: { in: chains.map((row) => row.id) } },
+    select: { checkoutId: true, subscription: { select: { vendor: { select: { name: true } } } } },
+  });
+  const owners = await db.vendorOwner.findMany({
+    where: { id: { in: [...new Set(chains.map((row) => row.chainOwnerId!))] } }, select: { id: true, user: { select: { phone: true } } },
+  });
+  const phoneOf = new Map(owners.map((owner) => [owner.id, owner.user.phone]));
+  return new Map(chains.map((row): [string, MmgCheckoutSupportPartner] => {
+    const names = parts.filter((part) => part.checkoutId === row.id).map((part) => part.subscription.vendor?.name ?? '?').sort();
+    const phone = phoneOf.get(row.chainOwnerId!);
+    return [row.id, {
+      kind: 'VENDOR', displayName: `All branches (${names.length}): ${names.join(', ')}`.slice(0, 160),
+      maskedPhone: phone ? maskPhone(phone) : null, subscriptionId: null,
+    }];
+  }));
+}
+
 async function rowsOf(db: PrismaClient, tenantId: string, intents: IntentRow[]): Promise<SupportRowBase[]> {
-  const [partners, references] = await Promise.all([
-    partnersOf(db, intents.map((row) => row.subscriptionId)),
+  const [partners, chainPartners, references] = await Promise.all([
+    partnersOf(db, intents.flatMap((row) => (row.subscriptionId ? [row.subscriptionId] : []))),
+    chainPartnersOf(db, intents),
     ledgerReferencesOf(db, tenantId, intents.map((row) => row.id)),
   ]);
   return intents.map((row) => ({
@@ -292,7 +322,8 @@ async function rowsOf(db: PrismaClient, tenantId: string, intents: IntentRow[]):
     currencyCode: row.currencyCode,
     status: row.status as MmgCheckoutSupportStatus,
     platform: row.platform,
-    partner: partners.get(row.subscriptionId) ?? { kind: 'UNKNOWN', displayName: null, maskedPhone: null, subscriptionId: row.subscriptionId },
+    partner: (row.subscriptionId ? partners.get(row.subscriptionId) : chainPartners.get(row.id))
+      ?? { kind: 'UNKNOWN', displayName: null, maskedPhone: null, subscriptionId: row.subscriptionId },
     createdAt: row.createdAt.toISOString(),
     replyAt: iso(row.replyAt),
     confirmedAt: iso(row.confirmedAt),
@@ -324,6 +355,7 @@ export async function searchMmgCheckouts(db: PrismaClient, input: SupportSearchI
   const query = normaliseSupportQuery(input.q ?? '');
   let refIntents = new Set<string>();
   let phoneSubscriptions = new Set<string>();
+  let phoneOwners = new Set<string>();
   const match: Prisma.MmgCheckoutIntentWhereInput[] = [];
   if (query.shape !== 'EMPTY') {
     if (query.digits) {
@@ -334,6 +366,8 @@ export async function searchMmgCheckouts(db: PrismaClient, input: SupportSearchI
     if (query.phones.length > 0) {
       phoneSubscriptions = new Set(await subscriptionsOfPhones(db, input.tenantId, query.phones));
       if (phoneSubscriptions.size > 0) match.push({ subscriptionId: { in: [...phoneSubscriptions] } });
+      phoneOwners = new Set(await ownersOfPhones(db, input.tenantId, query.phones));
+      if (phoneOwners.size > 0) match.push({ chainOwnerId: { in: [...phoneOwners] } });
     }
     if (match.length === 0) return { data: [], nextCursor: null, queryType: 'NO_MATCH', queryShape: query.shape };
   }
@@ -359,7 +393,7 @@ export async function searchMmgCheckouts(db: PrismaClient, input: SupportSearchI
     if (query.digits && row.mmgTransactionId === query.digits) found.push('MMG_TRANSACTION_ID');
     if (query.digits && row.candidates.includes(query.digits)) found.push('MMG_CANDIDATE');
     if (refIntents.has(row.id)) found.push('MMG_REFERENCE');
-    if (phoneSubscriptions.has(row.subscriptionId)) found.push('PARTNER_PHONE');
+    if (row.subscriptionId ? phoneSubscriptions.has(row.subscriptionId) : !!row.chainOwnerId && phoneOwners.has(row.chainOwnerId)) found.push('PARTNER_PHONE');
     return found;
   };
   const data: MmgCheckoutSupportRow[] = (await rowsOf(db, input.tenantId, page)).map((row, i) => ({ ...row, matchedBy: matchesOf(page[i]!) }));
@@ -375,7 +409,7 @@ export async function searchMmgCheckouts(db: PrismaClient, input: SupportSearchI
 /** What a CONFIRMED checkout's credit paid: the week the settlement applied it
  *  to at once (its hold resolved PAID by the same instant's charge), or credit
  *  kept for the next bill, or still being applied; and the receipt issued. */
-async function creditedPeriodOf(db: PrismaClient, row: IntentRow): Promise<MmgCheckoutCreditedPeriod> {
+async function creditedPeriodOf(db: PrismaClient, row: IntentRow & { subscriptionId: string }): Promise<MmgCheckoutCreditedPeriod> {
   const [hold, credit] = await Promise.all([
     db.paymentConfirmationHold.findUnique({ where: { checkoutId: row.id }, select: { status: true, resolvedAt: true } }),
     row.providerPaymentId
@@ -428,6 +462,7 @@ export async function mmgCheckoutSupportDetail(
     ...rows[0]!,
     timeline: observations.slice(0, MMG_SUPPORT_TIMELINE_MAX).map((o) => timelineEntryOf(row, o, creationFor(o))),
     timelineTruncated: observations.length > MMG_SUPPORT_TIMELINE_MAX,
-    creditedPeriod: row.status === 'CONFIRMED' ? await creditedPeriodOf(db, row) : null,
+    // [ENTERPRISE E1] A chain checkout credited several branches: each branch's own fee screen and receipts show it.
+    creditedPeriod: row.status === 'CONFIRMED' && row.subscriptionId ? await creditedPeriodOf(db, { ...row, subscriptionId: row.subscriptionId }) : null,
   };
 }

@@ -21,7 +21,8 @@ export interface MmgCheckoutSupportPartner {
   displayName: string | null;
   /** The paying partner's phone, masked (+592•••••1234). */
   maskedPhone: string | null;
-  subscriptionId: string;
+  /** Null for an owner's "pay all my branches" checkout, which pays several subscriptions (ENTERPRISE E1). */
+  subscriptionId: string | null;
 }
 export const MMG_CHECKOUT_SUPPORT_PARTNER_KEYS = ['kind', 'displayName', 'maskedPhone', 'subscriptionId'] as const;
 

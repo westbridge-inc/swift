@@ -4,6 +4,7 @@ import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, FULL_
 import { COMPLETION_CLAIM_WAIT_MS } from '../../providers/card/card-provider';
 import type { OnAudit } from '../../lib/audit-writer';
 import { personUserOf } from '../subscription/subscription-owner';
+import { lockCheckoutAuthority } from './chain-checkout';
 
 /** An existing credit, bound to this checkout's exact instruction and owner.
  * A manual PAID checkbox alone never creates or proves a money movement. */
@@ -29,6 +30,32 @@ export async function verifiedCheckoutCredit(tx: Prisma.TransactionClient, check
   return event ? { identity, creditEventId: event.id } : null;
 }
 
+/** [ENTERPRISE E1] One branch's verified share of a chain checkout MMG confirmed: the checkout's one credited MMG
+ *  identity (claimed by the checkout itself, naming no single subscription, for exactly the checkout's amount) and
+ *  this branch's own top-up of exactly its part, keyed by both. Only the checkout's own credit counts: a chain
+ *  payment is never proven by an agent-cash or admin top-up of one branch. */
+export async function verifiedChainPartCredit(tx: Prisma.TransactionClient, checkoutPartId: string, providerPaymentId?: string) {
+  const part = await tx.mmgCheckoutPart.findUnique({ where: { id: checkoutPartId }, include: { checkout: true } });
+  const checkout = part?.checkout;
+  if (!part || !checkout || !checkout.chainOwnerId || checkout.status !== 'CONFIRMED' || !checkout.providerPaymentId) return null;
+  if (providerPaymentId && providerPaymentId !== checkout.providerPaymentId) return null;
+  const refs = [...checkout.candidates, ...(checkout.mmgTransactionId ? [checkout.mmgTransactionId] : [])];
+  const identities = await tx.$queryRaw<Array<{ id: string; providerTxnId: string; creditedPaymentId: string }>>`
+    SELECT p.id,p."providerTxnId",p."creditedPaymentId" FROM provider_payments p
+    WHERE p.id=${checkout.providerPaymentId} AND p.provider='MMG' AND p.status='CREDITED'
+      AND p."tenantId"=${checkout.tenantId} AND p."subscriptionId" IS NULL
+      AND p.amount=${checkout.amount} AND p."currencyCode"=${checkout.currencyCode}
+      AND p."creditedPaymentId"='mco:'||${checkout.id}
+      AND EXISTS (SELECT 1 FROM unnest(${refs}::text[]) r WHERE mmg_txn_canon(r)=mmg_txn_canon(p."providerTxnId")) FOR UPDATE`;
+  const identity = identities[0];
+  if (!identity) return null;
+  const [event] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT ev.id FROM billing_events ev WHERE ev."subscriptionId"=${part.subscriptionId}
+      AND ev.type='PREPAID_TOPUP' AND ev.amount=${part.amount} AND ev."currencyCode"=${part.currencyCode}
+      AND ev."idempotencyKey"='mmg-checkout:pp:'||${identity.id}||':'||${part.id} LIMIT 1`;
+  return event ? { identity, creditEventId: event.id } : null;
+}
+
 const partnerSelect = {
   vendor: { select: { name: true } },
   rider: { select: { user: { select: { firstName: true, lastName: true } } } },
@@ -42,7 +69,8 @@ function partnerLabel(sub: Prisma.SubscriptionGetPayload<{ select: typeof partne
 
 export async function confirmationReviewQueue(db: PrismaClient, tenantId: string, now = new Date()) {
   const holds = await db.paymentConfirmationHold.findMany({ where: { tenantId, status: { in: ACTIVE_CONFIRMATION_STATES } },
-    orderBy: [{ reviewDueAt: 'asc' }, { id: 'asc' }], take: 200, include: { clock: true, checkout: { select: { merchantTransactionId: true } }, originalSubscription: { select: partnerSelect } } });
+    orderBy: [{ reviewDueAt: 'asc' }, { id: 'asc' }], take: 200, include: { clock: true, checkout: { select: { merchantTransactionId: true } },
+      checkoutPart: { select: { checkoutId: true, checkout: { select: { merchantTransactionId: true } } } }, originalSubscription: { select: partnerSelect } } });
   const checkoutIds = holds.flatMap((hold) => hold.checkoutId ? [hold.checkoutId] : []);
   // Read-only choices for the existing resolver. It independently checks the ledger
   // again when the approved action executes; a displayed record never proves credit.
@@ -57,12 +85,13 @@ export async function confirmationReviewQueue(db: PrismaClient, tenantId: string
     WHERE c."tenantId"=${tenantId} AND c.id IN (${Prisma.join(checkoutIds)})
     ORDER BY c.id,p.id`) : [];
   const payments = holds.map((hold) => ({
-    swiftReference: hold.checkout?.merchantTransactionId ?? null, partner: partnerLabel(hold.originalSubscription),
+    swiftReference: hold.checkout?.merchantTransactionId ?? hold.checkoutPart?.checkout.merchantTransactionId ?? null, partner: partnerLabel(hold.originalSubscription),
     settlementPayments: recorded.filter((record) => record.checkoutId === hold.checkoutId).map(({ providerPaymentId, mmgTransactionId }) => ({ providerPaymentId, mmgTransactionId })),
     id: hold.id, subscriptionId: hold.subscriptionId, epoch: hold.sourceEpoch, clockEpoch: hold.clock.epoch,
     clockVersion: hold.clock.version, status: hold.status, resolvable: true,
-    source: hold.checkoutId ? 'MMG_CHECKOUT' : hold.cardSessionId ? 'CARD_SESSION' : 'PAYMENT',
-    sourceId: hold.checkoutId ?? hold.cardSessionId ?? hold.paymentId,
+    // [ENTERPRISE E1] A branch's share of a chain checkout: resolving it resolves the whole checkout (every branch).
+    source: hold.checkoutId ? 'MMG_CHECKOUT' : hold.checkoutPartId ? 'MMG_CHAIN_CHECKOUT' : hold.cardSessionId ? 'CARD_SESSION' : 'PAYMENT',
+    sourceId: hold.checkoutId ?? hold.checkoutPartId ?? hold.cardSessionId ?? hold.paymentId,
     reason: hold.reason, beganAt: hold.beganAt, reviewDueAt: hold.reviewDueAt, overdue: hold.reviewDueAt <= now,
     remainingGraceMs: Math.max(0, FULL_FEE_GRACE_MS - activeOverdueMs(hold.clock, now)),
   }));
@@ -120,9 +149,13 @@ export async function resolveFinanceConfirmation(db: PrismaClient, input: {
   return db.$transaction(async (tx) => {
     const candidate = await tx.paymentConfirmationHold.findFirst({ where: { id: input.id, tenantId: input.tenantId } });
     if (!candidate) throw new NotFoundError('Payment confirmation', input.id);
+    // [ENTERPRISE E1] A chain checkout's branches are locked first, in the order every verifier takes them.
+    const chainPart = candidate.checkoutPartId
+      ? await tx.mmgCheckoutPart.findUniqueOrThrow({ where: { id: candidate.checkoutPartId }, include: { checkout: true } }) : null;
+    const chain = chainPart ? await lockCheckoutAuthority(tx, chainPart.checkout) : null;
     const clock = await currentDunningClock(tx, candidate.subscriptionId, now);
     const hold = await tx.paymentConfirmationHold.findUniqueOrThrow({ where: { id: input.id } });
-    const sourceId = hold.checkoutId ?? hold.cardSessionId ?? hold.paymentId;
+    const sourceId = hold.checkoutId ?? hold.checkoutPartId ?? hold.cardSessionId ?? hold.paymentId;
     if (hold.tenantId !== input.tenantId || sourceId !== input.sourceId) throw new NotFoundError('Payment confirmation', input.id);
     if (!ACTIVE_CONFIRMATION_STATES.includes(hold.status)) return { id: hold.id, subscriptionId: hold.subscriptionId, status: hold.status, changed: false };
     if (hold.sourceEpoch !== input.epoch || clock.epoch !== input.epoch || clock.version !== input.clockVersion) {
@@ -130,7 +163,21 @@ export async function resolveFinanceConfirmation(db: PrismaClient, input: {
     }
     const evidence = { actor: input.actorId, reference: input.evidenceReference };
     const conflict = () => new AppError(409, 'SETTLEMENT_EVIDENCE_REQUIRED', 'Complete or reconcile this payment through its existing settlement workflow first.');
-    if (hold.checkoutId) {
+    if (hold.checkoutPartId && chainPart && chain) {
+      const source = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: chainPart.checkoutId } });
+      if (input.decision === 'PAID') {
+        // Only the chain checkout's own verified credit proves a branch's share: MMG confirmed the payment and it
+        // was credited to every branch (a person never credits one branch of a chain payment by hand here).
+        const proof = await verifiedChainPartCredit(tx, chainPart.id, input.providerPaymentId);
+        if (!proof) throw conflict();
+        await markSettlementApplying(tx, hold.subscriptionId, { checkoutPartId: chainPart.id }, now);
+      } else {
+        if (source.status === 'CONFIRMED' || source.providerPaymentId) throw conflict();
+        // Not paid is a fact about the ONE MMG payment: every branch the checkout covered is released together.
+        await tx.mmgCheckoutIntent.update({ where: { id: source.id }, data: { status: 'NOT_PAID', nextCheckAt: null, reason: 'FINANCE_CONFIRMED_UNPAID' } });
+        for (const fee of chain.covered) await resolveConfirmationInTx(tx, fee.subscriptionId, fee.source, 'PROVEN_UNPAID', evidence, now);
+      }
+    } else if (hold.checkoutId) {
       const source = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: hold.checkoutId } });
       if (input.decision === 'PAID') {
         const proof = await verifiedCheckoutCredit(tx, source, input.providerPaymentId);

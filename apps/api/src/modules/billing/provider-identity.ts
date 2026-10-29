@@ -51,7 +51,9 @@ export async function claimProviderPaymentInTx(
     providerTxnId: string;
     amount: number;
     currencyCode: string;
-    subscriptionId: string;
+    /** The subscription credited; null for an owner's "pay all my branches" checkout [ENTERPRISE E1], whose one
+     *  payment credits several branches (each branch's top-up names this identity and its part). */
+    subscriptionId: string | null;
     /** [F7] Whose books the payment evidence belongs to, named explicitly:
      *  system work (a reply, a poll) has no tenant to inherit. */
     tenantId: string;

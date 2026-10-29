@@ -422,4 +422,49 @@ For Swift support, never a partner. Both routes are under `/api/v1/admin`, for `
 
 **Every read is recorded** in the admin audit trail, inside the request, before the answer leaves: who, when, which identifier type matched (`queryType`), what kind of query it was (`queryShape`) and the checkout ids. Never the query itself: it may be a phone number. A refused read, and a detail of a checkout that is not there, disclosed nothing and are not recorded.
 
+## 12. Pay all my branches (store owners with several branches)
+
+[ENTERPRISE E1 · owner, 29 Oct 2026] An owner of several stores (branches) may pay every branch fee that is due in **one** MMG checkout. It is optional: each branch's own checkout (sections 3–5) keeps working exactly as before. Nothing in sections 1–11 changes: one MMG page, one `merchantTransactionId`, the same six conditions before anything is credited (section 5), the same not-paid, expired and held states.
+
+Routes (vendor family only; the store's OWNER only, with the selected store's `x-vendor-id`; a manager or staff member gets `403`):
+
+`GET /api/v1/vendor/subscription/chain-fees`
+
+```ts
+{ success: true, data: {
+  branches: Array<{
+    vendorId: string; branchName: string;
+    subscriptionId: string | null; subscriptionStatus: SubscriptionStatus | null;
+    state: 'DUE' | 'TRIAL' | 'NOTHING_DUE' | 'PAYMENT_CONFIRMING' | 'NOT_PAYABLE';
+    amountGyd: number | null;   // DUE only: exactly what that branch's own Pay button would charge now
+  }>;
+  totalGyd: number;              // the DUE amounts added up
+  currencyCode: 'GYD';
+  payable: boolean;              // false for a store-review demo owner, or when nothing is DUE
+  recentCheckouts: ChainCheckout[]; // the owner's last 10 pay-all checkouts, newest first
+} }
+```
+
+A branch is `DUE` only when its status is `ACTIVE`, `PAST_DUE` or `SUSPENDED`, its own MMG Pay is live (section 3: configured, platform switch, nothing of its fee being confirmed) and it owes something within the one-week-ahead limit. A branch in its free trial is `TRIAL`; a churned, paused, cancelled or waived branch is `NOT_PAYABLE` (paying rejoins a churned store from that store's own fee screen).
+
+`POST /api/v1/vendor/subscription/chain-fees/mmg-checkout` with `Idempotency-Key` (section 2), `x-client-platform`, a fresh step-up ("confirm it's you", `403 STEP_UP_REQUIRED` otherwise), and the list the owner was shown and confirmed:
+
+```ts
+{ branches: Array<{ subscriptionId: string; amountGyd: number }>; totalGyd: number }
+```
+
+The server never takes an amount from this body: it prices the list again, then again under every branch's billing locks, **before** any MMG page exists. Any difference (a branch added, missing or repeated, another amount or total, a branch's wallet or obligation that moved, a branch paid on its own meanwhile) is `409 PAYMENT_QUOTE_CHANGED`: show the list again. Nothing is ever adjusted after a payment. `409 NOTHING_DUE` when no branch is due. The answer is the start route's shape (section 4) plus `branches: Array<{ vendorId; branchName; subscriptionId; amountGyd }>`; `201` new, `200` when the owner's open pay-all checkout is handed back. One open or confirming pay-all checkout per owner (a partial unique index); every other refusal of section 4 applies the same way.
+
+`GET /api/v1/vendor/subscription/chain-fees/mmg-checkout/{ref}` follows it: a `CheckoutStatus` (section 5, without `subscriptionStatus`) plus `branches`. `404 CHECKOUT_NOT_FOUND` for an unknown ref and for another owner's.
+
+**While it is unresolved** (open, confirming, held, or expired without an answer), every branch it pays is paused exactly as its own checkout would pause it: each branch's billing clock is held by that branch's part (`payment_confirmation_holds.checkoutPartId`). So each branch's own Pay is `off`, its own checkout start is `409 PAYMENT_CONFIRMING`, and reminders and suspension wait. A fee is never paid twice.
+
+**Crediting.** Once MMG's lookup confirms the exact total (the six conditions), one transaction claims the one MMG payment once (`provider_payments`, naming no single subscription) and credits each branch's own weekly fee with exactly its share: one top-up per branch (event key `mmg-checkout:pp:<identity>:<part>`), a receipt per branch (`fee_receipts`), and the week each share pays is recorded on that receipt when the branch's charge spends it (`fee_receipt_allocations`). A replay, a second door or the poll credits nothing more.
+
+**Not paid, expired, held** behave exactly as for one checkout (section 5), for every branch at once: MMG's not-paid answer releases every branch; an expired checkout with no answer keeps every branch paused until MMG answers or a person confirms it was not paid (finance review: resolving one branch's share as not paid resolves the whole checkout); a held payment is reviewed by a person. A branch's share is never confirmed as paid by hand on its own: only the checkout's own verified credit settles it. The automatic no-reply close (HOLD-AUTO) covers single checkouts only; a pay-all checkout left unanswered is closed by a person.
+
+**Not here:** returning a pay-all payment through MMG's reversal (`409 CHAIN_CHECKOUT`: it paid several branches; follow the refund procedure), reopening its page ("Back to MMG's page"), a monthly cycle, volume discounts, bank transfer.
+
+**Notice.** The owner hears once per outcome (push kind `billing_mmg_checkout`, data `{ ref, status, chainCheckout: true }`, no `subscriptionId`): route it to the pay-all screen, or to the fee screen of the selected store on an older app.
+
 Changes to this contract are made here first, in the same PR as the code that changes.

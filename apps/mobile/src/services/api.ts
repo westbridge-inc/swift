@@ -961,24 +961,6 @@ export const servicesApi = {
     api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
   completeJob: (id: string, expectedUpdatedAt: string) =>
     api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
-  // [BOOK-P3] Book a pro from their list of services (behind INSTANT_BOOKING on the server: off = 404).
-  proOfferings: (providerId: string) => api.get(`/services/providers/${providerId}/offerings`),
-  proSlots: (providerId: string, offeringId: string, date: string) =>
-    api.get(`/services/providers/${providerId}/slots`, { params: { offeringId, date } }),
-  bookPro: (input: { providerId: string; offeringId: string; scheduledFor: string; expectedPrice: number; note?: string }) =>
-    api.post('/services/jobs/book', input, serviceJobLifecycleConfig()),
-  // The free times to move a booked service to (its booked length), and the move itself.
-  jobSlots: (id: string, date: string) => api.get(`/services/jobs/${id}/slots`, { params: { date } }),
-  rescheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedScheduledFor: string }) =>
-    api.post(`/services/jobs/${id}/reschedule`, input, serviceJobLifecycleConfig()),
-  // The pro's own list of services, weekly hours and time off.
-  myBookable: () => api.get('/services/providers/me/bookable'),
-  addOffering: (input: { name: string; durationMinutes: number; price: number }) => api.post('/services/providers/me/offerings', input),
-  updateOffering: (id: string, input: { name?: string; durationMinutes?: number; price?: number; active?: boolean }) =>
-    api.patch(`/services/providers/me/offerings/${id}`, input),
-  saveHours: (slots: Array<{ dayOfWeek: number; start: string; end: string }>) => api.put('/services/providers/me/hours', { slots }),
-  addTimeOff: (input: { date: string; start?: string; end?: string }) => api.post('/services/providers/me/time-off', input),
-  removeTimeOff: (id: string) => api.delete(`/services/providers/me/time-off/${id}`),
 };
 
 /** [DOC-CONSENT S4] How the person gave the document tick for this upload: ticked on this visit, shown from their own

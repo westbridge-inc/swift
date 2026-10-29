@@ -48,8 +48,6 @@ import { PinConfirmScreen } from '../modules/movement/screens/PinConfirmScreen';
 import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { ServiceProviderScreen } from '../modules/services/screens/ServiceProviderScreen';
-import { ProBookingScreen } from '../modules/services/screens/ProBookingScreen';
-import { ProBookableScreen } from '../modules/services/screens/ProBookableScreen';
 import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
 
 const Tab = createBottomTabNavigator();
@@ -184,8 +182,6 @@ export function CustomerStack() {
       <Stack.Screen name="Services" component={ServicesScreen} />
       <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="ServiceProvider" component={ServiceProviderScreen} />
-      <Stack.Screen name="ProBooking" component={ProBookingScreen} />
-      <Stack.Screen name="ProBookable" component={ProBookableScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
     </Stack.Navigator>
   );

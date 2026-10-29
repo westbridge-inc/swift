@@ -180,8 +180,7 @@ describe('one version for the whole batch', () => {
   // Agreement s.5) as 2026-10-28 (legal-appointment-rules.test.ts).
   // [BOOK-FU2 · owner B3, material] "Customer didn't come" (Terms s.6, Privacy s.6) as 2026-10-28.1.
   // [TERMS · owner 29 Oct, non-material] pro appointments booked from a provider's list (Terms s.7) as 2026-10-29.
-  // [BOOK-P3 · COORD (b), non-material] the free cancel after a business's or provider's move (Terms s.7) as 2026-10-29.1.
-  it('is 2026-10-29.1', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-29.1');
+  it('is 2026-10-29', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-29');
   });
 });

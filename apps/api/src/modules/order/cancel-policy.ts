@@ -46,13 +46,6 @@ export const FREE_CANCEL_WINDOW_MIN = 1;
  *  bump + pins); the switch stays off until then. */
 export const APPOINTMENT_FREE_CANCEL_BEFORE_MIN = 120;
 
-/** [BOOK-P3 · COORD ruling 29 Oct 2026 (b) · Terms s7] When the BUSINESS (a store appointment) or the PROVIDER
- *  (a time booked from a pro's list) moves a confirmed appointment, the customer — who did not choose the new
- *  time — can cancel it free in the app for this many minutes after being told, even inside the 2-hour
- *  cut-off. The one number: the Terms, the refunds page and both FAQs say it from here (legal tests tie them).
- *  INSTANT_BOOKING on only, like the rest of the appointment rule. Never a fee either way. */
-export const APPOINTMENT_MOVED_FREE_CANCEL_MIN = 60;
-
 /** [BOOK-S3 · B1] Does the appointment rule decide this order's free window? */
 function appointmentWindowApplies(order: CancellationSnapshot): order is CancellationSnapshot & { appointmentSlot: Date } {
   return order.fulfillment === 'APPOINTMENT' && order.appointmentSlot != null && instantBookingEnabled();
@@ -103,9 +96,6 @@ export type CancellationSnapshot = {
   /** A booking's slot, chosen at checkout and reserved by the provider at
    *  acceptance — the booking's promised moment. */
   appointmentSlot?: Date | null;
-  /** [BOOK-P3 · COORD (b)] When the business last moved this appointment (null: never). Opens
-   *  APPOINTMENT_MOVED_FREE_CANCEL_MIN of free cancel after it. */
-  appointmentMovedAt?: Date | null;
   /** [owner #52] The delivery promise made at checkout (ALG-12; revised only
    *  out loud). */
   promisedAt?: Date | null;
@@ -276,22 +266,6 @@ const plusMinutes = (at: Date, minutes: number) => new Date(at.getTime() + minut
 const latest = (dates: Array<Date | null | undefined>): Date | null =>
   dates.reduce<Date | null>((a, b) => (b != null && (a == null || b.getTime() > a.getTime()) ? b : a), null);
 
-/** [BOOK-P3 · COORD (b) · Terms s7] The free cancel a move by the business or provider opens:
- *  APPOINTMENT_MOVED_FREE_CANCEL_MIN after the move (the customer is told at once), or until the
- *  appointment starts if that is sooner. Null when it was never moved by them. */
-function movedWindowEnd(movedAt: Date | null | undefined, start: Date): Date | null {
-  if (!movedAt) return null;
-  const end = plusMinutes(movedAt, APPOINTMENT_MOVED_FREE_CANCEL_MIN);
-  return end.getTime() < start.getTime() ? end : start;
-}
-
-/** [BOOK-P3 · COORD (b)] For the move notices: when the customer's free cancel of an appointment just
- *  moved by the business or provider (at `movedAt`, to start at `start`) ends — the later of two hours
- *  before the new start and the post-move window. The moved appointment's own verdict reads the same. */
-export function movedAppointmentFreeCancelEnd(start: Date, movedAt: Date): Date {
-  return latest([plusMinutes(start, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN), movedWindowEnd(movedAt, start)]) as Date;
-}
-
 /** Nobody holds the job. */
 function unassigned(order: CancellationSnapshot): boolean {
   return order.riderId == null && order.driverId == null;
@@ -327,13 +301,8 @@ function freeWindowEnd(order: CancellationSnapshot): Date | null {
   const accepted = order.assignedAt ?? order.acceptedAt ?? order.placedAt;
   const afterAcceptance = plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
   // [BOOK-S3 · owner B1] An appointment: free until two hours before it starts.
-  // [BOOK-P3 · COORD (b)] ... and for APPOINTMENT_MOVED_FREE_CANCEL_MIN after the business moved it.
   if (appointmentWindowApplies(order)) {
-    return latest([
-      plusMinutes(order.appointmentSlot, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN),
-      afterAcceptance,
-      movedWindowEnd(order.appointmentMovedAt, order.appointmentSlot),
-    ]);
+    return latest([plusMinutes(order.appointmentSlot, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN), afterAcceptance]);
   }
   return afterAcceptance;
 }
@@ -532,8 +501,6 @@ export type ServiceJobCancelSnapshot = {
   offeringId?: string | null;
   scheduledFor?: Date | null;
   providerConfirmedAt?: Date | null;
-  /** [BOOK-P3 · COORD (b)] When the provider last moved this list-booked job (null: never). */
-  providerMovedAt?: Date | null;
 };
 
 /** [BOOK-P2 · owner B1] Does the appointment rule decide this job's cancel? A job booked from a
@@ -551,8 +518,6 @@ export function serviceAppointmentFreeCancelEnd(job: ServiceJobCancelSnapshot): 
   return latest([
     plusMinutes(job.scheduledFor, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN),
     confirmed ? plusMinutes(confirmed, FREE_CANCEL_WINDOW_MIN) : null,
-    // [BOOK-P3 · COORD (b)] The provider moved it: free for APPOINTMENT_MOVED_FREE_CANCEL_MIN after.
-    movedWindowEnd(job.providerMovedAt, job.scheduledFor),
   ]);
 }
 

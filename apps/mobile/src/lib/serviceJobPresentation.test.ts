@@ -143,13 +143,9 @@ describe('[coordinator ruling 14 Oct · Terms 2026-10-15 §7] who may cancel a s
 
   it('the job card asks this one rule for its Cancel button and its contact words', () => {
     const SCREEN = readFileSync(join(process.cwd(), 'src/modules/services/screens/ServiceJobsScreen.tsx'), 'utf8');
-    // [BOOK-P3] Through serviceJobControls (lib/proBooking), which reads the server's appointment view for a job
-    // booked from a pro's list and THIS rule for every other job (proBooking.test.ts pins both).
-    const CONTROLS = readFileSync(join(process.cwd(), 'src/lib/proBooking.ts'), 'utf8');
-    expect(CONTROLS).toMatch(/serviceJobCancelView\(job\.status, isCustomer\)/);
-    expect(SCREEN).toMatch(/serviceJobControls\(job, isCustomer\)/);
-    expect(SCREEN).toMatch(/\{controls\.canCancel \? \(\s*<PillButton label="Cancel"/);
-    expect(SCREEN).toMatch(/\{controls\.contactWords\}/);
+    expect(SCREEN).toMatch(/serviceJobCancelView\(job\.status, isCustomer\)/);
+    expect(SCREEN).toMatch(/\{cancelView\.canCancel \? \(\s*<PillButton label="Cancel"/);
+    expect(SCREEN).toMatch(/\{cancelView\.contactWords\}/);
     expect(SCREEN).not.toMatch(/\['REQUESTED', 'QUOTED', 'SCHEDULED', 'IN_PROGRESS'\]\.includes\(job\.status\)/);
   });
 });

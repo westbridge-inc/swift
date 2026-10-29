@@ -596,41 +596,6 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     ]);
   });
 
-  // [BOOK-P3 · COORD ruling 29 Oct 2026 (b) · Terms s7] With instant booking on, when the BUSINESS moves a confirmed
-  // appointment the customer can cancel it free in the app for 60 minutes after being told, even inside the 2-hour
-  // cut-off. The business's move (the route) stamps the order and says so in the notice; the customer's preview and
-  // cancel read the stamp from the live order row.
-  it('[BOOK-P3] after the business moves it: free to cancel for 60 minutes, even inside the 2-hour cut-off; the notice says until when', async () => {
-    const customer = await makeUser('Maya', ['CUSTOMER'], 'CUSTOMER');
-    const order = await booked(customer, cutId, gy(gyDay(3), 9, 0));
-    expect((await accept(order.id)).statusCode).toBe(200);
-    const bookingId = (await bookingOf(order.id)).id;
-    process.env['INSTANT_BOOKING'] = '1';
-    try {
-      const moved = await call('POST', `/api/v1/vendor/bookings/${bookingId}/reschedule`, provider.token, { newSlotStart: gy(gyDay(3), 10, 0).toISOString() });
-      expect(moved.statusCode, moved.body).toBe(200);
-      const { appointmentMovedAt } = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { appointmentMovedAt: true } });
-      expect(appointmentMovedAt).not.toBeNull();
-      const told = await app.prisma.notification.findFirstOrThrow({ where: { userId: customer.userId, data: { path: ['bookingId'], equals: moved.json().data.id } } });
-      expect(told.body).toMatch(/If the new time doesn\u2019t suit you, you can cancel it free in the app until /);
-      // The appointment is now 90 minutes away, accepted long ago: the 2-hour rule alone refuses; the move's hour allows.
-      const end = new Date(appointmentMovedAt!.getTime() + 60 * MINUTE);
-      await app.prisma.order.update({ where: { id: order.id }, data: { appointmentSlot: new Date(Date.now() + 90 * MINUTE), acceptedAt: new Date(Date.now() - 24 * 60 * MINUTE) } });
-      const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
-      expect(mine.json().data).toMatchObject({ canCancel: true, cancelUnavailable: null, freeCancellationExpiresAt: end.toISOString() });
-      // Control: the same order, its move an hour and a minute ago, is refused (contact the business).
-      await app.prisma.order.update({ where: { id: order.id }, data: { appointmentMovedAt: new Date(Date.now() - 61 * MINUTE) } });
-      const late = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
-      expect([late.statusCode, late.json().error?.code]).toEqual([409, 'CANCEL_WINDOW_CLOSED']);
-      await app.prisma.order.update({ where: { id: order.id }, data: { appointmentMovedAt: new Date(Date.now() - 5 * MINUTE) } });
-      const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
-      expect(res.statusCode, res.body).toBe(200);
-      expect(res.json().data).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });
-    } finally {
-      delete process.env['INSTANT_BOOKING'];
-    }
-  });
-
   it('[AX289 F6] a reschedule racing a cancellation of the same order waits on the ORDER first, then loses cleanly — 409 BOOKING_MOVED, never a deadlock or a 500', async () => {
     const day = gyDay(5);
     const from = gy(day, 9, 0);

@@ -391,8 +391,6 @@ export class BookingService {
 
     const { config, vendorId } = await this.validatedSlot(booking.itemId, newSlotStart);
     const slotEnd = new Date(newSlotStart.getTime() + config.durationMinutes * 60_000);
-    // [BOOK-P3 · COORD (b)] The moment a BUSINESS move is stamped on the order (instant booking on only).
-    const movedByBusinessAt = actor.vendorId && !actor.customerId && instantBookingEnabled() ? new Date() : null;
     try {
       const next = await this.prisma.$transaction(async (tx) => {
         // [AX289 F6] The canonical lock order is Order → Booking: the
@@ -442,18 +440,13 @@ export class BookingService {
         // order screen and home card, the provider board and detail, admin.
         // Moving only the booking left all of them on the old time while the
         // provider calendar and the reminder moved: two answers to "when".
-        // [BOOK-P3 · COORD (b) · Terms s7] A move by the BUSINESS (with INSTANT_BOOKING on) opens the
-        // customer's free cancel for APPOINTMENT_MOVED_FREE_CANCEL_MIN from now (cancel-policy.ts).
         if (booking.orderId) {
-          await tx.order.update({
-            where: { id: booking.orderId },
-            data: { appointmentSlot: newSlotStart, ...(movedByBusinessAt ? { appointmentMovedAt: movedByBusinessAt } : {}) },
-          });
+          await tx.order.update({ where: { id: booking.orderId }, data: { appointmentSlot: newSlotStart } });
         }
         return created;
       });
       await this.nudgeForItem(booking.itemId);
-      return { booking: next, moved: true as const, previousSlotStart: booking.slotStart, serviceName: booking.item.name, movedByBusinessAt };
+      return { booking: next, moved: true as const, previousSlotStart: booking.slotStart, serviceName: booking.item.name };
     } catch (error) {
       if (isSlotConflict(error)) throw slotTaken();
       // [AX289 F6] A deadlock or serialization failure is a race this move

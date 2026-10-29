@@ -2,7 +2,7 @@ import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutov
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
 import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
-import { verifiedCheckoutCredit } from './confirmation-finance';
+import { verifiedChainPartCredit, verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash, randomUUID } from 'node:crypto';
@@ -4459,8 +4459,10 @@ export class BillingService {
   /** Finish an already credited checkout using wallet funds only. Its pause
    * stays durable until the paid period or bank-only disposition commits. */
   async recoverConfirmationSettlements(subscriptionId?: string, now = new Date()): Promise<number> {
+    // [ENTERPRISE E1] A branch's share of a chain checkout settles exactly like a single checkout, on its own clock.
     const pending = await this.prisma.paymentConfirmationHold.findMany({ where: {
-      ...(subscriptionId ? { subscriptionId } : {}), status: 'SETTLEMENT_APPLY_PENDING', checkoutId: { not: null },
+      ...(subscriptionId ? { subscriptionId } : {}), status: 'SETTLEMENT_APPLY_PENDING',
+      OR: [{ checkoutId: { not: null } }, { checkoutPartId: { not: null } }],
     }, orderBy: { beganAt: 'asc' }, take: 100 });
     const usd = await this.loadUsdPricing();
     let recovered = 0;
@@ -4473,10 +4475,18 @@ export class BillingService {
       done = await this.prisma.$transaction(async (tx) => {
         const clock = await currentDunningClock(tx, candidate.subscriptionId, now);
         const hold = await tx.paymentConfirmationHold.findUnique({ where: { id: candidate.id } });
-        if (hold?.status !== 'SETTLEMENT_APPLY_PENDING' || !hold.checkoutId) return false;
-        const checkout = await tx.mmgCheckoutIntent.findUnique({ where: { id: hold.checkoutId } });
-        if (!checkout || checkout.status !== 'CONFIRMED' || !checkout.providerPaymentId) return false;
-        const proof = await verifiedCheckoutCredit(tx, checkout);
+        if (hold?.status !== 'SETTLEMENT_APPLY_PENDING' || (!hold.checkoutId && !hold.checkoutPartId)) return false;
+        let source: { checkoutId: string } | { checkoutPartId: string };
+        let proof: Awaited<ReturnType<typeof verifiedCheckoutCredit>>;
+        if (hold.checkoutId) {
+          const checkout = await tx.mmgCheckoutIntent.findUnique({ where: { id: hold.checkoutId } });
+          if (!checkout || checkout.status !== 'CONFIRMED' || !checkout.providerPaymentId) return false;
+          source = { checkoutId: checkout.id };
+          proof = await verifiedCheckoutCredit(tx, checkout);
+        } else {
+          source = { checkoutPartId: hold.checkoutPartId! };
+          proof = await verifiedChainPartCredit(tx, hold.checkoutPartId!);
+        }
         if (!proof) return false;
         const identity = proof.identity;
         const sub = await tx.subscription.findUniqueOrThrow({ where: { id: hold.subscriptionId }, include: PAYER_INCLUDE });
@@ -4484,16 +4494,16 @@ export class BillingService {
         const evidence = { actor: 'checkout-settlement', reference: identity.id };
         if (!await billingEffectsReady(tx)) return false; // Credit is recorded; preserve application protection through cutover.
         if (clock.epoch > hold.sourceEpoch || authority.bankInsteadOfAdvance || sub.nextBillingDate > now) {
-          await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
+          await resolveConfirmationInTx(tx, sub.id, source, 'PAID', evidence, now);
           return true;
         }
-        if (await hasConfirmationInTx(tx, sub.id, now, { checkoutId: checkout.id })) return false;
+        if (await hasConfirmationInTx(tx, sub.id, now, source)) return false;
         // [BILLING-REANCHOR] A return buys the week from the due date moved on by the time suspended: price that week.
         const priced = await this.priceEligibleFor(await returnReanchorProof(tx, sub, now) ? { ...sub, nextBillingDate: returnWeekStart(sub, now) } : sub, usd);
         const amount = sub.feeWaived ? 0 : Number(priced.amount);
         const balance = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } });
         if (amount > 0 && (!balance || balance.currencyCode !== sub.currencyCode || Number(balance.balance) < amount)) return false;
-        await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
+        await resolveConfirmationInTx(tx, sub.id, source, 'PAID', evidence, now);
         const result = await this.applySuccessfulChargeInTx(tx, sub, amount, amount > 0 ? 'prepaid' : 'fee-waived', now,
           sub.nextBillingDate.toISOString().slice(0, 10), undefined, priced.usdTrio, amount);
         if (result !== 'advanced') throw new Error('Verified checkout balance was not applied');

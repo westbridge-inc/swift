@@ -7,7 +7,6 @@ import { BookingService } from '../modules/booking/booking.service';
 import { CUSTOMER_RESCHEDULE_BEFORE_MIN, RESCHEDULE_WINDOW_CLOSED_CODE, RESCHEDULE_WINDOW_CLOSED_MESSAGE } from '../modules/booking/reschedule-policy';
 import {
   APPOINTMENT_FREE_CANCEL_BEFORE_MIN,
-  APPOINTMENT_MOVED_FREE_CANCEL_MIN,
   FREE_CANCEL_WINDOW_MIN,
   VERY_LATE_AFTER_MIN,
   cancellationVerdict,
@@ -60,13 +59,12 @@ describe('[BOOK-S7] Terms section 7 states the appointment rule the server appli
     expect(TERMS_S7).toContain(
       `While Swift's instant appointment booking is switched on, an appointment the Business or provider has confirmed (by accepting it, or automatically when you booked it) can be cancelled free in the app until ${HOURS} hours before it starts, and always for at least ${WORD[FREE_CANCEL_WINDOW_MIN]} minute after it was confirmed, instead of the ${WORD[FREE_CANCEL_WINDOW_MIN]} minute above;`,
     );
-    // The hours appear only inside switched-on sentences (the cancel clause and the move clause; [BOOK-P3 · COORD (b)]
-    // the free cancel after a move "even within 2 hours of its start"): never as an unconditional promise.
-    expect(TERMS_S7.match(/\d+ hours?/g)).toEqual([`${HOURS} hours`, `${HOURS} hours`, `${HOURS} hours`]);
+    // The hours appear only inside the switched-on sentence (its cancel clause and its move clause): never as an
+    // unconditional promise.
+    expect(TERMS_S7.match(/\d+ hours?/g)).toEqual([`${HOURS} hours`, `${HOURS} hours`]);
     const sentences = TERMS_S7.split(/(?<=\.)\s/).filter((s) => s.includes(`${HOURS} hours`));
-    expect(sentences).toHaveLength(2);
+    expect(sentences).toHaveLength(1);
     expect(sentences[0]).toMatch(/^While Swift's instant appointment booking is switched on,/);
-    expect(sentences[1]).toMatch(/^While instant appointment booking is switched on, if the Business or provider moves your appointment,/);
   });
 
   it('the move (reschedule): only where the app offers it, until the same number of hours before the start; then contact the Business or provider', () => {
@@ -93,8 +91,7 @@ describe('[BOOK-S7] the refunds page and both FAQ answers say the same rule, fro
   });
 
   it.each([['web FAQ', WEB_FAQ], ['app FAQ', APP_FAQ]])('%s', (_name, text) => {
-    // [BOOK-P3 · COORD (b)] ... and for APPOINTMENT_MOVED_FREE_CANCEL_MIN after the business or provider moves it.
-    expect(text).toContain(`While instant appointment booking is switched on, an appointment the business or provider has confirmed can be cancelled free until ${HOURS} hours before it starts (and always for ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed, and for ${APPOINTMENT_MOVED_FREE_CANCEL_MIN} minutes after the business or provider moves it, or until it starts if that is sooner); after that, contact the business or provider.`);
+    expect(text).toContain(`While instant appointment booking is switched on, an appointment the business or provider has confirmed can be cancelled free until ${HOURS} hours before it starts (and always for ${FREE_CANCEL_WINDOW_MIN} minute after it was confirmed); after that, contact the business or provider.`);
     expect(text).toContain('Any other service job can be cancelled free until it is booked.');
   });
 });
@@ -129,10 +126,8 @@ describe('[TERMS 2026-10-29] Terms section 7: a time booked from a provider\'s l
     expect(TERMS_S7).toContain(
       `While instant appointment booking is switched on, a provider can also move an appointment booked from their list of services, and you are told in the app when they do; if the provider has not started it ${VERY_LATE_AFTER_MIN} minutes after its start time, you can still cancel it free in the app.`,
     );
-    // The minutes appear only inside switched-on sentences: never as an unconditional promise. [BOOK-P3 · COORD (b)]
-    // The second number is the free cancel after a move (APPOINTMENT_MOVED_FREE_CANCEL_MIN), its own switched-on sentence.
-    expect(TERMS_S7.match(/\d+ minutes?/g)).toEqual([`${VERY_LATE_AFTER_MIN} minutes`, `${APPOINTMENT_MOVED_FREE_CANCEL_MIN} minutes`]);
-    for (const x of sentencesOf(TERMS_S7).filter((y) => /\d+ minutes/.test(y))) expect(x).toMatch(/^While instant appointment booking is switched on,/);
+    // The minutes appear once, only inside that switched-on sentence: never as an unconditional promise.
+    expect(TERMS_S7.match(/\d+ minutes?/g)).toEqual([`${VERY_LATE_AFTER_MIN} minutes`]);
     const late = sentencesOf(TERMS_S7).filter((x) => x.includes(`${VERY_LATE_AFTER_MIN} minutes`));
     expect(late).toHaveLength(1);
     expect(late[0]).toMatch(/^While instant appointment booking is switched on,/);

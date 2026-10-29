@@ -133,7 +133,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'orders', model: 'Order', by: ['customerId'], key: 'id', omit: { mmgPayUrlSnapshot: 'OTHER_PERSON', mmgRecipientNameSnapshot: 'OTHER_PERSON', mmgNumberSnapshot: 'OTHER_PERSON', vatSellerNumber: 'OTHER_PERSON', vatSellerName: 'OTHER_PERSON' },
-    fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'vatAmount', 'vatRateBps', 'vatStandardGoods', 'vatZeroRatedGoods', 'vatExemptGoods', 'vatBase', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'appointmentMovedAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'vatAmount', 'vatRateBps', 'vatStandardGoods', 'vatZeroRatedGoods', 'vatExemptGoods', 'vatBase', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
   },
   {
     // [REVIEW-M S3-1 · multi-stop] The places a passenger's taxi ride stopped at, each with its ride (orderId = the
@@ -170,7 +170,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   {
     category: 'serviceJobs', model: 'ServiceJob', by: ['customerId'], key: 'id',
     // [BOOK-P1] The service booked (its id) and when the booked time ends.
-    fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'providerMovedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
   },
   {
     // [BOOK-S1] Whether the business took one booking at a time when it was made is bookkeeping for the database's overlap rule.
@@ -297,7 +297,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'mmgCheckouts', model: 'MmgCheckoutIntent', by: ['createdByUserId'], key: 'id', omit: { candidates: 'SYSTEM' },
-    fields: ['id', 'subscriptionId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
+    fields: ['id', 'subscriptionId', 'chainOwnerId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
   },
   {
     category: 'feeNotices', model: 'BillingFeeNotice', by: ['userId'], key: 'id', omit: { payload: 'SYSTEM' },
@@ -430,7 +430,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'serviceJobsAsProvider', model: 'ServiceJob', by: ['providerId'], via: 'provider', key: 'id', rest: 'OTHER_PERSON',
-    fields: ['providerId', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'providerMovedAt', 'completedAt', 'cancelledAt', 'createdAt'],
+    fields: ['providerId', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt'],
   },
   {
     // [BOOK-P1] The services the person offers as a provider: name, length, price.
