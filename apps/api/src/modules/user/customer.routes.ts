@@ -45,6 +45,7 @@ import { customerRescheduleVerdict } from '../booking/reschedule-policy';
 import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
+import { assertOneAppointment } from '../booking/appointment-checkout';
 import {
   publicOperatingHours,
   publicStorefrontCategory,
@@ -2118,6 +2119,8 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
     // [GUARDRAILS §8] A prohibited item is refused in the sold-out shape (409 ITEM_UNAVAILABLE).
     await assertOrderableNow(app.prisma, [{ id: item.id, name: item.name }]);
+    // [BOOK-FU3 · money] A booking line is one appointment: asking for more is a plain 400.
+    assertOneAppointment(item.fulfillment, quantity);
 
     // Inventory (§4.2): don't let the cart promise more than the shelf holds.
     // Checkout re-checks atomically; this is the early, friendly stop.
@@ -2177,7 +2180,8 @@ export async function customerRoutes(app: FastifyInstance) {
     if (existing) {
       await app.prisma.cartItem.update({
         where: { id: existing.id },
-        data: { quantity: existing.quantity + quantity },
+        // [BOOK-FU3] Re-adding the same booking never grows it past one appointment.
+        data: { quantity: item.fulfillment === 'APPOINTMENT' ? 1 : existing.quantity + quantity },
       });
     } else {
       await app.prisma.cartItem.create({
@@ -2224,8 +2228,10 @@ export async function customerRoutes(app: FastifyInstance) {
     }
     // [GUARDRAILS §8] A prohibited line cannot be grown or edited — only removed.
     if (body.quantity > 0) {
-      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true } });
+      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true, fulfillment: true } });
       await assertOrderableNow(app.prisma, [lineItem]);
+      // [BOOK-FU3 · money] A booking line stays one appointment (0 still removes it).
+      assertOneAppointment(lineItem.fulfillment, body.quantity);
     }
     // [M023] An edited selection passes the same validator as an added one.
     const editedSelection = body.selectedOptions === undefined || body.quantity <= 0
