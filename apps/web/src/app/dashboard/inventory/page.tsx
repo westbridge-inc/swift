@@ -169,6 +169,10 @@ export default function InventoryPage() {
   // [STORE-VAT · owner O-5] The owner whose store told Swift it is VAT-registered gives each item its VAT class here.
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
   const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
+  // [BOOK-S5b · owner A4] The selected store's word that "Confirm bookings automatically" can be chosen (switch on).
+  const profileStores = (profile.data as { vendors?: Array<{ id: string; instantBookingAvailable?: unknown }> } | undefined)?.vendors ?? [];
+  const profileStore = profileStores.find((v) => v.id === storeId) ?? (profileStores.length === 1 ? profileStores[0] : undefined);
+  const instantAvailable = profileStore?.instantBookingAvailable === true;
   const vat = useQuery({ queryKey: storeKey(storeId, 'vat'), queryFn: getStoreVat, enabled: isOwner });
   const vatRate = vat.data && vat.data.status !== 'NONE' ? vat.data.ratePercent : null;
   const vatEffective = vat.data?.effective === true;
@@ -337,7 +341,7 @@ export default function InventoryPage() {
         </p>
       )}
       {tools && dialog && <tools.MenuDialog dialog={dialog} storeId={storeId} sections={sections} counts={perSection} vendorType={vendorType}
-        vatRate={vatRate} vatEffective={vatEffective} onClose={() => setDialog(null)} />}
+        instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} onClose={() => setDialog(null)} />}
     </div>
   );
 }

@@ -18,6 +18,12 @@ import { adjustStock } from '@/lib/stock-adjust';
 // The app's own words for the store's pick tick (a plain file, imported as is).
 import { STORE_PICK } from '../../../../../mobile/src/lib/storePick';
 import { SOLD_IN_STORE } from '../../../../../mobile/src/lib/inStoreSale';
+// [BOOK-S5b · owner A4/C2] A bookable service's hours per day, gap, notice and "Confirm bookings automatically":
+// the partner app's own rules (#2196), imported as is (a plain file with no imports).
+import {
+  BUFFER_CHOICES, NOTICE_CHOICES, choicesWith, minutesLabel, nextWindow, openingBookingSettings,
+  slotsFromWeekHours, weekHoursFromSlots, weekHoursProblem, type WeekHours,
+} from '../../../../../mobile/src/lib/bookingHours';
 // [IN-STORE-SALE] A tracked row's "Sold in store −1" (drawn from this chunk, like the row's other tools).
 export { SaleStock } from './sold-in-store';
 
@@ -194,13 +200,15 @@ let draftKeys = 0;
 const nextKey = () => `draft-${++draftKeys}`;
 
 export function ItemEditor({
-  storeId, item, sections, vendorType, vatRate, vatEffective, onClose,
+  storeId, item, sections, vendorType, instantAvailable = false, vatRate, vatEffective, onClose,
 }: {
   storeId: string | null;
   /** The item to edit (a GET /items row), or null for a new item. */
   item: MenuItem | null;
   sections: Array<{ id: string; name: string }>;
   vendorType: string | undefined;
+  /** [BOOK-S5b] The profile's word that "Confirm bookings automatically" can be chosen (INSTANT_BOOKING on). */
+  instantAvailable?: boolean;
   /** Set only for the owner of a store that told Swift it is VAT-registered. */
   vatRate: number | null;
   vatEffective: boolean;
@@ -223,12 +231,22 @@ export function ItemEditor({
   const [lowStock, setLowStock] = useState(item?.lowStockThreshold != null ? String(item.lowStockThreshold) : '');
   const [vatClass, setVatClass] = useState<VatClass>(item?.vatClass ?? 'STANDARD');
   const [duration, setDuration] = useState<number>(booking.durationMinutes ?? 30);
-  const [days, setDays] = useState<number[]>(() => {
-    const ds = (booking.slots ?? []).map((s) => s.dayOfWeek);
-    return ds.length ? Array.from(new Set(ds)) : [1, 2, 3, 4, 5];
-  });
-  const [startTime, setStartTime] = useState(booking.slots?.[0]?.start ?? '09:00');
-  const [endTime, setEndTime] = useState(booking.slots?.[0]?.end ?? '17:00');
+  // [BOOK-S5b · as #2196] Hours per day, more than one window a day (a break is the gap between two). Every stored
+  // window is kept: this editor used to put the first window's times on every chosen day when it saved.
+  const [week, setWeek] = useState<WeekHours>(() => weekHoursFromSlots(booking.slots));
+  // [BOOK-S5b · owner A4/C2] The gap after each booking, the minimum notice and "Confirm bookings automatically".
+  // null = not touched: the opening value follows the server (the profile's word can arrive after the editor opens).
+  const offerInstant = isService && instantAvailable;
+  const opening = openingBookingSettings(item?.bookingConfig ?? null, offerInstant);
+  const [instantTouched, setInstant] = useState<boolean | null>(null);
+  const [bufferTouched, setBuffer] = useState<number | null>(null);
+  const [noticeTouched, setNoticeMinutes] = useState<number | null>(null);
+  const instant = instantTouched ?? opening.instantBooking;
+  const buffer = bufferTouched ?? opening.bufferMinutes;
+  const minNotice = noticeTouched ?? opening.minNoticeMinutes;
+  const hoursProblem = isService ? weekHoursProblem(week) : null;
+  const setDayWindows = (day: number, update: (_windows: WeekHours[number]) => WeekHours[number]) =>
+    setWeek((w) => w.map((windows, d) => (d === day ? update(windows) : windows)));
   const [mode, setMode] = useState<'AT_BUSINESS' | 'MOBILE' | 'BOTH'>(booking.serviceMode ?? 'AT_BUSINESS');
   const [radiusKm, setRadiusKm] = useState(booking.serviceRadiusKm != null ? String(booking.serviceRadiusKm) : '5');
   const [photo, setPhoto] = useState<File | null>(null);
@@ -241,17 +259,17 @@ export function ItemEditor({
 
   // [UI-SWEEP U67, as the app] A change is a difference from how the editor opened; closing with one asks first.
   const formNow = JSON.stringify([name, price, description, categoryId, available, popular, sku, unit, bulk, stock, lowStock, vatClass,
-    duration, [...days].sort((a, b) => a - b), startTime, endTime, mode, radiusKm, draftGroups.map((g) => [g.name, g.isRequired, g.maxSelect, g.options])]);
+    duration, week, instantTouched, bufferTouched, noticeTouched, mode, radiusKm, draftGroups.map((g) => [g.name, g.isRequired, g.maxSelect, g.options])]);
   const [formAtOpen] = useState(formNow);
   const unsaved = formNow !== formAtOpen || photo !== null;
   const tryClose = () => (unsaved ? setDiscardAsk(true) : onClose());
 
   const priceNum = Number(price);
-  const valid = name.trim().length >= 1 && price.trim() !== '' && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || days.length > 0);
+  const valid = name.trim().length >= 1 && price.trim() !== '' && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || hoursProblem == null);
   const label = !name.trim() ? 'Name the item first'
     : !(price.trim() !== '' && Number.isFinite(priceNum) && priceNum >= 0) ? 'Set a price'
       : !categoryId ? 'Pick a category'
-        : isService && days.length === 0 ? 'Pick available days'
+        : isService && hoursProblem ? 'Fix the hours'
           : item ? 'Save changes' : 'Add item';
 
   const save = useMutation({
@@ -269,7 +287,11 @@ export function ItemEditor({
               fulfillment: 'APPOINTMENT',
               bookingConfig: {
                 durationMinutes: duration,
-                slots: days.map((d) => ({ dayOfWeek: d, start: startTime, end: endTime })),
+                slots: slotsFromWeekHours(week),
+                bufferMinutes: buffer,
+                minNoticeMinutes: minNotice,
+                // [BOOK-S5b] Sent only while the server says it can be chosen; otherwise the listing keeps what it stores.
+                ...(offerInstant ? { instantBooking: instant } : {}),
                 serviceMode: mode,
                 ...(mode !== 'AT_BUSINESS' ? { serviceRadiusKm: Number(radiusKm) || 0 } : {}),
               },
@@ -361,16 +383,62 @@ export function ItemEditor({
           <div className="mt-1 flex flex-wrap gap-2">
             {[15, 30, 45, 60, 90, 120].map((m) => <Chip key={m} label={`${m} min`} on={duration === m} onClick={() => setDuration(m)} />)}
           </div>
-          <p className="sw-field-label mt-3">Available days</p>
-          <div className="mt-1 flex flex-wrap gap-2">
-            {DAY_LABELS.map((d, i) => <Chip key={d} label={d} on={days.includes(i)} onClick={() => setDays((p) => (p.includes(i) ? p.filter((x) => x !== i) : [...p, i]))} />)}
+          {/* [BOOK-S5b · as #2196] Hours per day. A day with no hours is closed; a break is the gap between two windows. */}
+          <p className="sw-field-label mt-3">Hours each day</p>
+          <div className="mt-1 space-y-2">
+            {DAY_LABELS.map((label, d) => {
+              const windows = week[d] ?? [];
+              const open = windows.length > 0;
+              return (
+                <div key={label} className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Chip label={open ? label : `${label} · closed`} on={open} onClick={() => setDayWindows(d, (w) => (w.length > 0 ? [] : [nextWindow([])]))} />
+                    {open ? (
+                      <button type="button" className="text-sm font-semibold text-[var(--swift-red)]" aria-label={`Add hours on ${label}`} onClick={() => setDayWindows(d, (w) => [...w, nextWindow(w)])}>Add hours</button>
+                    ) : null}
+                  </div>
+                  {windows.map((w, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input type="time" className="sw-input" aria-label={`${label} opens at${windows.length > 1 ? ` (${i + 1})` : ''}`} value={w.start}
+                        onChange={(e) => setDayWindows(d, (ws) => ws.map((x, j) => (j === i ? { ...x, start: e.target.value } : x)))} />
+                      <span className="text-sm text-[var(--swift-muted)]">to</span>
+                      <input type="time" className="sw-input" aria-label={`${label} closes at${windows.length > 1 ? ` (${i + 1})` : ''}`} value={w.end}
+                        onChange={(e) => setDayWindows(d, (ws) => ws.map((x, j) => (j === i ? { ...x, end: e.target.value } : x)))} />
+                      <button type="button" className="grid h-11 w-11 flex-none place-items-center text-[var(--swift-muted)]" aria-label={`Remove ${label} ${w.start}–${w.end}`}
+                        onClick={() => setDayWindows(d, (ws) => ws.filter((_, j) => j !== i))}>×</button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+            {hoursProblem ? <p role="alert" className="text-sm text-[var(--swift-red)]">{hoursProblem}</p> : null}
           </div>
-          <p className="sw-field-label mt-3">Hours</p>
-          <div className="mt-1 flex items-center gap-2">
-            <input type="time" className="sw-input" aria-label="Opens at" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
-            <span className="text-sm text-[var(--swift-muted)]">to</span>
-            <input type="time" className="sw-input" aria-label="Closes at" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+          <p className="sw-field-label mt-3">Gap after each booking</p>
+          <div className="mt-1 flex flex-wrap gap-2" role="group" aria-label="Gap after each booking">
+            {choicesWith(BUFFER_CHOICES, buffer).map((m) => <Chip key={m} label={minutesLabel(m)} on={buffer === m} onClick={() => setBuffer(m)} />)}
           </div>
+          <p className="sw-field-label mt-3">Minimum notice</p>
+          <p className="sw-caption">How close to its start a customer can still book a time.</p>
+          <div className="mt-1 flex flex-wrap gap-2" role="group" aria-label="Minimum notice">
+            {choicesWith(NOTICE_CHOICES, minNotice).map((m) => <Chip key={m} label={minutesLabel(m)} on={minNotice === m} onClick={() => setNoticeMinutes(m)} />)}
+          </div>
+          {/* [BOOK-S5b · owner A3/A4] Shown only while the server says it can be chosen. */}
+          {offerInstant ? (
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p id="confirm-automatically" className="text-sm font-semibold">Confirm bookings automatically</p>
+                <p className="sw-caption">
+                  {instant
+                    ? 'Bookings paid in cash at the appointment are confirmed as soon as the customer books. MMG bookings still wait for you to accept.'
+                    : 'Every booking waits for you to accept it.'}
+                </p>
+              </div>
+              <button type="button" role="switch" aria-labelledby="confirm-automatically" aria-checked={instant} onClick={() => setInstant(!instant)}
+                className="grid h-11 w-16 flex-none place-items-center">
+                <span className={`sw-stock-switch ${instant ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}><span className={`sw-stock-knob ${instant ? 'translate-x-5' : ''}`} /></span>
+              </button>
+            </div>
+          ) : null}
           <p className="sw-field-label mt-3">Where does it happen?</p>
           <div className="mt-1 flex flex-wrap gap-2">
             <Chip label="At my place" on={mode === 'AT_BUSINESS'} onClick={() => setMode('AT_BUSINESS')} />
@@ -697,18 +765,19 @@ export type MenuDialogState =
   | { kind: 'section'; mode: 'add' | 'rename' | 'delete'; section: { id: string; name: string } | null }
   | { kind: 'delete'; item: CatalogItem };
 
-export function MenuDialog({ dialog, storeId, sections, counts, vendorType, vatRate, vatEffective, onClose }: {
+export function MenuDialog({ dialog, storeId, sections, counts, vendorType, instantAvailable, vatRate, vatEffective, onClose }: {
   dialog: MenuDialogState;
   storeId: string | null;
   sections: Array<{ id: string; name: string }>;
   counts: Map<string, number>;
   vendorType: string | undefined;
+  instantAvailable?: boolean;
   vatRate: number | null;
   vatEffective: boolean;
   onClose: () => void;
 }) {
   if (dialog.kind === 'item') {
-    return <ItemEditor storeId={storeId} item={dialog.item} sections={sections} vendorType={vendorType} vatRate={vatRate} vatEffective={vatEffective} onClose={onClose} />;
+    return <ItemEditor storeId={storeId} item={dialog.item} sections={sections} vendorType={vendorType} instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} onClose={onClose} />;
   }
   if (dialog.kind === 'section') {
     return <SectionDialog storeId={storeId} vendorType={vendorType} section={dialog.section} mode={dialog.mode}

@@ -11,7 +11,7 @@ import { useStoreRole } from '@/lib/store-role';
 import { lazyRetry } from '@/lib/chunk-retry';
 import { getStores, money } from '@/lib/vendor-api';
 import {
-  deleteBookingException, getBookingExceptions, getBookings, getListingNames,
+  bookingMovable, deleteBookingException, getBookingExceptions, getBookings, getListingNames,
   type VendorBooking, type VendorBookingException,
 } from '@/lib/booking-api';
 import { formatAppointmentClock, formatAppointmentDay } from '@/lib/appointmentTime';
@@ -21,6 +21,8 @@ import { addAppointmentDays, appointmentDayKey } from '../../../../../mobile/src
 
 // [size budget] Opened by a tap: loaded then, not in the tab's first load.
 const BlockTimeDialog = lazyRetry(() => import('@/components/schedule-block-time'));
+// [BOOK-S5b · owner B2] "Move": loaded on tap too.
+const MoveBookingDialog = lazyRetry(() => import('@/components/schedule-move-booking'));
 
 /** The selected store's type, from the same stores read the console shell makes
  *  (`known` once it answered; `failed` when it failed with no answer at all). */
@@ -63,10 +65,10 @@ const blockSpoken = (e: VendorBookingException, names: Map<string, string> | und
   return `${names?.get(e.itemId) ?? 'one listing'}, ${blockWhen(e)}`;
 };
 
-function AppointmentRow({ b }: { b: VendorBooking }) {
+function AppointmentRow({ b, onMove }: { b: VendorBooking; onMove?: () => void }) {
   const confirmed = b.status === 'CONFIRMED';
   return (
-    <li className="sw-card flex items-center gap-4 p-4">
+    <li className="sw-card flex flex-wrap items-center gap-4 p-4">
       <div className="min-w-[64px] text-center">
         <p className="text-sm font-bold">{formatAppointmentClock(b.slotStart)}</p>
         <p className="text-xs text-[var(--swift-muted)]">{formatAppointmentClock(b.slotEnd)}</p>
@@ -81,6 +83,12 @@ function AppointmentRow({ b }: { b: VendorBooking }) {
       <span className={`flex-none rounded-full px-3 py-1 text-[12px] font-semibold ${confirmed ? 'bg-[var(--swift-soft-success)] text-[var(--swift-success)]' : 'bg-[var(--swift-sunken)] text-[var(--swift-muted)]'}`}>
         {bookingWords(b.status)}
       </span>
+      {/* [BOOK-S5b · owner B2, the app's AppointmentCard] Move it to another free time of the same service. */}
+      {onMove ? (
+        <div className="flex w-full justify-end">
+          <button type="button" className="text-sm font-semibold text-[var(--swift-red)]" aria-label={`Move ${b.serviceName} at ${formatAppointmentClock(b.slotStart)}`} onClick={onMove}>Move</button>
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -119,6 +127,7 @@ export default function SchedulePage() {
   };
   const [dayKey, setDayKey] = useState(() => appointmentDayKey(new Date()));
   const [blocking, setBlocking] = useState(false);
+  const [moving, setMoving] = useState<VendorBooking | null>(null);
 
   // The strip follows the market calendar, including near UTC midnight.
   const today = appointmentDayKey(new Date());
@@ -200,12 +209,14 @@ export default function SchedulePage() {
             </div>
           ) : dayBookings.length > 0 && (
             <ul className="space-y-3" aria-label="Appointments">
-              {dayBookings.map((b) => <AppointmentRow key={b.id} b={b} />)}
+              {dayBookings.map((b) => <AppointmentRow key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} />)}
             </ul>
           )}
         </div>
       )}
       {blocking && <Suspense fallback={null}><BlockTimeDialog dayKey={dayKey} onClose={() => setBlocking(false)} /></Suspense>}
+      {/* Mounted only while a booking is being moved (its free-times read runs only then). */}
+      {moving && <Suspense fallback={null}><MoveBookingDialog booking={moving} onClose={() => setMoving(null)} /></Suspense>}
     </div>
   );
 }
