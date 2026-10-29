@@ -21,9 +21,10 @@
 #
 # [BACKUP-FU · COORD] A CHAIN: each signed batch names the batch shipped before it (its name and
 # the SHA-256 of its signature file) inside its own signed manifest; the first one says "prev none".
-# A restore refuses a chain with a batch missing from it. This host keeps the last link in
-# BACKUP_LEDGER_CHAIN_FILE; without it (a new host) it reads the newest signature in the bucket,
-# proves it, and links to that; only a bucket with no signed batch starts a chain.
+# A restore refuses a chain with a batch missing from it, or a fork. Each batch links to the newest
+# signed batch in the bucket (proven); this host's record of its own last batch
+# (BACKUP_LEDGER_CHAIN_FILE) must agree, or nothing is shipped. Only a bucket with no signed batch
+# starts a chain.
 #
 # An entry holds ids, timestamps and de-identified columns only. The plain batch exists only in this
 # run's private directory and is removed before the upload; only the .gpg leaves the host. Settings
@@ -161,27 +162,38 @@ mkdir -p "$TMP_DIR/out"
 SIGNED=0
 if [ -n "$SIGNING_KEY" ]; then
   [ -r "$SIGNING_KEY" ] || die "the backup signing key ($SIGNING_KEY) cannot be read; nothing was shipped"
-  # [BACKUP-FU · COORD] The link to the batch before this one.
+  # [BACKUP-FU · COORD · REVIEW-M S4-2] The link to the batch before this one: always the NEWEST
+  # signed batch in the bucket, proven, so a run that died after its signature reached the bucket
+  # cannot make the next batch fork from an older one. This host's own record (its last shipped
+  # batch and that signature's digest) must agree: a newest batch older than the record, or with
+  # another signature, means a shipped batch was deleted or replaced, and nothing is shipped.
+  LISTED="$(aws_s3 s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix "$BACKUP_PREFIX/erasure-ledger/" --query 'Contents[].Key' --output text)" ||
+    die "could not list the off-site erasure ledger to find the batch this one follows; nothing was shipped (the next run retries)"
+  PREV="$(tr '\t ' '\n\n' <<<"$LISTED" | sed -n 's#^.*/\(erasure-ledger-[0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{8\}\.jsonl\.gpg\)\.sig$#\1#p' | LC_ALL=C sort | tail -1)"
+  REC_PREV=""; REC_SHA256=""
   if [ -s "$CHAIN_FILE" ]; then
-    read -r PREV PREV_SHA256 < "$CHAIN_FILE" || true
-    [[ "${PREV:-}" =~ ^erasure-ledger-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.jsonl\.gpg$ ]] && [[ "${PREV_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
+    read -r REC_PREV REC_SHA256 < "$CHAIN_FILE" || true
+    [[ "${REC_PREV:-}" =~ ^erasure-ledger-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.jsonl\.gpg$ ]] && [[ "${REC_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
       die "the erasure ledger chain record $CHAIN_FILE is malformed; nothing was shipped"
-  else
-    # No record here: link to the newest signed batch in the bucket, proven; none at all starts the chain.
-    LISTED="$(aws_s3 s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix "$BACKUP_PREFIX/erasure-ledger/" --query 'Contents[].Key' --output text)" ||
-      die "could not list the off-site erasure ledger to find the batch this one follows; nothing was shipped (the next run retries)"
-    PREV="$(tr '\t ' '\n\n' <<<"$LISTED" | sed -n 's#^.*/\(erasure-ledger-[0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{8\}\.jsonl\.gpg\)\.sig$#\1#p' | LC_ALL=C sort | tail -1)"
-    if [ -n "$PREV" ]; then
-      aws_s3 s3 cp "s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/$PREV.sig" "/out/prev.sig" --only-show-errors ||
-        die "could not fetch the newest batch signature ($PREV.sig); nothing was shipped (the next run retries)"
-      python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$TMP_DIR/out/prev.sig" --name "$PREV" ||
-        die "the newest batch signature in the bucket ($PREV.sig) does not verify against $ALLOWED_SIGNERS; nothing was shipped"
-      PREV_SHA256="$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TMP_DIR/out/prev.sig")"
-    elif [ -e "$FIRST_SIGNED" ]; then
-      die "signed batches have shipped from this host ($FIRST_SIGNED) but the bucket lists none and $CHAIN_FILE is missing: the chain cannot be continued; nothing was shipped"
-    else
-      PREV=none; PREV_SHA256=""
+  fi
+  if [ -n "$PREV" ]; then
+    if [ -n "$REC_PREV" ] && [[ "$PREV" < "$REC_PREV" ]]; then
+      die "the last batch this host shipped ($REC_PREV) is not in the bucket (its newest signed batch is $PREV): a shipped batch was DELETED. Nothing was shipped; restore it from the bucket's versions"
     fi
+    aws_s3 s3 cp "s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/$PREV.sig" "/out/prev.sig" --only-show-errors ||
+      die "could not fetch the newest batch signature ($PREV.sig); nothing was shipped (the next run retries)"
+    python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$TMP_DIR/out/prev.sig" --name "$PREV" ||
+      die "the newest batch signature in the bucket ($PREV.sig) does not verify against $ALLOWED_SIGNERS; nothing was shipped"
+    PREV_SHA256="$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TMP_DIR/out/prev.sig")"
+    if [ "$PREV" = "$REC_PREV" ] && [ "$PREV_SHA256" != "$REC_SHA256" ]; then
+      die "the signature of the last batch this host shipped ($PREV.sig) is not the one it uploaded: it was replaced. Nothing was shipped"
+    fi
+  elif [ -n "$REC_PREV" ]; then
+    die "the last batch this host shipped ($REC_PREV) is not in the bucket, which lists no signed batch: shipped batches were DELETED. Nothing was shipped; restore them from the bucket's versions"
+  elif [ -e "$FIRST_SIGNED" ]; then
+    die "signed batches have shipped from this host ($FIRST_SIGNED) but the bucket lists none: the chain cannot be continued; nothing was shipped"
+  else
+    PREV=none; PREV_SHA256=""
   fi
   PREV_ARGS=(--prev "$PREV")
   [ "$PREV" = none ] || PREV_ARGS+=(--prev-sha256 "$PREV_SHA256")
@@ -210,13 +222,13 @@ if [ "$SIGNED" = 1 ]; then
   SIG_SIZE="$(wc -c < "$OUT.sig" | tr -d ' ')"
   aws_s3 s3 cp "/data/$NAME.sig" "s3://$BACKUP_BUCKET/$KEY.sig" --only-show-errors ||
     die "the batch is off-site but its signature could not be uploaded; nothing was recorded as shipped (the next run retries)"
-  # The signature is off-site: the next batch links to this one.
-  (umask 077; printf '%s %s\n' "$NAME" "$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OUT.sig")" > "$CHAIN_FILE.partial" &&
-    mv -f "$CHAIN_FILE.partial" "$CHAIN_FILE") ||
-    die "the batch and its signature are off-site but the chain record $CHAIN_FILE could not be written; nothing was recorded as shipped (fix the directory; the next run links to the bucket's newest batch)"
   REMOTE_SIG_SIZE="$(aws_s3 s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY.sig" --query 'ContentLength' --output text 2>/dev/null || true)"
   [ "$REMOTE_SIG_SIZE" = "$SIG_SIZE" ] ||
     die "the uploaded signature is $REMOTE_SIG_SIZE bytes, local $SIG_SIZE; nothing was recorded as shipped"
+  # [REVIEW-M S4-3] Only a signature proven off-site becomes this host's record of its last batch.
+  (umask 077; printf '%s %s\n' "$NAME" "$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OUT.sig")" > "$CHAIN_FILE.partial" &&
+    mv -f "$CHAIN_FILE.partial" "$CHAIN_FILE") ||
+    die "the batch and its signature are off-site but this host's chain record $CHAIN_FILE could not be written; nothing was recorded as shipped. Fix the directory; the next run links to the bucket's newest batch (this one) all the same"
 fi
 
 # Only now: the shipment, one row per entry, in one transaction.

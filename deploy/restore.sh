@@ -390,6 +390,14 @@ if rows:
         sys.exit(f"CHAIN_BROKEN: {len(anchors)} batches here say they are the first signed batch ({', '.join(anchors) or 'none'}); there is exactly one")
     if anchors[0] != min(r[0] for r in rows):
         sys.exit(f"CHAIN_BROKEN: the first signed batch {anchors[0]} is not the oldest signed batch here")
+    # [REVIEW-M S4-2] One line, no fork: no two batches follow the same batch.
+    followers = {}
+    for base, _created, prev, _prev_sha, _sha in rows:
+        if prev != "none":
+            followers.setdefault(prev, []).append(base)
+    for prev, bases in sorted(followers.items()):
+        if len(bases) > 1:
+            sys.exit(f"CHAIN_BROKEN: {' and '.join(sorted(bases))} both follow {prev}: the chain forks")
     for base, _created, prev, prev_sha, _sha in rows:
         if prev == "none":
             continue
@@ -433,6 +441,40 @@ for key in keys:
 PY
       LEDGER_BUCKET_NOTE="every batch the bucket lists is here"
       echo "off-site ledger : the bucket lists $(tr '\t ' '\n\n' <<<"$LISTED" | grep -c '\.jsonl\.gpg$' || true) batch(es); every one is here"
+      # [REVIEW-M S4-1] A batch DELETED from the bucket is not listed. With versioning on (#2186), the
+      # versions are listed too: a batch or signature whose newest version is a delete marker, or that
+      # has only old versions, is refused, named. With versioning off (or unreadable), say so.
+      VERSIONING="$(aws_s3 "$TMP_DIR:/data" s3api get-bucket-versioning --bucket "$BACKUP_BUCKET" --query Status --output text 2>/dev/null)" || VERSIONING=unknown
+      if [ "$VERSIONING" = Enabled ]; then
+        aws_s3 "$TMP_DIR:/data" s3api list-object-versions --bucket "$BACKUP_BUCKET" --prefix "${BACKUP_PREFIX:-db}/erasure-ledger/" --output json > "$TMP_DIR/ledger-versions" ||
+          die "--ledger-from: could not list the versions under s3://$BACKUP_BUCKET/${BACKUP_PREFIX:-db}/erasure-ledger/ to prove no batch was deleted (pass --ledger-no-bucket-check only if the bucket is gone); nothing was created"
+        python3 -I - "$TMP_DIR/ledger-versions" <<'PY' || die "--ledger-from: a batch was DELETED from the off-site bucket (above): its erasures would be skipped. Restore its newest version (the bucket keeps old versions), fetch it, and run again. Nothing was created"
+import json, re, sys
+raw = open(sys.argv[1]).read().strip()
+doc = json.loads(raw) if raw else {}
+batch = re.compile(r"(?:.*/)?erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8}\.jsonl\.gpg(?:\.sig)?")
+latest = {}
+for kind in ("Versions", "DeleteMarkers"):
+    for v in doc.get(kind) or []:
+        key = v.get("Key", "")
+        if not batch.fullmatch(key):
+            continue
+        latest.setdefault(key, None)
+        if v.get("IsLatest"):
+            latest[key] = kind
+for key, kind in sorted(latest.items()):
+    name = key.rsplit("/", 1)[-1]
+    if kind == "DeleteMarkers":
+        sys.exit(f"--ledger-from: {name} was deleted from the bucket (its newest version is a delete marker)")
+    if kind is None:
+        sys.exit(f"--ledger-from: {name} has only old versions in the bucket (no current one)")
+PY
+        LEDGER_BUCKET_NOTE="every batch the bucket lists is here, and none was deleted (versioning on)"
+        echo "off-site ledger : versioning is on; no batch or signature under erasure-ledger/ was deleted"
+      else
+        LEDGER_BUCKET_NOTE="every batch the bucket lists is here; versioning is not on, so a batch DELETED from the bucket would not be noticed"
+        echo "WARNING: the backup bucket's versioning is ${VERSIONING:-off}: a batch deleted from the bucket together with its signature cannot be noticed (deploy/backup-versioning.sh turns it on)." >&2
+      fi
     fi
   fi
   since="$(ledger_signed_since)"

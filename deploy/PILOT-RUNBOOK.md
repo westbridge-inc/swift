@@ -710,9 +710,12 @@ backups. Before the first production backup:
    and the 10-minute watch pages) rather than a batch no restore would take.
    The signed batches form ONE CHAIN: each one's signature names the batch
    shipped before it (and the digest of that batch's signature); the first
-   says `prev none`. The host keeps the last link in
-   `/var/backups/swift/.erasure-ledger-chain`; a new host links to the newest
-   proven signature in the bucket.
+   says `prev none`. Each batch links to the newest proven signature in the
+   bucket, so the chain never forks. The host keeps a record of its own last
+   batch in `/var/backups/swift/.erasure-ledger-chain`, written only after the
+   signature upload is proven. If that batch is no longer the bucket's newest
+   one, or its signature was replaced, the host ships nothing (a shipped batch
+   was deleted).
 
    Replaying it (a restore without the live database):
    - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`,
@@ -730,11 +733,16 @@ backups. Before the first production backup:
      `--ledger-from` joins the live ledger. Every signed batch is verified
      before anything is created (a batch that fails, or a signature whose
      batch is missing, stops the restore). The chain must be unbroken: a batch
-     missing from the start or the middle, or out of order, stops the restore
-     (`CHAIN_BROKEN`). With `BACKUP_BUCKET` set (and the backup key), the
+     missing from the start or the middle, out of order, or a fork (two
+     batches after the same one) stops the restore (`CHAIN_BROKEN`). With `BACKUP_BUCKET` set (and the backup key), the
      restore also lists the bucket's `erasure-ledger/` prefix, read-only, and
      stops if the bucket holds any batch or signature that is not in the
-     directory, so none is missing from the end either. Only when the bucket is
+     directory, so none is missing from the end either. With versioning on
+     (`deploy/backup-versioning.sh`), it also lists the versions there and stops
+     when a batch or signature was deleted (its newest version is a delete
+     marker, or it has only old versions): restore that version, fetch it, and
+     run again. With versioning off, it warns that a deletion would not be
+     noticed. Only when the bucket is
      gone, pass `--ledger-no-bucket-check`; the result then says the end of the
      ledger was not checked. A batch without a signature whose
      entries are all in a signed batch is set aside (its signature never

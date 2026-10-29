@@ -46,6 +46,13 @@ else:
         note('LIST ' + args[args.index('--prefix') + 1])
         if os.environ.get('FAIL') == 'list': sys.exit(255)
         print(os.environ.get('FAKE_LEDGER_KEYS', 'None')); sys.exit(0)
+    if args[:1] == ['run'] and 'get-bucket-versioning' in args:
+        if os.environ.get('FAKE_VERSIONING') == 'fail': sys.exit(255)
+        print(os.environ.get('FAKE_VERSIONING', 'None')); sys.exit(0)
+    if args[:1] == ['run'] and 'list-object-versions' in args:
+        note('VERSIONS ' + args[args.index('--prefix') + 1])
+        if os.environ.get('FAIL') == 'versions': sys.exit(255)
+        print(os.environ.get('FAKE_LEDGER_VERSIONS', '{}')); sys.exit(0)
     if args[:1] in (['volume'], ['run']): sys.exit(0)
     if args[:1] == ['rm']:
         note('INSTANCE REMOVED ' + ' '.join(args[1:])); sys.exit(0)
@@ -572,7 +579,66 @@ class TheOffsiteLedgerChain(unittest.TestCase):
         r, calls = self.restore_with(*self.DR, '--ledger-from', folder, **self.bucket_env(self.names(1, 2)))
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertIn('off-site ledger : the bucket lists 2 batch(es); every one is here', r.stdout)
-        self.assertIn('the signed batches form one unbroken chain; every batch the bucket lists is here)', r.stdout)
+        self.assertIn('the signed batches form one unbroken chain; every batch the bucket lists is here; versioning is not on', r.stdout)
+
+    # ── [REVIEW-M S4-2] no fork ──────────────────────────────────────────────
+    def test_a_fork_is_refused_naming_both_batches(self):
+        first = self.batch(1)
+        folder = self.ledger(first, self.batch(2))
+        # a third batch that also follows batch 1
+        d = Path(folder); d.chmod(0o700)
+        base = 'erasure-ledger-20261028T103000Z-0b9f0c43'
+        (d / f'{base}.jsonl').write_text(json.dumps({**OFFSITE[0], 'id': '0b9f0c3e-1111-4a2b-8c3d-000000000109', 'createdAt': '2026-10-28T10:03:00.000'}) + '\n')
+        (d / f'{base}.jsonl').chmod(0o600)
+        enc = d / f'{base}.jsonl.gpg'
+        enc.write_bytes(b'synthetic ciphertext')
+        one = d / 'erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg.sig'
+        subprocess.run([sys.executable, '-I', str(DEPLOY / 'backup-signature.py'), 'sign', '--key', str(self.key), '--object', str(enc), '--out', f'{enc}.sig',
+                        '--plain-sha256', hashlib.sha256((d / f'{base}.jsonl').read_bytes()).hexdigest(), '--created', '20261028T103000Z',
+                        '--prev', 'erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg', '--prev-sha256', hashlib.sha256(one.read_bytes()).hexdigest()],
+                       check=True, capture_output=True)
+        enc.unlink()
+        r, calls = self.restore_with(*self.DR, '--ledger-from', folder)
+        self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN: erasure-ledger-20261028T102000Z-0b9f0c42 and erasure-ledger-20261028T103000Z-0b9f0c43 both follow erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg: the chain forks')
+
+    # ── [REVIEW-M S4-1] a batch deleted from a versioned bucket ──────────────
+    def versions(self, *items):
+        """list-object-versions JSON: (key, kind, latest) with kind V (a version) or D (a delete marker)."""
+        doc = {'Versions': [], 'DeleteMarkers': []}
+        for key, kind, latest in items:
+            doc['Versions' if kind == 'V' else 'DeleteMarkers'].append({'Key': key, 'IsLatest': latest})
+        return json.dumps(doc)
+
+    def test_with_versioning_on_a_deleted_or_only_old_batch_is_refused_named(self):
+        folder = self.ledger(self.batch(1), self.batch(2))
+        here = [(k, 'V', True) for k in self.names(1, 2)]
+        gone = 'db/erasure-ledger/erasure-ledger-20261028T103000Z-0b9f0c43.jsonl.gpg'
+        for extra, says in (([(gone, 'V', False), (gone, 'D', True), (gone + '.sig', 'V', False), (gone + '.sig', 'D', True)], 'erasure-ledger-20261028T103000Z-0b9f0c43.jsonl.gpg was deleted from the bucket'),
+                            ([(gone + '.sig', 'V', False)], 'erasure-ledger-20261028T103000Z-0b9f0c43.jsonl.gpg.sig has only old versions')):
+            with self.subTest(says=says):
+                r, calls = self.restore_with(*self.DR, '--ledger-from', folder, **self.bucket_env(self.names(1, 2), FAKE_VERSIONING='Enabled',
+                                                                                                 FAKE_LEDGER_VERSIONS=self.versions(*here, *extra)))
+                self.assert_refused_before_anything(r, calls, says, 'a batch was DELETED from the off-site bucket')
+                self.assertIn('VERSIONS db/erasure-ledger/', calls)
+        r, calls = self.restore_with(*self.DR, '--ledger-from', folder, **self.bucket_env(self.names(1, 2), FAKE_VERSIONING='Enabled',
+                                                                                         FAKE_LEDGER_VERSIONS=self.versions(*here, (self.names(1)[0], 'V', False))))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn('every batch the bucket lists is here, and none was deleted (versioning on)', r.stdout)
+
+    def test_with_versioning_off_or_unreadable_the_result_says_a_deletion_would_not_be_noticed(self):
+        folder = self.ledger(self.batch(1))
+        for state in ('None', 'Suspended', 'fail'):
+            with self.subTest(state=state):
+                r, calls = self.restore_with(*self.DR, '--ledger-from', folder, **self.bucket_env(self.names(1), FAKE_VERSIONING=state))
+                self.assertEqual(r.returncode, 3, r.stderr)
+                self.assertIn('a batch deleted from the bucket together with its signature cannot be noticed', r.stderr)
+                self.assertIn('versioning is not on, so a batch DELETED from the bucket would not be noticed', r.stdout)
+                self.assertNotIn('VERSIONS db/erasure-ledger/', calls)
+
+    def test_with_versioning_on_a_versions_listing_failure_refuses(self):
+        r, calls = self.run_restore('versions', (*self.DR, '--ledger-from', self.ledger(self.batch(1))), trust=self.trust,
+                                    **self.bucket_env(self.names(1), FAKE_VERSIONING='Enabled'))
+        self.assert_refused_before_anything(r, calls, 'could not list the versions')
 
     def test_a_bucket_that_cannot_be_listed_refuses_unless_the_owner_says_it_is_gone(self):
         folder = self.ledger(self.batch(1))

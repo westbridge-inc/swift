@@ -72,7 +72,8 @@ if args[:1] == ["run"]:
     if "head-object" in args:
         key = args[args.index("--key") + 1]
         size = os.path.getsize(os.path.join(bucket, key))
-        print(size + (1 if os.environ.get("SIZE_LIES") == "1" else 0)); sys.exit(0)
+        lies = os.environ.get("SIZE_LIES") == "1" or (os.environ.get("SIG_SIZE_LIES") == "1" and key.endswith(".sig"))
+        print(size + (1 if lies else 0)); sys.exit(0)
 sys.exit(0)
 '''
 
@@ -264,6 +265,52 @@ class ErasureLedgerShip(unittest.TestCase):
                 self.assertIn("nothing was shipped", r.stderr)
                 self.assertEqual(self.objects(), [])
                 self.assertFalse(self.ships.exists())
+
+    # ── [REVIEW-M S4-2/S4-3] no fork, and the record follows only a proven signature ──
+    def test_the_host_record_is_written_only_after_the_uploaded_signature_is_proven(self):
+        r = self.run_ship("--project", "swift", SIG_SIZE_LIES="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("the uploaded signature is", r.stderr)
+        self.assertFalse(self.chain.exists())
+        self.assertFalse(self.ships.exists())
+
+    def test_a_run_that_died_before_its_record_does_not_make_the_next_batch_fork(self):
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        stale = self.chain.read_text()
+        self.next_batch(5)
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.chain.write_text(stale)  # the second run's record never got written
+        self.next_batch(6)
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first, second, third = sorted(self.batches())
+        self.assertEqual(self.manifest(Path(str(second) + ".sig"))["prev"], first.name)
+        self.assertEqual(self.manifest(Path(str(third) + ".sig"))["prev"], second.name)
+
+    def test_a_shipped_batch_deleted_or_replaced_in_the_bucket_stops_shipping(self):
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        [first] = self.batches()
+        sig = Path(str(first) + ".sig")
+        # replaced: another (validly signed) signature of the same batch
+        subprocess.run([sys.executable, "-I", str(DEPLOY / "backup-signature.py"), "sign", "--key", str(self.signing), "--object", str(first),
+                        "--out", str(sig), "--created", "20991231T000000Z", "--prev", "none"], check=True, capture_output=True)
+        self.next_batch(5)
+        self.ships.unlink()
+        r = self.run_ship("--project", "swift")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("it was replaced. Nothing was shipped", r.stderr)
+        self.assertFalse(self.ships.exists())
+        # deleted: the batch and its signature are gone
+        first.unlink(); sig.unlink()
+        r = self.run_ship("--project", "swift")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is not in the bucket", r.stderr)
+        self.assertIn("DELETED", r.stderr)
+        self.assertEqual(self.batches(), [])
+        self.assertFalse(self.ships.exists())
 
     def test_a_signature_that_does_not_upload_or_verify_records_nothing(self):
         for extra in ({"SIG_UPLOAD_FAIL": "1"}, {"BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.tmp / "missing-allowed-signers")}):
