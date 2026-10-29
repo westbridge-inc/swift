@@ -1534,6 +1534,85 @@ describe('a till’s "not for sale" survives every restock (REVIEW-G S4-3)', () 
   }, 60_000);
 });
 
+// [REVIEW-F S3-1 · COORD ruling 29 Oct 15:45Z] The web and phone item editors send the item's on/off answer on EVERY
+// save, the unchanged one too. A save that leaves the switch where it was is no answer: fixing the price of an item
+// the till marked not for sale (or one sold out by stock) keeps it sold out, so a later file still brings it back and
+// the store is never told it switched it off. Moving the switch is still the store's own answer and ends both marks.
+describe('an item editor save that leaves the switch alone keeps a sold-out item sold out (REVIEW-F S3-1)', () => {
+  const edit = (store: Store, itemId: string, payload: Record<string, unknown>) => app.inject({
+    method: 'PUT', url: `/api/v1/vendor/items/${itemId}`, payload,
+    headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
+  });
+
+  it('a price fix on an item the till marked not for sale keeps the till’s mark; a later file with it for sale brings it back', async () => {
+    const store = await makeStore();
+    const biscuit = await makeItem(store, 'EDT-1', 10, 450, { name: 'Biscuit' });
+    await syncOk(store, csvOf(forSaleRow('EDT-1', 'Biscuit', '450', '10', 'false')));
+    const marked = await itemOf(biscuit.id);
+    expect(marked.isAvailable).toBe(false);
+    expect(marked.tillOffAt).not.toBeNull();
+
+    // The editor sends the unchanged switch with the new price, as both apps do.
+    const saved = await edit(store, biscuit.id, { basePrice: 500, isAvailable: false, description: 'Crunchy' });
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: false, tillOffAt: marked.tillOffAt, autoHiddenAt: null, description: 'Crunchy' });
+    expect(Number((await itemOf(biscuit.id)).basePrice)).toBe(500);
+
+    // A restock still leaves it off: the till's mark held through the edit.
+    await app.prisma.$transaction((tx) => unhideRestocked(tx, biscuit.id));
+    expect((await itemOf(biscuit.id)).isAvailable).toBe(false);
+
+    const again = csvOf(forSaleRow('EDT-1', 'Biscuit', '500', '10', 'true'));
+    const p = await previewOk(store, again);
+    expect(p.changes.find((c) => c.itemId === biscuit.id)?.soldOut).toBe('BACK_ON_SALE');
+    expect(JSON.stringify(p.changes)).not.toContain('You switched this item off');
+    expect((await confirm(store, again, p)).statusCode).toBe(200);
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, tillOffAt: null, stockQuantity: 10 });
+  }, 60_000);
+
+  it('a price fix on an item sold out by stock keeps it sold out: a later file with stock, or a restock in the same save, brings it back', async () => {
+    const store = await makeStore();
+    const soap = await makeItem(store, 'EDT-2', 3, 200, { name: 'Soap' });
+    const rice = await makeItem(store, 'EDT-3', 2, 900, { name: 'Rice' });
+    await syncOk(store, csvOf(row('EDT-2', 'Soap', '200', '0'), row('EDT-3', 'Rice', '900', '0')));
+    const hidden = await itemOf(soap.id);
+    expect(hidden).toMatchObject({ isAvailable: false, stockQuantity: 0 });
+    expect(hidden.autoHiddenAt).not.toBeNull();
+
+    const saved = await edit(store, soap.id, { basePrice: 250, isAvailable: false });
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect(await itemOf(soap.id)).toMatchObject({ isAvailable: false, autoHiddenAt: hidden.autoHiddenAt, tillOffAt: null });
+
+    const back = csvOf(row('EDT-2', 'Soap', '250', '6'), row('EDT-3', 'Rice', '900', '0'));
+    const p = await previewOk(store, back);
+    expect(p.changes.find((c) => c.itemId === soap.id)?.soldOut).toBe('BACK_ON_SALE');
+    expect(JSON.stringify(p.changes)).not.toContain('You switched this item off');
+    expect((await confirm(store, back, p)).statusCode).toBe(200);
+    expect(await itemOf(soap.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 6 });
+
+    // The editor counts the shelf with the switch untouched: the restock brings it back, as any restock does.
+    const counted = await edit(store, rice.id, { stockQuantity: 4, isAvailable: false });
+    expect(counted.statusCode, counted.body).toBe(200);
+    expect(await itemOf(rice.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 4 });
+  }, 60_000);
+
+  it('moving the switch in the editor is still the store’s own answer: on ends the till’s mark, off is the store’s own off', async () => {
+    const store = await makeStore();
+    const tea = await makeItem(store, 'EDT-4', 4, 300, { name: 'Tea' });
+    const jam = await makeItem(store, 'EDT-5', 4, 600, { name: 'Jam' });
+    await syncOk(store, csvOf(forSaleRow('EDT-4', 'Tea', '300', '4', 'false'), forSaleRow('EDT-5', 'Jam', '600', '4', 'true')));
+    expect((await itemOf(tea.id)).tillOffAt).not.toBeNull();
+
+    expect((await edit(store, tea.id, { basePrice: 300, isAvailable: true })).statusCode).toBe(200);
+    expect(await itemOf(tea.id)).toMatchObject({ isAvailable: true, tillOffAt: null, autoHiddenAt: null });
+
+    expect((await edit(store, jam.id, { basePrice: 600, isAvailable: false })).statusCode).toBe(200);
+    const { preview: later } = await syncOk(store, csvOf(forSaleRow('EDT-4', 'Tea', '300', '4', 'true'), forSaleRow('EDT-5', 'Jam', '600', '9', 'true')));
+    expect(later.changes.find((c) => c.itemId === jam.id)?.soldOut).toBe('STAYS_SWITCHED_OFF');
+    expect(await itemOf(jam.id)).toMatchObject({ isAvailable: false, stockQuantity: 9 });
+  }, 60_000);
+});
+
 describe('only a till sync makes a checkout try again (REVIEW-M S3-1, S3-2)', () => {
   it('a sync takes the till-sync key: it waits for a checkout already sharing it', async () => {
     const store = await makeStore();

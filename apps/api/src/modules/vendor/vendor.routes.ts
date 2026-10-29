@@ -4256,11 +4256,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (!cat || cat.vendorId !== vendorId || cat.archivedAt) throw new NotFoundError('Category', body.categoryId);
     }
 
+    // [REVIEW-F S3-1 · COORD 29 Oct] The web and phone editors send the switch on EVERY save, the unchanged one too.
+    // A switch left where it was is no answer: it never ends the engine's sold-out or a till's "not for sale" (a price
+    // fix on a sold-out item keeps it sold out, so stock or a later till file still brings it back). Moving the switch
+    // is the store's own answer and ends both marks.
+    const availabilityAnswer = body.isAvailable !== undefined && body.isAvailable !== existing.isAvailable ? body.isAvailable : undefined;
+
     // Inventory: restocking above zero undoes an AUTO-hide (the engine hid it
     // when stock ran out) — the owner's own availability toggle always wins,
-    // and any explicit isAvailable in this request clears the auto-hide marker.
+    // and a moved switch in this request clears the auto-hide marker.
     const restocksAboveZero = body.stockQuantity !== undefined && (body.stockQuantity ?? 0) > 0;
-    const unhide = restocksAboveZero && existing.autoHiddenAt !== null && body.isAvailable === undefined;
+    const unhide = restocksAboveZero && existing.autoHiddenAt !== null && availabilityAnswer === undefined;
 
     // [MKT-2] STOCK IS NOT AN ORDINARY FIELD ON THIS FORM.
     //
@@ -4303,7 +4309,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
           ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
           // [REVIEW-G S4-3] The store's own answer also ends a till file's "not for sale".
-          ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null, tillOffAt: null }),
+          ...(availabilityAnswer !== undefined && { isAvailable: availabilityAnswer, autoHiddenAt: null, tillOffAt: null }),
           ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
           ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
           ...(body.allergens !== undefined && { allergens: body.allergens }),
@@ -4314,6 +4320,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         },
         include: itemInclude,
       });
+      // [GUARDRAILS §8] Judged on any "on" in the request, the unchanged one too (stricter than the moved switch).
       if (body.isAvailable === true) await assertNotBanned(tx, updated.id);
       if (!unhide) return updated;
       const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
