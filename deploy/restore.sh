@@ -99,8 +99,9 @@ KEEP_INSPECT=0
 # [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
 # base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
 PROJECT=""
-# [Off-site erasure ledger] The shipped entries, decrypted by the owner on his own computer: a plain
-# JSONL file only this login can read. They join the live ledger, or stand alone in a DR restore.
+# [Off-site erasure ledger] The shipped batches, decrypted by the owner on his own computer, each beside
+# its signature, in a directory only this login can read [BACKUP-FU]. They join the live ledger, or
+# stand alone in a DR restore.
 LEDGER_FROM=""
 # [SEC-BACKUP F2] The signature: the owner's explicit flag for a dump made before signing existed;
 # the drill's verified bundle (base64) and object name for the plain dump it pipes in; and
@@ -118,7 +119,7 @@ while [ $# -gt 0 ]; do
     --fetch-signature) FETCH_SIGNATURE=1 ;;
     --signature-b64) [ $# -ge 2 ] || die "--signature-b64 needs the signature bundle"; SIGNATURE_B64="$2"; shift ;;
     --signed-object) [ $# -ge 2 ] || die "--signed-object needs the signed object's name"; SIGNED_OBJECT="$2"; shift ;;
-    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the decrypted off-site ledger file"; LEDGER_FROM="$2"; shift ;;
+    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the directory of decrypted off-site ledger batches"; LEDGER_FROM="$2"; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
     --compare-source) COMPARE_SOURCE=1 ;;
     --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
@@ -283,45 +284,151 @@ REPLAY_SQL="$HERE/restore-replay-erasures.sql"
 OFFSITE_SQL="$HERE/restore-offsite-ledger.sql"
 OFFSITE_CSV=""
 OFFSITE_NEWEST=""
-# [Off-site erasure ledger] Check the file before anything is created: readable by this login only,
-# every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to CSV
-# (one JSON value per row) in this run's private directory; prints the newest entry's time.
+# [Off-site erasure ledger · BACKUP-FU] Check the batches before anything is created. --ledger-from is
+# the DIRECTORY the owner decrypted the off-site batches into: every <batch>.jsonl (readable by this
+# login only) beside the <batch>.jsonl.gpg.sig the shipper uploaded with it. Each signed batch is
+# verified against the trusted backup signing keys (the signature, the batch's name, and the
+# decrypted batch's SHA-256 that was signed with the encrypted copy) before any line is read; one
+# that fails is refused whatever the flags, and a signature whose batch is missing is refused too
+# (the fetch or the decryption was incomplete). A batch with NO signature:
+#   - whose every entry is also in a verified batch is set aside (a copy whose signature never
+#     reached the bucket: the shipper ships those entries again, signed);
+#   - otherwise is refused, unless the owner passes --allow-unsigned-legacy AND it is from before
+#     signing began (its name stamp and every entry's time before the first signed batch: the
+#     shipper's record BACKUP_FIRST_SIGNED_LEDGER_FILE, the owner's copy BACKUP_LEDGER_SIGNED_SINCE,
+#     and the oldest verified batch here, whichever is earliest). With no record at all it also
+#     needs --legacy-without-signing-record. A local file's time is its own claim (as for a local
+#     dump): the flag is the owner's explicit decision.
+# Every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to
+# CSV (one JSON value per row) in this run's private directory; prints the newest entry's time.
+FIRST_SIGNED_LEDGER_DEFAULT=/var/backups/swift/.first-signed-erasure-ledger
+ledger_signed_since() {
+  local stamp="${BACKUP_LEDGER_SIGNED_SINCE:-$(env_value BACKUP_LEDGER_SIGNED_SINCE)}" file
+  if [ -z "$stamp" ]; then
+    file="${BACKUP_FIRST_SIGNED_LEDGER_FILE:-$(env_value BACKUP_FIRST_SIGNED_LEDGER_FILE)}"
+    file="${file:-$FIRST_SIGNED_LEDGER_DEFAULT}"
+    [ -r "$file" ] && stamp="$(head -1 "$file" | tr -d '[:space:]')"
+  fi
+  [ -z "$stamp" ] && return 0
+  [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "the record of the first signed erasure ledger batch is malformed ($stamp); nothing was created"
+  printf '%s\n' "$stamp"
+}
 read_offsite_ledger() {
-  [ -f "$LEDGER_FROM" ] || die "--ledger-from: $LEDGER_FROM is not a file"
+  local inventory kind base rc since bundle
+  [ -d "$LEDGER_FROM" ] ||
+    die "--ledger-from takes the DIRECTORY of the decrypted off-site batches, each <batch>.jsonl beside its <batch>.jsonl.gpg.sig (PILOT-RUNBOOK §4): $LEDGER_FROM is not a directory; nothing was created"
   private_tmp
   OFFSITE_CSV="$TMP_DIR/offsite-ledger.csv"
-  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" <<'PY'
-import csv, json, os, re, stat, sys
-src, dst = sys.argv[1], sys.argv[2]
-if os.stat(src).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-    sys.exit("--ledger-from: the ledger file is readable by others; chmod 600 it")
+  inventory="$(python3 -I - "$LEDGER_FROM" <<'PY'
+import os, re, stat, sys
+d = sys.argv[1]
+st = os.stat(d)
+if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    sys.exit("--ledger-from: the ledger directory is open to others; chmod 700 it")
+batch = re.compile(r"(erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8})\.jsonl(\.gpg|\.gpg\.sig)?")
+plain, sigs = set(), set()
+for name in sorted(os.listdir(d)):
+    m = batch.fullmatch(name)
+    if not m:
+        sys.exit(f"--ledger-from: {name} is not an erasure ledger batch (<batch>.jsonl, .jsonl.gpg or .jsonl.gpg.sig)")
+    path = os.path.join(d, name)
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        sys.exit(f"--ledger-from: {name} is not a regular file")
+    if m.group(2) is None:
+        if os.stat(path).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            sys.exit(f"--ledger-from: {name} is readable by others; chmod 600 it")
+        plain.add(m.group(1))
+    elif m.group(2) == ".gpg.sig":
+        sigs.add(m.group(1))
+for b in sorted(sigs - plain):
+    sys.exit(f"--ledger-from: {b}.jsonl.gpg.sig is here but its decrypted batch {b}.jsonl is not: fetch and decrypt EVERY batch")
+if not plain:
+    sys.exit("--ledger-from: the ledger directory holds no decrypted batch")
+for b in sorted(plain):
+    print(("signed " if b in sigs else "unsigned ") + b)
+PY
+)" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
+  : > "$TMP_DIR/ledger-signed"; : > "$TMP_DIR/ledger-unsigned"
+  while read -r kind base; do
+    if [ "$kind" = unsigned ]; then printf '%s\n' "$base" >> "$TMP_DIR/ledger-unsigned"; continue; fi
+    rc=0
+    bundle="$(python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$LEDGER_FROM/$base.jsonl.gpg.sig" \
+      --name "$base.jsonl.gpg" --plain "$LEDGER_FROM/$base.jsonl" --print)" || rc=$?
+    case "$rc" in
+      0) ;;
+      4) die "the erasure ledger signature cannot be checked: the allowed-signers file is unusable (above); nothing was created" ;;
+      *) die "the signature of the erasure ledger batch $base was REFUSED (above): it was not shipped and signed by a Swift backup host, or it was changed. Nothing was created; --allow-unsigned-legacy does not override a signature that fails" ;;
+    esac
+    printf '%s %s\n' "$base" "$(sed -n 's/^created \([0-9]\{8\}T[0-9]\{6\}Z\)$/\1/p' <<<"$bundle" | head -1)" >> "$TMP_DIR/ledger-signed"
+  done <<<"$inventory"
+  since="$(ledger_signed_since)"
+  [ ! -s "$TMP_DIR/ledger-unsigned" ] || [ "$ALLOW_UNSIGNED" = 0 ] ||
+    echo "WARNING: --allow-unsigned-legacy: an erasure ledger batch WITHOUT a signature may be replayed onto the copy, only one from before signing began: its origin is NOT proven." >&2
+  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" "$TMP_DIR/ledger-signed" "$TMP_DIR/ledger-unsigned" "$since" "$ALLOW_UNSIGNED" "$LEGACY_NO_RECORD" <<'PY'
+import csv, json, os, re, sys
+d, dst, signed_file, unsigned_file, record, allow, no_record = sys.argv[1:8]
 kinds = {"receipts", "destroyed_keys", "retired_documents", "shredded_runs", "shredded_fields",
          "closed_accounts", "deleted_rows", "erased_rating_text", "erased_outbox_text"}
 uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 stamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?")
-newest, n = "", 0
-with open(src) as f, open(dst, "w", newline="") as out:
+def entries(base):
+    out = []
+    with open(os.path.join(d, base + ".jsonl")) as f:
+        for no, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                sys.exit(f"--ledger-from: {base}.jsonl line {no} is not JSON")
+            if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
+                    and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
+                sys.exit(f"--ledger-from: {base}.jsonl line {no} is not an erasure ledger entry")
+            out.append(e)
+    return out
+def as_stamp(created_at):
+    return re.sub(r"[-:]", "", created_at.split(".")[0]) + "Z"
+signed = [l.split() for l in open(signed_file).read().splitlines() if l.strip()]
+unsigned = [l.strip() for l in open(unsigned_file).read().splitlines() if l.strip()]
+take, ids = [], set()
+for base, *created in signed:
+    batch = entries(base)
+    take += batch
+    ids |= {e["id"] for e in batch}
+bounds = [b for b in [record] + [c[0] for _, *c in signed if c] if b]
+bound = min(bounds) if bounds else ""
+for base in unsigned:
+    batch = entries(base)
+    if batch and all(e["id"] in ids for e in batch):
+        print(f"off-site ledger : {base} has no signature; every entry in it is also in a verified batch: set aside", file=sys.stderr)
+        continue
+    if allow != "1":
+        sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature. Batches are signed; an unsigned one is refused, because anyone who can write to the backup bucket could have planted it. For a batch shipped before signing existed, the owner may pass --allow-unsigned-legacy")
+    written = base.split("-")[2]
+    if bound:
+        newest = max([written] + [as_stamp(e["createdAt"]) for e in batch])
+        if not newest < bound:
+            sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature and is from after signing began (its time {newest}, the first signed batch {bound}): not a legacy batch. Refused even with --allow-unsigned-legacy")
+        print(f"legacy check: {base} is from {newest}, before the first signed batch ({bound})", file=sys.stderr)
+    elif no_record != "1":
+        sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature, and there is no record of the first signed batch (BACKUP_FIRST_SIGNED_LEDGER_FILE) and no signed batch here: its time cannot be checked against when signing began. Set BACKUP_LEDGER_SIGNED_SINCE to the owner's recorded stamp, or, only if no batch was ever signed, add --legacy-without-signing-record as well")
+    else:
+        print(f"WARNING: --legacy-without-signing-record: no record of when erasure ledger signing began; {base} is NOT checked against it.", file=sys.stderr)
+    print(f"WARNING: REPLAYING AN UNSIGNED ERASURE LEDGER BATCH ({base}) because --allow-unsigned-legacy was given. Its origin is NOT proven.", file=sys.stderr)
+    take += batch
+if not take:
+    sys.exit("--ledger-from: the ledger directory holds no entry to replay")
+newest = ""
+with open(dst, "w", newline="") as out:
     w = csv.writer(out, lineterminator="\n")
-    for no, line in enumerate(f, 1):
-        if not line.strip():
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            sys.exit(f"--ledger-from: line {no} is not JSON")
-        if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
-                and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
-            sys.exit(f"--ledger-from: line {no} is not an erasure ledger entry")
+    for e in take:
         w.writerow([json.dumps(e)])
         newest = max(newest, e["createdAt"])
-        n += 1
-if n == 0:
-    sys.exit("--ledger-from: the ledger file holds no entry")
 print(newest)
 PY
 )" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
   [ -f "$OFFSITE_SQL" ] || die "--ledger-from: restore-offsite-ledger.sql is missing next to restore.sh"
-  echo "off-site ledger : $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
+  echo "off-site ledger : $(grep -c . "$TMP_DIR/ledger-signed") signed batch(es) verified, $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
 }
 replay_erasure_ledger() {
   local has=f names=() selects=() name="" line i script summary live_id copy_id

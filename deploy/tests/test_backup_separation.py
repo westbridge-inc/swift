@@ -84,8 +84,10 @@ class UnitsLoadOnlyTheBackupStore(unittest.TestCase):
             for name in names:
                 self.assertIn(f"{name}_FILE", unset, unit)
 
-    def test_the_backup_unit_holds_the_signing_key_and_the_ledger_unit_does_not_need_it(self):
-        self.assertIn("BACKUP_SIGNING_KEY", dict(load_credentials((DEPLOY / "swift-backup.service").read_text())))
+    def test_the_backup_unit_and_the_ledger_unit_both_hold_the_signing_key(self):
+        # [BACKUP-FU] erasure ledger batches are signed with the same key as the dumps
+        for unit in UNITS:
+            self.assertIn("BACKUP_SIGNING_KEY", dict(load_credentials((DEPLOY / unit).read_text())), unit)
 
     def test_the_drill_and_the_runbook_restore_use_the_backup_store_and_the_api_pair_only_as_the_fallback(self):
         drill = (DEPLOY / "backup-drill.sh").read_text()

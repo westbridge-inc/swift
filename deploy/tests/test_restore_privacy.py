@@ -8,6 +8,7 @@ apps/api/src/__tests__/restore-erasure-replay.test.ts.
 then `docker exec <instance>`), the live database stays behind `docker compose
 exec postgres`: the stand-in logs both in the same shape, and every dump here is
 signed as backup.sh signs it."""
+import hashlib
 import json
 import os
 import sys
@@ -96,7 +97,7 @@ if 'count(*)' in sql: print('1')
 
 
 class RestoreQuarantineAndReplay(unittest.TestCase):
-    def run_restore(self, fail='', extra_args=(), project=('--project', 'swift-restore-test'), **env_extra):
+    def run_restore(self, fail='', extra_args=(), project=('--project', 'swift-restore-test'), trust='', **env_extra):
         root = Path(tempfile.mkdtemp(prefix='swift-restore-privacy-'))
         self.addCleanup(shutil.rmtree, root, True)
         deploy = root / 'deploy'
@@ -116,7 +117,7 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         # [SEC-BACKUP F2] signed as backup.sh signs it
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'swift-backup-signing', '-f', str(root / 'signing')], check=True)
         allowed = root / 'allowed_signers'
-        allowed.write_text('swift-backup namespaces="swift-backup" ' + ' '.join((root / 'signing.pub').read_text().split()[:2]) + '\n')
+        allowed.write_text('swift-backup namespaces="swift-backup" ' + ' '.join((root / 'signing.pub').read_text().split()[:2]) + '\n' + trust)
         allowed.chmod(0o644)
         subprocess.run([sys.executable, '-I', str(DEPLOY / 'backup-signature.py'), 'sign', '--key', str(root / 'signing'),
                         '--object', str(dump), '--out', f'{dump}.sig', '--created', '20261028T000000Z'], check=True, capture_output=True)
@@ -329,32 +330,79 @@ OFFSITE = [
 
 
 class TheOffsiteLedger(unittest.TestCase):
-    """[Off-site erasure ledger] restore.sh --ledger-from <file>: the entries the host unit shipped (the
-    owner decrypts them on his own computer). They join the live ledger, or stand alone when the live
-    database is gone."""
+    """[Off-site erasure ledger] restore.sh --ledger-from <directory>: the batches the host unit shipped,
+    decrypted by the owner on his own computer, each beside its signature. They join the live ledger, or
+    stand alone when the live database is gone. [BACKUP-FU] A batch is replayed only once its signature
+    verifies; an unsigned one only as a legacy batch from before signing began."""
     run_restore = RestoreQuarantineAndReplay.run_restore
     first = staticmethod(RestoreQuarantineAndReplay.first)
 
-    def ledger(self, lines, mode=0o600):
+    def setUp(self):
+        self.keys = Path(tempfile.mkdtemp(prefix='swift-ledger-signing-'))
+        self.addCleanup(shutil.rmtree, self.keys, True)
+        self.key = self.make_key('ledger-signing')
+        self.trust = 'swift-backup namespaces="swift-backup" ' + ' '.join(Path(str(self.key) + '.pub').read_text().split()[:2]) + '\n'
+
+    def make_key(self, name):
+        key = self.keys / name
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'swift-backup-signing', '-f', str(key)], check=True)
+        return key
+
+    def ledger(self, *batches, mode=0o700):
+        """A directory as the owner leaves it: each batch's decrypted .jsonl beside the .jsonl.gpg.sig the
+        shipper uploaded (signed over the encrypted copy and the plain batch's SHA-256)."""
         d = Path(tempfile.mkdtemp(prefix='swift-offsite-ledger-'))
         self.addCleanup(shutil.rmtree, d, True)
-        f = d / 'ledger.jsonl'
-        f.write_text(''.join((l if isinstance(l, str) else json.dumps(l)) + '\n' for l in lines))
-        f.chmod(mode)
-        return str(f)
+        for b in batches:
+            base = f"erasure-ledger-{b.get('stamp', '20261028T100000Z')}-{b.get('id8', '0b9f0c3e')}"
+            plain = d / f'{base}.jsonl'
+            plain.write_text(''.join((l if isinstance(l, str) else json.dumps(l)) + '\n' for l in b.get('lines', OFFSITE)))
+            plain.chmod(b.get('mode', 0o600))
+            if b.get('signed', True):
+                enc = d / f'{base}.jsonl.gpg'
+                enc.write_bytes(b'synthetic ciphertext ' + base.encode())
+                sha = hashlib.sha256(plain.read_bytes()).hexdigest()
+                subprocess.run([sys.executable, '-I', str(DEPLOY / 'backup-signature.py'), 'sign', '--key', str(b.get('key', self.key)),
+                                '--object', str(enc), '--out', f'{enc}.sig', '--plain-sha256', sha, '--created', b.get('stamp', '20261028T100000Z')],
+                               check=True, capture_output=True)
+                if not b.get('keep_gpg', False):
+                    enc.unlink()
+            if 'after' in b:
+                b['after'](d, base)
+        d.chmod(mode)
+        return str(d)
+
+    def restore_with(self, *args, **env):
+        return self.run_restore('', args, trust=self.trust, **env)
+
+    def assert_refused_before_anything(self, r, calls, *needles):
+        self.assertNotEqual(r.returncode, 0)
+        for n in needles:
+            self.assertIn(n, r.stderr)
+        self.assertFalse(any('CREATE DATABASE' in l for l in calls))
+        self.assertFalse(any(l.startswith('pg_restore') for l in calls))
+        self.assertNotIn('RESTORE OK', r.stdout)
 
     def test_a_ledger_others_can_read_or_a_malformed_one_is_refused_before_anything(self):
-        for path in (self.ledger(OFFSITE, 0o644), self.ledger(['not json']), self.ledger([{**OFFSITE[0], 'kind': 'something_else'}]),
-                     self.ledger([{**OFFSITE[0], 'id': 'not-a-uuid'}]), '/nonexistent/ledger.jsonl'):
+        plain_file = Path(self.ledger({})) / 'erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl'
+        for path in (self.ledger({}, mode=0o755), self.ledger({'mode': 0o644}), self.ledger({'lines': ['not json']}),
+                     self.ledger({'lines': [{**OFFSITE[0], 'kind': 'something_else'}]}),
+                     self.ledger({'lines': [{**OFFSITE[0], 'id': 'not-a-uuid'}]}), '/nonexistent/ledger', str(plain_file),
+                     self.ledger({'after': lambda d, base: (d / 'notes.txt').write_text('x')})):
             with self.subTest(path=path):
-                r, calls = self.run_restore('', ('--ledger-from', path))
-                self.assertNotEqual(r.returncode, 0)
-                self.assertIn('--ledger-from', r.stderr)
-                self.assertFalse(any('CREATE DATABASE' in l for l in calls))
+                r, calls = self.restore_with('--ledger-from', path)
+                self.assert_refused_before_anything(r, calls, '--ledger-from')
+
+    def test_a_single_concatenated_file_is_refused_the_batches_are_checked_one_by_one(self):
+        plain_file = Path(self.ledger({})) / 'erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl'
+        r, calls = self.restore_with('--ledger-from', str(plain_file))
+        self.assert_refused_before_anything(r, calls, 'is not a directory; nothing was created')
 
     def test_with_the_live_database_the_offsite_entries_join_the_live_ledger(self):
-        r, calls = self.run_restore('', ('--ledger-from', self.ledger(OFFSITE)))
+        r, calls = self.restore_with('--ledger-from', self.ledger({'keep_gpg': True}))
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('signature OK: erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl.gpg was signed by the trusted backup signing key', r.stderr)
+        self.assertIn('off-site ledger : 1 signed batch(es) verified, 2 entr(ies)', r.stdout)
         self.assertTrue(any(':: COPY (' in l and l.startswith('psql db=swift_live_fixture') for l in calls))
         script = self.replay_script
         self.assertIn('CREATE TEMP TABLE restore_offsite', script)
@@ -363,16 +411,89 @@ class TheOffsiteLedger(unittest.TestCase):
         self.assertIn('RESTORE OK', r.stdout)
 
     def test_without_the_live_database_the_offsite_ledger_makes_the_copy_erasure_complete_up_to_its_newest_entry(self):
-        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection', '--ledger-from', self.ledger(OFFSITE)))
+        later = {**OFFSITE[1], 'id': '0b9f0c3e-1111-4a2b-8c3d-000000000003', 'createdAt': '2026-10-28T09:59:00.000'}
+        r, calls = self.restore_with('--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection',
+                                     '--ledger-from', self.ledger({}, {'stamp': '20261028T110000Z', 'id8': '0b9f0c3f', 'lines': [later]}))
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertEqual([l for l in calls if 'db=swift_live_fixture' in l], [])
         self.assertIn('CREATE TEMP TABLE restore_ledger_closed_accounts', self.replay_script)
         self.assertIn('CREATE TEMP TABLE restore_offsite', self.replay_script)
         out = r.stdout + r.stderr
-        self.assertIn('erasure-complete up to 2026-10-21T12:00:01.000', out)
+        self.assertIn('off-site ledger : 2 signed batch(es) verified, 3 entr(ies)', out)
+        self.assertIn('erasure-complete up to 2026-10-28T09:59:00.000', out)
         self.assertNotIn('NOT erasure-complete: replay the off-site ledger', out)
         self.assertNotIn('RESTORE OK', out)
 
+    # ── [BACKUP-FU] signed batches only ──────────────────────────────────────
+    def test_an_unsigned_batch_is_refused_before_anything(self):
+        r, calls = self.restore_with('--ledger-from', self.ledger({}, {'stamp': '20261028T110000Z', 'id8': '0b9f0c3f', 'signed': False,
+                                                                     'lines': [{**OFFSITE[0], 'id': '0b9f0c3e-1111-4a2b-8c3d-00000000000a'}]}))
+        self.assert_refused_before_anything(r, calls, 'erasure-ledger-20261028T110000Z-0b9f0c3f has NO signature')
+
+    def test_a_batch_changed_after_it_was_signed_is_refused_whatever_the_flags(self):
+        tamper = lambda d, base: (d / f'{base}.jsonl').write_text((d / f'{base}.jsonl').read_text().replace('synthetic-closed', 'someone-else'))
+        r, calls = self.restore_with('--allow-unsigned-legacy', '--legacy-without-signing-record', '--ledger-from', self.ledger({'after': tamper}))
+        self.assert_refused_before_anything(r, calls, 'REFUSED', 'was REFUSED')
+
+    def test_a_signature_moved_onto_another_batch_is_refused(self):
+        def rename(d, base):
+            other = 'erasure-ledger-20261028T120000Z-0b9f0c40'
+            (d / f'{base}.jsonl').rename(d / f'{other}.jsonl')
+            (d / f'{base}.jsonl.gpg.sig').rename(d / f'{other}.jsonl.gpg.sig')
+        r, calls = self.restore_with('--ledger-from', self.ledger({'after': rename}))
+        self.assert_refused_before_anything(r, calls, 'cannot be renamed into another')
+
+    def test_a_batch_signed_by_a_key_that_is_not_trusted_is_refused(self):
+        r, calls = self.restore_with('--allow-unsigned-legacy', '--ledger-from', self.ledger({'key': self.make_key('stranger')}))
+        self.assert_refused_before_anything(r, calls, 'does not verify against the trusted backup signing key')
+
+    def test_a_signature_whose_batch_was_not_decrypted_is_refused(self):
+        drop = lambda d, base: (d / f'{base}.jsonl').unlink()
+        r, calls = self.restore_with('--ledger-from', self.ledger({}, {'stamp': '20261028T110000Z', 'id8': '0b9f0c3f', 'after': drop}))
+        self.assert_refused_before_anything(r, calls, 'erasure-ledger-20261028T110000Z-0b9f0c3f.jsonl.gpg.sig is here but its decrypted batch')
+
+    def test_an_unsigned_copy_of_entries_a_signed_batch_holds_is_set_aside(self):
+        # The shipper's batch whose signature never reached the bucket: the next run shipped the same entries, signed.
+        r, calls = self.restore_with('--ledger-from', self.ledger({'stamp': '20261028T100000Z', 'id8': '0b9f0c3e', 'signed': False},
+                                                                   {'stamp': '20261028T100100Z', 'id8': '0b9f0c3e'}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('erasure-ledger-20261028T100000Z-0b9f0c3e has no signature; every entry in it is also in a verified batch: set aside', r.stderr)
+        self.assertIn('off-site ledger : 1 signed batch(es) verified, 2 entr(ies)', r.stdout)
+        self.assertIn('RESTORE OK', r.stdout)
+
+    def test_the_legacy_flag_takes_an_unsigned_batch_only_from_before_signing_began(self):
+        legacy = {'stamp': '20261021T120000Z', 'id8': '0b9f0c3e', 'signed': False}
+        later = {'stamp': '20261028T110000Z', 'id8': '0b9f0c3f', 'signed': False,
+                 'lines': [{**OFFSITE[0], 'id': '0b9f0c3e-1111-4a2b-8c3d-00000000000b', 'createdAt': '2026-10-28T10:59:00.000'}]}
+        record = self.keys / 'first-signed-erasure-ledger'
+        record.write_text('20261028T100000Z\n')
+        # Older than the shipper's record: replayed, loudly.
+        r, calls = self.restore_with('--allow-unsigned-legacy', '--ledger-from', self.ledger(legacy), BACKUP_FIRST_SIGNED_LEDGER_FILE=str(record))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('legacy check: erasure-ledger-20261021T120000Z-0b9f0c3e is from 20261021T120001Z, before the first signed batch (20261028T100000Z)', r.stderr)
+        self.assertIn('REPLAYING AN UNSIGNED ERASURE LEDGER BATCH', r.stderr)
+        self.assertIn('RESTORE OK', r.stdout)
+        # After it: refused even with the flag (the record, the owner's stamp, or the oldest signed batch here).
+        for env, extra in (({'BACKUP_FIRST_SIGNED_LEDGER_FILE': str(record)}, ()),
+                           ({'BACKUP_FIRST_SIGNED_LEDGER_FILE': str(self.keys / 'none'), 'BACKUP_LEDGER_SIGNED_SINCE': '20261028T100000Z'}, ()),
+                           ({'BACKUP_FIRST_SIGNED_LEDGER_FILE': str(self.keys / 'none')}, ({'stamp': '20261028T100000Z', 'id8': '0b9f0c3d'},))):
+            with self.subTest(env=env):
+                r, calls = self.restore_with('--allow-unsigned-legacy', '--ledger-from', self.ledger(later, *extra), **env)
+                self.assert_refused_before_anything(r, calls, 'is from after signing began', 'Refused even with --allow-unsigned-legacy')
+        # An entry newer than the cut-over in an old-looking batch is not legacy either.
+        forged = {**legacy, 'lines': [{**OFFSITE[0], 'createdAt': '2026-10-28T10:30:00.000'}]}
+        r, calls = self.restore_with('--allow-unsigned-legacy', '--ledger-from', self.ledger(forged), BACKUP_FIRST_SIGNED_LEDGER_FILE=str(record))
+        self.assert_refused_before_anything(r, calls, 'is from after signing began')
+
+    def test_with_no_record_of_when_signing_began_the_owner_must_say_so_twice(self):
+        legacy = {'stamp': '20261021T120000Z', 'id8': '0b9f0c3e', 'signed': False}
+        env = {'BACKUP_FIRST_SIGNED_LEDGER_FILE': str(self.keys / 'none')}
+        r, calls = self.restore_with('--allow-unsigned-legacy', '--ledger-from', self.ledger(legacy), **env)
+        self.assert_refused_before_anything(r, calls, 'there is no record of the first signed batch')
+        r, calls = self.restore_with('--allow-unsigned-legacy', '--legacy-without-signing-record', '--ledger-from', self.ledger(legacy), **env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('--legacy-without-signing-record: no record of when erasure ledger signing began', r.stderr)
+        self.assertIn('RESTORE OK', r.stdout)
 
 
 class TheDeidentificationGap(unittest.TestCase):

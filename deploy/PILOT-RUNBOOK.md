@@ -698,17 +698,40 @@ backups. Before the first production backup:
    environment, so staging needs BACKUP_GPG_RECIPIENT_FILE and
    BACKUP_GPG_FINGERPRINT too, or it ships nothing (and doctor.sh FAILs).
 
+   Every batch is signed on the host with the backup signing key, as every
+   dump is: `<batch>.jsonl.gpg.sig` sits beside each `<batch>.jsonl.gpg`
+   (it holds the batch's name, size and digests, no entry). The unit loads
+   the key from the backup store (`BACKUP_SIGNING_KEY`); a unit installed
+   before this ships unsigned batches with a loud warning. Once one signed
+   batch has shipped, the host records the time in
+   `/var/backups/swift/.first-signed-erasure-ledger` (keep a copy of that
+   stamp with the allowed-signers file, as `BACKUP_LEDGER_SIGNED_SINCE`), and
+   from then on a run without a working key ships NOTHING (the entries wait,
+   and the 10-minute watch pages) rather than a batch no restore would take.
+
    Replaying it (a restore without the live database):
-   - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`.
-     The ones from before the backup you restore are harmless (each fact is
-     applied once). Fetch them all rather than guess the cut.
-   - Decrypt them on the owner's own computer, concatenate them into one file,
-     and `chmod 600` it.
-   - Copy it to the restore host and run `restore.sh --project <name>
-     --no-live-ledger --i-know-live-is-gone --ledger-from <file> <dump>`. Add
+   - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`,
+     the `.jsonl.gpg` batches AND their `.jsonl.gpg.sig` signatures, into one
+     directory. The ones from before the backup you restore are harmless (each
+     fact is applied once). Fetch them all rather than guess the cut.
+   - On the owner's own computer, decrypt each batch beside its signature,
+     keeping its name without `.gpg` (`gpg --output <batch>.jsonl --decrypt
+     <batch>.jsonl.gpg`), then `chmod 600` the files and `chmod 700` the
+     directory. Do not concatenate them: each batch is checked against its own
+     signature.
+   - Copy the directory to the restore host and run `restore.sh --project <name>
+     --no-live-ledger --i-know-live-is-gone --ledger-from <directory> <dump>`. Add
      the two DR flags only when the live database is really gone; with it,
-     `--ledger-from` joins the live ledger.
-   - When the restore is done, shred the decrypted file on BOTH machines
+     `--ledger-from` joins the live ledger. Every signed batch is verified
+     before anything is created (a batch that fails, or a signature whose
+     batch is missing, stops the restore). A batch without a signature whose
+     entries are all in a signed batch is set aside (its signature never
+     reached the bucket; the next run shipped it again, signed). Any other
+     unsigned batch is refused, unless it is from before signing began and the
+     owner adds `--allow-unsigned-legacy` (on a new host, also
+     `BACKUP_LEDGER_SIGNED_SINCE`, or `--legacy-without-signing-record` only if
+     no batch was ever signed).
+   - When the restore is done, shred the decrypted files on BOTH machines
      (`shred -u <file>`, or `rm -P` on a Mac).
 
    Every restore (drill, rehearsal or DR) also prints
