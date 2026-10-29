@@ -313,7 +313,10 @@ if args[:1] == ["run"]:
             shutil.copyfile(source, local(dst))
         sys.exit(0)
     if "head-object" in args:
-        print(os.path.getsize(os.path.join(bucket, args[args.index("--key") + 1])))
+        path = os.path.join(bucket, args[args.index("--key") + 1])
+        if not os.path.exists(path):  # as S3 answers for a missing key (or one whose newest version is a delete marker)
+            sys.stderr.write("An error occurred (404) when calling the HeadObject operation: Not Found\n"); sys.exit(254)
+        print(os.path.getsize(path))
         sys.exit(0)
 sys.exit(0)
 '''
@@ -908,6 +911,70 @@ class TheLegacyFlagEndsWhereSigningBegan(unittest.TestCase):
         self.assertNotIn("RESTORING AN UNSIGNED DUMP", r.stderr)
 
 
+class AnExpiredDumpIsNotAMissingSignature(unittest.TestCase):
+    """[BACKUP-FU2 · owner 29 Oct] Hourly dumps are deleted by the bucket's lifecycle rule 30 days after they
+    were made, each with its .sig. Asking for one that is gone says so: it is never mistaken for an
+    UNSIGNED dump (the drill would then offer --allow-unsigned-legacy) and never ends in a bare AWS error."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-expired-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        (self.bin / "docker").write_text(FAKE_DOCKER)
+        (self.bin / "pg_restore").write_text(FAKE_PG_RESTORE)
+        for b in self.bin.iterdir():
+            b.chmod(0o755)
+        self.bucket = self.tmp / "bucket" / "db"
+        self.bucket.mkdir(parents=True)
+        self.log = self.tmp / "calls"
+        self.log.write_text("")
+        self.key, self.allowed = make_signing_key(self.tmp)
+
+    def restore(self, *flags, name="swift-20261001T010000Z.dump.gpg"):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("BACKUP_", "AWS_"))}
+        env.update({"PATH": f"{self.bin}:{os.environ['PATH']}", "CALL_LOG": str(self.log), "FAKE_BUCKET": str(self.tmp / "bucket"),
+                    "BACKUP_BUCKET": "swift-backups", "AWS_ACCESS_KEY_ID": "id", "AWS_SECRET_ACCESS_KEY": "secret",
+                    "AWS_CLI_IMAGE": IMAGE, "BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.allowed),
+                    "BACKUP_FIRST_SIGNED_FILE": str(self.tmp / "absent")})
+        tail = [] if flags else ["swift_restore_expired"]
+        return subprocess.run(["bash", str(DEPLOY / "restore.sh"), "--project", "swift", *flags, f"s3://swift-backups/db/{name}", *tail],
+                              env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def assert_gone(self, r, name):
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"{name} is not in the backup bucket", r.stderr)
+        self.assertIn("deleted by the bucket's retention rule", r.stderr)
+        self.assertNotIn("swift-backup-signature none", r.stdout)
+        self.assertNotIn("has NO signature", r.stderr)
+        self.assertNotIn("RESTORING AN UNSIGNED DUMP", r.stderr)
+
+    def test_the_drill_is_told_the_dump_is_gone_not_that_it_is_unsigned(self):
+        r = self.restore("--fetch-signature")
+        self.assert_gone(r, "swift-20261001T010000Z.dump.gpg")
+
+    def test_a_restore_or_fetch_of_an_expired_dump_says_it_is_gone_even_with_the_legacy_flags(self):
+        for flags, name in ((("--fetch-encrypted",), "swift-20261001T010000Z.dump.gpg"),
+                            (("--allow-unsigned-legacy", "--legacy-without-signing-record", "--fetch-encrypted"), "swift-20261001T010000Z.dump.gpg"),
+                            ((), "swift-20261001T010000Z.dump")):
+            with self.subTest(flags=flags, name=name):
+                self.assert_gone(self.restore(*flags, name=name), name)
+
+    def test_a_signature_left_without_its_dump_says_the_dump_is_gone(self):
+        # The .sig is uploaded after its dump, so on a day boundary it can outlive the dump by a day.
+        dump = self.tmp / "swift-20261001T010000Z.dump.gpg"
+        dump.write_bytes(os.urandom(256))
+        sign(self.key, dump)
+        shutil.copyfile(f"{dump}.sig", self.bucket / f"{dump.name}.sig")
+        self.assert_gone(self.restore("--fetch-encrypted"), dump.name)
+
+    def test_a_dump_that_is_there_without_a_signature_is_still_unsigned(self):
+        (self.bucket / "swift-20261001T010000Z.dump.gpg").write_bytes(os.urandom(256))
+        r = self.restore("--fetch-signature")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "swift-backup-signature none")
+
+
 class DrillCarriesTheHostVerifiedSignature(unittest.TestCase):
     """backup-drill.sh asks the host for the verified signature first; no signature means no drill
     unless the owner passes --allow-unsigned-legacy."""
@@ -1080,7 +1147,9 @@ class VersioningIsBounded(unittest.TestCase):
 
     def test_old_versions_expire_and_the_rule_comes_before_versioning_keeping_other_rules(self):
         import json
-        self.state.write_text(json.dumps({"rules": [{"ID": "dumps-90d", "Status": "Enabled", "Prefix": "db/", "Expiration": {"Days": 90}}]}))
+        # [BACKUP-FU2] the bucket's other rule stays (it leaves the erasure ledger alone; one that would
+        # expire the ledger is refused: test_a_rule_that_would_expire_the_ledger_is_refused_nothing_changed)
+        self.state.write_text(json.dumps({"rules": [{"ID": "scratch-90d", "Status": "Enabled", "Prefix": "scratch/", "Expiration": {"Days": 90}}]}))
         r = self.run_it(BACKUP_VERSION_RETAIN_DAYS="14")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("old versions: expire after 14 days", r.stdout)
@@ -1089,7 +1158,7 @@ class VersioningIsBounded(unittest.TestCase):
         ours = next(x for x in st["rules"] if x["ID"] == "swift-backup-noncurrent-versions")
         self.assertEqual(ours["NoncurrentVersionExpiration"], {"NoncurrentDays": 14})
         self.assertEqual(ours["Expiration"], {"ExpiredObjectDeleteMarker": True})
-        self.assertTrue(any(x["ID"] == "dumps-90d" for x in st["rules"]))
+        self.assertTrue(any(x["ID"] == "scratch-90d" for x in st["rules"]))
         calls = self.log.read_text().splitlines()
         self.assertLess(calls.index("put-bucket-lifecycle-configuration"), calls.index("put-bucket-versioning"))
 
@@ -1106,6 +1175,130 @@ class VersioningIsBounded(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("NO expiry rule", r.stdout)
         self.assertIn("kept forever", r.stderr)
+
+    # ── [BACKUP-FU2 · owner 29 Oct 17:07Z] hourly dumps kept 30 days, the erasure ledger never ─────
+    # Real key names, as backup.sh and erasure-ledger-ship.sh write them.
+    @staticmethod
+    def keys(prefix="db"):
+        dumps = [f"{prefix}/swift-20261028T091500Z.dump.gpg", f"{prefix}/swift-20261028T091500Z.dump.gpg.sig",
+                 f"{prefix}/swift-20261028T091500Z.dump", f"{prefix}/swift-20261028T091500Z.dump.sig"]
+        ledger = [f"{prefix}/erasure-ledger/erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl.gpg",
+                  f"{prefix}/erasure-ledger/erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl.gpg.sig"]
+        return dumps, ledger
+
+    @staticmethod
+    def expiring(rules, key):
+        """The Enabled rules that would expire the CURRENT object KEY (S3 prefix matching; a rule without a
+        prefix covers every key). Noncurrent-version and delete-marker cleanup never expire a current object."""
+        out = []
+        for r in rules:
+            if r.get("Status") != "Enabled":
+                continue
+            exp = r.get("Expiration") or {}
+            if "Days" not in exp and "Date" not in exp:
+                continue
+            f = r.get("Filter") or {}
+            prefix = r.get("Prefix", f.get("Prefix", (f.get("And") or {}).get("Prefix", "")))
+            if key.startswith(prefix or ""):
+                out.append(r["ID"])
+        return out
+
+    def test_current_dumps_expire_after_30_days_by_default_and_never_the_ledger(self):
+        import json
+        r = self.run_it()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rules = json.loads(self.state.read_text())["rules"]
+        ours = next(x for x in rules if x["ID"] == "swift-backup-dump-retention")
+        self.assertEqual(ours, {"ID": "swift-backup-dump-retention", "Status": "Enabled", "Prefix": "db/swift-",
+                                "Expiration": {"Days": 30}})
+        dumps, ledger = self.keys()
+        for key in dumps:
+            self.assertEqual(self.expiring(rules, key), ["swift-backup-dump-retention"], key)
+        for key in ledger:
+            self.assertEqual(self.expiring(rules, key), [], key)
+        self.assertIn("hourly dumps: deleted 30 days after they were made (lifecycle rule swift-backup-dump-retention, prefix db/swift-; the erasure ledger is never expired)", r.stdout)
+        # both rules land in ONE configuration, before versioning
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(calls.count("put-bucket-lifecycle-configuration"), 1, calls)
+        self.assertLess(calls.index("put-bucket-lifecycle-configuration"), calls.index("put-bucket-versioning"))
+
+    def test_the_days_and_the_prefix_follow_the_settings(self):
+        import json
+        r = self.run_it(BACKUP_OFFSITE_RETAIN_DAYS="45", BACKUP_PREFIX="production")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rules = json.loads(self.state.read_text())["rules"]
+        ours = next(x for x in rules if x["ID"] == "swift-backup-dump-retention")
+        self.assertEqual((ours["Prefix"], ours["Expiration"]), ("production/swift-", {"Days": 45}))
+        dumps, ledger = self.keys("production")
+        self.assertTrue(all(self.expiring(rules, k) == ["swift-backup-dump-retention"] for k in dumps))
+        self.assertFalse([k for k in ledger if self.expiring(rules, k)])
+        self.assertIn("hourly dumps: deleted 45 days after they were made", r.stdout)
+
+    def test_a_bad_retention_or_prefix_changes_nothing(self):
+        for extra in ({"BACKUP_OFFSITE_RETAIN_DAYS": "0"}, {"BACKUP_OFFSITE_RETAIN_DAYS": "30d"}, {"BACKUP_OFFSITE_RETAIN_DAYS": "10000"},
+                      {"BACKUP_PREFIX": "/db"}, {"BACKUP_PREFIX": "db/"}, {"BACKUP_PREFIX": "d b"}, {"BACKUP_PREFIX": "db/../x"}):
+            with self.subTest(**extra):
+                self.log.write_text("")
+                r = self.run_it(**extra)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("put-", self.log.read_text())
+
+    def test_a_rule_that_would_expire_the_ledger_is_refused_nothing_changed(self):
+        import json
+        for rule in ({"ID": "old-90d", "Status": "Enabled", "Prefix": "db/", "Expiration": {"Days": 90}},
+                     {"ID": "everything", "Status": "Enabled", "Prefix": "", "Expiration": {"Days": 365}},
+                     {"ID": "filtered", "Status": "Enabled", "Filter": {"Prefix": "db/erasure"}, "Expiration": {"Date": "2027-01-01T00:00:00Z"}},
+                     {"ID": "no-prefix", "Status": "Enabled", "Filter": {}, "Expiration": {"Days": 7}}):
+            with self.subTest(rule=rule["ID"]):
+                self.state.write_text(json.dumps({"rules": [rule]}))
+                self.log.write_text("")
+                r = self.run_it()
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(f"lifecycle rule {rule['ID']} would delete the erasure ledger (db/erasure-ledger/)", r.stderr)
+                self.assertIn("nothing was changed", r.stderr)
+                self.assertNotIn("put-", self.log.read_text())
+                self.assertEqual(json.loads(self.state.read_text())["rules"], [rule])
+        # a disabled rule, or one that only cleans old versions, deletes no current batch
+        harmless = [{"ID": "off", "Status": "Disabled", "Prefix": "", "Expiration": {"Days": 1}},
+                    {"ID": "old-only", "Status": "Enabled", "Prefix": "", "NoncurrentVersionExpiration": {"NoncurrentDays": 9}}]
+        self.state.write_text(json.dumps({"rules": harmless}))
+        r = self.run_it()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_status_fails_without_the_dump_expiry_or_with_a_ledger_expiry(self):
+        import json
+        noncurrent = {"ID": "swift-backup-noncurrent-versions", "Status": "Enabled", "Prefix": "",
+                      "NoncurrentVersionExpiration": {"NoncurrentDays": 30}, "Expiration": {"ExpiredObjectDeleteMarker": True}}
+        self.state.write_text(json.dumps({"versioning": "Enabled", "rules": [noncurrent]}))
+        r = self.run_it("--status")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("hourly dumps: NO expiry rule", r.stdout)
+        dumps_rule = {"ID": "swift-backup-dump-retention", "Status": "Enabled", "Prefix": "db/swift-", "Expiration": {"Days": 30}}
+        self.state.write_text(json.dumps({"versioning": "Enabled", "rules": [noncurrent, dumps_rule]}))
+        r = self.run_it("--status")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("hourly dumps: deleted 30 days after they were made", r.stdout)
+        self.assertNotIn("put-", self.log.read_text())
+        self.state.write_text(json.dumps({"versioning": "Enabled", "rules": [noncurrent, dumps_rule,
+                                          {"ID": "old-90d", "Status": "Enabled", "Prefix": "db/", "Expiration": {"Days": 90}}]}))
+        r = self.run_it("--status")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("lifecycle rule old-90d would delete the erasure ledger", r.stderr)
+
+    def test_the_runbook_says_one_shipper_per_prefix_and_how_to_take_a_fork(self):
+        runbook = " ".join((DEPLOY / "PILOT-RUNBOOK.md").read_text().split())
+        self.assertIn("One shipper per bucket prefix; stop the old host's timer before a new host ships; drills use their own prefix.", runbook)
+        self.assertIn("is refused by default", runbook)
+        self.assertIn("`--ledger-accept-fork`", runbook)
+        self.assertIn("WARNING: LEDGER FORK ACCEPTED", runbook)
+        self.assertIn("hourly dumps are kept 30 days.", runbook)
+        self.assertIn("the ledger is never expired", runbook)
+        self.assertNotIn("Never give the `erasure-ledger/` prefix a shorter lifecycle rule than the dumps", runbook)
+
+    def test_the_owner_helper_says_what_step_3_sets(self):
+        tool = (DEPLOY / "owner" / "swift-backup-key.command").read_text()
+        self.assertIn("hourly backups deleted 30 days after they are made (never the erasure ledger)", tool)
+        self.assertIn("/opt/swift/deploy/backup-versioning.sh", tool)
 
 
 class DoctorSeesWhatBackupsLeaveBehind(unittest.TestCase):

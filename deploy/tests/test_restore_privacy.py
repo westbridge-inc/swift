@@ -582,10 +582,10 @@ class TheOffsiteLedgerChain(unittest.TestCase):
         self.assertIn('the signed batches form one unbroken chain; every batch the bucket lists is here; versioning is not on', r.stdout)
 
     # ── [REVIEW-M S4-2] no fork ──────────────────────────────────────────────
-    def test_a_fork_is_refused_naming_both_batches(self):
-        first = self.batch(1)
-        folder = self.ledger(first, self.batch(2))
-        # a third batch that also follows batch 1
+    def forked(self, *before, third_prev_sha=None):
+        """Batches 1 and 2, then a third batch that ALSO follows batch 1 (two hosts shipped to one prefix);
+        every batch signed by the trusted key. BEFORE: batches 1 and 2 (default plain)."""
+        folder = self.ledger(*(before or (self.batch(1), self.batch(2))))
         d = Path(folder); d.chmod(0o700)
         base = 'erasure-ledger-20261028T103000Z-0b9f0c43'
         (d / f'{base}.jsonl').write_text(json.dumps({**OFFSITE[0], 'id': '0b9f0c3e-1111-4a2b-8c3d-000000000109', 'createdAt': '2026-10-28T10:03:00.000'}) + '\n')
@@ -595,11 +595,68 @@ class TheOffsiteLedgerChain(unittest.TestCase):
         one = d / 'erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg.sig'
         subprocess.run([sys.executable, '-I', str(DEPLOY / 'backup-signature.py'), 'sign', '--key', str(self.key), '--object', str(enc), '--out', f'{enc}.sig',
                         '--plain-sha256', hashlib.sha256((d / f'{base}.jsonl').read_bytes()).hexdigest(), '--created', '20261028T103000Z',
-                        '--prev', 'erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg', '--prev-sha256', hashlib.sha256(one.read_bytes()).hexdigest()],
+                        '--prev', 'erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg', '--prev-sha256', third_prev_sha or hashlib.sha256(one.read_bytes()).hexdigest()],
                        check=True, capture_output=True)
         enc.unlink()
-        r, calls = self.restore_with(*self.DR, '--ledger-from', folder)
-        self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN: erasure-ledger-20261028T102000Z-0b9f0c42 and erasure-ledger-20261028T103000Z-0b9f0c43 both follow erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg: the chain forks')
+        return folder
+
+    FORK = 'erasure-ledger-20261028T102000Z-0b9f0c42 and erasure-ledger-20261028T103000Z-0b9f0c43 both follow erasure-ledger-20261028T101000Z-0b9f0c41.jsonl.gpg'
+
+    def test_a_fork_is_refused_naming_both_batches(self):
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.forked())
+        self.assert_refused_before_anything(r, calls, f'CHAIN_BROKEN: {self.FORK}: the chain forks')
+
+    # ── [BACKUP-FU2 · #2207 REVIEW-G S4-1] the operator path for a fork whose branches all verify ──
+    def test_the_refusal_names_the_operator_flag(self):
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.forked())
+        self.assert_refused_before_anything(r, calls, '--ledger-accept-fork', 'PILOT-RUNBOOK')
+        self.assertNotIn('LEDGER FORK ACCEPTED', r.stderr)
+
+    def test_the_owner_flag_accepts_a_fork_whose_branches_all_verify_loudly(self):
+        r, calls = self.restore_with(*self.DR, '--ledger-accept-fork', '--ledger-from', self.forked())
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn(f'WARNING: LEDGER FORK ACCEPTED (--ledger-accept-fork): {self.FORK}', r.stderr)
+        self.assertIn('every batch on every branch was verified and is replayed', r.stderr)
+        self.assertIn('one shipper per bucket prefix', r.stderr)
+        # every branch's entries are replayed (erasing more is the safe direction)
+        self.assertIn('off-site ledger : 3 signed batch(es) verified, 3 entr(ies)', r.stdout)
+        self.assertIn('the signed batches FORK (accepted with --ledger-accept-fork; every branch verified and replayed)', r.stdout)
+        self.assertNotIn('one unbroken chain', r.stdout)
+
+    def test_the_fork_flag_never_excuses_another_break(self):
+        drop = lambda d, base: [p.unlink() for p in d.glob(f'{base}.*')]
+        for folder, says in ((self.forked(third_prev_sha='f' * 64), 'is not the one it was signed after'),
+                             (self.forked(self.batch(1), self.batch(2), self.batch(4, prev='erasure-ledger-20261028T105000Z-0b9f0c45.jsonl.gpg')), 'which is not here'),
+                             (self.forked(self.batch(1), self.batch(2, prev='none')), 'say they are the first signed batch')):
+            with self.subTest(says=says):
+                r, calls = self.restore_with(*self.DR, '--ledger-accept-fork', '--ledger-from', folder)
+                self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN', says)
+
+    def test_the_fork_flag_without_a_fork_changes_nothing_and_needs_the_ledger(self):
+        r, calls = self.restore_with(*self.DR, '--ledger-accept-fork', '--ledger-from', self.ledger(self.batch(1), self.batch(2)))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn('the signed batches form one unbroken chain', r.stdout)
+        self.assertNotIn('LEDGER FORK ACCEPTED', r.stderr)
+        r, calls = self.restore_with('--ledger-accept-fork')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('--ledger-accept-fork goes with --ledger-from', r.stderr)
+        self.assertFalse(any('CREATE DATABASE' in l for l in calls))
+
+    # ── [BACKUP-FU2] hourly dumps expire after 30 days; the ledger check never looks at them ──
+    def test_expired_dumps_beside_the_ledger_never_break_it(self):
+        folder = self.ledger(self.batch(1), self.batch(2))
+        dumps = ['db/swift-20261001T010000Z.dump.gpg', 'db/swift-20261001T010000Z.dump.gpg.sig']
+        here = [(k, 'V', True) for k in self.names(1, 2)]
+        expired = [(k, kind, latest) for k in dumps for kind, latest in (('V', False), ('D', True))]
+        only_old = [('db/swift-20260930T230000Z.dump.gpg', 'V', False)]
+        r, calls = self.restore_with(*self.DR, '--ledger-from', folder,
+                                     **self.bucket_env(self.names(1, 2) + ['db/swift-20261029T090000Z.dump.gpg'], FAKE_VERSIONING='Enabled',
+                                                       FAKE_LEDGER_VERSIONS=self.versions(*here, *expired, *only_old)))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn('LIST db/erasure-ledger/', calls)
+        self.assertIn('VERSIONS db/erasure-ledger/', calls)
+        self.assertIn('the signed batches form one unbroken chain; every batch the bucket lists is here, and none was deleted (versioning on)', r.stdout)
+        self.assertNotIn('CHAIN_BROKEN', r.stderr)
 
     # ── [REVIEW-M S4-1] a batch deleted from a versioned bucket ──────────────
     def versions(self, *items):
