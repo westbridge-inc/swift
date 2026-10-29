@@ -41,6 +41,11 @@ if args[:1] == ['compose']:
 else:
     # the throwaway instance
     if args[:2] in (['container', 'inspect'], ['volume', 'inspect']): sys.exit(1)
+    if args[:1] == ['run'] and 'list-objects-v2' in args:
+        # [BACKUP-FU] the off-site ledger listing (read-only)
+        note('LIST ' + args[args.index('--prefix') + 1])
+        if os.environ.get('FAIL') == 'list': sys.exit(255)
+        print(os.environ.get('FAKE_LEDGER_KEYS', 'None')); sys.exit(0)
     if args[:1] in (['volume'], ['run']): sys.exit(0)
     if args[:1] == ['rm']:
         note('INSTANCE REMOVED ' + ' '.join(args[1:])); sys.exit(0)
@@ -353,6 +358,7 @@ class TheOffsiteLedger(unittest.TestCase):
         shipper uploaded (signed over the encrypted copy and the plain batch's SHA-256)."""
         d = Path(tempfile.mkdtemp(prefix='swift-offsite-ledger-'))
         self.addCleanup(shutil.rmtree, d, True)
+        last = None  # [BACKUP-FU · COORD] each signed batch links to the one signed before it
         for b in batches:
             base = f"erasure-ledger-{b.get('stamp', '20261028T100000Z')}-{b.get('id8', '0b9f0c3e')}"
             plain = d / f'{base}.jsonl'
@@ -362,9 +368,12 @@ class TheOffsiteLedger(unittest.TestCase):
                 enc = d / f'{base}.jsonl.gpg'
                 enc.write_bytes(b'synthetic ciphertext ' + base.encode())
                 sha = hashlib.sha256(plain.read_bytes()).hexdigest()
+                prev = b.get('prev', last[0] if last else 'none')
+                chain = [] if prev is None else ['--prev', prev] + ([] if prev == 'none' else ['--prev-sha256', b.get('prev_sha', last[1] if last else '0' * 64)])
                 subprocess.run([sys.executable, '-I', str(DEPLOY / 'backup-signature.py'), 'sign', '--key', str(b.get('key', self.key)),
-                                '--object', str(enc), '--out', f'{enc}.sig', '--plain-sha256', sha, '--created', b.get('stamp', '20261028T100000Z')],
+                                '--object', str(enc), '--out', f'{enc}.sig', '--plain-sha256', sha, '--created', b.get('stamp', '20261028T100000Z'), *chain],
                                check=True, capture_output=True)
+                last = (f'{base}.jsonl.gpg', hashlib.sha256(Path(f'{enc}.sig').read_bytes()).hexdigest())
                 if not b.get('keep_gpg', False):
                     enc.unlink()
             if 'after' in b:
@@ -494,6 +503,85 @@ class TheOffsiteLedger(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('--legacy-without-signing-record: no record of when erasure ledger signing began', r.stderr)
         self.assertIn('RESTORE OK', r.stdout)
+
+
+class TheOffsiteLedgerChain(unittest.TestCase):
+    """[BACKUP-FU · COORD] A batch missing from the folder must never pass unnoticed: its erasures would be
+    skipped and a disaster-recovery restore would still say erasure-complete. The signed batches form one
+    chain (each names the one before it inside its signature); the bucket, when it can be listed, must hold
+    no batch that is not here."""
+    DR = ('--no-live-ledger', '--i-know-live-is-gone', '--keep-for-inspection')
+    run_restore = RestoreQuarantineAndReplay.run_restore
+    first = staticmethod(RestoreQuarantineAndReplay.first)
+    setUp = TheOffsiteLedger.setUp
+    make_key = TheOffsiteLedger.make_key
+    ledger = TheOffsiteLedger.ledger
+    restore_with = TheOffsiteLedger.restore_with
+    assert_refused_before_anything = TheOffsiteLedger.assert_refused_before_anything
+
+    def batch(self, n, **extra):
+        e = [{**OFFSITE[0], 'id': f'0b9f0c3e-1111-4a2b-8c3d-00000000010{n}', 'createdAt': f'2026-10-28T10:0{n}:00.000'}]
+        return {'stamp': f'20261028T10{n}000Z', 'id8': f'0b9f0c4{n}', 'lines': e, **extra}
+
+    def names(self, *ns):
+        return [f'db/erasure-ledger/erasure-ledger-20261028T10{n}000Z-0b9f0c4{n}.jsonl.gpg{s}' for n in ns for s in ('', '.sig')]
+
+    def test_a_complete_chain_passes_and_says_so(self):
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.ledger(self.batch(1), self.batch(2), self.batch(3)))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn('off-site ledger : 3 signed batch(es) verified, 3 entr(ies)', r.stdout)
+        self.assertIn('erasure-complete up to 2026-10-28T10:03:00.000 (the newest entry of the off-site ledger; the signed batches form one unbroken chain; the bucket was NOT listed', r.stdout)
+
+    def test_a_missing_middle_batch_is_refused_before_anything(self):
+        drop = lambda d, base: [p.unlink() for p in d.glob(f'{base}.*')]
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.ledger(self.batch(1), self.batch(2, after=drop), self.batch(3)))
+        self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN: erasure-ledger-20261028T103000Z-0b9f0c43 follows erasure-ledger-20261028T102000Z-0b9f0c42.jsonl.gpg, which is not here')
+        self.assertNotIn('erasure-complete', r.stdout + r.stderr.replace('NOT erasure-complete', ''))
+
+    def test_a_missing_first_batch_is_refused(self):
+        drop = lambda d, base: [p.unlink() for p in d.glob(f'{base}.*')]
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.ledger(self.batch(1, after=drop), self.batch(2)))
+        self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN', 'say they are the first signed batch')
+
+    def test_a_reordered_chain_is_refused(self):
+        # 1 <- 3 <- 2: the batch named for 10:20 says it came after the one named for 10:30.
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.ledger(self.batch(1), self.batch(3), self.batch(2)))
+        self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN', 'which is not older: the chain is out of order')
+
+    def test_a_link_to_another_signature_of_the_batch_before_is_refused(self):
+        r, calls = self.restore_with(*self.DR, '--ledger-from', self.ledger(self.batch(1), self.batch(2, prev_sha='f' * 64)))
+        self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN', 'is not the one it was signed after')
+
+    def test_two_chain_starts_or_a_batch_without_a_link_are_refused(self):
+        for second, says in ((self.batch(2, prev='none'), '2 batches here say they are the first signed batch'),
+                             (self.batch(2, prev=None), 'is signed without a link to the batch before it')):
+            with self.subTest(prev=second['prev']):
+                r, calls = self.restore_with(*self.DR, '--ledger-from', self.ledger(self.batch(1), second))
+                self.assert_refused_before_anything(r, calls, 'CHAIN_BROKEN', says)
+
+    def bucket_env(self, keys, **extra):
+        return dict(BACKUP_BUCKET='swift-backups', BACKUP_AWS_ACCESS_KEY_ID='test-id', BACKUP_AWS_SECRET_ACCESS_KEY='test-secret',
+                    BACKUP_KEY_SOURCE='dedicated', AWS_CLI_IMAGE='amazon/aws-cli@sha256:' + 'a' * 64,
+                    FAKE_LEDGER_KEYS='\t'.join(keys) or 'None', **extra)
+
+    def test_the_bucket_is_listed_and_a_newest_batch_missing_here_is_refused(self):
+        folder = self.ledger(self.batch(1), self.batch(2))
+        r, calls = self.restore_with(*self.DR, '--ledger-from', folder, **self.bucket_env(self.names(1, 2, 3)))
+        self.assert_refused_before_anything(r, calls, 'the bucket holds erasure-ledger-20261028T103000Z-0b9f0c43.jsonl.gpg')
+        self.assertIn('LIST db/erasure-ledger/', calls)
+        r, calls = self.restore_with(*self.DR, '--ledger-from', folder, **self.bucket_env(self.names(1, 2)))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn('off-site ledger : the bucket lists 2 batch(es); every one is here', r.stdout)
+        self.assertIn('the signed batches form one unbroken chain; every batch the bucket lists is here)', r.stdout)
+
+    def test_a_bucket_that_cannot_be_listed_refuses_unless_the_owner_says_it_is_gone(self):
+        folder = self.ledger(self.batch(1))
+        r, calls = self.run_restore('list', (*self.DR, '--ledger-from', folder), trust=self.trust, **self.bucket_env(self.names(1)))
+        self.assert_refused_before_anything(r, calls, 'could not list')
+        r, calls = self.run_restore('list', (*self.DR, '--ledger-no-bucket-check', '--ledger-from', folder), trust=self.trust, **self.bucket_env(self.names(1)))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn('--ledger-no-bucket-check: the off-site bucket is not listed', r.stderr)
+        self.assertNotIn('LIST db/erasure-ledger/', calls)
 
 
 class TheDeidentificationGap(unittest.TestCase):

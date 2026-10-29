@@ -19,6 +19,12 @@
 # without a working key ships NOTHING: an unsigned batch from after that could never be replayed,
 # so the entries wait and page (the 10-minute watch) instead.
 #
+# [BACKUP-FU · COORD] A CHAIN: each signed batch names the batch shipped before it (its name and
+# the SHA-256 of its signature file) inside its own signed manifest; the first one says "prev none".
+# A restore refuses a chain with a batch missing from it. This host keeps the last link in
+# BACKUP_LEDGER_CHAIN_FILE; without it (a new host) it reads the newest signature in the bucket,
+# proves it, and links to that; only a bucket with no signed batch starts a chain.
+#
 # An entry holds ids, timestamps and de-identified columns only. The plain batch exists only in this
 # run's private directory and is removed before the upload; only the .gpg leaves the host. Settings
 # and storage keys as backup.sh: deploy/.env (settings only); the keys are the backup bucket's own
@@ -51,7 +57,7 @@ env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
-for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE PILOT_ENV BACKUP_GPG_RECIPIENT_FILE BACKUP_GPG_FINGERPRINT BACKUP_SIGNING_ALLOWED_SIGNERS BACKUP_FIRST_SIGNED_LEDGER_FILE; do
+for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE PILOT_ENV BACKUP_GPG_RECIPIENT_FILE BACKUP_GPG_FINGERPRINT BACKUP_SIGNING_ALLOWED_SIGNERS BACKUP_FIRST_SIGNED_LEDGER_FILE BACKUP_LEDGER_CHAIN_FILE; do
   if [ -z "${!var:-}" ]; then export "$var=$(env_value "$var")"; fi
 done
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
@@ -64,6 +70,7 @@ if [ -z "$SIGNING_KEY" ] && [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -e "$CREDEN
 fi
 ALLOWED_SIGNERS="${BACKUP_SIGNING_ALLOWED_SIGNERS:-/etc/swift/backup-allowed-signers}"
 FIRST_SIGNED="${BACKUP_FIRST_SIGNED_LEDGER_FILE:-/var/backups/swift/.first-signed-erasure-ledger}"
+CHAIN_FILE="${BACKUP_LEDGER_CHAIN_FILE:-/var/backups/swift/.erasure-ledger-chain}"
 
 # The database (read-only for the read; the shipment record is its own write).
 db_psql() {
@@ -138,13 +145,48 @@ rm -f -- "$BATCH"
 OUT="$OUT.gpg"
 NAME="$NAME.gpg"
 
+# The pinned AWS CLI container, as backup.sh runs it (credentials by NAME only).
+image="${AWS_CLI_IMAGE:-}"
+printf '%s\n' "$image" | grep -Eq '@sha256:[0-9a-f]{64}$' || die "AWS_CLI_IMAGE must pin an image@sha256:<64-hex> digest"
+aws_s3() {
+  local endpoint=()
+  [ -z "${AWS_S3_ENDPOINT:-}" ] || endpoint=(--endpoint-url "$AWS_S3_ENDPOINT")
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY ${AWS_REGION:+-e AWS_REGION} \
+    -v "$TMP_DIR:/data:ro" -v "$TMP_DIR/out:/out" "$image" ${endpoint[@]+"${endpoint[@]}"} "$@"
+}
+mkdir -p "$TMP_DIR/out"
 # ── SIGNATURE [BACKUP-FU] ──────────────────────────────────────────────────
 # The encrypted batch and the plain batch's digest, signed and proven here, before it leaves.
 SIGNED=0
 if [ -n "$SIGNING_KEY" ]; then
   [ -r "$SIGNING_KEY" ] || die "the backup signing key ($SIGNING_KEY) cannot be read; nothing was shipped"
+  # [BACKUP-FU · COORD] The link to the batch before this one.
+  if [ -s "$CHAIN_FILE" ]; then
+    read -r PREV PREV_SHA256 < "$CHAIN_FILE" || true
+    [[ "${PREV:-}" =~ ^erasure-ledger-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.jsonl\.gpg$ ]] && [[ "${PREV_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
+      die "the erasure ledger chain record $CHAIN_FILE is malformed; nothing was shipped"
+  else
+    # No record here: link to the newest signed batch in the bucket, proven; none at all starts the chain.
+    LISTED="$(aws_s3 s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix "$BACKUP_PREFIX/erasure-ledger/" --query 'Contents[].Key' --output text)" ||
+      die "could not list the off-site erasure ledger to find the batch this one follows; nothing was shipped (the next run retries)"
+    PREV="$(tr '\t ' '\n\n' <<<"$LISTED" | sed -n 's#^.*/\(erasure-ledger-[0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{8\}\.jsonl\.gpg\)\.sig$#\1#p' | LC_ALL=C sort | tail -1)"
+    if [ -n "$PREV" ]; then
+      aws_s3 s3 cp "s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/$PREV.sig" "/out/prev.sig" --only-show-errors ||
+        die "could not fetch the newest batch signature ($PREV.sig); nothing was shipped (the next run retries)"
+      python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$TMP_DIR/out/prev.sig" --name "$PREV" ||
+        die "the newest batch signature in the bucket ($PREV.sig) does not verify against $ALLOWED_SIGNERS; nothing was shipped"
+      PREV_SHA256="$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TMP_DIR/out/prev.sig")"
+    elif [ -e "$FIRST_SIGNED" ]; then
+      die "signed batches have shipped from this host ($FIRST_SIGNED) but the bucket lists none and $CHAIN_FILE is missing: the chain cannot be continued; nothing was shipped"
+    else
+      PREV=none; PREV_SHA256=""
+    fi
+  fi
+  PREV_ARGS=(--prev "$PREV")
+  [ "$PREV" = none ] || PREV_ARGS+=(--prev-sha256 "$PREV_SHA256")
   python3 -I "$HERE/backup-signature.py" sign --key "$SIGNING_KEY" --object "$OUT" --out "$OUT.sig" \
-    --plain-sha256 "$PLAIN_SHA256" --created "$STAMP" >/dev/null ||
+    --plain-sha256 "$PLAIN_SHA256" --created "$STAMP" "${PREV_ARGS[@]}" >/dev/null ||
     die "signing the batch with the backup signing key failed; nothing was shipped (the next run retries)"
   python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$OUT.sig" --name "$NAME" --object "$OUT" ||
     die "the batch is signed but the signature does NOT verify against $ALLOWED_SIGNERS, so every restore would refuse it; nothing was shipped. Run: sudo swift-secrets backup init"
@@ -155,16 +197,6 @@ else
   echo "WARNING: ERASURE LEDGER BATCH NOT SIGNED: this unit has no backup signing key (BACKUP_SIGNING_KEY). A restore replays it only with --allow-unsigned-legacy. Install the backup store (sudo swift-secrets backup init) and the current swift-erasure-ledger.service (owner sheet BACKUP-KEY-SETUP)." >&2
 fi
 
-# The pinned AWS CLI container, as backup.sh runs it (credentials by NAME only).
-image="${AWS_CLI_IMAGE:-}"
-printf '%s\n' "$image" | grep -Eq '@sha256:[0-9a-f]{64}$' || die "AWS_CLI_IMAGE must pin an image@sha256:<64-hex> digest"
-aws_s3() {
-  local endpoint=()
-  [ -z "${AWS_S3_ENDPOINT:-}" ] || endpoint=(--endpoint-url "$AWS_S3_ENDPOINT")
-  docker run --rm --user "$(id -u):$(id -g)" \
-    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY ${AWS_REGION:+-e AWS_REGION} \
-    -v "$TMP_DIR:/data:ro" "$image" ${endpoint[@]+"${endpoint[@]}"} "$@"
-}
 # Under the backups' own prefix: the same bucket lifecycle as the backups, never shorter.
 KEY="$BACKUP_PREFIX/erasure-ledger/$NAME"
 SIZE="$(wc -c < "$OUT" | tr -d ' ')"
@@ -178,6 +210,10 @@ if [ "$SIGNED" = 1 ]; then
   SIG_SIZE="$(wc -c < "$OUT.sig" | tr -d ' ')"
   aws_s3 s3 cp "/data/$NAME.sig" "s3://$BACKUP_BUCKET/$KEY.sig" --only-show-errors ||
     die "the batch is off-site but its signature could not be uploaded; nothing was recorded as shipped (the next run retries)"
+  # The signature is off-site: the next batch links to this one.
+  (umask 077; printf '%s %s\n' "$NAME" "$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OUT.sig")" > "$CHAIN_FILE.partial" &&
+    mv -f "$CHAIN_FILE.partial" "$CHAIN_FILE") ||
+    die "the batch and its signature are off-site but the chain record $CHAIN_FILE could not be written; nothing was recorded as shipped (fix the directory; the next run links to the bucket's newest batch)"
   REMOTE_SIG_SIZE="$(aws_s3 s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY.sig" --query 'ContentLength' --output text 2>/dev/null || true)"
   [ "$REMOTE_SIG_SIZE" = "$SIG_SIZE" ] ||
     die "the uploaded signature is $REMOTE_SIG_SIZE bytes, local $SIG_SIZE; nothing was recorded as shipped"

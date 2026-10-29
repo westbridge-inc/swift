@@ -65,7 +65,9 @@ function ledgerDir(lines: string, opts: { signed?: boolean; tamper?: boolean } =
     const encrypted = join(dir, `${base}.jsonl.gpg`);
     writeFileSync(encrypted, 'synthetic ciphertext');
     execFileSync('python3', ['-I', join(DEPLOY, 'backup-signature.py'), 'sign', '--key', join(tmp, 'signing'), '--object', encrypted,
-      '--out', `${encrypted}.sig`, '--plain-sha256', createHash('sha256').update(readFileSync(plain)).digest('hex'), '--created', '20261028T100000Z']);
+      '--out', `${encrypted}.sig`, '--plain-sha256', createHash('sha256').update(readFileSync(plain)).digest('hex'), '--created', '20261028T100000Z',
+      // [BACKUP-FU · COORD] the first (and only) batch of the chain
+      '--prev', 'none']);
     rmSync(encrypted);
   }
   if (opts.tamper) writeFileSync(plain, readFileSync(plain, 'utf8').replace(/"closed_accounts"/, '"deleted_rows"'), { mode: 0o600 });
@@ -277,6 +279,7 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(r.status, r.stderr + r.stdout).toBe(3);
     expect(r.stderr).toContain('signature OK: erasure-ledger-20261028T100000Z-0b9f0c3e.jsonl.gpg was signed by the trusted backup signing key');
     expect(r.stdout).toContain('off-site ledger : 1 signed batch(es) verified');
+    expect(r.stdout).toContain('the signed batches form one unbroken chain');
     expect(r.stdout + r.stderr).toContain(`erasure-complete up to ${newest}`);
     expect(r.stdout + r.stderr).not.toContain('RESTORE OK');
     const s = r.scratch;

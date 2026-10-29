@@ -708,6 +708,11 @@ backups. Before the first production backup:
    stamp with the allowed-signers file, as `BACKUP_LEDGER_SIGNED_SINCE`), and
    from then on a run without a working key ships NOTHING (the entries wait,
    and the 10-minute watch pages) rather than a batch no restore would take.
+   The signed batches form ONE CHAIN: each one's signature names the batch
+   shipped before it (and the digest of that batch's signature); the first
+   says `prev none`. The host keeps the last link in
+   `/var/backups/swift/.erasure-ledger-chain`; a new host links to the newest
+   proven signature in the bucket.
 
    Replaying it (a restore without the live database):
    - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`,
@@ -724,7 +729,14 @@ backups. Before the first production backup:
      the two DR flags only when the live database is really gone; with it,
      `--ledger-from` joins the live ledger. Every signed batch is verified
      before anything is created (a batch that fails, or a signature whose
-     batch is missing, stops the restore). A batch without a signature whose
+     batch is missing, stops the restore). The chain must be unbroken: a batch
+     missing from the start or the middle, or out of order, stops the restore
+     (`CHAIN_BROKEN`). With `BACKUP_BUCKET` set (and the backup key), the
+     restore also lists the bucket's `erasure-ledger/` prefix, read-only, and
+     stops if the bucket holds any batch or signature that is not in the
+     directory, so none is missing from the end either. Only when the bucket is
+     gone, pass `--ledger-no-bucket-check`; the result then says the end of the
+     ledger was not checked. A batch without a signature whose
      entries are all in a signed batch is set aside (its signature never
      reached the bucket; the next run shipped it again, signed). Any other
      unsigned batch is refused, unless it is from before signing began and the

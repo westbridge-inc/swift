@@ -42,8 +42,24 @@ if args[:1] == ["compose"]:
         sys.exit(0)
     sys.exit(0)
 if args[:1] == ["run"]:
-    mount = args[args.index("-v") + 1]
-    host, inner = mount.split(":")[0], mount.split(":")[1]
+    mounts = [args[i + 1].split(":")[:2] for i, a in enumerate(args) if a == "-v"]
+    host, inner = mounts[0]
+    def local(path):
+        for h, c in mounts:
+            if path == c or path.startswith(c + "/"):
+                return h + path[len(c):]
+        raise SystemExit("unmounted path " + path)
+    if "list-objects-v2" in args:
+        if os.environ.get("LIST_FAIL") == "1": sys.exit(255)
+        prefix = args[args.index("--prefix") + 1]
+        keys = sorted(os.path.relpath(os.path.join(r, f), bucket) for r, _, fs in os.walk(bucket) for f in fs)
+        keys = [k for k in keys if k.startswith(prefix)]
+        print("\t".join(keys) if keys else "None"); sys.exit(0)
+    if "cp" in args and args[args.index("cp") + 1].startswith("s3://"):
+        i = args.index("cp")
+        src, dst = args[i + 1], args[i + 2]
+        shutil.copyfile(os.path.join(bucket, src[len("s3://"):].split("/", 1)[1]), local(dst))
+        sys.exit(0)
     if "cp" in args:
         i = args.index("cp")
         src, dst = args[i + 1], args[i + 2]
@@ -101,6 +117,7 @@ class ErasureLedgerShip(unittest.TestCase):
         self.allowed.write_text('swift-backup namespaces="swift-backup" ' + " ".join((self.tmp / "signing.pub").read_text().split()[:2]) + "\n")
         self.allowed.chmod(0o644)
         self.first_signed = self.tmp / "first-signed-erasure-ledger"
+        self.chain = self.tmp / "erasure-ledger-chain"
 
     def run_ship(self, *args, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("BACKUP_", "AWS_", "PILOT_ENV"))}
@@ -111,7 +128,7 @@ class ErasureLedgerShip(unittest.TestCase):
             "AWS_CLI_IMAGE": IMAGE, "AWS_S3_ENDPOINT": "https://storage.example.invalid", "PILOT_ENV": "production",
             "BACKUP_GPG_FINGERPRINT": self.fpr, "BACKUP_GPG_RECIPIENT_FILE": str(self.public),
             "BACKUP_SIGNING_KEY_FILE": str(self.signing), "BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.allowed),
-            "BACKUP_FIRST_SIGNED_LEDGER_FILE": str(self.first_signed),
+            "BACKUP_FIRST_SIGNED_LEDGER_FILE": str(self.first_signed), "BACKUP_LEDGER_CHAIN_FILE": str(self.chain),
         })
         env.update(extra)
         env = {k: v for k, v in env.items() if v is not None}
@@ -182,6 +199,71 @@ class ErasureLedgerShip(unittest.TestCase):
         stamp = self.first_signed.read_text().strip()
         self.assertRegex(stamp, r"^\d{8}T\d{6}Z$")
         self.assertIn(stamp, obj.name)
+
+    # ── [BACKUP-FU · COORD] the chain ─────────────────────────────────────────
+    def manifest(self, sig):
+        text = Path(sig).read_text()
+        return dict(l.split(" ", 1) for l in text[:text.index("-----BEGIN")].splitlines()[1:])
+
+    def next_batch(self, n):
+        import time; time.sleep(1.1)  # a new second: the batch names carry the time
+        self.ledger.write_text("".join(json.dumps({**e, "id": e["id"][:-1] + str(n)}) + "\n" for e in ENTRIES))
+
+    def test_the_first_batch_starts_the_chain_and_each_next_one_names_the_one_before_it(self):
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        [first] = self.batches()
+        first_sig = Path(str(first) + ".sig")
+        self.assertEqual(self.manifest(first_sig)["prev"], "none")
+        self.assertNotIn("prev-sha256", self.manifest(first_sig))
+        self.assertEqual(self.chain.read_text().split(), [first.name, hashlib.sha256(first_sig.read_bytes()).hexdigest()])
+        self.next_batch(7)
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        [second] = [b for b in self.batches() if b != first]
+        m = self.manifest(Path(str(second) + ".sig"))
+        self.assertEqual(m["prev"], first.name)
+        self.assertEqual(m["prev-sha256"], hashlib.sha256(first_sig.read_bytes()).hexdigest())
+        ok = self.verify(Path(str(second) + ".sig"), second.name, "--object", str(second))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_a_host_without_its_chain_record_links_to_the_newest_proven_batch_in_the_bucket(self):
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        [first] = self.batches()
+        self.chain.unlink()
+        self.next_batch(8)
+        r = self.run_ship("--project", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        [second] = [b for b in self.batches() if b != first]
+        self.assertEqual(self.manifest(Path(str(second) + ".sig"))["prev"], first.name)
+
+    def test_a_planted_newest_signature_in_the_bucket_is_not_linked_to(self):
+        other = self.tmp / "planter"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "planter", "-f", str(other)], check=True)
+        planted = self.bucket / "db/erasure-ledger/erasure-ledger-20991231T000000Z-ffffffff.jsonl.gpg"
+        planted.parent.mkdir(parents=True)
+        planted.write_bytes(b"planted")
+        subprocess.run([sys.executable, "-I", str(DEPLOY / "backup-signature.py"), "sign", "--key", str(other), "--object", str(planted),
+                        "--out", f"{planted}.sig", "--created", "20991231T000000Z", "--prev", "none"], check=True, capture_output=True)
+        r = self.run_ship("--project", "swift")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not verify", r.stderr)
+        self.assertFalse(self.ships.exists())
+        self.assertFalse(self.chain.exists())
+
+    def test_a_chain_that_cannot_be_continued_ships_nothing(self):
+        for extra, prep in (({"LIST_FAIL": "1"}, None), ({}, lambda: self.first_signed.write_text("20261028T091500Z\n")),
+                            ({}, lambda: self.chain.write_text("not-a-batch 1234\n"))):
+            with self.subTest(extra=extra, prep=prep is not None):
+                for f in (self.first_signed, self.chain, self.ships):
+                    if f.exists(): f.unlink()
+                if prep: prep()
+                r = self.run_ship("--project", "swift", **extra)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("nothing was shipped", r.stderr)
+                self.assertEqual(self.objects(), [])
+                self.assertFalse(self.ships.exists())
 
     def test_a_signature_that_does_not_upload_or_verify_records_nothing(self):
         for extra in ({"SIG_UPLOAD_FAIL": "1"}, {"BACKUP_SIGNING_ALLOWED_SIGNERS": str(self.tmp / "missing-allowed-signers")}):
