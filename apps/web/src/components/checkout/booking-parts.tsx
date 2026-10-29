@@ -12,7 +12,7 @@ import {
   placedBookingOutcome,
   placedOrderConfirmationCopy,
   placedPopupTitle,
-} from '@/lib/app-rules';
+} from '@/lib/booking-rules';
 import type { HeldTime } from '@/lib/held-time';
 import styles from '@/app/(app)/cart/cart.module.css';
 

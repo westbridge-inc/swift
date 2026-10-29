@@ -1,4 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from '@/app/(app)/layout';
@@ -48,6 +50,8 @@ const bookingCart = (overrides: Record<string, unknown> = {}) => ({
 });
 
 let mmg = false;
+/** [#2205] The store's live switches: closed now (open = false) still takes a booking; paused never does. */
+let storeLive = { isCurrentlyOpen: true, acceptingOrders: true };
 let cart: () => unknown = () => bookingCart();
 let slotsAnswer: (_date: string) => Record<string, unknown> = () => ({});
 let checkoutReply: ApiReply | null = null;
@@ -74,6 +78,7 @@ beforeEach(async () => {
   window.history.replaceState({}, '', '/');
   state.push.mockReset(); state.replace.mockReset();
   mmg = false;
+  storeLive = { isCurrentlyOpen: true, acceptingOrders: true };
   signedIn = true;
   cart = () => bookingCart();
   slotsAnswer = (date) => slots(date);
@@ -82,8 +87,8 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/auth/me') return signedIn ? ok({ user: { id: 'c1' } }) : { status: 401, body: { success: false } };
     if (url.pathname === '/api/v1/auth/refresh') return { status: 401, body: { success: false } };
     if (url.pathname === '/api/v1/market/depth') return ok({ visible: false, items: 0, vendors: 0 });
-    if (url.pathname === '/api/v1/customer/vendors/v1') return ok(STORE);
-    if (url.pathname === '/api/v1/public/storefronts/fixture-studio') return ok(storefrontFixture({ ...STORE, addressLine1: '4 Fixture Lane', city: 'Georgetown' }));
+    if (url.pathname === '/api/v1/customer/vendors/v1') return ok({ ...STORE, ...storeLive });
+    if (url.pathname === '/api/v1/public/storefronts/fixture-studio') return ok(storefrontFixture({ ...STORE, ...storeLive, addressLine1: '4 Fixture Lane', city: 'Georgetown' }));
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') return ok(cart());
     if (url.pathname === '/api/v1/customer/cart' && method === 'DELETE') { cart = () => ({ items: [] }); return ok({}); }
     if (url.pathname === '/api/v1/customer/cart/items' && method === 'POST') { cart = () => bookingCart(); return { status: 201, body: { success: true, data: {} } }; }
@@ -232,6 +237,52 @@ describe('[BOOK-S6b] the one checkout books an appointment', () => {
     at('/checkout', <CheckoutPage />);
     expect(await screen.findByText('Book one appointment at a time on the web. Remove the other bookings to continue.')).toBeTruthy();
     expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
+  });
+});
+
+describe('[BOOK-WEB follow-up · #2205] a store closed right now still takes a booking; a paused one does not', () => {
+  it('store page: Book works while the store is closed now, and the sheet opens', async () => {
+    cart = () => ({ items: [] });
+    storeLive = { isCurrentlyOpen: false, acceptingOrders: true };
+    at('/store/fixture-studio', await storePage());
+    const book = await screen.findByRole('button', { name: 'Book Fixture trim' });
+    await waitFor(() => expect((book as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(book);
+    expect(await screen.findByRole('dialog', { name: 'Fixture trim' })).toBeTruthy();
+  });
+
+  it('store page: paused orders keep Book disabled, and its name says why', async () => {
+    cart = () => ({ items: [] });
+    storeLive = { isCurrentlyOpen: true, acceptingOrders: false };
+    at('/store/fixture-studio', await storePage());
+    const book = await screen.findByRole('button', { name: 'Fixture trim can\u2019t be booked while the store has paused orders' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((book as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('checkout: a booking at a store closed now is not locked', async () => {
+    holdTime({});
+    storeLive = { isCurrentlyOpen: false, acceptingOrders: true };
+    at('/checkout', <CheckoutPage />);
+    expect(await screen.findByRole('button', { name: 'Request booking · $2,500' })).toBeTruthy();
+    expect(screen.queryByText(/This store is closed right now/)).toBeNull();
+  });
+
+  it('checkout: a paused store still locks a booking, and goods at a closed store stay locked', async () => {
+    holdTime({});
+    storeLive = { isCurrentlyOpen: true, acceptingOrders: false };
+    const { unmount } = at('/checkout', <CheckoutPage />);
+    expect(await screen.findByText('This store has paused orders. Checkout stays locked until the live store starts taking orders again.')).toBeTruthy();
+    unmount();
+    storeLive = { isCurrentlyOpen: false, acceptingOrders: true };
+    cart = () => bookingCart({ items: [goodsLine], vendors: [{ vendorId: 'v1', name: 'Fixture Studio', fulfillment: 'DELIVERY', subtotal: 900, deliveryFee: 0, totalAmount: 900, meetsMinimum: true }] });
+    at('/checkout', <CheckoutPage />);
+    expect(await screen.findByText('This store is closed right now. Checkout stays locked until the live store is open.')).toBeTruthy();
+  });
+
+  it('the sheet’s loading fallback says what is happening', () => {
+    const page = readFileSync(join(process.cwd(), 'src/components/storefront/storefront-experience.tsx'), 'utf8');
+    expect(page).toMatch(/<Suspense fallback=\{<p className=\{styles\.notice\} role="status">Opening times…<\/p>\}>\s*<BookingSheet/);
   });
 });
 

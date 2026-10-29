@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import { rescheduleBooking } from '@/lib/customer-orders';
-import type { AppointmentBookingView } from '@/lib/app-rules';
+import type { AppointmentBookingView } from '@/lib/booking-rules';
 import { SlotPicker } from '@/components/booking/slot-picker';
 import booking from '@/components/booking/booking.module.css';
 import styles from './tracking.module.css';

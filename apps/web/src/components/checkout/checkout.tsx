@@ -250,10 +250,12 @@ export function CheckoutPanel() {
         return block('The public store no longer matches this saved cart. Remove its items and start again from a live store page.');
       }
       setPickupStore({ address: [liveStore.addressLine1, liveStore.city].filter(Boolean).join(', '), hours: todayHours(liveStore.operatingHours) });
-      if (!liveStore.isCurrentlyOpen || !liveStore.acceptingOrders) {
-        return block(liveStore.isCurrentlyOpen
-          ? 'This store has paused orders. Checkout stays locked until the live store starts taking orders again.'
-          : 'This store is closed right now. Checkout stays locked until the live store is open.');
+      // [#2205] A store closed right now still takes a booking (for a later time); paused orders never do.
+      const closedNow = !liveStore.isCurrentlyOpen && !cartIsBooking;
+      if (closedNow || !liveStore.acceptingOrders) {
+        return block(closedNow
+          ? 'This store is closed right now. Checkout stays locked until the live store is open.'
+          : 'This store has paused orders. Checkout stays locked until the live store starts taking orders again.');
       }
       if (menuRead.status === 'rejected') throw menuRead.reason;
       const vendor = menuRead.value;
