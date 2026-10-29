@@ -392,3 +392,25 @@ describe('[BOOK-S6b] Book on the store page', () => {
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
   });
 });
+
+describe('[BOOK-POLISH · #2205] a booking line is one appointment: no quantity to change', () => {
+  it('checkout: the booking line has no + / − (only Remove); a goods line beside it keeps its stepper', async () => {
+    holdTime({});
+    cart = () => bookingCart({ items: [bookingLine, { ...goodsLine, quantity: 2, lineTotal: 1800 }] });
+    at('/checkout', <CheckoutPage />);
+    expect(await screen.findByRole('button', { name: 'Add another Fixture comb' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove one Fixture comb' })).toBeTruthy();
+    expect(screen.queryByLabelText('Fixture trim quantity')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add another Fixture trim' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove one Fixture trim' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Remove Fixture trim from cart' })).toBeTruthy();
+  });
+
+  it('store page: a booking already in the cart shows Book, never a quantity stepper', async () => {
+    at('/store/fixture-studio', await storePage());
+    expect(await screen.findByRole('button', { name: 'Book Fixture trim' })).toBeTruthy();
+    expect(screen.queryByLabelText('Fixture trim quantity')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add another Fixture trim' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove one Fixture trim' })).toBeNull();
+  });
+});
