@@ -3,6 +3,7 @@ import { invalidateAlgoConfig } from '../algo/algo-config';
 import { pointInPolygon } from '../../utils/geo';
 import { runWithTenant } from '../../plugins/tenant-context';
 import { AppError } from '../../utils/errors';
+import type { OnAudit } from '../../lib/audit-writer';
 
 // ---------------------------------------------------------------------------
 // [RIDER-SAFE 5 · COORD ruling 29 Oct 2026] SWIFT'S DELIVERY PAUSE SWITCH.
@@ -17,7 +18,9 @@ import { AppError } from '../../utils/errors';
 //
 // The read is never cached: a pause takes effect on every instance at the
 // next checkout, not 30 seconds later. Each write also leaves an AuditLog row
-// carrying the reason.
+// carrying the reason, inside the same transaction: through the admin route
+// it is the route's own inline row (ADM-002) naming the new version row as
+// its subject; a direct caller gets a DELIVERY_PAUSE_SET row.
 //
 // Fail-open on a READ failure, deliberately: a database hiccup while reading
 // the switch must not stop every delivery in the country. The switch is an
@@ -85,7 +88,13 @@ export async function deliveryPausedAt(
  */
 export async function setDeliveryPause(
   prisma: PrismaClient,
-  input: { tenantId: string; platform: boolean; zoneIds: string[]; actorUserId: string; reason: string; expectedVersion?: number },
+  input: {
+    tenantId: string; platform: boolean; zoneIds: string[]; actorUserId: string; reason: string; expectedVersion?: number;
+    /** [ADM-004] The admin route's inline audit writer. Called inside the
+     *  transaction, after the new version row; a refused audit row rolls the
+     *  switch back. Absent: this helper writes its own DELIVERY_PAUSE_SET row. */
+    onAudit?: OnAudit;
+  },
 ): Promise<DeliveryPauseState> {
   const next = normalise({ platform: input.platform, zoneIds: input.zoneIds });
   if (next.zoneIds.length > 0) {
@@ -103,18 +112,35 @@ export async function setDeliveryPause(
       if (input.expectedVersion !== undefined && input.expectedVersion !== currentVersion) {
         throw new AppError(409, 'PAUSE_CHANGED', 'Someone else changed the delivery pause. Refresh and try again.');
       }
-      await tx.algoConfig.create({
+      const created = await tx.algoConfig.create({
         data: { tenantId: input.tenantId, key: DELIVERY_PAUSE_KEY, value: next, version: currentVersion + 1, founderGated: false, updatedBy: input.actorUserId },
+        select: { id: true },
       });
-      await tx.auditLog.create({
-        data: {
-          userId: input.actorUserId,
-          action: 'DELIVERY_PAUSE_SET',
-          entity: 'algo_config',
-          entityId: `${input.tenantId}:${DELIVERY_PAUSE_KEY}`,
-          changes: { from: normalise(current?.value ?? null), to: next, version: currentVersion + 1, reason: input.reason },
-        },
-      });
+      const from = normalise(current?.value ?? null);
+      if (input.onAudit) {
+        // The subject is the version row this write created (versions are
+        // never updated, so there is no "before" row to digest): its id, the
+        // version, and both sides of the switch, as scalar facts.
+        await input.onAudit(tx, {
+          versionRowId: created.id,
+          configKey: DELIVERY_PAUSE_KEY,
+          version: currentVersion + 1,
+          fromPlatform: from.platform,
+          toPlatform: next.platform,
+          fromZoneIds: from.zoneIds.join(','),
+          toZoneIds: next.zoneIds.join(','),
+        });
+      } else {
+        await tx.auditLog.create({
+          data: {
+            userId: input.actorUserId,
+            action: 'DELIVERY_PAUSE_SET',
+            entity: 'algo_config',
+            entityId: `${input.tenantId}:${DELIVERY_PAUSE_KEY}`,
+            changes: { from, to: next, version: currentVersion + 1, versionRowId: created.id, reason: input.reason },
+          },
+        });
+      }
     });
   } catch (err) {
     // Two admins at the same instant: the unique (tenant, key, version) row decides.
