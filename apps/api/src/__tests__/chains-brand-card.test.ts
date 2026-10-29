@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
@@ -10,6 +10,7 @@ import { searchRoutes } from '../modules/search/search.routes';
 import { publicRoutes } from '../modules/public/public.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { collapseBrands, type BrandFact } from '../modules/vendor/brand';
+import { resetHiddenItemIdsCacheForTests } from '../modules/compliance/prohibited-gate';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -226,5 +227,45 @@ describe('[CHAINS] the storefront lets the customer pick another branch', () => 
     expect(brand.name).toBe('Royal Zorvette');
     expect(brand.branches.map((b) => b.id).sort()).toEqual([ids['Near'], ids['Far'], ids['Shut']].sort());
     expect(brand.branches.every((b) => typeof b.slug === 'string')).toBe(true);
+  });
+});
+
+describe('[CHAINS · GUARDRAILS §8] a branch filed under a banned category is never on a switcher', () => {
+  // REVIEW-G #2222 S4-1: both switchers spread the store exclusion (#54) beside the visible rule. A sibling branch Swift
+  // would otherwise rank FIRST (nearest, open, taking orders, delivers here) is filed under Pharmacy by a person.
+  let pharmacy = '';
+  beforeAll(async () => {
+    await store('Pharm', brandOwner, { lat: HERE.lat + 0.0009 });
+    const c = await runWithoutTenant(() => app.prisma.discoveryCategory.create({ data: {
+      tenantId: TENANT, slug: 'pharmacy', name: 'Pharmacy & Health', kind: 'RETAIL', vertical: 'RETAIL', emoji: '💊', status: 'ACTIVE',
+    } }), 'test-fixture:chains');
+    pharmacy = c.id;
+    await runWithoutTenant(() => app.prisma.vendorDiscoveryCategory.create({ data: {
+      tenantId: TENANT, vendorId: ids['Pharm']!, categoryId: pharmacy, role: 'PRIMARY', source: 'ADMIN',
+    } }), 'test-fixture:chains');
+    resetHiddenItemIdsCacheForTests();
+  });
+  afterAll(async () => {
+    await runWithoutTenant(async () => {
+      await app.prisma.vendorDiscoveryCategory.deleteMany({ where: { categoryId: pharmacy } });
+      await app.prisma.discoveryCategory.deleteMany({ where: { id: pharmacy } });
+    }, 'test-fixture:chains');
+    resetHiddenItemIdsCacheForTests();
+  });
+
+  it('the app storefront: the brand\'s other branches only, the banned one never listed', async () => {
+    const res = await get(`/api/v1/customer/vendors/${ids['Far']}?${at}`);
+    expect(res.statusCode, res.body).toBe(200);
+    const branches = (res.json().data.brand as { branches: Array<{ id: string }> }).branches.map((b) => b.id);
+    expect(branches).not.toContain(ids['Pharm']);
+    expect(branches).toEqual([ids['Near'], ids['Far'], ids['Shut']]);
+  });
+
+  it('the website\'s store page: the same, the banned branch never listed', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/public/storefronts/brand-${RUN}-near` });
+    expect(res.statusCode, res.body).toBe(200);
+    const branches = (res.json().data.brand as { branches: Array<{ id: string }> }).branches.map((b) => b.id);
+    expect(branches).not.toContain(ids['Pharm']);
+    expect(branches.sort()).toEqual([ids['Near'], ids['Far'], ids['Shut']].sort());
   });
 });
