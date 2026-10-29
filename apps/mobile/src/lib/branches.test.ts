@@ -61,7 +61,15 @@ describe('[CHAINS] a store not live yet says whose turn it is', () => {
   });
   it('reads the server strictly: unknown steps dropped; a live store has no go-live line', () => {
     expect(goLiveOf({ goLive: { waitingFor: 'OWNER', steps: ['PUBLISHED_PHONE', 'SOMETHING_NEW', 3] } })).toEqual({ waitingFor: 'OWNER', steps: ['PUBLISHED_PHONE'] });
-    expect(ownerStepWords({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['SOMETHING_NEW'] } })).toEqual([BRANCH_COPY.finishButton]);
+    // [REVIEW-F #2220 f710ebda N3] Only unknown steps: no step line at all (the Finish setting it up button stands
+    // alone, never named twice); the branch's own screen says to finish what it still asks for.
+    const unknownOnly = { name: 'Royal Camp', status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['SOMETHING_NEW'] } };
+    expect(ownerStepWords(unknownOnly)).toEqual([]);
+    expect(goLiveLine(unknownOnly)).toBe('Before Swift can check it, finish what this screen still asks for.');
+    expect(goLiveLine({ ...unknownOnly, goLive: { waitingFor: 'OWNER', steps: [] } })).toBe(BRANCH_COPY.finishHere);
+    for (const steps of [[], ['SOMETHING_NEW'], ['DOCUMENTS'], ['PUBLISHED_PHONE', 'FOOD_HANDLERS']]) {
+      expect(ownerStepWords({ ...unknownOnly, goLive: { waitingFor: 'OWNER', steps } })).not.toContain(BRANCH_COPY.finishButton);
+    }
     expect(goLiveLine({ name: 'Royal Camp', status: 'ACTIVE', goLive: null })).toBeNull();
   });
   it('the add screens name the owner\'s part instead of promising a wait for Swift', () => {

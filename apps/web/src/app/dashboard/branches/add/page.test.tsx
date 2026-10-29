@@ -77,7 +77,11 @@ describe('[CHAINS] add a branch (web)', () => {
     expect(screen.getByText('Free until 5 November 2026 if Swift approves it before 5 November 2026. After that, $15,000/week.')).toBeTruthy();
     expect(screen.getByText('The free trial belongs to your business, not to one branch: a branch you close during the free trial still uses it up.')).toBeTruthy();
     expect(screen.getByText('Your agreed rate: $12,000/week (or the branch’s own fee, if lower).')).toBeTruthy();
-    expect(screen.getByText('A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what, with a button to finish it.')).toBeTruthy();
+    expect(screen.getByText('A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what is left and where: on this website, or in the Swift app for documents.')).toBeTruthy();
+    expect(screen.queryByText(/with a button to finish it/)).toBeNull();
+    // [REVIEW-F #2220 f710ebda N1] The header never promises no documents: a branch of another type can owe its own.
+    expect(screen.getByText('A new store of your business, under this same login. Documents Swift already checked are not asked again.')).toBeTruthy();
+    expect(screen.queryByText(/Your documents are not asked again/)).toBeNull();
     expect(screen.queryByText(/You’ll see it as waiting for Swift’s approval/)).toBeNull();
   });
 

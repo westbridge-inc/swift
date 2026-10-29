@@ -21,6 +21,7 @@ export const BRANCH_COPY = {
   checkFirst: 'A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, your list of branches says what, with a button to finish it.',
   swiftChecks: 'Everything Swift needs from you is in. A person at Swift checks this branch before it goes live.',
   finishButton: 'Finish setting it up',
+  finishHere: 'Before Swift can check it, finish what this screen still asks for.',
   trialBelongsToBusiness: 'The free trial belongs to your business, not to one branch: a branch you close during the free trial still uses it up.',
   ownFee: 'Each branch pays its own weekly fee, with its own checkout.',
 } as const;
@@ -80,11 +81,12 @@ export function goLiveOf(store: StoreLike | null | undefined): StoreGoLive | nul
   return { waitingFor: g.waitingFor, steps };
 }
 
-/** The owner's steps for a store not live yet, in words (none when it is Swift's turn). */
+/** The owner's steps for a store not live yet, in words (none when it is Swift's turn). Only the steps this app knows:
+ *  with none known, no line at all, so the Finish setting it up button is never named twice (REVIEW-F #2220 N3). */
 export function ownerStepWords(store: StoreLike | null | undefined): string[] {
   const g = goLiveOf(store);
   if (!g || g.waitingFor !== 'OWNER' || !awaitingApproval(store)) return [];
-  return g.steps.length > 0 ? g.steps.map((x) => GO_LIVE_STEP_WORDS[x]) : [BRANCH_COPY.finishButton];
+  return g.steps.map((x) => GO_LIVE_STEP_WORDS[x]);
 }
 
 /**
@@ -104,7 +106,8 @@ export function goLiveLine(store: StoreLike | null | undefined): string | null {
   const g = goLiveOf(store);
   if (!g || !awaitingApproval(store)) return null;
   if (g.waitingFor === 'SWIFT') return BRANCH_COPY.swiftChecks;
-  return `Before Swift can check it: ${ownerStepWords(store).join('; ')}.`;
+  const steps = ownerStepWords(store);
+  return steps.length > 0 ? `Before Swift can check it: ${steps.join('; ')}.` : BRANCH_COPY.finishHere;
 }
 
 export type BulkOutcome = { done: string[]; failed: Array<{ id: string; message: string }> };
