@@ -91,7 +91,7 @@ const MIN = 60_000;
 const at = (ms: number) => new Date(NOW + ms).toISOString();
 const booking = (extra: Record<string, unknown> = {}) => ({
   id: 'b-1', serviceName: 'Haircut', price: 2000, slotStart: at(-15 * MIN), slotEnd: at(15 * MIN),
-  status: 'CONFIRMED', orderId: 'o-1', customer: { firstName: 'Asha' }, itemId: 'item-1', ...extra,
+  status: 'CONFIRMED', orderId: 'o-1', customer: { firstName: 'Asha' }, itemId: 'item-1', noShow: { allowed: true }, ...extra,
 });
 const refusal = (code: string, message: string) => Object.assign(new Error('Request failed with status code 409'), {
   response: { status: 409, data: { success: false, error: { code, message } } },
@@ -150,6 +150,25 @@ describe('[BOOK-NS-APP] which Schedule bookings offer "Customer didn\'t come"', 
     expect(button('Move')).toBeTruthy();
   });
 
+  it('[REVIEW-F S3-1 on #2201] an older server (no noShow word) or the server saying no: no button', async () => {
+    await render([booking({ id: 'b-old', noShow: undefined }), booking({ id: 'b-no', orderId: 'o-2', noShow: { allowed: false } })]);
+    expect(host.textContent).toContain('Haircut');
+    expect(button(NO_SHOW)).toBeUndefined();
+  });
+
+  it('at the start the Schedule is read again, and the link appears with the server\'s new word', async () => {
+    const soon = booking({ slotStart: at(200), slotEnd: at(30 * MIN), noShow: { allowed: false } });
+    await render([soon]);
+    expect(button(NO_SHOW)).toBeUndefined();
+    const reads = fx.bookings.mock.calls.length;
+    fx.bookings.mockResolvedValue([{ ...soon, noShow: { allowed: true } }]);
+    vi.setSystemTime(NOW + 300); // the device clock passes the start; the card's timer fires on its own
+    await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
+    await settle();
+    expect(fx.bookings.mock.calls.length, 'read again at the start').toBeGreaterThan(reads);
+    expect(button(NO_SHOW)).toBeTruthy();
+  });
+
   it('a reserved (not accepted) or completed booking, or one without an order: no button', async () => {
     await render([
       booking({ id: 'b-r', status: 'RESERVED', orderId: 'o-r' }),
@@ -161,7 +180,7 @@ describe('[BOOK-NS-APP] which Schedule bookings offer "Customer didn\'t come"', 
   });
 
   it('an older server\'s booking (no orderId, no itemId): no button, no Move, nothing breaks', async () => {
-    const { orderId: _o, itemId: _i, ...old } = booking();
+    const { orderId: _o, itemId: _i, noShow: _n, ...old } = booking();
     await render([old]);
     expect(host.textContent).toContain('Haircut');
     expect(button(NO_SHOW)).toBeUndefined();

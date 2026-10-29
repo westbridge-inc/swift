@@ -157,7 +157,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const menu = useVendorMenu();
   // [BOOK-NS-APP · owner B3] "Customer didn't come": the screen draws again at the appointment's start, and the
   // popup asks once, then shows the server's answer (NoShowConfirm).
-  const noShowNow = useStartClock(order?.fulfillment === 'APPOINTMENT' ? order?.appointmentSlot : null);
+  const noShowNow = useStartClock(order?.fulfillment === 'APPOINTMENT' ? order?.appointmentSlot : null, () => { void refetch(); });
   const [noShowAsk, setNoShowAsk] = useState(false);
 
   // [MOB-050] A missing orderId is not a slow network. It used to render the

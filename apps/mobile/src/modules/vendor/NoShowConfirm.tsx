@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { space } from '@swift/ui';
 import { IconChip, PillButton, PopupCard, PopupTitle, T } from '../../kit';
 import { useMarkNoShow } from '../../hooks/vendorops';
@@ -10,18 +10,24 @@ const MAX_TIMER_MS = 2_147_000_000;
 
 /**
  * [BOOK-NS-APP] The clock a "Customer didn't come" check reads. A screen left open across the appointment's start
- * draws again at the start, so the button appears then (not at the next read of the order). No time, or a time
- * already started: no timer.
+ * draws again at the start and calls onStart: the server's word (noShow.allowed) was given at the last read, before
+ * the start, so the screen reads the order again and the button appears with the server's new word. No time, or a
+ * time already started: no timer.
  */
-export function useStartClock(iso: unknown): number {
+export function useStartClock(iso: unknown, onStart?: () => void): number {
   const now = Date.now();
   const wait = msUntilStart(iso, now);
   const [, redraw] = useState(0);
+  const started = useRef(onStart);
+  started.current = onStart;
   const pending = wait !== null && wait > 0;
   const key = typeof iso === 'string' ? iso : iso instanceof Date ? iso.toISOString() : '';
   useEffect(() => {
     if (!pending || wait === null) return undefined;
-    const timer = setTimeout(() => redraw((n) => n + 1), Math.min(wait + 50, MAX_TIMER_MS));
+    const timer = setTimeout(() => {
+      redraw((n) => n + 1);
+      if (wait + 50 <= MAX_TIMER_MS) started.current?.();
+    }, Math.min(wait + 50, MAX_TIMER_MS));
     return () => clearTimeout(timer);
     // The wait is read at each draw; the timer follows the time and whether it is still ahead.
     // eslint-disable-next-line react-hooks/exhaustive-deps

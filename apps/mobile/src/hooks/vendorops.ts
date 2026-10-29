@@ -1202,6 +1202,8 @@ export interface VendorBooking {
   customer: { firstName: string } | null;
   /** [BOOK-S5a] The listing booked (its free times are what a move may pick). An older server omits it. */
   itemId?: string;
+  /** [BOOK-NS-APP] The server's word on "Customer didn't come" for this booking, at the read. An older server omits it. */
+  noShow?: { allowed: boolean };
 }
 
 /** The Services SCHEDULE: upcoming appointments (default two-week window) for the

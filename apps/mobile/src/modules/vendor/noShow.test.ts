@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { NO_SHOW_WORDS, bookingNoShowOpen, msUntilStart, noShowClosedLine, noShowRefusalWords, orderNoShowOpen } from './noShow';
+import { NO_SHOW_WORDS, bookingNoShowOpen, msUntilStart, noShowClosedLine, noShowRefusalWords, orderNoShowOpen, serverAllowsNoShow } from './noShow';
 
 // ---------------------------------------------------------------------------
 // [BOOK-NS-APP · owner B3] "Customer didn't come" in the partner app: when the button shows (the same rule the
@@ -14,10 +14,32 @@ const NOW = Date.parse('2026-10-29T15:00:00.000Z');
 const MIN = 60_000;
 const at = (ms: number) => new Date(NOW + ms).toISOString();
 const appt = (extra: Record<string, unknown> = {}) => ({
-  fulfillment: 'APPOINTMENT', status: 'ACCEPTED', appointmentSlot: at(-5 * MIN), paymentMethod: 'CASH', ...extra,
+  fulfillment: 'APPOINTMENT', status: 'ACCEPTED', appointmentSlot: at(-5 * MIN), paymentMethod: 'CASH', noShow: { allowed: true }, ...extra,
 });
 const refusal = (code: string, message: string) => Object.assign(new Error('Request failed with status code 409'), {
   response: { status: 409, data: { success: false, error: { code, message } } },
+});
+
+describe('[REVIEW-F S3-1 on #2201] the server\'s word comes first', () => {
+  it('no word (an older server): no button on the order or the Schedule, whatever the order looks like', () => {
+    expect(orderNoShowOpen(appt({ noShow: undefined }), NOW)).toBe(false);
+    expect(bookingNoShowOpen({ status: 'CONFIRMED', orderId: 'o-1', slotStart: at(-MIN) }, NOW)).toBe(false);
+  });
+  it('the server says no: no button', () => {
+    expect(orderNoShowOpen(appt({ noShow: { allowed: false } }), NOW)).toBe(false);
+    expect(bookingNoShowOpen({ status: 'CONFIRMED', orderId: 'o-1', slotStart: at(-MIN), noShow: { allowed: false } }, NOW)).toBe(false);
+  });
+  it('only a true word counts (not a truthy one)', () => {
+    for (const noShow of [{ allowed: 'true' }, { allowed: 1 }, { allowed: null }, {}, null, true]) {
+      expect(orderNoShowOpen(appt({ noShow }), NOW), JSON.stringify(noShow)).toBe(false);
+    }
+    expect(serverAllowsNoShow({ noShow: { allowed: true } })).toBe(true);
+    expect(serverAllowsNoShow(undefined)).toBe(false);
+  });
+  it('the server says yes but the order has moved on here (cancelled, not started on this clock): the app\'s rule still holds', () => {
+    expect(orderNoShowOpen(appt({ status: 'CANCELLED' }), NOW)).toBe(false);
+    expect(orderNoShowOpen(appt({ appointmentSlot: at(MIN) }), NOW)).toBe(false);
+  });
 });
 
 describe('[BOOK-NS-APP] the order: an accepted appointment whose time has started', () => {
@@ -48,10 +70,16 @@ describe('[BOOK-NS-APP] the order: an accepted appointment whose time has starte
     expect(orderNoShowOpen(appt({ paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: at(-60 * MIN) }), NOW)).toBe(false);
     expect(orderNoShowOpen(appt({ paymentMethod: 'MOBILE_MONEY' }), NOW)).toBe(true);
   });
+  it('[REVIEW-F S4-1 on #2201] paid by MMG (the server refuses it): no button; an unpaid MMG booking and cash keep it', () => {
+    expect(orderNoShowOpen(appt({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' }), NOW)).toBe(false);
+    expect(orderNoShowOpen(appt({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' }), NOW)).toBe(false);
+    expect(orderNoShowOpen(appt({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' }), NOW)).toBe(true);
+    expect(orderNoShowOpen(appt({ paymentMethod: 'CASH', paymentStatus: 'CAPTURED' }), NOW)).toBe(true);
+  });
 });
 
 describe('[BOOK-NS-APP] the Schedule: a confirmed booking with its order, its time started', () => {
-  const booking = (extra: Record<string, unknown> = {}) => ({ status: 'CONFIRMED', orderId: 'o-1', slotStart: at(-MIN), ...extra });
+  const booking = (extra: Record<string, unknown> = {}) => ({ status: 'CONFIRMED', orderId: 'o-1', slotStart: at(-MIN), noShow: { allowed: true }, ...extra });
   it('shows once the time has started', () => {
     expect(bookingNoShowOpen(booking(), NOW)).toBe(true);
     expect(bookingNoShowOpen(booking({ slotStart: at(0) }), NOW)).toBe(true);
@@ -88,6 +116,23 @@ describe('[BOOK-NS-APP] the words', () => {
       ['NO_SHOW_PAID_MMG', 'This booking is already paid by MMG, so it cannot be closed here. Settle it with the customer directly, or contact Swift Support.'],
     ] as const;
     for (const [code, message] of words) expect(noShowRefusalWords(refusal(code, message)), code).toBe(message);
+  });
+  it('[REVIEW-F S3-1 on #2201] a server without the step (its not-found answer): one plain line, never the route text', () => {
+    const missing = Object.assign(new Error('Request failed with status code 404'), {
+      response: { status: 404, data: { success: false, error: { code: 'NOT_FOUND', message: 'Route PUT /api/v1/vendor/orders/o-1/no-show not found' } } },
+    });
+    expect(noShowRefusalWords(missing)).toBe('This isn’t available yet. Contact Swift Support if the customer didn’t come.');
+    expect(noShowRefusalWords({ response: { status: 404, data: { error: { code: 'ROUTE_NOT_FOUND', message: 'Route not found' } } } })).toBe(NO_SHOW_WORDS.notAvailable);
+    const bare = Object.assign(new Error('Request failed with status code 404'), { response: { status: 404, data: { message: 'Route PUT:/api/v1/vendor/orders/o-1/no-show not found', statusCode: 404 } } });
+    expect(noShowRefusalWords(bare)).toBe(NO_SHOW_WORDS.notAvailable);
+  });
+  it('another business\'s order (a 404 in the server\'s own words) and a 409 keep the server\'s words', () => {
+    const notYours = Object.assign(new Error('Request failed with status code 404'), {
+      response: { status: 404, data: { success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } } },
+    });
+    expect(noShowRefusalWords(notYours)).toBe('Order not found');
+    // A 409 is a refusal whatever its words.
+    expect(noShowRefusalWords(refusal('NOT_FOUND', 'Route PUT /x not found'))).toBe('Route PUT /x not found');
   });
   it('no words from the server (no connection): a plain sentence, never a code', () => {
     expect(noShowRefusalWords(new Error('Network Error'))).toBe('You appear to be offline — check your connection and try again.');

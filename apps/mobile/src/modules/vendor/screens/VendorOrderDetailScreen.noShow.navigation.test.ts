@@ -22,6 +22,7 @@ const fx = vi.hoisted(() => ({
   act: { mutate: () => undefined, isPending: false, isError: false, error: null } as any,
   noShow: (_id: string): Promise<unknown> => Promise.resolve(undefined),
   sent: [] as string[],
+  refetch: vi.fn(),
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 
@@ -62,7 +63,7 @@ vi.mock('../../../hooks/vendorops', async () => {
   const { useMutation } = await import('@tanstack/react-query');
   const idle = () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null });
   return {
-    useVendorOrder: (id?: string) => ({ data: id ? fx.orders[id] : undefined, isLoading: false, isError: false, refetch: vi.fn() }),
+    useVendorOrder: (id?: string) => ({ data: id ? fx.orders[id] : undefined, isLoading: false, isError: false, refetch: fx.refetch }),
     useOrderAction: () => fx.act, useRetryDispatch: idle, useSetOrderFulfillmentMode: idle, useReturnReceived: idle,
     usePickingActions: () => ({ setPicked: idle(), substitute: idle(), refundLine: idle() }),
     usePendingPickLines: () => new Set(),
@@ -79,7 +80,7 @@ const MIN = 60_000;
 const at = (ms: number) => new Date(NOW + ms).toISOString();
 const appt = (extra: Record<string, unknown> = {}) => ({
   id: 'a', orderNumber: 'SW-2001', statusHistory: [], customer: { firstName: 'Asha' }, vendor: { vendorType: 'SERVICE' },
-  paymentMethod: 'CASH', items: [], fulfillment: 'APPOINTMENT', status: 'ACCEPTED', appointmentSlot: at(-10 * MIN), ...extra,
+  paymentMethod: 'CASH', items: [], fulfillment: 'APPOINTMENT', status: 'ACCEPTED', appointmentSlot: at(-10 * MIN), noShow: { allowed: true }, ...extra,
 });
 const COMPLETE = [{ label: 'Mark complete', action: 'complete-appointment' }];
 const refusal = (code: string, message: string) => Object.assign(new Error('Request failed with status code 409'), {
@@ -116,6 +117,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
   fx.sent = [];
+  fx.refetch = vi.fn();
   fx.noShow = () => Promise.resolve(undefined);
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
@@ -153,6 +155,22 @@ describe('[BOOK-NS-APP] where "Customer didn\'t come" shows on the order screen'
     expect(button('Customer didn’t come')).toBeUndefined();
   });
 
+  it('[REVIEW-F S3-1 on #2201] an older server (no noShow word): no button, even on a started accepted appointment', async () => {
+    await show(appt({ noShow: undefined }));
+    expect(button('Mark complete')).toBeTruthy();
+    expect(button('Customer didn’t come')).toBeUndefined();
+  });
+
+  it('[REVIEW-F S3-1 on #2201] the server says no (e.g. paid by MMG): no button', async () => {
+    await show(appt({ noShow: { allowed: false }, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' }));
+    expect(button('Customer didn’t come')).toBeUndefined();
+  });
+
+  it('[REVIEW-F S4-1 on #2201] paid by MMG: no button even if a word said yes', async () => {
+    await show(appt({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' }));
+    expect(button('Customer didn’t come')).toBeUndefined();
+  });
+
   it('an appointment with no time on it (an odd or older record): no button', async () => {
     await show(appt({ appointmentSlot: null }));
     expect(button('Customer didn’t come')).toBeUndefined();
@@ -170,17 +188,32 @@ describe('[BOOK-NS-APP] where "Customer didn\'t come" shows on the order screen'
 });
 
 describe('[BOOK-NS-APP] the screen left open across the start', () => {
-  it('the button appears at the start without a new read of the order', async () => {
+  it('at the start the order is read again, and the button appears with the server\'s new word', async () => {
     vi.useRealTimers();
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     timeoutsFaked = true;
     vi.setSystemTime(NOW);
-    await show(appt({ appointmentSlot: at(90_000) }));
+    // Read before the start: the server's word is no (not started).
+    fx.refetch = vi.fn(() => { fx.orders = { a: appt({ appointmentSlot: at(90_000), noShow: { allowed: true } }) }; });
+    await show(appt({ appointmentSlot: at(90_000), noShow: { allowed: false } }));
     expect(button('Customer didn’t come')).toBeUndefined();
     await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(fx.refetch, 'no read before the start').not.toHaveBeenCalled();
     expect(button('Customer didn’t come'), 'not yet').toBeUndefined();
     await act(async () => { vi.advanceTimersByTime(31_000); });
-    expect(button('Customer didn’t come'), 'at the start').toBeTruthy();
+    expect(fx.refetch, 'one read at the start').toHaveBeenCalledTimes(1);
+    expect(button('Customer didn’t come'), 'at the start, with the server\'s yes').toBeTruthy();
+  });
+
+  it('a read at the start that still says no keeps it hidden (the server is the judge)', async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    timeoutsFaked = true;
+    vi.setSystemTime(NOW);
+    await show(appt({ appointmentSlot: at(90_000), noShow: { allowed: false } }));
+    await act(async () => { vi.advanceTimersByTime(91_000); });
+    expect(fx.refetch).toHaveBeenCalledTimes(1);
+    expect(button('Customer didn’t come')).toBeUndefined();
   });
 });
 
@@ -215,6 +248,17 @@ describe('[BOOK-NS-APP] one confirm step, then the server\'s answer', () => {
     await tap('Customer didn’t come');
     await tap('Yes, they didn’t come');
     expect(dialog()!.textContent).toContain('Recorded: the customer didn’t come. No fee, no strike.');
+  });
+
+  it('[REVIEW-F S3-1 on #2201] a server without the step (its not-found answer): one plain line, never the route text', async () => {
+    fx.noShow = () => Promise.reject(Object.assign(new Error('Request failed with status code 404'), {
+      response: { status: 404, data: { success: false, error: { code: 'NOT_FOUND', message: 'Route PUT /api/v1/vendor/orders/a/no-show not found' } } },
+    }));
+    await show(appt());
+    await tap('Customer didn’t come');
+    await tap('Yes, they didn’t come');
+    expect(dialog()!.textContent).toContain('This isn’t available yet. Contact Swift Support if the customer didn’t come.');
+    expect(text()).not.toContain('Route PUT');
   });
 
   it.each([

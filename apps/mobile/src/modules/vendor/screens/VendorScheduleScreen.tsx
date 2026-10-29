@@ -53,11 +53,11 @@ export function bookingStatusPill(status: string): { label: string; tone: 'succe
   }
 }
 
-function AppointmentCard({ b, onMove, onNoShow }: { b: VendorBooking; onMove?: () => void; onNoShow: (orderId: string) => void }) {
+function AppointmentCard({ b, onMove, onNoShow, onStarted }: { b: VendorBooking; onMove?: () => void; onNoShow: (orderId: string) => void; onStarted: () => void }) {
   const pill = bookingStatusPill(b.status);
   // [BOOK-NS-APP · owner B3] A confirmed booking whose time has started: "Customer didn't come" (the card draws
-  // again at the start, so it appears then).
-  const now = useStartClock(b.status === 'CONFIRMED' ? b.slotStart : null);
+  // again at the start and the Schedule is read again, so it appears with the server's word).
+  const now = useStartClock(b.status === 'CONFIRMED' ? b.slotStart : null, onStarted);
   const noShow = bookingNoShowOpen(b, now) ? b.orderId : null;
   return (
     <Card style={{ marginBottom: space.sm }}>
@@ -230,7 +230,7 @@ export function VendorScheduleScreen({ navigation }: any) {
               body="Your open hours are visible to customers — reservations land here."
             />
           ) : (
-            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} onNoShow={setNoShowFor} />)
+            dayBookings.map((b) => <AppointmentCard key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} onNoShow={setNoShowFor} onStarted={() => { void q.refetch(); }} />)
           )}
         </ScrollView>
       )}
