@@ -54,8 +54,11 @@ describe('the in-app "Can I cancel an order?" answer says what Terms §7 says', 
   });
 
   it('[review S3-1 on #1732] the cash checkout caption says free until the store ACCEPTS, never only while it has not been told', () => {
-    const cart = readFileSync(join(process.cwd(), 'src', 'modules', 'cart', 'cartPayment.ts'), 'utf8');
-    expect(cart).toContain('Until the store accepts it, you can cancel free from the order screen.');
+    // [BOOK-WEB #2206] The cart's payment words live in two files now: cartPayment.ts (before an order is placed) and
+    // cartPlaced.ts (the confirmation copy, moved word for word). The pin reads both, and the caption is in cartPlaced.
+    const read = (file: string) => readFileSync(join(process.cwd(), 'src', 'modules', 'cart', file), 'utf8');
+    const cart = `${read('cartPayment.ts')}\n${read('cartPlaced.ts')}`;
+    expect(read('cartPlaced.ts')).toContain('Until the store accepts it, you can cancel free from the order screen.');
     expect(cart).not.toMatch(/hasn.t received it/);
   });
 

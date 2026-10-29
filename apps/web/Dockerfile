@@ -68,6 +68,8 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [BOOK-WEB #2206] ...and its after-placing copy and MMG pay action, loaded with the booking success panel (types only).
+COPY apps/mobile/src/modules/cart/cartPlaced.ts apps/mobile/src/modules/cart/cartPlaced.ts
 # [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
 COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
 # [UI-SWEEP U14 / U17] The order pages speak the phone's status words and its

@@ -1,11 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { formatAmount } from '@/lib/money';
 import { addToCart, clearCart, type CartLine, type MenuItem } from '@/lib/customer';
 import { formatAppointmentClock } from '@/lib/appointmentTime';
 import { saveHeldTime, type HeldTime } from '@/lib/held-time';
+import { queueStorefrontContinuation } from '@/lib/storefront-continuation';
 import { Sheet } from '@/components/sheet';
 import { BookingChoice } from '@/components/booking/booking-choice';
 import styles from './storefront.module.css';
@@ -24,7 +25,7 @@ const gyMoney = (value: unknown) => formatAmount(value, '$');
  * emptied only when the customer says so.
  */
 export function BookingSheet({
-  item, vendorId, vendorName, vendorAddress, price, cartLines, blocked, onBooked, onClose,
+  item, vendorId, vendorName, vendorAddress, price, cartLines, blocked, guest, onBooked, onClose,
 }: {
   item: MenuItem;
   vendorId: string;
@@ -35,6 +36,9 @@ export function BookingSheet({
   cartLines: () => CartLine[];
   /** Why the cart cannot be written now (an unresolved checkout, taps still out), or null. */
   blocked: () => string | null;
+  /** A guest: the free times are read signed in, so they sign in first and the sheet reopens on return (the queued
+   *  intent); nothing is read or added before that. `signIn` also closes this sheet (the intent stays queued). */
+  guest: { storeSlug: string; returnPath: string; signIn: () => void } | null;
   /** The booking is in the cart and its time held: the page goes to checkout. */
   onBooked: () => void;
   onClose: () => void;
@@ -42,6 +46,12 @@ export function BookingSheet({
   const [picked, setPicked] = useState<HeldTime | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!guest) return;
+    queueStorefrontContinuation({ storeSlug: guest.storeSlug, itemId: item.id, selectedOptions: {}, returnPath: guest.returnPath });
+    guest.signIn();
+    // Once, for the guest who tapped Book.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const book = async (held: HeldTime) => {
     if (busy) return;
@@ -67,6 +77,7 @@ export function BookingSheet({
     }
   };
 
+  if (guest) return null;
   return (
     <Sheet labelledBy="booking-sheet-title" onClose={() => { if (!busy) onClose(); }} className={styles.sheet}>
       <div className={styles.sheetHeader}>

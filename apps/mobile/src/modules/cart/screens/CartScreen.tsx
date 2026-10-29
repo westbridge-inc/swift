@@ -74,12 +74,11 @@ import {
   checkoutPaymentFields,
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
-  paymentActionForCheckout,
-  placedOrderConfirmationCopy,
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../cartPayment';
+import { paymentActionForCheckout, placedOrderConfirmationCopy } from '../cartPlaced';
 import { touchTarget } from '../../../kit/touch-target';
 import { bookingSummaryNote, checkoutButtonLabel, mmgBookingWaitsNote, placedBookingOutcome, placedPopupTitle, type PlacedBookingOutcome } from '../../../lib/appointmentBooking';
 

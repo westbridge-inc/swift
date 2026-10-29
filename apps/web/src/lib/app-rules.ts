@@ -25,20 +25,3 @@ export {
 } from '../../../mobile/src/modules/cart/cartPayment';
 // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The accepted order's "Pay $X by MMG to <store>'s MMG number": one parser.
 export { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../mobile/src/lib/mmgStorePayment';
-// [BOOK-S6b · owner C3 28 Oct 2026] Web customer booking says what the phone says, from the same rules:
-// the "Instant confirmation" badge only on the slots answer's own word, "Book now" vs "Request booking",
-// the booking summary line, and a placed booking is "confirmed" only when the checkout answer's
-// appointment order is already ACCEPTED (never a guess). The order's "Change time" reads the server's
-// appointmentBooking projection the same way.
-export {
-  appointmentBookingView,
-  bookingSummaryNote,
-  checkoutButtonLabel,
-  listingConfirmsInstantly,
-  mmgBookingWaitsNote,
-  placedBookingOutcome,
-  placedPopupTitle,
-  type AppointmentBookingView,
-  type PlacedBookingOutcome,
-} from '../../../mobile/src/lib/appointmentBooking';
-export { paymentActionForCheckout, placedOrderConfirmationCopy } from '../../../mobile/src/modules/cart/cartPayment';

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { ItemSlots } from '@/lib/customer';
-import { listingConfirmsInstantly } from '@/lib/app-rules';
+import { listingConfirmsInstantly } from '@/lib/booking-rules';
 import { visitModeFor, type HeldTime, type VisitMode } from '@/lib/held-time';
 import { SlotPicker } from './slot-picker';
 import styles from './booking.module.css';
