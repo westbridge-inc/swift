@@ -13,6 +13,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { LocalStorageProvider } from '../providers/storage/storage-provider';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
+import { storeShowsPhoto } from '../utils/public-store-photos';
 
 const storage = new LocalStorageProvider();
 vi.mock('../providers/storage/storage-provider', async (original) => ({ ...await original<object>(), getStorageProvider: () => storage }));
@@ -165,6 +166,30 @@ describe('[CHAINS] POST /vendor/menu/copy', () => {
     expect(mains!.imageUrl).toBe(chicken.imageUrl);
     // The source is untouched.
     expect((await liveMenu(north.id)).flatMap((c) => c.items).length).toBe(5);
+  });
+
+  it('the copied photos are served by the public door for the new branch (its own folder, its own rows)', async () => {
+    const menu = await liveMenu(camp.id);
+    const section = menu[0]!.imageUrl!;
+    const item = menu[0]!.items[0]!.imageUrl!;
+    const file = (url: string) => url.split('/').pop()!;
+    expect(await storeShowsPhoto(app, camp.id, file(section)), 'the section photo').toBe(true);
+    expect(await storeShowsPhoto(app, camp.id, file(item)), 'the item photo').toBe(true);
+  });
+
+  it('an item pointing at ANOTHER store\'s photo is copied without a photo (only the source store\'s own folder is read)', async () => {
+    const stranger = await makeOwner();
+    const theirs = await store(stranger.ownerId, 'Other Photo');
+    const foreign = await photoFor(theirs.id);
+    const src = await store(owner.ownerId, 'Royal Src');
+    const shelf = await app.prisma.category.create({ data: { vendorId: src.id, name: 'Mains', sortOrder: 0 } });
+    await app.prisma.item.create({ data: { vendorId: src.id, categoryId: shelf.id, name: 'Borrowed photo plate', basePrice: '700', imageUrl: foreign } });
+    const target = await store(owner.ownerId, 'Royal Dst');
+    const res = await copy(owner.token, target.id, src.id);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ items: 1, photos: 0, photosNotCopied: 1 });
+    const copied = (await liveMenu(target.id))[0]!.items[0]!;
+    expect(copied.imageUrl).toBeNull();
   });
 
   it('the same copy sent again answers the first one and writes nothing; a new copy into a menu that has items is refused', async () => {
