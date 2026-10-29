@@ -199,23 +199,19 @@ export function CheckoutPanel() {
     }
     const fulfillmentModes = new Set(c.items.map((line) => line.fulfillment));
     const cartIsBooking = bookingsOnly(c.items);
-    if (cartIsBooking) {
-      // [BOOK-S6b] One booking per order, as checkout places it (one listing,
-      // one time): the server refuses a group of several.
-      if (c.items.length !== 1) {
-        return block('Book one appointment at a time on the web. Remove the other bookings to continue.');
-      }
-      if (c.items[0]!.quantity !== 1) {
-        return block('A booking is for one appointment. Remove it and book it again from the store page.');
-      }
+    if (cartIsBooking || fulfillmentModes.has('APPOINTMENT')) {
+      // [BOOK-S6b] One booking per order, as checkout places it (one listing, one time). The rule and its words load
+      // with the booking parts (perf budget), only for a cart that holds a booking.
+      const { bookingCartProblem } = await import('@/components/checkout/booking-parts');
+      if (request !== refreshSequence.current) return null;
+      const problem = bookingCartProblem(c.items);
+      if (problem) return block(problem);
       const only = c.items[0]!;
       void heldTimeStore().then(({ readHeldTime }) => setHeldTime((current) => (current?.itemId === only.itemId ? current : readHeldTime(only.itemId))));
     } else if (fulfillmentModes.size !== 1 || !fulfillmentModes.has('DELIVERY')) {
       return block(fulfillmentModes.has('PICKUP')
         ? 'Pickup-only items are ordered in the Swift app for now. Remove those lines to order on the web.'
-        : fulfillmentModes.has('APPOINTMENT')
-          ? 'A booking is placed on its own. Remove the booking to order the other items, or remove them to book it.'
-          : 'This cart mixes or omits fulfilment modes, so Swift will not show or submit one aggregate total.');
+        : 'This cart mixes or omits fulfilment modes, so Swift will not show or submit one aggregate total.');
     }
     // [W5 · review S2] Any promotion, even one that discounts nothing here (a
     // free-delivery code under pickup): checkout would still spend its use.
@@ -534,7 +530,7 @@ export function CheckoutPanel() {
           const quotedTotal = refreshedTotal(quotedCart);
           await refresh({ announceChecking: false });
           setError(bookingOrder
-            ? `Swift checked this address: the booking comes to ${quotedTotal}. Review it, then book.`
+            ? (await import('@/components/checkout/booking-parts')).addressCheckedWords(quotedTotal)
             : `Swift refreshed this order to ${quotedTotal}. Review the new server total, then place the order again.`);
           window.requestAnimationFrame(() => errorMessage.current?.focus());
           return;
@@ -866,12 +862,8 @@ export function CheckoutPanel() {
               {busy ? (booking ? 'Booking…' : 'Placing…')
                 : booking
                   // [BOOK-S6a rule] "Book now" only when the slots answer said instant and the customer pays cash; else a request.
-                  ? !heldTime ? 'Pick a time to book'
-                    : homeVisit && !addrId ? 'Add your address to book'
-                      // The server checks the address first (as a delivery quote is asked for): nothing is booked yet.
-                      : homeVisit && !hasDestinationQuote ? 'Check this address'
-                      // [BOOK-S6a rule, loaded with the booking parts] "Book now" vs "Request booking".
-                      : <Suspense fallback={`Book · ${money(total)}`}><BookingPart part="label" instant={heldTime.instant === true} payingCash={!payByMmg} total={money(total)} /></Suspense>
+                  // [BOOK-S6a rule, loaded with the booking parts] "Book now" vs "Request booking", and what is missing first.
+                  ? <Suspense fallback="Book"><BookingPart part="label" heldTime={heldTime} homeVisit={homeVisit} hasAddress={Boolean(addrId)} addressChecked={hasDestinationQuote} payingCash={!payByMmg} total={money(total)} /></Suspense>
                 : !pickup && !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : pickup ? `Place pickup order · ${money(total)}${payByMmg ? ' · pay by MMG' : ''}` : hasDestinationQuote ? (payByMmg ? `Place order · ${money(total)} · pay by MMG` : `Place cash order · ${money(total)}`) : 'Get delivery quote'}
             </button>
           )}

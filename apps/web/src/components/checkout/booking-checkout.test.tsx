@@ -386,6 +386,8 @@ describe('[BOOK-S6b] Book on the store page', () => {
     await waitFor(() => expect((book as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(book);
     await waitFor(() => expect(state.push).toHaveBeenCalledWith(`/login?next=${encodeURIComponent('/store/fixture-studio')}`));
+    // The intent waits for the return from sign-in (the sheet reopens then).
+    expect(JSON.parse(sessionStorage.getItem('swift_storefront_add') ?? 'null')).toMatchObject({ storeSlug: 'fixture-studio', itemId: 'i9' });
     expect(calls('GET', '/api/v1/customer/items/i9/slots')).toHaveLength(0);
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
   });

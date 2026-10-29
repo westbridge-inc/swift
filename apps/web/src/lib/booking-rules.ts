@@ -18,4 +18,4 @@ export {
   type AppointmentBookingView,
   type PlacedBookingOutcome,
 } from '../../../mobile/src/lib/appointmentBooking';
-export { paymentActionForCheckout, placedOrderConfirmationCopy } from '../../../mobile/src/modules/cart/cartPayment';
+export { paymentActionForCheckout, placedOrderConfirmationCopy } from '../../../mobile/src/modules/cart/cartPlaced';

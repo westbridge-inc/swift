@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
-import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import { lazyRetry } from '@/lib/chunk-retry';
 import {
   addToCart,
@@ -678,13 +678,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
    */
   const bookItem = (item: DisplayItem, trigger?: HTMLElement) => {
     if (!bookable || !item.isAvailable || itemPrice(item) === null || cartHydrationPending || cartMutationLockedByCheckout()) return;
-    if (!signedIn) {
-      if (restoringSession.current) return;
-      // A renewed session reopens the sheet from the queued intent (the effect below).
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: {}, returnPath });
-      signInThen(returnPath, false);
-      return;
-    }
+    if (!signedIn && restoringSession.current) return;
     modalReturnFocus.current = trigger ?? null;
     setBookingItem(item);
   };
@@ -1259,6 +1253,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             vendorId={catalog.id}
             cartLines={() => cartNow.current?.items ?? []}
             blocked={bookingBlocked}
+            guest={signedIn ? null : { storeSlug: store.slug, returnPath, signIn: () => { setBookingItem(null); signInThen(returnPath, false); } }}
             onBooked={() => { refreshShellCart(); setBookingItem(null); router.push('/checkout'); }}
             onClose={closeBooking}
           />

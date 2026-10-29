@@ -99,9 +99,32 @@ export function BookingPlaced({ placed }: { placed: PlacedBooking }) {
   );
 }
 
-/** The Book button's words: "Book now" only for an instant listing paid in cash, else "Request booking" (#2194). */
-export function BookingButtonLabel({ instant, payingCash, total }: { instant: boolean; payingCash: boolean; total: string }) {
-  return <>{`${checkoutButtonLabel({ appointmentOnly: true, pickup: false, everyBookingInstant: instant, payingCash })} · ${total}`}</>;
+/** The Book button's words: what is missing first (a time, an address, the server's check of it), then "Book now"
+ *  only for an instant listing paid in cash, else "Request booking" (#2194). */
+export function BookingButtonLabel({ heldTime, homeVisit, hasAddress, addressChecked, payingCash, total }: {
+  heldTime: HeldTime | null; homeVisit: boolean; hasAddress: boolean; addressChecked: boolean; payingCash: boolean; total: string;
+}) {
+  if (!heldTime) return <>Pick a time to book</>;
+  if (homeVisit && !hasAddress) return <>Add your address to book</>;
+  // The server checks the address first (as a delivery quote is asked for): nothing is booked yet.
+  if (homeVisit && !addressChecked) return <>Check this address</>;
+  return <>{`${checkoutButtonLabel({ appointmentOnly: true, pickup: false, everyBookingInstant: heldTime.instant === true, payingCash })} · ${total}`}</>;
+}
+
+/** [BOOK-S6b] One booking per order, as checkout places it (one listing, one time): the server refuses a group of
+ *  several, and a booking with goods. The words for a cart that breaks it, or null. */
+export function bookingCartProblem(items: Array<{ fulfillment?: string; quantity: number }>): string | null {
+  if (!items.every((line) => line.fulfillment === 'APPOINTMENT')) {
+    return 'A booking is placed on its own. Remove the booking to order the other items, or remove them to book it.';
+  }
+  if (items.length !== 1) return 'Book one appointment at a time on the web. Remove the other bookings to continue.';
+  if (items[0]!.quantity !== 1) return 'A booking is for one appointment. Remove it and book it again from the store page.';
+  return null;
+}
+
+/** The line after the server checked a home visit's address (nothing is booked yet). */
+export function addressCheckedWords(total: string): string {
+  return `Swift checked this address: the booking comes to ${total}. Review it, then book.`;
 }
 
 /** [perf budget] One on-demand entry for the checkout: each booking part by name. */
