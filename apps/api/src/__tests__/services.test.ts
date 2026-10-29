@@ -747,13 +747,16 @@ describe('Services — job lifecycle + two-way rating', () => {
   it('[owner #50 · coordinator rulings 14 Oct · Terms §7] the customer cancels free while the job is a request; once it is booked or in progress the app refuses and names who to contact — never a fee', async () => {
     const provider = await makeVerifiedProvider('carpenter');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // [BOOK-P1] Each booked job takes its own hour: one provider is never booked twice in one minute.
+    let hour = 0;
     const job = async () => {
+      hour += 1;
       const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
       expect(created.statusCode, created.body).toBe(201);
       const jobId = created.json().data.id as string;
       // (Merged with #1483: lifecycle commands carry the job's last-seen version.)
       await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
-      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
+      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY + hour * 60 * 60 * 1000).toISOString(), ...await commandState(jobId) }, customer.token);
       expect(scheduled.json().data.status).toBe('SCHEDULED');
       return jobId;
     };

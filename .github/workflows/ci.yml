@@ -632,6 +632,19 @@ jobs:
           found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='bookings_vendor_matches_item' AND NOT tgisinternal")
           if [ "$found" != "1" ]; then echo "::error::MISSING booking trigger: bookings_vendor_matches_item"; exit 1; fi
           echo "ok: bookings_vendor_matches_item present"
+      # [BOOK-P1] One pro, one time: a provider's live jobs never overlap, and a
+      # booked service is the provider's own — raw SQL too (provider-time.ts).
+      - name: Pro one-at-a-time constraints exist
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          for c in service_jobs_provider_one_at_a_time service_jobs_ends_after_start service_offerings_duration_check service_offerings_price_check service_provider_time_off_window_check; do
+            found=$(psql "$DB" -tAc "SELECT 1 FROM pg_constraint WHERE conname='$c'")
+            if [ "$found" != "1" ]; then echo "::error::MISSING pro booking constraint: $c (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $c present"
+          done
+          found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='service_jobs_offering_matches_provider' AND NOT tgisinternal")
+          if [ "$found" != "1" ]; then echo "::error::MISSING pro booking trigger: service_jobs_offering_matches_provider"; exit 1; fi
+          echo "ok: service_jobs_offering_matches_provider present"
       # Row 106 (#1217): QR tenant lineage, store-tenant immutability and the
       # permanent printed-token identity registry are raw SQL — a printed code
       # becoming reissuable, or a store becoming movable, must go RED.
