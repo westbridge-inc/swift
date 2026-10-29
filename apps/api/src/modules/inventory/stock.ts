@@ -359,7 +359,7 @@ export async function recordOpeningBalances(
      WHERE i.id = v.id AND i."vendorId" = ${input.vendorId} AND v.quantity >= 0
     RETURNING i.id AS id`;
   if (set.length !== entries.length) {
-    throw new AppError(500, 'OPENING_BALANCE_MISMATCH', 'Opening balances did not match the items created');
+    throw new AppError(500, 'OPENING_BALANCE_MISMATCH', 'Opening stock counts did not match the items created');
   }
   await tx.stockMovement.createMany({
     data: entries.map((e) => ({

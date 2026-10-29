@@ -241,6 +241,7 @@ const OUT: Record<string, string> = {
   'modules/safety/safety.routes.ts|POST|/sos/:id/confirm': 'Safety: confirms an existing SOS; it creates no order or money.',
   'modules/safety/safety.routes.ts|POST|/sos/:id/resolve': 'Safety: resolves an existing SOS; it creates no order or money.',
   'modules/vendor/vendor.routes.ts|POST|/items/:id/adjust': 'A stock count adjustment on the store\'s item (inventory), not an order or money.',
+  'modules/vendor/vendor.routes.ts|POST|/items/import/sync/confirm': 'Applies a till export to the store\'s own items (stock counts and prices), not an order or money. A replay is still a no-op: the upload id is the pos_imports row id, so a retried confirm returns the stored result, and (store, file hash) is unique.',
   'modules/vendor/vendor.routes.ts|POST|/store-categories/request': 'Asks Swift to add a store category; no order or money.',
   [`${ADMIN}|POST|/orders/:id/food-age-hold/release`]: 'Releases an age hold on an existing order (C2 workflow state), not a new order or money.',
   [`${ADMIN}|POST|/integrity/appeals/:id/resolve`]: 'Decides an integrity appeal (C3); it creates no order or money.',
