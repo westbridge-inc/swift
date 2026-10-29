@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { normalizeDocNumber } from '../modules/integrity/normalize';
 import { IdentityService } from '../modules/integrity/identity.service';
@@ -29,7 +29,7 @@ grantSuiteCapability('ddl');
 // 3. A CHAIN DEAL is born on a new branch: its custom rate is the owner's deal when the deal is not above its fee.
 // ---------------------------------------------------------------------------
 
-const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
+const prisma = testPrismaClient();
 const identity = new IdentityService(prisma);
 const trialLaw = new TrialEntitlementService(prisma);
 const subscriptions = new SubscriptionService(prisma);
@@ -255,6 +255,19 @@ describe('[CHAINS] shared chain trial', () => {
       });
     }
   }
+
+  it('a live FOUNDER_OVERRIDE still gives a returning owner (own grant spent by churn) a store trial, as before (REVIEW-G/M #2211 S4-1)', async () => {
+    const owner = await makeUser();
+    const other = await makeUser();
+    const clusterId = await sameId(owner.id, other.id);
+    await grantRow(clusterId, other.id, 'VENDOR');
+    await prisma.trialGrant.create({ data: { tenantId: TENANT, clusterId, role: `VENDOR:EX:${owner.id}`, accountId: owner.id, status: 'CONSUMED', startedAt: new Date(Date.now() - 30 * DAY), endsAt: new Date(Date.now() - 16 * DAY), statusReason: 'EXCEPTION_GRANT' } });
+    await exception(clusterId, 'FOUNDER_OVERRIDE');
+    const back = await makeStoreFor(owner.id);
+    const sub = await subscriptions.startTrialForVendor(back.vendor.id);
+    expect(sub.status).toBe('TRIAL');
+    expect(await prisma.trialGrant.count({ where: { accountId: owner.id, status: 'ACTIVE' } })).toBe(1);
+  });
 
   it('an owner whose first store trial came from a founder exception shares it with their branches too', async () => {
     const h1 = await makeUser();

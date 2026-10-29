@@ -322,13 +322,15 @@ export class SubscriptionService {
     const shared = ownGrant && branchOf && 'vendorId' in entity
       ? await sharedChainTrialEnd(tx, { ownerId: branchOf.ownerId, exceptVendorId: entity.vendorId, grantEndsAt: ownGrant.endsAt, now })
       : null;
-    // [REVIEW-M #2211 S3-2 residue] An exception gives a store trial only to an account that never held one of its
-    // own. A grant row stays ACTIVE past its end (nothing flips it), so an owner whose own trial ENDED would otherwise
-    // be granted again: a second VENDOR:EX row collides with the first (the branch could never be approved), and an
-    // ordinary ended trial would turn into a fresh 14 days. Branches added after the owner's trial pay from approval.
+    // [REVIEW-M #2211 S3-2 residue] An exception gives a store trial only to an account that holds no ACTIVE store
+    // trial grant of its own. A grant row stays ACTIVE past its end (nothing flips it), so an owner whose own trial
+    // ENDED would otherwise be granted again: a second VENDOR:EX row collides with the first (the branch could never
+    // be approved), and an ordinary ended trial would turn into a fresh 14 days. Branches added after the owner's
+    // trial pay from approval. [REVIEW-G/M #2211 S4-1] A grant spent by churn (CONSUMED) is not counted: a live
+    // founder exception may still give a returning owner a trial, exactly as before this change.
     const ownEver = vendorTrialOpen && decision.reason === 'EXCEPTION_GRANT' && !ownGrant
       ? await tx.trialGrant.findFirst({
-        where: { tenantId, accountId: human.userId, role: { in: ['VENDOR', `VENDOR:EX:${human.userId}`] } },
+        where: { tenantId, accountId: human.userId, role: { in: ['VENDOR', `VENDOR:EX:${human.userId}`] }, status: 'ACTIVE' },
         select: { id: true },
       })
       : null;

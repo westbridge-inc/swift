@@ -117,7 +117,7 @@ afterAll(async () => {
   await app.prisma.identityCluster.deleteMany({ where: { id: { in: clusters.map((c) => c.clusterId) } } });
   await app.prisma.vendorStaff.deleteMany({ where: { vendorId: { in: ids } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
+  await purgeFixtureAuditTrail(app.prisma, userIds, 'chains-add-branch');
   await app.prisma.vendor.deleteMany({ where: { id: { in: ids } } });
   await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
