@@ -91,8 +91,9 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
   // [BOOK-S7] 2026-10-28 (non-material pending the owner: appointment rules) is served on top: the newest material version stays 2026-10-27.
   // [BOOK-FU2] 2026-10-28.1 (material: "Customer didn't come") is served on top and is now the newest material version.
   // [TERMS] 2026-10-29 (non-material: Terms s.7 pro appointments) is served on top: the newest material version stays 2026-10-28.1.
-  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-29 (newest material: 2026-10-28.1, no-show record)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-29');
+  // [BOOK-P3] 2026-10-29.1 (non-material: the free cancel after a move) is served on top: the same.
+  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-10-29.1 (newest material: 2026-10-28.1, no-show record)', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-29.1');
     expect(materialVersion('2026-10-25')).toBe('2026-10-21');
     expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');

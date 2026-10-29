@@ -39,6 +39,7 @@ function initialState(): TransactionState {
       offeringId: null,
       endsAt: null,
       providerConfirmedAt: new Date('2026-09-19T13:00:00.000Z'),
+      providerMovedAt: null,
       chatRoomId: 'room-1',
       completedAt: null,
       cancelledAt: null,
