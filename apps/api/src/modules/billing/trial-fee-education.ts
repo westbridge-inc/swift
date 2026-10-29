@@ -5,7 +5,7 @@ import { payInfo } from './agent-cash.service';
 import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { feePauseHoldsBilling, feePauseSpanOpen } from './mmg-pause';
-import { payerUserIdOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
 
 // Trial first-payment funnel [san spec 21.4]: the first fee, told before the
 // first bill ever exists. Day 10 (trial end − 4d) and day 13 (− 1d): the exact
@@ -36,11 +36,7 @@ export async function sweepTrialFeeEducation(
       feeWaived: false,
       trialEndDate: { gt: now, lte: new Date(now.getTime() + 4 * DAY_MS) },
     },
-    include: {
-      rider: { select: { userId: true } },
-      driver: { select: { userId: true } },
-      vendor: { select: { owner: { select: { userId: true } } } },
-    },
+    include: PAYER_INCLUDE,
     take: 500,
   });
 
@@ -75,7 +71,8 @@ export async function sweepTrialFeeEducation(
       : await mmgCheckoutLive(prisma, sub, 'unknown')
         ? mmgPayLine(checkoutAmountGyd(fee))
         : feeDueLine(fee.amountDueGyd, sub.currencyCode, sub.trialEndDate, { first: true });
-    const audience = sub.vendor ? 'VENDOR' : 'MOVER';
+    // [BILL-PRO] A pro's fee is neither a store's nor a mover's: no shipped build opens a fee screen for it.
+    const audience = sub.vendor ? 'VENDOR' : sub.serviceProvider ? 'provider' : 'MOVER';
     if (stage === 'd10') {
       await notifications.send({
         userId,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  moverUserIdOf, moverUserOf, ownerOfRow, ownerTenantOf, payerAudienceOf, payerOf, payerUserIdOf,
+  moverUserIdOf, moverUserOf, ownerOfRow, ownerTenantOf, PAYER_INCLUDE, payerAudienceOf, payerOf, payerUserIdOf, personUserOf,
   subscriptionPaidBySql, subscriptionsPaidBy, subscriptionTenantInTx, subscriptionTenantSql, subscriptionTenantWhere,
 } from '../modules/subscription/subscription-owner';
 
@@ -80,18 +80,19 @@ describe('the owner of a row read with SUBSCRIPTION_OWNER_SELECT', () => {
   });
 });
 
-describe('the Prisma filters are the replaced literals', () => {
+describe('the Prisma filters are the replaced literals, plus the pro (BILL-PRO PR2)', () => {
   it('every subscription a person pays', () => {
-    expect(subscriptionsPaidBy('u-1')).toEqual({ OR: [{ rider: { userId: 'u-1' } }, { driver: { userId: 'u-1' } }, { vendor: { owner: { userId: 'u-1' } } }] });
+    expect(subscriptionsPaidBy('u-1')).toEqual({ OR: [{ rider: { userId: 'u-1' } }, { driver: { userId: 'u-1' } }, { vendor: { owner: { userId: 'u-1' } } }, { serviceProvider: { userId: 'u-1' } }] });
     const some = { in: ['u-1', 'u-2'] };
-    expect(subscriptionsPaidBy(some)).toEqual({ OR: [{ rider: { userId: some } }, { driver: { userId: some } }, { vendor: { owner: { userId: some } } }] });
+    expect(subscriptionsPaidBy(some)).toEqual({ OR: [{ rider: { userId: some } }, { driver: { userId: some } }, { vendor: { owner: { userId: some } } }, { serviceProvider: { userId: some } }] });
   });
 
   it('the one-owner tenant scope', () => {
     expect(subscriptionTenantWhere('t-1')).toEqual({ OR: [
-      { vendor: { tenantId: 't-1' }, riderId: null, driverId: null },
-      { rider: { user: { tenantId: 't-1' } }, vendorId: null, driverId: null },
-      { driver: { user: { tenantId: 't-1' } }, vendorId: null, riderId: null },
+      { vendor: { tenantId: 't-1' }, riderId: null, driverId: null, serviceProviderId: null },
+      { rider: { user: { tenantId: 't-1' } }, vendorId: null, driverId: null, serviceProviderId: null },
+      { driver: { user: { tenantId: 't-1' } }, vendorId: null, riderId: null, serviceProviderId: null },
+      { serviceProvider: { user: { tenantId: 't-1' } }, vendorId: null, riderId: null, driverId: null },
     ] });
   });
 });
@@ -116,7 +117,54 @@ describe('the SQL', () => {
 
   it('the paid-by condition names the person once per owner role', () => {
     const cond = subscriptionPaidBySql('u-1');
-    expect(flat(cond.sql)).toBe('(r."userId" = ? OR d."userId" = ? OR vo."userId" = ?)');
-    expect(cond.values).toEqual(['u-1', 'u-1', 'u-1']);
+    expect(flat(cond.sql)).toBe('(r."userId" = ? OR d."userId" = ? OR vo."userId" = ? OR sp."userId" = ?)');
+    expect(cond.values).toEqual(['u-1', 'u-1', 'u-1', 'u-1']);
+  });
+});
+
+describe('the pro (BILL-PRO PR2): a fourth owner, paid by the pro', () => {
+  const pro = { userId: 'u-pro' };
+  const row = (over: Record<string, unknown>) => ({ riderId: null, driverId: null, vendorId: null, serviceProviderId: null, rider: null, driver: null, vendor: null, serviceProvider: null, ...over }) as never;
+
+  it('the pro pays, after the three older owners (only a legacy row can have two)', () => {
+    expect(payerUserIdOf({ rider: null, driver: null, vendor: null, serviceProvider: pro })).toBe('u-pro');
+    expect(payerOf({ rider: null, driver: null, vendor: null, serviceProvider: pro })).toEqual({ userId: 'u-pro', kind: 'PROVIDER' });
+    expect(payerUserIdOf({ rider, driver: null, vendor: null, serviceProvider: pro })).toBe('u-rider');
+    expect(moverUserIdOf({ rider: null, driver: null, ...{ serviceProvider: pro } } as never)).toBeNull();
+  });
+
+  it("a pro row read without its owner is refused, never answered 'nobody pays'", () => {
+    expect(() => payerUserIdOf({ serviceProviderId: 'sp-1', rider: null, driver: null, vendor: null })).toThrow(expect.objectContaining({ code: 'PAYER_NOT_LOADED' }));
+    expect(() => payerOf({ serviceProviderId: 'sp-1' })).toThrow(expect.objectContaining({ code: 'PAYER_NOT_LOADED' }));
+    // Loaded and gone (the profile was deleted): nobody, as for every other owner.
+    expect(payerUserIdOf({ serviceProviderId: 'sp-1', serviceProvider: null })).toBeNull();
+  });
+
+  it("a pro's notice goes to the provider surface, never the earner app", () => {
+    expect(payerAudienceOf({ serviceProvider: pro })).toBe('provider');
+    expect(payerAudienceOf({ serviceProviderId: 'sp-1' })).toBe('provider');
+    expect(payerAudienceOf({ vendorId: 'v-1' })).toBe('business');
+    expect(payerAudienceOf({ vendorId: null, serviceProviderId: null })).toBe('earner');
+  });
+
+  it("the pro's own user record names the pro on receipts; a mover still comes first", () => {
+    expect(personUserOf({ rider: null, driver: null, serviceProvider: { user: { name: 'p' } } })).toEqual({ name: 'p' });
+    expect(personUserOf({ rider: { user: { name: 'r' } }, driver: null, serviceProvider: null })).toEqual({ name: 'r' });
+    expect(personUserOf({ rider: null, driver: null, serviceProvider: null })).toBeNull();
+    expect(moverUserOf({ rider: null, driver: null, ...{ serviceProvider: { user: { name: 'p' } } } } as never)).toBeNull();
+  });
+
+  it('a row read with SUBSCRIPTION_OWNER_SELECT: the pro, its tenant, and two owners still reported', () => {
+    expect(ownerOfRow(row({ serviceProviderId: 'sp', serviceProvider: { user: user('u-p', 't-3') } })))
+      .toEqual({ kind: 'PROVIDER', userId: 'u-p', tenantId: 't-3', serviceProviderId: 'sp', ownerColumns: 1 });
+    expect(ownerOfRow(row({ serviceProviderId: 'sp' }))).toBeNull();
+    expect(ownerOfRow(row({ riderId: 'r', rider: { user: user('u-r') }, serviceProviderId: 'sp', serviceProvider: { user: user('u-p') } })))
+      .toMatchObject({ kind: 'RIDER', ownerColumns: 2 });
+    expect(ownerTenantOf({ vendor: null, rider: null, driver: null, serviceProvider: { user: { tenantId: 't-p' } } })).toBe('t-p');
+  });
+
+  it('PAYER_INCLUDE loads all four owners', () => {
+    expect(Object.keys(PAYER_INCLUDE).sort()).toEqual(['driver', 'rider', 'serviceProvider', 'vendor']);
+    expect(PAYER_INCLUDE.serviceProvider).toEqual({ select: { userId: true } });
   });
 });
