@@ -105,6 +105,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-28',
     why: 'Appointments booked from a business’s listing: while Swift’s instant appointment booking is switched on, a confirmed appointment cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; a booking the app shows as confirmed when it is made was accepted in advance by the business; businesses keep their availability current and honour bookings or cancel them with a reason. With the switch off nothing changes for anyone. It lands before launch, gives customers more time, and asks no one for more, so nobody is asked again.',
   },
+  {
+    // [TERMS · owner 29 Oct 2026 15:50Z: NON-material, like 2026-10-28 (owner 28 Oct 19:15Z); DRAFT until counsel]
+    version: '2026-10-29',
+    why: 'Terms section 7: an appointment booked from an individual service provider\u2019s list of services follows the same rules as one booked from a business\u2019s listing. While Swift\u2019s instant appointment booking is switched on, it cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; the provider can move it too, and the customer is told in the app; if the provider has not started it 30 minutes after its start time, it cancels free. Terms section 5: a booking from such a list that the app shows as confirmed when it is made was accepted in advance by the provider, who published the list. Before this, such a job could not be cancelled in the app once booked. It lands before launch, gives customers more, and asks no one for more, so nobody is asked again.',
+  },
 ];
 
 /**
