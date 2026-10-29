@@ -7,7 +7,7 @@ import { addStaff, getStaff, removeStaff, updateStaffRole, type StaffMember } fr
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { useStepUp, isStepUpDismissed } from '@/lib/step-up';
-import { TEAM_ROLE_WORDS, branchLabel, isAwaitingApproval } from '@/lib/branches';
+import { TEAM_ROLE_WORDS, branchLabel } from '@/lib/branches';
 import { DataUnavailable } from '@/components/data-unavailable';
 
 const errorWords = (e: unknown, fallback: string) => (!e || isStepUpDismissed(e) ? null : e instanceof Error && e.message ? e.message : fallback);
@@ -26,7 +26,8 @@ export default function TeamPage() {
   const stepUp = useStepUp();
   const staff = useQuery({ queryKey: storeKey(storeId, 'staff'), queryFn: getStaff, enabled: owner });
   const stores = useQuery({ queryKey: ['stores'], queryFn: getStores, enabled: owner });
-  const others: Store[] = useMemo(() => (stores.data?.stores ?? []).filter((s) => s.id !== storeId && !isAwaitingApproval(s)), [stores.data?.stores, storeId]);
+  // [REVIEW-F #2220 S4-3] Only branches open on Swift (ACTIVE): the server refuses the whole add for any other.
+  const others: Store[] = useMemo(() => (stores.data?.stores ?? []).filter((s) => s.id !== storeId && s.status === 'ACTIVE'), [stores.data?.stores, storeId]);
   const [phone, setPhone] = useState('');
   const [memberRole, setMemberRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
   const [also, setAlso] = useState<Set<string>>(new Set());

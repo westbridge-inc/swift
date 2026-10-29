@@ -1509,12 +1509,16 @@ export const vendorApi = {
   /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
   withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
   // [CHAINS PR2 · owner 29 Oct 2026] One owner, many branches.
-  /** Every store this account works in, with `awaitingApproval` for a branch waiting for Swift. */
+  /** Every store this account works in; a store not live yet has `awaitingApproval` and `goLive` (whose turn it is). */
   stores: () => api.get('/vendor/stores'),
   /** What the add-a-branch screen shows first: the branch's weekly fee and its words, the shared trial, the deal. */
   branchTerms: (vendorType: string) => api.get('/vendor/stores/branch-terms', { params: { vendorType } }),
-  /** Add a branch (owner; confirm-it's-you; the weekly fee ticked for this branch). */
-  addBranch: (data: { business: Record<string, unknown>; weeklyFeeAck: { version: string; amount: number; currencyCode: string } }) =>
+  /** Add a branch (owner; confirm-it's-you; the weekly fee ticked for this branch), with what go-live needs from the
+   *  owner: the number customers can call (required) and, for a restaurant, the food handlers tick (optional). */
+  addBranch: (data: {
+    business: Record<string, unknown>; weeklyFeeAck: { version: string; amount: number; currencyCode: string };
+    publicPhone: string; foodHandlers?: { accept: true; attestationVersion: string };
+  }) =>
     api.post('/vendor/stores', data),
   /** Sales per branch and in all (owner: every branch; a manager: the branches they manage). */
   storesSummary: () => api.get('/vendor/stores/summary'),

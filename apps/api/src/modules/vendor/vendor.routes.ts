@@ -99,7 +99,7 @@ import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
 import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
-import { PartnerService, branchLimit } from '../partner/partner.service';
+import { BRANCH_TIER, PartnerService, branchLimit } from '../partner/partner.service';
 import { assertStoreNameAllowed, businessSchema, weeklyFeeAckSchema } from '../partner/business-input';
 import { assertWeeklyFeeAck, signupQuote, weeklyFeeTerms, WEEKLY_FEE_ACK_VERSION } from '../partner/weekly-fee-ack';
 import { chainTrialPreview } from '../subscription/subscription.service';
@@ -107,7 +107,7 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { refundRuleForWrite } from './refund-rule';
-import { awaitingFirstGoLive, goLiveMissing } from './go-live';
+import { awaitingFirstGoLive, goLiveMissing, type StoreGoLive } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
@@ -933,6 +933,25 @@ export async function storePhotoFieldsForWrite(
   return { logoUrl: one(logoUrl, current?.logoUrl), coverImageUrl: one(coverImageUrl, current?.coverImageUrl) };
 }
 
+/**
+ * [CHAINS PR2 · REVIEW-F #2220 S3-1] A store's `goLive` in the partner apps' lists: the go-live verdict for a store
+ * waiting for its first go-live (VerificationService.storeGoLiveViews); Swift's turn for any other store not live yet
+ * (a branch held for a person at Swift); null for a live, suspended or closed store.
+ */
+export function storeGoLiveShown(views: ReadonlyMap<string, StoreGoLive>, vendorId: string, awaitingApproval: boolean): StoreGoLive | null {
+  return views.get(vendorId) ?? (awaitingApproval ? { waitingFor: 'SWIFT', steps: [] } : null);
+}
+
+/** [REVIEW-F #2220 S4-4] How many branches' overviews GET /stores/summary reads at once. */
+export const SUMMARY_BATCH = 5;
+
+/** `run` over `items`, `size` at a time, the results in the items' order. */
+export async function mapInBatches<T, R>(items: readonly T[], size: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) out.push(...(await Promise.all(items.slice(i, i + size).map(run))));
+  return out;
+}
+
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   // [PERF item 3] A store's order taps answer without waiting for the push to the customer's
@@ -1077,8 +1096,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'asc' },
       select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true, isVerified: true, status: true, personApprovalRequired: true },
     });
-    // [CHAINS PR2] A branch waiting for Swift's approval says so in the switcher (status PENDING_APPROVAL).
-    const shown = stores.map(({ personApprovalRequired, ...store }) => ({ ...store, awaitingApproval: store.status === 'PENDING_APPROVAL' || personApprovalRequired }));
+    // [CHAINS PR2] A store not live yet (waiting to go live, or a branch waiting for a person at Swift) is
+    // `awaitingApproval`, and [REVIEW-F #2220 S3-1] its `goLive` says whose turn it is: the owner's (with the steps
+    // still to do) or Swift's. The apps say "waiting for Swift's approval" only on Swift's turn.
+    const views = await verification.storeGoLiveViews(stores.filter((s) => s.status === 'PENDING_APPROVAL').map((s) => s.id));
+    const shown = stores.map(({ personApprovalRequired, ...store }) => {
+      const awaitingApproval = store.status === 'PENDING_APPROVAL' || personApprovalRequired;
+      return { ...store, awaitingApproval, goLive: storeGoLiveShown(views, store.id, awaitingApproval) };
+    });
     return { success: true, data: { stores: shown, selectedId: access.vendorId, myRole: access.role } };
   });
 
@@ -1095,8 +1120,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       : (await app.prisma.vendorStaff.findMany({ where: { userId: request.user.userId, role: 'MANAGER', vendorId: { in: access.vendorIds } }, select: { vendorId: true } })).map((m) => m.vendorId);
     if (managed.length === 0) requireRole(access, 'MANAGER');
     const stores = await app.prisma.vendor.findMany({ where: { id: { in: managed } }, orderBy: { createdAt: 'asc' }, select: { id: true, name: true, city: true } });
-    const branches: Array<{ vendorId: string; name: string; city: string | null } & Awaited<ReturnType<typeof analytics.overview>>> = [];
-    for (const store of stores) branches.push({ vendorId: store.id, name: store.name, city: store.city, ...(await analytics.overview(store.id)) });
+    // [REVIEW-F #2220 S4-4] A few branches at a time (never 50 overviews one after another, nor 50 at once).
+    const branches = await mapInBatches(stores, SUMMARY_BATCH, async (store) => ({ vendorId: store.id, name: store.name, city: store.city, ...(await analytics.overview(store.id)) }));
     const sum = (pick: (b: (typeof branches)[number]) => number) => branches.reduce((total, b) => total + pick(b), 0);
     const total = {
       today: { orders: sum((b) => b.today.orders), revenue: sum((b) => b.today.revenue) },
@@ -1131,6 +1156,10 @@ export async function vendorRoutes(app: FastifyInstance) {
         limit: branchLimit(),
         dealWeeklyRate: owner.dealWeeklyRate === null ? null : Number(owner.dealWeeklyRate),
         dealCurrencyCode: owner.dealCurrencyCode,
+        // [REVIEW-F #2220 S3-1] A restaurant branch goes live only with its owner's food handlers tick: the form
+        // offers it here, in the words and version the tick is recorded in. A branch is born a registered seller
+        // (the tier column's default), so every restaurant branch is asked.
+        foodHandlers: foodHandlerTickApplies({ vendorType, tier: BRANCH_TIER }) ? { version: FOOD_HANDLERS_VERSION, tick: FOOD_HANDLERS_TICK_V1 } : null,
       },
     };
   });
@@ -1139,22 +1168,40 @@ export async function vendorRoutes(app: FastifyInstance) {
    * [CHAINS · owner 29 Oct 2026] POST /stores — add a branch under the same owner (PartnerService.addBranch).
    * Owner only (a manager or staff member never adds one), with a fresh "confirm it's you" (a branch is a new weekly
    * fee in the owner's name), the weekly fee shown and ticked for THIS branch, and a modest rate limit on top of
-   * the per-owner cap. The branch waits for approval like any store; the owner then switches to it (x-vendor-id) to
-   * set its hours, delivery area, published phone, food handlers tick and MMG details, each through its usual route.
+   * the per-owner cap. [REVIEW-F #2220 S3-1] The form also gives what go-live needs from the owner, so a new branch
+   * is not left waiting on its owner while it says it waits for Swift: the number customers can call (REQUIRED:
+   * published as the branch's `publicPhone`, by the storefront's own validator; `business.phone` stays Swift's
+   * private contact line) and, for a restaurant, the food handlers tick (optional here: it can be given later on the
+   * branch's own screen). The branch waits for approval like any store; its hours, delivery area and MMG details are
+   * set on its own screens (x-vendor-id), each through its usual route.
    */
   app.post('/stores', { ...auth, config: { rateLimit: { max: 10, timeWindow: '1 hour' } } }, async (request, reply) => {
     await requireVendor(app, request, 'OWNER');
     // [REVIEW-PARTNER] Answered before the step-up; the service refuses it too.
     if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
-    const body = z.object({ business: businessSchema, weeklyFeeAck: weeklyFeeAckSchema.optional() }).strict().parse(request.body);
+    const body = z.object({
+      business: businessSchema,
+      weeklyFeeAck: weeklyFeeAckSchema.optional(),
+      publicPhone: z.string().trim().max(32),
+      foodHandlers: z.object({ accept: z.literal(true), attestationVersion: z.literal(FOOD_HANDLERS_VERSION) }).strict().optional(),
+    }).strict().parse(request.body);
     assertStorePinInMarket(body.business.latitude, body.business.longitude);
+    // [REVIEW-F #2220 S3-1] A branch goes live only with a number customers can call: asked here, judged by the
+    // storefront's own validator before anything else is checked or written.
+    const publicPhone = publicPhoneForWrite(body.publicPhone);
+    if (publicPhone === null) throw new AppError(400, 'PUBLIC_PHONE_REQUIRED', 'Enter the number customers can call at this branch, including +592.');
+    if (body.foodHandlers && !foodHandlerTickApplies({ vendorType: body.business.vendorType, tier: BRANCH_TIER })) {
+      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
+    }
     await assertStoreNameAllowed(app.prisma, request.user.userId, body.business);
     await requireStepUp(app, request);
     // [Row 628] A branch is a new weekly fee: the tick is required from every client, and refused for other words.
     assertWeeklyFeeAck(true, body.weeklyFeeAck);
     const branch = await new PartnerService(app.prisma, notifications).addBranch(
       request.user.userId, body.business,
-      { weeklyFeeAck: body.weeklyFeeAck!, ip: request.ip, surface: consentSurfaceOf(request) },
+      { weeklyFeeAck: body.weeklyFeeAck!, ip: request.ip, surface: consentSurfaceOf(request), foodHandlers: body.foodHandlers !== undefined },
+      process.env,
+      { publicPhone },
     );
     reply.code(201);
     return { success: true, data: { id: branch.id, name: branch.name, status: branch.status } };
@@ -1451,8 +1498,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     // Legacy rows predate the MMG destination validator. Never reflect an
     // invalid stored value back into an app where it could be opened.
+    // [CHAINS PR2 · REVIEW-F #2220 S3-1] Each store not live yet says whose turn it is (the switcher's words).
+    const views = await verification.storeGoLiveViews(vendors.filter((v) => v.status === 'PENDING_APPROVAL').map((v) => v.id));
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
+      goLive: storeGoLiveShown(views, vendor.id, vendor.status === 'PENDING_APPROVAL' || vendor.personApprovalRequired),
       ...storeMoneySurfaceView(vendor),
       publicPhone: safePublicPhone(vendor.publicPhone),
       // [owner #51] What still stands between a never-live store and going

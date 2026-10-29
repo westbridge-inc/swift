@@ -33,7 +33,7 @@ import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { TYPES, TabHeader } from '../shared';
 import { useVendorProfile } from '../../../hooks/vendorops';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { BRANCH_COPY, storeLabel } from '../../../lib/branches';
+import { BRANCH_COPY, goLiveLine, storeLabel } from '../../../lib/branches';
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
@@ -381,8 +381,10 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
             {stores.map((s: any) => <Chip key={s.id} label={storeLabel(s)} selected={s.id === store.id} onPress={() => setSelectedStore(s.id)} />)}
           </ScrollView>
         ) : null}
+        {/* [REVIEW-F #2220 S3-1] A branch says whose turn it is: the owner's steps (each done below on this screen),
+            or, once nothing is owed by the owner, that a person at Swift checks it. */}
         {store.personApprovalRequired ? (
-          <T variant="body" tone="muted" style={{ marginBottom: space.md }}>{BRANCH_COPY.checkFirst}</T>
+          <T variant="body" tone="muted" style={{ marginBottom: space.md }}>{goLiveLine(store) ?? BRANCH_COPY.checkFirst}</T>
         ) : null}
         <PricingCard kind="vendor" vendorType={store.vendorType} />
         {needsPhone ? (

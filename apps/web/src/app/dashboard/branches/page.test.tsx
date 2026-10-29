@@ -16,7 +16,9 @@ const writes: Array<{ method: string; path: string; store: string | undefined; b
 const stores = [
   { id: 'north', name: 'Royal North', vendorType: 'RESTAURANT', isCurrentlyOpen: true, acceptingOrders: true, city: 'Georgetown', isVerified: true, status: 'ACTIVE', awaitingApproval: false },
   { id: 'camp', name: 'Royal Camp', vendorType: 'RESTAURANT', isCurrentlyOpen: true, acceptingOrders: true, city: 'Georgetown', isVerified: true, status: 'ACTIVE', awaitingApproval: false },
-  { id: 'east', name: 'Royal East', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: 'Georgetown', isVerified: false, status: 'PENDING_APPROVAL', awaitingApproval: true },
+  { id: 'east', name: 'Royal East', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: 'Georgetown', isVerified: false, status: 'PENDING_APPROVAL', awaitingApproval: true, goLive: { waitingFor: 'SWIFT', steps: [] } },
+  { id: 'south', name: 'Royal South', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: 'Georgetown', isVerified: false, status: 'PENDING_APPROVAL', awaitingApproval: true, goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS'] } },
+  { id: 'west', name: 'Royal West', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: 'Georgetown', isVerified: false, status: 'PENDING_APPROVAL', awaitingApproval: true, goLive: { waitingFor: 'OWNER', steps: ['PUBLISHED_PHONE', 'DOCUMENTS'] } },
 ];
 const fig = (orders: number, revenue: number) => ({ orders, revenue });
 
@@ -99,6 +101,39 @@ describe('[CHAINS] the Branches page', () => {
       { dayOfWeek: 0, isClosed: true },
       { dayOfWeek: 1, openTime: '09:00', closeTime: '21:00', isClosed: false },
     ] } }]);
+  });
+
+  // [REVIEW-F #2220 S3-1] Whose turn it is, from the server's go-live; the owner's steps with a way to them.
+  it('a branch waiting for its OWNER is never "waiting for Swift": its steps are named, and a button opens its Settings', async () => {
+    api();
+    const { user } = renderWithQuery(<BranchesPage />);
+    expect(await screen.findByText('Royal West · not live yet: finish setting it up')).toBeTruthy();
+    expect(screen.queryByText('Royal West · waiting for Swift’s approval')).toBeNull();
+    expect(screen.getByText('Add the number customers can call')).toBeTruthy();
+    expect(screen.getAllByText('Add the documents it still needs, in the Swift app under Documents')).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: "Finish in Royal East's Settings" })).toBeNull();
+    // documents are added in the Swift app: named, with no Settings button that could not finish them
+    expect(screen.getByText('Royal South · not live yet: finish setting it up')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: "Finish in Royal South's Settings" })).toBeNull();
+    await user.click(screen.getByRole('button', { name: "Finish in Royal West's Settings" }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/dashboard/settings'));
+    expect((await import('@/lib/auth')).getSelectedStore()).toBe('west');
+  });
+
+  it('several branches at once offers live branches only (REVIEW-F N1)', async () => {
+    api();
+    renderWithQuery(<BranchesPage />);
+    expect(await screen.findByRole('checkbox', { name: /Royal North/ })).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: /Royal East/ })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /Royal West/ })).toBeNull();
+  });
+
+  it('a manager (perhaps at two businesses) sees "N stores", never "One business" (REVIEW-F S4-2)', async () => {
+    api({ role: 'MANAGER' });
+    renderWithQuery(<BranchesPage />);
+    expect(await screen.findByText('5 stores')).toBeTruthy();
+    expect(screen.queryByText(/One business/)).toBeNull();
+    expect(screen.queryByText('Not live yet')).toBeNull();
   });
 
   it('staff do not see the branches', async () => {

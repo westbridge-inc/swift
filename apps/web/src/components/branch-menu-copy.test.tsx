@@ -33,7 +33,8 @@ describe('[CHAINS] copy the menu from another branch (web)', () => {
     api(true);
     const onCopied = vi.fn();
     const { user } = renderWithQuery(<BranchMenuCopy storeId="camp" stores={stores} onCopied={onCopied} />);
-    expect(screen.queryByRole('option', { name: 'Royal East' }), 'a branch waiting for approval is not a source').toBeNull();
+    // [REVIEW-F #2220 N2] Any other branch is a source, live or not yet (as on the phone; the server decides).
+    expect(screen.getByRole('option', { name: 'Royal East' })).toBeTruthy();
     await user.selectOptions(screen.getByLabelText('Copy from'), 'north');
     await user.click(screen.getByRole('button', { name: 'Copy Royal North’s menu here' }));
     expect(await screen.findByText('Swift is busy right now. Try again.')).toBeTruthy();

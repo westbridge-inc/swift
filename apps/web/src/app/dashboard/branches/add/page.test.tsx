@@ -21,10 +21,11 @@ import AddBranchPage from './page';
 // The add asks this browser to confirm it's you, then is sent once more.
 // ---------------------------------------------------------------------------
 
+const FOOD_TICK = 'Everyone who handles food here holds a current food handler’s certificate.';
 const TERMS = { version: 'v1', items: [{ heading: 'When it starts', text: 'After Swift approves the store.' }], tick: 'I understand the weekly fee' };
 const posts: Array<{ path: string; body: unknown }> = [];
 
-function api(opts: { trialEnds?: string | null; role?: string; stepUp?: boolean; feeChangedOnce?: boolean; sameAmount?: boolean } = {}) {
+function api(opts: { trialEnds?: string | null; role?: string; stepUp?: boolean; feeChangedOnce?: boolean; sameAmount?: boolean; noFood?: boolean } = {}) {
   let stepped = !opts.stepUp;
   let feeChanged = !!opts.feeChangedOnce;
   let amount = 15000;
@@ -37,6 +38,7 @@ function api(opts: { trialEnds?: string | null; role?: string; stepUp?: boolean;
       weeklyFee: { amount, currencyCode: 'GYD', tier: 'SMALL', version: 'v1' }, terms: TERMS,
       sharedTrialEndsAt: opts.trialEnds === undefined ? '2026-11-05T16:00:00.000Z' : opts.trialEnds, stores: 1, limit: 50,
       dealWeeklyRate: 12000, dealCurrencyCode: 'GYD',
+      foodHandlers: opts.noFood ? null : { version: 'v1', tick: FOOD_TICK },
     } } };
     if (path === '/auth/step-up') return { body: { success: true, data: { sentTo: '+592 ••• 1234' } } };
     if (path === '/auth/step-up/verify') { stepped = true; return { body: { success: true, data: {} } }; }
@@ -51,8 +53,10 @@ function api(opts: { trialEnds?: string | null; role?: string; stepUp?: boolean;
 
 async function fill(user: Awaited<ReturnType<typeof renderWithQuery>>['user']) {
   await user.type(await screen.findByLabelText('Branch name'), 'Royal Camp');
-  await user.clear(screen.getByLabelText(/branch's phone/));
-  await user.type(screen.getByLabelText(/branch's phone/), '+5926001234');
+  await user.clear(screen.getByLabelText(/^Branch phone/));
+  await user.type(screen.getByLabelText(/^Branch phone/), '+5926001234');
+  await user.clear(screen.getByLabelText('The number customers can call'));
+  await user.type(screen.getByLabelText('The number customers can call'), '+592 600 7788');
   await user.type(screen.getByLabelText('Street address'), '2 Camp Street');
   await user.type(screen.getByLabelText('City or town'), 'Georgetown');
   await user.click(screen.getByRole('button', { name: 'Place the branch on the map' }));
@@ -73,7 +77,8 @@ describe('[CHAINS] add a branch (web)', () => {
     expect(screen.getByText('Free until 5 November 2026 if Swift approves it before 5 November 2026. After that, $15,000/week.')).toBeTruthy();
     expect(screen.getByText('The free trial belongs to your business, not to one branch: a branch you close during the free trial still uses it up.')).toBeTruthy();
     expect(screen.getByText('Your agreed rate: $12,000/week (or the branch’s own fee, if lower).')).toBeTruthy();
-    expect(screen.getByText('Swift checks every new branch before it goes live. You’ll see it as waiting for Swift’s approval.')).toBeTruthy();
+    expect(screen.getByText('A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what, with a button to finish it.')).toBeTruthy();
+    expect(screen.queryByText(/You’ll see it as waiting for Swift’s approval/)).toBeNull();
   });
 
   it('with no running trial: billed from the day Swift approves it', async () => {
@@ -99,8 +104,46 @@ describe('[CHAINS] add a branch (web)', () => {
     expect(sends[1]!.body).toEqual({
       business: { name: 'Royal Camp', vendorType: 'RESTAURANT', phone: '+5926001234', addressLine1: '2 Camp Street', city: 'Georgetown', latitude: 6.81, longitude: -58.16 },
       weeklyFeeAck: { version: 'v1', amount: 15000, currencyCode: 'GYD' },
+      publicPhone: '+592 600 7788',
     });
     expect(posts.find((p) => p.path === '/auth/step-up/verify')?.body).toEqual({ code: '123456' });
+  });
+
+  // [REVIEW-F #2220 S3-1] What go-live needs from the owner comes with the add.
+  it('the branch phone is labelled as Swift\'s private line; the number customers can call is asked with its disclosure and is required', async () => {
+    api();
+    const { user } = renderWithQuery(<AddBranchPage />);
+    expect(await screen.findByLabelText('Branch phone (Swift\'s contact line for the branch; customers don\'t see it)')).toBeTruthy();
+    expect(screen.queryByText(/customers see it\)/)).toBeNull();
+    expect(screen.getByLabelText('The number customers can call').getAttribute('aria-describedby')).toBe('call-us-help');
+    expect(document.getElementById('call-us-help')?.textContent).toMatch(/This is separate from the number you sign in with, which stays private\./);
+    await fill(user);
+    await user.click(await screen.findByRole('checkbox', { name: 'I understand the weekly fee' }));
+    await user.clear(screen.getByLabelText('The number customers can call'));
+    expect((screen.getByRole('button', { name: 'Add this branch' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a restaurant\'s food handlers tick, in the server\'s words: sent only when ticked; another business type is not asked', async () => {
+    api();
+    const { user } = renderWithQuery(<AddBranchPage />);
+    await fill(user);
+    await user.click(await screen.findByRole('checkbox', { name: 'I understand the weekly fee' }));
+    await user.click(await screen.findByRole('checkbox', { name: FOOD_TICK }));
+    await user.click(screen.getByRole('button', { name: 'Add this branch' }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/dashboard/branches'));
+    const sent = posts.filter((p) => p.path === '/vendor/stores').at(-1)!.body as Record<string, unknown>;
+    expect(sent['foodHandlers']).toEqual({ accept: true, attestationVersion: 'v1' });
+  });
+
+  it('no food handlers tick sent when it is not ticked, or when the server asks none', async () => {
+    api({ noFood: true });
+    const { user } = renderWithQuery(<AddBranchPage />);
+    await fill(user);
+    await user.click(await screen.findByRole('checkbox', { name: 'I understand the weekly fee' }));
+    expect(screen.queryByRole('checkbox', { name: FOOD_TICK })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Add this branch' }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalled());
+    expect(posts.filter((p) => p.path === '/vendor/stores').at(-1)!.body).not.toHaveProperty('foodHandlers');
   });
 
   it('a fee that changed: the terms are read again and the tick is asked again', async () => {

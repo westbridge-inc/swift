@@ -12,6 +12,8 @@ import { useStoreRole } from '@/lib/store-role';
 import { normalizeHours, timeAgo } from '@/lib/vendor-hub';
 import { BUCKETS, bucketFor } from '@/lib/order-buckets';
 import { branchLabel, branchOutcomeWords, forEachBranch, isAwaitingApproval } from '@/lib/branches';
+import { waitingFor } from '@/lib/branch-label';
+import { ownerSteps } from '@/lib/branch-go-live';
 import { DataUnavailable } from '@/components/data-unavailable';
 
 const LANE_WORDS = new Map(BUCKETS.map((b) => [b.key, b.label]));
@@ -24,7 +26,9 @@ const LANE_WORDS = new Map(BUCKETS.map((b) => [b.key, b.label]));
  *    to that branch's own board, where its actions are;
  *  - pause or take orders, and copy one branch's hours, across the branches ticked here: one request per branch over
  *    that branch's own route (each branch's own checks apply), then which ones did not go through and why.
- * A branch waiting for Swift's approval says so. The owner adds a branch from here.
+ * A branch waiting for Swift's approval says so — and [REVIEW-F #2220 S3-1] only then: a branch still waiting for its
+ * OWNER is listed under "Not live yet" with the owner's steps and a button to where each is done. The owner adds a
+ * branch from here.
  */
 export default function BranchesPage() {
   const router = useRouter();
@@ -42,7 +46,10 @@ export default function BranchesPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [report, setReport] = useState<string | null>(null);
   const tick = (id: string, on: boolean) => setTicked((t) => { const n = new Set(t); if (on) n.add(id); else n.delete(id); return n; });
-  const chosen = list.filter((s) => ticked.has(s.id)).map((s) => s.id);
+  // [REVIEW-F #2220 N1] Bulk actions are for branches that are live (a waiting branch takes no orders yet).
+  const live = list.filter((s) => !isAwaitingApproval(s));
+  const chosen = live.filter((s) => ticked.has(s.id)).map((s) => s.id);
+  const notLive = list.filter((s) => isAwaitingApproval(s));
 
   const run = async (label: string, act: (_id: string) => Promise<unknown>, ids = chosen) => {
     if (ids.length === 0 || busy) return;
@@ -82,19 +89,53 @@ export default function BranchesPage() {
     }
     router.push('/dashboard/orders');
   };
+  /** [REVIEW-F #2220 S3-1] Open the branch's own Settings, where its number customers can call and its food handlers tick are given. */
+  const finishAt = async (id: string) => {
+    if (id !== storeId) {
+      const switched = await switchStore(queryClient, {
+        from: storeId, to: id, commit: setSelectedStore,
+        confirmDiscard: (ids) => window.confirm(`You have unsaved changes (${ids.join(', ')}). Switching stores discards them. Switch anyway?`),
+      });
+      if (!switched) return;
+    }
+    router.push('/dashboard/settings');
+  };
 
   const current = list.find((s) => s.id === storeId);
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="sw-caption font-semibold uppercase tracking-wide text-[var(--swift-red)]">One business · {list.length} {list.length === 1 ? 'store' : 'stores'}</p>
+          {/* [REVIEW-F #2220 S4-2] A team member may work at stores of different businesses: only an owner's list is one business. */}
+          <p className="sw-caption font-semibold uppercase tracking-wide text-[var(--swift-red)]">{role === 'OWNER' ? 'One business · ' : ''}{list.length} {list.length === 1 ? 'store' : 'stores'}</p>
           <h1 className="sw-title">Branches</h1>
         </div>
         {role === 'OWNER' && <Link href="/dashboard/branches/add" className="sw-btn sw-btn-md">Add a branch</Link>}
       </div>
       {known && !manager && <p className="sw-card p-6 text-sm text-[var(--swift-muted)]">Branches are for the store&apos;s owner and managers.</p>}
       {stores.isError && <DataUnavailable what="your branches" error={stores.error} onRetry={() => void stores.refetch()} />}
+
+      {role === 'OWNER' && notLive.length > 0 && (
+        <section aria-labelledby="branches-waiting" className="sw-card p-5">
+          <h2 id="branches-waiting" className="text-base font-bold">Not live yet</h2>
+          <ul className="mt-2 divide-y divide-[var(--swift-border)]">
+            {notLive.map((s) => {
+              const steps = ownerSteps(s);
+              return (
+                <li key={s.id} className="space-y-1 py-2 text-sm">
+                  <p className="font-semibold">{branchLabel(s)}</p>
+                  {steps.length > 0 && (
+                    <ul className="list-disc pl-5 text-[var(--swift-muted)]">{steps.map((step) => <li key={step.words}>{step.words}</li>)}</ul>
+                  )}
+                  {waitingFor(s) === 'OWNER' && steps.some((step) => step.where === 'settings') && (
+                    <button type="button" className="sw-chip" onClick={() => void finishAt(s.id)}>Finish in {s.name}&apos;s Settings</button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
 
       {manager && (
         <section aria-labelledby="branches-money" className="sw-card overflow-x-auto p-5">
@@ -159,17 +200,17 @@ export default function BranchesPage() {
         </section>
       )}
 
-      {manager && list.length > 1 && (
+      {manager && live.length > 1 && (
         <section aria-labelledby="branches-bulk" className="sw-card p-5">
           <h2 id="branches-bulk" className="text-base font-bold">Several branches at once</h2>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">Tick the branches, then choose what to do. Each branch is changed on its own; any that can&apos;t be changed are named with the reason.</p>
           <ul className="mt-3 space-y-2">
-            {list.map((s) => (
+            {live.map((s) => (
               <li key={s.id}>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" className="h-4 w-4 accent-[var(--swift-red)]" checked={ticked.has(s.id)} onChange={(e) => tick(s.id, e.target.checked)} />
-                  <span className="font-semibold">{branchLabel(s)}</span>
-                  {!isAwaitingApproval(s) && <span className="text-xs text-[var(--swift-muted)]">{s.acceptingOrders ? 'Taking orders' : 'Orders paused'}</span>}
+                  <span className="font-semibold">{s.name}</span>
+                  <span className="text-xs text-[var(--swift-muted)]">{s.acceptingOrders ? 'Taking orders' : 'Orders paused'}</span>
                 </label>
               </li>
             ))}

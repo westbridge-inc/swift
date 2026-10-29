@@ -56,7 +56,6 @@ import {
   type DayHours,
 } from '../../../hooks/vendorops';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
-import { awaitingApproval } from '../../../lib/branches';
 import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
@@ -757,8 +756,10 @@ function StaffSection() {
   const [role, setRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
   const [removing, setRemoving] = useState<any | null>(null);
   // [CHAINS PR2] One person, several branches in one step (the owner's approved branches; one daily add).
+  // [REVIEW-F #2220 S4-3] Only branches that are open on Swift (ACTIVE): the server refuses the whole add for a
+  // waiting, suspended or closed one.
   const { store: here, stores: allStores } = useVendorProfile();
-  const otherBranches: any[] = (allStores ?? []).filter((s: any) => s.id !== here?.id && !awaitingApproval(s));
+  const otherBranches: any[] = (allStores ?? []).filter((s: any) => s.id !== here?.id && s.status === 'ACTIVE');
   const [alsoAt, setAlsoAt] = useState<string[]>([]);
 
   const members: any[] = staffQ.data ?? [];

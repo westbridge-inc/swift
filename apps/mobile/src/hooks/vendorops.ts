@@ -1384,6 +1384,8 @@ export function useVendorTier<T = any>() {
 export type BranchStore = {
   id: string; name: string; vendorType: string; city?: string | null; status?: string; awaitingApproval?: boolean;
   acceptingOrders?: boolean; isCurrentlyOpen?: boolean; isVerified?: boolean;
+  /** [REVIEW-F #2220 S3-1] A store not live yet: whose turn it is, and the owner's steps (lib/branches goLiveOf). */
+  goLive?: { waitingFor: 'OWNER' | 'SWIFT'; steps: string[] } | null;
 };
 export type BranchMoney = { orders: number; revenue: number };
 export type BranchSummaryRow = { vendorId: string; name: string; city?: string | null; today: BranchMoney; week: BranchMoney; month: BranchMoney; pendingOrders: number; queueValue: number };
@@ -1392,6 +1394,8 @@ export type BranchTerms = {
   weeklyFee: { amount: number; currencyCode: string; tier: string; version: string };
   terms: { version: string; items: { heading: string; text: string }[]; tick: string } | null;
   sharedTrialEndsAt: string | null; stores: number; limit: number; dealWeeklyRate: number | null; dealCurrencyCode: string | null;
+  /** [REVIEW-F #2220 S3-1] A restaurant branch's food handlers tick: the server's words and version (null otherwise). */
+  foodHandlers?: { version: string; tick: string } | null;
 };
 
 /** Every store this account works in (GET /vendor/stores), with which branch waits for Swift's approval. */

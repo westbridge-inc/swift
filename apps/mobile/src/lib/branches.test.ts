@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  BRANCH_COPY, awaitingApproval, branchFeeTick, branchDealLine, branchTrialLine, bulkOutcomeLine, forEachBranch, menuCopyLines, newCopyKey, storeLabel,
+  BRANCH_COPY, awaitingApproval, branchFeeTick, branchDealLine, branchTrialLine, bulkOutcomeLine, forEachBranch, goLiveLine, goLiveOf, menuCopyLines, newCopyKey,
+  ownerStepWords, storeLabel,
 } from './branches';
 
 const fee = (n: number) => `G$${n.toLocaleString('en-US')}`;
@@ -32,8 +33,40 @@ describe('[CHAINS] the switcher says which branch waits for Swift', () => {
     expect(awaitingApproval({ status: 'ACTIVE', personApprovalRequired: false })).toBe(false);
   });
   it('the label', () => {
-    expect(storeLabel({ name: 'Royal North', status: 'PENDING_APPROVAL' })).toBe('Royal North · waiting for Swift’s approval');
+    expect(storeLabel({ name: 'Royal North', status: 'PENDING_APPROVAL', goLive: { waitingFor: 'SWIFT', steps: [] } })).toBe('Royal North · waiting for Swift’s approval');
     expect(storeLabel({ name: 'Royal Camp', status: 'ACTIVE' })).toBe('Royal Camp');
+  });
+});
+
+// [REVIEW-F #2220 S3-1] "Waiting for Swift's approval" only when nothing is owed by the owner.
+describe('[CHAINS] a store not live yet says whose turn it is', () => {
+  const owed = { name: 'Royal East', status: 'PENDING_APPROVAL', personApprovalRequired: true, goLive: { waitingFor: 'OWNER', steps: ['PUBLISHED_PHONE', 'FOOD_HANDLERS'] } };
+  const swift = { name: 'Royal East', status: 'PENDING_APPROVAL', personApprovalRequired: true, goLive: { waitingFor: 'SWIFT', steps: [] } };
+  it('the owner\'s turn: never "waiting for Swift", and the steps by name', () => {
+    expect(storeLabel(owed)).toBe('Royal East · not live yet: finish setting it up');
+    expect(storeLabel(owed)).not.toMatch(/Swift’s approval/);
+    expect(ownerStepWords(owed)).toEqual(['Add the number customers can call', 'Confirm your food handlers']);
+    expect(goLiveLine(owed)).toBe('Before Swift can check it: Add the number customers can call; Confirm your food handlers.');
+    expect(ownerStepWords({ ...owed, goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS'] } })).toEqual(['Add the documents it still needs']);
+  });
+  it('Swift\'s turn: waiting for Swift\'s approval, no owner steps', () => {
+    expect(storeLabel(swift)).toBe('Royal East · waiting for Swift’s approval');
+    expect(ownerStepWords(swift)).toEqual([]);
+    expect(goLiveLine(swift)).toBe(BRANCH_COPY.swiftChecks);
+  });
+  it('no word from the server: "not live yet", never a guess about whose turn it is', () => {
+    expect(storeLabel({ name: 'Royal East', status: 'PENDING_APPROVAL' })).toBe('Royal East · not live yet');
+    expect(storeLabel({ name: 'Royal East', status: 'PENDING_APPROVAL', goLive: { waitingFor: 'MAYBE' } })).toBe('Royal East · not live yet');
+    expect(goLiveLine({ name: 'Royal East', status: 'PENDING_APPROVAL' })).toBeNull();
+  });
+  it('reads the server strictly: unknown steps dropped; a live store has no go-live line', () => {
+    expect(goLiveOf({ goLive: { waitingFor: 'OWNER', steps: ['PUBLISHED_PHONE', 'SOMETHING_NEW', 3] } })).toEqual({ waitingFor: 'OWNER', steps: ['PUBLISHED_PHONE'] });
+    expect(ownerStepWords({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['SOMETHING_NEW'] } })).toEqual([BRANCH_COPY.finishButton]);
+    expect(goLiveLine({ name: 'Royal Camp', status: 'ACTIVE', goLive: null })).toBeNull();
+  });
+  it('the add screens name the owner\'s part instead of promising a wait for Swift', () => {
+    expect(BRANCH_COPY.checkFirst).not.toMatch(/you’ll see it as waiting for Swift’s approval/i);
+    expect(BRANCH_COPY.checkFirst).toMatch(/still needs something from you/);
   });
 });
 

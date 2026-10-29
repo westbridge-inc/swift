@@ -16,6 +16,8 @@ export interface BranchTerms {
   limit: number;
   dealWeeklyRate: number | null;
   dealCurrencyCode: string | null;
+  /** [REVIEW-F #2220 S3-1] A restaurant branch's food handlers tick: the server's words and version (null otherwise). */
+  foodHandlers?: { version: string; tick: string } | null;
 }
 export interface BranchBusiness {
   name: string; vendorType: string; phone: string; addressLine1: string; city: string; region?: string;
@@ -23,7 +25,11 @@ export interface BranchBusiness {
 }
 export const getBranchTerms = (vendorType: string) =>
   apiFetch(`${V}/stores/branch-terms?vendorType=${encodeURIComponent(vendorType)}`).then((r) => r.data as BranchTerms);
-export const addBranch = (body: { business: BranchBusiness; weeklyFeeAck: { version: string; amount: number; currencyCode: string } }) =>
+export const addBranch = (body: {
+  business: BranchBusiness; weeklyFeeAck: { version: string; amount: number; currencyCode: string };
+  /** [REVIEW-F #2220 S3-1] The number customers can call (required), and a restaurant's food handlers tick. */
+  publicPhone: string; foodHandlers?: { accept: true; attestationVersion: string };
+}) =>
   apiFetch(`${V}/stores`, { method: 'POST', body: JSON.stringify(body) }).then((r) => r.data as { id: string; name: string; status: string });
 
 export interface BranchFigures { orders: number; revenue: number }
