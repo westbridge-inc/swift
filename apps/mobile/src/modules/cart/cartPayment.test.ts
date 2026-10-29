@@ -171,3 +171,40 @@ describe('[BOOK-S6a] the booking confirmation copy follows the answer', () => {
     }
   });
 });
+
+// [BOOK-FU3 · REVIEW-F S4 on #2202] An MMG booking is a booking in every line (phone and website share these words).
+describe('[BOOK-FU3] MMG words for a booking say "booking", never "order"', () => {
+  const numberCaps = normalizeCartPaymentCapabilities({
+    scope: 'scope-b',
+    cash: { available: true, fundsFlow: 'DIRECT_AT_HANDOVER' },
+    mmg: { available: false, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', unavailableReason: 'PAY_LINKS_OFF' },
+    mmgStoreNumber: { available: true, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', payTo: 'STORE_NUMBER', shownWhen: 'STORE_ACCEPTS', unavailableReason: null },
+  });
+  const base = { appointment: true, pickup: false, held: false, submittedMethod: 'MOBILE_MONEY' as const, paymentAction: null };
+
+  it('the confirmation after an MMG booking to the store number', () => {
+    const copy = placedOrderConfirmationCopy({ ...base, mmgPayTo: 'STORE_NUMBER' });
+    expect(copy).toBe('When the business accepts, your booking shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the booking cancels automatically. You pay the business directly in MMG; it marks the booking paid when the money arrives. Swift never holds the money.');
+    expect(copy).not.toMatch(/\border\b/);
+  });
+
+  it('the confirmation when an MMG booking\'s pay link is missing', () => {
+    const copy = placedOrderConfirmationCopy(base);
+    expect(copy).toBe('Your MMG booking was placed, but its payment link is unavailable. Do not send money to another link; open the booking for the latest payment action.');
+    expect(copy).not.toMatch(/\border\b/);
+  });
+
+  it('the MMG choice on a booking-only cart (store number, and the older link rail)', () => {
+    const [, mmg] = cartPaymentOptions(numberCaps, { appointmentOnly: true, pickup: false });
+    expect(mmg!.sub).toBe('When the business accepts, your booking shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the booking cancels automatically. You pay the business directly in MMG. Swift never holds the money.');
+    const [, link] = cartPaymentOptions(capabilities('scope-bl', true), { appointmentOnly: true, pickup: false });
+    expect(link!.sub).toBe('Pay the business directly in MMG after booking. Swift never holds the money.');
+    for (const sub of [mmg!.sub, link!.sub]) expect(sub).not.toMatch(/\border\b/);
+  });
+
+  it('control: an ordinary order keeps the order words', () => {
+    expect(placedOrderConfirmationCopy({ ...base, appointment: false })).toBe('Your MMG order was placed, but its payment link is unavailable. Do not send money to another link; open the order for the latest payment action.');
+    const [, link] = cartPaymentOptions(capabilities('scope-ol', true), { appointmentOnly: false, pickup: false });
+    expect(link!.sub).toBe('Pay the business directly in MMG after placing the order. Swift never holds the money.');
+  });
+});
