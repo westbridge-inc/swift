@@ -180,3 +180,86 @@ export function useDeclineSlot() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// [BOOK-P3] Booking a pro from their list of services, moving it, and the pro's
+// own list, hours and time off. Every rule (notice, cut-off, caps, price,
+// agreement) is the server's: these hooks only read and send.
+// ---------------------------------------------------------------------------
+
+/** The pro's bookable services (GET /providers/:id/offerings). */
+export function useProOfferings<T = any>(providerId: string) {
+  return useQuery<T>({
+    queryKey: ['services', 'pro-offerings', providerId],
+    queryFn: () => unwrap<T>(servicesApi.proOfferings(providerId)),
+    enabled: !!providerId,
+    retry: false,
+  });
+}
+
+/** The free start times of one service on one Guyana date. Refetched while open: a time someone
+ *  else just booked disappears (the server's exclusion is still the final judge). */
+export function useProSlots<T = any>(providerId: string, offeringId: string, date: string) {
+  return useQuery<T>({
+    queryKey: ['services', 'pro-slots', providerId, offeringId, date],
+    queryFn: () => unwrap<T>(servicesApi.proSlots(providerId, offeringId, date)),
+    enabled: !!providerId && !!offeringId && !!date,
+    retry: false,
+    refetchInterval: 20_000,
+  });
+}
+
+export function useBookPro() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { providerId: string; offeringId: string; scheduledFor: string; expectedPrice: number; note?: string }) =>
+      unwrap(servicesApi.bookPro(input)),
+    onSuccess: () => track('service_job_booked', {}),
+    onSettled: (_data, _error, input) => {
+      qc.invalidateQueries({ queryKey: ['services', 'jobs'] });
+      qc.invalidateQueries({ queryKey: ['services', 'pro-slots', input.providerId] });
+      qc.invalidateQueries({ queryKey: ['services', 'pro-offerings', input.providerId] });
+    },
+  });
+}
+
+/** The free times to move a booked service to (its booked length, its own time not counted). */
+export function useJobSlots<T = any>(jobId: string, date: string) {
+  return useQuery<T>({
+    queryKey: ['services', 'job-slots', jobId, date],
+    queryFn: () => unwrap<T>(servicesApi.jobSlots(jobId, date)),
+    enabled: !!jobId && !!date,
+    retry: false,
+    refetchInterval: 20_000,
+  });
+}
+
+export function useRescheduleServiceJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...input }: { id: string; scheduledFor: string; expectedUpdatedAt: string; expectedScheduledFor: string }) =>
+      unwrap(servicesApi.rescheduleJob(id, input)),
+    onSettled: (_data, _error, { id }) => {
+      qc.invalidateQueries({ queryKey: ['services', 'jobs'] });
+      qc.invalidateQueries({ queryKey: ['services', 'job-slots', id] });
+    },
+  });
+}
+
+const MY_BOOKABLE_KEY = ['services', 'my-bookable'] as const;
+
+/** The pro's own list of services, weekly hours and time off (404 PRO_BOOKING_OFF while the switch is off). */
+export function useMyBookable<T = any>(enabled = true) {
+  return useQuery<T>({ queryKey: MY_BOOKABLE_KEY, queryFn: () => unwrap<T>(servicesApi.myBookable()), enabled, retry: false });
+}
+
+function useMyBookableMutation<I>(fn: (input: I) => Promise<any>) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (input: I) => unwrap(fn(input)), onSettled: () => qc.invalidateQueries({ queryKey: MY_BOOKABLE_KEY }) });
+}
+
+export const useAddOffering = () => useMyBookableMutation((input: { name: string; durationMinutes: number; price: number }) => servicesApi.addOffering(input));
+export const useUpdateOffering = () => useMyBookableMutation(({ id, ...input }: { id: string; name?: string; durationMinutes?: number; price?: number; active?: boolean }) => servicesApi.updateOffering(id, input));
+export const useSaveProHours = () => useMyBookableMutation((slots: Array<{ dayOfWeek: number; start: string; end: string }>) => servicesApi.saveHours(slots));
+export const useAddTimeOff = () => useMyBookableMutation((input: { date: string; start?: string; end?: string }) => servicesApi.addTimeOff(input));
+export const useRemoveTimeOff = () => useMyBookableMutation((id: string) => servicesApi.removeTimeOff(id));

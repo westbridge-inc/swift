@@ -36,6 +36,7 @@ import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES, peakMoment } f
 import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
 import { INSTANT_BOOKING_OFF_MESSAGE, instantBookingSettingsForSave, mergeBookingConfig, overlappingWindows, overlappingWindowsMessage, windowsForSave } from '../booking/booking-config';
 import { instantBookingEnabled, NEW_BOOKABLE_LISTING_DEFAULTS } from '../booking/instant-booking';
+import { movedAppointmentFreeCancelEnd } from '../order/cancel-policy';
 import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, noShowView, recordNoShowInTransaction } from '../booking/appointment-no-show';
 import { bookingLimitsFor } from '../booking/booking-limits';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
@@ -4871,11 +4872,20 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const result = await bookingService.rescheduleBooking(request.params.id, newSlotStart, { vendorId });
     if (result.moved) {
+      // [BOOK-P3 · COORD (b) · Terms s7] With instant booking on, a cash appointment the business moved cancels free in
+      // the app for APPOINTMENT_MOVED_FREE_CANCEL_MIN after the move (cancel-policy.ts); the notice names the end. An MMG
+      // appointment already paid to the business is the business's to cancel and refund, so it is not promised there.
+      const movedOrder = result.booking.orderId && result.movedByBusinessAt
+        ? await app.prisma.order.findUnique({ where: { id: result.booking.orderId }, select: { paymentMethod: true } })
+        : null;
+      const cancelLine = movedOrder?.paymentMethod === 'CASH' && result.movedByBusinessAt
+        ? ` If the new time doesn\u2019t suit you, you can cancel it free in the app until ${fmtSlotTime(movedAppointmentFreeCancelEnd(result.booking.slotStart, result.movedByBusinessAt))}.`
+        : '';
       await notifications.send({
         userId: result.booking.customerId,
         type: 'ORDER_UPDATE',
         title: 'Your appointment moved',
-        body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+        body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.${cancelLine}`,
         audience: 'customer',
         // [BOOK-FU2] With the booking's order, so every released build opens the booking itself (appointment-moved.ts).
         dedupeKey: appointmentMovedDedupeKey(result.booking.id),

@@ -110,6 +110,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-29',
     why: 'Terms section 7: an appointment booked from an individual service provider\u2019s list of services follows the same rules as one booked from a business\u2019s listing. While Swift\u2019s instant appointment booking is switched on, it cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; the provider can move it too, and the customer is told in the app; if the provider has not started it 30 minutes after its start time, it cancels free. Terms section 5: a booking from such a list that the app shows as confirmed when it is made was accepted in advance by the provider, who published the list. Before this, such a job could not be cancelled in the app once booked. It lands before launch, gives customers more, and asks no one for more, so nobody is asked again.',
   },
+  {
+    // [BOOK-P3 · COORD ruling 29 Oct 2026 (b): NON-material, customer-favourable, like 2026-10-29; DRAFT until counsel]
+    version: '2026-10-29.1',
+    why: 'Terms section 7: while Swift\u2019s instant appointment booking is switched on, if the business or provider moves a customer\u2019s appointment, the customer can also cancel it free in the app for 60 minutes after being told (or until it starts, if that is sooner), even within 2 hours of its start. Before this, a moved appointment kept only the 2-hour rule. It gives customers more, takes nothing from anyone and asks no one for more, so nobody is asked again.',
+  },
 ];
 
 /**
