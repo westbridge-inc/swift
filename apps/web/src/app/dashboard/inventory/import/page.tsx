@@ -1,15 +1,13 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { Suspense, useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { Download, FileSpreadsheet, Upload } from 'lucide-react';
+import { Download, Upload } from 'lucide-react';
 import { ApiRequestError, BROWSER_CLIENT, getSelectedStore } from '@/lib/auth';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
-import { formatMoney } from '@/lib/money';
-import {
-  automapCsv, automapXlsx, confirmImport, confirmTillSync, previewTillSync, templateUrl,
-  type ColumnChoice, type ColumnReading, type ImportField, type MissingPolicy, type SyncChange, type SyncPreview, type SyncResult,
-} from '@/lib/vendor-api';
+import { lazyRetry } from '@/lib/chunk-retry';
+import type { ColumnChoice, ColumnReading, ImportField, MissingPolicy, SyncPreview, SyncResult } from '@/lib/catalogue-import-api';
+import type { AddResult, Problem } from './panels';
 
 // ---------------------------------------------------------------------------
 // [POS-SYNC] Upload → preview → confirm → result.
@@ -18,31 +16,19 @@ import {
 // has are matched by SKU and updated, new SKUs are added, and the store sees
 // every change before anything is saved. A file with no SKU column can still be
 // added as new items (the old import), but it can never update anything.
+//
+// Everything after the upload (the calls, the columns, the preview, the result)
+// loads when a file is chosen, so the page's first load stays small.
 // ---------------------------------------------------------------------------
 
-type AddResult = Awaited<ReturnType<typeof confirmImport>>;
-type Problem = { code: string; message: string; stores: string[]; headers: string[]; mapping: Partial<Record<ImportField, string>> };
-
-const FIELD_LABELS: Array<[ImportField, string]> = [
-  ['sku', 'Item code (SKU)'],
-  ['name', 'Name'],
-  ['category', 'Category'],
-  ['basePrice', 'Selling price'],
-  ['stockQuantity', 'Stock count'],
-  ['isAvailable', 'For sale (yes / no)'],
-  ['tracksStock', 'Till counts stock (yes / no)'],
-  ['description', 'Description'],
-  ['unit', 'Unit'],
-];
-
-const SOLD_OUT_WORDS: Record<NonNullable<SyncChange['soldOut']>, string> = {
-  BECOMES_SOLD_OUT: 'Will show as sold out',
-  BACK_ON_SALE: 'Back on sale',
-  STAYS_SWITCHED_OFF: 'Stays off (you switched it off)',
-  SWITCHED_OFF_BY_TILL: 'Off until your till has it for sale again, or you switch it on (your till says not for sale)',
-};
-
-const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+const importApi = () => import('@/lib/catalogue-import-api');
+const panels = () => import('./panels');
+const ProblemPanel = lazyRetry(() => panels().then((m) => ({ default: m.ProblemPanel })));
+const ColumnsPanel = lazyRetry(() => panels().then((m) => ({ default: m.ColumnsPanel })));
+const SyncPreviewPanel = lazyRetry(() => panels().then((m) => ({ default: m.SyncPreviewPanel })));
+const SyncResultPanel = lazyRetry(() => panels().then((m) => ({ default: m.SyncResultPanel })));
+const AddReadyPanel = lazyRetry(() => panels().then((m) => ({ default: m.AddReadyPanel })));
+const AddResultPanel = lazyRetry(() => panels().then((m) => ({ default: m.AddResultPanel })));
 
 function problemOf(e: unknown): Problem | null {
   if (!(e instanceof ApiRequestError) || !e.code) return null;
@@ -78,14 +64,15 @@ export default function ImportPage() {
       const mode = { ...input.choice, mode: 'sync' as const };
       let r: ColumnReading;
       try {
-        r = input.file ? await automapXlsx(input.file, mode) : await automapCsv(input.csv!, mode);
+        const api = await importApi();
+        r = input.file ? await api.automapXlsx(input.file, mode) : await api.automapCsv(input.csv!, mode);
       } catch (e) {
         const workbookCopy = e instanceof ApiRequestError ? e.errorDetails?.['sourceCsv'] : undefined;
         if (typeof workbookCopy === 'string') setSourceCsv(workbookCopy);
         throw e;
       }
       if (r.sourceCsv !== undefined) setSourceCsv(r.sourceCsv);
-      const p = await previewTillSync(r.normalizedCsv, input.missing);
+      const p = await (await importApi()).previewTillSync(r.normalizedCsv, input.missing);
       return { r, p };
     },
     onSuccess: ({ r, p }) => { setReading(r); setPreview(p); setProblem(null); },
@@ -102,19 +89,19 @@ export default function ImportPage() {
   });
 
   const apply = useMutation({
-    mutationFn: () => confirmTillSync(reading!.normalizedCsv, preview!),
+    mutationFn: async () => (await importApi()).confirmTillSync(reading!.normalizedCsv, preview!),
     onSuccess: (r) => { setResult(r); setPreview(null); },
     onError: (e) => setError((e as Error).message),
   });
 
   /** The old path: no SKU column, so every row is added as a new item. */
   const readAsNew = useMutation({
-    mutationFn: () => automapCsv(sourceCsv!, { tillStore: choice.tillStore, mapping: choice.mapping }),
+    mutationFn: async () => (await importApi()).automapCsv(sourceCsv!, { tillStore: choice.tillStore, mapping: choice.mapping }),
     onSuccess: (r) => { setAddReading(r); setProblem(null); setError(null); },
     onError: (e) => setError((e as Error).message),
   });
   const addAll = useMutation({
-    mutationFn: () => confirmImport(addReading!.normalizedCsv),
+    mutationFn: async () => (await importApi()).confirmImport(addReading!.normalizedCsv),
     onSuccess: (r) => { setAddResult(r); setAddReading(null); },
     onError: (e) => setError((e as Error).message),
   });
@@ -155,7 +142,7 @@ export default function ImportPage() {
     // [W-01] The session rides as an HttpOnly cookie, so this raw fetch must send
     // credentials and name itself a browser client; there is no bearer to attach.
     const store = getSelectedStore();
-    const res = await fetch(`${API_URL}/api/v1${templateUrl().replace('/api/v1', '')}`, {
+    const res = await fetch(`${API_URL}/api/v1/vendor/items/import/template`, {
       credentials: 'include',
       headers: { 'X-Swift-Client': BROWSER_CLIENT, ...(store ? { 'x-vendor-id': store } : {}) },
     });
@@ -220,318 +207,53 @@ export default function ImportPage() {
 
       {error && <p role="alert" className="rounded-xl bg-[var(--swift-red)]/5 p-4 text-sm text-[var(--swift-red)]">{error}</p>}
 
-      {problem?.code === 'CHOOSE_TILL_STORE' && (
-        <section className="sw-card p-6">
-          <p className="font-bold">This file has more than one till store.</p>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">Choose the till store that is this Swift store. Only its prices and stock are used.</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {problem.stores.map((s) => (
-              <button key={s} onClick={() => reread({ ...choice, tillStore: s })}
-                className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
-                {s}
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
+      <Suspense fallback={null}>
+        {problem && (
+          <ProblemPanel
+            problem={problem}
+            sourceCsv={sourceCsv}
+            addPending={readAsNew.isPending}
+            onTillStore={(s) => reread({ ...choice, tillStore: s })}
+            onAddAsNew={() => readAsNew.mutate()}
+          />
+        )}
 
-      {problem && problem.code !== 'CHOOSE_TILL_STORE' && (
-        <section className="sw-card p-6">
-          <p className="font-bold">Swift could not find all the columns it needs.</p>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">{problem.message}</p>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            Choose the column that holds each one below. To update items, Swift needs the item code (SKU) and a price or a stock count.
-          </p>
-          {sourceCsv && (
-            <button onClick={() => readAsNew.mutate()} disabled={readAsNew.isPending}
-              className="mt-3 rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)] disabled:opacity-50">
-              My file has no item codes: add every row as a new item
-            </button>
-          )}
-        </section>
-      )}
+        {fileName && headers.length > 0 && !result && !addResult && (
+          <ColumnsPanel fileName={fileName} reading={reading} headers={headers} mapping={mapping} sourceCsv={sourceCsv} busy={busy} onChoose={chooseColumn} />
+        )}
 
-      {fileName && headers.length > 0 && !result && !addResult && (
-        <section className="sw-card p-6">
-          <p className="flex items-center gap-2 font-bold">
-            <FileSpreadsheet className="h-5 w-5 text-[var(--swift-red)]" />
-            {fileName}{reading?.profile && reading.profile.id !== 'generic' ? ` — read as a ${reading.profile.label}` : ''}
-            {reading?.tillStore ? ` (till store: ${reading.tillStore})` : ''}
-          </p>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            Which column holds what. Change any of them if Swift picked the wrong one. A cost column is never used as the price.
-          </p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            {FIELD_LABELS.map(([field, label]) => (
-              <label key={field} className="text-sm">
-                <span className="block font-semibold">{label}</span>
-                <select
-                  aria-label={label}
-                  className="mt-1 w-full rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-2 py-1.5"
-                  value={mapping[field] ?? ''}
-                  disabled={!sourceCsv || busy}
-                  onChange={(e) => chooseColumn(field, e.target.value)}
-                >
-                  <option value="">Not used</option>
-                  {headers.map((h) => <option key={h} value={h}>{h}</option>)}
-                </select>
-              </label>
-            ))}
-          </div>
-          {!sourceCsv && (
-            <p className="mt-2 text-xs text-[var(--swift-muted)]">This workbook is too large to change its columns here. Save it as CSV and upload that instead.</p>
-          )}
-        </section>
-      )}
+        {preview && (
+          <SyncPreviewPanel
+            preview={preview}
+            missing={missing}
+            busy={busy}
+            nothingToApply={!!nothingToApply}
+            onMissing={(m) => reread(choice, m)}
+            onApply={() => { setError(null); apply.mutate(); }}
+            onCancel={() => { reset(); setFileName(null); }}
+          />
+        )}
 
-      {preview && (
-        <SyncPreviewPanel
-          preview={preview}
-          missing={missing}
-          busy={busy}
-          nothingToApply={!!nothingToApply}
-          onMissing={(m) => reread(choice, m)}
-          onApply={() => { setError(null); apply.mutate(); }}
-          onCancel={() => { reset(); setFileName(null); }}
-        />
-      )}
+        {result && <SyncResultPanel result={result} />}
 
-      {result && <SyncResultPanel result={result} />}
+        {addReading && (
+          <AddReadyPanel reading={addReading} pending={addAll.isPending} onAdd={() => addAll.mutate()} onCancel={() => setAddReading(null)} />
+        )}
 
-      {addReading && (
-        <section className="sw-card p-6">
-          <p className="font-bold">{plural(addReading.rowCount, 'row')} ready to add as new items</p>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            Without item codes, a later file cannot update these items. Uploading this file again would add them again.
-          </p>
-          <div className="mt-4 flex gap-3">
-            <button onClick={() => addAll.mutate()} disabled={addAll.isPending}
-              className="rounded-lg bg-[var(--swift-red)] px-5 py-2.5 text-sm font-bold text-white hover:bg-[var(--swift-red-600)] disabled:opacity-50">
-              {addAll.isPending ? 'Adding…' : `Add ${plural(addReading.rowCount, 'item')}`}
-            </button>
-            <button onClick={() => setAddReading(null)} className="text-sm font-medium text-[var(--swift-muted)]">Cancel</button>
-          </div>
-        </section>
-      )}
-
-      {addResult && (
-        <section className="sw-card p-6">
-          <p className="sw-heading text-green-700">{plural(addResult.imported, 'item')} added</p>
-          {(addResult.waitingForCheckCount ?? 0) > 0 && (
-            <>
-              <p className="mt-2 text-sm font-semibold text-amber-700">
-                {addResult.waitingForCheckCount} waiting for a quick check — hidden from customers until Swift checks them:
-              </p>
-              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
-                {(addResult.waitingForCheck ?? []).map((w) => (
-                  <li key={w.row}>Row {w.row}: {w.name}</li>
-                ))}
-                {(addResult.waitingForCheckCount ?? 0) > (addResult.waitingForCheck ?? []).length && (
-                  <li>…and {(addResult.waitingForCheckCount ?? 0) - (addResult.waitingForCheck ?? []).length} more</li>
-                )}
-              </ul>
-            </>
-          )}
-          {(addResult.notesCount ?? 0) > 0 && (
-            <>
-              <p className="mt-2 text-sm font-semibold text-amber-700">
-                {addResult.notesCount === 1 ? '1 row was' : `${addResult.notesCount} rows were`} imported without a photo. Photos are uploaded, never imported: add them on each item.
-              </p>
-              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
-                {(addResult.notes ?? []).map((n) => (
-                  <li key={n.row}>Row {n.row}: {n.note}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          {addResult.failedCount > 0 && (
-            <>
-              <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{plural(addResult.failedCount, 'row')} not added:</p>
-              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
-                {addResult.failures.map((f) => <li key={f.row}>Row {f.row}: {f.errors.join('; ')}</li>)}
-              </ul>
-            </>
-          )}
-          <p className="mt-3 text-sm text-[var(--swift-muted)]">
-            Review everything in <a href="/dashboard/inventory" className="font-semibold text-[var(--swift-red)]">Inventory</a>.
-          </p>
-        </section>
-      )}
+        {addResult && <AddResultPanel result={addResult} />}
+      </Suspense>
 
       <div className="rounded-2xl bg-[var(--swift-subtle)] p-5 text-sm text-[var(--swift-muted)]">
         <p className="font-semibold text-[var(--swift-ink)]">How it works</p>
         <ul className="mt-1 list-disc space-y-1 pl-5">
           <li>Loyverse and QuickBooks item lists are recognised by their own columns. Other files are read by their column names, and you can change any choice.</li>
           <li>Stock changes are saved in your stock history as &ldquo;till export&rdquo;. An item at zero shows as sold out, and comes back when stock returns, unless you switched it off yourself.</li>
-          <li>An item your till says is not for sale, or one you mark sold out because it is not in the file, shows as sold out too. It comes back when a later file has it for sale, with stock if Swift counts it.</li>
+          <li>An item your till says is not for sale stays off, even when stock comes back, until a later file has it for sale or you switch it on.</li>
+          <li>An item you mark sold out because it is not in the file comes back when a later file has it for sale, with stock if Swift counts it.</li>
           <li>A price, count or code Swift cannot read is never guessed. That row is listed for you to fix.</li>
           <li>The same file cannot be applied twice, so items sold since then are never counted back in.</li>
         </ul>
       </div>
     </div>
-  );
-}
-
-function SyncPreviewPanel({ preview, missing, busy, nothingToApply, onMissing, onApply, onCancel }: {
-  preview: SyncPreview;
-  missing: MissingPolicy;
-  busy: boolean;
-  nothingToApply: boolean;
-  onMissing: (_policy: MissingPolicy) => void;
-  onApply: () => void;
-  onCancel: () => void;
-}) {
-  const t = preview.totals;
-  return (
-    <section aria-label="Preview" className="space-y-5 sw-card p-6">
-      <div>
-        <h2 className="sw-heading">What will change in {preview.storeName}</h2>
-        <p className="mt-1 text-sm text-[var(--swift-muted)]">
-          {plural(t.rows, 'row')} read. {plural(t.stockChanges, 'stock count')} and {plural(t.priceChanges, 'price')} change,{' '}
-          {plural(t.newItems, 'new item')}, {t.unchanged.toLocaleString()} already up to date, {plural(t.needsAttention, 'row')} need attention.
-        </p>
-      </div>
-
-      {preview.alreadyApplied && (
-        <p role="alert" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">
-          You already applied this exact file on {new Date(preview.alreadyApplied.appliedAt).toLocaleString()}. It cannot be applied
-          again, so items sold since then are not counted back in. Export a fresh file from your till.
-        </p>
-      )}
-
-      {preview.changes.length > 0 && (
-        <div>
-          <h3 className="font-bold">Changes to your items</h3>
-          <div className="mt-2 overflow-x-auto rounded-xl border border-[var(--swift-border)]">
-            <table className="w-full text-sm">
-              <thead className="bg-[var(--swift-subtle)] text-left text-xs text-[var(--swift-muted)]">
-                <tr><th className="px-3 py-2">Item</th><th className="px-3 py-2">Stock</th><th className="px-3 py-2">Price</th><th className="px-3 py-2">Sold out</th></tr>
-              </thead>
-              <tbody>
-                {preview.changes.map((c) => (
-                  <tr key={c.itemId} className="border-t border-[var(--swift-border)] align-top">
-                    <td className="px-3 py-2">
-                      <span className="font-semibold">{c.name}</span>
-                      <span className="block text-xs text-[var(--swift-muted)]">SKU {c.sku}</span>
-                      {c.notes.map((n) => <span key={n} className="block text-xs text-[var(--swift-muted)]">{n}</span>)}
-                    </td>
-                    <td className="px-3 py-2">
-                      {c.stock ? `${c.stock.from} → ${c.stock.to}` : 'No change'}
-                      {c.stock?.held ? <span className="block text-xs text-[var(--swift-muted)]">till {c.stock.till}, less {c.stock.held} in open orders</span> : null}
-                    </td>
-                    <td className="px-3 py-2">{c.price ? `${formatMoney(c.price.from)} → ${formatMoney(c.price.to)}` : 'No change'}</td>
-                    <td className="px-3 py-2">{c.soldOut ? SOLD_OUT_WORDS[c.soldOut] : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {t.priceChanges > 0 && (
-            <p className="mt-2 text-xs text-[var(--swift-muted)]">
-              Orders already placed keep the price they were placed at. A customer with this item in their cart sees the new price the next time the cart opens.
-            </p>
-          )}
-        </div>
-      )}
-
-      {preview.newItems.length > 0 && (
-        <div>
-          <h3 className="font-bold">New items to add</h3>
-          <ul className="mt-2 space-y-1 text-sm">
-            {preview.newItems.map((n) => (
-              <li key={n.row}>
-                {n.name} <span className="text-[var(--swift-muted)]">· SKU {n.sku} · {n.category} · {formatMoney(n.price)} · {n.stock === null ? 'stock not counted' : `${n.stock} in stock`}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {preview.needsAttention.length > 0 && (
-        <div>
-          <h3 className="font-bold text-[var(--swift-red)]">Rows that need attention (not used)</h3>
-          <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
-            {preview.needsAttention.map((n) => (
-              <li key={n.row}>Row {n.row}{n.sku ? ` · SKU ${n.sku}` : ''}{n.name ? ` · ${n.name}` : ''}: {n.reason}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {(preview.missing.length > 0 || preview.notOnSku > 0) && (
-        <div>
-          <h3 className="font-bold">Items on Swift that are not in this file</h3>
-          {preview.missing.length > 0 && (
-            <>
-              <p className="mt-1 text-sm text-[var(--swift-muted)]">{plural(preview.missing.length, 'item')}: {preview.missing.slice(0, 30).map((m) => m.name).join(', ')}{preview.missing.length > 30 ? '…' : ''}</p>
-              <fieldset className="mt-2 space-y-1 text-sm">
-                <legend className="sr-only">What to do with items not in this file</legend>
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="missing" checked={missing === 'LEAVE'} disabled={busy} onChange={() => onMissing('LEAVE')} />
-                  Leave them as they are
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="missing" checked={missing === 'SOLD_OUT'} disabled={busy} onChange={() => onMissing('SOLD_OUT')} />
-                  Mark them sold out
-                </label>
-              </fieldset>
-            </>
-          )}
-          {preview.notOnSku > 0 && (
-            <p className="mt-2 text-xs text-[var(--swift-muted)]">{plural(preview.notOnSku, 'item')} on Swift {preview.notOnSku === 1 ? 'is' : 'are'} without a SKU, so a file never changes {preview.notOnSku === 1 ? 'it' : 'them'}.</p>
-          )}
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          onClick={onApply}
-          disabled={busy || !!preview.alreadyApplied || nothingToApply}
-          className="rounded-lg bg-[var(--swift-red)] px-5 py-2.5 text-sm font-bold text-white hover:bg-[var(--swift-red-600)] disabled:opacity-50"
-        >
-          {busy ? 'Working…' : 'Apply these changes'}
-        </button>
-        <button onClick={onCancel} className="text-sm font-medium text-[var(--swift-muted)]">Cancel</button>
-        {nothingToApply && !preview.alreadyApplied && <span className="text-sm text-[var(--swift-muted)]">Nothing to change: your items already match this file.</span>}
-      </div>
-    </section>
-  );
-}
-
-function SyncResultPanel({ result }: { result: SyncResult }) {
-  const t = result.totals;
-  const prices = result.changes.filter((c) => c.price);
-  const waiting = result.waitingForCheck ?? [];
-  return (
-    <section aria-label="Result" className="sw-card p-6">
-      <p className="sw-heading text-green-700">Done. Your items are updated.</p>
-      <p className="mt-1 text-sm text-[var(--swift-muted)]">
-        {plural(t.stockChanges, 'stock count')} and {plural(t.priceChanges, 'price')} changed, {plural(t.newItems, 'item')} added
-        {t.switchedOffMissing > 0 ? `, ${plural(t.switchedOffMissing, 'missing item')} marked sold out` : ''}.
-        {t.needsAttention > 0 ? ` ${plural(t.needsAttention, 'row')} still need attention.` : ''}
-      </p>
-      {result.replayed && <p className="mt-1 text-sm text-[var(--swift-muted)]">This file had already been applied, so nothing was changed twice.</p>}
-      {waiting.length > 0 && (
-        <>
-          <p className="mt-3 text-sm font-semibold text-amber-700">
-            {plural(waiting.length, 'new item')} waiting for a quick check — hidden from customers until Swift checks {waiting.length === 1 ? 'it' : 'them'}:
-          </p>
-          <ul className="mt-1 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
-            {waiting.map((w) => <li key={w.row}>Row {w.row}: {w.name}</li>)}
-          </ul>
-        </>
-      )}
-      {prices.length > 0 && (
-        <>
-          <p className="mt-3 text-sm font-semibold">Price changes</p>
-          <ul className="mt-1 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
-            {prices.map((c) => <li key={c.itemId}>{c.name}: {formatMoney(c.price!.from)} → {formatMoney(c.price!.to)}</li>)}
-          </ul>
-        </>
-      )}
-      <p className="mt-3 text-sm text-[var(--swift-muted)]">
-        Review everything in <a href="/dashboard/inventory" className="font-semibold text-[var(--swift-red)]">Inventory</a>.
-      </p>
-    </section>
   );
 }

@@ -283,7 +283,7 @@ const PENDING_ELSEWHERE: Record<string, string> = {
 const KNOWN: Record<string, string> = {
   'app/trip/[token]/trip-share-client.tsx | view.status': 'The trip-share endpoint sends a sentence here (trip-share.service: PUBLIC_STATUS[order.status] ?? \'Trip in progress\'), never the order code.',
   'app/dashboard/schedule/page.tsx | e.reason': 'The note the store typed when it blocked the time (Block time: "Note (only you see this)", POST /vendor/bookings/exceptions reason, free text up to 200 characters); their words, not a code.',
-  'app/dashboard/inventory/import/page.tsx | n.reason': 'Built from needsAttention[].reason: the till sync\'s own plain sentence for a row it did not use (inventory/pos-sync.ts refuse(...), e.g. "This SKU is in the file 2 times. Fix the file so each SKU appears once."), never a code.',
+  'app/dashboard/inventory/import/panels.tsx | n.reason': 'Built from needsAttention[].reason: the till sync\'s own plain sentence for a row it did not use (inventory/pos-sync.ts refuse(...), e.g. "This SKU is in the file 2 times. Fix the file so each SKU appears once."), never a code.',
   'app/dashboard/inventory/page.tsx | reason': 'Built from check.reason: the note the operator typed when Swift removed the item (admin removal reason -> item.prohibitedReason); their words, not a code.',
   'components/advertiser-campaigns.tsx | c.statusReason': 'A sentence the server writes ("Advertiser suspended: …", "Reservation hold expired …" in modules/ads), not a code.',
   "lib/taxi-documents.ts | docType.replaceAll('_', ' ')": 'Fallback for a document the LABELS map does not know yet: document names are nouns (road_service_licence -> "Road Service Licence", pinned in taxi-documents.test.ts), not a status code.',
