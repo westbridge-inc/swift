@@ -12,6 +12,7 @@ import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { weeklyFeeAmount } from '../modules/billing/subscription-fee';
 
 // ---------------------------------------------------------------------------
 // [CHAINS · owner 29 Oct 2026] "Full tier fee per branch by default + an ADMIN
@@ -122,11 +123,14 @@ describe('[CHAINS] PUT /admin/vendor-owners/:id/deal-rate', () => {
     const res = await call('PUT', `/api/v1/admin/vendor-owners/${c.ownerId}/deal-rate`, { weeklyRate: 14000, reason: REASON });
     expect(res.statusCode, res.body).toBe(200);
     const outcomes = res.json().data.branches.map((b: { outcome: string }) => b.outcome);
-    expect(outcomes).toEqual(['APPLIED', 'APPLIED', 'WOULD_RAISE', 'APPLIED', 'NO_FEE_YET']);
+    expect(outcomes).toEqual(['APPLIED', 'APPLIED', 'OWN_FEE_LOWER', 'APPLIED', 'NO_FEE_YET']);
     const [a, b, small, trial] = await Promise.all(c.branches.slice(0, 4).map((x) => subOf(x.subscriptionId!)));
     expect(Number(a!.customRate)).toBe(14000);
     expect(Number(b!.customRate)).toBe(14000);
-    expect(small!.customRate, 'a branch already under the deal keeps its own fee').toBeNull();
+    // The deal is a standing rule on every branch; one whose own fee is lower keeps paying its own fee.
+    expect(Number(small!.customRate)).toBe(14000);
+    expect(weeklyFeeAmount(small!), 'a branch already under the deal keeps its own fee').toBe(12000);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: small!.id, type: 'TIER_CHANGE' } }), 'its fee did not change').toBe(0);
     expect(Number(trial!.customRate)).toBe(14000);
     // The weekly rate (the tier) is untouched: the deal is an override with a record.
     expect(Number(a!.weeklyRate)).toBe(20000);
@@ -143,7 +147,7 @@ describe('[CHAINS] PUT /admin/vendor-owners/:id/deal-rate', () => {
     // One audit row: who, why, and each branch's outcome.
     const audit = await runWithoutTenant(() => app.prisma.auditLog.findFirst({ where: { userId: adminId, entityId: c.ownerId } }), 'read');
     expect(audit, 'the deal is on the record').toBeTruthy();
-    expect(JSON.stringify(audit!.changes)).toContain('WOULD_RAISE');
+    expect(JSON.stringify(audit!.changes)).toContain('OWN_FEE_LOWER');
   });
 
   it('never changes a branch under a payment in flight; the same deal set again later applies it', async () => {
@@ -164,6 +168,13 @@ describe('[CHAINS] PUT /admin/vendor-owners/:id/deal-rate', () => {
     const third = await call('PUT', `/api/v1/admin/vendor-owners/${c.ownerId}/deal-rate`, { weeklyRate: 16000, reason: REASON });
     expect(third.json().data.branches[0].outcome, 'setting the same deal twice changes nothing').toBe('UNCHANGED');
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'TIER_CHANGE' } })).toBe(1);
+  });
+
+  it('a branch on an older, lower custom rate is never raised to the deal', async () => {
+    const c = await chain([{ weeklyRate: 20000, customRate: 10000 }]);
+    const res = await call('PUT', `/api/v1/admin/vendor-owners/${c.ownerId}/deal-rate`, { weeklyRate: 14000, reason: REASON });
+    expect(res.json().data.branches[0].outcome).toBe('WOULD_RAISE');
+    expect(Number((await subOf(c.branches[0]!.subscriptionId!)).customRate)).toBe(10000);
   });
 
   it('a deal is only ever lowered: raising it is a fee rise and is refused', async () => {

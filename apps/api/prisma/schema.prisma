@@ -1506,6 +1506,10 @@ model VendorStaff {
 
 model Vendor {
   id                      String                   @id @default(cuid())
+  /// [CHAINS · COORD ruling 29 Oct 2026] A branch added to an approved owner (POST /vendor/stores) waits for a PERSON
+  /// at Swift to approve it (its address and pin) before it can go live; the owner's documents are not asked again.
+  /// Cleared when a person activates it (admin approve). False for every store made any other way.
+  personApprovalRequired  Boolean                  @default(false)
   tenantId                String                   @default("swift-default")
   tenant                  Tenant                   @relation(fields: [tenantId], references: [id])
   ownerId                 String

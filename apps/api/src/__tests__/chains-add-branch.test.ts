@@ -204,6 +204,23 @@ describe('[CHAINS] POST /vendor/stores — add a branch', () => {
     });
   }
 
+  it('an owner whose own account is not active adds no branch (checked by the service, under its lock)', async () => {
+    const owner = await makeOwner();
+    await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'SUSPENDED' } });
+    await expect(new PartnerService(app.prisma).addBranch(owner.userId, { ...branchBody(), vendorType: 'RESTAURANT' } as Parameters<PartnerService['addBranch']>[1],
+      { weeklyFeeAck: await ackFor(owner.userId), surface: 'web' })).rejects.toMatchObject({ code: 'ACCOUNT_NOT_ACTIVE' });
+    expect(await storesOf(owner.ownerId)).toHaveLength(1);
+  });
+
+  it('a branch is born waiting for a person at Swift; a first store made at sign-up is not', async () => {
+    const owner = await makeOwner();
+    const res = await add(owner.token, { business: branchBody(), weeklyFeeAck: await ackFor(owner.userId) });
+    expect(res.statusCode, res.body).toBe(201);
+    const branch = await app.prisma.vendor.findUniqueOrThrow({ where: { id: res.json().data.id } });
+    expect(branch.personApprovalRequired).toBe(true);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: owner.firstId } })).personApprovalRequired).toBe(false);
+  });
+
   it('needs a fresh "confirm it\'s you"', async () => {
     const owner = await makeOwner('ACTIVE', false);
     const res = await add(owner.token, { business: branchBody(), weeklyFeeAck: await ackFor(owner.userId) });

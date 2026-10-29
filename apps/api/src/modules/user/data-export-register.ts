@@ -360,6 +360,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       mmgCheckoutHeldAt: 'FRAUD_SAFETY', suspensionSource: 'SYSTEM', isFeatured: 'SYSTEM', mmgMissesClearedAt: 'SYSTEM', nameReviewApprovedHash: 'SYSTEM',
       // [STORE-VAT · owner O-5] The staff member who decided the store's VAT.
       vatReviewedBy: 'OTHER_PERSON',
+      // [CHAINS] Whether a new branch still waits for a person at Swift to approve it: Swift's own bookkeeping.
+      personApprovalRequired: 'SYSTEM',
     },
     fields: [
       'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',

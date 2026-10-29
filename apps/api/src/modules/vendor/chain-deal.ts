@@ -18,8 +18,12 @@ import { weeklyFeeAmount } from '../billing/subscription-fee';
 // (subscription-fee.ts weeklyFeeFor) and the weekly re-tier already leaves alone.
 //
 // MONEY RULES (GUARDRAILS §1, §7 standing rule 2):
-//  - A deal never RAISES a fee. A branch whose own fee is already at or under
-//    the deal keeps it (WOULD_RAISE), and a deal can only be set at or under the
+//  - A deal never RAISES a fee, on any day. It is a STANDING rule: written on
+//    every branch as its custom rate, and the biller charges the lower of the
+//    custom rate and the branch's own tier rate (subscription-fee.ts), so a
+//    branch whose own fee is lower keeps it (OWN_FEE_LOWER), a branch that
+//    moves down a tier pays the lower tier, and a deal branch never moves UP a
+//    tier (billing.service recalculateVendorTiers). A deal can only be set at or under the
 //    owner's current deal: ending or raising one is a fee rise, which needs the
 //    14-day fee-change notice flow, never this button (DEAL_RISE_NEEDS_NOTICE).
 //  - It applies from each branch's NEXT weekly fee. A charge already issued keeps
@@ -33,7 +37,7 @@ import { weeklyFeeAmount } from '../billing/subscription-fee';
 //    billing-access.ts lockVendorActivationBilling).
 // ---------------------------------------------------------------------------
 
-export type BranchDealOutcome = 'APPLIED' | 'UNCHANGED' | 'WOULD_RAISE' | 'PAYMENT_IN_FLIGHT' | 'NOT_BILLED' | 'OTHER_CURRENCY' | 'NO_FEE_YET';
+export type BranchDealOutcome = 'APPLIED' | 'OWN_FEE_LOWER' | 'UNCHANGED' | 'WOULD_RAISE' | 'PAYMENT_IN_FLIGHT' | 'NOT_BILLED' | 'OTHER_CURRENCY' | 'NO_FEE_YET';
 
 export interface BranchDealRow {
   vendorId: string;
@@ -146,10 +150,16 @@ export async function setChainDeal(
       const from = weeklyFeeAmount(sub);
       if (NOT_BILLED.includes(sub.status) || sub.feeWaived) { branches.push(row('NOT_BILLED', sub.feeWaived ? 0 : null)); continue; }
       if (sub.currencyCode !== currencyCode) { branches.push(row('OTHER_CURRENCY', from)); continue; }
-      if (input.weeklyRate > from) { branches.push(row('WOULD_RAISE', from)); continue; }
       if (sub.customRate !== null && Number(sub.customRate) === input.weeklyRate) { branches.push(row('UNCHANGED', from)); continue; }
+      // The fee the branch would pay on the deal: the deal, or its own tier rate when that is lower (weeklyFeeFor).
+      const to = weeklyFeeAmount({ weeklyRate: sub.weeklyRate, customRate: input.weeklyRate });
+      // Never a rise: e.g. a branch on an older, lower custom rate keeps it.
+      if (to > from) { branches.push(row('WOULD_RAISE', from)); continue; }
       if (await paymentInFlight(tx, sub.id)) { branches.push(row('PAYMENT_IN_FLIGHT', from)); continue; }
+      // The deal is a STANDING rule (REVIEW-G/M #2211 S3-1): written on every branch as its custom rate, so the branch
+      // pays the lower of the deal and its own tier rate on every future week, whichever way its tier moves.
       await tx.subscription.update({ where: { id: sub.id }, data: { customRate: input.weeklyRate } });
+      if (to === from) { branches.push(row('OWN_FEE_LOWER', from)); continue; }
       const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
       await tx.billingEvent.create({ data: {
         subscriptionId: sub.id, type: 'TIER_CHANGE', amount: input.weeklyRate, currencyCode: sub.currencyCode,

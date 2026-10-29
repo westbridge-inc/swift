@@ -315,7 +315,8 @@ export class SubscriptionService {
     // of the owner's stores is in it, and is billed from approval after. Never a fresh 14 days, never a second
     // grant (REVIEW-M #2211 S3-2: a second exception grant for the same account collides with the first). Only an
     // account with no running trial of its own may be granted one (FIRST_TRIAL, or a founder exception).
-    const vendorTrialOpen = 'vendorId' in entity && (decision.grant || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE');
+    // FIRST_TRIAL means the cluster holds no store trial at all, so there is no own trial to share.
+    const vendorTrialOpen = 'vendorId' in entity && (decision.reason === 'EXCEPTION_GRANT' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE');
     const ownGrant = vendorTrialOpen ? await ownRunningStoreTrial(tx, human.userId, tenantId, now) : null;
     const branchOf = ownGrant && 'vendorId' in entity ? await tx.vendor.findUnique({ where: { id: entity.vendorId }, select: { ownerId: true } }) : null;
     const shared = ownGrant && branchOf && 'vendorId' in entity
@@ -342,7 +343,7 @@ export class SubscriptionService {
       ...(deal !== null ? { customRate: deal } : {}),
     } });
     // [REVIEW-M #2211 S4-3] A branch born on its owner's chain deal says so in its fee history.
-    if (deal !== null) await tx.billingEvent.create({ data: {
+    if (deal !== null && deal < weeklyRate) await tx.billingEvent.create({ data: {
       subscriptionId: sub.id, type: 'TIER_CHANGE', amount: deal, currencyCode,
       idempotencyKey: `chaindeal:${sub.id}:born:${weeklyRate}->${deal}`,
       note: `Chain deal: this store starts on its owner's negotiated weekly fee ${deal} (its own fee is ${weeklyRate}).`,
@@ -416,16 +417,18 @@ export async function sharedChainTrialEnd(
   return sibling.trialEndDate < input.grantEndsAt ? sibling.trialEndDate : input.grantEndsAt;
 }
 
-/** [CHAINS] The owner's chain deal for a store about to be priced at `weeklyRate`: the deal when it is in the same
- *  currency and not above that fee, else null (the store pays its own fee; a deal never raises one). */
+/** [CHAINS] The owner's chain deal for a store about to be priced: the deal when it is in the same currency, else null.
+ *  It is the store's custom rate, which is never charged above the store's own tier rate (weeklyFeeFor). */
 export async function chainDealFor(
   db: Prisma.TransactionClient | PrismaClient, vendorId: string, weeklyRate: number, currencyCode: string,
 ): Promise<number | null> {
   const store = await db.vendor.findUnique({ where: { id: vendorId }, select: { owner: { select: { dealWeeklyRate: true, dealCurrencyCode: true } } } });
   const deal = store?.owner.dealWeeklyRate;
   if (deal === null || deal === undefined || store?.owner.dealCurrencyCode !== currencyCode) return null;
+  // A standing rule (REVIEW-G/M #2211 S3-1): the branch is born on the deal even when its own tier fee is lower today;
+  // the biller charges the lower of the two (weeklyFeeFor), so it never pays more than either.
   const rate = Number(deal);
-  return rate > 0 && rate <= weeklyRate ? rate : null;
+  return rate > 0 ? rate : null;
 }
 
 /**

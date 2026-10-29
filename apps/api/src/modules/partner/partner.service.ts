@@ -132,10 +132,12 @@ export function assertOwnerInGoodStanding(stores: readonly StandingStore[], owne
 }
 
 /** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
-async function createStore(tx: Tx, ownerId: string, business: Business) {
+async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean } = {}) {
   return tx.vendor.create({
     data: {
       ownerId,
+      // [CHAINS · COORD ruling] A branch waits for a person at Swift to approve it before it can go live.
+      ...(opts.branch ? { personApprovalRequired: true } : {}),
       name: business.name,
       slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
       vendorType: business.vendorType,
@@ -412,7 +414,7 @@ export class PartnerService {
       // [Row 628] The fee the owner saw is the fee for this branch now, or nothing is written (WEEKLY_FEE_CHANGED).
       const quote = await signupQuote(tx, userId, { role: 'VENDOR', vendorType: business.vendorType });
       assertSawQuote(consent.weeklyFeeAck, quote);
-      const vendor = await createStore(tx, owner.id, business);
+      const vendor = await createStore(tx, owner.id, business, { branch: true });
       await recordConsent(tx, {
         subjectType: 'vendor_user',
         subjectId: userId,

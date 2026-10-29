@@ -280,7 +280,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     success: (res) => {
       const rows = (res as { data?: { branches?: Array<{ outcome: ChainDealOutcome }> } })?.data?.branches ?? [];
       const count = (o: ChainDealOutcome) => rows.filter((b) => b.outcome === o).length;
-      return `Chain deal set. ${count('APPLIED')} branch(es) changed, ${count('WOULD_RAISE')} already pay less, ${count('PAYMENT_IN_FLIGHT')} waiting on a payment, ${count('NO_FEE_YET')} not live yet.`;
+      return `Chain deal set. ${count('APPLIED')} branch(es) changed, ${count('OWN_FEE_LOWER')} already pay less, ${count('PAYMENT_IN_FLIGHT')} waiting on a payment, ${count('NO_FEE_YET')} not live yet.`;
     },
   }));
 

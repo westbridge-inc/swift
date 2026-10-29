@@ -7,6 +7,7 @@ import { TrialEntitlementService } from '../modules/integrity/trial-entitlement.
 import { previewTrial } from '../modules/integrity/enforcement';
 import { SubscriptionService, TRIAL_DAYS } from '../modules/subscription/subscription.service';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { weeklyFeeAmount } from '../modules/billing/subscription-fee';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] the trial law's partial unique index self-installs on a db-push database (migrations carry it in CI).
@@ -317,6 +318,9 @@ describe('[CHAINS] a chain deal is born on a new branch', () => {
     await prisma.vendorOwner.update({ where: { id: first.ownerId }, data: { dealWeeklyRate: tier + 500 } });
     const third = await makeStoreFor(owner.id);
     const thirdSub = await subscriptions.startTrialForVendor(third.vendor.id);
-    expect(thirdSub.customRate, 'a deal never raises a branch above its own fee').toBeNull();
+    // A standing rule: born on the deal, but never charged above its own fee.
+    expect(Number(thirdSub.customRate)).toBe(tier + 500);
+    expect(weeklyFeeAmount(thirdSub), 'a deal never raises a branch above its own fee').toBe(tier);
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: thirdSub.id } }), 'its fee is its own: nothing to record').toBe(0);
   });
 });

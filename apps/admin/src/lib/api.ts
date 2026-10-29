@@ -399,7 +399,7 @@ export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/s
 // given away with no record of why.
 /** [CHAINS] A chain deal: the weekly fee Swift negotiated for each branch of one owner. Never raises a fee; a second
  *  admin approves it; it applies from each branch's next weekly fee. */
-export type ChainDealOutcome = 'APPLIED' | 'UNCHANGED' | 'WOULD_RAISE' | 'PAYMENT_IN_FLIGHT' | 'NOT_BILLED' | 'OTHER_CURRENCY' | 'NO_FEE_YET';
+export type ChainDealOutcome = 'APPLIED' | 'OWN_FEE_LOWER' | 'UNCHANGED' | 'WOULD_RAISE' | 'PAYMENT_IN_FLIGHT' | 'NOT_BILLED' | 'OTHER_CURRENCY' | 'NO_FEE_YET';
 export interface ChainDealResult {
   dealWeeklyRate: number;
   currencyCode: string;

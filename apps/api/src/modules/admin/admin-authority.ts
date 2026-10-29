@@ -173,7 +173,7 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
-  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
   rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },

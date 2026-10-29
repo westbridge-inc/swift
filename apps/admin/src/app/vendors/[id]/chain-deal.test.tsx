@@ -30,7 +30,7 @@ describe('[CHAINS] chain deal on the store page', () => {
       if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/vendor-owners/owner-row-1/deal-rate') {
         return { body: { success: true, data: { dealWeeklyRate: 14000, currencyCode: 'GYD', branches: [
           { vendorId: 'vendor-target', vendorName: 'Royal North', from: 20000, to: 14000, outcome: 'APPLIED' },
-          { vendorId: 'vendor-2', vendorName: 'Royal Camp', from: 12000, to: 12000, outcome: 'WOULD_RAISE' },
+          { vendorId: 'vendor-2', vendorName: 'Royal Camp', from: 12000, to: 12000, outcome: 'OWN_FEE_LOWER' },
         ] } } };
       }
       throw new Error(`Unexpected request: ${request.method} ${request.url}`);
