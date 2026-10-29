@@ -3312,6 +3312,8 @@ model ServiceProvider {
   jobs            ServiceJob[]
   offerings       ServiceOffering[]
   timeOff         ServiceProviderTimeOff[]
+  /// [BILL-PRO] The pro's weekly-fee subscription (none until the fee is switched on for pros).
+  subscription    Subscription?
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
@@ -3531,6 +3533,10 @@ model Subscription {
   driver             Driver?               @relation(fields: [driverId], references: [id])
   vendorId           String?               @unique
   vendor             Vendor?               @relation(fields: [vendorId], references: [id])
+  /// [BILL-PRO] An independent service provider (a pro) who pays the weekly fee. Exactly one owner
+  /// column is set on a new row (rider, driver, vendor or pro); the database refuses two.
+  serviceProviderId  String?               @unique
+  serviceProvider    ServiceProvider?      @relation(fields: [serviceProviderId], references: [id])
   type               SubscriptionType
   status             SubscriptionStatus    @default(ACTIVE)
   weeklyRate         Decimal               @db.Decimal(10, 2)
@@ -4407,7 +4413,10 @@ enum SubscriptionType {
   RESTAURANT
   SUPERMARKET
   RETAIL_STORE
+  /// A Services STORE (a vendor of type SERVICE), not an independent pro.
   SERVICE_PROVIDER
+  /// [BILL-PRO] An independent service provider (a pro in the Services tab).
+  INDEPENDENT_PRO
 }
 
 enum SubscriptionStatus {

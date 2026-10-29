@@ -261,6 +261,10 @@ export interface TenantLineageRule {
   /** QR lineage never exempts an UPDATE whose non-null parent is missing or RLS-hidden. */
   requiredParent?: boolean;
 }
+/** [BILL-PRO PR1 · migration 20261029030000] The independent-pro owner branch of the
+ *  collection_contacts owner derivation. The DB-05 migration (20261013221500) shipped the
+ *  derivation without it; its backfill ran before any pro could own a subscription. */
+export const PRO_OWNER_TENANT_BRANCH = ' UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN service_providers sp ON sp.id = s."serviceProviderId" JOIN users u ON u.id = sp."userId" WHERE s.id = NEW."subscriptionId"';
 export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
@@ -358,9 +362,9 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   // checked by its own authority resolver, never by an invented foreign key).
   { table: 'content_reports', trigger: 'content_reports_tenant_matches_reporter', parent: 'users', fk: 'reporterId', nullable: true },
   // [DB-05 EXPAND] A collection contact belongs to its subscription's owner (vendor, or the
-  // rider or driver person); owners in more than one tenant are no owner at all.
+  // rider, driver or [BILL-PRO] independent pro person); owners in more than one tenant are no owner at all.
   { table: 'collection_contacts', trigger: 'collection_contacts_tenant_matches_owner', parent: 'subscriptions', fk: 'subscriptionId', nullable: true,
-    parentTenantSql: `SELECT CASE WHEN count(DISTINCT owners.t) = 1 THEN min(owners.t) END FROM (SELECT v."tenantId" AS t FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN riders r ON r.id = s."riderId" JOIN users u ON u.id = r."userId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN drivers d ON d.id = s."driverId" JOIN users u ON u.id = d."userId" WHERE s.id = NEW."subscriptionId") owners` },
+    parentTenantSql: `SELECT CASE WHEN count(DISTINCT owners.t) = 1 THEN min(owners.t) END FROM (SELECT v."tenantId" AS t FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN riders r ON r.id = s."riderId" JOIN users u ON u.id = r."userId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN drivers d ON d.id = s."driverId" JOIN users u ON u.id = d."userId" WHERE s.id = NEW."subscriptionId"${PRO_OWNER_TENANT_BRANCH}) owners` },
 ];
 
 /** The SQL that yields a lineage rule's parent tenant for the row `NEW`. */
