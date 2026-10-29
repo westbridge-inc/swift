@@ -498,6 +498,7 @@ function SyncPreviewPanel({ preview, missing, busy, nothingToApply, onMissing, o
 function SyncResultPanel({ result }: { result: SyncResult }) {
   const t = result.totals;
   const prices = result.changes.filter((c) => c.price);
+  const waiting = result.waitingForCheck ?? [];
   return (
     <section aria-label="Result" className="sw-card p-6">
       <p className="sw-heading text-green-700">Done. Your items are updated.</p>
@@ -507,6 +508,16 @@ function SyncResultPanel({ result }: { result: SyncResult }) {
         {t.needsAttention > 0 ? ` ${plural(t.needsAttention, 'row')} still need attention.` : ''}
       </p>
       {result.replayed && <p className="mt-1 text-sm text-[var(--swift-muted)]">This file had already been applied, so nothing was changed twice.</p>}
+      {waiting.length > 0 && (
+        <>
+          <p className="mt-3 text-sm font-semibold text-amber-700">
+            {plural(waiting.length, 'new item')} waiting for a quick check — hidden from customers until Swift checks {waiting.length === 1 ? 'it' : 'them'}:
+          </p>
+          <ul className="mt-1 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
+            {waiting.map((w) => <li key={w.row}>Row {w.row}: {w.name}</li>)}
+          </ul>
+        </>
+      )}
       {prices.length > 0 && (
         <>
           <p className="mt-3 text-sm font-semibold">Price changes</p>

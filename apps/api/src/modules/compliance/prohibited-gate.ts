@@ -387,18 +387,25 @@ export async function assertNotBanned(db: Db, itemId: string, options: { wordBan
 /**
  * Stock coming back un-hides an item the stock engine hid ("zero hides, restock un-hides"), never one Swift does not
  * allow: a banned item stays off, and its stock is still counted. The stock adjust route, an order cancelled before
- * pickup and a picking restock all use this one guard; the item editor judges the edited item itself. [GUARDRAILS §8 ·
+ * pickup, a picking restock and a till sync all use this one guard; the item editor judges the edited item itself. [GUARDRAILS §8 ·
  * DS1266 S3, the rule of Opus S3-1]
  */
-export async function unhideRestocked(db: Db, itemId: string): Promise<void> {
+export async function unhideRestocked(db: Db, itemIds: string | readonly string[]): Promise<void> {
+  // [POS-SYNC] One item, or a till sync's whole batch: the same rule for each, in one locked read, one judgement and
+  // one write, so a 5,000-row file does not judge item by item while it holds the store.
+  const ids = [...new Set(typeof itemIds === 'string' ? [itemIds] : itemIds)].sort();
+  if (ids.length === 0) return;
   // ONE transaction, the item's row locked before it is judged: an edit of this item waits until the verdict and the
   // switch-on have committed together, so nothing can ban the item between the check and the write. A caller already
-  // in a transaction (the stock adjust route, a cancelled order, a picking restock) is joined, not left. [DS1267 S4]
+  // in a transaction (the stock adjust route, a cancelled order, a picking restock, a till sync) is joined, not left.
+  // Rows are locked in id order, as every path that moves several items locks them. [DS1267 S4]
   const judgeAndWrite = async (tx: Prisma.TransactionClient): Promise<void> => {
-    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "items" WHERE id = ${itemId} AND "autoHiddenAt" IS NOT NULL AND "stockQuantity" > 0 FOR UPDATE`;
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "items" WHERE id IN (${Prisma.join(ids)}) AND "autoHiddenAt" IS NOT NULL AND "stockQuantity" > 0 ORDER BY id FOR UPDATE`;
     if (locked.length === 0) return;
-    if ((await catalogueChecksFor(tx, [itemId])).get(itemId)?.state === 'BANNED') return;
-    await tx.item.updateMany({ where: { id: itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } }, data: { isAvailable: true, autoHiddenAt: null } });
+    const checks = await catalogueChecksFor(tx, locked.map((row) => row.id));
+    const allowed = locked.map((row) => row.id).filter((id) => checks.get(id)?.state !== 'BANNED');
+    if (allowed.length === 0) return;
+    await tx.item.updateMany({ where: { id: { in: allowed }, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } }, data: { isAvailable: true, autoHiddenAt: null } });
   };
   // A transaction's own client has no $transaction; the root client opens one.
   if ('$transaction' in db) await db.$transaction(judgeAndWrite);

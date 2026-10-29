@@ -370,7 +370,8 @@ const importCsvSchema = z.object({
 const columnChoiceSchema = z.object({
   mode: z.enum(['add', 'sync']).optional(),
   tillStore: z.string().trim().min(1).max(100).optional(),
-  mapping: z.record(z.enum(MAPPABLE_FIELDS as unknown as [string, ...string[]]), z.string().max(200)).optional(),
+  // (partialRecord: a store chooses only the columns it changes.)
+  mapping: z.partialRecord(z.enum(MAPPABLE_FIELDS as unknown as [string, ...string[]]), z.string().max(200)).optional(),
 });
 const automapBodySchema = importCsvSchema.merge(columnChoiceSchema);
 
@@ -399,7 +400,7 @@ const csvRowSchema = z.object({
   description: z.string().max(2000).optional().default(''),
   // [POS-SYNC] A blank price used to coerce to 0 and import a free item. A
   // price is required; it is never invented.
-  basePrice: z.string().trim().min(1, 'A price is required').pipe(z.coerce.number().min(0).max(10_000_000)),
+  basePrice: z.string().trim().min(1, 'A price is required').pipe(z.coerce.number<string>().min(0).max(10_000_000)),
   sku: z.string().max(64).optional().default(''),
   unit: z.string().max(30).optional().default(''),
   stockQuantity: z
@@ -4079,6 +4080,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: access.vendorId },
       select: { id: true, name: true, tenantId: true },
     });
+    // [GUARDRAILS §8 · #54] A store filed under a banned category syncs nothing, as it imports nothing.
+    await assertStoreAllowed(app.prisma, store.id);
     return store;
   }
 

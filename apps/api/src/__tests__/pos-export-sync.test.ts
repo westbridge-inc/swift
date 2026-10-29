@@ -4,7 +4,7 @@ import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
-import { prismaPlugin, runWithoutTenant, TENANT_MODEL_NAMES } from '../plugins/prisma';
+import { beginRequestTenantContext, prismaPlugin, runWithoutTenant, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { TENANT_TABLES, TENANT_LINEAGE_TABLES } from '../lib/tenant-rls';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -14,6 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { reconcileItemStock, applyStockMovement, applyStockMovements } from '../modules/inventory/stock';
 import { OrderService } from '../modules/order/order.service';
+import { prohibitedStoreCategory, unhideRestocked } from '../modules/compliance/prohibited-gate';
 import ExcelJS from 'exceljs';
 import type { Server } from 'socket.io';
 import { rateLimitKey } from '../utils/rate-limit-key';
@@ -147,7 +148,7 @@ interface PreviewData {
   notOnSku: number;
   totals: Record<string, number>;
 }
-interface ConfirmData extends PreviewData { replayed: boolean; appliedAt: string }
+interface ConfirmData extends PreviewData { replayed: boolean; appliedAt: string; waitingForCheck: Array<{ row: number; name: string }> }
 
 const itemOf = (id: string) => app.prisma.item.findUniqueOrThrow({ where: { id } });
 const movementsOf = (itemId: string) => app.prisma.stockMovement.findMany({ where: { itemId }, orderBy: { occurredAt: 'asc' } });
@@ -158,6 +159,9 @@ beforeAll(async () => {
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382/15';
 
   app = Fastify({ logger: false });
+  // As app.ts does: every request starts a fresh tenant store, so one test's
+  // caller (another tenant's, say) never leaks into the next request.
+  app.addHook('onRequest', async () => { beginRequestTenantContext(); });
   registerErrorHandler(app);
   await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
   await app.register(prismaPlugin);
@@ -917,7 +921,7 @@ describe('availability: a big file never turns a checkout into a server error (S
     expect((await asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' })).statusCode).toBe(200);
   }, 60_000);
 
-  it('a 5,000-row file confirmed between a checkout’s pricing and its commit: both finish, nothing is a server error', async () => {
+  it('a 5,000-row file confirmed between a checkout’s pricing and its commit: the file lands, the checkout is refused by the price lock, nothing is a server error', async () => {
     const store = await makeStore();
     const N = 5000;
     await app.prisma.item.createMany({
@@ -955,20 +959,20 @@ describe('availability: a big file never turns a checkout into a server error (S
       },
     );
     expect(applied.r.statusCode, applied.r.body).toBe(200);
-    // On this branch the order is placed at the price the customer saw (100):
-    // checkout does not yet re-read prices where it commits. (The price lock,
-    // #1493, refuses this snapshot instead; this assertion moves with it.)
-    expect(checkout).toEqual({ statusCode: 200, code: '' });
-    const placed = await app.prisma.orderItem.findFirstOrThrow({ where: { order: { customerId: customer.userId } } });
-    expect(Number(placed.markedUpPrice)).toBe(100);
+    // The price lock (#1493) re-reads every price where checkout commits: the
+    // file moved this item from 100 to 110 after the cart was priced, so the
+    // order is refused as a plain "your cart changed" (409), never placed at
+    // a price the store no longer charges, and never a server error.
+    expect(checkout).toEqual({ statusCode: 409, code: 'CART_CHANGED' });
+    expect(await app.prisma.order.count({ where: { customerId: customer.userId } })).toBe(0);
     // The whole file landed set-based (about 1.7 s end to end locally; row by
     // row it took over 20 s).
     expect(applied.ms).toBeLessThan(10_000);
     expect(await app.prisma.stockMovement.count({ where: { itemId: { in: bulk.map((b) => b.id) }, reason: 'POS_IMPORT' } })).toBe(N);
     expect(await app.prisma.item.count({ where: { vendorId: store.vendorId, basePrice: 110 } })).toBe(N);
-    // The file set 40 before the order existed; the order then took its unit.
+    // The file set 40; the refused order took nothing.
     const firstAfter = await itemOf(first.id);
-    expect(firstAfter.stockQuantity).toBe(39);
+    expect(firstAfter.stockQuantity).toBe(40);
     // The fixture set 50 without a ledger row; every movement after it is in the ledger.
     expect((await reconcileItemStock(app.prisma, first.id)).drift).toBe(50);
   }, 240_000);
@@ -1247,4 +1251,145 @@ describe('the batch stock writer (S2)', () => {
     expect((await itemOf(lo.id)).stockQuantity).toBe(4);
     expect((await itemOf(hi.id)).stockQuantity).toBe(4);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// [POS-SYNC · main since 7 Oct] What a till file never touches: a deleted
+// (archived) listing, an appointment listing, and an item Swift does not allow
+// [GUARDRAILS §8]. A new row that IS banned goods is never added, a held word
+// is listed for a quick check, and a store filed under a banned category syncs
+// nothing.
+// ---------------------------------------------------------------------------
+describe('what a till file never touches (today’s rules)', () => {
+  it('a deleted (archived) listing is never matched, never "missing", and never shares its SKU with a live item', async () => {
+    const store = await makeStore();
+    const gone = await makeItem(store, 'ARC-1', 3, 500, { name: 'Old rice' });
+    await app.prisma.item.update({ where: { id: gone.id }, data: { archivedAt: new Date(), isAvailable: false } });
+    const live = await makeItem(store, 'ARC-2', 4, 600, { name: 'Live sugar' });
+    const goneTwin = await makeItem(store, 'ARC-2', 1, 600, { name: 'Deleted sugar' });
+    await app.prisma.item.update({ where: { id: goneTwin.id }, data: { archivedAt: new Date(), isAvailable: false } });
+    const otherGone = await makeItem(store, 'ARC-3', 2, 700, { name: 'Deleted flour' });
+    await app.prisma.item.update({ where: { id: otherGone.id }, data: { archivedAt: new Date(), isAvailable: false } });
+
+    const csv = csvOf(row('ARC-1', 'Rice', '550', '9'), row('ARC-2', 'Sugar', '650', '7'));
+    const p = await previewOk(store, csv, 'SOLD_OUT');
+    // ARC-1 belongs to no live item: it is a new item. ARC-2 is the live item only.
+    expect(p.newItems.map((n) => n.sku)).toEqual(['ARC-1']);
+    expect(p.changes.map((c) => c.itemId)).toEqual([live.id]);
+    expect(p.needsAttention).toEqual([]);
+    // A deleted listing is not on the store, so it is never "missing" from a file.
+    expect(p.missing.map((m) => m.itemId)).not.toContain(otherGone.id);
+    const res = await confirm(store, csv, p);
+    expect(res.statusCode, res.body).toBe(200);
+    for (const id of [gone.id, goneTwin.id, otherGone.id]) {
+      const after = await itemOf(id);
+      expect(after.isAvailable).toBe(false);
+      expect(after.archivedAt).not.toBeNull();
+      expect(await app.prisma.stockMovement.count({ where: { itemId: id, reason: 'POS_IMPORT' } })).toBe(0);
+    }
+    expect(Number((await itemOf(gone.id)).basePrice)).toBe(500);
+    expect((await itemOf(live.id)).stockQuantity).toBe(7);
+  });
+
+  it('an appointment listing is never changed by a file and never "missing" from one', async () => {
+    const store = await makeStore();
+    const haircut = await makeItem(store, 'SVC-1', null, 2000, { name: 'Haircut' });
+    const nails = await makeItem(store, 'SVC-2', null, 3000, { name: 'Nails' });
+    await app.prisma.item.updateMany({ where: { id: { in: [haircut.id, nails.id] } }, data: { fulfillment: 'APPOINTMENT' } });
+    const soap = await makeItem(store, 'GDS-1', 5, 300, { name: 'Soap' });
+
+    const csv = csvOf(row('SVC-1', 'Haircut', '2500', '4'), row('GDS-1', 'Soap', '300', '6'));
+    const p = await previewOk(store, csv, 'SOLD_OUT');
+    expect(p.needsAttention).toEqual([
+      expect.objectContaining({ sku: 'SVC-1', reason: 'On Swift this SKU is an appointment listing. A till file never changes appointments: edit it on Swift.' }),
+    ]);
+    expect(p.changes.map((c) => c.itemId)).toEqual([soap.id]);
+    expect(p.missing.map((m) => m.itemId)).not.toContain(nails.id);
+    expect((await confirm(store, csv, p)).statusCode).toBe(200);
+    expect(await itemOf(haircut.id)).toMatchObject({ isAvailable: true, stockQuantity: null });
+    expect(Number((await itemOf(haircut.id)).basePrice)).toBe(2000);
+    expect((await itemOf(nails.id)).isAvailable).toBe(true);
+  });
+
+  it('an item Swift does not allow is never changed or brought back by a file [GUARDRAILS §8]', async () => {
+    const store = await makeStore();
+    const removed = await makeItem(store, 'BAN-1', 0, 900, { name: 'Shelf item', isAvailable: false });
+    await app.prisma.item.update({
+      where: { id: removed.id },
+      data: { autoHiddenAt: new Date(), prohibitedAt: new Date(), prohibitedClass: 'ALCOHOL', prohibitedReason: 'Alcohol is not sold on Swift' },
+    });
+    const bread = await makeItem(store, 'BRD-1', 0, 400, { name: 'Bread', isAvailable: false });
+    await app.prisma.item.update({ where: { id: bread.id }, data: { autoHiddenAt: new Date() } });
+
+    const csv = csvOf(row('BAN-1', 'Shelf item', '950', '12'), row('BRD-1', 'Bread', '400', '8'));
+    const p = await previewOk(store, csv);
+    expect(p.needsAttention).toEqual([
+      expect.objectContaining({ sku: 'BAN-1', reason: 'Swift does not allow this item, so the file does not change it.' }),
+    ]);
+    expect(p.changes.map((c) => [c.itemId, c.soldOut])).toEqual([[bread.id, 'BACK_ON_SALE']]);
+    expect((await confirm(store, csv, p)).statusCode).toBe(200);
+    expect(await itemOf(removed.id)).toMatchObject({ isAvailable: false, stockQuantity: 0 });
+    expect(Number((await itemOf(removed.id)).basePrice)).toBe(900);
+    expect(await itemOf(bread.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 8 });
+  });
+
+  it('the restock guard takes a batch: each item is judged, a banned one stays off, the rest come back', async () => {
+    const store = await makeStore();
+    const banned = await makeItem(store, 'GRD-1', 0, 900, { name: 'Guard item', isAvailable: false });
+    await app.prisma.item.update({
+      where: { id: banned.id },
+      data: { autoHiddenAt: new Date(), stockQuantity: 4, prohibitedAt: new Date(), prohibitedClass: 'TOBACCO', prohibitedReason: 'Tobacco is not sold on Swift' },
+    });
+    const plain = await makeItem(store, 'GRD-2', 0, 300, { name: 'Guard bread', isAvailable: false });
+    await app.prisma.item.update({ where: { id: plain.id }, data: { autoHiddenAt: new Date(), stockQuantity: 4 } });
+    const empty = await makeItem(store, 'GRD-3', 0, 300, { name: 'Guard empty', isAvailable: false });
+    await app.prisma.item.update({ where: { id: empty.id }, data: { autoHiddenAt: new Date() } });
+
+    await app.prisma.$transaction((tx) => unhideRestocked(tx, [banned.id, plain.id, empty.id]));
+    expect((await itemOf(banned.id)).isAvailable).toBe(false);
+    expect(await itemOf(plain.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null });
+    expect((await itemOf(empty.id)).isAvailable).toBe(false);
+  });
+
+  it('a new row that IS banned goods is never added; a held word is added and listed for a quick check', async () => {
+    const store = await makeStore();
+    const csv = csvOf(
+      row('NEW-1', `${RUN} Banks Beer`, '400', '10'),
+      row('NEW-2', `Beer batter mix ${RUN}`, '450', '6'),
+      row('NEW-3', `Mauby ${RUN}`, '300', '5'),
+    );
+    const p = await previewOk(store, csv);
+    expect(p.needsAttention).toEqual([expect.objectContaining({ sku: 'NEW-1', reason: 'Swift doesn\'t allow this item: alcohol.' })]);
+    expect(p.newItems.map((n) => n.sku)).toEqual(['NEW-2', 'NEW-3']);
+    const res = await confirm(store, csv, p);
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json().data as ConfirmData).waitingForCheck).toEqual([{ row: 3, name: `Beer batter mix ${RUN}` }]);
+    expect(await app.prisma.item.count({ where: { vendorId: store.vendorId, sku: 'NEW-1' } })).toBe(0);
+    expect(await app.prisma.item.count({ where: { vendorId: store.vendorId, sku: { in: ['NEW-2', 'NEW-3'] } } })).toBe(2);
+  });
+
+  it('a store filed under a banned category syncs nothing [GUARDRAILS §8 · #54]', async () => {
+    const store = await makeStore();
+    await makeItem(store, 'PH-1', 2, 500, { name: 'Shampoo' });
+    const pharmacy = await runWithoutTenant(async () => {
+      const existing = await app.prisma.discoveryCategory.findUnique({ where: { tenantId_slug: { tenantId: 'swift-default', slug: 'pharmacy' } } });
+      if (existing) return existing;
+      return await app.prisma.discoveryCategory.create({ data: { tenantId: 'swift-default', slug: 'pharmacy', name: 'Pharmacy & Health', kind: 'RETAIL', vertical: 'RETAIL', emoji: '🧪', status: 'ACTIVE' } });
+    });
+    await runWithoutTenant(async () => {
+      await app.prisma.vendorDiscoveryCategory.create({
+        data: { tenantId: 'swift-default', vendorId: store.vendorId, categoryId: pharmacy.id, role: 'PRIMARY', source: 'ADMIN' },
+      });
+    });
+    // Positive control: the store IS filed under a banned category.
+    expect(await runWithoutTenant(() => prohibitedStoreCategory(app.prisma, store.vendorId))).toMatchObject({ slug: 'pharmacy' });
+    const csv = csvOf(row('PH-1', 'Shampoo', '550', '9'));
+    const res = await preview(store, csv);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('PROHIBITED_ITEM');
+    const fake = { uploadId: 'x'.repeat(24), contentHash: '0'.repeat(64), planDigest: '0'.repeat(64), missingPolicy: 'LEAVE' } as PreviewData;
+    const applied = await confirm(store, csv, fake);
+    expect(applied.statusCode, applied.body).toBe(409);
+    expect(applied.json().error.code).toBe('PROHIBITED_ITEM');
+  });
 });

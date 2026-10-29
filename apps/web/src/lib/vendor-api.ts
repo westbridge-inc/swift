@@ -406,7 +406,11 @@ export interface SyncPreview extends SyncPlanView {
   planDigest: string;
   alreadyApplied: { uploadId: string; appliedAt: string } | null;
 }
-export interface SyncResult extends SyncPlanView { appliedAt: string; replayed: boolean }
+export interface SyncResult extends SyncPlanView {
+  appliedAt: string; replayed: boolean;
+  /** [GUARDRAILS §8] New items a banned word holds for a quick check (absent on older servers). */
+  waitingForCheck?: Array<{ row: number; name: string }>;
+}
 
 export const previewTillSync = (csv: string, missing: MissingPolicy) =>
   apiFetch(`${V}/items/import/sync/preview`, { method: 'POST', body: JSON.stringify({ csv, missing }) }).then(

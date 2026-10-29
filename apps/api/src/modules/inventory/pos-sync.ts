@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { catalogueChecksFor, unhideRestocked } from '../compliance/prohibited-gate';
+import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { OrderService } from '../order/order.service';
 import { applyStockMovements, recordOpeningBalances } from './stock';
 
@@ -20,6 +22,11 @@ import { applyStockMovements, recordOpeningBalances } from './stock';
 // file or twice in the store, an unreadable / zero price, a fractional or
 // negative count. Each is listed as "needs attention" and nothing is applied
 // for it. A blank cell is "no information": it changes nothing.
+//
+// What a file never touches: a deleted (archived) listing, which is not on the
+// store any more; an appointment listing, which has no stock and is not the
+// till's; and an item Swift does not allow [GUARDRAILS §8] — a row naming one
+// is listed, and a new row whose name IS banned goods is never added.
 //
 // What it writes, and how:
 //  - stock: the till's count is an absolute number, so the change is a ledger
@@ -103,6 +110,8 @@ export interface StoreItem {
   stockQuantity: number | null;
   isAvailable: boolean;
   autoHiddenAt: Date | null;
+  /** APPOINTMENT listings are bookings, not shelf stock: a till file never changes them. */
+  fulfillment: string;
 }
 
 export interface ChangeView {
@@ -176,15 +185,21 @@ export function buildSyncPlan(input: {
   canAddNew: boolean;
   /** Units of each item sold on Swift in orders not yet collected (still on the till's shelf). */
   held?: Map<string, number>;
+  /** [GUARDRAILS §8] Items Swift does not allow (catalogueChecksFor: BANNED). A file never changes them. */
+  banned?: ReadonlySet<string>;
 }): SyncPlan {
   const { rows, items, missingPolicy } = input;
   const held = input.held ?? new Map<string, number>();
+  const banned = input.banned ?? new Set<string>();
 
   const store = new Map<string, StoreItem[]>();
   let notOnSku = 0;
   for (const item of items) {
     const key = skuKey(item.sku);
-    if (!key) { notOnSku += 1; continue; }
+    if (!key) {
+      if (!isAppointment(item)) notOnSku += 1;
+      continue;
+    }
     store.set(key, [...(store.get(key) ?? []), item]);
   }
 
@@ -220,6 +235,12 @@ export function buildSyncPlan(input: {
       return refuse(`The "available for sale" cell says "${available}". It should say yes or no.`);
     }
 
+    if (owners.length === 1 && isAppointment(owners[0]!)) {
+      return refuse('On Swift this SKU is an appointment listing. A till file never changes appointments: edit it on Swift.');
+    }
+    if (owners.length === 1 && banned.has(owners[0]!.id)) {
+      return refuse('Swift does not allow this item, so the file does not change it.');
+    }
     if (owners.length === 1) {
       matched.push({
         row: rowNo, item: owners[0]!, fileName: name, sku,
@@ -239,6 +260,9 @@ export function buildSyncPlan(input: {
     for (const [field, value] of [['name', name], ['category', category], ['description', description], ['unit', unit]] as const) {
       if (value.length > FIELD_LIMITS[field]) return refuse(`The ${field} is longer than ${FIELD_LIMITS[field]} characters.`);
     }
+    // [GUARDRAILS §8 · #55] A name that IS banned goods is never added (the add-only import's rule).
+    const bannedGoods = certainGoods(name);
+    if (bannedGoods) return refuse(notAllowedMessage(bannedGoods.prohibitedClass));
     if (!input.canAddNew) return refuse('Swift has to verify your store before new items can be listed. Your existing items were still updated.');
     newItems.push({
       row: rowNo, sku, name, category, description, unit,
@@ -255,6 +279,8 @@ export function buildSyncPlan(input: {
   for (const [key, owners] of store) {
     if (inFile.has(key)) continue;
     for (const item of owners) {
+      // An appointment listing is never the till's, so it is never "missing" from a till file.
+      if (isAppointment(item)) continue;
       // An item the ENGINE hid at zero is switched off too: the store chose
       // "sold out", and a later restock must not bring it back on its own.
       const action = missingPolicy === 'LEAVE'
@@ -274,7 +300,7 @@ export function buildSyncPlan(input: {
   }
 
   const digest = createHash('sha256').update(JSON.stringify({
-    v: 1,
+    v: 2,
     vendorId: input.vendorId,
     contentHash: input.contentHash,
     missingPolicy,
@@ -353,8 +379,21 @@ function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
 }
 
 const ITEM_SELECT = {
-  id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true,
+  id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true, fulfillment: true,
 } as const;
+
+/** The store's live listings: a deleted (archived) one is not on the store any more, so a file never matches it. */
+const liveItemsOf = (vendorId: string) => ({ vendorId, archivedAt: null });
+
+const isAppointment = (item: Pick<StoreItem, 'fulfillment'>): boolean => item.fulfillment === 'APPOINTMENT';
+
+/** [GUARDRAILS §8] Of the store items a file row names, those Swift does not allow (judged now, from their words). */
+async function bannedAmong(db: Prisma.TransactionClient, items: StoreItem[], rows: Array<Record<string, string>>): Promise<Set<string>> {
+  const keys = new Set(rows.map((r) => skuKey(r['sku'])).filter(Boolean));
+  const named = items.filter((i) => keys.has(skuKey(i.sku))).map((i) => i.id);
+  const checks = await catalogueChecksFor(db, named);
+  return new Set(named.filter((id) => checks.get(id)?.state === 'BANNED'));
+}
 
 /** Order states in which the goods are still in the store — the states a
  *  cancellation restocks from (OrderService.restocksOnCancel, the one list). */
@@ -400,9 +439,10 @@ export async function previewSync(
   input: { vendorId: string; csv: string; rows: Array<Record<string, string>>; missingPolicy: MissingPolicy; canAddNew: boolean },
 ) {
   const contentHash = contentHashOf(input.csv);
-  const items = await db.item.findMany({ where: { vendorId: input.vendorId }, select: ITEM_SELECT });
+  const items = await db.item.findMany({ where: liveItemsOf(input.vendorId), select: ITEM_SELECT });
   const held = await unitsHeldByOpenOrders(db, input.vendorId, trackedSkuItemIds(items, input.rows));
-  const plan = buildSyncPlan({ vendorId: input.vendorId, contentHash, rows: input.rows, items, missingPolicy: input.missingPolicy, canAddNew: input.canAddNew, held });
+  const banned = await bannedAmong(db, items, input.rows);
+  const plan = buildSyncPlan({ vendorId: input.vendorId, contentHash, rows: input.rows, items, missingPolicy: input.missingPolicy, canAddNew: input.canAddNew, held, banned });
   const earlier = await db.posImport.findFirst({
     where: { vendorId: input.vendorId, contentHash },
     select: { id: true, createdAt: true },
@@ -430,7 +470,11 @@ export interface ConfirmInput {
   now?: Date;
 }
 
-export type ConfirmResult = SyncView & { uploadId: string; contentHash: string; appliedAt: string; replayed: boolean };
+export type ConfirmResult = SyncView & {
+  uploadId: string; contentHash: string; appliedAt: string; replayed: boolean;
+  /** [GUARDRAILS §8] New items a banned word holds hidden until a person checks them, by row (as the add-only import). */
+  waitingForCheck: Array<{ row: number; name: string }>;
+};
 
 /** Prices listed in the audit row (the full list is in the PosImport summary). */
 const AUDIT_PRICE_LINES = 200;
@@ -477,11 +521,12 @@ export async function confirmSync(
     // that moves several items) before it is read, so the counts the deltas
     // are taken from cannot move until this commits.
     await tx.$queryRaw`SELECT id FROM "items" WHERE "vendorId" = ${input.vendorId} ORDER BY id FOR UPDATE`;
-    const items = await tx.item.findMany({ where: { vendorId: input.vendorId }, select: ITEM_SELECT });
+    const items = await tx.item.findMany({ where: liveItemsOf(input.vendorId), select: ITEM_SELECT });
     const held = await unitsHeldByOpenOrders(tx, input.vendorId, trackedSkuItemIds(items, input.rows));
+    const banned = await bannedAmong(tx, items, input.rows);
     const plan = buildSyncPlan({
       vendorId: input.vendorId, contentHash: input.contentHash, rows: input.rows, items,
-      missingPolicy: input.missingPolicy, canAddNew: input.canAddNew, held,
+      missingPolicy: input.missingPolicy, canAddNew: input.canAddNew, held, banned,
     });
     if (plan.digest !== input.planDigest) {
       throw new AppError(409, 'PREVIEW_STALE', 'Your store changed since the preview, so it no longer shows what would happen. Preview the file again.');
@@ -519,11 +564,9 @@ export async function confirmSync(
         data: { isAvailable: false, autoHiddenAt: now },
       });
       // ...and a restock brings back only an item the engine hid. The owner's
-      // own "off" carries no marker, so it is never undone.
-      await tx.item.updateMany({
-        where: { id: { in: movedIds }, vendorId: input.vendorId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-        data: { isAvailable: true, autoHiddenAt: null },
-      });
+      // own "off" carries no marker, so it is never undone; an item Swift does
+      // not allow never comes back (the one guard every restock uses).
+      await unhideRestocked(tx, movedIds);
     }
 
     // The till says "not for sale", and items missing from the file when the
@@ -539,6 +582,7 @@ export async function confirmSync(
       });
     }
 
+    const waitingForCheck: ConfirmResult['waitingForCheck'] = [];
     if (plan.view.newItems.length > 0) {
       const wanted = new Map(plan.view.newItems.map((n) => [n.category.toLowerCase(), n.category]));
       const existing = await tx.category.findMany({ where: { vendorId: input.vendorId }, select: { id: true, name: true } });
@@ -569,6 +613,11 @@ export async function confirmSync(
       if (created.length !== plan.view.newItems.length) throw new AppError(500, 'NEW_ITEMS_MISMATCH', 'New items were not all created');
       // [F2] The ledger explains the count each item is born with.
       const idBySku = new Map(created.map((c) => [skuKey(c.sku), c.id]));
+      // [GUARDRAILS §8] A banned word in a new item's own text holds it hidden until a person checks it.
+      const checks = await catalogueChecksFor(tx, created.map((c) => c.id));
+      for (const n of plan.view.newItems) {
+        if (checks.get(idBySku.get(skuKey(n.sku))!)?.state === 'WAITING') waitingForCheck.push({ row: n.row, name: n.name });
+      }
       await recordOpeningBalances(tx, {
         vendorId: input.vendorId,
         tenantId: input.tenantId,
@@ -584,6 +633,7 @@ export async function confirmSync(
       uploadId: input.uploadId,
       contentHash: input.contentHash,
       appliedAt: now.toISOString(),
+      waitingForCheck,
     };
     await tx.posImport.create({
       data: {
