@@ -5,7 +5,8 @@ import { normalizeDocNumber } from '../modules/integrity/normalize';
 import { IdentityService } from '../modules/integrity/identity.service';
 import { TrialEntitlementService } from '../modules/integrity/trial-entitlement.service';
 import { previewTrial } from '../modules/integrity/enforcement';
-import { SubscriptionService, TRIAL_DAYS } from '../modules/subscription/subscription.service';
+import { SubscriptionService, TRIAL_DAYS, chainTrialPreview } from '../modules/subscription/subscription.service';
+import { lockVendorActivationBilling } from '../modules/billing/billing-access';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { weeklyFeeAmount } from '../modules/billing/subscription-fee';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
@@ -235,15 +236,22 @@ describe('[CHAINS] shared chain trial', () => {
         // The clock passes the owner's trial end. Nothing flips a grant off ACTIVE at its end, so its row stays ACTIVE.
         const past = new Date(Date.now() - DAY);
         await prisma.trialGrant.updateMany({ where: { clusterId }, data: { startedAt: new Date(past.getTime() - TRIAL_DAYS * DAY), endsAt: past } });
+        // The trial converted and the first week is paid (next bill ahead), so no fee sweep elsewhere picks these rows up.
+        const ahead = new Date(Date.now() + 6 * DAY);
         await prisma.subscription.updateMany({
           where: { vendor: { owner: { userId: { in: [owner.id, other.id] } } } },
-          data: { status: 'ACTIVE', isTrialActive: false, trialEndDate: past, currentPeriodEnd: past, nextBillingDate: past },
+          data: { status: 'ACTIVE', isTrialActive: false, trialEndDate: past, currentPeriodEnd: ahead, nextBillingDate: ahead },
         });
         const b = await makeStoreFor(owner.id);
         const sub = await subscriptions.startTrialForVendor(b.vendor.id);
         expect(sub.status, 'billed from approval').toBe('ACTIVE');
         expect(sub.isTrialActive).toBe(false);
         expect(await prisma.trialGrant.count({ where: { accountId: owner.id } }), 'still the one grant of their own').toBe(1);
+        // REVIEW-G P2: and the branch after that too (it used to throw once a second exception trial had ended).
+        const c = await makeStoreFor(owner.id);
+        expect((await subscriptions.startTrialForVendor(c.vendor.id)).status).toBe('ACTIVE');
+        expect(await prisma.trialGrant.count({ where: { accountId: owner.id } })).toBe(1);
+        expect(await chainTrialPreview(prisma, owner.id, new Date()), 'the add-a-branch screen says: billed from approval').toBeNull();
       });
     }
   }
@@ -265,6 +273,25 @@ describe('[CHAINS] shared chain trial', () => {
       expect(cSub.trialEndDate!.getTime()).toBe(bSub.trialEndDate!.getTime());
     }
     expect(await prisma.trialGrant.count({ where: { accountId: h2.id } })).toBe(1);
+    // REVIEW-G E12: the add-a-branch screen tells this owner (trial from a founder exception) the same shared end day.
+    expect((await chainTrialPreview(prisma, h2.id, new Date()))?.getTime()).toBe(bSub.trialEndDate!.getTime());
+  });
+
+  it('a branch approved while its owner\'s chain deal is being set waits for the deal and is born on it (REVIEW-G E10)', async () => {
+    const owner = await makeUser();
+    const first = await makeStoreFor(owner.id);
+    await subscriptions.startTrialForVendor(first.vendor.id);
+    const b = await makeStoreFor(owner.id);
+    let activation: Promise<{ customRate: unknown }> | null = null;
+    await prisma.$transaction(async (tx) => {
+      // What setChainDeal holds while it writes a deal: the owner's settlement locks.
+      await lockVendorActivationBilling(tx, owner.id);
+      await tx.vendorOwner.update({ where: { userId: owner.id }, data: { dealWeeklyRate: 9000, dealCurrencyCode: 'GYD', dealSetAt: new Date(), dealSetBy: 'founder-test', dealReason: 'chain deal test' } });
+      activation = subscriptions.startTrialForVendor(b.vendor.id);
+      await new Promise((r) => setTimeout(r, 1500));
+    }, { timeout: 20_000 });
+    const sub = await activation!;
+    expect(Number(sub.customRate), 'born on the deal set while it waited').toBe(9000);
   });
 });
 
