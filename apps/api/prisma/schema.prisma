@@ -1822,6 +1822,10 @@ model Item {
   /// Set when the inventory engine hid the item (stock hit 0) — distinguishes
   /// auto-hides (undone automatically on restock) from the owner's own toggle.
   autoHiddenAt      DateTime?
+  /// [POS-SYNC] Set when a till file marked the item "not for sale". Unlike autoHiddenAt, no restock undoes it
+  /// (a cancelled order, picking, a stock adjustment): only a later till file with the item for sale, or the
+  /// store's own switch, brings it back.
+  tillOffAt         DateTime?
   /// [GUARDRAILS §8] A person removed this item as prohibited (alcohol, tobacco,
   /// vapes, 18+, medicines, cooking gas, fuel). One way: hidden everywhere and
   /// never editable back. The class names what it is; the reason is shown to

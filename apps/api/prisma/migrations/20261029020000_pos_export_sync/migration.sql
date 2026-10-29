@@ -9,8 +9,11 @@
 --  3. The tenant wall: RLS ENABLED and FORCED with the canonical policy (rlsDdlFor('pos_imports')).
 --  4. Tenant lineage: a row's tenant is its store's tenant (tenantLineageDdl(), byte for byte).
 --  5. Frozen: an applied import is a fact. UPDATE is refused; a row leaves only with its store.
+--  6. items."tillOffAt" (nullable, no default): set when a till file marked the item "not for sale". No restock undoes
+--     it; only a later till file with the item for sale, or the store's own switch, does.
 --
--- New, empty table; nothing existing is touched or scanned. The enum value is additive.
+-- New, empty table; the enum value is additive; the new items column is nullable with no default, so adding it is a
+-- catalogue change only (no rewrite, no scan; a brief lock, bounded by lock_timeout).
 --
 -- ROLLBACK (forward repair is preferred). Roll the application back first. The guard refuses while any applied import
 -- exists, because the record of what a store applied would be lost. The enum value stays (Postgres cannot drop one; an
@@ -23,6 +26,7 @@
 --     END IF;
 --   END $$;
 --   DROP TABLE "pos_imports";
+--   ALTER TABLE "items" DROP COLUMN "tillOffAt";  -- an item a till file switched off then stays off as the store's own
 --   DROP FUNCTION pos_imports_tenant_matches_vendor();
 --   DROP FUNCTION pos_imports_frozen();
 --   DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261029020000_pos_export_sync';
@@ -101,3 +105,7 @@ CREATE OR REPLACE FUNCTION pos_imports_frozen() RETURNS trigger AS $$
       END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS pos_imports_frozen ON pos_imports;
 CREATE TRIGGER pos_imports_frozen BEFORE UPDATE ON pos_imports FOR EACH ROW EXECUTE FUNCTION pos_imports_frozen();
+
+-- 6. The till's own "not for sale" marker (see the header).
+-- AlterTable
+ALTER TABLE "items" ADD COLUMN "tillOffAt" TIMESTAMP(3);

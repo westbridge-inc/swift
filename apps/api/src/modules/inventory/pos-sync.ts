@@ -114,6 +114,8 @@ export interface StoreItem {
   stockQuantity: number | null;
   isAvailable: boolean;
   autoHiddenAt: Date | null;
+  /** [REVIEW-G S4-3] Set while the item is off because a till file said "not for sale". */
+  tillOffAt: Date | null;
   /** APPOINTMENT listings are bookings, not shelf stock: a till file never changes them. */
   fulfillment: string;
 }
@@ -373,11 +375,14 @@ function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
   // hid (at zero, by a till's "not for sale", or "mark them sold out") comes
   // back when this file has it for sale with stock (any, if Swift does not
   // count it); one the store switched off itself stays off.
+  // [REVIEW-G S4-3] The till's "not for sale" takes an item on sale, or one
+  // sold out by stock, off under the till's own mark: no restock undoes that,
+  // only a file with it for sale (or the store's own switch).
   let soldOut: SoldOutEffect | null = null;
   const after = stock ? stock.to! : from;
-  const hiddenBySystem = !item.isAvailable && item.autoHiddenAt !== null;
+  const hiddenBySystem = !item.isAvailable && (item.autoHiddenAt !== null || item.tillOffAt !== null);
   if (m.tillOff) {
-    if (item.isAvailable) soldOut = 'SWITCHED_OFF_BY_TILL';
+    if (item.isAvailable || item.autoHiddenAt !== null) soldOut = 'SWITCHED_OFF_BY_TILL';
   } else if (stock && after !== null && after <= 0 && item.isAvailable) {
     soldOut = 'BECOMES_SOLD_OUT';
   } else if (hiddenBySystem && (after === null || after > 0)) {
@@ -392,7 +397,7 @@ function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
 }
 
 const ITEM_SELECT = {
-  id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true, fulfillment: true,
+  id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true, tillOffAt: true, fulfillment: true,
 } as const;
 
 /** The store's live listings: a deleted (archived) one is not on the store any more, so a file never matches it. */
@@ -581,6 +586,17 @@ export async function confirmSync(
         data: { isAvailable: false, autoHiddenAt: now },
       });
     }
+    // [REVIEW-G S4-3] This file has for sale an item a till file had marked not
+    // for sale: the till's mark ends. It becomes the engine's sold-out, so the
+    // guard below brings it back when there is stock, and a count of zero
+    // leaves it sold out until stock returns.
+    const tillPutsBack = plan.matched.filter((m) => !m.tillOff && !m.item.isAvailable && m.item.tillOffAt !== null).map((m) => m.item.id);
+    if (tillPutsBack.length > 0) {
+      await tx.item.updateMany({
+        where: { id: { in: tillPutsBack }, vendorId: input.vendorId, isAvailable: false, tillOffAt: { not: null } },
+        data: { autoHiddenAt: now, tillOffAt: null },
+      });
+    }
     // A restock, or a file that has it for sale again, brings back only an item
     // the system hid. The owner's own "off" carries no marker, so it is never
     // undone; an item the till still says is not for sale stays off; an item
@@ -590,13 +606,20 @@ export async function confirmSync(
       .filter((id) => !tillKeepsOff.has(id));
     await unhideRestocked(tx, comeBack);
 
-    // [REVIEW-F S3-1] The till says "not for sale", and items missing from the
-    // file when the store chose "mark them sold out": hidden as SOLD OUT (the
-    // system's marker), so a later file with them for sale brings them back.
-    const soldOutNow = [
-      ...changes.filter((c) => c.soldOut === 'SWITCHED_OFF_BY_TILL').map((c) => c.itemId),
-      ...plan.switchOffIds,
-    ];
+    // [REVIEW-G S4-3] The till says "not for sale": off under the till's own
+    // mark (never the engine's sold-out, which any restock undoes), so only a
+    // later file with it for sale, or the store's own switch, brings it back.
+    const tillOffNow = changes.filter((c) => c.soldOut === 'SWITCHED_OFF_BY_TILL').map((c) => c.itemId);
+    if (tillOffNow.length > 0) {
+      await tx.item.updateMany({
+        where: { id: { in: tillOffNow }, vendorId: input.vendorId, OR: [{ isAvailable: true }, { autoHiddenAt: { not: null } }] },
+        data: { isAvailable: false, autoHiddenAt: null, tillOffAt: now },
+      });
+    }
+    // [REVIEW-F S3-1] Items missing from the file when the store chose "mark
+    // them sold out": hidden as SOLD OUT (the system's marker), so a later
+    // file with them for sale brings them back.
+    const soldOutNow = plan.switchOffIds;
     if (soldOutNow.length > 0) {
       await tx.item.updateMany({
         where: { id: { in: soldOutNow }, vendorId: input.vendorId, isAvailable: true },

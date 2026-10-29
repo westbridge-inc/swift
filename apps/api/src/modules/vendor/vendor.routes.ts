@@ -4302,7 +4302,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.unit !== undefined && { unit: body.unit }),
           ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
           ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
-          ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
+          // [REVIEW-G S4-3] The store's own answer also ends a till file's "not for sale".
+          ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null, tillOffAt: null }),
           ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
           ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
           ...(body.allergens !== undefined && { allergens: body.allergens }),
@@ -4409,10 +4410,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // item the engine had already hidden at zero left the marker behind, and
     // the next restock — a till re-upload, a cancelled order — switched it
     // back on. Each switch leaves an audit row naming who flipped it.
+    // [REVIEW-G S4-3] It ends a till file's "not for sale" too: switched on, the
+    // item is on sale; switched off, it is the store's own "off", which a later
+    // till file never undoes.
     const item = await app.prisma.$transaction(async (tx) => {
       const updated = await tx.item.update({
         where: { id: request.params.id, archivedAt: null },
-        data: { isAvailable: newAvailability, autoHiddenAt: null },
+        data: { isAvailable: newAvailability, autoHiddenAt: null, tillOffAt: null },
         select: { id: true, name: true, isAvailable: true },
       });
       await tx.auditLog.create({

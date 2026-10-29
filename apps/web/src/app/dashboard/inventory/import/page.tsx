@@ -39,7 +39,7 @@ const SOLD_OUT_WORDS: Record<NonNullable<SyncChange['soldOut']>, string> = {
   BECOMES_SOLD_OUT: 'Will show as sold out',
   BACK_ON_SALE: 'Back on sale',
   STAYS_SWITCHED_OFF: 'Stays off (you switched it off)',
-  SWITCHED_OFF_BY_TILL: 'Will show as sold out (your till says not for sale)',
+  SWITCHED_OFF_BY_TILL: 'Off until your till has it for sale again, or you switch it on (your till says not for sale)',
 };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;

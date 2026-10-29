@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { nanoid } from 'nanoid';
+import { wordFreeTag } from './helpers/fixture-ids';
 import type { UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { TENANT_TABLES, TENANT_LINEAGE_TABLES } from '../lib/tenant-rls';
@@ -32,7 +33,8 @@ import { rateLimitKey } from '../utils/rate-limit-key';
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const RUN = nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+// Digits only: RUN also builds item names the prohibited-items checker reads (checked-names.test.ts).
+const RUN = wordFreeTag(6);
 const PHONE_BASE = 592_007_100_000 + Math.floor(Math.random() * 800_000);
 const FOREIGN_TENANT = `pos-sync-foreign-${RUN}`;
 
@@ -134,7 +136,7 @@ interface PreviewChange {
   row: number; sku: string; itemId: string; name: string; fileName: string;
   stock: { from: number | null; to: number | null } | null;
   price: { from: number; to: number } | null;
-  soldOut: 'BECOMES_SOLD_OUT' | 'BACK_ON_SALE' | 'STAYS_SWITCHED_OFF' | null;
+  soldOut: 'BECOMES_SOLD_OUT' | 'BACK_ON_SALE' | 'STAYS_SWITCHED_OFF' | 'SWITCHED_OFF_BY_TILL' | null;
   notes: string[];
 }
 interface PreviewData {
@@ -812,8 +814,9 @@ describe('till export profiles (F1): cost is never the price', () => {
     expect(fried.isAvailable).toBe(true);
     const off = await itemOf(biscuit.id);
     expect(off.isAvailable).toBe(false);
-    // [REVIEW-F S3-1] The till's "not for sale" is sold out, not the store's own switch.
-    expect(off.autoHiddenAt).not.toBeNull();
+    // [REVIEW-F S3-1] The till's "not for sale" is not the store's own switch. [REVIEW-G S4-3] It carries the till's
+    // own mark, not the sold-out one, so no restock puts it back on sale.
+    expect(off).toMatchObject({ autoHiddenAt: null, tillOffAt: expect.any(Date) });
   });
 });
 
@@ -1457,6 +1460,78 @@ describe('sold out by a file comes back with the file (REVIEW-F S3-1)', () => {
     expect(p.changes.find((c) => c.itemId === mine.id)?.soldOut).toBe('STAYS_SWITCHED_OFF');
     expect((await itemOf(mine.id)).isAvailable).toBe(false);
   });
+});
+
+// [REVIEW-G S4-3 · COORD ruling 29 Oct] The till's "not for sale" is the till's decision, not a sold-out: no restock
+// undoes it. Only a later till file with the item for sale, or the store's own switch, brings it back. Sold out by
+// stock (the engine's hide at zero) still comes back by itself when stock returns.
+describe('a till’s "not for sale" survives every restock (REVIEW-G S4-3)', () => {
+  const adjust = (store: Store, itemId: string, delta: number) => app.inject({
+    method: 'POST', url: `/api/v1/vendor/items/${itemId}/adjust`, payload: { delta, reason: 'RECEIVED' },
+    headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
+  });
+  const toggle = (store: Store, itemId: string, isAvailable: boolean) => app.inject({
+    method: 'PUT', url: `/api/v1/vendor/items/${itemId}/availability`, payload: { isAvailable },
+    headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
+  });
+
+  it('a cancelled order, a stock adjustment or any other restock leaves it off; a later file with it for sale brings it back', async () => {
+    const store = await makeStore();
+    const biscuit = await makeItem(store, 'TNS-1', 10, 450, { name: 'Biscuit' });
+    const order = await openOrderHolding(store, biscuit.id, 2, 'PENDING'); // 10 -> 8, 2 held
+    await syncOk(store, csvOf(forSaleRow('TNS-1', 'Biscuit', '450', '10', 'false')));
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: false, stockQuantity: 8 });
+
+    // The order is cancelled before pickup: its 2 units go back on the shelf, and the item stays off.
+    const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
+    await app.prisma.$transaction((tx) => new OrderService(app.prisma as never, ioStub).restockCancelledOrder(order.id, tx));
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: false, stockQuantity: 10 });
+    // The store receives stock: still off.
+    expect((await adjust(store, biscuit.id, 5)).statusCode).toBe(200);
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: false, stockQuantity: 15 });
+    // Every other restock (picking, an in-store sale undone) goes through the same guard: still off.
+    await app.prisma.$transaction((tx) => unhideRestocked(tx, biscuit.id));
+    expect((await itemOf(biscuit.id)).isAvailable).toBe(false);
+
+    // A later file with it for sale: back on sale, and the till's mark is gone.
+    const again = csvOf(forSaleRow('TNS-1', 'Biscuit', '450', '15', 'true'));
+    const p = await previewOk(store, again);
+    expect(p.changes.find((c) => c.itemId === biscuit.id)?.soldOut).toBe('BACK_ON_SALE');
+    expect((await confirm(store, again, p)).statusCode).toBe(200);
+    expect(await itemOf(biscuit.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, tillOffAt: null, stockQuantity: 15 });
+  }, 60_000);
+
+  it('sold out by stock still comes back by itself, unless the till then says not for sale; the store’s own switch ends the till’s hold', async () => {
+    const store = await makeStore();
+    const soap = await makeItem(store, 'TNS-2', 3, 200, { name: 'Soap' });
+    const rice = await makeItem(store, 'TNS-3', 5, 900, { name: 'Rice' });
+    const tea = await makeItem(store, 'TNS-4', 4, 300, { name: 'Tea' });
+    await syncOk(store, csvOf(row('TNS-2', 'Soap', '200', '0'), row('TNS-3', 'Rice', '900', '0'), forSaleRow('TNS-4', 'Tea', '300', '4', 'false')));
+    expect(await itemOf(soap.id)).toMatchObject({ isAvailable: false, stockQuantity: 0 });
+
+    // Sold out by stock: a restock brings it back.
+    expect((await adjust(store, soap.id, 2)).statusCode).toBe(200);
+    expect(await itemOf(soap.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null });
+
+    // Sold out by stock, then the till says not for sale: the preview says so, and a restock leaves it off.
+    const off = csvOf(forSaleRow('TNS-3', 'Rice', '900', '0', 'false'));
+    const p = await previewOk(store, off);
+    expect(p.changes.find((c) => c.itemId === rice.id)?.soldOut).toBe('SWITCHED_OFF_BY_TILL');
+    expect((await confirm(store, off, p)).statusCode).toBe(200);
+    expect((await adjust(store, rice.id, 3)).statusCode).toBe(200);
+    expect(await itemOf(rice.id)).toMatchObject({ isAvailable: false, stockQuantity: 3 });
+
+    // The store turns the till's item on: on sale, and the till's mark is gone.
+    expect((await toggle(store, tea.id, true)).statusCode).toBe(200);
+    expect(await itemOf(tea.id)).toMatchObject({ isAvailable: true, tillOffAt: null });
+    // The till says not for sale again, then the store switches it off itself: that is the store's own "off", which a
+    // later file with the item for sale never undoes.
+    await syncOk(store, csvOf(forSaleRow('TNS-4', 'Tea', '300', '4', 'false')));
+    expect((await toggle(store, tea.id, false)).statusCode).toBe(200);
+    const { preview: later } = await syncOk(store, csvOf(forSaleRow('TNS-4', 'Tea', '300', '9', 'true')));
+    expect(later.changes.find((c) => c.itemId === tea.id)?.soldOut).toBe('STAYS_SWITCHED_OFF');
+    expect(await itemOf(tea.id)).toMatchObject({ isAvailable: false, stockQuantity: 9 });
+  }, 60_000);
 });
 
 describe('only a till sync makes a checkout try again (REVIEW-M S3-1, S3-2)', () => {
