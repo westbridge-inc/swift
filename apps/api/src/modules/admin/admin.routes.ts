@@ -114,6 +114,7 @@ import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLAS
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
 import { moverUserOf, PAYER_INCLUDE, subscriptionTenantWhere } from '../subscription/subscription-owner';
+import { readDeliveryPause, setDeliveryPause } from '../dispatch/delivery-pause';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1134,6 +1135,8 @@ export async function adminRoutes(app: FastifyInstance) {
       pendingVendors,
       pastDueSubs,
       unassignedOrders,
+      freeRiders,
+      waitingForRider,
     } = await platformStats(app.prisma, { tenantId, today, subscriptionScope });
 
     // [A-07] What will actually be billed this week, and — separately — what
@@ -1189,6 +1192,8 @@ export async function adminRoutes(app: FastifyInstance) {
           weeklyWaived: row.waived,
         })),
         alerts: { pendingVendors, pastDueSubs, unassignedOrders },
+        // [RIDER-SAFE 6] Free riders beside the orders waiting for one, now.
+        riderSupply: { freeRiders, waitingForRider },
       },
     };
   });
@@ -2844,6 +2849,39 @@ export async function adminRoutes(app: FastifyInstance) {
       truncated: live.length === SCAN_CAP,
       data: breaches,
     };
+  });
+
+  // [RIDER-SAFE 5 · COORD ruling 29 Oct 2026] SWIFT'S DELIVERY PAUSE. One
+  // switch stops new DELIVERY orders platform-wide (this operator's tenant) or
+  // in chosen zones; pickup stays open, orders already placed carry on. C3: a
+  // reason is required (it affects every store's livelihood) and the write is
+  // a new version row + an audit row (dispatch/delivery-pause.ts).
+  app.get('/delivery-pause', { preHandler: [adminGuard] }, async () => {
+    const tenantId = requireTenantId();
+    const state = await readDeliveryPause(app.prisma, tenantId);
+    const zones = await app.prisma.zone.findMany({ where: { tenantId, isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+    return { success: true, data: { ...state, zones } };
+  });
+
+  app.put('/delivery-pause', { preHandler: [adminGuard] }, async (request: any) => {
+    const tenantId = requireTenantId();
+    const body = z.object({
+      platform: z.boolean(),
+      zoneIds: z.array(z.string().min(1).max(64)).max(50).default([]),
+      reason: z.string().max(2000),
+      expectedVersion: z.number().int().min(0).optional(),
+    }).parse(request.body ?? {});
+    const state = await setDeliveryPause(app.prisma, {
+      tenantId, platform: body.platform, zoneIds: body.zoneIds, actorUserId: request.user.userId,
+      reason: body.reason.trim(), expectedVersion: body.expectedVersion,
+      // [ADM-004] One audit row, inside the switch's transaction, naming the
+      // version row it created (ADMIN_ROUTES_WITHOUT_ENTITY says why there is
+      // no route-declared subject to digest).
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        entityId: typeof facts['versionRowId'] === 'string' ? facts['versionRowId'] : undefined, extra: facts,
+      }),
+    });
+    return { success: true, data: state };
   });
 
   app.get('/orders/:id', { preHandler: [adminGuard] }, async (request) => {

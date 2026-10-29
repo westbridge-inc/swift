@@ -2684,6 +2684,18 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             const p = await scanStrugglingDeliveries(ctx.prisma, notifications);
             if (p > 0) ctx.log.info({ prompted: p }, 'struggling deliveries: options pushed');
           }
+          // [RIDER-SAFE 6] One "riders are short" page per tenant per window,
+          // measured from waiting orders and recent exhausted searches.
+          {
+            const { pageRidersShort } = await import('../modules/dispatch/riders-short');
+            const { notifyAdmins } = await import('../modules/notification/notification.service');
+            const paged = await pageRidersShort({
+              prisma: ctx.prisma,
+              pageOnce: (key, ttl, page) => opsPageOnce(ctx, key, ttl, page),
+              notifyAdmins: (input) => notifyAdmins(ctx.prisma, notifications, input),
+            }).catch((err: unknown) => { ctx.log.warn({ err }, 'riders-short: scan failed'); return [] as string[]; });
+            if (paged.length > 0) ctx.log.warn({ tenants: paged }, 'riders-short: operations paged');
+          }
       }
     },
     { connection, concurrency: 5 },

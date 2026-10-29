@@ -104,6 +104,62 @@ function toCandidate(o: OrderRow): CandidateOrder | null {
   };
 }
 
+/**
+ * [RIDER-SAFE 1] Which of these riders could take a NEW order from this store
+ * as an extra leg — the checkout's honest-capacity read, asked BEFORE any
+ * order exists. The same rulebook as `stackVerdict` (evaluatePureRules, the
+ * one capacity knob as R2's limit); the candidate leg is described from the
+ * store, the customer's drop-off and the basket instead of an order row.
+ *
+ * Conservative in the same directions: a rider with no live leg is not a
+ * stack (the caller counts them as free), and a rider whose live run cannot
+ * be described, or who cannot be read, is never counted. One read for all the
+ * riders' legs, not one per rider.
+ */
+export async function stackableForProbe(
+  tx: Tx,
+  riderIds: readonly string[],
+  probe: Omit<CandidateOrder, 'orderId'>,
+  capacity: number,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (riderIds.length === 0 || capacity <= 1) return out;
+  const [riders, legs] = await Promise.all([
+    tx.rider.findMany({ where: { id: { in: [...riderIds] } }, select: { id: true, vehicleType: true, floatLimit: true } }),
+    tx.order.findMany({
+      where: { riderId: { in: [...riderIds] }, status: { notIn: TERMINAL_ORDER_STATUSES } },
+      select: { ...ORDER_SELECT, riderId: true },
+    }) as unknown as Promise<Array<OrderRow & { riderId: string }>>,
+  ]);
+  const candidate: CandidateOrder = { ...probe, orderId: 'probe' };
+  const cfg: BatchingConfig = { ...DEFAULT_BATCHING_CONFIG, maxOrdersPerRun: capacity };
+  for (const rider of riders) {
+    const runRows = legs.filter((l) => l.riderId === rider.id);
+    if (runRows.length === 0) continue; // free, not a stack
+    const runOrders: CandidateOrder[] = [];
+    let describable = true;
+    for (const row of runRows) {
+      const c = toCandidate(row);
+      if (!c) { describable = false; break; }
+      runOrders.push(c);
+    }
+    if (!describable) continue;
+    const run: RunShape = {
+      orders: runOrders,
+      vehicleType: VEHICLE_KEY[rider.vehicleType] ?? '__UNPRICED__',
+      riderCashFloatCap: Number(rider.floatLimit),
+      riderBlocked: false,
+    };
+    if (evaluatePureRules(candidate, run, cfg).eligible) out.add(rider.id);
+  }
+  return out;
+}
+
+/** The size class the stacking rulebook speaks, for a goods order's required size (unknown = XL, conservative). */
+export function sizeClassForProbe(size: string | null | undefined): CandidateOrder['sizeClass'] {
+  return (size ? SIZE_CLASS[size] : undefined) ?? 'XL';
+}
+
 export type StackVerdict =
   | { eligible: true; legs: number }
   | { eligible: false; legs: number; rule: string; detail: string };

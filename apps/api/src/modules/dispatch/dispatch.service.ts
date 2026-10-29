@@ -61,6 +61,7 @@ import {
   WITHDRAWN_CARD_SCREEN_SKEW_MS,
 } from './dispatch-generation-keys';
 import { assertOrderMayProceed } from '../compliance/prohibited-gate';
+import { measureDeliveryCapacity, type CapacityProbe, type DeliveryCapacity } from './delivery-capacity';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -144,6 +145,14 @@ export const TAXI_RESCAN_MS = Math.max(15_000, Number(process.env['TAXI_RESCAN_M
 /** How long a waiting taxi request keeps re-sweeping before the honest
  *  release (mirrors the ride-queue TTL semantics). */
 export const TAXI_WAIT_LIMIT_MIN = Math.max(5, Number(process.env['TAXI_WAIT_LIMIT_MIN'] ?? 30));
+/** [RIDER-SAFE 3] FOOD slow lane: past the fast cap a waiting food or grocery
+ *  order is re-swept this often, quietly, until the food-age cutoff. */
+export const FOOD_RESCAN_MS = 60_000;
+/** Backstop for an order that never becomes ready: no re-sweep past this many
+ *  minutes from placement (the food-age cutoff normally ends it far sooner). */
+export const FOOD_SLOW_LANE_MAX_MINUTES = 180;
+/** The verticals with a food-age cutoff ride the slow lane; a parcel's sender may cancel free while nobody has it. */
+export const FOOD_SLOW_LANE_TYPES: ReadonlySet<string> = new Set(['FOOD_DELIVERY', 'GROCERY_DELIVERY']);
 
 /** Straight-line candidate cap. The geo query keeps the N movers with the
  *  smallest great-circle distance; rankCandidates then re-sorts THOSE by real
@@ -1064,6 +1073,22 @@ export class DispatchService {
         ? Math.max(1, Math.round(candidates[0].etaMinutes))
         : null,
     };
+  }
+
+  /**
+   * [RIDER-SAFE 1] The honest delivery capacity for a NEW order from one store
+   * (dispatch/delivery-capacity.ts): free riders from the exact candidate
+   * query above, stacked riders whose run this store's order could join, all
+   * riders near, minus the orders already waiting. GOOD / BUSY (with the
+   * rider wait) / NONE.
+   */
+  async getDeliveryCapacity(probe: CapacityProbe): Promise<DeliveryCapacity> {
+    return measureDeliveryCapacity({
+      prisma: this.prisma,
+      candidates: (point, floatRequired, tenantId, packageSize) => this.findCandidates(
+        'availability:RIDER', point, BASE_RADIUS_KM, 'RIDER', floatRequired, null, tenantId, packageSize, undefined, undefined, undefined, false,
+      ),
+    }, probe, DISPATCH_LOCATION_FRESH_SECONDS);
   }
 
   async findCandidates(
@@ -3143,6 +3168,28 @@ export class DispatchService {
     if (pool === 'RIDER') {
       const authority = await this.offerAuthority(order.id, pool, order.fulfillmentModeVersion);
       if (!authority.offerable) return false;
+    }
+
+    // [RIDER-SAFE 3 · COORD ruling 29 Oct 2026] FOOD slow lane. Past the fast
+    // cap a food or grocery order used to go TERMINAL: nothing asked a rider
+    // again until the store pressed retry, so a rider who came online two
+    // minutes later never heard of it while the food went cold. Like the taxi
+    // slow lane above, the order now keeps re-sweeping QUIETLY every
+    // FOOD_RESCAN_MS — the notices below are once per order state, so a
+    // re-sweep sends nothing new — until a rider takes it, the store or the
+    // customer ends it, or the food-age cutoff retires it (dispatchOrder runs
+    // that cutoff first on every sweep; paid MMG stays held for a person,
+    // never auto-cancelled). FOOD_SLOW_LANE_MAX_MINUTES from placement is the
+    // backstop for an order that never becomes ready.
+    if (pool === 'RIDER' && this.scheduleRedispatch && FOOD_SLOW_LANE_TYPES.has(order.orderType)) {
+      const row = await this.prisma.order.findUnique({
+        where: { id: order.id },
+        select: { placedAt: true, foodAgeHeldAt: true },
+      });
+      if (row && !row.foodAgeHeldAt && Date.now() - row.placedAt.getTime() < FOOD_SLOW_LANE_MAX_MINUTES * 60_000) {
+        await this.scheduleRedispatch(order.id, FOOD_RESCAN_MS, replayTag ? redispatchJobId(order.id, replayTag) : undefined)
+          .catch((err: unknown) => log().warn({ err, orderId: order.id }, 'dispatch: food slow-lane re-sweep could not be scheduled'));
+      }
     }
 
     await this.notifications.send({
