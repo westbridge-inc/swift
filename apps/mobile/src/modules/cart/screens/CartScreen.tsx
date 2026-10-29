@@ -22,6 +22,7 @@ import {
   useSetCartTip,
 } from '../../../hooks/customer';
 import { useCartSteppers } from '../../../hooks/useCartSteppers';
+import { isBooking } from '../../../lib/cartSteppers';
 import { useRowHold } from '../../../lib/useRowHold';
 import { maybePrimeNotifications } from '../../../services/notification-priming';
 import { useAuthStore } from '../../../stores/authStore';
@@ -898,15 +899,28 @@ export function CartScreen() {
                           marginTop: space.sm,
                         }}
                       >
-                        {/* A quantity stepper is one of the four things allowed
-                            to wear maroon. */}
-                        <AddMorph
-                          qty={steppers.qty(`line:${it.id}`, it)}
-                          busy={false}
-                          onAdd={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
-                          onInc={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
-                          onDec={() => steppers.qty(`line:${it.id}`, it) > 1 && steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) - 1)}
-                        />
+                        {/* [BOOK-POLISH · #2205] A booking line is ONE appointment (the server refuses any other
+                            number): no + / −, its time shows instead; the trash still takes it out. */}
+                        {isBooking(it) ? (
+                          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Feather name="calendar" size={13} color={color.text.muted} />
+                            <T variant="caption" tone="muted" style={{ flex: 1 }}>
+                              {appointments[it.itemId]
+                                ? `${formatAppointmentSlot(appointments[it.itemId]!.slotStart)}${appointments[it.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}`
+                                : 'No time picked yet'}
+                            </T>
+                          </View>
+                        ) : (
+                          /* A quantity stepper is one of the four things allowed
+                             to wear maroon. */
+                          <AddMorph
+                            qty={steppers.qty(`line:${it.id}`, it)}
+                            busy={false}
+                            onAdd={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
+                            onInc={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
+                            onDec={() => steppers.qty(`line:${it.id}`, it) > 1 && steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) - 1)}
+                          />
+                        )}
                         {/* Removing a line is an ordinary action, not an error —
                             it stops being red. hitSlop holds the 44pt target. */}
                         <Pressable

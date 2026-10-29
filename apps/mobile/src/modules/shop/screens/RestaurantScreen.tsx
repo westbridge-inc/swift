@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
 import { useCart, useReportContent, useToggleFavorite, useVendor } from '../../../hooks/customer';
 import { useCartSteppers } from '../../../hooks/useCartSteppers';
+import { isBooking } from '../../../lib/cartSteppers';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { requestAuthContinuation } from '../../../navigation/authContinuation';
@@ -125,7 +126,8 @@ function ProductTile({
   /** [STORE-VAT] The store's VAT (null for every store but a person-approved VAT store). */
   vat?: StorefrontVat | null;
 }) {
-  const hasOptions = (item.optionGroups?.length ?? 0) > 0;
+  // [BOOK-POLISH · #2205] A booking is one appointment: its + opens the booking screen (pick a time), never a quantity.
+  const opensItem = (item.optionGroups?.length ?? 0) > 0 || isBooking(item);
   const out = item.stockQuantity === 0;
   return (
     <View style={{ width: TILE_W }}>
@@ -157,9 +159,9 @@ function ProductTile({
           <View style={{ alignSelf: 'flex-end' }}>
             <AddMorph
               size="sm"
-              qty={hasOptions ? 0 : qty}
+              qty={opensItem ? 0 : qty}
               busy={busy}
-              onAdd={hasOptions ? onOpen : onAdd}
+              onAdd={opensItem ? onOpen : onAdd}
               onInc={() => onSetQty(qty + 1)}
               onDec={() => onSetQty(qty - 1)}
             />
@@ -765,9 +767,11 @@ function RestaurantStore() {
                     }}
                   >
                     {cat.items.map((item: any, idx: number) => {
-                      const hasOptions = (item.optionGroups?.length ?? 0) > 0;
+                      // [BOOK-POLISH · #2205] An item with choices, or a booking (one appointment, its time picked on
+                      // the item screen), opens the item: no quantity on the row.
+                      const opensItem = (item.optionGroups?.length ?? 0) > 0 || isBooking(item);
                       const line = lineFor(item.id);
-                      const shown = hasOptions ? 0 : steppers.qty(item.id, line);
+                      const shown = opensItem ? 0 : steppers.qty(item.id, line);
                       const tapTo = (next: number) => guardAuth(() => steppers.set(item.id, line, next, { vendorId, itemId: item.id }));
                       return (
                         <MenuRow
@@ -782,7 +786,7 @@ function RestaurantStore() {
                           busy={false}
                           last={idx === cat.items.length - 1}
                           onOpen={() => openItem(item)}
-                          onAdd={() => (hasOptions ? openItem(item) : tapTo(shown + 1))}
+                          onAdd={() => (opensItem ? openItem(item) : tapTo(shown + 1))}
                           onInc={() => tapTo(shown + 1)}
                           onDec={() => tapTo(shown - 1)}
                         />

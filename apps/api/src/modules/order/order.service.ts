@@ -3597,7 +3597,9 @@ export class OrderService {
       if (!selection) { needsOptions.push(line.name); continue; }
       cartItems.push({
         itemId: line.itemId,
-        quantity: line.quantity,
+        // [BOOK-POLISH · REVIEW-M N1 on #2205] A booking line is ONE appointment (appointment-checkout.ts): an order
+        // placed before that rule can hold a booking of 2, and checkout now refuses any other number.
+        quantity: item.fulfillment === 'APPOINTMENT' ? 1 : line.quantity,
         selectedOptions: selection,
         specialInstructions: normalizeItemNote(line.specialInstructions),
       });

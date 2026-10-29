@@ -19,7 +19,7 @@ import { createRoot } from 'react-dom/client';
 // are stand-ins that answer when the test says; a "cart read" is a re-render with the server's lines and a new read time.
 // ---------------------------------------------------------------------------
 
-type Line = { id: string; itemId: string; quantity: number };
+type Line = { id: string; itemId: string; quantity: number; fulfillment?: string };
 const fx = vi.hoisted(() => ({
   calls: [] as Array<{ kind: 'add' | 'set'; body: Record<string, unknown>; ok: (_answer?: unknown) => void; fail: () => void }>,
   refetch: vi.fn(),
@@ -272,5 +272,34 @@ describe('[REVIEW-F #2145 S4-2] one stepper per line for the store page and the 
     await answer(0, [{ id: 'line-rice', itemId: 'rice', quantity: 2 }]);
     expect(sent()[1]).toEqual(['set', { id: 'line-rice', quantity: 3 }]);
     expect(page('cart')).toBe('line-rice=3 pending');
+  });
+});
+
+describe('[BOOK-POLISH · #2205] a booking line is one appointment', () => {
+  const cut = { id: 'line-cut', itemId: 'cut', quantity: 1, fulfillment: 'APPOINTMENT' };
+  const cartTap = async (line: Line, next: number) => { await act(async () => { cartPage.set(`line:${line.id}`, line, next); }); };
+
+  it('a + on a booking line sends nothing and stays 1 (the server refuses any other number)', async () => {
+    showCart = true;
+    await read([cut]);
+    await cartTap(cut, 2);
+    await cartTap(cut, 5);
+    expect(sent()).toEqual([]);
+    expect(page('cart')).toBe('line-cut=1 settled');
+  });
+
+  it('taking the booking out (0) still goes to the server', async () => {
+    showCart = true;
+    await read([cut]);
+    await cartTap(cut, 0);
+    expect(sent()).toEqual([['set', { id: 'line-cut', quantity: 0 }]]);
+  });
+
+  it('control: an ordinary line beside it still goes past 1', async () => {
+    showCart = true;
+    const rice = { id: 'line-rice', itemId: 'rice', quantity: 1 };
+    await read([cut, rice]);
+    await cartTap(rice, 3);
+    expect(sent()).toEqual([['set', { id: 'line-rice', quantity: 3 }]]);
   });
 });
