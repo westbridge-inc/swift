@@ -25,7 +25,7 @@ import { useBookPro, useProOfferings, useProSlots } from '../../../hooks';
 import { appointmentDayKey, formatAppointmentClock, formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { moneyExact } from '../../../lib/money';
 import { serviceJobErrorMessage } from '../../../lib/serviceJobPresentation';
-import { bookingDays, bookingRefusalRefresh, durationLabel, type ProOfferingsAnswer } from '../../../lib/proBooking';
+import { APPOINTMENT_FREE_CANCEL_HOURS, bookingDays, bookingRefusalRefresh, durationLabel, type ProOfferingsAnswer } from '../../../lib/proBooking';
 
 /** How many days the strip shows (the server's horizon may cut it shorter). */
 const DAYS_SHOWN = 30;
@@ -181,7 +181,7 @@ export function ProBookingScreen({ navigation, route }: any) {
                   <TonePill label="Cash at the appointment" tone="neutral" />
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                  You can cancel or move it free in the app until 2 hours before it starts. After that, contact the provider.
+                  {`You can cancel or move it free in the app until ${APPOINTMENT_FREE_CANCEL_HOURS} hours before it starts.`}
                 </T>
               </View>
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  APPOINTMENT_FREE_CANCEL_HOURS,
   bookingDays,
   bookingRefusalRefresh,
   daysBetween,
@@ -114,6 +115,15 @@ describe('the day strip, times and words', () => {
 
 describe('the screens ask the server, and the stack can open them', () => {
   const read = (p: string) => readFileSync(join(process.cwd(), p), 'utf8');
+
+  it('[REVIEW-G N1] the sentence before booking names the API\'s own cut-off, and promises nothing after it', () => {
+    const api = read('../api/src/modules/order/cancel-policy.ts');
+    const minutes = Number(/export const APPOINTMENT_FREE_CANCEL_BEFORE_MIN = (\d+);/.exec(api)?.[1]);
+    expect(APPOINTMENT_FREE_CANCEL_HOURS).toBe(minutes / 60);
+    const booking = read('src/modules/services/screens/ProBookingScreen.tsx');
+    expect(booking).toContain('You can cancel or move it free in the app until ${APPOINTMENT_FREE_CANCEL_HOURS} hours before it starts.');
+    expect(booking).not.toMatch(/until 2 hours before|After that, contact/);
+  });
 
   it('the job card reads serviceJobControls and moves through the per-job times', () => {
     const card = read('src/modules/services/screens/ServiceJobsScreen.tsx');

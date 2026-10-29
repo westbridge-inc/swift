@@ -8,6 +8,11 @@
 import { addAppointmentDays, appointmentWeekday, formatAppointmentDay } from './appointmentTime';
 import { serviceJobCancelView } from './serviceJobPresentation';
 
+/** [BOOK-P3 · REVIEW-G N1 on #2219] The hours before the start until which a confirmed appointment cancels and moves
+ *  free in the app (owner B1/B2): the API's APPOINTMENT_FREE_CANCEL_BEFORE_MIN / 60 (cancel-policy.ts), pinned equal by
+ *  proBooking.test.ts. The server's verdict on each job still decides; this is only the sentence before booking. */
+export const APPOINTMENT_FREE_CANCEL_HOURS = 2;
+
 export interface ProOffering {
   id: string;
   name: string;
