@@ -5,7 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { Card, Chip, PillButton, T } from '../kit';
 
-import { KITCHEN_CAPACITY_MAX, nextKitchenCapacity } from '../lib/kitchenCapacity';
+import { nextKitchenCapacity } from '../lib/kitchenCapacity';
 
 export { KITCHEN_CAPACITY_MAX, nextKitchenCapacity, storedKitchenCapacity } from '../lib/kitchenCapacity';
 
