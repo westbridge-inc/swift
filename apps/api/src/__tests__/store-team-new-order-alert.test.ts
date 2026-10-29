@@ -509,7 +509,8 @@ describe('[#15] every publication to a store room goes through the team gate', (
     // + [O-2] the store's "Handed to rider" tap (order:handed_to_rider to the store team, through the gate)
     // + [BOOK-S3] a booking confirmed at checkout (INSTANT_BOOKING): the store board refreshes on
     // order:status_changed instead of order:new (which sounds the new-order alarm), through the gate.
-    expect(publishers).toBe(17);
+    // + [BOOK-FU2 · owner B3] "Customer didn't come": the store board hears its closed appointment, through the gate.
+    expect(publishers).toBe(18);
   });
 });
 

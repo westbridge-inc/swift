@@ -142,6 +142,8 @@ const TENANT_QUERY_EXTENSIONS = {
   taxiRideWaiting: scoped,
   // [O-1] A call-bridge attempt belongs to its order's operator, like the order.
   callSession: scoped,
+  // [BOOK-FU2 · owner B3] A missed-appointment record belongs to its order's operator, like the order.
+  appointmentNoShow: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,

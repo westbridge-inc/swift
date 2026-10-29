@@ -566,6 +566,9 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     expect(notice.title).toBe('Appointment moved');
     expect(notice.body).toContain(`${weekdayOf(day)} ${dayNum}`);
     expect(notice.body).toMatch(/moved from .*13:00 to .*17:30\.$/);
+    // [BOOK-FU2] The store's copy names the booking's ORDER and is tagged for the business: on builds 9, 11 and 12
+    // it opens that order on the order desk (booking_rescheduled, with no order, opened Schedule there).
+    expect(notice.data).toEqual({ kind: 'appointment_moved', bookingId: moved.json().data.id, orderId: order.id, audience: 'business' });
 
     // The provider can move it back; the customer is told, and every surface follows.
     const back = await call('POST', `/api/v1/vendor/bookings/${moved.json().data.id}/reschedule`, provider.token, { newSlotStart: from.toISOString() });
@@ -576,6 +579,21 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     });
     expect(told.title).toBe('Your appointment moved');
     expect(told.body).toMatch(/moved from .*17:30 to .*13:00\.$/);
+    expect(told.data).toEqual({ kind: 'appointment_moved', bookingId: back.json().data.id, orderId: order.id, audience: 'customer' });
+
+    // [BOOK-FU2] Once per MOVE per person, not once per time: the customer moves it to 17:30 a second time
+    // and the store is told again (a new booking row, a new key), so it holds two notices, one per move.
+    const again = await call('POST', `/api/v1/customer/bookings/${back.json().data.id}/reschedule`, customer.token, { newSlotStart: to.toISOString() });
+    expect(again.statusCode, again.body).toBe(200);
+    const storeNotices = await app.prisma.notification.findMany({
+      where: { userId: provider.userId, data: { path: ['kind'], equals: 'appointment_moved' }, AND: [{ data: { path: ['orderId'], equals: order.id } }] },
+      orderBy: { createdAt: 'asc' },
+      select: { data: true, dedupeKey: true },
+    });
+    expect(storeNotices.map((n) => n.dedupeKey)).toEqual([
+      `appointment-moved:${moved.json().data.id}`,
+      `appointment-moved:${again.json().data.id}`,
+    ]);
   });
 
   it('[AX289 F6] a reschedule racing a cancellation of the same order waits on the ORDER first, then loses cleanly — 409 BOOKING_MOVED, never a deadlock or a 500', async () => {

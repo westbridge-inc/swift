@@ -287,6 +287,16 @@ const PUBLISHED: Record<
     driver_agreement: '88858e16c7cbee85bb9e52e64c34383668cf8e079f0b456a30845f31e0d74bfc',
     vendor_agreement: 'b594c5fc7bc2b83bdba4a07228b7c0b8421b4a267793299b5a575b6fd01b59d8',
   },
+  // [BOOK-FU2 · owner B3 · MATERIAL] "Customer didn't come": Terms s.6 (no fee, no strike; a person reviews repeated
+  // missed appointments) and Privacy s.6 (the record: which booking, when and who at the business recorded it, kept
+  // with its order's record). Same day as 2026-10-28, so LAST_UPDATED is unchanged and both agreements keep their
+  // hashes. Taking those two sentences back out reproduces all four 2026-10-28 pins exactly.
+  '2026-10-28.1': {
+    terms: '5a3912091a9cceff70d91b5a56df70dc54736413e8eedc8866d65fccbfb11c6f',
+    privacy: '3a7f4a78881e18fdc07d86e234f93b08ce81d7f5f7d3437d28abb1402a9da434',
+    driver_agreement: '88858e16c7cbee85bb9e52e64c34383668cf8e079f0b456a30845f31e0d74bfc',
+    vendor_agreement: 'b594c5fc7bc2b83bdba4a07228b7c0b8421b4a267793299b5a575b6fd01b59d8',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

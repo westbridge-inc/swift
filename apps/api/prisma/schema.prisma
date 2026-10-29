@@ -453,6 +453,7 @@ model Tenant {
   custodyRecoveryCases CustodyRecoveryCase[]
   taxiRideWaitings TaxiRideWaiting[]
   callSessions     CallSession[]
+  appointmentNoShows AppointmentNoShow[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -2072,6 +2073,8 @@ model Order {
   taxiRideWaiting    TaxiRideWaiting?
   /// [O-1] Swift call-bridge attempts on this order (never a phone number).
   callSessions       CallSession[]
+  /// [BOOK-FU2 · owner B3] The business recorded that the customer did not come to this appointment (one, ever).
+  appointmentNoShow  AppointmentNoShow?
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -2525,6 +2528,27 @@ model TaxiRideWaiting {
 
   @@index([tenantId])
   @@map("taxi_ride_waiting")
+}
+
+/// [BOOK-FU2 · owner B3, 28 Oct 2026] "Customer didn't come": the business recorded in the app that the customer did
+/// not come to an appointment it had accepted, after its start. The order closes (CANCELLED, no fee, no strike); a
+/// person at Swift reviews repeated cases. The row holds ONLY which booking it was, when the business recorded it and
+/// who at the business recorded it. Kept with its order's record (Privacy Policy section 6); one per order.
+model AppointmentNoShow {
+  id               String   @id @default(cuid())
+  tenantId         String   @default("swift-default")
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  orderId          String   @unique
+  order            Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// The booking (the order's live booking row at that moment).
+  bookingId        String
+  /// When the business recorded it.
+  recordedAt       DateTime @default(now())
+  /// Who at the business recorded it (the owner or a team member).
+  recordedByUserId String
+
+  @@index([tenantId])
+  @@map("appointment_no_shows")
 }
 
 /// [O-1 · owner 22-24 Oct 2026] One Swift call-bridge attempt on a live order:

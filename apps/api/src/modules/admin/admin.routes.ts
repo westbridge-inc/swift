@@ -1386,6 +1386,26 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /** GET /missed-appointments — [BOOK-FU2 · owner B3] "a person reviews repeat cases": the customers whose
+   *  businesses recorded at least two missed appointments ("Customer didn't come"), most first, with the count and
+   *  the latest date. Counts only; nothing here restricts anyone. Numbers masked like the people list. */
+  app.get('/missed-appointments', { preHandler: [adminGuard] }, async (request) => {
+    const { repeatNoShowCustomers } = await import('../booking/appointment-no-show');
+    const repeats = (await repeatNoShowCustomers(app.prisma)).slice(0, 200);
+    const people = await app.prisma.user.findMany({
+      where: { id: { in: repeats.map((r) => r.customerId) } },
+      select: { id: true, firstName: true, lastName: true, phone: true, status: true },
+    });
+    const contact = holdsPersonContact(request, 'user');
+    const byId = new Map(people.map((p) => [p.id, contact ? p : maskUserListRow(p)]));
+    const data = repeats.map((r) => ({
+      customer: byId.get(r.customerId) ?? { id: r.customerId },
+      missedAppointments: r.missedAppointments,
+      lastRecordedAt: r.lastRecordedAt.toISOString(),
+    }));
+    return { success: true, data };
+  });
+
   /** GET /users/:id/risk — one deterministic number from existing signals
    *  (marketplace §10). Throttles inform decisions; bans stay with the
    *  explicit strike rules. */

@@ -227,7 +227,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // reschedule moves Order.appointmentSlot with the booking [Q12], and that
   // list prints each appointment's slot. An untagged row (the API tags both
   // copies; only an old inbox row has no tag) cannot say whose it is, so it
-  // still opens the app normally.
+  // still opens the app normally. [BOOK-FU2] The API no longer sends it: a
+  // move is now appointment_moved (below), which carries the booking's order:
+  // with only the booking id, builds 9 and 11 opened nothing for the customer
+  // and Schedule for the business, and build 12 the orders list and Schedule.
+  // This case stays for the inbox rows sent before that.
   if (kind === 'booking_rescheduled') {
     if (audience === 'business') return { screen: 'Schedule' };
     return audience === 'customer' ? { screen: 'OrdersHistory' } : null;
@@ -246,7 +250,14 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // the booking's order screen (Delivery renders an appointment's status); with
   // no order on file, their orders list. An untagged copy cannot say whose it
   // is, so it opens the app normally rather than guess a stack.
-  if (kind === 'appointment_reminder') {
+  // [BOOK-FU2] appointment_moved (a store appointment moved; the other side is
+  // told) takes the same branch: it replaced booking_rescheduled, which carried
+  // no order (builds 9 and 11: customer nothing, business Schedule; build 12:
+  // customer OrdersHistory, business Schedule), and builds 9, 11 and 12 route
+  // this kind through their order branches exactly as here: the booking itself.
+  // A move updates the order's time, so the order screen and the order desk
+  // both show the new time.
+  if (kind === 'appointment_reminder' || kind === 'appointment_moved') {
     if (audience === 'business') return orderId ? { screen: 'VendorOrderDetail', params: { orderId } } : { screen: 'Schedule' };
     if (audience === 'customer') return orderId ? { screen: 'Delivery', params: { orderId } } : { screen: 'OrdersHistory' };
     return null;

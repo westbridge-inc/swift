@@ -58,6 +58,14 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
       'Privacy: Swift’s emails (receipts, notices and the link to your data export) are now delivered by Resend, an email service. It receives your email address, if you gave one, and the email itself; it sends them from Brazil and keeps its records in the United States.',
     ],
   },
+  {
+    // [BOOK-FU2 · owner B3 28 Oct 2026 · COORD 19:06Z: MATERIAL — a new personal record ("Customer didn't come")]
+    version: '2026-10-28.1',
+    summary: [
+      'Appointments: if a business records in the app that you did not come to an appointment you booked, the booking closes. That record carries no fee and no strike; a person at Swift reviews repeated missed appointments and may contact you about them.',
+      'Privacy: Swift keeps that record (which booking it was, when the business recorded it, and who at the business recorded it) with the order’s record, for as long as the order’s record is kept.',
+    ],
+  },
 ];
 
 /**
