@@ -299,6 +299,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders': c('C1', 'order.read'),
   'GET /orders/held': c('C0', 'order.read'),
   'GET /orders/sla-breaches': c('C0', 'order.read'),
+  // [RIDER-SAFE 5] Swift's delivery pause: read it; set or lift it (a reason, audited).
+  'GET /delivery-pause': c('C0', 'order.read'),
+  'PUT /delivery-pause': c('C3', 'delivery.pause'),
   'GET /orders/:id': c('C1', 'order.read'),
   'GET /ops/live': c('C1', 'ops.live.read'),
   'POST /orders/:id/retry-dispatch': c('C2', 'order.dispatch'),

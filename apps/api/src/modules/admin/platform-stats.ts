@@ -10,6 +10,8 @@
 import type { PrismaClient } from '@prisma/client';
 import { PRODUCTION_TENANT, REAL_PEOPLE } from '../../lib/production-only';
 import { readFeeCollectionAuthorities } from '../subscription/mover-fee-authority';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
+import { waitingForRiderWhere } from '../dispatch/delivery-capacity';
 
 export interface PlatformStatsInput {
   tenantId: string;
@@ -34,6 +36,8 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
     pendingVendors,
     pastDueSubs,
     unassignedOrders,
+    freeRiders,
+    waitingForRider,
   ] = await Promise.all([
       prisma.user.count({ where: REAL_PEOPLE }),
       prisma.order.count({ where: PRODUCTION_TENANT }),
@@ -74,12 +78,22 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
         where: {
           riderId: null,
           ...PRODUCTION_TENANT,
+          // [RIDER-SAFE 6] Orders a RIDER should carry: platform delivery only.
+          // A taxi has no rider (its driverId is the mover), a pickup or a
+          // booking never gets one, and a store delivering itself has no rider
+          // by design — counting them read as a rider shortage that wasn't.
+          orderType: { not: 'TAXI' },
+          fulfillment: 'DELIVERY',
           status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
           placedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) },
           // A held order (LIFECYCLE_V2) is waiting on the customer, not ops.
-          AND: [{ OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] }],
+          AND: [{ OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] }, notSelfDeliveredFilter()],
         },
       }),
+      // [RIDER-SAFE 6] "Free riders vs waiting orders": riders online with
+      // empty hands and room, beside the orders waiting for a rider right now.
+      prisma.rider.count({ where: { isOnline: true, isAvailable: true, currentOrderId: null, user: { tenantId, ...REAL_PEOPLE } } }),
+      prisma.order.count({ where: { ...waitingForRiderWhere(), ...PRODUCTION_TENANT } }),
       ]);
   // [PERF row 561] One batched read for every subscription's collection authority (same answer per
   // subscription as readFeeCollectionAuthority): it used to be one read, and for a mover one transaction,
@@ -90,5 +104,5 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
     if (!authority?.allowed) return null;
     return { ...sub, type: authority.mover?.feeType ?? sub.type };
   }).filter((sub): sub is NonNullable<typeof sub> => sub !== null);
-  return { totalUsers, totalOrders, todayOrders, todayRevenue, activeRiders, activeDrivers, activeVendors, totalVendors, activeSubscriptions, todayNewUsers, pendingVendors, pastDueSubs, unassignedOrders };
+  return { totalUsers, totalOrders, todayOrders, todayRevenue, activeRiders, activeDrivers, activeVendors, totalVendors, activeSubscriptions, todayNewUsers, pendingVendors, pastDueSubs, unassignedOrders, freeRiders, waitingForRider };
 }

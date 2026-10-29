@@ -108,6 +108,8 @@ import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignme
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
+import { storeRiderBacklog } from '../dispatch/delivery-capacity';
+import { deliveryPausedAt } from '../dispatch/delivery-pause';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2018,6 +2020,38 @@ export async function vendorRoutes(app: FastifyInstance) {
       select: { isCurrentlyOpen: true, acceptingOrders: true },
     });
     return { success: true, data: { isCurrentlyOpen: updated.isCurrentlyOpen, acceptingOrders: updated.acceptingOrders } };
+  });
+
+  /**
+   * GET /vendor/delivery-status — [RIDER-SAFE 4/5 · COORD ruling 29 Oct 2026]
+   * Whether customers can order DELIVERY from this store right now, and if
+   * not, why: Swift paused delivery (platform-wide or this zone), or the
+   * store's own orders are waiting for riders (at `delivery.vendorBacklogCap`
+   * new delivery orders pause by themselves and resume when a rider takes
+   * one). Pickup stays open either way. Read-only.
+   */
+  app.get('/vendor/delivery-status', auth, async (request) => {
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, tenantId: true, latitude: true, longitude: true } });
+    const [pause, backlog] = await Promise.all([
+      deliveryPausedAt(app.prisma, vendor.tenantId, { lat: vendor.latitude, lng: vendor.longitude }),
+      storeRiderBacklog(app.prisma, vendor.id, vendor.tenantId),
+    ]);
+    const reason = pause.paused ? 'SWIFT_PAUSED' as const : backlog.paused ? 'STORE_BUSY' as const : null;
+    return {
+      success: true,
+      data: {
+        deliveryOpen: reason === null,
+        reason,
+        waitingForRider: backlog.waiting,
+        backlogCap: backlog.cap,
+        message: reason === 'SWIFT_PAUSED'
+          ? 'Swift has paused delivery in your area for now. Customers can still order for pickup.'
+          : reason === 'STORE_BUSY'
+            ? `${backlog.waiting} of your orders are waiting for a rider, so new delivery orders are paused. They restart by themselves when a rider takes one. Customers can still order for pickup.`
+            : null,
+      },
+    };
   });
 
   /** PUT /vendor/toggle-orders — Toggle acceptingOrders */
