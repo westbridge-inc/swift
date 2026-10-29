@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { testPhone } from './helpers/fixture-ids';
 import { TENANT_LINEAGE_TABLES, tenantLineageDdl } from '../lib/tenant-rls';
 
@@ -17,7 +18,7 @@ import { TENANT_LINEAGE_TABLES, tenantLineageDdl } from '../lib/tenant-rls';
 // Every case runs inside a transaction that is rolled back at the end (after
 // forcing the deferred checks), so the suite leaves no rows behind.
 
-const db = new PrismaClient();
+const db = testPrismaClient();
 const TENANT = 'swift-default';
 const MIGRATION = '20261029030000_pro_subscription_owner';
 const DIR = join(__dirname, '..', '..', 'prisma', 'migrations', MIGRATION);
