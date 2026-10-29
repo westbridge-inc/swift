@@ -677,6 +677,24 @@ backups. Before the first production backup:
    swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
+
+   **Off-site retention (owner ruling, 29 Oct): hourly dumps are kept 30
+   days.** `deploy/backup-versioning.sh` (step 3 of
+   `deploy/owner/swift-backup-key.command`) sets a lifecycle rule,
+   `swift-backup-dump-retention`, that deletes every object whose key starts
+   with `$BACKUP_PREFIX/swift-` (the dumps and their `.sig`) 30 days after it
+   was made (`BACKUP_OFFSITE_RETAIN_DAYS`), beside the rule that deletes old
+   versions after `BACKUP_VERSION_RETAIN_DAYS`. With versioning on, an expired
+   dump stays as an old version for those days before it is gone. The rule
+   never matches `$BACKUP_PREFIX/erasure-ledger/`: the ledger is never
+   expired, because a restore needs every signed batch of its chain. The
+   script keeps the bucket's other rules, but if any enabled rule would expire
+   a current object under the ledger prefix it changes NOTHING and names that
+   rule (narrow it first); `--status` fails without the dump rule or with
+   such a rule. A dump asked for after it expired is reported as gone
+   ("is not in the backup bucket"), never as an unsigned dump. A dump you
+   want kept longer (one taken before a risky change, say) must be copied out
+   of the bucket's dump prefix before it expires.
 4. Install the OFF-SITE ERASURE LEDGER timer (production and staging). Every
    erasure writes its ledger entry in its own transaction; this unit ships the
    unshipped entries every minute, encrypted to the same owner key, to
@@ -688,9 +706,10 @@ backups. Before the first production backup:
        systemctl enable --now swift-erasure-ledger.timer
        systemctl list-timers swift-erasure-ledger.timer
 
-   The ledger objects live under the backups' own prefix, so the bucket
-   keeps them at least as long as the backups. Never give the
-   `erasure-ledger/` prefix a shorter lifecycle rule than the dumps. An entry
+   The ledger objects live under the backups' own prefix but are NEVER
+   expired: the dump retention rule matches `$BACKUP_PREFIX/swift-` only, and
+   `deploy/backup-versioning.sh` refuses a configuration with any rule that
+   would expire `erasure-ledger/`. Never add one by hand. An entry
    still unshipped after 10 minutes pages the platform responders (the API's
    erasure-ledger watch; production only), and doctor.sh FAILs. pilot-up.sh
    refuses a production stage that starts the API unless this timer is
@@ -717,6 +736,16 @@ backups. Before the first production backup:
    one, or its signature was replaced, the host ships nothing (a shipped batch
    was deleted).
 
+   **One shipper per bucket prefix; stop the old host's timer before a new
+   host ships; drills use their own prefix.** Two hosts shipping to the same
+   `$BACKUP_PREFIX` fork the chain (each links to the newest batch it saw).
+   When a server is replaced, `systemctl disable --now
+   swift-erasure-ledger.timer swift-backup-hourly.timer` (or
+   `swift-backup.timer`) on the old host first, then start the new host's
+   timers. A drill, rehearsal or copy host that runs backup.sh or the
+   shipper sets its own `BACKUP_PREFIX` (for example `drill-<date>`) in its
+   deploy/.env, so it never writes under the production prefix.
+
    Replaying it (a restore without the live database):
    - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`,
      the `.jsonl.gpg` batches AND their `.jsonl.gpg.sig` signatures, into one
@@ -734,7 +763,18 @@ backups. Before the first production backup:
      before anything is created (a batch that fails, or a signature whose
      batch is missing, stops the restore). The chain must be unbroken: a batch
      missing from the start or the middle, out of order, or a fork (two
-     batches after the same one) stops the restore (`CHAIN_BROKEN`). With `BACKUP_BUCKET` set (and the backup key), the
+     batches after the same one) stops the restore (`CHAIN_BROKEN`).
+     **A forked ledger whose branches both verify** (two hosts shipped to one
+     prefix) is refused by default. First find out why (which host shipped
+     each branch, and that both hosts were Swift's own). Only then may the
+     owner add `--ledger-accept-fork`: every batch on every branch must still
+     verify, there must be one first batch, and every link must be present,
+     older and point at the exact signature it followed; anything else is still
+     `CHAIN_BROKEN`. The restore then replays the entries of ALL branches
+     (applying more erasures is the safe direction), prints `WARNING: LEDGER
+     FORK ACCEPTED` naming the fork, and its result line says `the signed
+     batches FORK` instead of `one unbroken chain`. Then stop the second
+     shipper (above) before the next shipment. With `BACKUP_BUCKET` set (and the backup key), the
      restore also lists the bucket's `erasure-ledger/` prefix, read-only, and
      stops if the bucket holds any batch or signature that is not in the
      directory, so none is missing from the end either. With versioning on

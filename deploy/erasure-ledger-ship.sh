@@ -209,7 +209,8 @@ else
   echo "WARNING: ERASURE LEDGER BATCH NOT SIGNED: this unit has no backup signing key (BACKUP_SIGNING_KEY). A restore replays it only with --allow-unsigned-legacy. Install the backup store (sudo swift-secrets backup init) and the current swift-erasure-ledger.service (owner sheet BACKUP-KEY-SETUP)." >&2
 fi
 
-# Under the backups' own prefix: the same bucket lifecycle as the backups, never shorter.
+# Under the backups' own prefix, never expired: the dump retention rule matches "$BACKUP_PREFIX/swift-"
+# only, and deploy/backup-versioning.sh refuses any rule that would expire erasure-ledger/.
 KEY="$BACKUP_PREFIX/erasure-ledger/$NAME"
 SIZE="$(wc -c < "$OUT" | tr -d ' ')"
 aws_s3 s3 cp "/data/$NAME" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors ||
