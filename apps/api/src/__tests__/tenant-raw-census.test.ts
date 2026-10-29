@@ -58,6 +58,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/compliance/prohibited-scan.service.ts': { sites: 1, role: 'REQUEST' },
   'modules/discovery/discovery.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/dispatch/dispatch.service.ts': { sites: 4, role: 'SHARED' },
+  // [RIDER-SAFE 1] Riders online near a store, busy or not (the honest capacity's "riders who will free up"):
+  // reached from checkout and the cart's availability read; tenant-filtered on the joined user like findCandidates.
+  'modules/dispatch/delivery-capacity.ts': { sites: 1, role: 'SHARED' },
   'modules/mover-authority-cutover-preparation.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/mover-revocation-outbox.ts': { sites: 4, role: 'JOB_PENDING' },
   // [Off-site erasure ledger, #1984] The platform watch: counts and ages of unshipped ledger entries only

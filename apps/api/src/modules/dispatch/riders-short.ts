@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { algoValue } from '../algo/algo-config';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { waitingForRiderWhere, waitingSinceWhere, waitingGraceMinutes } from './delivery-capacity';
 
 // ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@ export async function measureRidersShort(prisma: PrismaClient, now = new Date())
       prisma.order.count({
         where: { ...base, tenantId, AND: [...(base.AND as object[]), waitingSinceWhere(new Date(now.getTime() - grace * 60_000))] },
       }),
-      prisma.rider.count({ where: { isOnline: true, isAvailable: true, currentOrderId: null, user: { tenantId } } }),
+      prisma.rider.count({ where: { isOnline: true, isAvailable: true, orders: { none: { status: { notIn: TERMINAL_ORDER_STATUSES } } }, user: { tenantId } } }),
       algoValue(prisma, 'delivery.ridersShortWaiting', tenantId),
       algoValue(prisma, 'delivery.ridersShortExhaustions', tenantId),
     ]);

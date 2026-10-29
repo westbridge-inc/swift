@@ -12,6 +12,7 @@ import { PRODUCTION_TENANT, REAL_PEOPLE } from '../../lib/production-only';
 import { readFeeCollectionAuthorities } from '../subscription/mover-fee-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { waitingForRiderWhere } from '../dispatch/delivery-capacity';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 export interface PlatformStatsInput {
   tenantId: string;
@@ -92,7 +93,8 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
       }),
       // [RIDER-SAFE 6] "Free riders vs waiting orders": riders online with
       // empty hands and room, beside the orders waiting for a rider right now.
-      prisma.rider.count({ where: { isOnline: true, isAvailable: true, currentOrderId: null, user: { tenantId, ...REAL_PEOPLE } } }),
+      // Empty hands are counted from the orders table (no live leg), never the leg pointer.
+      prisma.rider.count({ where: { isOnline: true, isAvailable: true, orders: { none: { status: { notIn: TERMINAL_ORDER_STATUSES } } }, user: { tenantId, ...REAL_PEOPLE } } }),
       prisma.order.count({ where: { ...waitingForRiderWhere(), ...PRODUCTION_TENANT } }),
       ]);
   // [PERF row 561] One batched read for every subscription's collection authority (same answer per
