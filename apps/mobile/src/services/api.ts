@@ -1342,6 +1342,8 @@ export const vendorApi = {
   /** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
   handedToRider: (id: string) => api.put(`/vendor/orders/${id}/handed-to-rider`, {}),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
+  /** [BOOK-NS-APP · owner B3] "Customer didn't come": the server closes the started appointment and records it. */
+  markNoShow: (id: string) => api.put(`/vendor/orders/${id}/no-show`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),

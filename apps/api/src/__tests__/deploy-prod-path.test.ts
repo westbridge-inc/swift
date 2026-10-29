@@ -1492,6 +1492,49 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
       expect(r.status, r.stderr + r.stdout).toBe(0);
     });
 
+  // [BACKUP-FU] PostgreSQL does not always print a definition back the way it read it. On the
+  // migration-built schema three come back different after ANY dump and restore: a CHECK with an
+  // IN list on a varchar column (ANY ((ARRAY[...])::text[]) reads back as ANY (ARRAY[(...)::text])),
+  // and two trigger WHEN clauses with a row-wise IS DISTINCT FROM (nested ORs read back flat). The
+  // same meaning, printed differently: the drill must pass them, and only them.
+  const REPRINTED = String.raw`
+CREATE TABLE public.orders (id text PRIMARY KEY, "cashStatus" varchar(16),
+  CONSTRAINT orders_cash_status CHECK ("cashStatus" IS NULL OR "cashStatus" IN ('RETURNED', 'HELD', 'RESOLVED')));
+CREATE TABLE public.subscriptions (id text PRIMARY KEY, "riderId" text, "driverId" text, "vendorId" text);
+CREATE FUNCTION public.keep_lineage() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE CONSTRAINT TRIGGER subscriptions_lineage AFTER UPDATE ON public.subscriptions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN ((OLD."riderId", OLD."driverId", OLD."vendorId") IS DISTINCT FROM (NEW."riderId", NEW."driverId", NEW."vendorId")) EXECUTE FUNCTION public.keep_lineage();
+CREATE TRIGGER users_closed AFTER UPDATE ON public.users FOR EACH ROW
+  WHEN (NEW.status = 'CLOSED' AND (OLD.status, OLD.balance, OLD.id) IS DISTINCT FROM (NEW.status, NEW.balance, NEW.id)) EXECUTE FUNCTION public.keep_lineage();
+INSERT INTO public.orders VALUES ('o1', 'HELD'), ('o2', NULL);
+INSERT INTO public.subscriptions VALUES ('s1', 'r1', NULL, NULL);
+`;
+
+  it('[BACKUP-FU] passes a copy whose constraint and trigger definitions PostgreSQL only prints differently, and names each one', () => {
+    const r = drill(null, { fixture: FIXTURE + REPRINTED });
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain('compare-source: 3 definitions differ only in how PostgreSQL prints them');
+    for (const name of ['constraint orders.orders_cash_status', 'trigger subscriptions.subscriptions_lineage', 'trigger users.users_closed']) {
+      expect(r.stdout).toContain(name);
+    }
+    expect(r.stdout).toContain('RESTORE OK');
+  });
+
+  it.each([
+    ['a CHECK that allows one more value', `ALTER TABLE public.orders DROP CONSTRAINT orders_cash_status, ADD CONSTRAINT orders_cash_status CHECK ("cashStatus" IS NULL OR "cashStatus" IN ('RETURNED', 'HELD', 'RESOLVED', 'LOST'))`, 'constraint|orders|orders_cash_status|'],
+    ['a CHECK that is no longer validated', `ALTER TABLE public.orders DROP CONSTRAINT orders_cash_status, ADD CONSTRAINT orders_cash_status CHECK ("cashStatus" IS NULL OR "cashStatus" IN ('RETURNED', 'HELD', 'RESOLVED')) NOT VALID`, 'constraint|orders|orders_cash_status|'],
+    ['a trigger that watches one column fewer', `DROP TRIGGER subscriptions_lineage ON public.subscriptions; CREATE CONSTRAINT TRIGGER subscriptions_lineage AFTER UPDATE ON public.subscriptions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((OLD."riderId", OLD."driverId") IS DISTINCT FROM (NEW."riderId", NEW."driverId")) EXECUTE FUNCTION public.keep_lineage()`, 'subscriptions_lineage'],
+    ['a trigger that fires at another time', `DROP TRIGGER users_closed ON public.users; CREATE TRIGGER users_closed BEFORE UPDATE ON public.users FOR EACH ROW WHEN (NEW.status = 'CLOSED' AND (OLD.status, OLD.balance, OLD.id) IS DISTINCT FROM (NEW.status, NEW.balance, NEW.id)) EXECUTE FUNCTION public.keep_lineage()`, 'users_closed'],
+    ['a reprinted trigger that is disabled', `ALTER TABLE public.subscriptions DISABLE TRIGGER subscriptions_lineage`, 'subscriptions_lineage'],
+  ])('[BACKUP-FU] still fails on %s among definitions that are only printed differently', (_what, change, named) => {
+    const r = drill(change, { fixture: FIXTURE + REPRINTED });
+    expect(r.status, r.stdout).not.toBe(0);
+    expect(r.stdout).toContain('MISMATCH');
+    expect(r.stdout).toContain(named);
+    expect(r.stderr).toContain('was dropped with its throwaway instance');
+    expect(r.stdout).not.toContain('RESTORE OK');
+  });
+
   it('[SEC-BACKUP F2] restores into a throwaway instance, never the live cluster, as a login that is not a superuser there', () => {
     const r = drill(null, { args: ['--compare-source', '--keep-for-inspection'] });
     expect(r.status, r.stderr + r.stdout).toBe(0);

@@ -847,11 +847,137 @@ SELECT line FROM (
   UNION ALL
   SELECT format('extension|%s|%s', e.extname, e.extversion) FROM pg_extension e
 ) s ORDER BY line COLLATE \"C\";"
+# [BACKUP-FU] PostgreSQL does not always print a definition back the way it read it: after ANY dump
+# and restore, a CHECK with an IN list on a varchar column, or a trigger WHEN with a row-wise
+# IS DISTINCT FROM, reads back in other words with the same meaning. Text is never loosened
+# (no whitespace or cast rules). Instead, for a CHECK constraint or a trigger present on both
+# sides under the same name (and, for a trigger, the same enabled state) whose definitions differ,
+# the SOURCE's own definition is read again by the scratch instance's server, on the restored
+# table, exactly as the restore read the dump: inside one transaction that is rolled back, as the
+# restore login. Only when what that server prints is byte-identical to the restored definition
+# are the two the same; anything else (a different expression, timing, NOT VALID, an error) stays
+# a mismatch.
+# (read -d '', not $(cat <<...): bash 3.2 misparses a here-document inside $( ).
+REPRINT_PY=""
+IFS= read -r -d '' REPRINT_PY <<'PY' || true
+import sys
+
+def split(line):
+    """(kind, relation, name, enabled) and the definition, for a CHECK or a trigger line."""
+    kind = line.split("|", 1)[0]
+    if kind == "constraint":
+        p = line.split("|", 3)
+        if len(p) == 4 and p[3].startswith("CHECK ("):
+            return ("constraint", p[1], p[2], ""), p[3]
+    if kind == "trigger":
+        p = line.split("|", 4)
+        if len(p) == 5 and p[4].startswith(("CREATE TRIGGER ", "CREATE CONSTRAINT TRIGGER ")):
+            return ("trigger", p[1], p[2], p[3]), p[4]
+    return None, None
+
+def literal(s):
+    return "'" + s.replace("'", "''") + "'"
+
+def pairs(live, scratch):
+    """Lines that differ, paired by kind, relation, name (and enabled state): one on each side."""
+    lc, sc = {}, {}
+    for l in live: lc[l] = lc.get(l, 0) + 1
+    for l in scratch: sc[l] = sc.get(l, 0) + 1
+    def index(lines):
+        out = {}
+        for l in lines:
+            key, d = split(l)
+            if key: out.setdefault(key, []).append((l, d))
+        return out
+    a = index([l for l in lc if lc[l] > sc.get(l, 0)])
+    b = index([l for l in sc if sc[l] > lc.get(l, 0)])
+    found = []
+    for key in sorted(a):
+        if len(a[key]) == 1 and len(b.get(key, [])) == 1 and lc[a[key][0][0]] == 1 and sc[b[key][0][0]] == 1:
+            found.append((key, a[key][0], b[key][0]))
+    return found
+
+REREAD = """CREATE FUNCTION pg_temp.swift_reread(n int, kind text, rel text, name text, def text) RETURNS text LANGUAGE plpgsql AS $reread$
+DECLARE r regclass; tmp text := 'swift_reread_' || n; head text; was text; tmp_head text; printed text;
+BEGIN
+  r := rel::regclass;
+  IF kind = 'constraint' THEN
+    -- NOT VALID: the restored table is not scanned; the suffix is the only change it makes to the text.
+    EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I %s', r, tmp, CASE WHEN def LIKE '% NOT VALID' THEN def ELSE def || ' NOT VALID' END);
+    SELECT pg_get_constraintdef(c.oid) INTO printed FROM pg_constraint c WHERE c.conrelid = r AND c.conname = tmp;
+    IF def NOT LIKE '% NOT VALID' THEN
+      IF right(printed, 10) <> ' NOT VALID' THEN RETURN NULL; END IF;
+      printed := left(printed, -10);
+    END IF;
+    RETURN printed;
+  END IF;
+  FOREACH head IN ARRAY ARRAY['CREATE TRIGGER ', 'CREATE CONSTRAINT TRIGGER '] LOOP
+    was := head || quote_ident(name) || ' ';
+    tmp_head := head || quote_ident(tmp) || ' ';
+    IF left(def, length(was)) = was THEN
+      EXECUTE tmp_head || substr(def, length(was) + 1);
+      SELECT pg_get_triggerdef(t.oid) INTO printed FROM pg_trigger t WHERE t.tgrelid = r AND t.tgname = tmp;
+      IF left(printed, length(tmp_head)) <> tmp_head THEN RETURN NULL; END IF;
+      RETURN was || substr(printed, length(tmp_head) + 1);
+    END IF;
+  END LOOP;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END $reread$;"""
+
+mode, live_file, scratch_file = sys.argv[1:4]
+live = open(live_file).read().splitlines()
+scratch = open(scratch_file).read().splitlines()
+found = pairs(live, scratch)
+if mode == "sql":
+    if found:
+        rows = ",\n".join("(%d, %s, %s, %s, %s)" % (i, literal(k[0]), literal(k[1]), literal(k[2]), literal(src[1]))
+                          for i, (k, src, _) in enumerate(found))
+        print("SET standard_conforming_strings = on;")
+        print("BEGIN;")
+        print(REREAD)
+        print("SELECT n || '|' || coalesce(pg_temp.swift_reread(n, kind, rel, name, def), '') FROM (VALUES\n" + rows + "\n) v(n, kind, rel, name, def) ORDER BY n;")
+        print("ROLLBACK;")
+elif mode == "apply":
+    reread = {}
+    for line in open(sys.argv[4]).read().splitlines():
+        n, _, printed = line.partition("|")
+        if n.isdigit(): reread[int(n)] = printed
+    swap, names = {}, []
+    for i, (key, src, dst) in enumerate(found):
+        if reread.get(i) and reread[i] == dst[1]:
+            swap[src[0]] = dst[0]
+            names.append("%s %s.%s" % (key[0], key[1], key[2]))
+    with open(sys.argv[5], "w") as out:
+        out.write("".join(swap.get(l, l) + "\n" for l in live))
+    print("\n".join(names))
+else:
+    sys.exit("unknown mode")
+PY
 compare_with_source() {
-  local live_snapshot scratch_snapshot
+  local live_snapshot scratch_snapshot reprinted
   live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die_copy "could not read the source database $LIVE_DB"
   scratch_snapshot="$(scratch_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die_copy "could not read the scratch database"
   grep -q '^rows|' <<<"$live_snapshot" || die_copy "the source database $LIVE_DB has no tables to compare"
+  if [ "$live_snapshot" != "$scratch_snapshot" ]; then
+    private_tmp
+    printf '%s\n' "$live_snapshot" > "$TMP_DIR/live.snapshot"
+    printf '%s\n' "$scratch_snapshot" > "$TMP_DIR/scratch.snapshot"
+    python3 -I -c "$REPRINT_PY" sql "$TMP_DIR/live.snapshot" "$TMP_DIR/scratch.snapshot" > "$TMP_DIR/reread.sql" ||
+      die_copy "could not list the definitions to read again"
+    if [ -s "$TMP_DIR/reread.sql" ]; then
+      # A failure here leaves every difference standing (it is reported below as a mismatch).
+      scratch_psql "$SCRATCH" -q -tA < "$TMP_DIR/reread.sql" > "$TMP_DIR/reread.out" || : > "$TMP_DIR/reread.out"
+      reprinted="$(python3 -I -c "$REPRINT_PY" apply "$TMP_DIR/live.snapshot" "$TMP_DIR/scratch.snapshot" "$TMP_DIR/reread.out" "$TMP_DIR/live.reprinted")" ||
+        die_copy "could not apply the definitions read again"
+      if [ -n "$reprinted" ]; then
+        live_snapshot="$(LC_ALL=C sort "$TMP_DIR/live.reprinted")"
+        scratch_snapshot="$(LC_ALL=C sort "$TMP_DIR/scratch.snapshot")"
+        echo "compare-source: $(grep -c . <<<"$reprinted") definitions differ only in how PostgreSQL prints them after a restore (the source's own definition, read again by the scratch instance's server in a transaction that was rolled back, prints byte-identical to the restored one): $(paste -sd ';' - <<<"$reprinted" | sed 's/;/; /g')"
+      fi
+    fi
+  fi
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
