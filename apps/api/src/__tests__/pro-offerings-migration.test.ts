@@ -22,8 +22,8 @@ import {
 const MIGRATIONS = path.resolve(__dirname, '../../prisma/migrations');
 const NAME = '20261029010000_pro_offerings_hours';
 const DIR = path.join(MIGRATIONS, NAME);
-/** The newest migration on main when this was written, and the newest pending stamp then (BOOK-S no-show). */
-const NEWEST_ON_MAIN = '20261028120000_booking_one_provider_one_time';
+/** The newest migration on main when this was written, and the newest pending stamp then. */
+const NEWEST_ON_MAIN = '20261028230000_appointment_no_shows';
 const NEWEST_PENDING_STAMP = '20261028230000';
 const NEW_TABLES = ['service_offerings', 'service_provider_time_off'] as const;
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
