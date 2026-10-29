@@ -1,6 +1,7 @@
 import { lockIdentityAuthority, identityAuthority, IdentityReviewRequiredError } from './identity-review';
 import type { PrismaClient } from '@prisma/client';
 import { subscriptionsPaidBy } from '../subscription/subscription-owner';
+import { liveExceptionCovers } from './trial-entitlement.service';
 
 // The enforcement ladder's read side (spec Part 4). Rungs 2–3 bite at
 // ACTIVATION, not at signup: a held account's documents are never
@@ -77,11 +78,8 @@ export async function previewTrial(
 
   const grants = await prisma.trialGrant.findMany({ where: { tenantId, clusterId, role } });
   if (grants.length === 0) return { willTrial: true, reason: 'FIRST_TRIAL', message: null };
-  const exception = await prisma.exceptionGrant.findFirst({
-    where: { clusterId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
-    select: { id: true },
-  });
-  if (exception) return { willTrial: true, reason: 'EXCEPTION_GRANT', message: null };
+  // [CHAINS] The same scope rule decide() applies: an exception grants only what it says.
+  if (await liveExceptionCovers(prisma, { clusterId, accountId, role, tenantId })) return { willTrial: true, reason: 'EXCEPTION_GRANT', message: null };
   return grants.some((g) => g.status === 'ACTIVE')
     ? { willTrial: false, reason: 'TRIAL_ACTIVE_ELSEWHERE', message: ENFORCEMENT_COPY.TRIAL_ACTIVE_ELSEWHERE }
     : { willTrial: false, reason: 'TRIAL_CONSUMED', message: ENFORCEMENT_COPY.TRIAL_CONSUMED(weeklyRateLabel ?? 'the weekly fee') };

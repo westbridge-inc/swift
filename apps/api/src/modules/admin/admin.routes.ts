@@ -54,6 +54,7 @@ import {
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
+import { chainOf, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -4360,6 +4361,52 @@ export async function adminRoutes(app: FastifyInstance) {
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
+  });
+
+  /** [CHAINS · owner 29 Oct 2026] GET /vendor-owners/:id/chain — one owner's stores and what each pays a week, with
+   *  the chain deal Swift agreed (if any): what the console shows beside the deal form. Reads only. */
+  app.get('/vendor-owners/:id/chain', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await chainOf(app.prisma, id, requireTenantId()) };
+  });
+
+  /**
+   * [CHAINS · owner 29 Oct 2026] PUT /vendor-owners/:id/deal-rate { weeklyRate, reason } — the weekly fee Swift
+   * negotiated with one chain, for each of its branches (vendor/chain-deal.ts). Money (C4): a stated reason and a
+   * second person. Never a rise (a branch already under the deal keeps its fee; a deal is only ever lowered), never
+   * under a payment in flight, from each branch's next weekly fee. The deal, every branch's new rate and the audit
+   * row commit together; the owner is told after the commit.
+   */
+  app.put('/vendor-owners/:id/deal-rate', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      weeklyRate: z.number().int().positive().max(10_000_000),
+      reason: z.string().trim().min(8).max(500),
+    }).parse(request.body ?? {});
+    const result = await setChainDeal(
+      app.prisma,
+      { ownerId: id, weeklyRate: body.weeklyRate, reason: body.reason, adminUserId: request.user.userId, tenantId: requireTenantId() },
+      (tx, done) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        reason: body.reason,
+        extra: {
+          dealWeeklyRate: done.dealWeeklyRate,
+          currencyCode: done.currencyCode,
+          branches: done.branches.map((b) => `${b.vendorId}:${b.outcome}:${b.from ?? '-'}->${b.to ?? '-'}`).join(' '),
+        },
+      }),
+    );
+    const applied = result.branches.filter((b) => b.outcome === 'APPLIED').length;
+    if (applied > 0) {
+      await notifications.send({
+        userId: result.ownerUserId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Your weekly fee per branch',
+        body: `Swift set your weekly fee to ${result.currencyCode} ${result.dealWeeklyRate.toLocaleString('en-US')} for ${applied === 1 ? 'one branch' : `${applied} branches`}, from each branch's next weekly fee. Weeks already paid keep their price.`,
+        audience: 'business',
+        data: { kind: 'billing_rate_change', change: 'CHAIN_DEAL', weeklyRate: result.dealWeeklyRate, currencyCode: result.currencyCode },
+      }).catch((err: unknown) => request.log.error({ err, ownerId: id }, '[CHAINS] chain deal notice not delivered'));
+    }
+    return { success: true, data: result };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {

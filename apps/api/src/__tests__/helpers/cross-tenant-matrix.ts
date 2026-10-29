@@ -311,6 +311,8 @@ export function craftedBodies(w: World): Record<string, Record<string, unknown>>
     // fail-closed for tenant B today (TENANT_BILLING_UNAVAILABLE): valid, so they reach the lookup if that ever opens
     [`POST ${A}/subscriptions/:id/topup`]: { amount: 2000, reference: 'MATRIX-REF' },
     [`POST ${A}/subscriptions/:id/refund-credit/set-aside`]: { amount: 100 },
+    // [CHAINS] a chain deal: valid, so the re-send reaches the owner lookup (and its tenant wall)
+    [`PUT ${A}/vendor-owners/:id/deal-rate`]: { weeklyRate: 1000, reason: 'MATRIX chain deal' },
     [`POST ${A}/subscriptions/:id/refund-credit/release`]: { amount: 100, setAsideId: v.subscription },
     [`POST ${A}/billing/agent-payments`]: { san: '000000000', amount: 2000, paidAt: at, receiptNumber: 'MATRIX-001', verifiedInPortal: true },
     [`POST ${A}/billing/agent-payments/:id/attach`]: { subscriptionId: v.subscription },

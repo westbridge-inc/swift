@@ -61,7 +61,7 @@ import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 import { vendorOperateRefusal, vendorOperateError } from './vendor-operate';
-import { ReviewDemoMoneyRefusedError, isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import { ReviewDemoMoneyRefusedError, ReviewDemoRoleRefusedError, isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
@@ -94,6 +94,10 @@ import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
 import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
+import { PartnerService, branchLimit } from '../partner/partner.service';
+import { assertStoreNameAllowed, businessSchema, weeklyFeeAckSchema } from '../partner/business-input';
+import { assertWeeklyFeeAck, signupQuote, weeklyFeeTerms, WEEKLY_FEE_ACK_VERSION } from '../partner/weekly-fee-ack';
+import { chainTrialPreview } from '../subscription/subscription.service';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
@@ -1025,6 +1029,58 @@ export async function vendorRoutes(app: FastifyInstance) {
       select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true, isVerified: true },
     });
     return { success: true, data: { stores, selectedId: access.vendorId, myRole: access.role } };
+  });
+
+  /**
+   * [CHAINS · owner 29 Oct 2026] GET /stores/branch-terms?vendorType= — what the add-a-branch screen shows before the
+   * owner ticks anything: this branch's weekly fee (each branch pays its own), whether the owner's running free trial
+   * covers it and until when (a branch shares the owner's trial, never a fresh one), how many stores the account runs
+   * and may run, and the chain deal Swift agreed, if any. Owner only. Reads only.
+   */
+  app.get('/stores/branch-terms', auth, async (request) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const { vendorType } = z.object({ vendorType: z.enum(['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']).default('RESTAURANT') }).parse(request.query ?? {});
+    const userId = request.user.userId;
+    const quote = await signupQuote(app.prisma, userId, { role: 'VENDOR', vendorType });
+    const owner = await app.prisma.vendorOwner.findUniqueOrThrow({ where: { userId }, select: { dealWeeklyRate: true, dealCurrencyCode: true } });
+    const sharedTrialEndsAt = await chainTrialPreview(app.prisma, userId, new Date());
+    return {
+      success: true,
+      data: {
+        weeklyFee: { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier, version: WEEKLY_FEE_ACK_VERSION },
+        terms: weeklyFeeTerms(),
+        sharedTrialEndsAt: sharedTrialEndsAt?.toISOString() ?? null,
+        stores: access.vendorIds.length,
+        limit: branchLimit(),
+        dealWeeklyRate: owner.dealWeeklyRate === null ? null : Number(owner.dealWeeklyRate),
+        dealCurrencyCode: owner.dealCurrencyCode,
+      },
+    };
+  });
+
+  /**
+   * [CHAINS · owner 29 Oct 2026] POST /stores — add a branch under the same owner (PartnerService.addBranch).
+   * Owner only (a manager or staff member never adds one), with a fresh "confirm it's you" (a branch is a new weekly
+   * fee in the owner's name), the weekly fee shown and ticked for THIS branch, and a modest rate limit on top of
+   * the per-owner cap. The branch waits for approval like any store; the owner then switches to it (x-vendor-id) to
+   * set its hours, delivery area, published phone, food handlers tick and MMG details, each through its usual route.
+   */
+  app.post('/stores', { ...auth, config: { rateLimit: { max: 10, timeWindow: '1 hour' } } }, async (request, reply) => {
+    await requireVendor(app, request, 'OWNER');
+    // [REVIEW-PARTNER] Answered before the step-up; the service refuses it too.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
+    const body = z.object({ business: businessSchema, weeklyFeeAck: weeklyFeeAckSchema.optional() }).strict().parse(request.body);
+    assertStorePinInMarket(body.business.latitude, body.business.longitude);
+    await assertStoreNameAllowed(app.prisma, request.user.userId, body.business);
+    await requireStepUp(app, request);
+    // [Row 628] A branch is a new weekly fee: the tick is required from every client, and refused for other words.
+    assertWeeklyFeeAck(true, body.weeklyFeeAck);
+    const branch = await new PartnerService(app.prisma, notifications).addBranch(
+      request.user.userId, body.business,
+      { weeklyFeeAck: body.weeklyFeeAck!, ip: request.ip, surface: consentSurfaceOf(request) },
+    );
+    reply.code(201);
+    return { success: true, data: { id: branch.id, name: branch.name, status: branch.status } };
   });
 
   // =========================================================================

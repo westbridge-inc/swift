@@ -62,7 +62,7 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'modules/notification/marketing-message.ts': { count: 1, why: INTERNAL },
   'modules/notification/notification.service.ts': { count: 3, why: INTERNAL },
   'modules/order/statement.ts': { count: 1, why: OWN },
-  'modules/partner/partner.routes.ts': { count: 1, why: OWN },
+  'modules/partner/business-input.ts': { count: 1, why: OWN },
   'modules/rating/vendor-review-visibility.ts': { count: 1, why: INTERNAL },
   'modules/review/content-pack.ts': { count: 1, why: INTERNAL },
   'modules/safety/deletion-hold.ts': { count: 2, why: INTERNAL },

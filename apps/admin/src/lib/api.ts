@@ -397,6 +397,17 @@ export const featureVendor = (id: string, featured: boolean) =>
 export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/subscriptions?${params || 'limit=50'}`);
 // [A-12] The reason is REQUIRED — a waiver with no stated reason is revenue
 // given away with no record of why.
+/** [CHAINS] A chain deal: the weekly fee Swift negotiated for each branch of one owner. Never raises a fee; a second
+ *  admin approves it; it applies from each branch's next weekly fee. */
+export type ChainDealOutcome = 'APPLIED' | 'UNCHANGED' | 'WOULD_RAISE' | 'PAYMENT_IN_FLIGHT' | 'NOT_BILLED' | 'OTHER_CURRENCY' | 'NO_FEE_YET';
+export interface ChainDealResult {
+  dealWeeklyRate: number;
+  currencyCode: string;
+  branches: Array<{ vendorId: string; vendorName: string; from: number | null; to: number | null; outcome: ChainDealOutcome }>;
+}
+export const setChainDeal = (ownerId: string, weeklyRate: number, reason: string): Promise<Envelope<ChainDealResult>> =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/deal-rate`, { method: 'PUT', body: JSON.stringify({ weeklyRate, reason }), reason });
+
 export const waiveSubscriptionFee = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 // [M-08] The server REQUIRES an Idempotency-Key on a top-up: a retry after a

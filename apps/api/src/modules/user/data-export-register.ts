@@ -343,7 +343,10 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'storeOwnership', model: 'VendorOwner', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'createdAt'],
+    // [CHAINS] The chain deal is the owner's own commercial term: its weekly fee, currency and when it was set. Who at
+    // Swift set it and the staff's reason are Swift's internal record.
+    fields: ['id', 'userId', 'createdAt', 'dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt'],
+    omit: { dealReason: 'INTERNAL_NOTE', dealSetBy: 'OTHER_PERSON' },
   },
   {
     // [REVIEW-M S3 on #2027 · follow-up] The record of each store the person OWNS, read through the ownership
