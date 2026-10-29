@@ -4989,7 +4989,7 @@ export class BillingService {
    * finds the rate already at target and skips before it gets here.
    */
   private async applyTierChange(
-    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
+    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string; customRate?: Prisma.Decimal | null },
     target: PartnerRate,
     note: string,
     transaction?: Prisma.TransactionClient,
@@ -5000,8 +5000,9 @@ export class BillingService {
       // [G S4-2] A negotiated rate or a waived fee is a human decision: one set after the caller read
       // the plan (an operator's waive, the USD migration's customRate) leaves weeklyRate as it was, so
       // the compare-and-set checks both too and the move loses.
+      // [CHAINS] A chain-deal branch moves down its tier with its deal in place: the set names the deal it read.
       const won = await tx.subscription.updateMany({
-        where: { id: sub.id, weeklyRate: sub.weeklyRate, customRate: null, feeWaived: false },
+        where: { id: sub.id, weeklyRate: sub.weeklyRate, customRate: sub.customRate ?? null, feeWaived: false },
         data: { weeklyRate: target.rate },
       });
       if (won.count === 0) return false;
@@ -5034,7 +5035,7 @@ export class BillingService {
    */
   private async retierInTx(
     tx: Prisma.TransactionClient,
-    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
+    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string; customRate?: Prisma.Decimal | null },
     target: PartnerRate,
     note: string,
     opts: { now: Date; lowerTarget?: PartnerRate; basis: Record<string, unknown> },
@@ -5170,6 +5171,7 @@ export class BillingService {
             owner: {
               select: {
                 user: { select: { countryCode: true, id: true } },
+                dealWeeklyRate: true,
               },
             },
           },
@@ -5183,7 +5185,11 @@ export class BillingService {
         if (!sub.vendor) continue;
         // A negotiated rate or a waived fee is a human decision — a catalogue
         // growing past a threshold must never silently overwrite one.
-        if (sub.customRate != null || sub.feeWaived) continue;
+        // [CHAINS · REVIEW-M #2211 S3-1] A branch on its owner's chain deal still follows its tier DOWN: the tier
+        // rate is what the deal is never above (weeklyFeeFor charges the lower of the two). A rise is never moved in
+        // for it (holdFeeRiseInTx: a negotiated rate is not a rise), so it keeps the deal.
+        const chainDeal = sub.customRate != null && sub.vendor.owner.dealWeeklyRate != null;
+        if ((sub.customRate != null && !chainDeal) || sub.feeWaived) continue;
 
         const tiers = await this.countryConfig.getSubscriptionTiers(sub.vendor.owner.user.countryCode);
         const activeListings = await this.prisma.item.count({

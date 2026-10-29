@@ -3,6 +3,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { lockVendorActivationBilling } from '../billing/billing-access';
 import { ACTIVE_CONFIRMATION_STATES, feeReversalOpenInTx, lateCardApprovalHeldInTx } from '../billing/dunning-clock';
 import { CountryConfigService } from '../country/country-config.service';
+import { weeklyFeeAmount } from '../billing/subscription-fee';
 
 // ---------------------------------------------------------------------------
 // [CHAINS · owner 29 Oct 2026] A CHAIN DEAL: the weekly fee Swift negotiated with
@@ -93,7 +94,7 @@ export async function chainOf(prisma: PrismaClient, ownerId: string, tenantId: s
         id: v.subscription.id, status: v.subscription.status, currencyCode: v.subscription.currencyCode, feeWaived: v.subscription.feeWaived,
         weeklyRate: Number(v.subscription.weeklyRate),
         customRate: v.subscription.customRate === null ? null : Number(v.subscription.customRate),
-        weeklyFee: v.subscription.feeWaived ? 0 : Number(v.subscription.customRate ?? v.subscription.weeklyRate),
+        weeklyFee: v.subscription.feeWaived ? 0 : weeklyFeeAmount(v.subscription),
         trialEndDate: v.subscription.trialEndDate, nextBillingDate: v.subscription.nextBillingDate,
       } : null,
     })),
@@ -137,15 +138,16 @@ export async function setChainDeal(
       const sub = vendor.subscription;
       const row = (outcome: BranchDealOutcome, to: number | null = null): BranchDealRow => ({
         vendorId: vendor.id, vendorName: vendor.name, subscriptionId: sub?.id ?? null, status: sub?.status ?? null,
-        from: sub ? Number(sub.customRate ?? sub.weeklyRate) : null, to, outcome,
+        from: sub ? weeklyFeeAmount(sub) : null, to, outcome,
       });
       // Not live yet: the branch is born on the deal when Swift approves it (SubscriptionService.createRow).
       if (!sub) { branches.push(row('NO_FEE_YET')); continue; }
-      const from = Number(sub.customRate ?? sub.weeklyRate);
+      // What the branch is charged now: its custom rate, never above its tier rate (weeklyFeeFor).
+      const from = weeklyFeeAmount(sub);
       if (NOT_BILLED.includes(sub.status) || sub.feeWaived) { branches.push(row('NOT_BILLED', sub.feeWaived ? 0 : null)); continue; }
       if (sub.currencyCode !== currencyCode) { branches.push(row('OTHER_CURRENCY', from)); continue; }
       if (input.weeklyRate > from) { branches.push(row('WOULD_RAISE', from)); continue; }
-      if (sub.customRate !== null && from === input.weeklyRate) { branches.push(row('UNCHANGED', from)); continue; }
+      if (sub.customRate !== null && Number(sub.customRate) === input.weeklyRate) { branches.push(row('UNCHANGED', from)); continue; }
       if (await paymentInFlight(tx, sub.id)) { branches.push(row('PAYMENT_IN_FLIGHT', from)); continue; }
       await tx.subscription.update({ where: { id: sub.id }, data: { customRate: input.weeklyRate } });
       const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;

@@ -188,9 +188,50 @@ describe('[CHAINS] shared chain trial', () => {
     const b = await makeStoreFor(h2.id);
     expect((await subscriptions.startTrialForVendor(b.vendor.id)).status, 'the exception trial').toBe('TRIAL');
     await prisma.exceptionGrant.update({ where: { id: ex.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-    // h2's next store: the running VENDOR grant is h1's, not h2's own, so nothing is shared.
+    // h2's own exception trial is used up (a store of h2 churned) while store B's trial still runs: h2's next store
+    // finds a running VENDOR grant, but it is h1's, not h2's own, so nothing is shared.
+    await prisma.trialGrant.updateMany({ where: { accountId: h2.id, role: `VENDOR:EX:${h2.id}` }, data: { status: 'CONSUMED' } });
     const c = await makeStoreFor(h2.id);
     expect((await subscriptions.startTrialForVendor(c.vendor.id)).status).toBe('ACTIVE');
+  });
+
+  for (const scope of ['FOUNDER_OVERRIDE', 'MULTI_LOCATION_VENDOR']) {
+    it(`a live ${scope} exception never gives a branch a fresh trial: every branch shares the owner's, one grant, every approval succeeds`, async () => {
+      const owner = await makeUser();
+      const other = await makeUser();
+      const clusterId = await sameId(owner.id, other.id);
+      await exception(clusterId, scope);
+      const first = await makeStoreFor(owner.id);
+      const firstSub = await subscriptions.startTrialForVendor(first.vendor.id);
+      expect(firstSub.status).toBe('TRIAL');
+      const end = firstSub.trialEndDate!.getTime();
+      for (let n = 0; n < 3; n += 1) {
+        const b = await makeStoreFor(owner.id);
+        const sub = await subscriptions.startTrialForVendor(b.vendor.id);
+        expect(sub.status, `branch ${n + 2}`).toBe('TRIAL');
+        expect(sub.trialEndDate!.getTime(), `branch ${n + 2} shares the owner's end`).toBe(end);
+      }
+      expect(await prisma.trialGrant.count({ where: { accountId: owner.id } }), 'one grant for the whole chain').toBe(1);
+    });
+  }
+
+  it('an owner whose first store trial came from a founder exception shares it with their branches too', async () => {
+    const h1 = await makeUser();
+    const h2 = await makeUser();
+    const clusterId = await sameId(h1.id, h2.id);
+    const a = await makeStoreFor(h1.id);
+    await subscriptions.startTrialForVendor(a.vendor.id);
+    await exception(clusterId, 'MULTI_LOCATION_VENDOR');
+    const b = await makeStoreFor(h2.id);
+    const bSub = await subscriptions.startTrialForVendor(b.vendor.id);
+    expect(bSub.status).toBe('TRIAL');
+    for (let n = 0; n < 2; n += 1) {
+      const c = await makeStoreFor(h2.id);
+      const cSub = await subscriptions.startTrialForVendor(c.vendor.id);
+      expect(cSub.status).toBe('TRIAL');
+      expect(cSub.trialEndDate!.getTime()).toBe(bSub.trialEndDate!.getTime());
+    }
+    expect(await prisma.trialGrant.count({ where: { accountId: h2.id } })).toBe(1);
   });
 });
 
@@ -269,6 +310,9 @@ describe('[CHAINS] a chain deal is born on a new branch', () => {
     const branchSub = await subscriptions.startTrialForVendor(branch.vendor.id);
     expect(Number(branchSub.customRate)).toBe(tier - 2000);
     expect(Number(branchSub.weeklyRate)).toBe(tier);
+    // [REVIEW-M S4-3] Its fee history says why it pays the deal.
+    const born = await prisma.billingEvent.findMany({ where: { subscriptionId: branchSub.id, type: 'TIER_CHANGE' } });
+    expect(born.map((e) => Number(e.amount))).toEqual([tier - 2000]);
 
     await prisma.vendorOwner.update({ where: { id: first.ownerId }, data: { dealWeeklyRate: tier + 500 } });
     const third = await makeStoreFor(owner.id);

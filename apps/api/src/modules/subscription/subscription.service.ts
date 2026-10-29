@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuthority } from '../integrity/identity-review';
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
+import { lockVendorActivationBilling } from '../billing/billing-access';
 import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -21,6 +22,8 @@ import { log } from '../../utils/logger';
 // ---------------------------------------------------------------------------
 
 export const TRIAL_DAYS = 14;
+/** The trial ledger tenant every store's trial grant is written under (withActivation -> createRow). */
+export const STORE_TRIAL_TENANT = 'swift-default';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {
@@ -179,7 +182,7 @@ export class SubscriptionService {
       const activation = await this.activation(entity, tx);
       const sub = payer && !('vendorId' in entity)
         ? await this.moverRow(entity, payer, activation, tx)
-        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, 'swift-default');
+        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, STORE_TRIAL_TENANT);
       return apply(tx, sub);
     };
     return '$transaction' in db ? db.$transaction(run) : run(db);
@@ -307,19 +310,30 @@ export class SubscriptionService {
     const decision = await law.decide(human.userId, human.role, tenantId);
     if (!decision.grant && decision.reason === 'REVIEW_REQUIRED') throw new IdentityReviewRequiredError();
     const now = new Date();
-    // [CHAINS · owner 29 Oct 2026] A branch of a chain shares the owner's running trial: it ends the same day.
-    const shared = !decision.grant && decision.reason === 'TRIAL_ACTIVE_ELSEWHERE' && 'vendorId' in entity
-      ? await sharedChainTrialEnd(tx, { vendorId: entity.vendorId, userId: human.userId, clusterId: decision.clusterId, tenantId, now })
+    // [CHAINS · owner 29 Oct 2026] A store whose owner ALREADY holds a running store trial of their own (ordinary
+    // or a founder exception's) is a branch of that owner: it shares the running trial (same end day) while another
+    // of the owner's stores is in it, and is billed from approval after. Never a fresh 14 days, never a second
+    // grant (REVIEW-M #2211 S3-2: a second exception grant for the same account collides with the first). Only an
+    // account with no running trial of its own may be granted one (FIRST_TRIAL, or a founder exception).
+    const vendorTrialOpen = 'vendorId' in entity && (decision.grant || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE');
+    const ownGrant = vendorTrialOpen ? await ownRunningStoreTrial(tx, human.userId, tenantId, now) : null;
+    const branchOf = ownGrant && 'vendorId' in entity ? await tx.vendor.findUnique({ where: { id: entity.vendorId }, select: { ownerId: true } }) : null;
+    const shared = ownGrant && branchOf && 'vendorId' in entity
+      ? await sharedChainTrialEnd(tx, { ownerId: branchOf.ownerId, exceptVendorId: entity.vendorId, grantEndsAt: ownGrant.endsAt, now })
       : null;
-    const trial = decision.grant || shared !== null;
-    const end = decision.grant ? new Date(now.getTime() + TRIAL_DAYS * DAY_MS) : shared ?? now;
-    if (!trial && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
+    const fresh = decision.grant && !ownGrant;
+    const trial = fresh || shared !== null;
+    const end = fresh ? new Date(now.getTime() + TRIAL_DAYS * DAY_MS) : shared ?? now;
+    if (!trial && !decision.grant && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
       await tx.enforcementAction.create({ data: {
         accountId: human.userId, clusterId: decision.clusterId, level: 'DENY_TRIAL', reasonCode: decision.reason,
         signalsFired: [{ note: 'trial law at activation', role: human.role }] as never, decidedBy: 'SYSTEM',
       } });
     }
-    // [CHAINS] The owner's chain deal, when it is not above this store's own fee (it never raises a fee).
+    // [CHAINS] The owner's chain deal, when it is not above this store's own fee (it never raises a fee). Read under
+    // the settlement locks a deal is written under (setChainDeal), so a branch activated while a deal is being set
+    // is born on it or waits for it (REVIEW-M #2211 S4-4).
+    if ('vendorId' in entity) await lockVendorActivationBilling(tx, human.userId);
     const deal = 'vendorId' in entity ? await chainDealFor(tx, entity.vendorId, weeklyRate, currencyCode) : null;
     const sub = await tx.subscription.create({ data: {
       ...entity, type, weeklyRate, currencyCode, billingMethod: 'CASH', currentPeriodStart: now,
@@ -327,7 +341,13 @@ export class SubscriptionService {
       trialEndDate: end, currentPeriodEnd: end, nextBillingDate: end,
       ...(deal !== null ? { customRate: deal } : {}),
     } });
-    if (decision.grant) await law.recordGrant(tx, {
+    // [REVIEW-M #2211 S4-3] A branch born on its owner's chain deal says so in its fee history.
+    if (deal !== null) await tx.billingEvent.create({ data: {
+      subscriptionId: sub.id, type: 'TIER_CHANGE', amount: deal, currencyCode,
+      idempotencyKey: `chaindeal:${sub.id}:born:${weeklyRate}->${deal}`,
+      note: `Chain deal: this store starts on its owner's negotiated weekly fee ${deal} (its own fee is ${weeklyRate}).`,
+    } });
+    if (fresh) await law.recordGrant(tx, {
       accountId: human.userId, clusterId: decision.clusterId, role: human.role,
       tenantId, trialDays: TRIAL_DAYS, exception: decision.reason === 'EXCEPTION_GRANT',
     });
@@ -362,37 +382,38 @@ export class SubscriptionService {
   }
 }
 
-/**
- * [CHAINS · owner 29 Oct 2026: "shared chain trial"] A store added to a chain while the owner's free trial runs shares
- * that trial: it ends when the trial does — never a fresh 14 days per branch, and no second trial grant. Null (billed
- * from approval, as before) unless ALL of these hold:
- *  - the trial law found the trial running elsewhere (decide(): TRIAL_ACTIVE_ELSEWHERE, not consumed, held or owed);
- *  - the running VENDOR grant is THIS account's own (another account of the same person gets nothing from it);
- *  - another store of the SAME owner is in a live trial right now.
- * The end is the earliest of those stores' trial ends and the grant's own end: a branch never outlives the trial.
- */
-export async function sharedChainTrialEnd(
-  tx: Prisma.TransactionClient,
-  input: { vendorId: string; userId: string; clusterId: string; tenantId: string; now: Date },
-): Promise<Date | null> {
-  const store = await tx.vendor.findUnique({ where: { id: input.vendorId }, select: { ownerId: true, owner: { select: { userId: true } } } });
-  if (!store || store.owner.userId !== input.userId) return null;
-  const grant = await tx.trialGrant.findFirst({
-    where: { tenantId: input.tenantId, clusterId: input.clusterId, role: 'VENDOR', status: 'ACTIVE', accountId: input.userId, endsAt: { gt: input.now } },
+/** [CHAINS] The trial grant this account is running for its stores, if any: its own ordinary VENDOR grant or a founder
+ *  exception's (`VENDOR:EX:<account>`), ACTIVE and not past its end. Any cluster: a merge can move it. */
+export async function ownRunningStoreTrial(
+  db: Prisma.TransactionClient | PrismaClient, userId: string, tenantId: string, now: Date,
+): Promise<{ endsAt: Date } | null> {
+  return db.trialGrant.findFirst({
+    where: { tenantId, accountId: userId, role: { in: ['VENDOR', `VENDOR:EX:${userId}`] }, status: 'ACTIVE', endsAt: { gt: now } },
     orderBy: { endsAt: 'asc' },
     select: { endsAt: true },
   });
-  if (!grant) return null;
+}
+
+/**
+ * [CHAINS · owner 29 Oct 2026: "shared chain trial"] A store added to a chain while the owner's free trial runs shares
+ * that trial: it ends when the trial does. The caller has found the owner's OWN running store trial (ownRunningStoreTrial);
+ * this finds another store of the SAME owner in a live trial now, and answers the earlier of that store's trial end and
+ * the grant's own end (a branch never outlives the trial), or null (no store is in the trial: billed from approval).
+ */
+export async function sharedChainTrialEnd(
+  tx: Prisma.TransactionClient | PrismaClient,
+  input: { ownerId: string; exceptVendorId?: string; grantEndsAt: Date; now: Date },
+): Promise<Date | null> {
   const sibling = await tx.subscription.findFirst({
     where: {
-      vendor: { ownerId: store.ownerId }, vendorId: { not: input.vendorId },
+      vendor: { ownerId: input.ownerId }, ...(input.exceptVendorId ? { vendorId: { not: input.exceptVendorId } } : {}),
       status: 'TRIAL', isTrialActive: true, trialEndDate: { gt: input.now },
     },
     orderBy: { trialEndDate: 'asc' },
     select: { trialEndDate: true },
   });
   if (!sibling?.trialEndDate) return null;
-  return sibling.trialEndDate < grant.endsAt ? sibling.trialEndDate : grant.endsAt;
+  return sibling.trialEndDate < input.grantEndsAt ? sibling.trialEndDate : input.grantEndsAt;
 }
 
 /** [CHAINS] The owner's chain deal for a store about to be priced at `weeklyRate`: the deal when it is in the same
@@ -415,19 +436,10 @@ export async function chainDealFor(
 export async function chainTrialPreview(prisma: PrismaClient, userId: string, now: Date): Promise<Date | null> {
   const owner = await prisma.vendorOwner.findUnique({ where: { userId }, select: { id: true } });
   if (!owner) return null;
-  const law = await previewTrial(prisma, userId, 'VENDOR', 'swift-default');
-  if (law.reason !== 'TRIAL_ACTIVE_ELSEWHERE') return null;
-  const grant = await prisma.trialGrant.findFirst({
-    where: { tenantId: 'swift-default', role: 'VENDOR', status: 'ACTIVE', accountId: userId, endsAt: { gt: now } },
-    orderBy: { endsAt: 'asc' },
-    select: { endsAt: true },
-  });
-  if (!grant) return null;
-  const sibling = await prisma.subscription.findFirst({
-    where: { vendor: { ownerId: owner.id }, status: 'TRIAL', isTrialActive: true, trialEndDate: { gt: now } },
-    orderBy: { trialEndDate: 'asc' },
-    select: { trialEndDate: true },
-  });
-  if (!sibling?.trialEndDate) return null;
-  return sibling.trialEndDate < grant.endsAt ? sibling.trialEndDate : grant.endsAt;
+  // Store trials live in the default tenant's trial ledger: withActivation creates every store's row there.
+  const law = await previewTrial(prisma, userId, 'VENDOR', STORE_TRIAL_TENANT);
+  if (law.reason !== 'TRIAL_ACTIVE_ELSEWHERE' && law.reason !== 'EXCEPTION_GRANT') return null;
+  const own = await ownRunningStoreTrial(prisma, userId, STORE_TRIAL_TENANT, now);
+  if (!own) return null;
+  return sharedChainTrialEnd(prisma, { ownerId: owner.id, grantEndsAt: own.endsAt, now });
 }

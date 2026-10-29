@@ -27,20 +27,28 @@ export interface Waivable extends Priced {
   feeWaived?: boolean | null;
 }
 
+const numberOf = (raw: unknown): number => {
+  if (raw === null || raw === undefined) return NaN;
+  return typeof raw === 'number' ? raw : Number((raw as { toString(): string }).toString());
+};
+
 /**
  * THE price, as the biller reads it: an explicit custom rate wins over the
- * tier's list rate. Returned in whatever shape it was stored (Prisma `Decimal`
- * or number) so a caller that needs exactness keeps it.
+ * tier's list rate — but is never ABOVE it. [CHAINS · REVIEW-M #2211 S3-1] A
+ * custom rate is a negotiated price (a chain deal) or a frozen one (the USD
+ * migration freezes it AT the list rate); when the tier's own rate is lower
+ * (the branch moved down a tier), the lower one is charged, so a discount can
+ * never become a surcharge. Returned in whatever shape it was stored (Prisma
+ * `Decimal` or number) so a caller that needs exactness keeps it.
  */
 export function weeklyFeeFor<T>(sub: { weeklyRate: T; customRate?: T | null }): T {
-  return sub.customRate ?? sub.weeklyRate;
+  if (sub.customRate === null || sub.customRate === undefined) return sub.weeklyRate;
+  return numberOf(sub.weeklyRate) < numberOf(sub.customRate) ? sub.weeklyRate : sub.customRate;
 }
 
 /** The same price as a number, for display and arithmetic. */
 export function weeklyFeeAmount(sub: Priced): number {
-  const raw = (sub.customRate ?? sub.weeklyRate) as { toString(): string } | number | null | undefined;
-  if (raw === null || raw === undefined) return 0;
-  const n = typeof raw === 'number' ? raw : Number(raw.toString());
+  const n = numberOf(weeklyFeeFor({ weeklyRate: sub.weeklyRate, customRate: sub.customRate }));
   return Number.isFinite(n) ? n : 0;
 }
 
