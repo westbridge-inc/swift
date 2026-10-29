@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ItemSlots } from '@/lib/customer';
 import { listingConfirmsInstantly } from '@/lib/app-rules';
-import { visitModeFor, type PendingAppointment, type VisitMode } from '@/lib/pending-appointments';
+import { visitModeFor, type HeldTime, type VisitMode } from '@/lib/held-time';
 import { SlotPicker } from './slot-picker';
 import styles from './booking.module.css';
 
@@ -22,9 +22,9 @@ export function BookingChoice({
   itemId: string;
   vendorName: string;
   vendorAddress: string | null;
-  initial?: PendingAppointment | null;
+  initial?: HeldTime | null;
   disabled?: boolean;
-  onChange: (_appointment: PendingAppointment | null) => void;
+  onChange: (_held: HeldTime | null) => void;
 }) {
   const [slot, setSlot] = useState<string | null>(initial?.itemId === itemId ? initial.slotStart : null);
   const [answer, setAnswer] = useState<ItemSlots | null>(null);

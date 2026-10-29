@@ -5,7 +5,7 @@ import { X } from 'lucide-react';
 import { formatAmount } from '@/lib/money';
 import type { MenuItem } from '@/lib/customer';
 import { formatAppointmentClock } from '@/lib/appointmentTime';
-import type { PendingAppointment } from '@/lib/pending-appointments';
+import type { HeldTime } from '@/lib/held-time';
 import { Sheet } from '@/components/sheet';
 import { BookingChoice } from '@/components/booking/booking-choice';
 import styles from './storefront.module.css';
@@ -26,10 +26,10 @@ export function BookingSheet({
   price: number | null;
   busy: boolean;
   error: string | null;
-  onBook: (_appointment: PendingAppointment) => void;
+  onBook: (_held: HeldTime) => void;
   onClose: () => void;
 }) {
-  const [picked, setPicked] = useState<PendingAppointment | null>(null);
+  const [picked, setPicked] = useState<HeldTime | null>(null);
   return (
     <Sheet labelledBy="booking-sheet-title" onClose={onClose} className={styles.sheet}>
       <div className={styles.sheetHeader}>

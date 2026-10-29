@@ -13,7 +13,7 @@ import {
 import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
-import { savePendingAppointment, type PendingAppointment } from '@/lib/pending-appointments';
+import { saveHeldTime, type HeldTime } from '@/lib/held-time';
 import { lazyRetry } from '@/lib/chunk-retry';
 import {
   addToCart,
@@ -706,7 +706,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
    * picked time is held for this tab until checkout sends it. A cart with
    * other lines is emptied only when the customer says so.
    */
-  const confirmBooking = async (item: DisplayItem, appointment: PendingAppointment) => {
+  const confirmBooking = async (item: DisplayItem, held: HeldTime) => {
     if (bookingBusy || cartMutationLockedByCheckout()) return;
     if (cartBusyNow()) { setBookingError('Your cart is still updating. Try again in a moment.'); return; }
     const lines = cartNow.current?.items ?? [];
@@ -720,7 +720,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         if (lines.length > 0) await clearCart();
         await addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 });
       }
-      savePendingAppointment(appointment);
+      saveHeldTime(held);
       refreshShellCart();
       setBookingItem(null);
       router.push('/checkout');
@@ -1289,7 +1289,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             price={itemPrice(bookingItem)}
             busy={bookingBusy}
             error={bookingError}
-            onBook={(appointment) => void confirmBooking(bookingItem, appointment)}
+            onBook={(held) => void confirmBooking(bookingItem, held)}
             onClose={closeBooking}
           />
         </Suspense>

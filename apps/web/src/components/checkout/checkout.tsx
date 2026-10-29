@@ -58,12 +58,12 @@ import {
 } from '@/lib/app-rules';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  clearPendingAppointment,
+  clearHeldTime,
   isHomeVisit,
-  readPendingAppointment,
-  savePendingAppointment,
-  type PendingAppointment,
-} from '@/lib/pending-appointments';
+  readHeldTime,
+  saveHeldTime,
+  type HeldTime,
+} from '@/lib/held-time';
 import styles from '@/app/(app)/cart/cart.module.css';
 import { lazyRetry } from '@/lib/chunk-retry';
 
@@ -117,7 +117,7 @@ export function CheckoutPanel() {
   const booking = bookingsOnly(cart?.items);
   const pickup = orderingMode === 'PICKUP' && !booking;
   // [BOOK-S6b] The time picked on the store page (held for this tab), or picked here.
-  const [appointment, setAppointment] = useState<PendingAppointment | null>(null);
+  const [heldTime, setHeldTime] = useState<HeldTime | null>(null);
   const [changingTime, setChangingTime] = useState(false);
   // [BOOK-S6b] A placed booking: the checkout answer's own words (confirmed vs requested).
   const [placed, setPlaced] = useState<{ orderId: string | null; title: string; copy: string } | null>(null);
@@ -217,10 +217,10 @@ export function CheckoutPanel() {
         return block('Book one appointment at a time on the web. Remove the other bookings to continue.');
       }
       if (c.items[0]!.quantity !== 1) {
-        return block('A booking is for one appointment. Remove it and book it again from the store page.');
+        return block('A booking is for one heldTime. Remove it and book it again from the store page.');
       }
       const only = c.items[0]!;
-      setAppointment((current) => (current?.itemId === only.itemId ? current : readPendingAppointment(only.itemId)));
+      setHeldTime((current) => (current?.itemId === only.itemId ? current : readHeldTime(only.itemId)));
     } else if (fulfillmentModes.size !== 1 || !fulfillmentModes.has('DELIVERY')) {
       return block(fulfillmentModes.has('PICKUP')
         ? 'Pickup-only items are ordered in the Swift app for now. Remove those lines to order on the web.'
@@ -335,7 +335,7 @@ export function CheckoutPanel() {
   const minimumShortfall = Math.max(0, Number(cart?.minimumOrderAmount ?? 0) - serverSubtotal);
   const hasDestinationQuote = Boolean(addrId && cart?.deliveryAddress?.id === addrId);
   // [BOOK-S6b] A booking needs an address only when they come to you.
-  const homeVisit = booking && isHomeVisit(appointment);
+  const homeVisit = booking && isHomeVisit(heldTime);
   const needsAddress = booking ? homeVisit : !pickup;
   // Pickup needs no destination: its quote is the price. So does a booking at the business.
   const hasQuote = !needsAddress || hasDestinationQuote;
@@ -360,16 +360,16 @@ export function CheckoutPanel() {
 
   /** [BOOK-S6b] A different time (or place) is a different booking request: like
    *  the tip, it starts a fresh checkout attempt, and never under an unresolved one. */
-  function chooseAppointment(next: PendingAppointment | null) {
-    const same = next && appointment && next.itemId === appointment.itemId && next.slotStart === appointment.slotStart
-      && next.mode === appointment.mode && next.instant === appointment.instant;
-    if (same || (!next && !appointment)) return;
+  function chooseHeldTime(next: HeldTime | null) {
+    const same = next && heldTime && next.itemId === heldTime.itemId && next.slotStart === heldTime.slotStart
+      && next.mode === heldTime.mode && next.instant === heldTime.instant;
+    if (same || (!next && !heldTime)) return;
     if (checkoutBusy.current || cartMutationLockedByCheckout()) return;
     resetCheckoutReplay();
     setError(null);
-    setAppointment(next);
-    if (next) savePendingAppointment(next);
-    else clearPendingAppointment();
+    setHeldTime(next);
+    if (next) saveHeldTime(next);
+    else clearHeldTime();
   }
 
   function cartMutationLockedByCheckout() {
@@ -464,7 +464,7 @@ export function CheckoutPanel() {
   async function placeOrder() {
     if (!cart?.items?.length || checkoutBusy.current || cartSafety !== 'safe' || (needsAddress && !addrId) || !meetsMinimum) return;
     // [BOOK-S6b] A booking is sent with its time, or not at all (the server's SLOT_REQUIRED).
-    if (booking && !appointment) return;
+    if (booking && !heldTime) return;
     checkoutBusy.current = true;
     setBusy(true); setError(null); setNoRiders(false);
     try {
@@ -505,8 +505,8 @@ export function CheckoutPanel() {
       const pickupOrder = pickup ? pickupChoices(quoteStoreIds(liveCart.items)) : null;
       // [BOOK-S6b] The booking's time and place, exactly as picked: the server judges
       // it (free, in the future, notice, where) in the same commit that places it.
-      const bookingOrder = booking && appointment && bookingsOnly(liveCart.items) && liveCart.items[0]!.itemId === appointment.itemId
-        ? { itemId: appointment.itemId, slotStart: appointment.slotStart, ...(appointment.mode ? { mode: appointment.mode } : {}) }
+      const bookingOrder = booking && heldTime && bookingsOnly(liveCart.items) && liveCart.items[0]!.itemId === heldTime.itemId
+        ? { itemId: heldTime.itemId, slotStart: heldTime.slotStart, ...(heldTime.mode ? { mode: heldTime.mode } : {}) }
         : null;
       if (booking && !bookingOrder) {
         setChangingTime(true);
@@ -558,7 +558,7 @@ export function CheckoutPanel() {
       if (bookingOrder) {
         // [BOOK-S6b · like #2194] What the ANSWER says the booking is: "confirmed" only when its
         // appointment order came back ACCEPTED (the business's standing acceptance), else requested.
-        clearPendingAppointment();
+        clearHeldTime();
         const outcome = placedBookingOutcome(res);
         const submittedMethod = body.paymentMethod;
         setPlaced({
@@ -612,8 +612,8 @@ export function CheckoutPanel() {
       // [BOOK-S6b] The time went (another customer booked it, or it is no longer offered):
       // it is let go and the free times open again; the server's words say why.
       if (e instanceof ApiRequestError && (e.code === 'SLOT_TAKEN' || e.code === 'SLOT_REQUIRED')) {
-        clearPendingAppointment();
-        setAppointment(null);
+        clearHeldTime();
+        setHeldTime(null);
         setChangingTime(true);
       }
       // The server's own answer (order.service.ts): 409 DELIVERY_NO_RIDERS.
@@ -712,7 +712,7 @@ export function CheckoutPanel() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void mutateCart(async () => { if (l.fulfillment === 'APPOINTMENT') clearPendingAppointment(); await removeCartLine(l.id); })}
+                    onClick={() => void mutateCart(async () => { if (l.fulfillment === 'APPOINTMENT') clearHeldTime(); await removeCartLine(l.id); })}
                     aria-label={`Remove ${l.name} from cart`}
                     className={styles.removeButton}
                   ><Trash2 size={18} /></button>
@@ -725,9 +725,9 @@ export function CheckoutPanel() {
         {booking ? (
           <section className={styles.panel} aria-labelledby="booking-time-title">
             <h2 id="booking-time-title" className={styles.panelTitle}>Your booking</h2>
-            {appointment && !changingTime ? (
+            {heldTime && !changingTime ? (
               <div className={styles.panelStack}>
-                <p className={styles.stateCopy}><b>{formatAppointmentSlot(appointment.slotStart)}</b>{homeVisit ? ' · at your address' : ''}</p>
+                <p className={styles.stateCopy}><b>{formatAppointmentSlot(heldTime.slotStart)}</b>{homeVisit ? ' · at your address' : ''}</p>
                 <button type="button" disabled={busy} onClick={() => setChangingTime(true)} className={`${styles.button} ${styles.buttonSecondary}`}>Change time</button>
               </div>
             ) : (
@@ -737,13 +737,13 @@ export function CheckoutPanel() {
                     itemId={cart.items[0]!.itemId}
                     vendorName={cart.vendor?.name ?? 'the business'}
                     vendorAddress={pickupStore?.address || null}
-                    initial={appointment}
+                    initial={heldTime}
                     disabled={busy}
-                    onChange={chooseAppointment}
+                    onChange={chooseHeldTime}
                   />
                 </Suspense>
-                {appointment ? (
-                  <button type="button" disabled={busy} onClick={() => setChangingTime(false)} className={`${styles.button} ${styles.buttonSecondary}`}>Keep {formatAppointmentSlot(appointment.slotStart)}</button>
+                {heldTime ? (
+                  <button type="button" disabled={busy} onClick={() => setChangingTime(false)} className={`${styles.button} ${styles.buttonSecondary}`}>Keep {formatAppointmentSlot(heldTime.slotStart)}</button>
                 ) : null}
               </div>
             )}
@@ -865,7 +865,7 @@ export function CheckoutPanel() {
           <div className={styles.breakdown}>
             <div className={styles.moneyLine}><span className={styles.moneyLabel}>{booking ? cart.items[0]!.name : `Items (${unitCount})`}</span><strong className={styles.moneyValue}>{money(serverSubtotal)}</strong></div>
             {booking
-              ? <div className={styles.moneyLine}><span className={styles.moneyLabel}>Time</span><strong className={styles.moneyValue}>{appointment ? formatAppointmentSlot(appointment.slotStart) : 'Pick a time'}</strong></div>
+              ? <div className={styles.moneyLine}><span className={styles.moneyLabel}>Time</span><strong className={styles.moneyValue}>{heldTime ? formatAppointmentSlot(heldTime.slotStart) : 'Pick a time'}</strong></div>
               : pickup
               ? <div className={styles.moneyLine}><span className={styles.moneyLabel}>Pickup</span><strong className={styles.moneyValue}>No delivery fee</strong></div>
               : <div className={styles.moneyLine}><span className={styles.moneyLabel}>Delivery fee</span><strong className={styles.moneyValue}>{hasDestinationQuote ? money(deliveryFee) : 'Choose an address for a quote'}</strong></div>}
@@ -883,7 +883,7 @@ export function CheckoutPanel() {
             </p>
           ) : null}
           {booking ? (
-            <p className={styles.payNote}>{bookingSummaryNote({ everyBookingInstant: appointment?.instant === true, payingCash: !payByMmg })}</p>
+            <p className={styles.payNote}>{bookingSummaryNote({ everyBookingInstant: heldTime?.instant === true, payingCash: !payByMmg })}</p>
           ) : null}
           {noRiders && !pickup && !booking ? (
             <div className={styles.noRiders}>
@@ -894,20 +894,20 @@ export function CheckoutPanel() {
               <button type="button" onClick={() => void placeOrder()} disabled={busy || moneyUnreadable} className={`${styles.button} ${styles.buttonSecondary}`}>{payByMmg ? 'Try delivery again' : 'Try cash delivery again'}</button>
             </div>
           ) : (
-            <button type="button" onClick={() => void placeOrder()} disabled={busy || (needsAddress && !addrId) || !meetsMinimum || moneyUnreadable || (booking && !appointment)} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
+            <button type="button" onClick={() => void placeOrder()} disabled={busy || (needsAddress && !addrId) || !meetsMinimum || moneyUnreadable || (booking && !heldTime)} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
               {busy ? (booking ? 'Booking…' : 'Placing…')
                 : booking
                   // [BOOK-S6a rule] "Book now" only when the slots answer said instant and the customer pays cash; else a request.
-                  ? !appointment ? 'Pick a time to book'
+                  ? !heldTime ? 'Pick a time to book'
                     : homeVisit && !addrId ? 'Add your address to book'
                       // The server checks the address first (as a delivery quote is asked for): nothing is booked yet.
                       : homeVisit && !hasDestinationQuote ? 'Check this address'
-                      : `${checkoutButtonLabel({ appointmentOnly: true, pickup: false, everyBookingInstant: appointment.instant === true, payingCash: !payByMmg })} · ${money(total)}`
+                      : `${checkoutButtonLabel({ appointmentOnly: true, pickup: false, everyBookingInstant: heldTime.instant === true, payingCash: !payByMmg })} · ${money(total)}`
                 : !pickup && !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : pickup ? `Place pickup order · ${money(total)}${payByMmg ? ' · pay by MMG' : ''}` : hasDestinationQuote ? (payByMmg ? `Place order · ${money(total)} · pay by MMG` : `Place cash order · ${money(total)}`) : 'Get delivery quote'}
             </button>
           )}
-          {booking && mmgBookingWaitsNote({ appointmentOnly: true, everyBookingInstant: appointment?.instant === true, payingCash: !payByMmg }) ? (
-            <p className={styles.payNote}>{mmgBookingWaitsNote({ appointmentOnly: true, everyBookingInstant: appointment?.instant === true, payingCash: !payByMmg })}</p>
+          {booking && mmgBookingWaitsNote({ appointmentOnly: true, everyBookingInstant: heldTime?.instant === true, payingCash: !payByMmg }) ? (
+            <p className={styles.payNote}>{mmgBookingWaitsNote({ appointmentOnly: true, everyBookingInstant: heldTime?.instant === true, payingCash: !payByMmg })}</p>
           ) : null}
           <p className={styles.payNote}>{payByMmg ? `You’ll pay ${cart.vendor?.name ?? 'the business'} on MMG — Swift never holds your money.` : booking ? 'Pay cash directly to the business when the service is done.' : pickup ? 'Pay in cash when you collect it.' : 'Pay in cash when it arrives.'}</p>
         </section> : null}

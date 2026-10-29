@@ -13,7 +13,7 @@ import { getSessionPrincipal } from './auth';
 
 export type VisitMode = 'AT_BUSINESS' | 'MOBILE';
 
-export interface PendingAppointment {
+export interface HeldTime {
   itemId: string;
   /** ISO instant from the server's own slots answer. */
   slotStart: string;
@@ -25,14 +25,14 @@ export interface PendingAppointment {
   instant?: boolean;
 }
 
-const PREFIX = 'swift_web_appointment';
+const PREFIX = 'swift_web_held_time';
 
 function storageKey(): string | null {
   const principal = getSessionPrincipal();
   return principal ? `${PREFIX}:${principal}` : null;
 }
 
-function valid(value: unknown): value is PendingAppointment {
+function valid(value: unknown): value is HeldTime {
   if (!value || typeof value !== 'object') return false;
   const v = value as { itemId?: unknown; slotStart?: unknown; mode?: unknown; serviceMode?: unknown; instant?: unknown };
   return typeof v.itemId === 'string' && v.itemId.length > 0
@@ -43,7 +43,7 @@ function valid(value: unknown): value is PendingAppointment {
 }
 
 /** The time picked for this listing in this tab, or null (none, another account, unreadable). */
-export function readPendingAppointment(itemId: string): PendingAppointment | null {
+export function readHeldTime(itemId: string): HeldTime | null {
   if (typeof window === 'undefined') return null;
   const key = storageKey();
   if (!key) return null;
@@ -56,18 +56,18 @@ export function readPendingAppointment(itemId: string): PendingAppointment | nul
 }
 
 /** One booking per order: holding a time for one listing replaces any other. */
-export function savePendingAppointment(appointment: PendingAppointment): void {
+export function saveHeldTime(held: HeldTime): void {
   if (typeof window === 'undefined') return;
   const key = storageKey();
-  if (!key || !valid(appointment)) return;
+  if (!key || !valid(held)) return;
   try {
-    window.sessionStorage.setItem(key, JSON.stringify(appointment));
+    window.sessionStorage.setItem(key, JSON.stringify(held));
   } catch {
     // Storage can be disabled: checkout then asks for the time again.
   }
 }
 
-export function clearPendingAppointment(): void {
+export function clearHeldTime(): void {
   if (typeof window === 'undefined') return;
   const key = storageKey();
   try {
@@ -89,7 +89,7 @@ export function visitModeFor(serviceMode: string | undefined, chosen: VisitMode)
 }
 
 /** A visit to the customer's address: the one case a booking needs a delivery address. */
-export function isHomeVisit(appointment: Pick<PendingAppointment, 'mode' | 'serviceMode'> | null | undefined): boolean {
-  if (!appointment) return false;
-  return appointment.mode === 'MOBILE' || (appointment.mode === undefined && (appointment.serviceMode === 'MOBILE' || appointment.serviceMode === 'BOTH'));
+export function isHomeVisit(held: Pick<HeldTime, 'mode' | 'serviceMode'> | null | undefined): boolean {
+  if (!held) return false;
+  return held.mode === 'MOBILE' || (held.mode === undefined && (held.serviceMode === 'MOBILE' || held.serviceMode === 'BOTH'));
 }

@@ -6,7 +6,7 @@ import CheckoutPage from '@/app/(app)/checkout/page';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import { loadItemSheet } from '@/components/storefront/storefront-experience';
-import { addAppointmentDays, appointmentDayKey } from '@/lib/appointmentTime';
+import { addAppointmentDays as addDays, appointmentDayKey as dayKeyOf } from '@/lib/appointmentTime';
 
 // ---------------------------------------------------------------------------
 // [BOOK-S6b · owner C3 28 Oct 2026] Web customers book a Services store's
@@ -24,7 +24,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: state.push, back: state.back, replace: state.replace, refresh: vi.fn() }),
 }));
 
-const TOMORROW = addAppointmentDays(appointmentDayKey(new Date()), 1);
+const TOMORROW = addDays(dayKeyOf(new Date()), 1);
 // 10:00 and 10:30 in Guyana (UTC-4, no daylight saving) tomorrow.
 const SLOT = `${TOMORROW}T14:00:00.000Z`;
 const SLOT_2 = `${TOMORROW}T14:30:00.000Z`;
@@ -63,8 +63,8 @@ const slots = (date: string, extra: Record<string, unknown> = {}) => ({
   date, durationMinutes: 30, slots: date === TOMORROW ? [SLOT, SLOT_2] : [], bookableWeekdays: [0, 1, 2, 3, 4, 5, 6],
   serviceMode: 'AT_BUSINESS', serviceRadiusKm: null, ...extra,
 });
-const holdTime = (appointment: Record<string, unknown>) =>
-  sessionStorage.setItem('swift_web_appointment:c1', JSON.stringify({ itemId: 'i9', slotStart: SLOT, mode: 'AT_BUSINESS', serviceMode: 'AT_BUSINESS', ...appointment }));
+const holdTime = (fields: Record<string, unknown>) =>
+  sessionStorage.setItem('swift_web_held_time:c1', JSON.stringify({ itemId: 'i9', slotStart: SLOT, mode: 'AT_BUSINESS', serviceMode: 'AT_BUSINESS', ...fields }));
 
 beforeAll(() => loadItemSheet());
 
@@ -137,7 +137,7 @@ describe('[BOOK-S6b] the one checkout books an appointment', () => {
     // At the business: no address is priced or sent.
     expect(calls('PUT', '/api/v1/customer/cart/address')).toHaveLength(0);
     // The held time is spent.
-    expect(sessionStorage.getItem('swift_web_appointment:c1')).toBeNull();
+    expect(sessionStorage.getItem('swift_web_held_time:c1')).toBeNull();
     expect(state.push).not.toHaveBeenCalled();
   });
 
@@ -189,7 +189,7 @@ describe('[BOOK-S6b] the one checkout books an appointment', () => {
     expect(await screen.findByText('That slot was just taken — pick another time')).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Pick a time to book' })).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Tomorrow' })).toBeTruthy();
-    expect(sessionStorage.getItem('swift_web_appointment:c1')).toBeNull();
+    expect(sessionStorage.getItem('swift_web_held_time:c1')).toBeNull();
     expect(screen.queryByRole('heading', { name: /Booking (requested|confirmed)/ })).toBeNull();
   });
 
@@ -253,7 +253,7 @@ describe('[BOOK-S6b] Book on the store page', () => {
     fireEvent.click(within(sheet).getByRole('button', { name: /^Book 10:00\sAM · \$2,500$/ }));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/checkout'));
     expect(bodyOf(calls('POST', '/api/v1/customer/cart/items')[0])).toEqual({ vendorId: 'v1', itemId: 'i9', quantity: 1 });
-    expect(JSON.parse(sessionStorage.getItem('swift_web_appointment:c1')!)).toEqual({ itemId: 'i9', slotStart: SLOT, mode: 'AT_BUSINESS', serviceMode: 'AT_BUSINESS' });
+    expect(JSON.parse(sessionStorage.getItem('swift_web_held_time:c1')!)).toEqual({ itemId: 'i9', slotStart: SLOT, mode: 'AT_BUSINESS', serviceMode: 'AT_BUSINESS' });
   });
 
   it('the "Instant confirmation" badge shows only on the server’s instantConfirmation, and the held time remembers it', async () => {
@@ -270,7 +270,7 @@ describe('[BOOK-S6b] Book on the store page', () => {
     fireEvent.click(await within(sheet).findByRole('button', { name: /10:00\sAM/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: /^Book 10:00\sAM/ }));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/checkout'));
-    expect(JSON.parse(sessionStorage.getItem('swift_web_appointment:c1')!).instant).toBe(true);
+    expect(JSON.parse(sessionStorage.getItem('swift_web_held_time:c1')!).instant).toBe(true);
   });
 
   it('a business that offers both lets the customer choose, and the choice is what checkout sends', async () => {
@@ -287,7 +287,7 @@ describe('[BOOK-S6b] Book on the store page', () => {
     fireEvent.click(await within(sheet).findByRole('button', { name: /10:00\sAM/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: /^Book 10:00\sAM/ }));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/checkout'));
-    expect(JSON.parse(sessionStorage.getItem('swift_web_appointment:c1')!)).toMatchObject({ mode: 'MOBILE', serviceMode: 'BOTH' });
+    expect(JSON.parse(sessionStorage.getItem('swift_web_held_time:c1')!)).toMatchObject({ mode: 'MOBILE', serviceMode: 'BOTH' });
   });
 
   it('a cart with other items is emptied only when the customer says so', async () => {
