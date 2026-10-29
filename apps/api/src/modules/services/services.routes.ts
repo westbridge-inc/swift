@@ -40,7 +40,7 @@ import { executeTenantBoundServiceJobTransaction } from './service-job-transacti
 import { canonicalSlotStart } from '../booking/availability';
 import { isServiceJobExclusionViolation } from './provider-time';
 import { registerProviderBookableRoutes } from './provider-bookable.routes';
-import { registerProBookingRoutes, serviceAppointmentViewFor } from './pro-booking.routes';
+import { proBookableFromListOf, registerProBookingRoutes, serviceAppointmentViewFor } from './pro-booking.routes';
 import {
   commandGeneration,
   legacyQuoteSchema,
@@ -505,6 +505,11 @@ export async function servicesRoutes(app: FastifyInstance) {
     // [COORD 18 Oct, option S] The star a customer (or the provider) sees is from whole groups of 5 only; the
     // ranking below still reads the true mean (display only).
     const shown = await shownRatingsFor(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.userId));
+    // [BOOK-P3] Which of these pros a customer can book from their list right now (the phone shows Book
+    // for them, a quote request for everyone): the switch on, a trade with a bookable menu, weekly hours,
+    // at least one active service, and the agreement with the advance-acceptance clause accepted. The
+    // booking routes re-check all of it (pro-booking.routes.ts); this only decides the button.
+    const bookableFromList = await proBookableFromListOf(app.prisma, visible, trade);
     const rankMean = new Map(visible.map((p) => [p.id, p.averageRating]));
 
     const ranked = visible
@@ -530,6 +535,7 @@ export async function servicesRoutes(app: FastifyInstance) {
           selfSkilled: qualifications.length === 0 && licenceOn === null && !licenceRequiredOf.get(provider.id),
           certified: qualifications.length > 0 || licenceOn !== null,
           badges: qualifications.map((qualification) => qualification.type),
+          bookableFromList: bookableFromList.has(provider.id),
           // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
           licenceCheckedOn: qualifications.reduce<Date | null>(
             (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), licenceOn,

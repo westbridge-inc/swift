@@ -13,6 +13,8 @@ import { pickerJobInterval, PRO_MIN_NOTICE_MINUTES, providerCalendar } from '../
 import { QUOTE_JOB_PICKER_BLOCK_MINUTES, serviceJobInterval } from '../modules/services/provider-time';
 import { categoryTakesAppointments, publicServiceCatalog, SERVICE_TRADE_CATALOG, type ServiceTradeId } from '../modules/services/service-catalog';
 import { instantOfGuyanaWallClock } from '../utils/guyana-day';
+import { providerAcceptedMenuAgreement } from '../modules/services/pro-menu-agreement';
+import { PRO_MENU_AGREEMENT } from '../modules/services/pro-menu-agreement-version';
 
 // ---------------------------------------------------------------------------
 // [BOOK-P2 Track P] The pure rules of booking a pro: which categories take
@@ -133,5 +135,75 @@ describe('where the booking takes its locks (no deadlock with a move, the quote 
     const positions = order.map((s) => move.indexOf(s));
     expect(positions.every((p) => p >= 0), String(positions)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+});
+
+describe('[BOOK-P3 · COORD 16:13Z] the agreement gate: fail-closed until BILL-PRO names the clause version', () => {
+  const fakeDb = (latest: { action: string; documentVersion: string } | null) => {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      db: { consentRecord: { findFirst: async (args: unknown) => { calls.push(args); return latest; } } } as unknown as Parameters<typeof providerAcceptedMenuAgreement>[0],
+    };
+  };
+
+  it('no agreement version carries the clause yet: nobody is bookable from a list, whatever they accepted', async () => {
+    expect(PRO_MENU_AGREEMENT).toEqual({ documentType: 'vendor_agreement', sinceVersion: null });
+    const { db, calls } = fakeDb({ action: 'granted', documentVersion: '2099-01-01' });
+    expect(await providerAcceptedMenuAgreement(db, 'u1')).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it('once named: the latest row for that document decides (version at or after the clause, not withdrawn)', async () => {
+    const agreement = { documentType: 'vendor_agreement' as const, sinceVersion: '2026-11-01' };
+    const cases: Array<[{ action: string; documentVersion: string } | null, boolean]> = [
+      [null, false],
+      [{ action: 'granted', documentVersion: '2026-10-29' }, false],
+      [{ action: 'granted', documentVersion: '2026-11-01' }, true],
+      [{ action: 're_granted', documentVersion: '2026-11-01.2' }, true],
+      [{ action: 'withdrawn', documentVersion: '2026-11-05' }, false],
+      [{ action: 'granted', documentVersion: 'junk' }, false],
+    ];
+    for (const [row, want] of cases) {
+      const { db, calls } = fakeDb(row);
+      expect(await providerAcceptedMenuAgreement(db, 'pro-user', agreement), JSON.stringify(row)).toBe(want);
+      expect(calls).toEqual([{ where: { subjectId: 'pro-user', documentType: 'vendor_agreement' }, orderBy: { capturedAt: 'desc' }, select: { action: true, documentVersion: true } }]);
+    }
+  });
+});
+
+describe('[BOOK-P3 · M S4-3] the pro\'s own time edits take the pro-time lock before they write', () => {
+  const routes = readFileSync(join(process.cwd(), 'src/modules/services/provider-bookable.routes.ts'), 'utf8');
+  const between = (from: string, to: string) => routes.slice(routes.indexOf(from), to ? routes.indexOf(to, routes.indexOf(from) + 1) : undefined);
+
+  it('hours, a day off, taking it back: lockProviderTime(tx, provider.id) inside the transaction, before the write', () => {
+    const cases: Array<[string, string, string]> = [
+      ["app.put('/providers/me/hours'", "app.post('/providers/me/time-off'", 'tx.serviceProvider.update('],
+      ["app.post('/providers/me/time-off'", "app.delete<", 'tx.serviceProviderTimeOff.create('],
+      ["app.delete<", '', 'tx.serviceProviderTimeOff.deleteMany('],
+    ];
+    for (const [from, to, write] of cases) {
+      const body = between(from, to);
+      const order = ['await bindTenantTransaction(tx);', 'await lockProviderTime(tx, provider.id);', write].map((s) => body.indexOf(s));
+      expect(order.every((p) => p >= 0), `${from} ${String(order)}`).toBe(true);
+      expect([...order].sort((a, b) => a - b), from).toEqual(order);
+    }
+  });
+
+  it('a move reads the pro\'s hours inside the lock, not from the row read before it', () => {
+    const pro = readFileSync(join(process.cwd(), 'src/modules/services/pro-booking.routes.ts'), 'utf8');
+    const move = pro.slice(pro.indexOf("app.post<{ Params: { id: string } }>('/jobs/:id/reschedule'"));
+    const order = ['await lockProviderTime(tx, job.providerId);', "tx.serviceProvider.findUniqueOrThrow({ where: { id: job.providerId }, select: { weeklyHours: true } })", 'weeklyHours: hours.weeklyHours'].map((s) => move.indexOf(s));
+    expect(order.every((p) => p >= 0), String(order)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(move.slice(0, move.indexOf('await lockProviderTime(tx, job.providerId);'))).not.toContain('weeklyHours');
+  });
+
+  it('a booking checks the agreement inside its transaction, after the live verification', () => {
+    const pro = readFileSync(join(process.cwd(), 'src/modules/services/pro-booking.routes.ts'), 'utf8');
+    const book = pro.slice(pro.indexOf("app.post('/jobs/book'"), pro.indexOf('/** POST /jobs/:id/reschedule'));
+    const order = ['await assertProviderCanOperate(tx, provider);', 'await assertProviderMenuAgreement(tx, provider);', 'tx.serviceJob.create('].map((s) => book.indexOf(s));
+    expect(order.every((p) => p >= 0), String(order)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 });
