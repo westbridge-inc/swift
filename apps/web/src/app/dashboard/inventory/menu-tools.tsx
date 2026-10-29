@@ -418,7 +418,7 @@ export function ItemEditor({
             {choicesWith(BUFFER_CHOICES, buffer).map((m) => <Chip key={m} label={minutesLabel(m)} on={buffer === m} onClick={() => setBuffer(m)} />)}
           </div>
           <p className="sw-field-label mt-3">Minimum notice</p>
-          <p className="sw-caption">How soon before a time a customer can still book it.</p>
+          <p className="sw-caption">How close to its start a customer can still book a time.</p>
           <div className="mt-1 flex flex-wrap gap-2" role="group" aria-label="Minimum notice">
             {choicesWith(NOTICE_CHOICES, minNotice).map((m) => <Chip key={m} label={minutesLabel(m)} on={minNotice === m} onClick={() => setNoticeMinutes(m)} />)}
           </div>

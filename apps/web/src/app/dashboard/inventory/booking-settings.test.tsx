@@ -101,6 +101,8 @@ describe('[BOOK-S5b] a bookable service’s hours, gap, notice and confirm-autom
     const gap = within(editor).getByRole('group', { name: 'Gap after each booking' });
     expect(within(gap).getByRole('button', { name: '7 min' }).getAttribute('aria-pressed')).toBe('true');
     await click(within(gap).getByRole('button', { name: '15 min' }));
+    // [REVIEW-F S4-1 on #2203] The phone's caption (#2201).
+    expect(within(editor).getByText('How close to its start a customer can still book a time.')).toBeTruthy();
     const notice = within(editor).getByRole('group', { name: 'Minimum notice' });
     expect(within(notice).getByRole('button', { name: '2 hours' }).getAttribute('aria-pressed')).toBe('true');
     await click(within(notice).getByRole('button', { name: '1 day' }));

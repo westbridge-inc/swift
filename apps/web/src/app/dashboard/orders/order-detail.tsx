@@ -39,12 +39,28 @@ export function boardOrder(board: unknown, id: string): VendorOrder | undefined 
 }
 const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', ...COURIER_ACTIVE];
 
-/** [BOOK-S5b · owner B3] An accepted appointment whose booked time has started (the server's own test, at the time the
- *  window is drawn; the server judges it again on the locked order). */
-export function appointmentStarted(o: Pick<VendorOrder, 'status' | 'fulfillment' | 'appointmentSlot'>, now = Date.now()): boolean {
+/** [BOOK-S5b · owner B3, the phone's orderNoShowOpen (#2201)] "Customer didn't come" is offered only where the server
+ *  would take it: the server's own word on this order (noShow.allowed === true, absent on an older server), an
+ *  appointment the store accepted, not paid by MMG (the server refuses it: no money moves there), its time started.
+ *  The server judges it again on the locked order. */
+export function noShowOffered(o: Pick<VendorOrder, 'status' | 'fulfillment' | 'appointmentSlot' | 'paymentMethod' | 'paymentStatus' | 'noShow'>, now = Date.now()): boolean {
+  if (o.noShow?.allowed !== true) return false;
   if (o.fulfillment !== 'APPOINTMENT' || (o.status || '').toUpperCase() !== 'ACCEPTED' || !o.appointmentSlot) return false;
+  if (o.paymentMethod === 'MOBILE_MONEY' && mmgMoneyMoved(o.paymentStatus)) return false;
   const at = Date.parse(o.appointmentSlot);
   return Number.isFinite(at) && at <= now;
+}
+
+/** [REVIEW-F S3-1 on #2203, the phone's words] A server without the step answers its not-found handler (404 with no
+ *  code, ROUTE_NOT_FOUND, or NOT_FOUND worded "Route PUT ... not found"): one plain line, never its route text. Any
+ *  other refusal (another business's order is a 404 in its own words, the 409s) is shown as the server says it. */
+export const NO_SHOW_NOT_AVAILABLE = 'This isn’t available yet. Contact Swift Support if the customer didn’t come.';
+export function noShowRefusalWords(error: unknown): string {
+  const e = error as { status?: unknown; code?: unknown; message?: unknown } | null;
+  const routeMissing = e?.status === 404 && (e.code === undefined || e.code === null || e.code === 'ROUTE_NOT_FOUND'
+    || (e.code === 'NOT_FOUND' && typeof e.message === 'string' && /^Route [A-Z]+ /.test(e.message)));
+  if (routeMissing) return NO_SHOW_NOT_AVAILABLE;
+  return typeof e?.message === 'string' && e.message.trim() ? e.message : 'Couldn’t record that. Check your connection and try again.';
 }
 
 /** Mirrors the mobile app's orderActions — one source of truth for what a
@@ -63,7 +79,7 @@ function actionsFor(o: VendorOrder) {
     out.push({ label: 'Mark complete', kind: 'complete-appointment' });
     // [BOOK-S5b · owner B3, #2198] Once the appointment's time has started, the business can close an accepted booking
     // the customer did not come to. The server is the judge (PUT /orders/:id/no-show); this only offers the button.
-    if (appointmentStarted(o)) out.push({ label: 'Customer didn\u2019t come', kind: 'no-show', tone: 'danger' });
+    if (noShowOffered(o)) out.push({ label: 'Customer didn\u2019t come', kind: 'no-show', tone: 'danger' });
   } else if (s === 'ACCEPTED' || s === 'CONFIRMED') {
     // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order's one step is "Paid by MMG" (below);
     // the server refuses Start preparing for it (MMG_PAYMENT_PENDING).
@@ -356,7 +372,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       const confirmed = confirmedOrderFields(answer, id);
       if (confirmed) queryClient.setQueryData<VendorOrder>(storeKey(storeId, 'order', id), (o) => (o ? { ...o, ...confirmed } : o));
     },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(noShowRefusalWords(e)),
     onSettled: () => {
       setConfirmNoShow(false);
       refresh();

@@ -12,13 +12,16 @@ import { wireVendorOrderDetail } from '@/test/vendor-wire-fixtures';
 // ---------------------------------------------------------------------------
 
 let writes: ApiRequest[];
-let refusal: { code: string; message: string } | null;
+let refusal: { code?: string; message: string } | null;
+let refusalStatus = 409;
 
 function appointment(over: Record<string, unknown> = {}) {
   return wireVendorOrderDetail({
     status: 'ACCEPTED', fulfillment: 'APPOINTMENT', deliveryFee: '0.00', totalAmount: '4000.00', acceptedAt: new Date().toISOString(),
     appointmentSlot: new Date(Date.now() - 20 * 60_000).toISOString(),
     vendor: { vendorType: 'SERVICE', selfDeliveryEnabled: false },
+    // [#2198 375ccad4] The server's own word, computed at the read.
+    noShow: { allowed: true },
     ...over,
   });
 }
@@ -32,7 +35,7 @@ function serve(detail: Record<string, unknown>) {
     if (request.method === 'GET' && path === '/api/v1/vendor/items') return { body: { success: true, data: [] } };
     if (request.method === 'PUT' && path === '/api/v1/vendor/orders/order-live/no-show') {
       writes.push(request);
-      if (refusal) return { status: 409, body: { success: false, error: refusal } };
+      if (refusal) return { status: refusalStatus, body: { success: false, error: refusal } };
       Object.assign(server, { status: 'CANCELLED', cancellationReason: "Customer didn't come (recorded by the business)." });
       return { body: { success: true, data: { id: 'order-live', status: 'CANCELLED' } } };
     }
@@ -52,7 +55,7 @@ async function openDetail(detail: Record<string, unknown>) {
   return { user, dialog };
 }
 
-beforeEach(() => { stubAudioContext(); writes = []; refusal = null; });
+beforeEach(() => { stubAudioContext(); writes = []; refusal = null; refusalStatus = 409; });
 afterEach(() => { refusal = null; });
 
 describe('[BOOK-S5b] Customer didn’t come on the web order window', () => {
@@ -82,6 +85,35 @@ describe('[BOOK-S5b] Customer didn’t come on the web order window', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Yes, they didn’t come' }));
     expect(await within(dialog).findByText(refusal.message)).toBeTruthy();
     expect(within(dialog).queryByText(/Booking closed:/)).toBeNull();
+  });
+
+  it.each([
+    ['the server sends no word (an older server)', { noShow: undefined }],
+    ['the server says no', { noShow: { allowed: false } }],
+    ['a word that is not exactly true', { noShow: { allowed: 'yes' } }],
+    ['paid by MMG (the server refuses it: no money moves there)', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' }],
+  ])('not offered when %s', async (_why, over) => {
+    const { dialog } = await openDetail(appointment(over as Record<string, unknown>));
+    expect(within(dialog).queryByRole('button', { name: 'Customer didn’t come' })).toBeNull();
+  });
+
+  it('a server without the step: one plain line, never its route text', async () => {
+    refusalStatus = 404;
+    refusal = { code: 'NOT_FOUND', message: 'Route PUT /api/v1/vendor/orders/order-live/no-show not found' };
+    const { user, dialog } = await openDetail(appointment());
+    await user.click(within(dialog).getByRole('button', { name: 'Customer didn’t come' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Yes, they didn’t come' }));
+    expect(await within(dialog).findByText('This isn’t available yet. Contact Swift Support if the customer didn’t come.')).toBeTruthy();
+    expect(within(dialog).queryByText(/Route PUT/)).toBeNull();
+  });
+
+  it('a 404 in the server’s own words (not the route) is shown as it is', async () => {
+    refusalStatus = 404;
+    refusal = { code: 'NOT_FOUND', message: 'Order not found' };
+    const { user, dialog } = await openDetail(appointment());
+    await user.click(within(dialog).getByRole('button', { name: 'Customer didn’t come' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Yes, they didn’t come' }));
+    expect(await within(dialog).findByText('Order not found')).toBeTruthy();
   });
 
   it('not offered before the appointment’s time has started', async () => {
