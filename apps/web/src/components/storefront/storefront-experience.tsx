@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
-import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import { lazyRetry } from '@/lib/chunk-retry';
 import {
   addToCart,
@@ -501,6 +501,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const storeAcceptsOrders = catalog.isCurrentlyOpen && catalog.acceptingOrders;
   const catalogVerified = catalogState === 'ready';
   const orderable = storeAcceptsOrders && catalogVerified;
+  // [BOOK-WEB · #2205] A booking is for a later time: a store closed right now still takes one; paused orders never.
+  const bookable = catalog.acceptingOrders && catalogVerified;
   const cartItems = cart?.items ?? [];
   const cartHydrationPending = !sessionKnown || (signedIn && !cartHydrated);
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
@@ -675,14 +677,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
    * reopens on return, as an item's Add does.
    */
   const bookItem = (item: DisplayItem, trigger?: HTMLElement) => {
-    if (!orderable || !item.isAvailable || itemPrice(item) === null || cartHydrationPending || cartMutationLockedByCheckout()) return;
-    if (!signedIn) {
-      if (restoringSession.current) return;
-      // A renewed session reopens the sheet from the queued intent (the effect below).
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: {}, returnPath });
-      signInThen(returnPath, false);
-      return;
-    }
+    if (!bookable || !item.isAvailable || itemPrice(item) === null || cartHydrationPending || cartMutationLockedByCheckout()) return;
+    if (!signedIn && restoringSession.current) return;
     modalReturnFocus.current = trigger ?? null;
     setBookingItem(item);
   };
@@ -737,7 +733,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     if (!intent) return;
     const item = catalog.categories.flatMap(category => category.items).find(item => item.id === intent.itemId);
     // [BOOK-S6b] A guest's Book reopens the listing's sheet after sign-in (nothing is added until they pick a time).
-    if (item?.fulfillment === 'APPOINTMENT' && catalog.isCurrentlyOpen && catalog.acceptingOrders && item.isAvailable && itemPrice(item) !== null) {
+    if (item?.fulfillment === 'APPOINTMENT' && catalog.acceptingOrders && item.isAvailable && itemPrice(item) !== null) {
       setBookingItem(item);
       return;
     }
@@ -1038,8 +1034,10 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                   type="button"
                                   className={styles.chooseButton}
                                   onClick={(event) => bookItem(item, event.currentTarget)}
-                                  disabled={cartHydrationPending || !orderable || !priced}
-                                  aria-label={`Book ${item.name}`}
+                                  disabled={cartHydrationPending || !bookable || !priced}
+                                  aria-label={bookable ? `Book ${item.name}` : !catalog.acceptingOrders
+                                    ? `${item.name} can’t be booked while the store has paused orders`
+                                    : `${item.name} can’t be booked until the live menu is checked`}
                                 >
                                   Book
                                 </button>
@@ -1246,7 +1244,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       ) : null}
 
       {bookingItem ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={<p className={styles.notice} role="status">Opening times…</p>}>
           <BookingSheet
             item={bookingItem}
             vendorName={catalog.name}
@@ -1255,6 +1253,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             vendorId={catalog.id}
             cartLines={() => cartNow.current?.items ?? []}
             blocked={bookingBlocked}
+            guest={signedIn ? null : { storeSlug: store.slug, returnPath, signIn: () => { setBookingItem(null); signInThen(returnPath, false); } }}
             onBooked={() => { refreshShellCart(); setBookingItem(null); router.push('/checkout'); }}
             onClose={closeBooking}
           />

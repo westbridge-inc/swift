@@ -6,11 +6,10 @@ import {
   checkoutPaymentMethod,
   mmgOffered,
   normalizeCartPaymentCapabilities,
-  paymentActionForCheckout,
-  placedOrderConfirmationCopy,
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
 } from './cartPayment';
+import { paymentActionForCheckout, placedOrderConfirmationCopy } from './cartPlaced';
 
 function capabilities(scope: string, mmg: boolean): CartPaymentCapabilities {
   return {
