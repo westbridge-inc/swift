@@ -13,7 +13,7 @@ import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
 import { PAY_AHEAD_LIMIT, payAheadRefusal, readPayAhead } from './pay-ahead';
-import { payerUserIdOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
 
 /** [REVIEW S3-2] A provider transaction whose money was refunded to the payer. */
 export const PROVIDER_REFUNDED = 'REFUNDED';
@@ -198,7 +198,7 @@ export async function payInfo(
     const tenant = await prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
     if (tenant?.usdPricingEnabled && tenant.displayDual) {
       const { resolveRateForRun, dualDisplay } = await import('./fx');
-      const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
+      const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', INDEPENDENT_PRO: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
       const [entry, rate] = await Promise.all([
         // [F2] The row in force now, never a scheduled one.
         prisma.priceBookEntry.findFirst({ where: { role, active: true, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } }),
@@ -669,14 +669,10 @@ export class AgentCashService {
     if (p.payerMsisdn) {
       const sub = await this.prisma.subscription.findUnique({
         where: { id: committed.subscriptionId },
-        select: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { owner: { select: { userId: true } } } },
-        },
+        select: PAYER_INCLUDE,
       });
       const userId = payerUserIdOf(sub);
-      if (userId) await captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : sub?.driver ? 'DRIVER' : 'RIDER', payerMsisdn: p.payerMsisdn, observed: true, observationId: paymentId, subscriptionId: committed.subscriptionId }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
+      if (userId) await captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : sub?.serviceProvider ? 'PROVIDER' : sub?.driver ? 'DRIVER' : 'RIDER', payerMsisdn: p.payerMsisdn, observed: true, observationId: paymentId, subscriptionId: committed.subscriptionId }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
     }
     return { status: 'accepted', paymentId: committed.paymentId, subscriptionId: committed.subscriptionId };
   }

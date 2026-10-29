@@ -4,7 +4,7 @@ import { IdentityService } from './identity.service';
 import { normalizePhone, normalizeEmail, normalizePlate } from './normalize';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
-import { payerOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerOf } from '../subscription/subscription-owner';
 
 // Phase 2 (spec Part 12): run the matcher across the EXISTING user base and
 // hand the founder an evidence report of every multi-account cluster BEFORE
@@ -65,9 +65,7 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
     select: {
       id: true,
       mmgPayerMsisdn: true,
-      rider: { select: { userId: true } },
-      driver: { select: { userId: true } },
-      vendor: { select: { owner: { select: { userId: true } } } },
+      ...PAYER_INCLUDE,
     },
   });
   for (const r of rails) {

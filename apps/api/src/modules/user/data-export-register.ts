@@ -399,7 +399,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'riderId', 'driverId', 'orderId', 'type', 'amount', 'status', 'createdAt'],
   },
   {
-    category: 'moverSubscriptions', model: 'Subscription', by: ['riderId', 'driverId'], via: 'mover', key: 'id',
+    // [BILL-PRO] A mover's subscription never has a pro owner (the database allows one owner per subscription).
+    category: 'moverSubscriptions', model: 'Subscription', by: ['riderId', 'driverId'], via: 'mover', key: 'id', omit: { serviceProviderId: 'OTHER_PERSON' },
     fields: ['id', 'riderId', 'driverId', 'type', 'status', 'weeklyRate', 'currentPeriodStart', 'currentPeriodEnd', 'nextBillingDate', 'isInGracePeriod', 'gracePeriodEnd', 'isTrialActive', 'trialEndDate', 'autoRenew', 'lastPaymentDate', 'lastPaymentId', 'failedAttempts', 'feeWaived', 'feeWaivedReason', 'customRate', 'currencyCode', 'autoSuspendEnabled', 'billingMethod', 'mmgPayerMsisdn', 'suspendedAt', 'billingConfirmationPausedAt', 'billingEnforcementDueAt', 'san', 'sanAssignedAt', 'createdAt', 'updatedAt'],
   },
   {
@@ -435,6 +436,11 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     // [BOOK-P1] The days and hours the person set as away, as a provider.
     category: 'serviceTimeOff', model: 'ServiceProviderTimeOff', by: ['providerId'], via: 'provider', key: 'id',
     fields: ['id', 'providerId', 'date', 'start', 'end', 'createdAt'],
+  },
+  {
+    // [BILL-PRO] An independent pro's weekly-fee subscription (none exist until the fee is switched on for pros).
+    category: 'proSubscriptions', model: 'Subscription', by: ['serviceProviderId'], via: 'provider', key: 'id',
+    fields: ['id', 'serviceProviderId', 'type', 'status', 'weeklyRate', 'currentPeriodStart', 'currentPeriodEnd', 'nextBillingDate', 'isInGracePeriod', 'gracePeriodEnd', 'isTrialActive', 'trialEndDate', 'autoRenew', 'lastPaymentDate', 'lastPaymentId', 'failedAttempts', 'feeWaived', 'feeWaivedReason', 'customRate', 'currencyCode', 'autoSuspendEnabled', 'billingMethod', 'mmgPayerMsisdn', 'suspendedAt', 'billingConfirmationPausedAt', 'billingEnforcementDueAt', 'san', 'sanAssignedAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceQualifications', model: 'ServiceQualification', by: ['providerId'], via: 'provider', key: 'id',

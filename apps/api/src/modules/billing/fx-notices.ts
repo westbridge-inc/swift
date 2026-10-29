@@ -6,7 +6,7 @@ import { fxNoticesUndeliveredGauge, fxChargesWithoutNoticeGauge } from '../../pl
 import { log } from '../../utils/logger';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import { activePriceBook, bookAt, bookRowsAt, earliestPriceChange, priceBookKey, priceBookNoticeKey, PRICE_BOOK_NOTICE_DAYS } from './price-book';
-import { payerUserIdOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 
 // System 2 Part 12 — the >2% notice rule: when a fee payer's NEXT local
 // amount will differ >2% from their LAST charged amount (an FX move), they
@@ -32,7 +32,7 @@ import { payerUserIdOf } from '../subscription/subscription-owner';
 
 const SUB_ROLE: Record<string, string> = {
   RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR',
-  SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER',
+  SERVICE_PROVIDER: 'SERVICE', INDEPENDENT_PRO: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER',
 };
 const DAY_MS = 86_400_000;
 
@@ -41,6 +41,7 @@ export const fxNoticeKey = (subscriptionId: string, rateId: string) => `fxnotice
 type PayerSub = {
   id: string; type: string; nextBillingDate: Date;
   rider: { userId: string } | null; driver: { userId: string } | null; vendor: { owner: { userId: string } } | null;
+  serviceProvider?: { userId: string } | null;
 };
 
 function payerOf(sub: PayerSub): string | null {
@@ -94,7 +95,7 @@ export async function runFxChangeNotices(
     where: { type: 'REMINDER', idempotencyKey: { startsWith: 'fxnotice:' }, deliveredAt: null, ...(opts.subscriptionIds ? { subscriptionId: { in: opts.subscriptionIds } } : {}) },
     orderBy: { createdAt: 'asc' },
     take: 200,
-    include: { subscription: { include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } } } },
+    include: { subscription: { include: PAYER_INCLUDE } },
   });
   for (const event of owed) {
     if (!event.amountUsd || !event.fxRateUsed) continue;
@@ -127,11 +128,7 @@ export async function runFxChangeNotices(
       status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] },
       ...(opts.subscriptionIds ? { id: { in: opts.subscriptionIds } } : {}),
     },
-    include: {
-      rider: { select: { userId: true } },
-      driver: { select: { userId: true } },
-      vendor: { select: { owner: { select: { userId: true } } } },
-    },
+    include: PAYER_INCLUDE,
   });
   for (const rate of rates) {
     for (const sub of subs) {
@@ -311,7 +308,7 @@ export async function announcePriceBookEntry(prisma: PrismaClient, io: Server, e
       ...(pending ? { id: { in: pending } } : {}),
       type: { in: (entry.tier ? types.filter((t) => t === entry.tier) : types) as never },
     },
-    include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
+    include: PAYER_INCLUDE,
   });
   for (const sub of subs) {
     // A role-wide row does not change a type that has its own tier row.
@@ -345,7 +342,7 @@ export async function announcePriceBookEntry(prisma: PrismaClient, io: Server, e
     let inboxId = '';
     try {
       inboxId = await notifications.send({
-        userId, type: 'SYSTEM_ANNOUNCEMENT', audience: sub.vendor ? 'business' : 'earner',
+        userId, type: 'SYSTEM_ANNOUNCEMENT', audience: payerAudienceOf(sub),
         title: lower ? 'Your weekly fee is going down' : 'Your weekly fee is changing',
         body: `From your weekly fee due ${day}, your Swift weekly fee will be ${formatMoney(amountUsd, 'USD')}${local !== null ? ` (about ${formatMoney(local, tenant.settlementCurrency)} at today's exchange rate)` : ''}. ${lower ? 'A week you have already paid keeps the price you paid.' : 'Until then nothing changes, and any week you have already paid keeps the price you paid.'}`,
         data: { kind: 'billing_rate_change', change: 'PRICE_BOOK', subscriptionId: sub.id, priceBookEntryId: entry.id, amountUsd, appliesFrom: appliesFrom.toISOString() },

@@ -20,6 +20,8 @@ it('locks payer and sorted sources before winding down subscriptions and vendor 
     vendorStaff: { deleteMany: vi.fn(async () => ({ count: 1 })) },
     rider: { findUnique: vi.fn(async () => ({ id: 'rider-1' })), update: vi.fn(async () => ({})) },
     driver: { findUnique: vi.fn(async () => null) },
+    // [BILL-PRO] The person is also an independent pro: their own weekly fee winds down too.
+    serviceProvider: { findUnique: vi.fn(async () => ({ id: 'pro-1' })) },
     subscription: {
       updateMany: vi.fn(async () => { writes.push('subscription'); return { count: 1 }; }),
     },
@@ -32,4 +34,6 @@ it('locks payer and sorted sources before winding down subscriptions and vendor 
   await windDownPartner(prisma as unknown as Prisma.TransactionClient, 'user-1');
 
   expect(writes).toEqual(['payer', 'sources', 'subscription', 'vendor', 'mmg-stages']);
+  const where = (prisma.subscription.updateMany.mock.calls[0] as unknown as [{ where: { OR: unknown[] } }])[0].where;
+  expect(where.OR).toEqual([{ riderId: 'rider-1' }, { serviceProviderId: 'pro-1' }, { vendorId: { in: ['vendor-1'] } }]);
 });

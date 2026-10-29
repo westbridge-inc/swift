@@ -8,7 +8,7 @@ import { log } from '../../utils/logger';
 import { usdMigrationFlipsCounter, usdMigrationHeldGauge } from '../../plugins/observability';
 import { weeklyFeeAmount } from './subscription-fee';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
-import { payerUserIdOf, subscriptionTenantWhere } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerUserIdOf, subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 // System 2 Part 13/20 — migration of existing local-priced subscriptions.
 // The founder picks a mode per tenant at enable time:
@@ -29,18 +29,14 @@ import { payerUserIdOf, subscriptionTenantWhere } from '../subscription/subscrip
 
 const SUB_ROLE: Record<string, string> = {
   RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR',
-  SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER',
+  SERVICE_PROVIDER: 'SERVICE', INDEPENDENT_PRO: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER',
 };
 const DAY_MS = 86_400_000;
 
 async function userIdFor(prisma: PrismaClient, subId: string): Promise<string | null> {
   const sub = await prisma.subscription.findUnique({
     where: { id: subId },
-    select: {
-      rider: { select: { userId: true } },
-      driver: { select: { userId: true } },
-      vendor: { select: { owner: { select: { userId: true } } } },
-    },
+    select: PAYER_INCLUDE,
   });
   return payerUserIdOf(sub);
 }

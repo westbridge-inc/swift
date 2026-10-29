@@ -62,6 +62,7 @@ async function releaseSanInTransaction(db: Db, subscriptionId: string, reason: s
       vendor: { select: { tenantId: true } },
       rider: { select: { user: { select: { tenantId: true } } } },
       driver: { select: { user: { select: { tenantId: true } } } },
+      serviceProvider: { select: { user: { select: { tenantId: true } } } },
     },
   });
   if (!sub?.san) return;

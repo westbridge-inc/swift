@@ -16,7 +16,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/observability';
 import { ringRecipients, storeTeam } from './store-team';
 import { vendorAlertSms } from './vendor-alert-sms';
-import { payerUserIdOf } from '../subscription/subscription-owner';
+import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
@@ -74,8 +74,9 @@ type NotificationType =
 /** Which app-within-the-app a notification belongs to. One ACCOUNT spans
  *  roles, but SURFACES are role-scoped: the shopping app must not feed a
  *  driver's operator alerts. Untagged = legacy rows; clients fall back to a
- *  kind deny-list for those. */
-export type NotificationAudience = 'customer' | 'earner' | 'business';
+ *  kind deny-list for those. 'provider' = an independent pro's own fee
+ *  (BILL-PRO); shipped builds show it in no inbox surface. */
+export type NotificationAudience = 'customer' | 'earner' | 'business' | 'provider';
 
 export interface NotificationPayload {
   /** Durable weekly-fee stage and optional SMS, never used by other notices. */
@@ -283,7 +284,7 @@ export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId:
   }
   const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
-    select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
+    select: PAYER_INCLUDE,
   }).catch(err => {
     if (requireResolved) throw err;
     return null;
