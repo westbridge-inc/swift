@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useAddToCart, useUpdateCartItem } from './customer';
 import { useAuthStore } from '../stores/authStore';
-import { answeredCart, clampQty, heldQty, isPlainLine, nextSend, type CartLine } from '../lib/cartSteppers';
+import { answeredCart, clampQty, heldQty, isPlainLine, maxQtyFor, nextSend, type CartLine } from '../lib/cartSteppers';
 
 /** How to add an item that is not in the cart yet (the store page's + on an option-less item). */
 type AddAs = { vendorId: string; itemId: string };
@@ -162,7 +162,8 @@ export function useCartSteppers(cart: { data?: unknown; dataUpdatedAt?: number; 
     qty: (key: string, line: CartLine | null | undefined) => entries.get(keyOf(key, line))?.target ?? heldQty(line),
     set: (key: string, line: CartLine | null | undefined, next: number, addAs?: AddAs) => {
       const k = keyOf(key, line);
-      const target = clampQty(next);
+      // [BOOK-POLISH] A booking line never goes past 1 (no request for a number the server refuses).
+      const target = clampQty(next, maxQtyFor(line));
       let entry = entries.get(k);
       if (!entry) {
         if (target === heldQty(line)) return;

@@ -18,6 +18,7 @@ const fx = vi.hoisted(() => ({
   lines: [] as Array<{ id: string; itemId: string; quantity: number }>,
   writes: [] as Array<[string, unknown]>,
   report: vi.fn(),
+  navigate: vi.fn(),
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 
@@ -31,7 +32,7 @@ vi.mock('react-native', async () => {
   };
 });
 vi.mock('@expo/vector-icons', () => ({ Feather: () => null }));
-vi.mock('@react-navigation/native', () => ({ useRoute: () => fx.route, useNavigation: () => ({ navigate: vi.fn(), goBack: vi.fn() }) }));
+vi.mock('@react-navigation/native', () => ({ useRoute: () => fx.route, useNavigation: () => ({ navigate: fx.navigate, goBack: vi.fn() }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock('@swift/ui', () => ({ color: fx.token, font: fx.token, fontSize: fx.token, radius: fx.token, space: fx.token, withAlpha: () => 'c' }));
 vi.mock('../../../hooks/customer', () => {
@@ -77,7 +78,9 @@ vi.mock('../../../kit', async () => {
   const Box = (p: any) => h('div', null, p.children);
   const Nothing = () => null;
   return {
-    AddMorph: Nothing, CartBar: Nothing, useCartBarClearance: () => 0, ErrorState: Nothing, FoodCard: Nothing,
+    // The mart grid's tile stepper: its number and its + (the restaurant rows use MenuRow below).
+    AddMorph: (p: any) => h('div', { 'data-tile-qty': String(p.qty) }, h('button', { type: 'button', 'aria-label': 'Tile +', onClick: p.qty > 0 ? p.onInc : p.onAdd }, '+')),
+    CartBar: Nothing, useCartBarClearance: () => 0, ErrorState: Nothing, FoodCard: Nothing,
     HeartBadge: Nothing, IconChip: Nothing, LoadingBlock: Nothing, Money: Nothing, Photo: Nothing, TonePill: Nothing,
     PopupCard: (p: any) => (p.visible ? h('div', null, p.children) : null), PopupTitle: Box,
     T: (p: any) => h('span', null, p.children), SectionHeader: (p: any) => h('h3', null, p.title),
@@ -135,5 +138,48 @@ describe('[TAP-AUDIT] the store page\'s + answers at the tap', () => {
     expect(row('Pepperpot').getAttribute('data-qty')).toBe('1');
     await click(row('Curry chicken').querySelector('[aria-label="Add Curry chicken"]')!);
     expect(fx.writes).toEqual([['add', { vendorId: 'a', itemId: 'pepperpot', quantity: 1 }], ['set', { id: 'line-curry', quantity: 2 }]]);
+  });
+});
+
+describe('[BOOK-POLISH · #2205] a booking on the store page has no + / −', () => {
+  // A store that lists a booking (an APPOINTMENT listing) among its goods: its + opens the booking screen (pick a
+  // time) and never sets a quantity, even with the booking already in the cart.
+  const massage = { id: 'massage', name: 'Chair massage', basePrice: 3000, fulfillment: 'APPOINTMENT' };
+  const draw = async (vendor: Record<string, unknown>) => {
+    fx.vendors = { a: vendor };
+    await act(async () => root.render(React.createElement('div', null)));
+    await act(async () => root.render(React.createElement(RestaurantScreen)));
+  };
+
+  it('menu row: shows no quantity; + opens the booking screen and writes nothing', async () => {
+    fx.lines = [{ id: 'line-massage', itemId: 'massage', quantity: 1 }];
+    await draw({ ...store, categories: [{ id: 'a-mains', name: 'Mains', items: [massage, { id: 'curry', name: 'Curry chicken', basePrice: 1000 }] }] });
+    expect(row('Chair massage').getAttribute('data-qty')).toBe('0');
+    await click(row('Chair massage').querySelector('[aria-label="Add Chair massage"]')!);
+    expect(fx.navigate).toHaveBeenCalledWith('MenuItem', { vendorId: 'a', itemId: 'massage' });
+    expect(fx.writes).toEqual([]);
+    expect(row('Chair massage').getAttribute('data-qty')).toBe('0');
+  });
+
+  it('control: a goods row beside it keeps its stepper', async () => {
+    fx.lines = [{ id: 'line-curry', itemId: 'curry', quantity: 1 }];
+    await draw({ ...store, categories: [{ id: 'a-mains', name: 'Mains', items: [massage, { id: 'curry', name: 'Curry chicken', basePrice: 1000 }] }] });
+    expect(row('Curry chicken').getAttribute('data-qty')).toBe('1');
+  });
+
+  it('shop grid tile: shows no quantity; + opens the booking screen and writes nothing', async () => {
+    fx.lines = [{ id: 'line-massage', itemId: 'massage', quantity: 1 }];
+    await draw({ ...store, vendorType: 'STORE', categories: [{ id: 'a-aisle', name: 'Aisle', items: [massage] }] });
+    const tile = host.querySelector('[data-tile-qty]')!;
+    expect(tile.getAttribute('data-tile-qty')).toBe('0');
+    await click(tile.querySelector('[aria-label="Tile +"]')!);
+    expect(fx.navigate).toHaveBeenCalledWith('MenuItem', { vendorId: 'a', itemId: 'massage' });
+    expect(fx.writes).toEqual([]);
+  });
+
+  it('control: a goods tile keeps its quantity', async () => {
+    fx.lines = [{ id: 'line-curry', itemId: 'curry', quantity: 2 }];
+    await draw({ ...store, vendorType: 'STORE', categories: [{ id: 'a-aisle', name: 'Aisle', items: [{ id: 'curry', name: 'Curry chicken', basePrice: 1000 }] }] });
+    expect(host.querySelector('[data-tile-qty]')!.getAttribute('data-tile-qty')).toBe('2');
   });
 });
