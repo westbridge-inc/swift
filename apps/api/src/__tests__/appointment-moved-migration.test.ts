@@ -26,12 +26,15 @@ describe('the appointment-moved migration', () => {
     expect(NAME > NEWEST_PENDING_STAMP).toBe(true);
   });
 
-  it('adds exactly the two nullable stamps, and the rollback drops exactly them', () => {
+  it('sets a lock timeout, adds exactly the two nullable stamps, and the rollback drops exactly them', () => {
+    // [REVIEW-G N1] A short lock timeout first, like its siblings: the ALTERs never queue behind a long writer.
     expect(statements(readFileSync(path.join(DIR, 'migration.sql'), 'utf8'))).toEqual([
+      "SET lock_timeout = '10s';",
       'ALTER TABLE "orders" ADD COLUMN "appointmentMovedAt" TIMESTAMP(3);',
       'ALTER TABLE "service_jobs" ADD COLUMN "providerMovedAt" TIMESTAMP(3);',
     ]);
     expect(statements(readFileSync(path.join(DIR, 'rollback.sql'), 'utf8'))).toEqual([
+      "SET lock_timeout = '10s';",
       'ALTER TABLE "service_jobs" DROP COLUMN IF EXISTS "providerMovedAt";',
       'ALTER TABLE "orders" DROP COLUMN IF EXISTS "appointmentMovedAt";',
     ]);
