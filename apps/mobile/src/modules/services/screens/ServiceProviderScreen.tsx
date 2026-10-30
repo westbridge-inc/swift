@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import { ScrollView, View } from 'react-native';
 import { color, space } from '@swift/ui';
 import {
@@ -151,6 +152,13 @@ function ProviderDashboard({
   const banner = proFeeBanner(provider);
   const qc = useQueryClient();
   const bookableQ = useMyBookable<{ bookable?: boolean }>();
+
+  // [BILL-PRO · REVIEW-F #2231 S3-4] Back from the fee screen (a tick, a payment) or the agreement: where the pro stands
+  // is read again on focus, so "Not listed" and the button never go stale.
+  useFocusEffect(useCallback(() => {
+    void refetchProfile();
+    void qc.invalidateQueries({ queryKey: ['provider', 'fee'] });
+  }, [refetchProfile, qc]));
 
   // The approval path persists public listability before returning. Refresh the
   // profile projection as soon as the shared checklist reports completion.

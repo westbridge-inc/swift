@@ -1047,4 +1047,11 @@ describe('[BILL-PRO · REVIEW-G #2217 S4-2] a pro\'s fee notice under a partner 
       expect(destinationFor({ kind, subscriptionId: 's1', audience: 'provider' }, () => open)).toEqual({ screen: 'ProviderWeeklyFee', params: {} });
     }
   });
+  it('[REVIEW-F #2231 S4-2] a provider-tagged checkout notice opens the pro fee screen on its checkout, never the store/mover one', () => {
+    for (const open of ['vendor', 'mover', 'customer'] as const) {
+      expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'c1', status: 'CONFIRMED', audience: 'provider' }, () => open)).toEqual({ screen: 'ProviderWeeklyFee', params: { ref: 'c1' } });
+    }
+    // A store's or mover's checkout notice is unchanged.
+    expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'c1', audience: 'business' })).toMatchObject({ screen: 'WeeklyFee', params: { ref: 'c1' } });
+  });
 });

@@ -43,7 +43,14 @@ export function LegalAcceptanceModal() {
   });
   const accept = useMutation({
     mutationFn: async (version: string) => (await authApi.acceptLegal(version)).data?.data as LegalAcceptance,
-    onSuccess: (next) => { qc.setQueryData(['legal-acceptance', sessionGeneration], next); setTicked(false); },
+    onSuccess: (next) => {
+      qc.setQueryData(['legal-acceptance', sessionGeneration], next);
+      setTicked(false);
+      // [BILL-PRO · REVIEW-F #2231 S3-4] A pro's standing follows the agreement: the dashboard card and the fee screen
+      // read it again now, never the stale "Accept the Business Agreement".
+      void qc.invalidateQueries({ queryKey: ['services', 'provider-me'] });
+      void qc.invalidateQueries({ queryKey: ['provider', 'fee'] });
+    },
     // The words may have changed while they read: show the new ones, unticked.
     onError: () => { setTicked(false); void status.refetch(); },
   });

@@ -80,6 +80,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // so a page could only be stopped from a computer. Only ops pages carry an opsAlertId.
   const opsAlertId = data['opsAlertId'];
   if (typeof opsAlertId === 'string' && opsAlertId) return { screen: 'OpsAlerts', params: { opsAlertId } };
+  // [BILL-PRO · REVIEW-F #2231 S4-2] A pro's checkout notice the delivery rename missed opens the PRO fee screen, on
+  // its checkout: the store/mover WeeklyFee cannot load a pro's fee.
+  if (data['kind'] === 'billing_mmg_checkout' && data['audience'] === 'provider') {
+    return { screen: 'ProviderWeeklyFee', params: typeof data['ref'] === 'string' ? { ref: data['ref'] } : {} };
+  }
   if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
