@@ -1091,9 +1091,28 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       switch (job.name) {
         case 'process-billing': {
           // [BILL-PRO · owner 30 Oct 00:14Z] Pros due a weekly fee (behind PRO_WEEKLY_FEE) are born first, so one who
-          // ticked before the switch turned on is listed within the hour, with a full 14-day trial from then.
-          const { birthDueProFees } = await import('../modules/services/pro-fee');
-          const proFees = await birthDueProFees(ctx.prisma);
+          // ticked before the switch turned on is listed within the hour, with a full 14-day trial from then; and
+          // [REVIEW-M #2229 S3-1 · owner B1] a pro whose Services store fee is now live has their own fee stopped
+          // BEFORE this cycle charges anything (one fee). [M S4-1] Isolated: a failure here pages, and billing runs on.
+          let proFees: { born: number; tried: number; oneFeeStopped: number } | { failed: true } = { born: 0, tried: 0, oneFeeStopped: 0 };
+          try {
+            const { birthDueProFees } = await import('../modules/services/pro-fee');
+            const birth = await birthDueProFees(ctx.prisma);
+            const oneFee = await billing.stopProFeesCoveredByStore();
+            proFees = { ...birth, oneFeeStopped: oneFee.length };
+          } catch (error) {
+            proFees = { failed: true };
+            ctx.log.error({ err: error }, '[BILL-PRO] pro fee pass failed; billing continues');
+            const { notifyAdmins } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'pro-fee-pass', 3600, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: 'Pro weekly fee pass failed',
+                body: 'The hourly pass that starts pros\' weekly fees and keeps one fee per person failed this cycle. Billing ran on. Check the API logs.',
+                data: { kind: 'ops_billing_failures', proFeePass: 'failed' },
+              }),
+            ).catch((pageError: unknown) => ctx.log.error({ err: pageError }, '[BILL-PRO] pro fee pass page failed'));
+          }
           const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period

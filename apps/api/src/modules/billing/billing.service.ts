@@ -390,6 +390,9 @@ function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: str
   return `${reason}. ${retrySentence} ${payLine}`;
 }
 
+/** [BILL-PRO · owner B1] The billing event note when a pro's own fee stops because their store's fee covers them. */
+export const PRO_FEE_COVERED_BY_STORE_NOTE = 'Weekly billing stopped: your Services store fee covers your provider profile (one fee)';
+
 export class BillingService {
   private countryConfig: CountryConfigService;
   private cardRailProvider: CardRailProvider | null | undefined;
@@ -3706,6 +3709,56 @@ export class BillingService {
       });
       return tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
     });
+  }
+
+  /**
+   * [BILL-PRO · REVIEW-M #2229 S3-1 · owner B1 "one fee"] A pro whose own weekly fee was born BEFORE their Services
+   * store's fee became live pays one fee: the store's. Their own pro fee is stopped exactly as a partner stops billing
+   * (same locks, same order): no new pro week is ever charged or retried, an ACTIVE paid week runs to its end and then
+   * lapses to PAUSED owing nothing (lapseStoppedSubscriptions), a trial ends at zero fee (E12). A week already owed
+   * before the store fee began stays owed (it was a week the pro operated on), never charged twice. System action:
+   * the audit names no person. Only a pro fee is ever touched, and only while that person's store fee is live.
+   * Returns the ids stopped. The hourly billing job runs it before any charge.
+   */
+  async stopProFeesCoveredByStore(): Promise<string[]> {
+    const { liveServicesStoreFee } = await import('../services/pro-fee');
+    const candidates = await this.prisma.subscription.findMany({
+      where: { serviceProviderId: { not: null }, autoRenew: true, status: { notIn: ['CANCELLED', 'CHURNED'] } },
+      select: { id: true, serviceProvider: { select: { userId: true } } },
+      orderBy: { id: 'asc' },
+      take: 500,
+    });
+    const stopped: string[] = [];
+    for (const row of candidates) {
+      const userId = row.serviceProvider?.userId;
+      if (!userId || !(await liveServicesStoreFee(this.prisma, userId))) continue;
+      try {
+        const done = await this.prisma.$transaction(async (tx) => {
+          const payer = await lockSubscriptionPayer(tx, row.id);
+          if (payer.kind !== 'PROVIDER') return false;
+          const { sub: fresh } = await lockBillingAuthority(tx, row.id);
+          await currentDunningClock(tx, row.id);
+          if (!fresh.autoRenew || fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') return false;
+          // Re-read under the locks: the store fee must still be live.
+          if (!(await liveServicesStoreFee(tx, userId))) return false;
+          await tx.subscription.update({ where: { id: row.id }, data: { autoRenew: false, nextRetryAt: null } });
+          await tx.billingEvent.create({ data: {
+            subscriptionId: row.id, type: 'TIER_CHANGE', currencyCode: fresh.currencyCode,
+            idempotencyKey: `stop-one-fee:${row.id}:${fresh.updatedAt.toISOString()}`,
+            note: PRO_FEE_COVERED_BY_STORE_NOTE,
+          } });
+          await tx.auditLog.create({ data: {
+            userId: null, action: 'BILLING_STOPPED_ONE_FEE', entity: 'Subscription', entityId: row.id,
+            changes: { autoRenew: false, nextRetryAt: null, reason: 'SERVICES_STORE_FEE_LIVE' },
+          } });
+          return true;
+        });
+        if (done) stopped.push(row.id);
+      } catch (err) {
+        log().error({ err, subscriptionId: row.id }, '[BILL-PRO] one-fee stop failed; retried next hour');
+      }
+    }
+    return stopped;
   }
 
   /**

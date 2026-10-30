@@ -16,6 +16,10 @@ import { recordReacceptance } from '../modules/legal/reaccept';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { assertProviderCanOperate } from '../modules/services/provider-operate';
+import { BillingService, PRO_FEE_COVERED_BY_STORE_NOTE } from '../modules/billing/billing.service';
+import { SubscriptionService } from '../modules/subscription/subscription.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { getPaymentProvider } from '../providers/payment/payment-provider';
 import {
   assertProFeeAllowsNewWork, birthDueProFees, ensureProFeeBorn, PRO_FEE_CUSTOMER_MESSAGE, proFeeQuote, proFeeStanding, proWeeklyFeeEnabled, recordProFeeAck,
 } from '../modules/services/pro-fee';
@@ -329,6 +333,51 @@ describe('switch on: an unpaid fee blocks new work, never booked work (B2)', () 
 });
 
 describe('switch on: one fee for a Services-store owner who is also a pro (B1)', () => {
+  it('[REVIEW-M #2229 S3-1] pro fee first, store fee later: the pro fee stops before any charge (one fee); its trial ends at zero fee and pauses', async () => {
+    on();
+    const pro = await makePro({ agreed: true });
+    const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    // No store yet: nothing to stop.
+    expect(await sys(() => billing.stopProFeesCoveredByStore())).not.toContain(id);
+    expect((await proSub(pro.providerId))!.autoRenew).toBe(true);
+
+    await servicesStoreFor(pro.userId);
+    expect(await sys(() => billing.stopProFeesCoveredByStore())).toContain(id);
+    const stopped = (await proSub(pro.providerId))!;
+    expect(stopped).toMatchObject({ autoRenew: false, nextRetryAt: null, status: 'TRIAL' });
+    const events = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: id, note: PRO_FEE_COVERED_BY_STORE_NOTE }, select: { type: true } }));
+    expect(events).toEqual([{ type: 'TIER_CHANGE' }]);
+    expect(await sys(() => app.prisma.auditLog.findFirst({ where: { entityId: id, action: 'BILLING_STOPPED_ONE_FEE' }, select: { userId: true } }))).toEqual({ userId: null });
+    // Idempotent: nothing more on the next hour.
+    expect(await sys(() => billing.stopProFeesCoveredByStore())).not.toContain(id);
+    // The store fee decides standing.
+    expect(await sys(() => proFeeStanding(app.prisma, pro.userId))).toMatchObject({ source: 'STORE', operable: true });
+
+    // The boundary: the trial ends; the stopped fee owes nothing for it and pauses, and no pro week is charged.
+    const after = new Date(stopped.trialEndDate!.getTime() + 60 * 60_000);
+    await sys(() => new SubscriptionService(app.prisma).convertExpiredTrials(after));
+    await sys(() => billing.lapseStoppedSubscriptions(after));
+    expect((await proSub(pro.providerId))!.status).toBe('PAUSED');
+    // Only E12's zero-fee record of the free trial: nothing with an amount, no failure, no payment.
+    const charges = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: id, type: { in: ['CHARGE_SUCCESS', 'CHARGE_FAILED'] } }, select: { type: true, amount: true } }));
+    expect(charges.map((c) => [c.type, Number(c.amount)])).toEqual([['CHARGE_SUCCESS', 0]]);
+    const payments = await sys(() => app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: id }, select: { amount: true } }));
+    expect(payments.every((p) => Number(p.amount) === 0)).toBe(true);
+  });
+
+  it('[REVIEW-M #2229 S3-1] a pro fee is never stopped for a store fee that has ended, nor for another person\'s store', async () => {
+    on();
+    const pro = await makePro({ agreed: true });
+    const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+    await servicesStoreFor(pro.userId, 'CANCELLED');
+    const other = await makeUser();
+    await servicesStoreFor(other.userId);
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    expect(await sys(() => billing.stopProFeesCoveredByStore())).not.toContain(id);
+    expect((await proSub(pro.providerId))!.autoRenew).toBe(true);
+  });
+
   it('while the store fee is live no pro fee is born and the store fee decides; a suspended store fee blocks the pro too', async () => {
     on();
     const pro = await makePro({ agreed: true });
