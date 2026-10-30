@@ -21,6 +21,7 @@
     "/portal/documents/page": 149,
     "/portal/weekly-fee/page": 154,
     "/portal/account/page": 146,
-    "/advertiser/page": 144
+    "/advertiser/page": 144,
+    "/(marketing)/launching-soon/page": 113
   }
 }

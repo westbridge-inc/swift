@@ -32,6 +32,9 @@ import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
 import { OPERATOR } from './legal/generated';
 import { launch } from './site.launch';
 
+/** [Owner 15 Oct 2026; hours 30 Oct 2026: 8:00–16:00] Support's days and hours, in Guyana time. */
+const SUPPORT_DAYS = 'Monday to Saturday, 8:00–16:00 Guyana time';
+
 export const site = {
   // [Owner 15 Oct 2026 · legal research A11, R2] The company's identity has ONE source, shared with the Terms
   // and the Privacy Policy: apps/api/src/modules/legal/operator.ts, through the legal:sync snapshot. To change
@@ -52,8 +55,12 @@ export const site = {
   /** Support inbox. Already live on the domain's mail — do not change. */
   supportEmail: OPERATOR.supportEmail,
 
+  /** [Owner 15 Oct 2026] When support answers. The one source for the days and hours: the home page's trust strip
+   *  shows it as is, and supportHours below builds on it. */
+  supportDays: SUPPORT_DAYS,
+
   /** [Owner 15 Oct 2026] When support answers, and what to do in an emergency. No page may promise faster. */
-  supportHours: 'Monday to Saturday, 8:00–20:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
+  supportHours: `${SUPPORT_DAYS} (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.`,
 
   /** Canonical apex host. www 301s here; AASA resolves here with no redirect.
    *  Declared in site.domain.ts so next.config can read it without tripping

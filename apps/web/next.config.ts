@@ -84,6 +84,8 @@ export default function createNextConfig(phase: string): NextConfig {
       const splitChunks = config.optimization?.splitChunks;
       if (!splitChunks || typeof splitChunks !== 'object') return config;
       const appOwnCode = /[\\/](src[\\/]|lucide-react[\\/])/;
+      type ChunkModule = { type?: string; nameForCondition?: () => string | null };
+      const appOwnJs = (module: ChunkModule) => !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? '');
       splitChunks.cacheGroups = {
         ...(splitChunks.cacheGroups ?? {}),
         customerAppShared: {
@@ -94,6 +96,21 @@ export default function createNextConfig(phase: string): NextConfig {
           minChunks: 12,
           minSize: 0,
           priority: 25,
+          reuseExistingChunk: true,
+        },
+        // [WEBSITE 30 Oct · size budget] The same, for the public site's pages (app/(marketing)/...): a module the
+        // marketing layout loads (the footer's store links and the launch switch's one question to the server) and
+        // a page loads too was copied into that page's own chunk. One chunk the layout always loads holds it
+        // instead, so no marketing page downloads it twice. Pages outside (marketing) keep their chunking.
+        marketingLayoutShared: {
+          name: 'marketing-shared',
+          chunks: (chunk: { name?: string | null }) => /^app\/\(marketing\)\//.test(chunk.name ?? ''),
+          test: (module: ChunkModule, context?: { chunkGraph?: { getModuleChunksIterable: (_m: unknown) => Iterable<{ name?: string | null }> } }) =>
+            appOwnJs(module)
+            && [...(context?.chunkGraph?.getModuleChunksIterable(module) ?? [])].some((chunk) => chunk.name === 'app/(marketing)/layout'),
+          minChunks: 2,
+          minSize: 0,
+          priority: 23,
           reuseExistingChunk: true,
         },
       };
