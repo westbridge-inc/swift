@@ -15,6 +15,7 @@ import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
 import { useStoreRole } from '@/lib/store-role';
 import type { VendorMemberRole } from '@/lib/vendor-hub';
 import { StoreLiveFeed } from '@/components/store-live-feed';
+import { branchLabel } from '@/lib/branch-label';
 
 /**
  * The business console's places: the app's four sections
@@ -75,7 +76,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
       >
         <StoreIcon className="h-4 w-4 shrink-0 text-[var(--swift-red)]" />
         <span className={`min-w-0 flex-1 truncate text-sm font-semibold ${selected ? '' : 'text-[var(--swift-red)]'}`}>
-          {selected ? selected.name : 'Choose a store'}
+          {selected ? branchLabel(selected) : 'Choose a store'}
         </span>
         {(list.length > 1 || !selected) && <ChevronDown className="h-4 w-4 shrink-0 text-[var(--swift-muted)]" />}
       </button>
@@ -90,7 +91,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
               }}
               className={`block w-full truncate px-3 py-2 text-left text-sm hover:bg-[var(--swift-subtle)] ${s.id === selected?.id ? 'font-bold text-[var(--swift-red)]' : ''}`}
             >
-              {s.name}
+              {branchLabel(s)}
               <span className="ml-2 text-xs text-[var(--swift-muted)]">{s.city ?? ''}</span>
             </button>
           ))}

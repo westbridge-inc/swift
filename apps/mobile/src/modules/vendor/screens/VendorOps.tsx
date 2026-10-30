@@ -75,6 +75,7 @@ import { money } from '../../../lib/money';
 import { canAttestPayment, paymentAttestBlockedReason } from '../../../lib/orderStatus';
 import { vendorSurfaceForRole } from '../../../lib/vendorRbac';
 import { shownStoreOpen } from '../../../lib/storeOpenSwitch';
+import { storeLabel } from '../../../lib/branches';
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import {
   TYPES,
@@ -1000,8 +1001,10 @@ export function VendorOps({ store, navigation }: any) {
         {stores.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: space.lg }} contentContainerStyle={{ gap: space.md }}>
             {stores.map((s: any) => (
-              <Chip key={s.id} label={s.name} selected={s.id === store.id} onPress={() => void switchStore(s.id)} />
+              <Chip key={s.id} label={storeLabel(s)} selected={s.id === store.id} onPress={() => void switchStore(s.id)} />
             ))}
+            {/* [CHAINS PR2] Every branch at a glance and several at once. */}
+            <Chip label="All branches" onPress={() => navigation?.navigate?.('VendorBranches')} />
           </ScrollView>
         ) : null}
 

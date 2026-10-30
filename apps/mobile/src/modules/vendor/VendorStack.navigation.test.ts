@@ -189,6 +189,10 @@ vi.mock('./screens/VendorOrderDetailScreen', () => ({ VendorOrderDetailScreen: (
 vi.mock('./screens/VendorOrderHistoryScreen', () => ({ VendorOrderHistoryScreen: () => null }));
 vi.mock('./screens/VendorScheduleScreen', () => ({ VendorScheduleScreen: () => null }));
 vi.mock('./screens/VendorTierScreen', () => ({ VendorTierScreen: () => null }));
+// [CHAINS PR2] Branch screens are unrelated to tap routing; the add-branch
+// screen reaches the persisted location store (native MMKV storage).
+vi.mock('./screens/VendorBranchesScreen', () => ({ VendorBranchesScreen: () => null }));
+vi.mock('./screens/VendorAddBranchScreen', () => ({ VendorAddBranchScreen: () => null }));
 
 vi.mock('expo-notifications', () => ({
   addNotificationResponseReceivedListener: (listener: typeof fx.listener) => { fx.listener = listener; return { remove: vi.fn() }; },

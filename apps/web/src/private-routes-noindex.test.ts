@@ -66,6 +66,9 @@ const PRIVATE_PAGES = [
   '(app)/orders/page.tsx',
   '(app)/orders/[id]/page.tsx',
   'dashboard/page.tsx',
+  'dashboard/branches/page.tsx', // [CHAINS PR2] a business's branches, their figures and orders
+  'dashboard/branches/add/page.tsx', // [CHAINS PR2] add a branch (owner)
+  'dashboard/team/page.tsx', // [CHAINS PR2] the store's team (names and phones)
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',

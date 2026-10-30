@@ -13,6 +13,7 @@ import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { type VendorMemberRole, TabHeader, VendorBillingNotice } from '../shared';
 import { HeldStoreOrders } from './HeldStoreOrders';
+import { storeLabel } from '../../../lib/branches';
 
 export function VendorBillingSuspended({ store, stores, myRole }: { store: any; stores: any[]; myRole?: VendorMemberRole }) {
   const navigation = useNavigation<any>();
@@ -54,7 +55,7 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
             {stores.map((candidate) => (
               <Chip
                 key={candidate.id}
-                label={candidate.name}
+                label={storeLabel(candidate)}
                 selected={candidate.id === store.id}
                 onPress={() => void switchStore(candidate.id)}
               />

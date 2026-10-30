@@ -7,6 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { assertUsersMayContact } from '../moderation/user-block.service';
 import { formatGuyanaTime, guyanaDayKey } from '../../utils/guyana-day';
 import { ownerWallSystem } from '../../lib/owner-rls';
+import { assertProFeeAllowsNewWork, ensureProFeeBorn } from './pro-fee';
 
 /** The verification projection is used both on the root client and inside
  * profile-save transactions. Keep the contract narrow enough that the same
@@ -393,6 +394,9 @@ export async function refreshProviderVerification(
 
     await projectProviderVerificationLocked(tx, userId, observer);
   });
+  // [BILL-PRO PR3] A pro whose documents are approved may now owe the weekly fee (behind PRO_WEEKLY_FEE; never
+  // without their tick). Its own transaction, after this one, because activation takes the identity lock first.
+  await ensureProFeeBorn(prisma, userId);
 }
 
 /**
@@ -578,6 +582,9 @@ export async function createServiceJobWithLiveAuthority(
     if (!verified || !trade) {
       throw new AppError(403, 'PROVIDER_NOT_VERIFIED', 'This provider is not currently verified to accept jobs');
     }
+    // [BILL-PRO PR3 · owner B2] A pro whose weekly fee is unpaid (or who has not accepted the agreement) takes no
+    // new requests (PRO_WEEKLY_FEE on only).
+    await assertProFeeAllowsNewWork(tx, provider.userId, 'customer');
 
     await observer?.afterAuthorityChecked?.({
       providerId: provider.id,

@@ -7,7 +7,7 @@ import {
   getRiderProfile, getVerificationStatus, submitVerificationDocument, uploadVerificationFile,
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { LEGAL_URL } from '@/lib/api';
+import { LEGAL_URL } from '@/lib/legal-url';
 import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 import { documentExpiryDay } from '@/lib/documentExpiry';
 

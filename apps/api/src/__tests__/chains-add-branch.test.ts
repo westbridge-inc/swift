@@ -82,8 +82,9 @@ async function ackFor(userId: string, vendorType = 'RESTAURANT') {
   return { version: WEEKLY_FEE_ACK_VERSION, amount: quote.amount, currencyCode: quote.currencyCode };
 }
 
+// [REVIEW-F #2220 S3-1] Every add carries the number customers can call (chains-branch-go-live pins it).
 const add = (token: string, payload: Record<string, unknown>, vendorId?: string) => app.inject({
-  method: 'POST', url: '/api/v1/vendor/stores', payload,
+  method: 'POST', url: '/api/v1/vendor/stores', payload: { publicPhone: '+5926007788', ...payload },
   headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(vendorId ? { 'x-vendor-id': vendorId } : {}) },
 });
 const terms = (token: string, query = '') => app.inject({

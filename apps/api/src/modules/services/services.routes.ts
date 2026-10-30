@@ -52,6 +52,7 @@ import {
   scheduledTransitionSchema,
   transitionGenerationSchema,
 } from './service-job-client-contract';
+import { assertProFeeAllowsNewWork, proFeeStanding } from './pro-fee';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -370,6 +371,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     const licence = trade === null ? { required: false, checkedOn: null } : await requiredLicenceStatus(app.prisma, request.user.userId);
     const licenceOn = licence.checkedOn;
     const certified = matching.length > 0 || licenceOn !== null;
+    const standing = await proFeeStanding(app.prisma, request.user.userId);
     const licenceCheckedOn = [licenceOn, ...matching.map((q) => q.verifiedAt)].reduce<Date | null>(
       (latest, at) => (at && (!latest || at > latest) ? at : latest), null,
     )?.toISOString() ?? null;
@@ -386,6 +388,10 @@ export async function servicesRoutes(app: FastifyInstance) {
         certified,
         // [R7 · ROLE-DOCS PR 3] "Licence on file, checked on [date]": the latest day a person checked one (null = none).
         licenceCheckedOn,
+        // [BILL-PRO PR3] The pro's weekly-fee standing and whether customers can find them now (documents approved
+        // and, with PRO_WEEKLY_FEE on, the agreement accepted and the fee operable). Builds 9-12 ignore both.
+        fee: standing,
+        listed: provider.isVerified && standing.operable,
       },
     };
   });
@@ -485,7 +491,9 @@ export async function servicesRoutes(app: FastifyInstance) {
     });
     const pageCandidates = candidates.slice(0, query.limit);
     const live = await Promise.all(pageCandidates.map(async (provider) => {
-      const verified = await isProviderVerified(app.prisma, provider.userId);
+      // [BILL-PRO PR3 · owner A3/B2] Listed only while the pro may take new work: documents approved AND (PRO_WEEKLY_FEE
+      // on) the agreement accepted and the fee operable.
+      const verified = await isProviderVerified(app.prisma, provider.userId) && (await proFeeStanding(app.prisma, provider.userId)).operable;
       // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person (read only for a listed provider)
       const licence = verified ? await requiredLicenceStatus(app.prisma, provider.userId) : { required: false, checkedOn: null };
       return { provider, verified, licenceOn: licence.checkedOn, licenceRequired: licence.required };
@@ -672,6 +680,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       if (!(await isProviderVerified(tx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before taking new work.');
       }
+      // [BILL-PRO PR3 · owner B2] No new quote while the pro's weekly fee is unpaid (PRO_WEEKLY_FEE on only).
+      await assertProFeeAllowsNewWork(tx, request.user.userId, 'provider');
       return transitionServiceJob(tx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -724,6 +734,8 @@ export async function servicesRoutes(app: FastifyInstance) {
     // silently overwritten.
     // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
     const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
+      // [BILL-PRO PR3 · owner B2] A pro whose weekly fee is unpaid takes no new booking (PRO_WEEKLY_FEE on only).
+      await assertProFeeAllowsNewWork(boundTx, job.provider.userId, 'customer');
       return transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -776,6 +788,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       if (!(await isProviderVerified(tx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before confirming new work.');
       }
+      // [BILL-PRO PR3 · owner B2] No new confirm while the pro's weekly fee is unpaid (PRO_WEEKLY_FEE on only).
+      await assertProFeeAllowsNewWork(tx, request.user.userId, 'provider');
       const confirmedAt = new Date();
       return transitionServiceJob(tx, {
         jobId: id,
