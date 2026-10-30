@@ -55,6 +55,8 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'modules/auth/step-up.ts': { count: 2, why: INTERNAL },
   'modules/billing/billing.service.ts': { count: 1, why: INTERNAL },
   'modules/billing/mmg-checkout-support.ts': { count: 4, why: OPS },
+  // [ENTERPRISE E3] The owner's own phone on their own fee statement.
+  'modules/billing/chain-statement.ts': { count: 1, why: OWN },
   'modules/cash/cash-rules.service.ts': { count: 2, why: INTERNAL },
   'modules/custody/custody-recovery.ts': { count: 1, why: OPS },
   'modules/integrity/backfill.ts': { count: 2, why: INTERNAL },
