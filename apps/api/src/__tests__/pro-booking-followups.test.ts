@@ -1,11 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 
-// The agreement version with the advance-acceptance clause: none exists on main yet (fail-closed, pinned in
-// pro-booking.unit.test.ts), so this suite names one.
-vi.mock('../modules/services/pro-menu-agreement-version', () => ({
-  PRO_MENU_AGREEMENT: { documentType: 'vendor_agreement', sinceVersion: '2026-10-29' },
-}));
-const AGREEMENT_VERSION = '2026-10-29';
+// [BILL-PRO PR7] The agreement version with the advance-acceptance clause is the real one now: the Business
+// Agreement's section 12 (PRO_AGREEMENT_VERSION, which PRO_MENU_AGREEMENT.sinceVersion names). No mock.
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -31,6 +27,9 @@ import { installDdl } from './helpers/install-ddl';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { lockProviderTime } from '../modules/services/provider-calendar';
+import { PRO_AGREEMENT_VERSION, recordReacceptance } from '../modules/legal/reaccept';
+
+const AGREEMENT_VERSION = PRO_AGREEMENT_VERSION;
 
 // The heal below is raw DDL (idempotent; a no-op on a migrated database).
 grantSuiteCapability('ddl');
@@ -241,12 +240,30 @@ describe('[COORD 16:13Z] a pro is bookable from their list only after accepting 
     const mine = async () => (await inject('GET', '/api/v1/services/providers/me/bookable', pro.token)).json().data.agreementAccepted;
     expect(errorOf(await list())).toEqual([409, 'PROVIDER_AGREEMENT_PENDING']);
     expect(await mine()).toBe(false);
+    // [BILL-PRO PR7] 2026-10-29 (Terms s5 for customers, before the pro agreement had the clause) is not enough.
+    await consent(pro.userId, '2026-10-29', 'granted');
+    expect(errorOf(await list())).toEqual([409, 'PROVIDER_AGREEMENT_PENDING']);
     await consent(pro.userId, AGREEMENT_VERSION, 're_granted');
     expect((await list()).statusCode).toBe(200);
     expect(await mine()).toBe(true);
     await consent(pro.userId, AGREEMENT_VERSION, 'withdrawn');
     expect(errorOf(await list())).toEqual([409, 'PROVIDER_AGREEMENT_PENDING']);
     await consent(pro.userId, '2026-11-02', 'granted');
+    expect((await list()).statusCode).toBe(200);
+  });
+
+  it('[BILL-PRO PR7] the pro\'s own tick (the re-accept route\'s recordReacceptance) is what the gate reads', async () => {
+    on();
+    const pro = await makePro('tutor', { agreed: null });
+    const c = await makeUser();
+    await makeOffering(pro.providerId, 60);
+    const list = () => inject('GET', `/api/v1/services/providers/${pro.providerId}/offerings`, c.token);
+    expect(errorOf(await list())).toEqual([409, 'PROVIDER_AGREEMENT_PENDING']);
+    await runWithoutTenant(() => recordReacceptance(app.prisma, { userId: pro.userId, roles: ['CUSTOMER'], hadAccepted: true, surface: 'ios' }));
+    const row = await runWithoutTenant(() => app.prisma.consentRecord.findFirst({
+      where: { subjectId: pro.userId, documentType: 'vendor_agreement' }, orderBy: { capturedAt: 'desc' }, select: { documentVersion: true, action: true },
+    }));
+    expect(row).toEqual({ documentVersion: AGREEMENT_VERSION, action: 'granted' });
     expect((await list()).statusCode).toBe(200);
   });
 

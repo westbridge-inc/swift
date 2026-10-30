@@ -61,6 +61,11 @@ function itemRange(catalogue: CataloguePriceBand[], i: number): string {
   return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} active items`;
 }
 
+/** A catalogue step's own free trial (a NEW store at that step when Swift approves it), else the list's. A value that
+ *  is not a whole number of days above zero is not shown: the list's own trial stands. */
+const bandTrialDays = (band: CataloguePriceBand, fallback: number) =>
+  typeof band.trialDays === 'number' && Number.isInteger(band.trialDays) && band.trialDays > 0 ? band.trialDays : fallback;
+
 function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
   return (
     <div className="rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
@@ -120,13 +125,21 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                   Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.
                 </p>
               </PriceCard>
-              {list.catalogue.map((band, i) => (
-                <PriceCard key={band.tier} title={CATALOGUE_CLASSES[band.tier]?.label ?? 'Businesses'} price={amount(band.rate)} trialDays={list.pricing.trialDays}>
-                  <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                    {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
-                  </p>
-                </PriceCard>
-              ))}
+              {list.catalogue.map((band, i) => {
+                const trialDays = bandTrialDays(band, list.pricing.trialDays);
+                return (
+                  <PriceCard key={band.tier} title={CATALOGUE_CLASSES[band.tier]?.label ?? 'Businesses'} price={amount(band.rate)} trialDays={trialDays}>
+                    <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                      {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
+                    </p>
+                    {trialDays !== list.pricing.trialDays && (
+                      <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                        A new store with this many active items when Swift approves it gets {trialDays} days free.
+                      </p>
+                    )}
+                  </PriceCard>
+                );
+              })}
             </div>
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
               A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the

@@ -87,9 +87,10 @@ describe('public pricing (price on the door)', () => {
     expect(d.vendors).toEqual({
       service: 8000,
       catalogue: [
-        { minItems: 0, tier: 'small', rate: 15000 },
-        { minItems: 1000, tier: 'large', rate: 20000 },
-        { minItems: 10000, tier: 'department', rate: 60000 },
+        { minItems: 0, tier: 'small', rate: 15000, trialDays: 14 },
+        { minItems: 1000, tier: 'large', rate: 20000, trialDays: 14 },
+        // [DEPT-PRICE · owner 29 Oct 2026] 45,000 (was 60,000); a NEW department-store signup gets 7 days free.
+        { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
       ],
     });
     // Older clients read the legacy numbers, which never under-quote a bill:
@@ -110,8 +111,8 @@ describe('public pricing (price on the door)', () => {
     expect(d.weekly.moverHeavy).toBe(heavyOffered.length ? Math.max(...heavyOffered.map((q) => q.rate)) : null);
     expect(d.weekly.moverHeavy).not.toBe(9000);
     expect(d.weekly.smallVendor).toBe(15000);
-    expect(d.weekly.largeVendor).toBe(60000);
-    expect(d.weekly.departmentVendor).toBe(60000);
+    expect(d.weekly.largeVendor).toBe(45000);
+    expect(d.weekly.departmentVendor).toBe(45000);
   });
 
   it('does not publish a future island price book', async () => {
