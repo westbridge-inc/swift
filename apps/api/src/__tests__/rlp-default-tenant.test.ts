@@ -64,7 +64,9 @@ afterAll(async () => {
   // is real money: the claim was refused before the reserve was read (no PAYOUT row), and the PROVISION rows
   // are on this run's own made-up countries, keyed to their period, with no tie to a user; they stay.
   await sys(async () => {
-    await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } });
+    // A claim has no foreign key to its order or people: found by its id AND by this file's customers, so a claim
+    // never orphans (REVIEW-G S4 on #2235).
+    await app.prisma.reimbursementClaim.deleteMany({ where: { OR: [{ id: { in: claimIds } }, { customerId: { in: userIds } }] } });
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:rlp-default-tenant').catch(() => 0);
     // Riders, customers, admins and notifications cascade from the user.
@@ -73,6 +75,8 @@ afterAll(async () => {
     // A cleanup that leaves the operator or its people behind fails this file, not a later one.
     expect(await app.prisma.tenant.count({ where: { id: TENANT_B } })).toBe(0);
     expect(await app.prisma.user.count({ where: { OR: [{ id: { in: userIds } }, { tenantId: TENANT_B }] } })).toBe(0);
+    expect(await app.prisma.reimbursementClaim.count({ where: { OR: [{ id: { in: claimIds } }, { customerId: { in: userIds } }] } })).toBe(0);
+    expect(await app.prisma.order.count({ where: { OR: [{ id: { in: orderIds } }, { tenantId: TENANT_B }] } })).toBe(0);
   });
   await app.close();
 });
