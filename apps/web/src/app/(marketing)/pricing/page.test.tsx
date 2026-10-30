@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api';
@@ -142,7 +144,7 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     }
   });
 
-  it('shows no multi-store discount — every store pays its own tier, even if an older server still sends the old rule', async () => {
+  it('shows no multi-store discount — every store pays its own fee, even if an older server still sends the old rule', async () => {
     pricing = { ...GY, franchise: { minLocations: 5, discountPct: 50 } };
     await renderPage();
     expect(screen.queryByRole('heading', { name: 'Franchises' })).toBeNull();
@@ -155,12 +157,36 @@ describe('public pricing page — every partner reads their own weekly fee', () 
 
   it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
     await renderPage();
-    expect(document.body.textContent).toContain('Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs.');
+    expect(document.body.textContent).toContain('Every store is its own account with its own weekly fee, however many stores its owner runs.');
+    // [REVIEW-F S3-1 on #2234] A store is priced at its first step whatever its catalogue (R27 off): never 'the rate for its own catalogue'.
+    expect(document.body.textContent).not.toMatch(/rate for its own catalogue/);
     cleanup();
     // A server from before multi-store pricing existed sends no key at all.
     pricing = { ...GY, franchise: undefined };
     await renderPage();
     expect(document.body.textContent).toContain('however many stores its owner runs');
+  });
+
+  // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
+  // born on the first catalogue step and nothing moves it between steps. The page must not say it moves on its own.
+  it('[R27] never says a store moves between catalogue rates on its own: every new store starts on the first rate', async () => {
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).not.toMatch(/automatic/i);
+    expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
+    expect(page).toContain('Today every new store starts on the Businesses rate (a services business on the Services rate), whatever the size of its catalogue, and Swift does not move a store to another rate as its active items change.');
+    expect(page).toContain('A rate agreed with Swift stays as agreed.');
+  });
+
+  it('[R27] names the first step the server lists, not a label frozen into the sentence', async () => {
+    pricing = { ...GY, vendors: { ...GY.vendors, catalogue: [{ minItems: 0, tier: 'large', rate: 20000 }, { minItems: 10000, tier: 'department', rate: 45000 }] } };
+    await renderPage();
+    expect(document.body.textContent).toContain('Today every new store starts on the Large catalogues rate (a services business');
+  });
+
+  it('[R27] the sentence holds only while the server\'s weekly re-tier is off — turning it on must revisit this page', () => {
+    const flag = readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', 'billing', 'weekly-retier.ts'), 'utf8');
+    expect(flag).toMatch(/^export const WEEKLY_RETIER_ON = false;$/m);
   });
 
   it('prints the server boundaries, not copy frozen into the page', async () => {
