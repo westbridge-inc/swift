@@ -1,6 +1,6 @@
 import { lockFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import type { PrismaClient } from '@prisma/client';
-import type { NotificationService } from '../notification/notification.service';
+import type { NotificationAudience, NotificationService } from '../notification/notification.service';
 import { payInfo } from './agent-cash.service';
 import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -72,14 +72,17 @@ export async function sweepTrialFeeEducation(
         ? mmgPayLine(checkoutAmountGyd(fee))
         : feeDueLine(fee.amountDueGyd, sub.currencyCode, sub.trialEndDate, { first: true });
     // [BILL-PRO] A pro's fee is neither a store's nor a mover's: no shipped build opens a fee screen for it.
-    const audience = sub.vendor ? 'VENDOR' : sub.serviceProvider ? 'provider' : 'MOVER';
+    // [REVIEW-M #2217 N1] The audience names NotificationService knows ('business' / 'earner'); the old 'VENDOR' /
+    // 'MOVER' spellings were cast past the type. Builds 9-12 route this notice the same with either spelling (it
+    // carries no orderId; build 12's feeFamilyOf reads both), and the customer inbox hides both.
+    const audience: NotificationAudience = sub.vendor ? 'business' : sub.serviceProvider ? 'provider' : 'earner';
     if (stage === 'd10') {
       await notifications.send({
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends soon',
         body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
-        audience: audience as never,
+        audience,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
         feeStageKey: `trial:${stage}`,
       });
@@ -90,7 +93,7 @@ export async function sweepTrialFeeEducation(
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends soon',
         body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
-        audience: audience as never,
+        audience,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
         feeStageKey: `trial:${stage}`,
       });
