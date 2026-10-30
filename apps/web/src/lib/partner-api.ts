@@ -1,11 +1,7 @@
 import { apiFetch } from './auth';
 
-/** The server's switches the web reads before offering a door. Advertising is
- *  off at launch; anything but a literal `true` reads as off. */
-export async function getCapabilities(): Promise<{ adsEnabled: boolean }> {
-  const r = await apiFetch('/api/v1/public/capabilities');
-  return { adsEnabled: r.data?.adsEnabled === true };
-}
+// The server's switches live in lib/capabilities (the Switch app sheet in every shell imports only that; CI perf #2220).
+export { getCapabilities } from './capabilities';
 
 export interface Advertiser { id: string; companyName: string; status: string; memberRole: string }
 export interface Campaign {

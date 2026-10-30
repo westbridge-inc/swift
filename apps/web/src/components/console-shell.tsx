@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Bell, LogOut, Menu, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { SignOutButton } from '@/components/sign-out-button';
-import { Avatar, SwitchAppSheet, type ShellPerson } from '@/components/customer-shell';
+import { Avatar, SwitchAppSheet } from '@/components/account-chrome';
+import type { ShellPerson } from '@/components/customer-shell';
 import { OfflineNotice } from '@/components/offline-notice';
 import { SwiftLogo } from '@/components/swift-logo';
 

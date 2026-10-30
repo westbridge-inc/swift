@@ -16,6 +16,12 @@ export interface Store {
   acceptingOrders: boolean;
   city: string | null;
   isVerified: boolean;
+  /** [CHAINS PR2] The store's status; a branch waiting for Swift's approval is PENDING_APPROVAL. */
+  status?: string;
+  /** [CHAINS PR2] The server's word that this store is not live yet (a new branch, or a store not yet approved). */
+  awaitingApproval?: boolean;
+  /** [REVIEW-F #2220 S3-1] Whose turn it is for a store not live yet, and the owner's steps (lib/branch-label). */
+  goLive?: { waitingFor: 'OWNER' | 'SWIFT'; steps: string[] } | null;
 }
 
 // ── The money seam ───────────────────────────────────────────────────────────
@@ -365,3 +371,4 @@ export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((
 // a mis-click on the wrong row cannot close a debt.
 export const confirmSettlement = (id: string, amount: string | number) =>
   apiFetch(`${V}/cash-settlements/${id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });
+

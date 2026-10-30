@@ -38,8 +38,9 @@ const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-/** The partner an activation path is about to make live. */
-export type ActivationEntity = { riderId: string } | { driverId: string } | { vendorId: string };
+/** The partner an activation path is about to make live. [BILL-PRO PR3] A pro (an independent service provider)
+ *  is activated by services/pro-fee.ts ensureProFeeBorn only, behind PRO_WEEKLY_FEE. */
+export type ActivationEntity = { riderId: string } | { driverId: string } | { vendorId: string } | { serviceProviderId: string };
 
 /** What activating a partner would price: the subscription they already
  *  hold (nothing to price), or the type, market, rate and trial length a new
@@ -151,9 +152,30 @@ export class SubscriptionService {
     };
   }
 
+  /** [BILL-PRO PR3] A pro is priced like a Services store: the flat services rate (serviceVendor), never re-tiered.
+   *  Re-read in the activation transaction: the fee is due only while the switch is on, the pro's documents are
+   *  approved, they accepted the Business Agreement that covers Providers, and no Services store fee of theirs is
+   *  live (one fee, owner B1). Otherwise PRO_FEE_NOT_DUE and nothing is written. */
+  private async proActivation(serviceProviderId: string, db: Db): Promise<ActivationPricing> {
+    const pro = await db.serviceProvider.findUnique({
+      where: { id: serviceProviderId },
+      select: { userId: true, subscription: true, user: { select: { countryCode: true } } },
+    });
+    if (!pro) throw new NotFoundError('ServiceProvider', serviceProviderId);
+    if (pro.subscription) return { existing: pro.subscription };
+    const { assertProFeeDue } = await import('../services/pro-fee-due');
+    await assertProFeeDue(db, pro.userId);
+    const countryCode = pro.user.countryCode;
+    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
+    const priced = partnerRateFor(tiers, { kind: 'VENDOR', isService: true, activeListings: 0 });
+    // A pro's trial is always the full TRIAL_DAYS (the department-store 7-day rule is a store tier's; owner 30 Oct 00:14Z).
+    return { existing: null, type: 'INDEPENDENT_PRO', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
+  }
+
   private activation(entity: ActivationEntity, db: Db): Promise<ActivationPricing> {
     if ('riderId' in entity) return this.riderActivation(entity.riderId, db);
     if ('driverId' in entity) return this.driverActivation(entity.driverId, db);
+    if ('serviceProviderId' in entity) return this.proActivation(entity.serviceProviderId, db);
     return this.vendorActivation(entity.vendorId, db);
   }
 
@@ -186,7 +208,7 @@ export class SubscriptionService {
       await lockIdentityAuthority(tx);
       // [#1393] One weekly fee per mover payer: the payer and every one of its
       // sources are locked (and ownership re-read) before the activation is read.
-      const payer = 'vendorId' in entity ? null : await this.lockMoverPayer(entity, tx);
+      const payer = 'vendorId' in entity || 'serviceProviderId' in entity ? null : await this.lockMoverPayer(entity, tx);
       // [#1879 S3-3 · REVIEW-G R1] No activation write for an erased account. The person's users row is locked
       // here (a mover's already is, by lockMoverPayer), so an erasure either commits its cut-off first and this
       // refuses, or waits behind this transaction and its wind-down then cancels what was written.
@@ -194,9 +216,11 @@ export class SubscriptionService {
         throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Nothing can be activated for it.');
       }
       const activation = await this.activation(entity, tx);
-      const sub = payer && !('vendorId' in entity)
+      const sub = payer && ('riderId' in entity || 'driverId' in entity)
         ? await this.moverRow(entity, payer, activation, tx)
-        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, STORE_TRIAL_TENANT, activation.trialDays);
+        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx,
+          // [BILL-PRO] A pro's trial is decided in their own user's tenant (stores keep STORE_TRIAL_TENANT, as before).
+          'serviceProviderId' in entity ? (await this.humanTenant(entity, tx)) : STORE_TRIAL_TENANT, activation.trialDays);
       return apply(tx, sub);
     };
     return '$transaction' in db ? db.$transaction(run) : run(db);
@@ -205,6 +229,8 @@ export class SubscriptionService {
   async startTrialForRider(riderId: string, db?: Db) { return this.start({ riderId }, db); }
   async startTrialForDriver(driverId: string, db?: Db) { return this.start({ driverId }, db); }
   async startTrialForVendor(vendorId: string, db?: Db) { return this.start({ vendorId }, db); }
+  /** [BILL-PRO PR3] Only services/pro-fee.ts ensureProFeeBorn calls this (behind PRO_WEEKLY_FEE). */
+  async startTrialForServiceProvider(serviceProviderId: string, db?: Db) { return this.start({ serviceProviderId }, db); }
 
   private async start(entity: ActivationEntity, db: Db = this.prisma) {
     const sub = await this.withActivation(entity, async (_tx, row) => row, db);
@@ -293,7 +319,12 @@ export class SubscriptionService {
 
   /** The human behind the entity + their trial-law role (§3: the trial
    *  belongs to the human, not the account or the entity). */
-  private async humanFor(entity: { riderId?: string; driverId?: string; vendorId?: string }, db: Db = this.prisma): Promise<{ userId: string; role: string }> {
+  private async humanTenant(entity: { serviceProviderId: string }, db: Db): Promise<string> {
+    const pro = await db.serviceProvider.findUniqueOrThrow({ where: { id: entity.serviceProviderId }, select: { user: { select: { tenantId: true } } } });
+    return pro.user.tenantId;
+  }
+
+  private async humanFor(entity: { riderId?: string; driverId?: string; vendorId?: string; serviceProviderId?: string }, db: Db = this.prisma): Promise<{ userId: string; role: string }> {
     if (entity.riderId) {
       const r = await db.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } });
       return { userId: r.userId, role: 'RIDER' };
@@ -301,6 +332,11 @@ export class SubscriptionService {
     if (entity.driverId) {
       const d = await db.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
       return { userId: d.userId, role: 'DRIVER' };
+    }
+    if (entity.serviceProviderId) {
+      // [BILL-PRO · owner A2] The trial law's own role for a pro: one trial per person as a pro, apart from a store's.
+      const p = await db.serviceProvider.findUniqueOrThrow({ where: { id: entity.serviceProviderId }, select: { userId: true } });
+      return { userId: p.userId, role: 'SERVICE_PROVIDER' };
     }
     const v = await db.vendor.findUniqueOrThrow({
       where: { id: entity.vendorId! },

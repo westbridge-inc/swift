@@ -34,7 +34,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
-import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
+import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND, storeGoLive, type StoreGoLive } from '../vendor/go-live';
 import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
@@ -2583,6 +2583,34 @@ export class VerificationService {
       publishedPhone: goLiveMissing(vendor).length === 0,
       foodHandlers,
     };
+  }
+
+  /**
+   * [CHAINS PR2 · REVIEW-F #2220 S3-1] For the partner apps' store lists: each never-live store's go-live, in the
+   * projection's own terms (vendor/go-live.ts storeGoLive) — whose turn it is and the owner's steps still to do. Only
+   * stores waiting for their first go-live (PENDING_APPROVAL) get one; a live, suspended or closed store maps to
+   * nothing. Reads only: the owner's checklist for the store's type (no document field is opened, so nothing is
+   * audited on a list read), its published phone, and its food handlers tick. The storefront disclosure block is not
+   * compiled here: for a store whose documents are complete its elements are already met (the address is the store's
+   * own, the contact the owner's verified sign-in phone, the name the approved documents'), and the console keeps the
+   * full verdict (vendorActivationNext).
+   */
+  async storeGoLiveViews(vendorIds: readonly string[], db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<Map<string, StoreGoLive>> {
+    const out = new Map<string, StoreGoLive>();
+    if (vendorIds.length === 0) return out;
+    const stores = await db.vendor.findMany({
+      where: { id: { in: [...vendorIds] }, status: 'PENDING_APPROVAL' },
+      select: { id: true, status: true, vendorType: true, tier: true, publicPhone: true, owner: { select: { userId: true } } },
+    });
+    for (const store of stores) {
+      const checklist = await this.activationChecklist(store.owner.userId, store.vendorType as ChecklistRole, { db, vendorId: store.id });
+      const required = foodHandlerTickApplies(store);
+      out.set(store.id, storeGoLive(store, {
+        documentStates: checklist.items.map((item) => item.state),
+        foodHandlers: { required, attested: required && await storeAttested(db, store.owner.userId, store.id) },
+      }));
+    }
+    return out;
   }
 
   /**
