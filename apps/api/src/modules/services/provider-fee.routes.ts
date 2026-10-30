@@ -108,12 +108,15 @@ export async function providerFeeRoutes(app: FastifyInstance): Promise<void> {
 
   app.put('/subscription/billing-method', auth, async (request) => {
     const body = z.object({ method: z.enum(['CASH', 'NONE']) }).parse(request.body);
+    // [REVIEW-G #2230 S4] The profile gate first: a person with no provider profile is refused here (404), never asked
+    // for a step-up or told a store's fee covers a provider profile they do not have.
+    const pro = await proOf(request);
     // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
     if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     // [REVIEW-G #2230 N2] A pro their store's fee covers has nothing of their own to resume: say so in their words.
     if (body.method === 'CASH' && await coveredByOf(request.user.userId)) throw new AppError(409, PRO_FEE_COVERED_CODE, PRO_FEE_COVERED_MESSAGE);
     await requireStepUp(app, request);
-    const sub = (await proOf(request)).subscription;
+    const sub = pro.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const updated = body.method === 'NONE'
       ? await billing.stopBilling(sub.id, request.user.userId)
