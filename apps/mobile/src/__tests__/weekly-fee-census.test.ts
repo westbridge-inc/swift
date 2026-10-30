@@ -25,6 +25,7 @@ describe('partner checkout surface census', () => {
   });
   it('phone checkout uses the auth browser with the fixed return and platform-scoped transport', () => {
     expect(source('src/modules/billing/screens/WeeklyFeeScreen.tsx')).toContain("WebBrowser.openAuthSessionAsync(url, 'swift://pay/mmg/return')");
+    expect(source('src/modules/vendor/screens/VendorPayAllScreen.tsx')).toContain("WebBrowser.openAuthSessionAsync(url, 'swift://pay/mmg/return')");
     expect(source('src/services/api.ts')).toContain("config.headers['x-client-platform'] = Platform.OS");
   });
   it('the mobile and web state machines cannot drift', () => {
@@ -32,5 +33,7 @@ describe('partner checkout surface census', () => {
     expect(source('src/lib/weeklyFeeReopen.ts')).toBe(source('../web/src/lib/weekly-fee-reopen.ts'));
     // [FEE-STATUS · REVIEW-F S4-1] The fee status words, shared the same way.
     expect(source('src/lib/fee-status.ts')).toBe(source('../web/src/lib/fee-status.ts'));
+    // [ENTERPRISE E1b] "Pay all my branches": the list, its words and the checkout follow, shared the same way.
+    expect(source('src/lib/chain-fee.ts')).toBe(source('../web/src/lib/chain-fee.ts'));
   });
 });

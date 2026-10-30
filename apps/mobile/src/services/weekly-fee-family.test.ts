@@ -44,6 +44,7 @@ vi.mock('../stores/authStore', () => ({
   useAuthStore: Object.assign((pick: (_s: unknown) => unknown) => pick({ user: { id: fx.owner.userId }, sessionGeneration: 1, intent: 'mover' }), { getState: () => ({ intent: 'mover' }) }),
 }));
 vi.mock('../stores/moverPreview', () => ({ useMoverPreview: (pick: (_s: unknown) => unknown) => pick({ preview: false }) }));
+vi.mock('../stores/vendorPreview', () => ({ useVendorPreview: (pick: (_s: unknown) => unknown) => pick({ previewType: null }) }));
 vi.mock('../stores/storeSwitcher', async () => {
   const { createStore } = await import('zustand/vanilla');
   const state = createStore(() => ({ selectedStoreId: 'store-B', storeGeneration: 0, feeContextPending: false, feeContextError: null as unknown, setSelectedStore: (id: string) => state.setState({ selectedStoreId: id, storeGeneration: state.getState().storeGeneration + 1 }), setFeeContextPending: (pending: boolean) => state.setState({ feeContextPending: pending }) }));
@@ -53,7 +54,7 @@ vi.mock('../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'Loa
 vi.mock('../hooks', () => ({ useMoverKind: fx.moverKind, useMoverSubscription: () => ({ data: { id: 'mover-sub', status: 'ACTIVE' }, refetch: vi.fn() }) }));
 // The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
 vi.mock('../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
-vi.mock('../hooks/vendorops', () => ({ useVendorSubscription: () => ({ data: { id: 'subscription-A', status: 'ACTIVE' }, refetch: vi.fn() }) }));
+vi.mock('../hooks/vendorops', () => ({ useVendorSubscription: () => ({ data: { id: 'subscription-A', status: 'ACTIVE' }, refetch: vi.fn() }), useVendorProfile: () => ({ myRole: 'OWNER', stores: [{ id: 'store-A' }] }) }));
 vi.mock('../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false }) }));
 vi.mock('../components/onboarding/WentLive', () => ({ useWentLive: vi.fn(), WentLivePopup: 'WentLivePopup' }));
 vi.mock('../modules/chat/screens/ConversationScreen', () => ({ ConversationScreen: 'ConversationScreen' }));

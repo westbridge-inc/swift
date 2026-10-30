@@ -922,9 +922,26 @@ describe('a weekly-fee notice opens the fee of the family it is about [PUSH-ROUT
     }
   });
 
+  it('[ENTERPRISE E2] a fee notice naming its store (a chain branch\'s fee change) opens THAT store\'s fee screen; one without stays on the family', () => {
+    expect(destinationFor({ kind: 'billing_rate_change', change: 'RISE', subscriptionId: 's1', vendorId: 'v1', audience: 'business' }))
+      .toEqual({ screen: 'WeeklyFee', params: { vendorId: 'v1', subscriptionId: 's1' } });
+    expect(destinationFor({ kind: 'billing_rate_change', change: 'RISE', vendorId: 'v1', audience: 'business' }))
+      .toEqual({ screen: 'WeeklyFee', params: { feeFamily: 'vendor' } });
+  });
+
   it('billing_mmg_checkout keeps its own contract (build 9 to 11 phones route it the same way)', () => {
     expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'r1', vendorId: 'v1', audience: 'business' }))
       .toEqual({ screen: 'WeeklyFee', params: { ref: 'r1', subscriptionId: 's1', vendorId: 'v1' } });
+  });
+
+  it('[ENTERPRISE E1b] a pay-all payment\'s notice (chainCheckout, no subscription) opens the owner\'s "Pay all my branches" on that ref', () => {
+    for (const chainCheckout of [true, 'true']) {
+      expect(destinationFor({ kind: 'billing_mmg_checkout', ref: 'chain-1', status: 'CONFIRMED', chainCheckout, audience: 'business' }))
+        .toEqual({ screen: 'WeeklyFee', params: { feeFamily: 'vendor', payAll: true, ref: 'chain-1' } });
+    }
+    // Anything else is not a pay-all notice: the one-branch contract stands.
+    expect(destinationFor({ kind: 'billing_mmg_checkout', ref: 'r1', subscriptionId: 's1', chainCheckout: false, audience: 'business' }))
+      .toEqual({ screen: 'WeeklyFee', params: { ref: 'r1', subscriptionId: 's1', vendorId: undefined } });
   });
 });
 
