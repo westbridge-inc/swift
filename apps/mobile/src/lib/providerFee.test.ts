@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, proFeeBanner, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickStartsLine, type ProFeeStanding,
+  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, proFeeAgreementFirst, proFeeBanner, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickStartsLine, type ProFeeStanding,
 } from './providerFee';
 import { providerVerificationPresentation } from '../modules/services/serviceCatalogPresentation';
 
@@ -53,6 +53,29 @@ describe('the "I understand the weekly fee" tick', () => {
     expect(proFeeTickStartsLine(view, true)).toMatch(/^Ticking this starts your weekly fee today: first a 14-day free trial/);
     expect(proFeeTickStartsLine(view, false)).toBeNull();
     expect(proFeeTickStartsLine({ ...view, coveredBy: 'STORE' }, true)).toBeNull();
+  });
+
+  it('[REVIEW-F #2231 S4] the agreement not accepted: never "ticking this starts your fee"; the agreement words and Review button instead', () => {
+    const view = { data: null, standing: { ...ON, why: 'AGREEMENT' as const }, feeTerms: TERMS };
+    // The tick is still asked (both ticks), but it cannot start the fee until the agreement is accepted.
+    expect(proFeeTick(view).kind).toBe('tick');
+    expect(proFeeTickStartsLine(view, true)).toBeNull();
+    expect(proFeeTickStartsLine({ ...view, standing: { ...ON, why: 'MISSING' as const } }, true)).toBeNull();
+    expect(proFeeTickStartsLine({ data: null, standing: ON, feeTerms: TERMS }, true)).not.toBeNull(); // only FEE_TERMS
+    expect(proFeeAgreementFirst(view)).toEqual({
+      title: 'Accept the Business Agreement first',
+      body: 'Your weekly fee can start only after you accept the Business Agreement that covers service providers. Ticking here does not start it on its own, and you are not listed until both are done.',
+    });
+    expect(proFeeAgreementFirst({ data: null, standing: ON, feeTerms: TERMS })).toBeNull();
+    expect(proFeeAgreementFirst({ ...view, feeTerms: { ...TERMS, acknowledged: true } })).toBeNull(); // no tick asked: the no-fee card says it
+    expect(proFeeAgreementFirst({ ...view, standing: OFF })).toBeNull();
+    const s = src('src/modules/services/screens/ProviderWeeklyFeeScreen.tsx');
+    expect(s).toContain('const agreementFirst = proFeeAgreementFirst(view);');
+    // The agreement card itself (up to its own </Card>) carries the words AND the Review button.
+    const card = /\{agreementFirst \? \(\s*<Card>((?:(?!<\/Card>)[\s\S])*)<\/Card>/.exec(s)?.[1] ?? '';
+    expect(card).toContain('{agreementFirst.title}');
+    expect(card).toContain('{agreementFirst.body}');
+    expect(card).toContain('<ReviewAgreementButton />');
   });
 });
 

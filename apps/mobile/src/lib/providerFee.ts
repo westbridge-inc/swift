@@ -44,10 +44,23 @@ export function proFeeChangedLine(view: ProFeeView | null | undefined): string |
  *  29 Oct): say why, so it never reads as a second charge. */
 export const PRO_FEE_COVERED_TICK_LINE = 'You are still asked to confirm your own provider fee below: it applies only if your store\u2019s weekly fee ends. While your store\u2019s fee is live you pay only that one.';
 
-/** [REVIEW-F #2231 S4-4] For a pro Swift has approved and who accepted the agreement, the tick itself starts the fee. */
+/** [REVIEW-F #2231 S4-4] For a pro Swift has approved and who accepted the agreement, the tick itself starts the fee.
+ *  [REVIEW-F #2231 S4] Only when the server says the tick is the one thing missing (FEE_TERMS): with the Business
+ *  Agreement not accepted (AGREEMENT) the tick cannot start the fee, and saying so would be false. */
 export function proFeeTickStartsLine(view: ProFeeView | null | undefined, isVerified: boolean | undefined): string | null {
   if (!isVerified || view?.coveredBy === 'STORE' || proFeeTick(view).kind !== 'tick') return null;
+  if (!view?.standing?.required || view.standing.why !== 'FEE_TERMS') return null;
   return 'Ticking this starts your weekly fee today: first a 14-day free trial if you have not had one as a service provider, then the amount above each week.';
+}
+
+/** [REVIEW-F #2231 S4] The tick is asked but the Business Agreement is not accepted yet (the server's standing says
+ *  AGREEMENT): the fee screen says the agreement comes first, with the Review button, next to the tick. */
+export function proFeeAgreementFirst(view: ProFeeView | null | undefined): { title: string; body: string } | null {
+  if (proFeeTick(view).kind !== 'tick' || !view?.standing?.required || view.standing.why !== 'AGREEMENT') return null;
+  return {
+    title: 'Accept the Business Agreement first',
+    body: 'Your weekly fee can start only after you accept the Business Agreement that covers service providers. Ticking here does not start it on its own, and you are not listed until both are done.',
+  };
 }
 
 /** [REVIEW-F #2231 S3-2] What the fee screen says when the pro has no fee of their own and nothing to tick, from where
