@@ -301,7 +301,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           Start earning with Swift
         </T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          Set up your vehicle and documents — we review them Monday to Saturday, 8:00–20:00 Guyana time, then you go online and start earning.
+          Set up your vehicle and documents — we review them Monday to Saturday, 8:00–16:00 Guyana time, then you go online and start earning.
         </T>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
           <ValuePill icon="check-decagram" label="Keep 100%" />

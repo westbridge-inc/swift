@@ -83,7 +83,9 @@ describe('[Item 7] the front door itself', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(['Order', 'Ride', 'Earn with Swift', 'Why people trust Swift']);
     const words = view.container.textContent ?? '';
     // Terms §4: paid in cash or straight to the business's own MMG; Swift holds no money.
-    expect(words).toContain('Pay in cash, or by MMG straight to the business. Swift never holds your money.');
+    // [REVIEW-F N2] Exact: the business (Terms §4), the rider (courier) or the driver (taxi fare) is paid directly;
+    // MMG only where they take it.
+    expect(words).toContain('Pay the business, rider or driver directly, in cash or by MMG where they take it. Swift never holds your money.');
     // Terms §11 + Privacy: a person checks every partner's documents before they operate (GUARDRAILS §7(4)).
     expect(words).toContain('Every business, rider and driver has their documents checked by a person on our team before they go live.');
     // Terms §10: the PIN handshake and live trip sharing.
@@ -114,13 +116,70 @@ describe('[Item 7] the front door itself', () => {
     expect(words).not.toContain('—');
   });
 
-  it('shows the real app in a phone frame, described for a screen reader, sized so the page does not jump', async () => {
+  // [WEBSITE round 2 · owner] More of the app: the Home screen in the hero, then the taxi fare before booking, live
+  // order tracking and the rider's side on the Order / Ride / Earn cards. Real app screens only, cut so no rating,
+  // review, earning or shop price shows; the greeting carries no name. Each is sized (no jump) and the three below
+  // the fold load lazily.
+  it('shows four real app screens, each described and sized; only the first loads eagerly', async () => {
     const view = await frontDoor();
     const images = [...view.container.querySelectorAll('img')];
-    expect(images.length).toBe(1);
-    expect(images[0]!.getAttribute('alt')).toBe('The Swift app’s Home screen: search, and tiles for Food, Groceries, Taxi, Send, Services, Orders, Favourites and Scan.');
-    expect(Number(images[0]!.getAttribute('width'))).toBeGreaterThan(0);
-    expect(Number(images[0]!.getAttribute('height'))).toBeGreaterThan(0);
+    expect(images.map((img) => img.getAttribute('alt'))).toEqual([
+      'The Swift app’s Home screen: a Good afternoon greeting, search, and tiles for Food, Groceries, Taxi, Send, Services, Orders, Favourites and Scan.',
+      'Live order tracking in the Swift app: the rider on the map and where the order stands.',
+      'Booking a taxi in the Swift app: pickup, destination and the fare for each ride before you request it.',
+      'The rider’s side of the Swift app: a map of Georgetown and the button to go online for jobs.',
+    ]);
+    for (const img of images) {
+      expect(Number(img.getAttribute('width')), img.alt).toBeGreaterThan(0);
+      expect(Number(img.getAttribute('height')), img.alt).toBeGreaterThan(0);
+    }
+    expect(images[0]!.getAttribute('loading')).not.toBe('lazy');
+    expect(images.slice(1).map((img) => img.getAttribute('loading'))).toEqual(['lazy', 'lazy', 'lazy']);
+  });
+
+  it('the screens never carry a name, a rating, a review or earnings in their words', async () => {
+    const view = await frontDoor();
+    const alts = [...view.container.querySelectorAll('img')].map((img) => img.alt).join(' ');
+    expect(alts).not.toMatch(/Demo|Kezia|rating|review|earn(ed|ings)/i);
+  });
+
+  it('on a phone the Order / Ride / Earn cards are one swipe row; on a wide screen, three columns', async () => {
+    const view = await frontDoor();
+    const row = view.container.querySelector('[data-swipe-row]')!;
+    expect(row).toBeTruthy();
+    for (const cls of ['overflow-x-auto', 'snap-x', 'snap-mandatory', 'md:grid', 'md:grid-cols-3', 'md:overflow-visible']) expect(row.className, cls).toContain(cls);
+    expect(row.querySelectorAll(':scope > article').length).toBe(3);
+  });
+
+  // [REVIEW-F S3-1] The page's focus ring is the brand maroon, invisible on the maroon Earn card: its two links
+  // draw a white ring instead (WCAG 2.4.7).
+  it('the Earn card\'s links show a white focus ring on the maroon card', async () => {
+    await frontDoor();
+    for (const name of ['Become a partner', 'See pricing']) {
+      const link = screen.getByRole('link', { name });
+      expect(link.className, name).toContain('focus-visible:outline-[var(--swift-white)]');
+    }
+  });
+
+  // [REVIEW-F S4-1] The support hours come from the company facts, never typed into the page.
+  it('the support line reads the hours from site.config, in Guyana time', async () => {
+    const view = await frontDoor();
+    const { site } = await import('@/site.config');
+    expect(site.supportDays).toContain('Guyana time');
+    expect(site.supportHours.startsWith(site.supportDays)).toBe(true);
+    expect(view.container.textContent).toContain(`People answer Help & Support in the app, ${site.supportDays}.`);
+  });
+
+  // [REVIEW-F S4-2] Turning the store switch on must not move the page: the store area keeps the height of the
+  // two buttons (one 56 px row, never wrapping) in both states.
+  it('the store area keeps one button-row of height whether the stores are live or not', async () => {
+    const view = await frontDoor();
+    const area = view.container.querySelector('[data-store-area]')!;
+    expect(area).toBeTruthy();
+    expect(area.className).toContain('min-h-14');
+    const { readFileSync } = await import('node:fs');
+    const buttons = readFileSync(join(SRC, 'components', 'app-store-links.tsx'), 'utf8');
+    expect(buttons).toMatch(/aria-label="Get the Swift app" className=\{`flex flex-nowrap gap-3/);
   });
 
   it('no heading skips a level, and axe finds nothing', async () => {
