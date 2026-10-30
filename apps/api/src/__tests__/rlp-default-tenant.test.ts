@@ -11,6 +11,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
 import { LOSS_PROTECTION_DEFAULTS, provisionReserveForPreviousMonth, sweepLossProtection } from '../modules/cash/rlp';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,8 @@ let app: FastifyInstance;
 let notifications: NotificationService;
 let cash: CashRulesService;
 const userIds: string[] = [];
+const orderIds: string[] = [];
+const claimIds: string[] = [];
 
 async function user(tenantId: string, roles: string[], active: string, extra: Record<string, unknown> = {}) {
   const u = await sys(() => app.prisma.user.create({ data: {
@@ -55,7 +58,22 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Claims, payouts and provisions are money records and stay (retained history); only scaffolding goes.
+  // [FOLLOWUPS] Everything this file made goes, operator B included. Left behind, B was an ACTIVE PRODUCTION
+  // tenant with users in it in a shared test DB: tenancy-foundation ('every seeded user and vendor belongs to an
+  // existing tenant': all on the default) and checkout-integrity failed in any later run on that DB. Nothing here
+  // is real money: the claim was refused before the reserve was read (no PAYOUT row), and the PROVISION rows
+  // are on this run's own made-up countries, keyed to their period, with no tie to a user; they stay.
+  await sys(async () => {
+    await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:rlp-default-tenant').catch(() => 0);
+    // Riders, customers, admins and notifications cascade from the user.
+    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await app.prisma.tenant.deleteMany({ where: { id: TENANT_B } });
+    // A cleanup that leaves the operator or its people behind fails this file, not a later one.
+    expect(await app.prisma.tenant.count({ where: { id: TENANT_B } })).toBe(0);
+    expect(await app.prisma.user.count({ where: { OR: [{ id: { in: userIds } }, { tenantId: TENANT_B }] } })).toBe(0);
+  });
   await app.close();
 });
 
@@ -71,9 +89,11 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
       subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 1000, tipAmount: 0, totalAmount: 1000,
       deliveryAddress: '1 Operator Street', deliveryLat: 6.8, deliveryLng: -58.15, pickupLat: 6.81, pickupLng: -58.16, pickupAddress: 'Pickup',
     } as never }));
+    orderIds.push(order.id);
     const claim = await sys(() => app.prisma.reimbursementClaim.create({ data: {
       orderId: order.id, riderId: rider.id, customerId: customer.id, amount: 1000, reason: 'no_show', gpsLat: 6.8, gpsLng: -58.15, status: 'APPROVED', flags: [],
     } as never }));
+    claimIds.push(claim.id);
 
     const tried = await sys(() => cash.markClaimPaid(claim.id, admin.id, `OPB-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`, '1000')).then(() => null, (err: unknown) => err as { code?: string; message?: string });
     expect(tried?.code).toBe('RLP_NOT_THIS_OPERATOR');
