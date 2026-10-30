@@ -154,13 +154,15 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               {list.pricing.franchise == null && (
                 <>Every store is its own account with its own weekly fee, however many stores its owner runs. </>
               )}
-              {/* [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts,
-                  WEEKLY_RETIER_ON = false): a store is born on the first catalogue step and nothing moves it to
-                  another. Only its free trial follows its catalogue. The page test pins the flag: turning the
-                  re-tier back on must revisit this sentence. */}
-              Today every new store starts on the {CATALOGUE_CLASSES[list.catalogue[0]!.tier]?.label ?? 'Businesses'} rate
-              (a services business on the Services rate), whatever the size of its catalogue, and Swift does not
-              move a store to another rate as its active items change. A rate agreed with Swift stays as agreed.
+              {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
+                  OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
+                  anything is charged (api partner/store-fee.ts). [R27] The weekly re-tier is OFF on the server
+                  (apps/api/src/modules/billing/weekly-retier.ts, WEEKLY_RETIER_ON = false): after that nothing
+                  moves it. The page test pins the flag: turning the re-tier back on must revisit this sentence. */}
+              When Swift approves a new store, its weekly fee is the rate for the active items it has then (a
+              services business pays the Services rate). The store sees that exact fee, and its owner ticks it
+              before anything is charged. After that, Swift does not move a store to another rate as its active
+              items change. A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

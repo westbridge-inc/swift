@@ -158,8 +158,6 @@ describe('public pricing page — every partner reads their own weekly fee', () 
   it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
     await renderPage();
     expect(document.body.textContent).toContain('Every store is its own account with its own weekly fee, however many stores its owner runs.');
-    // [REVIEW-F S3-1 on #2234] A store is priced at its first step whatever its catalogue (R27 off): never 'the rate for its own catalogue'.
-    expect(document.body.textContent).not.toMatch(/rate for its own catalogue/);
     cleanup();
     // A server from before multi-store pricing existed sends no key at all.
     pricing = { ...GY, franchise: undefined };
@@ -167,21 +165,19 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(document.body.textContent).toContain('however many stores its owner runs');
   });
 
-  // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
-  // born on the first catalogue step and nothing moves it between steps. The page must not say it moves on its own.
-  it('[R27] never says a store moves between catalogue rates on its own: every new store starts on the first rate', async () => {
+  // [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on its own catalogue's step,
+  // and its owner ticks that exact fee first. [R27] The weekly re-tier is OFF on the server
+  // (apps/api/src/modules/billing/weekly-retier.ts): after that nothing moves it. The page must not say it moves on its own.
+  it('[RETIER PR-A · R27] a new store is priced for its catalogue when approved and ticks that fee first; nothing moves it after', async () => {
     await renderPage();
     const page = document.body.textContent!;
     expect(page).not.toMatch(/automatic/i);
     expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
-    expect(page).toContain('Today every new store starts on the Businesses rate (a services business on the Services rate), whatever the size of its catalogue, and Swift does not move a store to another rate as its active items change.');
+    expect(page).not.toMatch(/every new store starts on/i);
+    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the active items it has then (a services business pays the Services rate). '
+      + 'The store sees that exact fee, and its owner ticks it before anything is charged. '
+      + 'After that, Swift does not move a store to another rate as its active items change.');
     expect(page).toContain('A rate agreed with Swift stays as agreed.');
-  });
-
-  it('[R27] names the first step the server lists, not a label frozen into the sentence', async () => {
-    pricing = { ...GY, vendors: { ...GY.vendors, catalogue: [{ minItems: 0, tier: 'large', rate: 20000 }, { minItems: 10000, tier: 'department', rate: 45000 }] } };
-    await renderPage();
-    expect(document.body.textContent).toContain('Today every new store starts on the Large catalogues rate (a services business');
   });
 
   it('[R27] the sentence holds only while the server\'s weekly re-tier is off — turning it on must revisit this page', () => {

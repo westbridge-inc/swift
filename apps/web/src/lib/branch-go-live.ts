@@ -9,6 +9,8 @@ export const GO_LIVE_STEPS: Readonly<Record<string, { words: string; where: 'set
   DOCUMENTS: { words: 'Add the documents it still needs, in the Swift app under Documents', where: 'app' },
   PUBLISHED_PHONE: { words: 'Add the number customers can call', where: 'settings' },
   FOOD_HANDLERS: { words: 'Confirm your food handlers', where: 'settings' },
+  // [RETIER PR-A2] the store's fee follows its catalogue above the first step: its owner reads and ticks it
+  WEEKLY_FEE: { words: 'Read and tick its weekly fee', where: 'settings' },
 };
 
 /** The owner's steps for a store not live yet (none on Swift's turn; unknown steps are left out). */

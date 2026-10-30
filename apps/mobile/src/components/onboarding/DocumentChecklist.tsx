@@ -7,6 +7,7 @@ import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { OwnNameCard } from './OwnNameCard';
 import { FoodHandlersCard } from './FoodHandlersCard';
+import { StoreWeeklyFeeCard } from './StoreWeeklyFeeCard';
 import { FOOD_HANDLERS_DOC } from './foodHandlers';
 import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
@@ -224,6 +225,8 @@ export function DocumentChecklist({
           />
         );
       })}
+      {/* [RETIER PR-A2] a store whose fee follows its catalogue above the first step ticks it here before it goes live */}
+      <StoreWeeklyFeeCard role={role} />
       {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
       {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
         ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}

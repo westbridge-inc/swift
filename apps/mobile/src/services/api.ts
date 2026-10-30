@@ -1325,6 +1325,12 @@ export const vendorApi = {
    *  handler's certificate. `version` is the server's (GET /verification/status → foodHandlerAttestation). */
   tickFoodHandlers: (vendorId: string, version: string) =>
     api.post('/vendor/onboarding/food-handlers', { accept: true, attestationVersion: version }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
+  /** [RETIER PR-A2] The selected store's weekly fee as it would be born now (its catalogue's step), and whether its
+   *  owner must tick it before the store goes live. */
+  storeWeeklyFee: () => api.get('/vendor/onboarding/weekly-fee'),
+  /** [RETIER PR-A2] The owner ticks that exact fee for the selected store (the server refuses any other amount). */
+  tickStoreWeeklyFee: (weeklyFeeAck: { version: string; amount: number; currencyCode: string }) =>
+    api.post('/vendor/onboarding/weekly-fee', { weeklyFeeAck }),
   // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
   toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
   toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
