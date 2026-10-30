@@ -56,7 +56,7 @@ export function PricingCard(props: PricingCardProps) {
     detail =
       quote.tier === 'service'
         ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'
-        : `Keep 100% of every sale — no commission on orders. This rate does not change as your catalogue grows.${trials.join('')}`;
+        : `Keep 100% of every sale — no commission on orders. Today this rate does not change as your catalogue grows.${trials.join('')}`;
   }
 
   return (
