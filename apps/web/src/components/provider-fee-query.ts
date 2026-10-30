@@ -16,5 +16,6 @@ export function useProviderFee() {
   }, [client]);
   const fee = useQuery({ queryKey: ['provider-fee'], queryFn: getProviderFee });
   const approval = useQuery({ queryKey: ['provider-approval'], queryFn: getProviderApproval, enabled: !!fee.data });
-  return { fee, isVerified: approval.data?.isVerified, approvalLoading: approval.isLoading };
+  // [REVIEW-F/M #2238 N1] A failed approval read is an error to retry, never "starts after approval" to an approved pro.
+  return { fee, approval, isVerified: approval.data?.isVerified, approvalLoading: approval.isLoading };
 }

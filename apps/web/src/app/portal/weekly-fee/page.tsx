@@ -14,7 +14,7 @@ export default function MoverWeeklyFeePage() {
   // [BILL-PRO PR6] A pro's own weekly fee (owner A4: in the app and on the website).
   const pro = useProviderFee();
   if (rider.isLoading || driver.isLoading || pro.fee.isLoading || pro.approvalLoading) return <p role="status" className="sw-empty">Loading your weekly fees…</p>;
-  if (rider.isError || driver.isError || pro.fee.isError) return <div role="alert" className="sw-card space-y-3 p-6">Could not load your partner profiles. <button className="sw-btn sw-btn-md sw-btn-outline" onClick={() => { void rider.refetch(); void driver.refetch(); void pro.fee.refetch(); }}>Try again</button></div>;
+  if (rider.isError || driver.isError || pro.fee.isError || pro.approval.isError) return <div role="alert" className="sw-card space-y-3 p-6">Could not load your partner profiles. <button className="sw-btn sw-btn-md sw-btn-outline" onClick={() => { void rider.refetch(); void driver.refetch(); void pro.fee.refetch(); void pro.approval.refetch(); }}>Try again</button></div>;
   return <div className="space-y-8">
     {rider.data && <div><h2 className="mb-4 font-bold">Delivery and courier</h2><WeeklyFee family="rider" /></div>}
     {driver.data && <div><h2 className="mb-4 font-bold">Taxi</h2><WeeklyFee family="driver" /></div>}

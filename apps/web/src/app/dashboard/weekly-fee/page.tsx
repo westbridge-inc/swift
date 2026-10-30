@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { WeeklyFee } from '@/components/weekly-fee';
 import { useStoreRole } from '@/lib/store-role';
+import { ProviderFeeLink } from '@/components/pro-office-note';
 export default function WeeklyFeePage() {
   // [ENTERPRISE E1b] The console's one role read: only the business owner of several stores is offered "Pay all my branches".
   const role = useStoreRole();
@@ -16,6 +17,8 @@ export default function WeeklyFeePage() {
       <WeeklyFee family="vendor" aside={payAll} />
       {/* [ENTERPRISE E3] The owner's monthly statement of every branch's fees (owner only; the page says so to others). */}
       <p className="mt-6 text-sm print:hidden"><Link href="/dashboard/weekly-fee/statement" className="underline">Monthly fee statement (all branches)</Link></p>
+      {/* [REVIEW-M #2238 S4-2] A store owner who is also a pro: their own pro fee. */}
+      <ProviderFeeLink />
     </>
   );
 }

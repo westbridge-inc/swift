@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, proFeeAgreementFirst, proFeeChangedLine, proFeeNoFeeWords, proFeeTick,
+  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, PRO_FEE_RUNNING_TICK_LINE, proFeeAgreementFirst, proFeeChangedLine, proFeeNoFeeWords, proFeeTick,
   proFeeTickStartsLine, type ProFeeStanding,
 } from './provider-fee';
 
@@ -31,6 +31,11 @@ describe('the pro fee words on the website are the phone\'s', () => {
     expect(phone).toContain(`title: '${agreement.title}'`);
     expect(phone).toContain(`body: '${agreement.body}'`);
     expect(phone).toContain(`'${proFeeTickStartsLine({ data: null, standing: ON, feeTerms: TERMS }, true)}'`);
+    // [REVIEW-M #2238 S4-1] A running fee: the running line, and the agreement card's running-fee body.
+    expect(phone).toContain(`'${PRO_FEE_RUNNING_TICK_LINE}'`);
+    const running = proFeeAgreementFirst({ data: { id: 's1' }, standing: { ...ON, why: 'AGREEMENT' }, feeTerms: TERMS })!;
+    expect(running.body).not.toBe(agreement.body);
+    expect(phone).toContain(`body: '${running.body}'`);
   });
 
   it('every no-fee card', () => {

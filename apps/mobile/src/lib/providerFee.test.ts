@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, proFeeAgreementFirst, proFeeBanner, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickStartsLine, type ProFeeStanding,
+  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_RUNNING_TICK_LINE, proFeeAgreementFirst, proFeeBanner, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickRunningLine,
+  proFeeTickStartsLine, type ProFeeStanding,
 } from './providerFee';
 import { providerVerificationPresentation } from '../modules/services/serviceCatalogPresentation';
 
@@ -152,5 +153,33 @@ describe('[REVIEW-M #2229 N1 · Business Agreement s.12] the words a store-cover
     expect(PRO_FEE_COVERED_COPY).toContain('covers your provider profile: you pay one fee');
     expect(PRO_FEE_COVERED_COPY).toContain('kept as credit on your provider fee, never lost');
     expect(PRO_FEE_COVERED_COPY).not.toMatch(/needs no separate fee/);
+  });
+});
+
+describe('[REVIEW-M #2238 S4-1] a pro whose fee is already running is asked to tick again (new words)', () => {
+  const born = { data: { id: 's1', status: 'ACTIVE' } as never, standing: ON, feeTerms: TERMS };
+  it('never "Ticking this starts your weekly fee today" (no new trial): the fee runs, and a price change is told in advance', () => {
+    expect(proFeeTick(born).kind).toBe('tick');
+    expect(proFeeTickStartsLine(born, true)).toBeNull();
+    expect(proFeeTickRunningLine(born)).toBe(PRO_FEE_RUNNING_TICK_LINE);
+    expect(PRO_FEE_RUNNING_TICK_LINE).toContain('does not start a new free trial');
+    expect(PRO_FEE_RUNNING_TICK_LINE).toContain('told to you in advance');
+  });
+  it('before the fee is born, or with nothing to tick, or covered by the store\'s fee: no running line', () => {
+    expect(proFeeTickRunningLine({ data: null, standing: ON, feeTerms: TERMS })).toBeNull();
+    expect(proFeeTickRunningLine({ ...born, feeTerms: { ...TERMS, acknowledged: true } })).toBeNull();
+    expect(proFeeTickRunningLine({ ...born, coveredBy: 'STORE' })).toBeNull();
+    expect(proFeeTickRunningLine({ ...born, standing: OFF })).toBeNull();
+  });
+  it('the agreement card never says the fee "can start only after" when it already runs', () => {
+    const card = proFeeAgreementFirst({ ...born, standing: { ...ON, why: 'AGREEMENT' } });
+    expect(card?.title).toBe('Accept the Business Agreement first');
+    expect(card?.body).not.toMatch(/can start only after/);
+    expect(card?.body).toBe('You are not listed and take no new jobs until you accept the Business Agreement that covers service providers. Ticking here does not do that on its own.');
+  });
+  it('the screen shows the running line under the tick', () => {
+    const s = src('src/modules/services/screens/ProviderWeeklyFeeScreen.tsx');
+    expect(s).toContain('const runningLine = proFeeTickRunningLine(view);');
+    expect(s).toMatch(/\{runningLine \? <T [^>]*>\{runningLine\}<\/T> : null\}/);
   });
 });

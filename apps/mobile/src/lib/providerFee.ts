@@ -48,15 +48,27 @@ export const PRO_FEE_COVERED_TICK_LINE = 'You are still asked to confirm your ow
  *  [REVIEW-F #2231 S4] Only when the server says the tick is the one thing missing (FEE_TERMS): with the Business
  *  Agreement not accepted (AGREEMENT) the tick cannot start the fee, and saying so would be false. */
 export function proFeeTickStartsLine(view: ProFeeView | null | undefined, isVerified: boolean | undefined): string | null {
-  if (!isVerified || view?.coveredBy === 'STORE' || proFeeTick(view).kind !== 'tick') return null;
+  // [REVIEW-M #2238 S4-1] Never once the fee is born: it already runs, and no new trial starts (proFeeTickRunningLine).
+  if (!isVerified || view?.data || view?.coveredBy === 'STORE' || proFeeTick(view).kind !== 'tick') return null;
   if (!view?.standing?.required || view.standing.why !== 'FEE_TERMS') return null;
   return 'Ticking this starts your weekly fee today: first a 14-day free trial if you have not had one as a service provider, then the amount above each week.';
+}
+
+/** [REVIEW-M #2238 S4-1] A pro whose fee is already born is asked to tick again (the server's words changed): the tick
+ *  confirms the words; it neither starts the fee nor a new free trial, and the born fee's price changes only through
+ *  the told-in-advance fee-rise rules (pro-fee.ts proFeeAckState: once born, the tick that bore it holds). */
+export const PRO_FEE_RUNNING_TICK_LINE = 'Your weekly fee is already running. Ticking confirms you have read the weekly fee again: it does not start a new free trial, and any change to what you pay is told to you in advance and applies only from a later week.';
+export function proFeeTickRunningLine(view: ProFeeView | null | undefined): string | null {
+  if (!view?.data || view.coveredBy === 'STORE' || !view.standing?.required || proFeeTick(view).kind !== 'tick') return null;
+  return PRO_FEE_RUNNING_TICK_LINE;
 }
 
 /** [REVIEW-F #2231 S4] The tick is asked but the Business Agreement is not accepted yet (the server's standing says
  *  AGREEMENT): the fee screen says the agreement comes first, with the Review button, next to the tick. */
 export function proFeeAgreementFirst(view: ProFeeView | null | undefined): { title: string; body: string } | null {
   if (proFeeTick(view).kind !== 'tick' || !view?.standing?.required || view.standing.why !== 'AGREEMENT') return null;
+  // [REVIEW-M #2238 S4-1] A fee already born does not "start" again: say what the agreement gates now.
+  if (view.data) return { title: 'Accept the Business Agreement first', body: 'You are not listed and take no new jobs until you accept the Business Agreement that covers service providers. Ticking here does not do that on its own.' };
   return {
     title: 'Accept the Business Agreement first',
     body: 'Your weekly fee can start only after you accept the Business Agreement that covers service providers. Ticking here does not start it on its own, and you are not listed until both are done.',
