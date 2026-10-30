@@ -247,3 +247,13 @@ export async function subscriptionTenantInTx(tx: Pick<Prisma.TransactionClient, 
   if (!tenantId) throw new AppError(500, 'SUBSCRIPTION_TENANT_UNKNOWN', `Subscription ${subscriptionId} has no payer to take a tenant from.`);
   return tenantId;
 }
+
+/** [BILL-PRO · owner B1 "one fee"] A person's Services store fee that is still live (not CANCELLED / CHURNED): while
+ *  one exists it is the only weekly fee that person pays; their own pro fee is not collected. The ONE definition:
+ *  the pro gate (services/pro-fee.ts), the collection authority (mover-fee-authority.ts) and the one-fee stop
+ *  (billing.service.ts) all read it from here. */
+export const SERVICES_STORE_FEE_ENDED = ['CANCELLED', 'CHURNED'] as const;
+export const liveServicesStoreFeeWhere = (userId: string) => ({
+  vendor: { vendorType: 'SERVICE' as const, owner: { userId } },
+  status: { notIn: [...SERVICES_STORE_FEE_ENDED] },
+}) satisfies Prisma.SubscriptionWhereInput;

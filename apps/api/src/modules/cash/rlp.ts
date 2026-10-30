@@ -17,6 +17,7 @@ import { AppError } from '../../utils/errors';
 import { admittedHandoverEvidence } from './handover-evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { ownerWallSystem } from '../../lib/owner-rls';
+import { subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -342,12 +343,9 @@ export async function provisionReserveForPreviousMonth(
   const payments = await prisma.subscriptionPayment.findMany({
     where: {
       status: 'CAPTURED', paidAt: { gte: monthStart, lt: monthEnd },
-      // Only Swift's own partners' fees provision Swift's reserve (RLP_TENANT).
-      subscription: { OR: [
-        { vendor: { tenantId: RLP_TENANT }, riderId: null, driverId: null },
-        { rider: { user: { tenantId: RLP_TENANT } }, vendorId: null, driverId: null },
-        { driver: { user: { tenantId: RLP_TENANT } }, vendorId: null, riderId: null },
-      ] },
+      // Only Swift's own partners' fees provision Swift's reserve (RLP_TENANT). [BILL-PRO] The one owner-tenant
+      // scope (subscription-owner.ts), so a pro's paid fee counts like a store's or a mover's.
+      subscription: subscriptionTenantWhere(RLP_TENANT),
     },
     select: {
       amount: true,
@@ -355,13 +353,15 @@ export async function provisionReserveForPreviousMonth(
         rider: { select: { user: { select: { countryCode: true } } } },
         driver: { select: { user: { select: { countryCode: true } } } },
         vendor: { select: { owner: { select: { user: { select: { countryCode: true } } } } } },
+        serviceProvider: { select: { user: { select: { countryCode: true } } } },
       } },
     },
   });
   const revenue = new Map<string, number>();
   for (const p of payments) {
     const s = p.subscription;
-    const country = s.rider?.user.countryCode ?? s.driver?.user.countryCode ?? s.vendor?.owner.user.countryCode ?? null;
+    const country = s.rider?.user.countryCode ?? s.driver?.user.countryCode ?? s.vendor?.owner.user.countryCode
+      ?? s.serviceProvider?.user.countryCode ?? null;
     if (!country) continue;
     revenue.set(country, (revenue.get(country) ?? 0) + Number(p.amount));
   }

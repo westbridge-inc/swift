@@ -20,6 +20,8 @@ import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { lockVendorActivationBilling } from '../billing/billing-access';
 import { hasActiveHold } from '../integrity/enforcement';
+import { FOOD_HANDLERS_CONSENT_TYPE, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies } from '../vendor/food-handlers';
+import { publicPhoneForWrite } from '../../utils/vendor-public-phone';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -131,13 +133,19 @@ export function assertOwnerInGoodStanding(stores: readonly StandingStore[], owne
   }
 }
 
+/** [CHAINS] A branch is born a registered seller (the tier column's default, written out): the add-a-branch terms
+ *  ask a restaurant branch for its food handlers tick by this tier (vendor/food-handlers.ts). */
+export const BRANCH_TIER = 'REGISTERED' as const;
+
 /** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
-async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean } = {}) {
+async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean; publicPhone?: string | null } = {}) {
   return tx.vendor.create({
     data: {
       ownerId,
       // [CHAINS · COORD ruling] A branch waits for a person at Swift to approve it before it can go live.
-      ...(opts.branch ? { personApprovalRequired: true } : {}),
+      ...(opts.branch ? { personApprovalRequired: true, tier: BRANCH_TIER } : {}),
+      // [REVIEW-F #2220 S3-1] The number customers can call, published by the owner on the add-a-branch form.
+      ...(opts.publicPhone ? { publicPhone: opts.publicPhone } : {}),
       name: business.name,
       slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
       vendorType: business.vendorType,
@@ -372,16 +380,28 @@ export class PartnerService {
    *    the tick is recorded with the branch it is for;
    *  - the branch is born PENDING_APPROVAL, like any store: the one activation projection makes it live when its own
    *    checklist (published phone, food handlers tick, name basis) is met, and prices its fee then (a shared trial
-   *    while the owner's trial runs, else billed from day one: SubscriptionService.createRow).
+   *    while the owner's trial runs, else billed from day one: SubscriptionService.createRow);
+   *  - [REVIEW-F #2220 S3-1] what go-live needs from the owner comes with the add, in the same transaction: the
+   *    number customers can call (`setup.publicPhone`, judged by the storefront's validator) and, for a restaurant,
+   *    the food handlers tick (`consent.foodHandlers`), recorded exactly as the branch's own screen records it
+   *    (POST /vendor/onboarding/food-handlers) — so the branch then waits for Swift, not for its owner.
    */
   async addBranch(
     userId: string,
     business: Business,
-    consent: { weeklyFeeAck: WeeklyFeeAck; ip?: string | null; surface: ConsentSurface },
+    consent: { weeklyFeeAck: WeeklyFeeAck; ip?: string | null; surface: ConsentSurface; foodHandlers?: boolean },
     env: Record<string, string | undefined> = process.env,
+    setup: { publicPhone?: string | null } = {},
   ): Promise<{ id: string; name: string; status: string; ownerId: string }> {
     assertStorePinInMarket(business.latitude, business.longitude);
+    const publicPhone = publicPhoneForWrite(setup.publicPhone);
+    if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType, tier: BRANCH_TIER })) {
+      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
+    }
     await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+    if (consent.foodHandlers) {
+      await publishLegalDocumentOnce(this.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
+    }
     const created = await this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string }>>`
         SELECT u."id", u."status"::text AS "status", t."kind"::text AS "tenantKind"
@@ -414,7 +434,15 @@ export class PartnerService {
       // [Row 628] The fee the owner saw is the fee for this branch now, or nothing is written (WEEKLY_FEE_CHANGED).
       const quote = await signupQuote(tx, userId, { role: 'VENDOR', vendorType: business.vendorType });
       assertSawQuote(consent.weeklyFeeAck, quote);
-      const vendor = await createStore(tx, owner.id, business, { branch: true });
+      const vendor = await createStore(tx, owner.id, business, { branch: true, publicPhone });
+      if (consent.foodHandlers) {
+        // The branch's own tick, as POST /vendor/onboarding/food-handlers records it (the same ledger row shape).
+        await recordConsent(tx, {
+          subjectType: 'vendor_user', subjectId: userId, documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION,
+          action: 'granted', surface: consent.surface, ip: consent.ip ?? null,
+          evidence: { vendorId: vendor.id, storeName: vendor.name, control: 'checkbox', path: 'vendor/stores', attestedAt: new Date().toISOString() },
+        });
+      }
       await recordConsent(tx, {
         subjectType: 'vendor_user',
         subjectId: userId,

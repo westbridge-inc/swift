@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { BrandCheckbox, Card, LabeledInput, PillButton, T } from '../../../kit';
+import { BrandCheckbox, Card, Chip, LabeledInput, PillButton, T } from '../../../kit';
 import { GUTTER } from '../shared';
 import { API_URL, vendorApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
@@ -31,6 +31,9 @@ import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboarding/backToSwift';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { TYPES, TabHeader } from '../shared';
+import { useVendorProfile } from '../../../hooks/vendorops';
+import { useStoreSwitcher } from '../../../stores/storeSwitcher';
+import { BRANCH_COPY, goLiveLine, storeLabel } from '../../../lib/branches';
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
@@ -354,6 +357,9 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
   // live the moment the server accepts it.
   const needsPhone = Array.isArray(store.goLiveMissing) && store.goLiveMissing.includes('PUBLISHED_PHONE');
   const qc = useQueryClient();
+  // [CHAINS PR2] A new branch waits here for Swift's approval: the owner can switch back to a live branch.
+  const { stores } = useVendorProfile();
+  const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const savePhone = useVendorMutation({
     mutationFn: (publicPhone: string | null) => vendorApi.updateProfile({ publicPhone }),
@@ -370,6 +376,16 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
       <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} onBack={back.leave} backBusy={back.leaving} />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        {Array.isArray(stores) && stores.length > 1 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm, marginBottom: space.lg }}>
+            {stores.map((s: any) => <Chip key={s.id} label={storeLabel(s)} selected={s.id === store.id} onPress={() => setSelectedStore(s.id)} />)}
+          </ScrollView>
+        ) : null}
+        {/* [REVIEW-F #2220 S3-1] A branch says whose turn it is: the owner's steps (each done below on this screen),
+            or, once nothing is owed by the owner, that a person at Swift checks it. */}
+        {store.personApprovalRequired ? (
+          <T variant="body" tone="muted" style={{ marginBottom: space.md }}>{goLiveLine(store) ?? BRANCH_COPY.checkFirst}</T>
+        ) : null}
         <PricingCard kind="vendor" vendorType={store.vendorType} />
         {needsPhone ? (
           <>

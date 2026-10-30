@@ -7,7 +7,7 @@ import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './m
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
 import { partnerRateFor, subscriptionTiersIn } from '../country/country-config.service';
 import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
-import { ownerOfRow, SUBSCRIPTION_OWNER_SELECT, subscriptionOwnerOf, type SubscriptionOwner } from './subscription-owner';
+import { liveServicesStoreFeeWhere, ownerOfRow, SUBSCRIPTION_OWNER_SELECT, subscriptionOwnerOf, type SubscriptionOwner } from './subscription-owner';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -270,6 +270,12 @@ export async function activateMoverFeeType(tx: Prisma.TransactionClient, payer: 
 export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<{ allowed: boolean; mover: MoverFeeResolution | null }> {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
   const ready = await billingEffectsReady(tx);
+  // [BILL-PRO · REVIEW-M #2229 S3-1 / G S2-1 · owner B1 "one fee"] A pro's own fee has no NEW collection authority
+  // while the same person's Services store fee is live: never charged, retried or dunned, whatever ran before it in the
+  // job. Read under the payer lock (the person's user row), which the store fee's own collection also takes.
+  if (payer.kind === 'PROVIDER') {
+    return { allowed: ready && (await tx.subscription.count({ where: liveServicesStoreFeeWhere(payer.userId) })) === 0, mover: null };
+  }
   if (payer.kind !== 'MOVER') return { allowed: ready, mover: null };
   const mover = await lockMoverFeeAuthority(tx, payer);
   return { allowed: ready && !!mover && mover.state === 'ACTIVE' && mover.canonicalSubscriptionId === subscriptionId, mover };
@@ -280,6 +286,8 @@ export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, s
 export async function readFeeCollectionAuthority(db: Db, subscriptionId: string): Promise<{ allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null }> {
   try {
     const payer = await subscriptionPayer(db, subscriptionId);
+    // [BILL-PRO · owner B1] The read twin of the one-fee rule above: a store-covered pro fee is not collectable.
+    if (payer.kind === 'PROVIDER' && (await db.subscription.count({ where: liveServicesStoreFeeWhere(payer.userId) })) > 0) return NOT_COLLECTABLE;
     if (payer.kind !== 'MOVER') return { allowed: true, canonical: true, mover: null };
     const mover = await resolveMoverFeeAuthority(db, payer);
     const canonical = !!mover && mover.canonicalSubscriptionId === subscriptionId;

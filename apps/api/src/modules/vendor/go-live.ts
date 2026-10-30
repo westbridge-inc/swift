@@ -31,3 +31,34 @@ export function goLiveMissing(vendor: { publicPhone: string | null | undefined }
 export function awaitingFirstGoLive(vendor: { status: string }): boolean {
   return vendor.status === 'PENDING_APPROVAL';
 }
+
+// ---------------------------------------------------------------------------
+// [CHAINS PR2 · REVIEW-F #2220 S3-1] WHO a never-live store is waiting for.
+//
+// A store waiting to go live is told "waiting for Swift's approval" ONLY when nothing is owed by its owner. The
+// owner's part of the go-live checklist is: the documents its type needs (each one sent; one Swift is still reading
+// is Swift's part), the published number customers can call (above), and, for a registered restaurant, the food
+// handlers tick (food-handlers.ts). Anything missing there is named as the owner's next step. When the owner's part
+// is complete, the rest is Swift's: reading a document, or (for a branch) a person approving it.
+// ---------------------------------------------------------------------------
+
+/** An owner's step before a store can go live, as the apps name it (each opens where it is done). */
+export type GoLiveStep = 'DOCUMENTS' | 'PUBLISHED_PHONE' | 'FOOD_HANDLERS';
+
+/** A never-live store's go-live: whose turn it is, and the owner's steps still to do (empty when it is Swift's). */
+export interface StoreGoLive { waitingFor: 'OWNER' | 'SWIFT'; steps: GoLiveStep[] }
+
+/** A checklist document the OWNER must act on: never sent, sent back, or out of date. A document Swift is still
+ *  reading (PENDING) is Swift's turn, and an approved one is done. */
+const OWNER_DOCUMENT_STATES: ReadonlySet<string> = new Set(['MISSING', 'REJECTED', 'EXPIRED']);
+
+export function storeGoLive(
+  store: { status: string; publicPhone: string | null | undefined },
+  facts: { documentStates: readonly string[]; foodHandlers: { required: boolean; attested: boolean } },
+): StoreGoLive {
+  const steps: GoLiveStep[] = [];
+  if (facts.documentStates.some((state) => OWNER_DOCUMENT_STATES.has(state))) steps.push('DOCUMENTS');
+  if (awaitingFirstGoLive(store) && goLiveMissing(store).length > 0) steps.push('PUBLISHED_PHONE');
+  if (facts.foodHandlers.required && !facts.foodHandlers.attested) steps.push('FOOD_HANDLERS');
+  return { waitingFor: steps.length > 0 ? 'OWNER' : 'SWIFT', steps };
+}

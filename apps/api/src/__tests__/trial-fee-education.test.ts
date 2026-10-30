@@ -50,6 +50,28 @@ async function makeTrial(daysLeft: number) {
   return { sub, userId: user.id };
 }
 
+// [BILL-PRO · REVIEW-G #2217 S4-3] A pro on a weekly-fee trial (PR3 births it): their own notice, as a provider.
+const providerIds: string[] = [];
+async function makeProTrial(daysLeft: number) {
+  seq += 1;
+  const user = await prisma.user.create({
+    data: { phone: `+${phoneBase + seq}`, firstName: 'Edu', lastName: `P${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true },
+  });
+  userIds.push(user.id);
+  const provider = await prisma.serviceProvider.create({ data: { userId: user.id, trade: 'tutor', isVerified: true } });
+  providerIds.push(provider.id);
+  const end = new Date(Date.now() + daysLeft * 86_400_000);
+  const sub = await prisma.subscription.create({
+    data: {
+      serviceProviderId: provider.id, type: 'INDEPENDENT_PRO', status: 'TRIAL', isTrialActive: true, trialEndDate: end,
+      weeklyRate: 8000, billingMethod: 'CASH',
+      currentPeriodStart: new Date(), currentPeriodEnd: end, nextBillingDate: end,
+    },
+  });
+  subIds.push(sub.id);
+  return { sub, userId: user.id };
+}
+
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
@@ -59,6 +81,7 @@ afterAll(async () => {
   await prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+  await prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } });
   await prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -118,6 +141,16 @@ describe('the trial fee-education sweep', () => {
       if (before === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
       else process.env['MMG_CHECKOUT_ENABLED'] = before;
     }
+  });
+
+  it('[BILL-PRO · G S4-3] a pro\'s trial notice goes to the pro, as a provider (not a store\'s or a mover\'s)', async () => {
+    const pro = await makeProTrial(3.5);
+    const store = await makeTrial(3.5);
+    const sent: Array<{ userId: string; audience?: unknown }> = [];
+    const spy = { send: async (input: { userId: string; audience?: unknown }) => { sent.push(input); } } as unknown as NotificationService;
+    await sweepTrialFeeEducation(prisma, spy);
+    expect(sent.find((n) => n.userId === pro.userId)?.audience).toBe('provider');
+    expect(sent.find((n) => n.userId === store.userId)?.audience).toBe('business'); // [M N1] a real audience name
   });
 
   it('the pilot metric derives paid-before-end from ledger rows', async () => {
