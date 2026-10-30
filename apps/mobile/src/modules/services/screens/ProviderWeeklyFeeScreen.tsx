@@ -8,7 +8,7 @@ import { WeeklyFeeScreen } from '../../billing/screens/WeeklyFeeScreen';
 import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { useAcknowledgeProviderFee, useProviderFee, useServiceProviderProfile } from '../../../hooks';
 import {
-  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, proFeeAgreementFirst, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickRunningLine, proFeeTickStartsLine,
+  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, proFeeAgreementFirst, proFeeChangedLine, proFeeNoFeeWords, proFeeRunningUnlistedLine, proFeeTick, proFeeTickRunningLine, proFeeTickStartsLine,
 } from '../../../lib/providerFee';
 
 /**
@@ -49,6 +49,7 @@ export function ProviderWeeklyFeeScreen({ route }: { route?: { params?: { ref?: 
   const changed = proFeeChangedLine(view);
   const startsLine = proFeeTickStartsLine(view, isVerified);
   const runningLine = proFeeTickRunningLine(view);
+  const unlistedLine = proFeeRunningUnlistedLine(view);
   const agreementFirst = proFeeAgreementFirst(view);
   const noFee = proFeeNoFeeWords(view, isVerified);
 
@@ -88,6 +89,7 @@ export function ProviderWeeklyFeeScreen({ route }: { route?: { params?: { ref?: 
             <WeeklyFeeTerms fee={tick} ticked={ticked} onToggle={() => setTickedFor(ticked ? null : tick.key)} />
             {startsLine ? <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{startsLine}</T> : null}
             {runningLine ? <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{runningLine}</T> : null}
+            {unlistedLine ? <T variant="caption" tone="error" style={{ marginTop: space.sm }}>{unlistedLine}</T> : null}
             {ack.isError ? (
               <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
                 {(ack.error as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message ?? "We couldn't save your tick. Try again."}
