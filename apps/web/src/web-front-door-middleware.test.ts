@@ -199,7 +199,7 @@ const ROUTE_CLASS: Record<string, 'ordering' | 'open'> = {
   '/login': 'open', '/signup': 'open',
   // Partner consoles (stores, riders, drivers, advertisers) work before launch.
   '/dashboard': 'open', '/dashboard/inventory': 'open', '/dashboard/inventory/import': 'open', '/dashboard/notifications': 'open',
-  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/settings/vat-report': 'open', '/dashboard/weekly-fee': 'open', '/weekly-fee': 'open',
+  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/settings/vat-report': 'open', '/dashboard/weekly-fee': 'open', '/dashboard/weekly-fee/statement': 'open', '/weekly-fee': 'open',
   '/portal': 'open', '/portal/account': 'open', '/portal/documents': 'open', '/portal/history': 'open',
   '/portal/notifications': 'open', '/portal/weekly-fee': 'open',
   '/advertiser': 'open', '/advertiser/account': 'open', '/advertiser/notifications': 'open',

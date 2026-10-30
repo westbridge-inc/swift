@@ -1,7 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
-import * as vendorApi from '@/lib/vendor-api';
 import * as chainStatement from '@/lib/chain-statement';
 import type { ChainStatement } from '@/lib/chain-statement';
 import FeeStatementPage from './page';
@@ -18,22 +17,21 @@ const statement: ChainStatement = {
   billedTo: { name: 'Sample Owner', email: 'owner@example.test', phone: null },
   currencyCode: 'GYD', deal: { weeklyRate: 14000, currencyCode: 'GYD' },
   branches: [
-    { vendorId: 'v1', branchName: 'North Branch', address: '1 Sample Street, Georgetown', subscriptionStatus: 'ACTIVE', weeklyFee: 14000, dealWeeklyRate: 14000,
+    { vendorId: 'v1', branchName: 'North Branch', address: '1 Sample Street, Georgetown', subscriptionStatus: 'ACTIVE', weeklyFee: 14000, feeWaived: false, dealWeeklyRate: 14000,
       weeks: [{ periodStart: '2026-10-02T12:00:00.000Z', periodEnd: '2026-10-09T12:00:00.000Z', amount: 14000, paidAt: '2026-10-02T12:00:00.000Z' }],
       owedNow: null, receipts: [{ receiptNumber: 'SWF-1', issuedAt: '2026-10-02T12:00:00.000Z', amount: 14000, channel: 'MMG_CHECKOUT' }], weeksTotal: 14000, receiptsTotal: 14000 },
-    { vendorId: 'v2', branchName: 'Camp Branch', address: '', subscriptionStatus: 'PAST_DUE', weeklyFee: 12000, dealWeeklyRate: null,
+    { vendorId: 'v2', branchName: 'Camp Branch', address: '', subscriptionStatus: 'PAST_DUE', weeklyFee: 12000, feeWaived: false, dealWeeklyRate: null,
       weeks: [], owedNow: { amount: 12000, dueSince: '2026-10-20T12:00:00.000Z' }, receipts: [], weeksTotal: 0, receiptsTotal: 0 },
   ],
   totals: { weeksCharged: 14000, received: 14000, owedNow: 12000 },
   vatNote: 'Not a VAT invoice', generatedAt: '2026-11-02T12:00:00.000Z',
 };
-const profile = (myRole: string) => ({ myRole, vendors: [{ id: 'store-1', name: 'North Branch' }] });
 
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('[E3] the fee statement page', () => {
   it('the owner sees the month: issuer, owner, each branch, totals and "Not a VAT invoice"', async () => {
-    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile('OWNER') as never);
+    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('OWNER');
     vi.spyOn(chainStatement, 'lastGuyanaMonth').mockReturnValue('2026-10');
     const get = vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
@@ -42,15 +40,20 @@ describe('[E3] the fee statement page', () => {
     expect(doc.textContent).toContain('Sample Operator Inc. (trading as Swift)');
     expect(doc.textContent).toContain('Business owner: Sample Owner · owner@example.test');
     expect(doc.textContent).toContain('Not a VAT invoice');
-    expect(within(doc).getByRole('table', { name: 'Weeks paid by North Branch' })).toBeTruthy();
-    expect(within(doc).getByRole('table', { name: 'Receipts for North Branch' }).textContent).toContain('SWF-1');
-    expect(doc.textContent).toContain('Owed now: ');
-    expect(doc.textContent).toContain('No week paid this month.');
+    expect(within(doc).getByRole('table', { name: 'Paid weeks starting this month, North Branch' })).toBeTruthy();
+    expect(within(doc).getByRole('table', { name: 'Receipts issued this month, North Branch' }).textContent).toContain('SWF-1');
+    // [REVIEW-F #2228 S3-1/S3-3] Said as it is: paid weeks STARTING this month; dated owed figures; the making time.
+    expect(doc.textContent).toContain('No paid week starts this month.');
+    expect(doc.textContent).toContain('Paid weeks starting this month: ');
+    expect(doc.textContent).toContain('Receipts issued this month (before any refund): ');
+    expect(doc.textContent).toContain('Made 2 Nov 2026');
+    expect(doc.textContent).toContain('Owed on 2 Nov 2026: ');
+    expect(doc.textContent).toMatch(/Weekly fee \S*14,000 \(chain deal\)/);
     expect(screen.getByRole('button', { name: 'Print or save as PDF' })).toBeTruthy();
   });
 
   it('another month asks for exactly that month', async () => {
-    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile('OWNER') as never);
+    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('OWNER');
     vi.spyOn(chainStatement, 'lastGuyanaMonth').mockReturnValue('2026-10');
     const get = vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
@@ -59,7 +62,7 @@ describe('[E3] the fee statement page', () => {
   });
 
   it('a manager is told only the owner sees it, and the server is not asked', async () => {
-    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile('MANAGER') as never);
+    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('MANAGER');
     const get = vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
     expect(await screen.findByText('Only the business owner sees the fee statement.')).toBeTruthy();

@@ -3,21 +3,24 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { getProfile, money } from '@/lib/vendor-api';
-import { getChainStatement, lastGuyanaMonth, statementDay, type ChainStatement } from '@/lib/chain-statement';
+import { formatMoney } from '@/lib/money';
+import { getChainStatement, getMyRole, lastGuyanaMonth, statementDay, statementTime, thisGuyanaMonth, type ChainStatement, type ChainStatementBranch } from '@/lib/chain-statement';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 
+const money = (n: number) => formatMoney(n);
+
 /**
  * [ENTERPRISE E3 · owner 29 Oct 2026] The owner's weekly-fee statement for one month: every branch, its fee and chain
- * deal, the weeks it paid, what it owes now and the receipts issued, from Swift's own records. Print it, or save it as a
- * PDF from the print dialog. It is a statement, never a tax invoice: "Not a VAT invoice". Owner only (the server
- * refuses anyone else).
+ * deal, its paid weeks that start in the month, what it owes on the day the statement is made, and the receipts issued
+ * in the month, from Swift's own records. Print it, or save it as a PDF from the print dialog (the console prints
+ * nothing of its own). It is a statement, never a tax invoice: "Not a VAT invoice". Owner only (the server refuses
+ * anyone else).
  */
 export default function FeeStatementPage() {
   const storeId = useStoreId();
-  const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
-  const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
+  const role = useQuery({ queryKey: storeKey(storeId, 'my-role'), queryFn: getMyRole });
+  const isOwner = role.data === 'OWNER';
   const [month, setMonth] = useState(() => lastGuyanaMonth());
   const statement = useQuery({ queryKey: storeKey(storeId, 'chain-statement', month), queryFn: () => getChainStatement(month), enabled: isOwner });
 
@@ -27,8 +30,9 @@ export default function FeeStatementPage() {
         <Link href="/dashboard/weekly-fee" className="text-sm text-[var(--swift-muted)] hover:underline">← Weekly fee</Link>
         <h1 className="sw-title mt-1">Fee statement</h1>
       </div>
-      {profile.isError && <DataUnavailable what="your store details" error={profile.error} onRetry={() => void profile.refetch()} />}
-      {profile.data && !isOwner && <div className="sw-card p-6 text-sm">Only the business owner sees the fee statement.</div>}
+      {role.isLoading && <div className="sw-empty print:hidden" role="status">Loading…</div>}
+      {role.isError && <DataUnavailable what="your store details" error={role.error} onRetry={() => void role.refetch()} />}
+      {role.isSuccess && !isOwner && <div className="sw-card p-6 text-sm">Only the business owner sees the fee statement.</div>}
       {isOwner && (
         <>
           <div className="sw-card p-6 space-y-3 print:hidden">
@@ -36,6 +40,8 @@ export default function FeeStatementPage() {
             <input
               id="statement-month"
               type="month"
+              min="2026-01"
+              max={thisGuyanaMonth()}
               value={month}
               onChange={(e) => e.target.value && setMonth(e.target.value)}
               className="rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm"
@@ -53,7 +59,17 @@ export default function FeeStatementPage() {
   );
 }
 
+/** What the branch pays per week, in words (REVIEW-F #2228 S4-2). */
+function feeLine(b: ChainStatementBranch): string {
+  if (b.weeklyFee === null) return 'No weekly fee yet';
+  if (b.subscriptionStatus === 'TRIAL') return `In its free trial (then ${money(b.weeklyFee)} a week)`;
+  if (b.subscriptionStatus === 'CHURNED' || b.subscriptionStatus === 'CANCELLED' || b.subscriptionStatus === 'PAUSED') return 'Not billed now';
+  if (b.feeWaived) return 'Weekly fee waived';
+  return `Weekly fee ${money(b.weeklyFee)}${b.dealWeeklyRate !== null && b.weeklyFee === b.dealWeeklyRate ? ' (chain deal)' : ''}`;
+}
+
 function StatementView({ s }: { s: ChainStatement }) {
+  const made = statementDay(s.generatedAt);
   return (
     <article className="sw-card p-6 space-y-5" aria-label={`Fee statement for ${s.month}`}>
       <header className="space-y-1 text-sm">
@@ -64,6 +80,7 @@ function StatementView({ s }: { s: ChainStatement }) {
       </header>
       <section className="text-sm space-y-1">
         <h2 className="font-bold">Weekly-fee statement · {statementDay(s.from)} to {statementDay(new Date(Date.parse(s.to) - 1).toISOString())}</h2>
+        <p>Made {statementTime(s.generatedAt)} (Guyana). What is owed is as on that day, not at the end of the month.</p>
         <p>Business owner: {s.billedTo.name}{s.billedTo.email ? ` · ${s.billedTo.email}` : ''}{s.billedTo.phone ? ` · ${s.billedTo.phone}` : ''}</p>
         <p>{s.deal ? `Chain deal: ${money(s.deal.weeklyRate)} a week per branch (or a branch's own fee, if lower).` : 'No chain deal: each branch pays its own weekly fee.'}</p>
       </section>
@@ -72,21 +89,21 @@ function StatementView({ s }: { s: ChainStatement }) {
           <h3 className="font-semibold">{b.branchName}</h3>
           {b.address && <p className="text-[var(--swift-muted)]">{b.address}</p>}
           <p>
-            Weekly fee: {b.weeklyFee === null ? 'none yet' : money(b.weeklyFee)}{b.dealWeeklyRate !== null ? ' (chain deal)' : ''}
-            {b.owedNow ? ` · Owed now: ${money(b.owedNow.amount)}, due since ${statementDay(b.owedNow.dueSince)}` : ' · Nothing owed now'}
+            {feeLine(b)}
+            {b.owedNow ? ` · Owed on ${made}: ${money(b.owedNow.amount)}, due since ${statementDay(b.owedNow.dueSince)}` : ` · Nothing owed on ${made}`}
           </p>
           {b.weeks.length > 0 ? (
-            <table className="w-full" aria-label={`Weeks paid by ${b.branchName}`}>
-              <thead><tr className="text-left text-[var(--swift-muted)]"><th>Week paid</th><th className="text-right">Fee</th></tr></thead>
+            <table className="w-full" aria-label={`Paid weeks starting this month, ${b.branchName}`}>
+              <thead><tr className="text-left text-[var(--swift-muted)]"><th>Week (starting this month)</th><th>Paid</th><th className="text-right">Fee</th></tr></thead>
               <tbody>
                 {b.weeks.map((w) => (
-                  <tr key={w.periodStart}><td>{statementDay(w.periodStart)} to {statementDay(w.periodEnd)}</td><td className="text-right">{money(w.amount)}</td></tr>
+                  <tr key={w.periodStart}><td>{statementDay(w.periodStart)} to {statementDay(w.periodEnd)}</td><td>{w.paidAt ? statementDay(w.paidAt) : '—'}</td><td className="text-right">{money(w.amount)}</td></tr>
                 ))}
               </tbody>
             </table>
-          ) : <p className="text-[var(--swift-muted)]">No week paid this month.</p>}
+          ) : <p className="text-[var(--swift-muted)]">No paid week starts this month.</p>}
           {b.receipts.length > 0 && (
-            <table className="w-full" aria-label={`Receipts for ${b.branchName}`}>
+            <table className="w-full" aria-label={`Receipts issued this month, ${b.branchName}`}>
               <thead><tr className="text-left text-[var(--swift-muted)]"><th>Receipt</th><th>Date</th><th className="text-right">Received</th></tr></thead>
               <tbody>
                 {b.receipts.map((r) => (
@@ -98,9 +115,9 @@ function StatementView({ s }: { s: ChainStatement }) {
         </section>
       ))}
       <section className="border-t border-[var(--swift-border)] pt-4 text-sm space-y-1">
-        <p>Weeks paid this month: <span className="font-semibold">{money(s.totals.weeksCharged)}</span></p>
-        <p>Received this month: <span className="font-semibold">{money(s.totals.received)}</span></p>
-        <p>Owed now: <span className="font-semibold">{money(s.totals.owedNow)}</span></p>
+        <p>Paid weeks starting this month: <span className="font-semibold">{money(s.totals.weeksCharged)}</span></p>
+        <p>Receipts issued this month (before any refund): <span className="font-semibold">{money(s.totals.received)}</span></p>
+        <p>Owed on {made}: <span className="font-semibold">{money(s.totals.owedNow)}</span></p>
         <p className="font-semibold">{s.vatNote}</p>
       </section>
     </article>

@@ -70,6 +70,13 @@ async function chain() {
     subscriptionId, amount, status, paymentMethod: 'CASH', periodStart: start, periodEnd: new Date(start.getTime() + 7 * DAY), paidAt: start } });
   await week(north.subId, new Date(from.getTime() + DAY), 14000);
   await week(north.subId, new Date(from.getTime() - 3 * DAY), 14000);
+  // [REVIEW-F #2228 S3-1] North's week starting on the month's last day, paid only after the month: it is a paid week
+  // STARTING this month, listed here. A week paid inside the month that starts next month is not (its receipt is).
+  const { to } = monthOf(new Date());
+  await app.prisma.subscriptionPayment.create({ data: {
+    subscriptionId: north.subId, amount: 14000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(to.getTime() - DAY), periodEnd: new Date(to.getTime() + 6 * DAY), paidAt: new Date(to.getTime() + 2 * DAY) } });
+  await app.prisma.subscriptionPayment.create({ data: {
+    subscriptionId: north.subId, amount: 14000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: to, periodEnd: new Date(to.getTime() + 7 * DAY), paidAt: new Date(to.getTime() - DAY) } });
   // Camp's charge in the month failed: an unpaid week is never listed as paid (it shows as owed now).
   await week(camp.subId, new Date(from.getTime() + DAY), 12000, 'FAILED');
   const ev = await app.prisma.billingEvent.create({ data: { subscriptionId: north.subId, type: 'PREPAID_TOPUP', amount: 14000, currencyCode: 'GYD', idempotencyKey: `stmt:${nanoid(10)}` } });
@@ -120,12 +127,15 @@ describe('[E3] the chain fee statement', () => {
     expect(s.billedTo.name).toBe(`Royal Head${RUN}`);
     expect(s.deal).toEqual({ weeklyRate: 14000, currencyCode: 'GYD' });
     const [north, camp] = s.branches;
-    expect(north).toMatchObject({ branchName: `A North ${RUN}`, weeklyFee: 14000, dealWeeklyRate: 14000, owedNow: null, weeksTotal: 14000, receiptsTotal: 14000 });
-    expect(north.weeks).toHaveLength(1);
+    expect(north).toMatchObject({ branchName: `A North ${RUN}`, weeklyFee: 14000, feeWaived: false, dealWeeklyRate: 14000, owedNow: null, weeksTotal: 28000, receiptsTotal: 14000 });
+    // The week starting inside the month (paid then) and the one starting on its last day (paid after it); never the
+    // week paid inside the month that starts next month, nor the one that started before the month.
+    expect(north.weeks).toHaveLength(2);
+    expect(north.weeks.every((w: { periodStart: string }) => w.periodStart >= s.from && w.periodStart < s.to)).toBe(true);
     expect(north.receipts[0]).toMatchObject({ amount: 14000, channel: 'MMG_CHECKOUT' });
     expect(camp).toMatchObject({ branchName: `B Camp ${RUN}`, weeklyFee: 12000, dealWeeklyRate: null, weeks: [], receipts: [] });
     expect(camp.owedNow).toMatchObject({ amount: 12000 });
-    expect(s.totals).toEqual({ weeksCharged: 14000, received: 14000, owedNow: 12000 });
+    expect(s.totals).toEqual({ weeksCharged: 28000, received: 14000, owedNow: 12000 });
   });
 
   it('a month asked for that is malformed, in the future or before fees existed is refused', async () => {

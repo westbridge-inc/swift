@@ -35,9 +35,11 @@ export interface ChainStatementBranch {
   subscriptionStatus: SubscriptionStatus | null;
   /** What the branch is charged per week now (the lower of its deal and its own fee); null when it has no fee. */
   weeklyFee: number | null;
+  /** [REVIEW-F #2228 S4-2] Its fee is waived (it pays nothing while waived). */
+  feeWaived: boolean;
   /** The chain deal it is on now, when it is on one. */
   dealWeeklyRate: number | null;
-  /** The weeks paid in the month (each week's fee, taken when it fell due). */
+  /** [REVIEW-F #2228 S3-1] The paid weeks that START in the month (whenever they were paid: paidAt says when). */
   weeks: Array<{ periodStart: string; periodEnd: string; amount: number; paidAt: string | null }>;
   /** What it owes now, when its weekly fee is past due (the amount its own fee screen shows). */
   owedNow: { amount: number; dueSince: string } | null;
@@ -122,6 +124,7 @@ export async function chainStatement(db: PrismaClient, input: { ownerId: string;
       vendorId: vendor.id, branchName: vendor.name, address: [vendor.addressLine1, vendor.city].filter(Boolean).join(', '),
       subscriptionStatus: sub?.status ?? null,
       weeklyFee: sub ? (sub.feeWaived ? 0 : weeklyFeeAmount(sub)) : null,
+      feeWaived: sub?.feeWaived ?? false,
       dealWeeklyRate: sub && sub.customRate !== null && owner.dealWeeklyRate !== null && Number(sub.customRate) === Number(owner.dealWeeklyRate)
         ? Number(owner.dealWeeklyRate) : null,
       weeks,
