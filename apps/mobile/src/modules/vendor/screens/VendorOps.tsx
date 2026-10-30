@@ -60,7 +60,9 @@ import {
   useVendorRevenue,
   useVendorOps,
   useVendorHours,
+  useDeliveryStatus,
 } from '../../../hooks/vendorops';
+import { DeliveryStatusNote } from '../../../components/DeliveryStatusNote';
 import { cardTapFor } from '../boardTaps';
 import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
 import { HANDOVER_WORDS, pickupCheckWords, withHandoverSteps } from '../storeHandover';
@@ -871,6 +873,7 @@ export function VendorOps({ store, navigation }: any) {
   const [rejecting, setRejecting] = useState<{ id: string; fulfillment?: string | null } | null>(null);
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
+  const deliveryStatus = useDeliveryStatus(true);
   const setSelfDelivery = useSetSelfDelivery();
   const setRequirePickupCode = useSetRequirePickupCode();
   const orderAction = useOrderAction();
@@ -1260,6 +1263,8 @@ export function VendorOps({ store, navigation }: any) {
               {(toggleOrders.error as any)?.response?.data?.error?.message ?? 'Couldn’t update — try again.'}
             </T>
           ) : null}
+          {/* [RIDER-SAFE 4/5] Why customers cannot order delivery right now (pickup stays open). */}
+          {!inPreview ? <DeliveryStatusNote status={deliveryStatus.data} /> : null}
         </Card>
 
         {/* Who delivers — self-delivery vs a Swift rider. When on, the server
