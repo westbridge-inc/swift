@@ -516,6 +516,9 @@ export async function authRoutes(app: FastifyInstance) {
         currencyCode: config.currencyCode,
         currencySymbol: config.currencySymbol,
         isActive: config.isActive,
+        // The trial every new store and mover starts on (14 days), which build 12 reads. [DEPT-PRICE · owner 29 Oct 2026]
+        // Each catalogue step carries its own `trialDays` too: a NEW store at the department step when Swift approves it
+        // gets 7 days (subscription/trial-length.ts).
         trialDays: TRIAL_DAYS,
         ...partnerPriceList(config.subscriptionTiers),
         // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
