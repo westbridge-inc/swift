@@ -48,6 +48,10 @@ describe('[E3] the fee statement page', () => {
     expect(doc.textContent).toContain('Receipts issued this month (before any refund): ');
     expect(doc.textContent).toContain('Made 2 Nov 2026');
     expect(doc.textContent).toContain('Owed on 2 Nov 2026: ');
+    // Both the branch's line and the total say the day.
+    const totals = Array.from(doc.querySelectorAll(':scope > section:last-of-type p')).map((p) => p.textContent ?? '');
+    expect(totals.some((t) => t.startsWith('Owed on 2 Nov 2026: '))).toBe(true);
+    expect(within(doc).getByText('Camp Branch').parentElement!.textContent).toContain(' · Owed on 2 Nov 2026: ');
     expect(doc.textContent).toMatch(/Weekly fee \S*14,000 \(chain deal\)/);
     expect(screen.getByRole('button', { name: 'Print or save as PDF' })).toBeTruthy();
   });
@@ -59,6 +63,40 @@ describe('[E3] the fee statement page', () => {
     renderWithQuery(<FeeStatementPage />);
     fireEvent.change(await screen.findByLabelText('Month'), { target: { value: '2026-09' } });
     await waitFor(() => expect(get).toHaveBeenCalledWith('2026-09'));
+  });
+
+  it('[REVIEW-F #2228 S4-2] each branch says what it pays: its own lower fee is not the deal; waived, trial and not-billed are said', async () => {
+    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('OWNER');
+    vi.spyOn(chainStatement, 'lastGuyanaMonth').mockReturnValue('2026-10');
+    const base = statement.branches[1]!;
+    const branch = (name: string, over: Partial<typeof base>) => ({ ...base, vendorId: name, branchName: name, owedNow: null, ...over });
+    vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue({ ...statement, branches: [
+      branch('Lower', { weeklyFee: 9000, dealWeeklyRate: 14000, subscriptionStatus: 'ACTIVE' }),
+      branch('Waived', { weeklyFee: 0, feeWaived: true, subscriptionStatus: 'ACTIVE' }),
+      branch('Trial', { weeklyFee: 12000, subscriptionStatus: 'TRIAL' }),
+      branch('Gone', { weeklyFee: 12000, subscriptionStatus: 'CHURNED' }),
+    ] });
+    renderWithQuery(<FeeStatementPage />);
+    const doc = await screen.findByRole('article', { name: 'Fee statement for 2026-10' });
+    const line = (name: string) => within(doc).getByRole('heading', { name }).parentElement!.textContent!;
+    expect(line('Lower')).toMatch(/Weekly fee \S*9,000 ·/);
+    expect(line('Lower')).not.toContain('(chain deal)');
+    expect(line('Waived')).toContain('Weekly fee waived');
+    expect(line('Trial')).toMatch(/In its free trial \(then \S*12,000 a week\)/);
+    expect(line('Gone')).toContain('Not billed now');
+  });
+
+  it('[REVIEW-F #2228 S4-3] the month picker runs from 2026-01 to this month, and the page says it is loading while it checks the role', async () => {
+    let resolve: (role: string) => void = () => undefined;
+    vi.spyOn(chainStatement, 'getMyRole').mockReturnValue(new Promise((r) => { resolve = r; }));
+    vi.spyOn(chainStatement, 'thisGuyanaMonth').mockReturnValue('2026-11');
+    vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
+    renderWithQuery(<FeeStatementPage />);
+    expect(screen.getByRole('status').textContent).toBe('Loading…');
+    resolve('OWNER');
+    const input = await screen.findByLabelText('Month');
+    expect(input.getAttribute('min')).toBe('2026-01');
+    expect(input.getAttribute('max')).toBe('2026-11');
   });
 
   it('a manager is told only the owner sees it, and the server is not asked', async () => {
