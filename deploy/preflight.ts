@@ -110,7 +110,7 @@ function readEnvFile(file: string): Record<string, string> {
 const STUBS: Record<string, string> = {
   DEV_OTP_BYPASS: '0',
   LIFECYCLE_V2: '1',
-  ORDER_HOLD_MINUTES: '5',
+  ORDER_HOLD_MINUTES: '1',
   OTP_HASH_SECRET: 'x'.repeat(48),
   JWT_SECRET: 'x'.repeat(48),
   KYC_PROVIDER: 'manual',

@@ -5,6 +5,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type Redis from 'ioredis';
 import { AppError } from '../../utils/errors';
 import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
+import { orderHoldMinutes } from './hold-minutes';
 
 /**
  * [M-11] The checkout command's durable tail and result.
@@ -128,7 +129,8 @@ export function vendorAlertLadderDelayMs(): number {
  *  rows inside it are complete. Same arithmetic the route used to do after
  *  the commit; the preview and the writer must never disagree [F036-03b]. */
 export async function checkoutQueueTiming(prisma: PrismaClient): Promise<CheckoutQueueTiming> {
-  const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 5) : 0;
+  // [owner 30 Oct 2026] The same hold, from the same default, as holdWindowMs (order/hold-minutes.ts).
+  const holdMin = process.env['LIFECYCLE_V2'] === '1' ? orderHoldMinutes() : 0;
   const slaMin = await vendorResponseSlaMinutes(prisma);
   return {
     alertDelayMs: vendorAlertLadderDelayMs(),
@@ -202,8 +204,9 @@ export async function persistCheckoutOutboxInTransaction(
       // [Q12] A HELD order gets no ladder here: the store hears nothing until
       // the release, and the release writes this same row at that moment
       // (persistReleaseAlertLadderInTransaction). Armed here too, its first
-      // rung could only stop (the five-minute hold outlives it) or, under a
-      // shorter hold, run a second ladder beside the release's one — two
+      // rung could only stop (a hold that outlives it) or, under a hold
+      // shorter than the rung (the one-minute hold, owner 30 Oct 2026, under
+      // loud alerts), run a second ladder beside the release's one — two
       // "still waiting" SMS for one order.
       ...(order.holdExpiresAt == null ? [vendorAlertLadderEffect(order.id, input.timing.alertDelayMs)] : []),
       { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: autoCancelDelayMs },
