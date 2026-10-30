@@ -313,6 +313,9 @@ export function craftedBodies(w: World): Record<string, Record<string, unknown>>
     [`POST ${A}/subscriptions/:id/refund-credit/set-aside`]: { amount: 100 },
     // [CHAINS] a chain deal: valid, so the re-send reaches the owner lookup (and its tenant wall)
     [`PUT ${A}/vendor-owners/:id/deal-rate`]: { weeklyRate: 1000, reason: 'MATRIX chain deal' },
+    // [ENTERPRISE E2] a deal end and its withdrawal: valid, so the re-send reaches the owner lookup (and its tenant wall)
+    [`POST ${A}/vendor-owners/:id/deal-change`]: { kind: 'END', reason: 'MATRIX chain deal change' },
+    [`DELETE ${A}/vendor-owners/:id/deal-change`]: { reason: 'MATRIX chain deal change' },
     [`POST ${A}/subscriptions/:id/refund-credit/release`]: { amount: 100, setAsideId: v.subscription },
     [`POST ${A}/billing/agent-payments`]: { san: '000000000', amount: 2000, paidAt: at, receiptNumber: 'MATRIX-001', verifiedInPortal: true },
     [`POST ${A}/billing/agent-payments/:id/attach`]: { subscriptionId: v.subscription },
