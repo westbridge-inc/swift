@@ -12,7 +12,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { isReviewSubscription, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
-import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
+import { CountryConfigService, catalogueStepsFor, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider, mmgDisabled, mmgPushFollowUpOn, mmgPushRailOn } from '../../providers/mmg/mmg-provider';
 import { noLivePayPath } from './fee-pause';
@@ -32,7 +32,7 @@ import { catalogueCardTop } from './card-price-cut';
 import { paymentInFlightInTx } from './payment-in-flight';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, retierRiseCopy, riseAppliesFrom, type HeldFeeRise, type RetierBasis } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, guyanaDay, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -5057,7 +5057,8 @@ export class BillingService {
           const target = this.retierTarget(sub.id, tiers, tariff.subject);
           if (!target) return false;
           return this.retierInTx(tx, sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`,
-            { now, basis: { kind: tariff.subject.kind, vehicleType: tariff.subject.vehicleType } });
+            { now, basis: { kind: tariff.subject.kind, vehicleType: tariff.subject.vehicleType },
+              riseBasis: { kind: 'VEHICLE', vehicleType: tariff.subject.vehicleType, tier: target.tier } });
         });
         if (moved) changed += 1;
         if (moved) await this.afterRetier(candidate.id, moved);
@@ -5151,25 +5152,30 @@ export class BillingService {
     sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string; customRate?: Prisma.Decimal | null },
     target: PartnerRate,
     note: string,
-    opts: { now: Date; lowerTarget?: PartnerRate; basis: Record<string, unknown> },
+    opts: { now: Date; lowerTarget?: PartnerRate; basis: Record<string, unknown>; riseBasis?: RetierBasis },
   ): Promise<RetierMove | false> {
     const from = Number(sub.weeklyRate);
     if (target.rate > from) {
       await lockSubscriptionPayer(tx, sub.id);
       await this.clearRetierLowerInTx(tx, sub.id, opts, 'HIGHER_AGAIN');
-      const held = await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: target.rate, currencyCode: sub.currencyCode, source: 'WEEKLY_RETIER', sourceRef: note, now: opts.now });
+      // [RETIER PR-B] The rise carries WHY (its notice tells the partner the catalogue or vehicle, and how to come down).
+      const held = await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: target.rate, currencyCode: sub.currencyCode, source: 'WEEKLY_RETIER', sourceRef: note, now: opts.now, ...(opts.riseBasis ? { basis: opts.riseBasis } : {}) });
       return held === 'held' ? { held: true } : false;
     }
-    // [R27 · security review: shrink-and-restore around one pass] A lower tier moves nothing until it
-    // holds on TWO consecutive weekly passes (RETIER_LOWER_CONFIRM_MIN_MS..MAX_MS apart), at the
-    // HIGHER of the two observations: then a held rise above it is dropped and the fee goes down.
-    // Every observation, confirmation and clearing is an audit row with its basis.
+    // [R27 · security review: shrink-and-restore around one pass] A lower tier moves the FEE nothing until
+    // it holds on TWO consecutive weekly passes (RETIER_LOWER_CONFIRM_MIN_MS..MAX_MS apart), at the
+    // HIGHER of the two observations: then the fee goes down. Every observation, confirmation and
+    // clearing is an audit row with its basis.
     const lower = opts.lowerTarget && opts.lowerTarget.rate > target.rate ? opts.lowerTarget : target;
-    const heldRow = await tx.platformConfig.findUnique({ where: { key: feeRiseKey(sub.id) } });
-    const held = heldRow ? readHeldFeeRise(heldRow.value) : null;
-    if (!(lower.rate < from) && !(held && held.to > lower.rate)) {
+    // [RETIER PR-B · owner 30 Oct 2026] A rise still waiting (told or not) whose new fee the partner no longer reaches
+    // — judged, for a store, on the week's largest catalogue (above: hiding listings around the pass never counts) —
+    // is cancelled on THIS pass, and a partner who was told is told it will not happen. Only the fee itself coming
+    // down waits for the second pass below. A chain deal's own change is the owner's deal, never the catalogue's.
+    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, lower.rate, { exceptChainDeal: true, why: 'BELOW_AGAIN' });
+    const keep = (move: RetierMove | false): RetierMove | false => (dropped ? { ...(move || {}), dropped } : move);
+    if (!(lower.rate < from)) {
       await this.clearRetierLowerInTx(tx, sub.id, opts, 'NOT_LOWER');
-      return false;
+      return keep(false);
     }
     await lockSubscriptionPayer(tx, sub.id);
     const key = retierLowerKey(sub.id);
@@ -5180,7 +5186,7 @@ export class BillingService {
       const value = { rate: lower.rate, tier: lower.tier, seenAt: opts.now.toISOString(), basis: opts.basis };
       await tx.platformConfig.upsert({ where: { key }, update: { value: value as unknown as Prisma.InputJsonValue }, create: { key, value: value as unknown as Prisma.InputJsonValue } });
       await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_SEEN', entity: 'Subscription', entityId: sub.id, changes: { from, ...value, replaces: seen ?? null } as unknown as Prisma.InputJsonValue } });
-      return false;
+      return keep(false);
     }
     if (age < RETIER_LOWER_CONFIRM_MIN_MS) {
       // A second pass inside the same week: the lower tier must hold at every observation.
@@ -5189,7 +5195,7 @@ export class BillingService {
         await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
         await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_SEEN', entity: 'Subscription', entityId: sub.id, changes: { from, ...value, raisedWithinWeek: opts.basis } as unknown as Prisma.InputJsonValue } });
       }
-      return false;
+      return keep(false);
     }
     const confirmed: PartnerRate = lower.rate >= seen.rate ? lower : { rate: seen.rate, tier: seen.tier as PartnerRate['tier'] };
     await tx.platformConfig.delete({ where: { key } });
@@ -5197,10 +5203,10 @@ export class BillingService {
       changes: { from, to: confirmed.rate, first: seen, second: { rate: lower.rate, at: opts.now.toISOString(), basis: opts.basis } } as unknown as Prisma.InputJsonValue } });
     // The card rate is not higher any more: a rise held for a higher one no longer stands (dropped, and
     // the payer told it will not happen if they were told it would).
-    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, confirmed.rate);
+    const droppedNow = dropped ?? await this.dropStaleFeeRiseInTx(tx, sub.id, confirmed.rate);
     const lowered = confirmed.rate < from && await this.applyTierChange(sub, confirmed, note, tx);
-    if (!lowered && !dropped) return false;
-    return { ...(lowered ? { lowered: { from, to: confirmed.rate } } : {}), ...(dropped ? { dropped } : {}) };
+    if (!lowered && !droppedNow) return false;
+    return { ...(lowered ? { lowered: { from, to: confirmed.rate } } : {}), ...(droppedNow ? { dropped: droppedNow } : {}) };
   }
 
   /** [R27] A pending lower-tier observation that no longer stands is cleared, with an audit row. */
@@ -5213,14 +5219,18 @@ export class BillingService {
       changes: { why, seen: row.value, at: opts.now.toISOString(), basis: opts.basis } as unknown as Prisma.InputJsonValue } });
   }
 
-  /** [R27] A held rise whose new fee is above what the card now gives: dropped in the caller's transaction. */
-  private async dropStaleFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, cardRate: number): Promise<HeldFeeRise | null> {
+  /** [R27] A held rise whose new fee is above what the card now gives: dropped in the caller's transaction.
+   *  [RETIER PR-B] `exceptChainDeal` leaves a chain deal's own change alone; `why` names the drop in its audit row. */
+  private async dropStaleFeeRiseInTx(
+    tx: Prisma.TransactionClient, subscriptionId: string, cardRate: number, opts: { exceptChainDeal?: boolean; why?: string } = {},
+  ): Promise<HeldFeeRise | null> {
     const row = await tx.platformConfig.findUnique({ where: { key: feeRiseKey(subscriptionId) } });
     const held = row ? readHeldFeeRise(row.value) : null;
     if (!held || !(held.to > cardRate)) return null;
+    if (opts.exceptChainDeal && held.source === 'CHAIN_DEAL') return null;
     await lockSubscriptionPayer(tx, subscriptionId);
     const sub = await tx.subscription.findUnique({ where: { id: subscriptionId } });
-    return (await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub as Subscription | null, !held.noticeAt)) ? held : null;
+    return (await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub as Subscription | null, !held.noticeAt, opts.why)) ? held : null;
   }
 
   /** [R27] After a re-tier commit: tell a lower fee, and a told rise that will not happen. */
@@ -5257,8 +5267,10 @@ export class BillingService {
    * days ahead (weekly-retier.ts, owner legal plan R27): nobody moves to a new
    * price. The two passes below stay callable for the day it comes back on.
    */
-  async runWeeklyRetier(): Promise<{ on: boolean; vendorsChanged: number; moversChanged: number }> {
-    if (!WEEKLY_RETIER_ON) {
+  async runWeeklyRetier(on: boolean = WEEKLY_RETIER_ON): Promise<{ on: boolean; vendorsChanged: number; moversChanged: number }> {
+    // [RETIER PR-B] `on` is the constant everywhere but the tests that run the whole pass switched on; the job calls
+    // this with no argument (weekly-retier-off.test.ts pins that call).
+    if (!on) {
       log().warn('[R27] weekly re-tier is OFF: no partner moves to a new weekly fee until the 14-day price-change notice ships');
       return { on: false, vendorsChanged: 0, moversChanged: 0 };
     }
@@ -5330,8 +5342,11 @@ export class BillingService {
         const weekTarget = this.retierTarget(sub.id, tiers, { kind: 'VENDOR', isService: sub.vendor.vendorType === 'SERVICE', activeListings: weekListings }) ?? target;
 
         const note = `${activeListings} active listings -> ${target.tier} tier`;
+        // [RETIER PR-B] WHY, for the notice: the listings counted and the item count the step starts at.
+        const step = sub.vendor.vendorType === 'SERVICE' ? null : catalogueStepsFor(tiers).find((candidate) => candidate.tier === target.tier) ?? null;
+        const riseBasis: RetierBasis | undefined = step && step.minItems > 0 ? { kind: 'CATALOGUE', items: activeListings, tier: target.tier, stepFrom: step.minItems } : undefined;
         const moved = await this.prisma.$transaction((tx) => this.retierInTx(tx, sub, target, note,
-          { now, lowerTarget: weekTarget, basis: { activeListings, weekListings } }));
+          { now, lowerTarget: weekTarget, basis: { activeListings, weekListings }, ...(riseBasis ? { riseBasis } : {}) }));
         if (moved) changed += 1;
         if (moved) await this.afterRetier(sub.id, moved);
       } catch (error) {
@@ -5513,13 +5528,17 @@ export class BillingService {
     const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
     const copy = held.source === 'CHAIN_DEAL'
       ? chainDealRiseCopy({ branch: await this.branchName(sub?.vendor?.id), from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, dealTo: held.customTo ?? null })
-      : feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
+      // [RETIER PR-B] A re-tier rise says why, and how to bring the fee back down.
+      : held.basis
+        ? retierRiseCopy({ from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, basis: held.basis })
+        : feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
     const userId = this.payerUserId(sub as SubWithRelations);
     const inboxId = await this.notifications.send({
       userId, type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
       data: {
         kind: FEE_RISE_NOTICE_KIND, change: 'RISE', subscriptionId, weeklyFee: held.to, previousWeeklyFee: held.from,
         currencyCode: held.currencyCode, appliesFrom: appliesFrom.toISOString(), toldAt: at.toISOString(),
+        ...(held.basis ? { reason: held.basis } : {}),
         // [REVIEW-F #2227 S3-1] A chain branch's notice opens THAT branch's fee screen (the router selects vendorId).
         ...(held.source === 'CHAIN_DEAL' && sub?.vendor ? { vendorId: sub.vendor.id } : {}),
       },
@@ -5563,7 +5582,7 @@ export class BillingService {
   }
 
   /** Drop a held rise that no longer matches (payer locked). True when a row was dropped. */
-  private async dropHeldFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, held: HeldFeeRise, sub: Subscription | null, untold: boolean): Promise<boolean> {
+  private async dropHeldFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, held: HeldFeeRise, sub: Subscription | null, untold: boolean, why?: string): Promise<boolean> {
     const key = feeRiseKey(subscriptionId);
     const row = await tx.platformConfig.findUnique({ where: { key } });
     // Only the very rise judged: a newer one held since is left for the next pass.
@@ -5573,7 +5592,7 @@ export class BillingService {
       action: 'BILLING_FEE_RISE_DROPPED', entity: 'Subscription', entityId: subscriptionId,
       changes: {
         from: held.from, to: held.to, told: !untold, appliesFrom: held.appliesFrom,
-        why: this.feeRiseObstacle(sub, held) ?? (sub?.feeWaived ? 'FEE_WAIVED' : 'NO_LONGER_HELD'),
+        why: this.feeRiseObstacle(sub, held) ?? why ?? (sub?.feeWaived ? 'FEE_WAIVED' : 'NO_LONGER_HELD'),
         rateNow: sub ? Number(sub.weeklyRate) : null,
       },
     } });
@@ -5604,6 +5623,14 @@ export class BillingService {
     }
     const appliesFrom = new Date(held.appliesFrom);
     if (sub!.nextBillingDate.getTime() < appliesFrom.getTime()) return 'waiting';
+    // [RETIER PR-B · owner 30 Oct 2026] A store's re-tier rise moves in only while the store still reaches its step:
+    // counted as the weekly pass counts a lower tier (the week's largest catalogue). Back under it before the new fee
+    // starts, the change does not happen (dropped by the hourly pass, and the partner told).
+    if (held.source === 'WEEKLY_RETIER' && held.basis?.kind === 'CATALOGUE' && sub!.vendorId && await this.storeBelowRise(tx, sub!.vendorId, held, now)) {
+      if (!opts.drop) return 'waiting';
+      await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub, false, 'BELOW_AGAIN');
+      return { dropped: true, held, feeNow: sub!.status !== 'CANCELLED' ? weeklyFeeAmount(sub!) : null };
+    }
     if (!held.deferredOnce) {
       const credit = await tx.prepaidBalance.findUnique({ where: { subscriptionId }, select: { balance: true, currencyCode: true } });
       if (credit && credit.currencyCode === sub!.currencyCode && Number(credit.balance) >= held.from) {
@@ -5636,6 +5663,19 @@ export class BillingService {
         ...(held.source === 'CHAIN_DEAL' ? { source: 'CHAIN_DEAL', customFrom: held.customFrom, customTo: held.customTo ?? null, notBefore: held.notBefore } : {}) },
     } });
     return 'applied';
+  }
+
+  /** [RETIER PR-B] Is this store's week's largest catalogue (available now, or made unavailable or edited in the last 7
+   *  days) priced below the rise's new fee? A market whose card cannot price it answers no (the rise waits, loudly). */
+  private async storeBelowRise(tx: Prisma.TransactionClient, vendorId: string, held: HeldFeeRise, now: Date): Promise<boolean> {
+    const vendor = await tx.vendor.findUnique({ where: { id: vendorId }, select: { vendorType: true, owner: { select: { user: { select: { countryCode: true } } } } } });
+    if (!vendor) return false;
+    const tiers = await this.countryConfig.getSubscriptionTiers(vendor.owner.user.countryCode, tx);
+    const weekListings = await tx.item.count({
+      where: { vendorId, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } }] },
+    });
+    const card = this.retierTarget(vendorId, tiers, { kind: 'VENDOR', isService: vendor.vendorType === 'SERVICE', activeListings: weekListings });
+    return card !== null && card.rate < held.to;
   }
 
   /** [ENTERPRISE E2] Chain-deal rises a withdrawn or superseded deal change dropped (chain-deal.ts): each branch that

@@ -1,4 +1,5 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, VehicleType } from '@prisma/client';
+import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { formatMoney } from '../../utils/currency-amount';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 
@@ -67,6 +68,13 @@ export const FEE_RISE_NOTICE_KIND = 'billing_rate_change';
  *  rate moves (customRate customFrom -> customTo, null = back to its own tier fee), never sooner than notBefore. */
 export type FeeRiseSource = 'MOVER_FEE_RESOLVED' | 'TAXI_ACTIVATION' | 'WEEKLY_RETIER' | 'CHAIN_DEAL';
 
+/** [RETIER PR-B · owner 30 Oct 2026] WHY a weekly re-tier rise: the catalogue a store reached (the listings counted,
+ *  the step and the item count that step starts at), or the vehicle a mover drives on Swift. Told in the notice, with
+ *  how to bring the fee back down. */
+export type RetierBasis =
+  | { kind: 'CATALOGUE'; items: number; tier: string; stepFrom: number }
+  | { kind: 'VEHICLE'; vehicleType: string; tier: string };
+
 export interface HeldFeeRise {
   /** The weekly rate the partner pays now, when the rise was held (major units). */
   from: number;
@@ -90,6 +98,20 @@ export interface HeldFeeRise {
   customTo?: number | null;
   /** ... and the deal's end date: no weekly fee due before it is charged the new fee (ISO). */
   notBefore?: string;
+  /** [RETIER PR-B] WEEKLY_RETIER only: why the card gives the higher fee (told in the notice). */
+  basis?: RetierBasis;
+}
+
+/** A stored basis, or undefined for anything that is not one. */
+function readRetierBasis(value: unknown): RetierBasis | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v['tier'] !== 'string') return undefined;
+  if (v['kind'] === 'CATALOGUE' && Number.isInteger(v['items']) && (v['items'] as number) >= 0 && Number.isInteger(v['stepFrom']) && (v['stepFrom'] as number) > 0) {
+    return { kind: 'CATALOGUE', items: v['items'] as number, tier: v['tier'], stepFrom: v['stepFrom'] as number };
+  }
+  if (v['kind'] === 'VEHICLE' && typeof v['vehicleType'] === 'string') return { kind: 'VEHICLE', vehicleType: v['vehicleType'], tier: v['tier'] };
+  return undefined;
 }
 
 const isIso = (v: unknown): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v));
@@ -125,11 +147,20 @@ export function readHeldFeeRise(value: unknown): HeldFeeRise | null {
   } else if ('customFrom' in v || 'customTo' in v || 'notBefore' in v) {
     return null;
   }
+  // [RETIER PR-B] A re-tier rise may carry its basis (the words of its notice); any other rise carries none, and a
+  // basis that cannot be read is not one.
+  let basis: Pick<HeldFeeRise, 'basis'> = {};
+  if (v['basis'] !== undefined && v['basis'] !== null) {
+    const read = v['source'] === 'WEEKLY_RETIER' ? readRetierBasis(v['basis']) : undefined;
+    if (!read) return null;
+    basis = { basis: read };
+  }
   return {
     from, to, currencyCode: v['currencyCode'], source: v['source'] as FeeRiseSource, heldAt: v['heldAt'], noticeAt, appliesFrom,
     inboxId: typeof v['inboxId'] === 'string' ? v['inboxId'] : null,
     ...(v['deferredOnce'] === true ? { deferredOnce: true } : {}),
     ...chain,
+    ...basis,
   };
 }
 
@@ -166,6 +197,37 @@ export function feeDecreaseCopy(p: { from: number; to: number; currencyCode: str
   return {
     title: 'Your weekly fee is going down',
     body: `From your next weekly fee, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). A weekly fee already charged keeps its amount.`,
+  };
+}
+
+/** A tier in the partner's words. */
+const TIER_WORDS: Record<string, string> = {
+  small: 'business', large: 'large catalogue', department: 'department store', service: 'service business',
+  courier: 'delivery and courier', courierHeavy: 'heavy delivery', taxi: 'taxi',
+};
+
+/**
+ * [RETIER PR-B · owner 30 Oct 2026 · F2] The words of a weekly re-tier rise: WHY (the catalogue or vehicle that
+ * reached a higher step), the new fee and from which weekly fee, that nothing changes until then, how to bring it
+ * back down, and how to say no. True with the re-tier's own rules: Swift counts a store's items each week (every
+ * listing available, or made unavailable or edited in the last 7 days); a store that is back under the step before
+ * the new fee starts is not moved, and is told so.
+ */
+export function retierRiseCopy(p: { from: number; to: number; currencyCode: string; date: Date | null; basis: RetierBasis }): { title: string; body: string } {
+  const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
+  const tier = TIER_WORDS[p.basis.tier] ?? p.basis.tier;
+  const why = p.basis.kind === 'CATALOGUE'
+    ? `Your store now has ${p.basis.items.toLocaleString('en-US')} items for sale, which is the ${tier} rate.`
+    : `Your vehicle on Swift is now a ${VEHICLE_CLASSES[p.basis.vehicleType as VehicleType]?.label ?? p.basis.vehicleType}, which is the ${tier} rate.`;
+  const when = p.date ? `From your weekly fee due ${feeRiseDay(p.date)}` : `From your first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`;
+  const down = p.basis.kind === 'CATALOGUE'
+    ? `Your fee follows the number of items for sale in your store, counted by Swift every week. If you bring it back under ${p.basis.stepFrom.toLocaleString('en-US')} items before the new fee starts, this change will not happen, and we will tell you.`
+    : 'Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down, and we will tell you.';
+  return {
+    title: 'Your weekly fee is changing',
+    body: `${why} ${when}, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
+      + 'Until then nothing changes, and any week you have already paid keeps the price you paid. '
+      + `${down} If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.`,
   };
 }
 
@@ -262,7 +324,7 @@ export async function holdChainDealRiseInTx(
  */
 export async function holdFeeRiseInTx(
   tx: Prisma.TransactionClient,
-  p: { subscriptionId: string; from: number; to: number; currencyCode: string; source: FeeRiseSource; sourceRef?: string | null; now: Date },
+  p: { subscriptionId: string; from: number; to: number; currencyCode: string; source: FeeRiseSource; sourceRef?: string | null; now: Date; basis?: RetierBasis },
 ): Promise<'held' | 'unchanged' | 'not-a-rise'> {
   if (!(p.from > 0) || !(p.to > p.from)) return 'not-a-rise';
   const sub = await tx.subscription.findUnique({ where: { id: p.subscriptionId }, select: { customRate: true, feeWaived: true, weeklyRate: true } });
@@ -274,6 +336,8 @@ export async function holdFeeRiseInTx(
   const value: HeldFeeRise = {
     from: p.from, to: p.to, currencyCode: p.currencyCode, source: p.source, heldAt: p.now.toISOString(),
     noticeAt: null, appliesFrom: null, inboxId: null,
+    // [RETIER PR-B] Only a re-tier rise carries its basis (the reader refuses one on any other source).
+    ...(p.source === 'WEEKLY_RETIER' && p.basis ? { basis: p.basis } : {}),
   };
   const json = value as unknown as Prisma.InputJsonValue;
   await tx.platformConfig.upsert({ where: { key }, update: { value: json }, create: { key, value: json } });
@@ -281,7 +345,7 @@ export async function holdFeeRiseInTx(
     action: 'BILLING_FEE_RISE_HELD', entity: 'Subscription', entityId: p.subscriptionId,
     changes: {
       from: p.from, to: p.to, currencyCode: p.currencyCode, source: p.source, sourceRef: p.sourceRef ?? null,
-      noticeDays: FEE_RISE_NOTICE_DAYS,
+      noticeDays: FEE_RISE_NOTICE_DAYS, ...(value.basis ? { basis: value.basis } : {}),
       replaces: held ? { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom } : null,
     },
   } });
