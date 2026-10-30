@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { BillingService } from '../billing/billing.service';
 import { NotificationService } from '../notification/notification.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
