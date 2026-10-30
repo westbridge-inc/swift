@@ -256,6 +256,14 @@
   letter-spacing: 4px;
 }
 
+/* [PICKUP] The store's code off: the order number to say at the counter — it is long, so it wraps, not overflows. */
+.pickupCheck strong {
+  font: 700 18px/24px var(--swift-face-display), system-ui, sans-serif;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .timeline {
   display: grid;
   gap: 0;

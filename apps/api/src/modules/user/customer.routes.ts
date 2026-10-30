@@ -103,6 +103,7 @@ import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCus
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 import { counterpartPhone } from '../calls/counterpart-phone';
 import { ownRiderNotice } from '../order/own-rider-notice';
+import { customerPickupCode, saysPickupHandover } from '../order/pickup-code-view';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2691,7 +2692,8 @@ export async function customerRoutes(app: FastifyInstance) {
       app.prisma.order.findMany({
         where,
         include: {
-          vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true } },
+          // [PICKUP] requirePickupCode is read for pickupCode below, never passed through as a store field.
+          vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true, requirePickupCode: true } },
           items: { select: { id: true, name: true, quantity: true, totalCustomer: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: false, withAvatar: true }) },
@@ -2715,7 +2717,7 @@ export async function customerRoutes(app: FastifyInstance) {
       // persisted type for everything else. The activity list's words read it.
       vertical: orderVertical(o),
       status: o.status,
-      vendor: o.vendor,
+      vendor: o.vendor ? (({ requirePickupCode: _code, ...vendor }) => vendor)(o.vendor) : o.vendor,
       items: o.items.map((i) => ({
         id: i.id,
         name: i.name,
@@ -2731,9 +2733,10 @@ export async function customerRoutes(app: FastifyInstance) {
       paymentMethod: o.paymentMethod,
       fulfillment: o.fulfillment,
       appointmentSlot: o.appointmentSlot,
-      // Takeaway handover gate — the customer PRESENTS this at the counter,
-      // so it must survive past the checkout confirmation screen.
-      pickupCode: o.pickupCode,
+      // Takeaway handover gate — the customer PRESENTS this at the counter when
+      // the store asks for it. [PICKUP · owner 30 Oct 2026] Store code off: no
+      // code (the counter checks the first name and order number).
+      pickupCode: customerPickupCode(o.pickupCode, o.vendor?.requirePickupCode),
       // Taxi context — a ride's identity is its route + class, not a vendor.
       rideClass: o.rideClass,
       pickupAddress: o.pickupAddress,
@@ -3032,7 +3035,9 @@ export async function customerRoutes(app: FastifyInstance) {
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
-        pickupCode: order.pickupCode,
+        // [PICKUP · owner 30 Oct 2026] Only when the store asks for it; the order
+        // screen of store build 12 (no pickupHandover=v1) keeps today's answer.
+        pickupCode: customerPickupCode(order.pickupCode, order.vendor?.requirePickupCode, !saysPickupHandover(request.query)),
         // [O-2 · owner 22 Oct 2026] Whether the store asks for that code. Off by default: the store checks
         // the customer's first name and order number instead (the code still works if it is asked for).
         pickupCodeRequired: order.vendor?.requirePickupCode === true,
@@ -3391,9 +3396,11 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const updated = await app.prisma.order.findUniqueOrThrow({
       where: { id: order.id },
-      select: { id: true, fulfillment: true, pickupCode: true, totalAmount: true, deliveryFee: true, tipAmount: true },
+      select: { id: true, fulfillment: true, pickupCode: true, totalAmount: true, deliveryFee: true, tipAmount: true, vendor: { select: { requirePickupCode: true } } },
     });
-    return { success: true, data: updated };
+    // [PICKUP · owner 30 Oct 2026] The code goes to the customer only when the store asks for it.
+    const { vendor: store, ...switched } = updated;
+    return { success: true, data: { ...switched, pickupCode: customerPickupCode(updated.pickupCode, store?.requirePickupCode) } };
   });
 
   // [DOC-1 §31.5 · §31.6 · P31-2 · ORDER-SPINE S1-6] The customer's OWN claim, from their device:

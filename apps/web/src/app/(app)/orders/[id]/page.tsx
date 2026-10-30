@@ -774,7 +774,16 @@ export default function OrderDetailPage() {
                   <h2 id="destination-title" className={styles.cardTitle}>{destination}</h2>
                 </div>
               </div>
-              {order.pickupCode ? (
+              {/* [PICKUP · owner 30 Oct 2026] The store's code off: the name + order-number check, never a code
+                  (not even one an older server still sends); the store taps "Handed to customer". */}
+              {order.fulfillment === 'PICKUP' && order.pickupCodeRequired === false ? (
+                !stopped && !completed ? (
+                  <div className={`${styles.pickupCode} ${styles.pickupCheck}`}>
+                    <span>{pickupCodeWords(false)}</span>
+                    <strong>{order.orderNumber}</strong>
+                  </div>
+                ) : null
+              ) : order.pickupCode ? (
                 <div className={styles.pickupCode}>
                   <span>{pickupCodeWords(order.pickupCodeRequired)}</span>
                   <strong>{order.pickupCode}</strong>

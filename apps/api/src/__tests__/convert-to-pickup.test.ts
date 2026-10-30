@@ -134,7 +134,12 @@ describe('POST /orders/:id/convert-to-pickup', () => {
     expect(res.statusCode).toBe(200);
     const d = res.json().data;
     expect(d.fulfillment).toBe('PICKUP');
-    expect(String(d.pickupCode)).toMatch(/^\d{6}$/);
+    // [PICKUP · owner 30 Oct 2026] A code is minted for the takeaway; the answer carries it only when the store
+    // asks for it (store code off — the default — means the counter checks the first name and order number).
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { pickupCode: true, vendor: { select: { requirePickupCode: true } } } });
+    expect(String(row.pickupCode)).toMatch(/^\d{6}$/);
+    expect(d.pickupCode).toBe(row.vendor?.requirePickupCode === true ? row.pickupCode : null);
+    expect(Object.keys(d)).not.toContain('vendor');
     expect(Number(d.deliveryFee)).toBe(0);
     expect(Number(d.tipAmount)).toBe(0);
     expect(Number(d.totalAmount)).toBe(4000); // 4900 − 600 fee − 300 tip
