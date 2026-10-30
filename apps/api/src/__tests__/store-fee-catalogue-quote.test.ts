@@ -114,7 +114,7 @@ afterAll(async () => {
 type Owner = { userId: string; vendorId: string; token: string };
 
 /** A store owner with one store waiting for its first go-live. */
-async function owner(opts: { vendorType?: VendorType; deal?: number; status?: 'PENDING_APPROVAL' | 'ACTIVE' } = {}): Promise<Owner> {
+async function owner(opts: { vendorType?: VendorType; deal?: number; status?: 'PENDING_APPROVAL' | 'ACTIVE' | 'SUSPENDED'; firstLiveAt?: Date } = {}): Promise<Owner> {
   seq += 1;
   const user = await system(() => app.prisma.user.create({ data: {
     phone: `+5928${NUM}${String(seq).padStart(2, '0')}`, firstName: 'Mala', lastName: `Shop${seq}`, roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER',
@@ -129,6 +129,7 @@ async function owner(opts: { vendorType?: VendorType; deal?: number; status?: 'P
       name: `Big Mart ${seq}`, slug: `store-fee-${RUN.toLowerCase()}-${seq}`, vendorType: opts.vendorType ?? 'SUPERMARKET',
       phone: `+5928${NUM}9${seq}`, addressLine1: '1 Water Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.16, status: opts.status ?? 'PENDING_APPROVAL', isVerified: false, publicPhone: '+5926001234',
+      ...(opts.firstLiveAt ? { firstLiveAt: opts.firstLiveAt } : {}),
     } },
   }, include: { vendors: true } }));
   const token = app.jwt.sign({ userId: user.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
@@ -274,19 +275,29 @@ describe('[RETIER PR-A] a department-size store is born on the department fee, o
 });
 
 describe('[REVIEW-M #2245] what the quote counts, and which tick counts', () => {
-  it('S3-1 deleted listings are not the store\'s catalogue: 10,000 listed with 2,000 deleted today is priced for 8,000 (large), and says so', async () => {
+  it('S3-1 · COORD: listings removed in the last 7 days still count (deleting just before approval does not lower the fee), and the words say so', async () => {
     const o = await owner();
     await addItems(o.vendorId, deptFloor);
     await system(() => app.prisma.$executeRaw`
       UPDATE "items" SET "archivedAt" = now(), "isAvailable" = false, "updatedAt" = now()
       WHERE "id" IN (SELECT "id" FROM "items" WHERE "vendorId" = ${o.vendorId} ORDER BY "id" LIMIT 2000)`);
     const view = await feeView(o);
+    expect(view).toMatchObject({ items: deptFloor, required: true, weeklyFee: { amount: dept, tier: 'department' } });
+    expect(view.why).toBe(`It has ${deptFloor.toLocaleString('en-US')} items on sale, or taken off sale, changed or removed in the last 7 days, so it is on the department store rate of GY$${dept.toLocaleString('en-US')} a week.`);
+  });
+
+  it('S3-1 · COORD: listings removed more than 7 days ago are not the store\'s catalogue: 10,000 with 2,000 removed 8 days ago is priced and trialled for 8,000 (large)', async () => {
+    const o = await owner();
+    await addItems(o.vendorId, deptFloor);
+    await system(() => app.prisma.$executeRaw`
+      UPDATE "items" SET "archivedAt" = now() - interval '8 days', "isAvailable" = false, "updatedAt" = now() - interval '8 days'
+      WHERE "id" IN (SELECT "id" FROM "items" WHERE "vendorId" = ${o.vendorId} ORDER BY "id" LIMIT 2000)`);
+    const view = await feeView(o);
     expect(view).toMatchObject({ items: deptFloor - 2000, required: true, weeklyFee: { amount: large, tier: 'large' } });
-    expect(view.why).toContain(`It has ${(deptFloor - 2000).toLocaleString('en-US')} items for sale`);
+    expect(view.why).toContain(`It has ${(deptFloor - 2000).toLocaleString('en-US')} items on sale`);
     expect((await tick(o, large)).statusCode).toBe(201);
     const sub = await birth(o);
     expect(Number(sub.weeklyRate)).toBe(large);
-    // and the trial follows the same count: not the department store's 7 days
     expect(Math.round((sub.trialEndDate!.getTime() - sub.currentPeriodStart.getTime()) / DAY)).toBe(14);
   });
 
@@ -304,7 +315,7 @@ describe('[REVIEW-M #2245] what the quote counts, and which tick counts', () => 
   });
 
   it('S4-2 a store that has been live, with no fee on record, whose documents lapsed and came back: re-verified on the first step as before, never asked or held', async () => {
-    const o = await owner({ status: 'ACTIVE' });
+    const o = await owner({ status: 'ACTIVE', firstLiveAt: new Date(Date.now() - 30 * DAY) });
     await addItems(o.vendorId, deptFloor);
     expect(await feeView(o)).toMatchObject({ required: false, ticked: false, weeklyFee: { amount: small, tier: 'small' } });
     await approveAll(o);
@@ -315,6 +326,34 @@ describe('[REVIEW-M #2245] what the quote counts, and which tick counts', () => 
     expect(Math.round((sub.trialEndDate!.getTime() - sub.currentPeriodStart.getTime()) / DAY)).toBe(7);
     expect(await notices(o)).toHaveLength(0);
     expect(await ticks(o)).toHaveLength(0);
+  });
+});
+
+describe('[RETIER PR-A · COORD security review] never live is a durable fact, not a status', () => {
+  it('a store suspended before it ever went live is still never-live: the console sees NEEDS_WEEKLY_FEE_TICK, a reinstate births nothing until the tick, then its catalogue step', async () => {
+    const o = await owner({ status: 'SUSPENDED' });
+    await addItems(o.vendorId, deptFloor);
+    expect(await feeView(o)).toMatchObject({ required: true, ticked: false, weeklyFee: { amount: dept, tier: 'department' } });
+    const goLive = { checklist: { complete: true, items: [] }, disclosure: { engaged: false, complete: null, missing: [] }, publishedPhone: true, foodHandlers: { required: false, attested: false },
+      weeklyFee: (await service.vendorGoLive(o.vendorId))!.weeklyFee } as never;
+    expect(vendorActivationNext({ status: 'SUSPENDED', suspensionSource: 'ADMIN', ownerAccountStatus: 'ACTIVE', subscription: null, feePause: feePausePredicate(false) }, goLive)).toBe('NEEDS_WEEKLY_FEE_TICK');
+    await expect(birth(o)).rejects.toMatchObject({ code: 'STORE_FEE_TICK_REQUIRED' });
+    expect((await tick(o, dept)).statusCode).toBe(201);
+    expect(Number((await birth(o)).weeklyRate)).toBe(dept);
+  });
+
+  it('going live marks the store for good: once its documents lapse and come back without a fee, it is priced on the first step', async () => {
+    const o = await owner();
+    await addItems(o.vendorId, largeFloor - 1);
+    await approveAll(o);
+    expect(await store(o)).toEqual({ status: 'ACTIVE', isVerified: true });
+    const marked = await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: o.vendorId }, select: { firstLiveAt: true } }));
+    expect(marked.firstLiveAt).toBeInstanceOf(Date);
+    // its fee row gone (a grandfathered store), documents lapsed, catalogue grown: never re-priced on it
+    await system(() => app.prisma.subscription.deleteMany({ where: { vendorId: o.vendorId } }));
+    await system(() => app.prisma.vendor.update({ where: { id: o.vendorId }, data: { isVerified: false, activationValidUntil: null } }));
+    await addItems(o.vendorId, deptFloor);
+    expect(await feeView(o)).toMatchObject({ required: false, weeklyFee: { amount: small, tier: 'small' } });
   });
 });
 

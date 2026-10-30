@@ -1947,6 +1947,8 @@ export async function adminRoutes(app: FastifyInstance) {
           where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
           data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
         });
+        // [RETIER PR-A] A reinstated store is live: the first time, for good (partner/store-fee.ts).
+        await tx.vendor.updateMany({ where: { id, firstLiveAt: null }, data: { firstLiveAt: new Date() } });
         if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
           extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },

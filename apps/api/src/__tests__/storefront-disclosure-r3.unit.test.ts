@@ -32,6 +32,8 @@ vi.mock('../modules/verification/extraction-ledger', async (original) => ({
 async function fixture(status = 'ACTIVE') {
   const vendor: Row = {
     id: 'store-fixture', tenantId: 'tenant-public', status, isVerified: true,
+    // [RETIER PR-A] when the store first went live (the projection marks it the first time it is made live)
+    firstLiveAt: null,
     tenant: { id: 'tenant-public', isActive: true, kind: 'PRODUCTION' }, subscription: null,
     name: 'Fixture Shop', slug: 'fixture-shop', addressLine1: 'Fixture business address', addressLine2: null,
     // [CHAINS PR3] The owner is a brand Swift named, so every read below also runs the storefront's branch switcher.

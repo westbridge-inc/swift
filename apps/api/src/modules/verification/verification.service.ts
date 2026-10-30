@@ -2766,6 +2766,9 @@ export class VerificationService {
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
+        // [RETIER PR-A] The first time a store is made live, for good (partner/store-fee.ts: only a never-live store is
+        // priced on its catalogue).
+        await db.vendor.updateMany({ where: { id: vendor.id, firstLiveAt: null }, data: { firstLiveAt: new Date() } });
         // [#1541 · #1516 review S4] A store whose weekly fee billing holds goes live UNDER that hold
         // (billing-access.ts), never open while its fee is unpaid; the promotion below then finds it not pending.
         if (await holdActivationForUnpaidFee(db, vendor.id)) await this.tellOwnerFeeHoldsGoLive(db, userId, vendor);

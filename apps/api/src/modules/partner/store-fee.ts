@@ -3,7 +3,6 @@ import { AppError } from '../../utils/errors';
 import { formatMoney } from '../../utils/currency-amount';
 import { PricingConfigError, partnerRateFor, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
-import { awaitingFirstGoLive } from '../vendor/go-live';
 import { assertSawQuote, assertWeeklyFeeAck, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck } from './weekly-fee-ack';
 
 // ---------------------------------------------------------------------------
@@ -39,12 +38,30 @@ export const STORE_FEE_NOTICE_KIND = 'vendor_needs_weekly_fee_tick';
 export const STORE_FEE_TICK_REQUIRED = 'STORE_FEE_TICK_REQUIRED';
 export const STORE_FEE_ALREADY_SET = 'STORE_FEE_ALREADY_SET';
 
-/** The store's catalogue as its fee and trial are priced from it: available now, or made unavailable or edited in
- *  the last 7 days (the re-tier's lower-tier count, billing.service recalculateVendorTiers). [REVIEW-M #2245 S3-1] A
- *  DELETED listing is archived (archivedAt set, never available again): it is not the store's catalogue and never
- *  counts, however recently it was deleted. */
+/** The 7-day window: a listing taken off sale, changed or removed this recently still counts (anti-hide). */
+export const CATALOGUE_WINDOW_DAYS = 7;
+/** [COORD 30 Oct 2026] The count in words, ONE phrase everywhere: the "why" sentence here, the website and the phone
+ *  (their pin reads this line). Keep it true to catalogueCountWhere. */
+export const CATALOGUE_COUNT_WORDS = 'taken off sale, changed or removed in the last 7 days';
+
+/** [REVIEW-M #2245 S3-1 · COORD ruling 30 Oct 2026] Which listings a store's fee and trial are priced from: every
+ *  listing on sale now; every listing taken off sale or changed in the last 7 days; and every listing REMOVED (deleted,
+ *  archivedAt set) in the last 7 days. Hiding or deleting listings just before approval does not count them out; a
+ *  listing removed longer ago is not the store's catalogue and never counts. (billing.service uses the same rule for
+ *  the re-tier's weekly count.) */
+export function catalogueCountWhere(vendorId: string, now: Date): Prisma.ItemWhereInput {
+  const since = new Date(now.getTime() - CATALOGUE_WINDOW_DAYS * DAY_MS);
+  return {
+    vendorId,
+    OR: [
+      { archivedAt: null, OR: [{ isAvailable: true }, { updatedAt: { gte: since } }] },
+      { archivedAt: { gte: since } },
+    ],
+  };
+}
+
 export function storeCatalogueCount(db: Db, vendorId: string, now = new Date()): Promise<number> {
-  return db.item.count({ where: { vendorId, archivedAt: null, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } }] } });
+  return db.item.count({ where: catalogueCountWhere(vendorId, now) });
 }
 
 export interface StoreFeeQuote {
@@ -87,7 +104,7 @@ export function storeFeeTickNeeded(amount: number, signupAmount: number): boolea
 export async function storeFeeQuote(db: Db, vendorId: string, now = new Date()): Promise<StoreFeeQuote> {
   const vendor = await db.vendor.findUnique({
     where: { id: vendorId },
-    select: { vendorType: true, status: true, owner: { select: { userId: true, dealWeeklyRate: true, dealCurrencyCode: true, user: { select: { countryCode: true } } } } },
+    select: { vendorType: true, firstLiveAt: true, owner: { select: { userId: true, dealWeeklyRate: true, dealCurrencyCode: true, user: { select: { countryCode: true } } } } },
   });
   if (!vendor) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Store not found');
   const config = await db.countryConfig.findUnique({ where: { code: vendor.owner.user.countryCode }, select: { currencyCode: true, subscriptionTiers: true } });
@@ -97,10 +114,12 @@ export async function storeFeeQuote(db: Db, vendorId: string, now = new Date()):
   const signup = partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: 0 });
   const items = isService ? null : await storeCatalogueCount(db, vendorId, now);
   const catalogue = isService ? signup : partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: items ?? 0 });
-  // [REVIEW-M #2245 S4-2 · COORD ruling: existing partners are not moved] Only a store that has never been live
-  // (waiting for its first go-live) is priced on its catalogue and asked to tick. A store that has been live and has
-  // no fee on record (documents lapsed and came back) is born as before: the first step, no tick, never held offline.
-  const step = awaitingFirstGoLive(vendor) ? catalogue : signup;
+  // [REVIEW-M #2245 S4-2 · COORD ruling: existing partners are not moved] Only a store that has NEVER been live
+  // (vendors.firstLiveAt: set the first time it is made live, never cleared; status cannot tell a store suspended before
+  // it ever went live from one suspended after) is priced on its catalogue and asked to tick. A store that has been
+  // live and has no fee on record (documents lapsed and came back) is born as before: the first step, no tick, never
+  // held offline.
+  const step = vendor.firstLiveAt === null ? catalogue : signup;
   // The owner's chain deal, as the birth reads it (subscription.service chainDealFor): same currency, above zero.
   const deal = vendor.owner.dealWeeklyRate;
   const dealRate = deal !== null && deal !== undefined && vendor.owner.dealCurrencyCode === config.currencyCode && Number(deal) > 0 ? Number(deal) : null;
@@ -184,7 +203,8 @@ export function storeTierWords(tier: PartnerTier): string {
 /** Why this amount, in one sentence (the quote's own numbers). */
 export function storeFeeWhy(quote: Pick<StoreFeeQuote, 'items' | 'tier' | 'cardRate' | 'dealRate' | 'amount' | 'currencyCode'>): string {
   const money = (n: number) => formatMoney(n, quote.currencyCode, { whole: true });
-  const size = quote.items === null ? '' : `It has ${quote.items.toLocaleString('en-US')} items for sale, so it is on the ${storeTierWords(quote.tier)} rate of ${money(quote.cardRate)} a week.`;
+  // The count's own words (catalogueCountWhere): on sale now, or taken off sale, changed or removed in the last 7 days.
+  const size = quote.items === null ? '' : `It has ${quote.items.toLocaleString('en-US')} items on sale, or ${CATALOGUE_COUNT_WORDS}, so it is on the ${storeTierWords(quote.tier)} rate of ${money(quote.cardRate)} a week.`;
   const deal = quote.dealRate !== null && quote.amount < quote.cardRate ? ` Your Swift chain deal brings it to ${money(quote.amount)}.` : '';
   return `${size}${deal}`.trim();
 }
