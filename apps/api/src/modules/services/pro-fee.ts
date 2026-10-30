@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient, Subscription } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { readFeePause } from '../billing/mmg-pause';
@@ -8,6 +8,7 @@ import {
   assertSawQuote, assertWeeklyFeeAck, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
 } from '../partner/weekly-fee-ack';
 import { subscriptionOperability, type OperabilitySubscription, type SubscriptionOperability } from '../subscription/operate-gate';
+import { liveServicesStoreFeeWhere } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // [BILL-PRO PR3 · owner 28 Oct 2026 Rounds A+B] THE PRO WEEKLY FEE: when a pro's fee is born, and whether a pro may
@@ -47,18 +48,10 @@ const OPERABILITY_SELECT = {
   billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true,
 } as const satisfies Prisma.SubscriptionSelect;
 
-/** A fee that has ended (no longer a fee anyone owes or pays). Every other status is still a live fee. */
-const ENDED_STATUSES: ReadonlyArray<Subscription['status']> = ['CANCELLED', 'CHURNED'];
 
 /** [B1] The person's own Services store fee that is still live (one fee covers their pro profile), or null. */
 export async function liveServicesStoreFee(db: Db, userId: string): Promise<OperabilitySubscription | null> {
-  const stores = await db.vendor.findMany({
-    where: { vendorType: 'SERVICE', owner: { userId }, subscription: { status: { notIn: [...ENDED_STATUSES] } } },
-    orderBy: { id: 'asc' },
-    select: { subscription: { select: OPERABILITY_SELECT } },
-  });
-  const fees = stores.flatMap((s) => (s.subscription ? [s.subscription] : []));
-  return fees[0] ?? null;
+  return db.subscription.findFirst({ where: liveServicesStoreFeeWhere(userId), orderBy: { vendorId: 'asc' }, select: OPERABILITY_SELECT });
 }
 
 export type ProFeeStanding =
