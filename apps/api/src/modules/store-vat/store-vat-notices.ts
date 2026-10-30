@@ -20,14 +20,19 @@ function sentence(reason: string): string {
   return /[.!?]$/.test(t) ? t : `${t}.`;
 }
 
-export function storeVatApprovedNotice(v: { registeredName: string; number: string; effectiveFrom: Date; ratePercent?: number }): { title: string; body: string } {
+export function storeVatApprovedNotice(v: { registeredName: string; number: string; effectiveFrom: Date; ratePercent?: number; mode?: string | null }): { title: string; body: string } {
+  const rate = v.ratePercent ?? STORE_VAT_RATE_PERCENT;
+  // [VAT-DOCS · owner 30 Oct 2026] A store whose typed prices exclude VAT has the VAT added into each price customers see.
+  const prices = v.mode === 'ADD_VAT_AT_CHECKOUT'
+    ? `From now on, Swift adds VAT at ${rate}% to the prices you type for standard-rated items, so customers see and pay prices that include VAT, `
+    : `From now on, your prices include VAT at ${rate}% `;
   return {
     title: 'Your VAT is approved',
     // [REVIEW-F #2102 S4-1] Approval needs the effective date to have arrived, so it is often in the past: the date is the
     // certificate's, and VAT is in the store's prices from now on (orders placed before approval carry none).
     body: `A person at Swift checked your GRA VAT certificate. Your certificate is in effect from ${calendarDay(v.effectiveFrom)}. `
-      + 'From now on, your prices include VAT at '
-      + `${v.ratePercent ?? STORE_VAT_RATE_PERCENT}% and your receipts say “VAT charged by ${v.registeredName} · VAT reg. no. ${v.number}”. `
+      + prices
+      + `and your receipts say “VAT charged by ${v.registeredName} · VAT reg. no. ${v.number}”. `
       + 'Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
   };
 }
@@ -39,9 +44,12 @@ export function storeVatRejectedNotice(reason: string): { title: string; body: s
   };
 }
 
-export function storeVatWithdrawnNotice(reason: string): { title: string; body: string } {
+export function storeVatWithdrawnNotice(reason: string, mode?: string | null): { title: string; body: string } {
   return {
     title: 'Your VAT was withdrawn',
-    body: `${sentence(reason)} New orders carry no VAT and your prices no longer say “incl. VAT”. Orders already placed keep their VAT.`,
+    body: `${sentence(reason)} New orders carry no VAT and your prices no longer say “incl. VAT”.`
+      // [VAT-DOCS] A store whose VAT was added to its prices gets the prices it typed back.
+      + (mode === 'ADD_VAT_AT_CHECKOUT' ? ' Swift no longer adds VAT to your prices: customers pay the prices you typed.' : '')
+      + ' Orders already placed keep their VAT.',
   };
 }
