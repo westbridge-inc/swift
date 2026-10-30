@@ -212,12 +212,17 @@ export interface ProFeeAckState {
  * or while their documents waited), they are asked again at the new amount and nothing is born until they tick it
  * (birth re-checks the exact rate it writes: pro-fee-due.ts). Once the fee is born the tick that bore it holds: the
  * born fee's own price changes go through the told-in-advance fee-rise rules, never through this tick.
+ * [REVIEW-G #2230 bd1e46f3 NEW S3-1 · owner B1] The same while their own Services store's fee is live and covers them
+ * (one fee): any live tick holds, so a services-rate change never unlists a covered pro (the fee they pay is the
+ * store's, whose price changes follow the 14-day fee-rise rule). Nothing is born at an unticked amount: when the
+ * cover ends they are back to the quote above, and birth re-checks the exact rate it writes.
  */
 export async function proFeeAckState(db: Db, userId: string): Promise<ProFeeAckState> {
   const ticked = await latestProFeeTick(db, userId);
   const quote = await proFeeQuote(db, userId);
   const own = await db.serviceProvider.findUnique({ where: { userId }, select: { subscription: { select: { id: true } } } });
-  const acknowledged = own?.subscription ? ticked !== null : tickIsFor(ticked, quote);
+  const held = own?.subscription ?? (await liveServicesStoreFee(db, userId));
+  const acknowledged = held ? ticked !== null : tickIsFor(ticked, quote);
   return { acknowledged, amount: quote.amount, currencyCode: quote.currencyCode, ticked, changed: ticked !== null && !acknowledged };
 }
 
