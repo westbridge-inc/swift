@@ -69,7 +69,7 @@ export async function sweepTrialFeeEducation(
     const payLine = fee.amountDueGyd <= 0
       ? feeCoveredLine(fee.weeklyFeeGyd, sub.currencyCode, { first: true })
       : await mmgCheckoutLive(prisma, sub, 'unknown')
-        ? mmgPayLine(checkoutAmountGyd(fee))
+        ? mmgPayLine(checkoutAmountGyd(fee), { alsoWebsite: !!sub.serviceProviderId })
         : feeDueLine(fee.amountDueGyd, sub.currencyCode, sub.trialEndDate, { first: true });
     // [BILL-PRO] A pro's fee is neither a store's nor a mover's: no shipped build opens a fee screen for it.
     // [REVIEW-M #2217 N1] The audience names NotificationService knows ('business' / 'earner'); the old 'VENDOR' /

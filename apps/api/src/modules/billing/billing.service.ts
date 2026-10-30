@@ -395,6 +395,15 @@ function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: str
 
 /** [BILL-PRO · owner B1] The billing event note when a pro's own fee stops because their store's fee covers them. */
 export const PRO_FEE_COVERED_BY_STORE_NOTE = 'Weekly billing stopped: your Services store fee covers your provider profile (one fee)';
+/** [BILL-PRO · REVIEW-M #2229 N2 · REVIEW-M/G #2230 S4-1] What a pro is told when the Services store fee that covered
+ *  them ends. Their own fee is stopped (and PAUSED once its paid week ran out), and a stopped fee does not pay, so the
+ *  words say to resume it first; the MMG sentence only when MMG checkout is live once resumed (as every fee notice). */
+export function proFeeCoverEndedBody(mmgLive: boolean): string {
+  return 'Your Services store\u2019s weekly fee has ended, so it no longer covers your provider profile. Your own provider weekly fee applies again. '
+    + 'To stay listed and take new requests and bookings after any week you have already paid, open your provider Weekly fee screen in the Swift app and tap Resume'
+    + (mmgLive ? ', then pay it with MMG in the Swift app or on the Swift website.' : '.')
+    + ' Jobs already booked can still go ahead.';
+}
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -3728,7 +3737,7 @@ export class BillingService {
    * the audit names no person. Only a pro fee is ever touched, and only while that person's store fee is live.
    * Returns the ids stopped. The hourly billing job runs it before any charge.
    */
-  async stopProFeesCoveredByStore(batchSize = 200): Promise<string[]> {
+  async stopProFeesCoveredByStore(batchSize = 200, seam: { beforeLock?: (subscriptionId: string) => Promise<void> } = {}): Promise<string[]> {
     const { liveServicesStoreFee } = await import('../services/pro-fee');
     // [COORD security review] Only pro fees whose person HAS a live Services store fee are read (a relation filter),
     // and every one of them is reached (cursor pages): no fixed window that leaves the 501st pro billing twice.
@@ -3753,6 +3762,8 @@ export class BillingService {
         const userId = row.serviceProvider?.userId;
         if (!userId || !(await liveServicesStoreFee(this.prisma, userId))) continue;
         try {
+          // (A test seam: the window between this read and the locks, REVIEW-G #2229 W4.)
+          await seam.beforeLock?.(row.id);
           const done = await this.prisma.$transaction(async (tx) => {
             const payer = await lockSubscriptionPayer(tx, row.id);
             if (payer.kind !== 'PROVIDER') return false;
@@ -3777,6 +3788,71 @@ export class BillingService {
         } catch (err) {
           log().error({ err, subscriptionId: row.id }, '[BILL-PRO] one-fee stop failed; retried next hour');
         }
+      }
+    }
+  }
+
+  /**
+   * [BILL-PRO · REVIEW-M #2229 N2] The pro's own fee after their Services store fee ENDS. A pro fee the one-fee pass
+   * stopped (PRO_FEE_COVERED_BY_STORE_NOTE) stays stopped: it is never charged again by itself. Once the store fee that
+   * covered it has ended, the pro is told, once per stop, that their own fee applies again and how to pay it. Returns
+   * the ids told.
+   */
+  async notifyProFeesNoLongerCovered(batchSize = 200, env: Record<string, string | undefined> = process.env): Promise<string[]> {
+    const { liveServicesStoreFee, proWeeklyFeeEnabled } = await import('../services/pro-fee');
+    const told: string[] = [];
+    // [REVIEW-G #2230 S4-1] Off: nobody is told to pay a fee nothing enforces.
+    if (!proWeeklyFeeEnabled(env)) return told;
+    let cursor: string | undefined;
+    for (;;) {
+      // [REVIEW-M/G #2230 N1] Bounded: only stops whose pro fee is STILL stopped (not resumed, cancelled or churned)
+      // are read, and stops already told are skipped with one read per page (no store read, no insert retried).
+      const stops = await this.prisma.billingEvent.findMany({
+        where: {
+          type: 'TIER_CHANGE', note: PRO_FEE_COVERED_BY_STORE_NOTE,
+          subscription: { serviceProviderId: { not: null }, autoRenew: false, status: { notIn: ['CANCELLED', 'CHURNED'] } },
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
+        orderBy: { id: 'asc' },
+        take: batchSize,
+        select: {
+          id: true, subscriptionId: true, currencyCode: true,
+          subscription: { select: { status: true, autoRenew: true, feeWaived: true, currencyCode: true, weeklyRate: true, customRate: true, serviceProvider: { select: { userId: true } } } },
+        },
+      });
+      if (stops.length === 0) return told;
+      cursor = stops[stops.length - 1]!.id;
+      const keyOf = (stop: { id: string; subscriptionId: string }) => `one-fee-ended:${stop.subscriptionId}:${stop.id}`;
+      const toldBefore = new Set((await this.prisma.billingEvent.findMany({
+        where: { idempotencyKey: { in: stops.map(keyOf) } }, select: { idempotencyKey: true },
+      })).map((e) => e.idempotencyKey));
+      for (const stop of stops) {
+        const userId = stop.subscription.serviceProvider?.userId;
+        if (!userId || toldBefore.has(keyOf(stop))) continue;
+        if (stop.subscription.autoRenew || ['CANCELLED', 'CHURNED'].includes(stop.subscription.status)) continue;
+        if (await liveServicesStoreFee(this.prisma, userId)) continue;
+        try {
+          // Once per stop: the event's unique key is the claim.
+          await this.prisma.billingEvent.create({ data: {
+            subscriptionId: stop.subscriptionId, type: 'REMINDER', currencyCode: stop.currencyCode,
+            idempotencyKey: keyOf(stop),
+            note: 'Told the pro their own weekly fee applies again (their Services store fee ended)',
+          } });
+        } catch (err) {
+          if ((err as { code?: string }).code === 'P2002') continue;
+          throw err;
+        }
+        // Whether MMG checkout is live for this fee once the pro resumes it (a stopped fee does not pay until then).
+        const mmgLive = await mmgCheckoutLive(this.prisma, { ...stop.subscription, status: 'ACTIVE' }, 'unknown').catch(() => false);
+        await this.notifications.send({
+          userId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Your provider weekly fee applies again',
+          body: proFeeCoverEndedBody(mmgLive),
+          audience: 'provider',
+          data: { kind: 'provider_fee_cover_ended', subscriptionId: stop.subscriptionId },
+        });
+        told.push(stop.subscriptionId);
       }
     }
   }
@@ -5613,7 +5689,7 @@ export class BillingService {
   private async feePayLine(sub: Subscription, due: Date | null): Promise<string> {
     try {
       const fee = await payInfo(this.prisma, sub);
-      if (await mmgCheckoutLive(this.prisma, sub, 'unknown')) return mmgPayLine(checkoutAmountGyd(fee));
+      if (await mmgCheckoutLive(this.prisma, sub, 'unknown')) return mmgPayLine(checkoutAmountGyd(fee), { alsoWebsite: !!sub.serviceProviderId });
       return feeDueLine(fee.amountDueGyd > 0 ? fee.amountDueGyd : fee.weeklyFeeGyd, sub.currencyCode, due);
     } catch (err) {
       log().warn({ err, subscriptionId: sub.id }, 'fee notice: the paying sentence fell back to the due line');
@@ -5628,7 +5704,7 @@ export class BillingService {
     try {
       const fee = await payInfo(this.prisma, sub);
       if (!(fee.amountDueGyd > 0) || !(await mmgCheckoutLive(this.prisma, sub, 'unknown'))) return '';
-      return mmgPayLine(checkoutAmountGyd(fee));
+      return mmgPayLine(checkoutAmountGyd(fee), { alsoWebsite: !!sub.serviceProviderId });
     } catch (err) {
       log().warn({ err, subscriptionId: sub.id }, 'fee reminder: sent without the MMG sentence');
       return '';

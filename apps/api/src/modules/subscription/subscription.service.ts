@@ -154,8 +154,9 @@ export class SubscriptionService {
 
   /** [BILL-PRO PR3] A pro is priced like a Services store: the flat services rate (serviceVendor), never re-tiered.
    *  Re-read in the activation transaction: the fee is due only while the switch is on, the pro's documents are
-   *  approved, they accepted the Business Agreement that covers Providers, and no Services store fee of theirs is
-   *  live (one fee, owner B1). Otherwise PRO_FEE_NOT_DUE and nothing is written. */
+   *  approved, they accepted the Business Agreement that covers Providers, they ticked "I understand the weekly fee" at
+   *  exactly the rate written here, and no Services store fee of theirs is live (one fee, owner B1). Otherwise
+   *  PRO_FEE_NOT_DUE and nothing is written. */
   private async proActivation(serviceProviderId: string, db: Db): Promise<ActivationPricing> {
     const pro = await db.serviceProvider.findUnique({
       where: { id: serviceProviderId },
@@ -163,13 +164,16 @@ export class SubscriptionService {
     });
     if (!pro) throw new NotFoundError('ServiceProvider', serviceProviderId);
     if (pro.subscription) return { existing: pro.subscription };
-    const { assertProFeeDue } = await import('../services/pro-fee-due');
-    await assertProFeeDue(db, pro.userId);
+    const { assertProFeeDue, proFeeSwitchedOn } = await import('../services/pro-fee-due');
+    proFeeSwitchedOn();
     const countryCode = pro.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     const priced = partnerRateFor(tiers, { kind: 'VENDOR', isService: true, activeListings: 0 });
+    const currencyCode = await this.countryConfig.getCurrencyCode(countryCode, db);
+    // [REVIEW-G #2230 S3-1] Due only when the pro's latest fee tick was given to exactly this rate and currency.
+    await assertProFeeDue(db, pro.userId, { amount: priced.rate, currencyCode });
     // A pro's trial is always the full TRIAL_DAYS (the department-store 7-day rule is a store tier's; owner 30 Oct 00:14Z).
-    return { existing: null, type: 'INDEPENDENT_PRO', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
+    return { existing: null, type: 'INDEPENDENT_PRO', priced, currencyCode, trialDays: TRIAL_DAYS };
   }
 
   private activation(entity: ActivationEntity, db: Db): Promise<ActivationPricing> {

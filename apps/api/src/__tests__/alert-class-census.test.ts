@@ -100,7 +100,8 @@ describe('the alert-class census: every kind the API sends has a deliberate loud
     ]);
     expect(sorted(ALERT_CLASS_KINDS.quiet)).toEqual([
       'RATING_REMINDER', 'ad_campaign_completed', 'ad_campaign_live', 'ad_campaign_resumed', 'ad_campaign_scheduled',
-      'ad_invoice_receipt', 'ad_weekly_report', 'trial_fee_education', 'vendor_tier_nudge',
+      // [BILL-PRO PR4] the pro's own trial notice, as quiet as trial_fee_education
+      'ad_invoice_receipt', 'ad_weekly_report', 'provider_fee_trial', 'trial_fee_education', 'vendor_tier_nudge',
     ]);
   });
 

@@ -591,6 +591,27 @@ const CENSUS: Case[] = [
   { k: 'ad_refund_payout_task', d: { campaignId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_campaign_paid', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'admins' },
   { k: 'sos_marked_safe', d: { sosAlertId: 'a1' }, to: null, why: 'admins' },
+  // [BILL-PRO PR4] A pro's weekly-fee notices (API notification/provider-fee-kinds.ts, audience 'provider'). The
+  // store and mover fee screens cannot load a pro's fee, so these open the pro's own dashboard (builds 9-12 do not
+  // know these kinds and open the app where it was). The pro fee screen routes them in BILL-PRO PR5.
+  { k: 'provider_fee_mmg_checkout', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_mmg_pending', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_success', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_failed', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_final_warning', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_suspended', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_suspended_nudge', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_reminder', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_banked', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_churned', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_topup', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_card_action_required', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_trial', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_fx_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_rate_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_usd_migration', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  { k: 'provider_fee_cover_ended', d: { subscriptionId: 's1', audience: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'the store fee that covered a pro ended: their own fee applies again (REVIEW-M #2229 N2)' },
+  { k: 'provider_fee_notice', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
 ];
 
 // ── [PUSH-ROUTING] The census keeps ONE payload per kind. The kinds below go to

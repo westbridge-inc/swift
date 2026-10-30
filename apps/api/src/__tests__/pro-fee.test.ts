@@ -16,7 +16,8 @@ import { recordReacceptance } from '../modules/legal/reaccept';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { assertProviderCanOperate } from '../modules/services/provider-operate';
-import { BillingService, PRO_FEE_COVERED_BY_STORE_NOTE } from '../modules/billing/billing.service';
+import { BillingService, proFeeCoverEndedBody, PRO_FEE_COVERED_BY_STORE_NOTE } from '../modules/billing/billing.service';
+import { resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions';
 import { PAYER_INCLUDE } from '../modules/subscription/subscription-owner';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -134,6 +135,7 @@ afterAll(async () => {
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
   });
@@ -393,6 +395,113 @@ describe('switch on: one fee for a Services-store owner who is also a pro (B1)',
     // The store fee ends: the pro fee is collectable again.
     await sys(() => app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CHURNED' } }));
     expect(await sys(() => app.prisma.$transaction((tx) => lockFeeCollectionAuthority(tx, id)))).toMatchObject({ allowed: true });
+  });
+
+  it('[REVIEW-M #2229 N2] when the store fee that covered a pro ends, the pro is told once that their own fee applies again', async () => {
+    on();
+    const mmgBefore = process.env['MMG_CHECKOUT_ENABLED'];
+    delete process.env['MMG_CHECKOUT_ENABLED'];
+    resetFeeCheckoutSwitchCache();
+    try {
+      const pro = await makePro({ agreed: true });
+      const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+      const storeSub = await servicesStoreFor(pro.userId);
+      const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+      expect(await sys(() => billing.stopProFeesCoveredByStore())).toContain(id);
+      // Still covered: nothing to tell.
+      expect(await sys(() => billing.notifyProFeesNoLongerCovered())).not.toContain(id);
+      await sys(() => app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CHURNED' } }));
+      // [REVIEW-G #2230 S4-1] Switch off: nobody is told to pay a fee nothing enforces.
+      expect(await sys(() => billing.notifyProFeesNoLongerCovered(200, {}))).toEqual([]);
+      expect(await sys(() => billing.notifyProFeesNoLongerCovered())).toContain(id);
+      const told = await sys(() => app.prisma.notification.findMany({ where: { userId: pro.userId, data: { path: ['kind'], equals: 'provider_fee_cover_ended' } }, select: { body: true } }));
+      // [REVIEW-M/G #2230 S4-1] A stopped fee does not pay: resume first; MMG checkout is off here, so no MMG sentence.
+      expect(told).toEqual([{ body: proFeeCoverEndedBody(false) }]);
+      expect(told[0]!.body).toContain('tap Resume');
+      expect(told[0]!.body).not.toContain('MMG');
+      // Once per stop.
+      expect(await sys(() => billing.notifyProFeesNoLongerCovered())).not.toContain(id);
+      expect(await sys(() => app.prisma.notification.count({ where: { userId: pro.userId, data: { path: ['kind'], equals: 'provider_fee_cover_ended' } } }))).toBe(1);
+      // The fee itself is not restarted by this: it waits for the pro.
+      expect((await proSub(pro.providerId))!.autoRenew).toBe(false);
+    } finally {
+      if (mmgBefore === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
+      else process.env['MMG_CHECKOUT_ENABLED'] = mmgBefore;
+      resetFeeCheckoutSwitchCache();
+    }
+  });
+
+  it('[REVIEW-M/G #2230 S4-1] the MMG sentence only when MMG checkout is live for the fee once resumed (it is PAUSED now)', async () => {
+    on();
+    const mmgBefore = process.env['MMG_CHECKOUT_ENABLED'];
+    process.env['MMG_CHECKOUT_ENABLED'] = '1';
+    resetFeeCheckoutSwitchCache();
+    try {
+      const pro = await makePro({ agreed: true });
+      const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+      const storeSub = await servicesStoreFor(pro.userId);
+      const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+      expect(await sys(() => billing.stopProFeesCoveredByStore())).toContain(id);
+      await sys(() => app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CANCELLED' } }));
+      await sys(() => app.prisma.subscription.update({ where: { id }, data: { status: 'PAUSED' } }));
+      expect(await sys(() => billing.notifyProFeesNoLongerCovered())).toContain(id);
+      const told = await sys(() => app.prisma.notification.findMany({ where: { userId: pro.userId, data: { path: ['kind'], equals: 'provider_fee_cover_ended' } }, select: { body: true } }));
+      expect(told).toEqual([{ body: proFeeCoverEndedBody(true) }]);
+      expect(told[0]!.body).toContain('tap Resume, then pay it with MMG in the Swift app or on the Swift website.');
+    } finally {
+      if (mmgBefore === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
+      else process.env['MMG_CHECKOUT_ENABLED'] = mmgBefore;
+      resetFeeCheckoutSwitchCache();
+    }
+  });
+
+  it('[REVIEW-G #2230 S4-2] a pro fee resumed, cancelled or churned after the stop is never told "applies again"', async () => {
+    on();
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    const cases: Array<[string, Record<string, unknown>]> = [['resumed', { autoRenew: true }], ['cancelled', { status: 'CANCELLED' }], ['churned', { status: 'CHURNED' }]];
+    const ids: string[] = [];
+    for (const [, change] of cases) {
+      const pro = await makePro({ agreed: true });
+      const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+      const storeSub = await servicesStoreFor(pro.userId);
+      expect(await sys(() => billing.stopProFeesCoveredByStore())).toContain(id);
+      await sys(() => app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CHURNED' } }));
+      await sys(() => app.prisma.subscription.update({ where: { id }, data: change }));
+      ids.push(id);
+    }
+    const told = await sys(() => billing.notifyProFeesNoLongerCovered());
+    for (const [i, [label]] of cases.entries()) expect(told, label).not.toContain(ids[i]);
+    expect(await sys(() => app.prisma.billingEvent.count({ where: { subscriptionId: { in: ids }, idempotencyKey: { startsWith: 'one-fee-ended:' } } }))).toBe(0);
+  });
+
+  it('[REVIEW-G #2229 W4] a store fee that ends between the stop pass\'s read and its locks stops nothing (re-read under the locks)', async () => {
+    on();
+    const pro = await makePro({ agreed: true });
+    const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+    const storeSub = await servicesStoreFor(pro.userId);
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    const stopped = await sys(() => billing.stopProFeesCoveredByStore(200, {
+      beforeLock: async (sid) => { if (sid === id) await app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CANCELLED' } }); },
+    }));
+    expect(stopped).not.toContain(id);
+    expect((await proSub(pro.providerId))!.autoRenew).toBe(true);
+    expect(await sys(() => app.prisma.billingEvent.count({ where: { subscriptionId: id, note: PRO_FEE_COVERED_BY_STORE_NOTE } }))).toBe(0);
+  });
+
+  it('[REVIEW-M #2229 S4-1] the batch read agrees with the single read: a covered pro fee is not collectable, an uncovered one is', async () => {
+    on();
+    const covered = await makePro({ agreed: true });
+    const coveredId = (await ensureProFeeBorn(app.prisma, covered.userId))!;
+    await servicesStoreFor(covered.userId);
+    const free = await makePro({ agreed: true });
+    const freeId = (await ensureProFeeBorn(app.prisma, free.userId))!;
+    const { readFeeCollectionAuthorities, readFeeCollectionAuthority } = await import('../modules/subscription/mover-fee-authority');
+    const batch = await sys(() => readFeeCollectionAuthorities(app.prisma, [coveredId, freeId]));
+    expect(batch.get(coveredId)).toMatchObject({ allowed: false, canonical: false });
+    expect(batch.get(freeId)).toMatchObject({ allowed: true, canonical: true });
+    for (const id of [coveredId, freeId]) {
+      expect(batch.get(id)).toEqual(await sys(() => readFeeCollectionAuthority(app.prisma, id)));
+    }
   });
 
   it('[COORD security review (a)] every covered pro fee is reached: 520 uncovered pro fees sort first, and pages of 2 still stop all three covered', async () => {

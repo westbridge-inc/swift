@@ -17,6 +17,7 @@ import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/
 import { ringRecipients, storeTeam } from './store-team';
 import { vendorAlertSms } from './vendor-alert-sms';
 import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
+import { providerFeeNotice } from './provider-fee-kinds';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
@@ -503,7 +504,10 @@ export class NotificationService {
       const id = await this.deliverFeeDemand(notice.id);
       return { id, pushed: false, fresh: id !== '' };
     }
-    const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
+    // [BILL-PRO PR4] A pro's fee notice is written and pushed under its own kind (provider-fee-kinds.ts). Only the
+    // delivered row changes: everything above (the fee-demand ledger and its stage rules) reads the original kind.
+    const delivered = providerFeeNotice(payload);
+    const data = delivered.audience ? { ...(delivered.data ?? {}), audience: delivered.audience } : delivered.data;
 
     // A notification is best-effort: a persistence/fan-out hiccup must NEVER
     // throw into the caller's request path. An order that reached DELIVERED must

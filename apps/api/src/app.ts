@@ -23,6 +23,7 @@ import { placesRoutes } from './modules/places/places.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
 import { serviceCatalogRoutes } from './modules/services/service-catalog.routes';
+import { providerFeeRoutes } from './modules/services/provider-fee.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
 import { setAppLogger } from './utils/logger';
 import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
@@ -338,6 +339,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
+  // [BILL-PRO PR4] A pro's own weekly fee (no fee exists while PRO_WEEKLY_FEE is off).
+  await app.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
   // [PT-2] Card rail v2 public doors: the provider's return (an observation
   // that never credits by itself) and, off production, the simulator's test

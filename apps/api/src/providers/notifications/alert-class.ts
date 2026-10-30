@@ -53,7 +53,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'RATING_REMINDER',
     'ad_weekly_report', 'ad_invoice_receipt',
     'ad_campaign_scheduled', 'ad_campaign_live', 'ad_campaign_completed', 'ad_campaign_resumed',
-    'vendor_tier_nudge', 'trial_fee_education',
+    'vendor_tier_nudge', 'trial_fee_education', 'provider_fee_trial',
   ],
 
   standard: [
@@ -107,6 +107,14 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [F2] A weekly fee change, told before it applies
     'billing_rate_change',
     'usd_migration_notice',
+    // [BILL-PRO PR4] A pro's own weekly-fee notices (notification/provider-fee-kinds.ts): as loud as the fee kinds they
+    // mirror. The trial notice stays quiet like trial_fee_education (below with the nudges).
+    'provider_fee_mmg_pending', 'provider_fee_success', 'provider_fee_failed', 'provider_fee_final_warning',
+    'provider_fee_suspended', 'provider_fee_suspended_nudge', 'provider_fee_reminder', 'provider_fee_banked',
+    'provider_fee_churned', 'provider_fee_topup', 'provider_fee_mmg_checkout', 'provider_fee_card_action_required',
+    'provider_fee_fx_change', 'provider_fee_rate_change', 'provider_fee_usd_migration', 'provider_fee_notice',
+    // [REVIEW-M #2229 N2] The store fee that covered a pro ended: their own fee applies again.
+    'provider_fee_cover_ended',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // [PAYMENT-SIMPLIFY] the store's MMG NUMBER change notices, exactly like the link's (ALG-34 parity)
