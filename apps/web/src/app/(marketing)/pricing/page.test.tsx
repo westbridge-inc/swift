@@ -48,6 +48,8 @@ const GY = {
       { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
     ],
   },
+  // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
+  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | undefined,
   // No multi-store pricing (owner, 13 Oct 2026): the server serves null.
   franchise: null,
   // What an older page reads; this page must not.
@@ -180,9 +182,44 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(page).toContain('A rate agreed with Swift stays as agreed.');
   });
 
-  it('[R27] the sentence holds only while the server\'s weekly re-tier is off — turning it on must revisit this page', () => {
-    const flag = readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', 'billing', 'weekly-retier.ts'), 'utf8');
-    expect(flag).toMatch(/^export const WEEKLY_RETIER_ON = false;$/m);
+  it('[RETIER PR-A/C] the Large catalogues and Department stores cards say a new store at that size starts on that rate, ticked first; the first step does not', async () => {
+    await renderPage();
+    const line = 'A new store with this many active items when Swift approves it starts on this rate. Its owner sees it and ticks it before anything is charged.';
+    expect(cardOf('Large catalogues').textContent).toContain(line);
+    expect(cardOf('Department stores').textContent).toContain(line);
+    expect(cardOf('Businesses').textContent).not.toContain(line);
+  });
+
+  it('[RETIER PR-C] the server switched the re-tier on: a rise told at least 14 days ahead, from the first weekly fee after; a fall lowers the fee with a notice', async () => {
+    pricing = { ...GY, catalogueRetier: { on: true, noticeDays: 14 } };
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).toContain('The store sees that exact fee, and its owner ticks it before anything is charged. '
+      + 'After that, Swift counts each store\'s active items every week: if they reach another rate, Swift tells the store in the app at least 14 days before, '
+      + 'and the new fee applies from its first weekly fee after that; if they fall below its rate, its fee goes down and the store is told. A rate agreed with Swift stays as agreed.');
+    expect(page).not.toContain('does not move a store');
+    expect(page).not.toMatch(/automatic/i);
+  });
+
+  it('[RETIER PR-C] a server that says nothing about the re-tier (older, malformed): no claim either way', async () => {
+    for (const catalogueRetier of [undefined, { on: 'yes' }, { on: true, noticeDays: 3 }]) {
+      pricing = { ...GY, catalogueRetier };
+      await renderPage();
+      const page = document.body.textContent!;
+      expect(page, JSON.stringify(catalogueRetier)).toContain('its owner ticks it before anything is charged. A rate agreed with Swift stays as agreed.');
+      expect(page, JSON.stringify(catalogueRetier)).not.toContain('After that');
+      cleanup();
+    }
+  });
+
+  // [R27 · RETIER PR-C] The later-moves sentence is the server's word, never the page's: the API serves `catalogueRetier.on`
+  // from its own switch (WEEKLY_RETIER_ON), so switching the re-tier on (the owner's go) changes this page with it.
+  it('[R27 · RETIER PR-C] the sentence follows the server\'s switch: the API serves it from WEEKLY_RETIER_ON, the page reads only that', () => {
+    const api = (...p: string[]) => readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', ...p), 'utf8');
+    expect(api('billing', 'weekly-retier.ts')).toMatch(/^export const WEEKLY_RETIER_ON = (false|true);$/m);
+    expect(api('auth', 'auth.routes.ts')).toContain('catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS }');
+    const page = readFileSync(join(__dirname, 'page.tsx'), 'utf8');
+    expect(page).toContain('const retier = catalogueRetierOf(list.pricing);');
   });
 
   it('prints the server boundaries, not copy frozen into the page', async () => {

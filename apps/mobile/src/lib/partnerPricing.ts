@@ -59,6 +59,28 @@ export interface PartnerPricing {
   weekly?: Record<string, number | null>;
   /** [row 628] The weekly fee words shown before sign-up, and the tick. Absent from an API that predates the tick. */
   feeTerms?: FeeTerms;
+  /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
+  catalogueRetier?: { on?: unknown; noticeDays?: unknown };
+}
+
+/** [RETIER PR-C · owner 30 Oct 2026] Whether Swift moves an existing store between catalogue steps (GET /auth/pricing
+ *  `catalogueRetier`, the server's WEEKLY_RETIER_ON) and the notice a rise gets. 'ON' only for exactly `on: true` with a
+ *  notice of 14 days or more; 'OFF' only for exactly `on: false`; anything else (an older server, a malformed answer) is
+ *  null, and no claim either way is made. */
+export function catalogueRetierOf(pricing: Pick<PartnerPricing, 'catalogueRetier'> | null | undefined): { on: true; noticeDays: number } | { on: false } | null {
+  const r = pricing?.catalogueRetier;
+  if (!r || typeof r !== 'object') return null;
+  if (r.on === false) return { on: false };
+  if (r.on === true && typeof r.noticeDays === 'number' && Number.isInteger(r.noticeDays) && r.noticeDays >= 14) return { on: true, noticeDays: r.noticeDays };
+  return null;
+}
+
+/** What happens to a store's rate after it is born, in the partner's words (empty when the server says nothing). */
+export function afterBirthWords(pricing: Pick<PartnerPricing, 'catalogueRetier'> | null | undefined): string {
+  const r = catalogueRetierOf(pricing);
+  if (!r) return '';
+  if (!r.on) return ' After that, the rate does not change as your catalogue grows.';
+  return ` After that, Swift counts your active items every week: if they reach another rate, Swift tells you in the app at least ${r.noticeDays} days before the new fee applies, and it applies from your first weekly fee after that; if they fall below your rate, your fee goes down and you are told.`;
 }
 
 /** [COORD ruling 22 Oct 2026 · row 628] The server's own words about the weekly fee — what it

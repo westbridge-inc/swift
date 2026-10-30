@@ -5,7 +5,7 @@ import { Card, T } from '../../kit';
 import { usePartnerPricing } from '../../hooks/verification';
 import { useAuthStore } from '../../stores/authStore';
 import { moneyIn } from '../../lib/money';
-import { bandTrialDays, moverQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
+import { afterBirthWords, bandTrialDays, catalogueRetierOf, moverQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
 
 /** Who the rate is for, in the partner's own words. */
 const MOVER_RATE_LABEL: Record<MoverTier, string> = {
@@ -45,10 +45,10 @@ export function PricingCard(props: PricingCardProps) {
     rate = quote.rate;
     // [RETIER PR-A · owner 30 Oct 2026] A store signs up before it has a catalogue, so the card quotes the first step.
     // Its fee is born when Swift approves it, on the step its OWN catalogue reaches then, and above the first step its
-    // owner sees that exact fee and ticks it before anything is charged (api partner/store-fee.ts). [R27] The weekly
-    // re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): after that, nothing moves it. The
-    // larger steps' fees are not quoted as this store's. The card test pins the server flag: turning the re-tier back
-    // on must revisit these words.
+    // owner sees that exact fee and ticks it before anything is charged (api partner/store-fee.ts). [RETIER PR-C] What
+    // happens after that is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves it; on, a
+    // rise is told 14 days ahead and a fall applies with a notice; no word, no claim. The larger steps' fees are not
+    // quoted as this store's.
     // [DEPT-PRICE · owner 29 Oct 2026] A step with its own free trial (7 days for a NEW department store) says so,
     // from the server's number: the headline keeps the trial every new store starts on.
     const trials = quote.ladder
@@ -57,8 +57,9 @@ export function PricingCard(props: PricingCardProps) {
       .map((step) => ` A new store with ${step.minItems.toLocaleString()}+ active items when Swift approves it gets ${bandTrialDays(step, p.trialDays)} days free.`);
     const next = quote.ladder[1];
     const sizeLine = next
-      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} active items. If yours has more by the time Swift approves the store, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.`
-      : ' This rate does not change as your catalogue grows.';
+      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} active items. If yours has more by the time Swift approves the store, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged.${afterBirthWords(p)}`
+      // One step only: there is no other rate to move to (said only when the server says the re-tier is off).
+      : catalogueRetierOf(p)?.on === false ? ' This rate does not change as your catalogue grows.' : '';
     detail =
       quote.tier === 'service'
         ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'

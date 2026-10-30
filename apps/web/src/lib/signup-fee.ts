@@ -10,6 +10,7 @@
 // amount, and refuses an amount that is not its quote right now (WEEKLY_FEE_CHANGED).
 // ---------------------------------------------------------------------------
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { catalogueRetierOf } from '@/lib/catalogue-retier';
 
 /** The server's fee words and the tick (the API anchors the consent row to exactly these). */
 export interface FeeTerms {
@@ -26,6 +27,8 @@ export interface SignupPricing {
   vendors?: { service: number; catalogue: { minItems: number; rate: number }[] };
   /** Absent from an API older than the tick: then there is nothing to tick and nothing is sent. */
   feeTerms?: FeeTerms;
+  /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
+  catalogueRetier?: { on?: unknown; noticeDays?: unknown };
 }
 
 /** What sign-up sends for the tick: the words' version and the fee on screen. */
@@ -52,8 +55,17 @@ export const FEE_ASK = {
 
 /** Beside a catalogue store's amount when the price list has more steps (the phone's price card says the same). */
 /** [RETIER PR-A · owner 30 Oct 2026] A store signs up before it has a catalogue: the fee is born when Swift approves it,
- *  on its own catalogue's step, ticked by its owner first. [R27] The weekly re-tier is OFF: nothing moves it after. */
-export const FEE_LADDER = 'This is the starting rate. If your store has more active items by the time Swift approves it, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.';
+ *  on its own catalogue's step, ticked by its owner first. [RETIER PR-C] What happens after that is the server's word
+ *  (`catalogueRetier`): off, nothing moves it; on, a rise is told ahead and a fall lowers it; no word, no claim. */
+export const FEE_LADDER = 'This is the starting rate. If your store has more active items by the time Swift approves it, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged.';
+
+/** The ladder line for this price list: FEE_LADDER and what happens to the rate after the store is approved. */
+export function feeLadderLine(pricing: SignupPricing): string {
+  const r = catalogueRetierOf(pricing);
+  if (!r) return FEE_LADDER;
+  if (!r.on) return `${FEE_LADDER} After that, the rate does not change as your catalogue grows.`;
+  return `${FEE_LADDER} After that, Swift counts your active items every week: if they reach another rate, Swift tells you in the app at least ${r.noticeDays} days before the new fee applies, and it applies from your first weekly fee after that; if they fall below your rate, your fee goes down and you are told.`;
+}
 
 /** True when this choice starts on a catalogue step the price list goes beyond. */
 export function feeSteps(pricing: SignupPricing, choice: FeeChoice): boolean {

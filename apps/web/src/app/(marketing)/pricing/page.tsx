@@ -3,16 +3,17 @@ import type { ReactNode } from 'react';
 import { Section } from '@/components/site';
 import { fetchPricing, type CataloguePriceBand, type CountryPricing, type MoverPriceQuote } from '@/lib/api';
 import { formatAmount, parseAmount } from '@/lib/money';
+import { catalogueRetierOf } from '@/lib/catalogue-retier';
 import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
 // Every number on this page is the server's quote — resolved by the same
 // function signup prices through — so what a partner reads here is what they
-// are billed. [R27] The weekly re-tier is OFF (no store moves between catalogue
-// steps), so the store steps above the first decide a NEW store's trial length
-// (and the fee of a store already on one before it went off); the paragraph
-// under the cards says so. A mover reads the rate of the role their
+// are billed. [RETIER PR-A/C] A NEW store's fee and trial follow the step its own
+// catalogue reaches when Swift approves it (its owner ticks the fee first);
+// whether Swift moves a store between steps after that is the server's word
+// (`catalogueRetier`): the paragraph under the cards says so. A mover reads the rate of the role their
 // vehicle provisions: a taxi driver and a delivery rider never share a figure.
 // Only vehicles a mover can register today are shown (the server's `offered`
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
@@ -135,6 +136,12 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                     <p className="mt-2 text-sm text-[var(--swift-muted)]">
                       {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
                     </p>
+                    {/* [RETIER PR-A/C] a step above the first is a new store's own fee when Swift approves it at that size */}
+                    {i > 0 && (
+                      <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                        A new store with this many active items when Swift approves it starts on this rate. Its owner sees it and ticks it before anything is charged.
+                      </p>
+                    )}
                     {trialDays !== list.pricing.trialDays && (
                       <p className="mt-2 text-sm text-[var(--swift-muted)]">
                         A new store with this many active items when Swift approves it gets {trialDays} days free.
@@ -156,13 +163,21 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               )}
               {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
                   OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
-                  anything is charged (api partner/store-fee.ts). [R27] The weekly re-tier is OFF on the server
-                  (apps/api/src/modules/billing/weekly-retier.ts, WEEKLY_RETIER_ON = false): after that nothing
-                  moves it. The page test pins the flag: turning the re-tier back on must revisit this sentence. */}
+                  anything is charged (api partner/store-fee.ts). [RETIER PR-C] What happens after that is the
+                  server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves a store; on, a rise is told
+                  in the app at least 14 days ahead and applies from the first weekly fee after it, a fall lowers the
+                  fee with a notice; no word, no claim. */}
               When Swift approves a new store, its weekly fee is the rate for the active items it has then (a
               services business pays the Services rate). The store sees that exact fee, and its owner ticks it
-              before anything is charged. After that, Swift does not move a store to another rate as its active
-              items change. A rate agreed with Swift stays as agreed.
+              before anything is charged.{' '}
+              {(() => {
+                const retier = catalogueRetierOf(list.pricing);
+                if (!retier) return null;
+                return retier.on
+                  ? <>After that, Swift counts each store&apos;s active items every week: if they reach another rate, Swift tells the store in the app at least {retier.noticeDays} days before, and the new fee applies from its first weekly fee after that; if they fall below its rate, its fee goes down and the store is told.{' '}</>
+                  : <>After that, Swift does not move a store to another rate as its active items change.{' '}</>;
+              })()}
+              A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

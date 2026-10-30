@@ -120,6 +120,22 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).not.toContain(LADDER);
   });
 
+  it('[RETIER PR-C] the server switched the re-tier on: the line says a rise is told 14 days ahead, a fall lowers the fee; no word, no claim', async () => {
+    fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, catalogueRetier: { on: true, noticeDays: 14 } }));
+    await throughName(/Put my business on Swift/);
+    const on = (await screen.findByRole('region', { name: 'Your weekly fee' })).textContent!;
+    expect(on).toContain('tick it before anything is charged. After that, Swift counts your active items every week: if they reach another rate, Swift tells you in the app at least 14 days before the new fee applies, and it applies from your first weekly fee after that; if they fall below your rate, your fee goes down and you are told.');
+    expect(on).not.toContain('does not change');
+  });
+
+  it('[RETIER PR-C] a server that says nothing about the re-tier: the line makes no claim about later moves', async () => {
+    fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, catalogueRetier: undefined }));
+    await throughName(/Put my business on Swift/);
+    const none = (await screen.findByRole('region', { name: 'Your weekly fee' })).textContent!;
+    expect(none).toContain('tick it before anything is charged.');
+    expect(none).not.toContain('After that');
+  });
+
   it('[REVIEW-F S3-2] a price list with one catalogue step has nothing to step up to, and a rider has no catalogue', async () => {
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, vendors: { service: 7000, catalogue: [{ minItems: 0, rate: 9000 }] } }));
     await throughName(/Put my business on Swift/);

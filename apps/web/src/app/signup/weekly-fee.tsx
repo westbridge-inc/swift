@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { formatAmount } from '@/lib/money';
-import { FEE_ASK, FEE_LADDER, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
+import { FEE_ASK, feeLadderLine, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
 import styles from '../auth-flow.module.css';
 
 /**
@@ -60,7 +60,7 @@ export function WeeklyFee({ role, type, onChange }: {
   return (
     <section aria-label="Your weekly fee" className={styles.stackTight}>
       <p className={styles.bodyCopy}><strong>Your weekly fee: {view.amount}</strong></p>
-      {view.steps ? <p className={styles.smallCopy}>{FEE_LADDER}</p> : null}
+      {view.steps && typeof pricing === 'object' ? <p className={styles.smallCopy}>{feeLadderLine(pricing)}</p> : null}
       {terms ? terms.items.map((item) => (
         <p key={item.heading} className={styles.smallCopy}><strong>{item.heading}:</strong> {item.text}</p>
       )) : null}
