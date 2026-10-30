@@ -25,6 +25,7 @@ import { searchMmgCheckouts } from '../modules/billing/mmg-checkout-support';
 import { partnerObligations } from '../modules/user/partner-wind-down';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { grantStepUp } from './helpers/step-up';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import {
   MMG_CHECKOUT_RUNTIME_DECORATION,
   mmgCheckoutPublicRoutes,
@@ -283,7 +284,7 @@ afterAll(async () => {
     await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } }).catch(() => undefined);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'chain-pay-all');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
