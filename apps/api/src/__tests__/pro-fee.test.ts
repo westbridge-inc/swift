@@ -16,7 +16,7 @@ import { recordReacceptance } from '../modules/legal/reaccept';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { assertProviderCanOperate } from '../modules/services/provider-operate';
-import { BillingService, PRO_FEE_COVERED_BY_STORE_NOTE } from '../modules/billing/billing.service';
+import { BillingService, PRO_FEE_COVER_ENDED_BODY, PRO_FEE_COVERED_BY_STORE_NOTE } from '../modules/billing/billing.service';
 import { PAYER_INCLUDE } from '../modules/subscription/subscription-owner';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -134,6 +134,7 @@ afterAll(async () => {
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
   });
@@ -393,6 +394,42 @@ describe('switch on: one fee for a Services-store owner who is also a pro (B1)',
     // The store fee ends: the pro fee is collectable again.
     await sys(() => app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CHURNED' } }));
     expect(await sys(() => app.prisma.$transaction((tx) => lockFeeCollectionAuthority(tx, id)))).toMatchObject({ allowed: true });
+  });
+
+  it('[REVIEW-M #2229 N2] when the store fee that covered a pro ends, the pro is told once that their own fee applies again', async () => {
+    on();
+    const pro = await makePro({ agreed: true });
+    const id = (await ensureProFeeBorn(app.prisma, pro.userId))!;
+    const storeSub = await servicesStoreFor(pro.userId);
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    expect(await sys(() => billing.stopProFeesCoveredByStore())).toContain(id);
+    // Still covered: nothing to tell.
+    expect(await sys(() => billing.notifyProFeesNoLongerCovered())).not.toContain(id);
+    await sys(() => app.prisma.subscription.update({ where: { id: storeSub }, data: { status: 'CHURNED' } }));
+    expect(await sys(() => billing.notifyProFeesNoLongerCovered())).toContain(id);
+    const told = await sys(() => app.prisma.notification.findMany({ where: { userId: pro.userId, data: { path: ['kind'], equals: 'provider_fee_cover_ended' } }, select: { body: true } }));
+    expect(told).toEqual([{ body: PRO_FEE_COVER_ENDED_BODY }]);
+    // Once per stop.
+    expect(await sys(() => billing.notifyProFeesNoLongerCovered())).not.toContain(id);
+    expect(await sys(() => app.prisma.notification.count({ where: { userId: pro.userId, data: { path: ['kind'], equals: 'provider_fee_cover_ended' } } }))).toBe(1);
+    // The fee itself is not restarted by this: it waits for the pro.
+    expect((await proSub(pro.providerId))!.autoRenew).toBe(false);
+  });
+
+  it('[REVIEW-M #2229 S4-1] the batch read agrees with the single read: a covered pro fee is not collectable, an uncovered one is', async () => {
+    on();
+    const covered = await makePro({ agreed: true });
+    const coveredId = (await ensureProFeeBorn(app.prisma, covered.userId))!;
+    await servicesStoreFor(covered.userId);
+    const free = await makePro({ agreed: true });
+    const freeId = (await ensureProFeeBorn(app.prisma, free.userId))!;
+    const { readFeeCollectionAuthorities, readFeeCollectionAuthority } = await import('../modules/subscription/mover-fee-authority');
+    const batch = await sys(() => readFeeCollectionAuthorities(app.prisma, [coveredId, freeId]));
+    expect(batch.get(coveredId)).toMatchObject({ allowed: false, canonical: false });
+    expect(batch.get(freeId)).toMatchObject({ allowed: true, canonical: true });
+    for (const id of [coveredId, freeId]) {
+      expect(batch.get(id)).toEqual(await sys(() => readFeeCollectionAuthority(app.prisma, id)));
+    }
   });
 
   it('[COORD security review (a)] every covered pro fee is reached: 520 uncovered pro fees sort first, and pages of 2 still stop all three covered', async () => {

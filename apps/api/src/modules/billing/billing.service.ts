@@ -394,6 +394,8 @@ function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: str
 
 /** [BILL-PRO · owner B1] The billing event note when a pro's own fee stops because their store's fee covers them. */
 export const PRO_FEE_COVERED_BY_STORE_NOTE = 'Weekly billing stopped: your Services store fee covers your provider profile (one fee)';
+/** [BILL-PRO · REVIEW-M #2229 N2] What a pro is told when the Services store fee that covered them ends. */
+export const PRO_FEE_COVER_ENDED_BODY = 'Your Services store\u2019s weekly fee has ended, so it no longer covers your provider profile. Your own provider weekly fee applies again: to stay listed and take new requests and bookings after any week you have already paid, pay it with MMG in the Swift app or on the Swift website. Jobs already booked can still go ahead.';
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -3779,6 +3781,53 @@ export class BillingService {
   }
 
   /**
+   * [BILL-PRO · REVIEW-M #2229 N2] The pro's own fee after their Services store fee ENDS. A pro fee the one-fee pass
+   * stopped (PRO_FEE_COVERED_BY_STORE_NOTE) stays stopped: it is never charged again by itself. Once the store fee that
+   * covered it has ended, the pro is told, once per stop, that their own fee applies again and how to pay it. Returns
+   * the ids told.
+   */
+  async notifyProFeesNoLongerCovered(batchSize = 200): Promise<string[]> {
+    const { liveServicesStoreFee } = await import('../services/pro-fee');
+    const told: string[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const stops = await this.prisma.billingEvent.findMany({
+        where: { note: PRO_FEE_COVERED_BY_STORE_NOTE, ...(cursor ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: 'asc' },
+        take: batchSize,
+        select: { id: true, subscriptionId: true, currencyCode: true, subscription: { select: { status: true, autoRenew: true, serviceProvider: { select: { userId: true } } } } },
+      });
+      if (stops.length === 0) return told;
+      cursor = stops[stops.length - 1]!.id;
+      for (const stop of stops) {
+        const userId = stop.subscription.serviceProvider?.userId;
+        if (!userId || stop.subscription.autoRenew || ['CANCELLED', 'CHURNED'].includes(stop.subscription.status)) continue;
+        if (await liveServicesStoreFee(this.prisma, userId)) continue;
+        try {
+          // Once per stop: the event's unique key is the claim.
+          await this.prisma.billingEvent.create({ data: {
+            subscriptionId: stop.subscriptionId, type: 'REMINDER', currencyCode: stop.currencyCode,
+            idempotencyKey: `one-fee-ended:${stop.subscriptionId}:${stop.id}`,
+            note: 'Told the pro their own weekly fee applies again (their Services store fee ended)',
+          } });
+        } catch (err) {
+          if ((err as { code?: string }).code === 'P2002') continue;
+          throw err;
+        }
+        await this.notifications.send({
+          userId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Your provider weekly fee applies again',
+          body: PRO_FEE_COVER_ENDED_BODY,
+          audience: 'provider',
+          data: { kind: 'provider_fee_cover_ended', subscriptionId: stop.subscriptionId },
+        });
+        told.push(stop.subscriptionId);
+      }
+    }
+  }
+
+  /**
    * [M-04 · operations clause] The repair pass the spec asks for: "find
    * terminal payments lacking matching failure events/counters and repair
    * idempotently; observe terminal-without-outcome count and age."
@@ -5559,7 +5608,7 @@ export class BillingService {
   private async feePayLine(sub: Subscription, due: Date | null): Promise<string> {
     try {
       const fee = await payInfo(this.prisma, sub);
-      if (await mmgCheckoutLive(this.prisma, sub, 'unknown')) return mmgPayLine(checkoutAmountGyd(fee));
+      if (await mmgCheckoutLive(this.prisma, sub, 'unknown')) return mmgPayLine(checkoutAmountGyd(fee), { alsoWebsite: !!sub.serviceProviderId });
       return feeDueLine(fee.amountDueGyd > 0 ? fee.amountDueGyd : fee.weeklyFeeGyd, sub.currencyCode, due);
     } catch (err) {
       log().warn({ err, subscriptionId: sub.id }, 'fee notice: the paying sentence fell back to the due line');
@@ -5574,7 +5623,7 @@ export class BillingService {
     try {
       const fee = await payInfo(this.prisma, sub);
       if (!(fee.amountDueGyd > 0) || !(await mmgCheckoutLive(this.prisma, sub, 'unknown'))) return '';
-      return mmgPayLine(checkoutAmountGyd(fee));
+      return mmgPayLine(checkoutAmountGyd(fee), { alsoWebsite: !!sub.serviceProviderId });
     } catch (err) {
       log().warn({ err, subscriptionId: sub.id }, 'fee reminder: sent without the MMG sentence');
       return '';

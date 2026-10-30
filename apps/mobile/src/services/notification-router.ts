@@ -94,6 +94,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // the one place the fee is seen and paid, on the family it is about. The
   // payload names the subscription, not the store, so a store fee opens on the
   // store the owner has selected; it carries no checkout ref to invent.
+  // [BILL-PRO PR4] A pro's own weekly-fee notices (API notification/provider-fee-kinds.ts) open the pro's dashboard:
+  // the store and mover fee screens cannot load a pro's fee. BILL-PRO PR5 points them at the pro fee screen.
+  if (kind.startsWith('provider_fee_')) return { screen: 'ServiceProvider' };
   if (PARTNER_FEE_KINDS.has(kind)) return { screen: 'WeeklyFee', params: { feeFamily: feeFamilyOf(audience, openApp) } };
 
   // [PUSH-ROUTING] DOCUMENTS. "Your document was rejected — fix it and

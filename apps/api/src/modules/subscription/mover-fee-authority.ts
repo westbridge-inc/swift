@@ -328,10 +328,22 @@ export async function readFeeCollectionAuthorities(db: PrismaClient, subscriptio
   const rows = await db.subscription.findMany({ where: { id: { in: subscriptionIds } }, select: PAYER_SELECT });
   const byId = new Map(rows.map((row) => [row.id, row]));
   const moverSubs = new Map<string, { payer: SubscriptionPayer; subs: string[] }>();
+  // [BILL-PRO · REVIEW-M #2229 S4-1] The same one-fee rule as readFeeCollectionAuthority: a pro's own fee is not
+  // collectable while that person's Services store fee is live (one count per pro in the batch).
+  const proUserIds = [...new Set(subscriptionIds.flatMap((id) => {
+    const row = byId.get(id);
+    const payer = row ? payerOfRow(row) : null;
+    return payer?.kind === 'PROVIDER' ? [payer.userId] : [];
+  }))];
+  const coveredPros = new Set<string>();
+  for (const userId of proUserIds) {
+    if (await db.subscription.count({ where: liveServicesStoreFeeWhere(userId) })) coveredPros.add(userId);
+  }
   for (const id of subscriptionIds) {
     const row = byId.get(id);
     const payer = row ? payerOfRow(row) : null;
     if (!payer) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
+    if (payer.kind === 'PROVIDER' && coveredPros.has(payer.userId)) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
     if (payer.kind !== 'MOVER') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
     const group = moverSubs.get(payer.userId) ?? { payer, subs: [] };
     group.subs.push(id);

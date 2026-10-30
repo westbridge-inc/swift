@@ -326,6 +326,39 @@ export async function runWeeklySettlement(ctx: JobContext) {
 /** One ops page per condition per window [SWIFT-AUD-D7-02]: redis SET NX is
  *  the dedup, so N instances or repeated scans can never spam the admins.
  *  Fire-and-caught — paging must not fail the job that noticed the problem. */
+/**
+ * [BILL-PRO · REVIEW-M #2229 S4-1/S4-2] The pro weekly fee passes of the hourly billing job, each isolated: a pass
+ * that throws is logged and pages the admins once an hour, the next pass still runs, and this never throws, so the
+ * billing cycle after it always runs. (Neither pass is load-bearing for "never charged twice": the charge path refuses a
+ * store-covered pro fee by itself, lockFeeCollectionAuthority.) `page` is the admin page (a seam for its test).
+ */
+export async function runProFeePasses<K extends string>(
+  ctx: Pick<JobContext, 'prisma' | 'io' | 'redis' | 'log'>,
+  passes: Record<K, () => Promise<number>>,
+  page: (name: string) => Promise<unknown> = async (name) => {
+    const { notifyAdmins, NotificationService: Notifications } = await import('../modules/notification/notification.service');
+    return notifyAdmins(ctx.prisma, new Notifications(ctx.prisma, ctx.io), {
+      tenantId: null,
+      title: 'Pro weekly fee pass failed',
+      body: `The hourly ${name} pass for pros' weekly fees failed this cycle. Billing ran on. Check the API logs.`,
+      data: { kind: 'ops_billing_failures', proFeePass: name },
+    });
+  },
+): Promise<Record<K, number | 'failed'>> {
+  const out = {} as Record<K, number | 'failed'>;
+  for (const name of Object.keys(passes) as K[]) {
+    try {
+      out[name] = await passes[name]();
+    } catch (error) {
+      out[name] = 'failed';
+      ctx.log.error({ err: error, pass: name }, '[BILL-PRO] pro fee pass failed; billing continues');
+      await opsPageOnce(ctx, `pro-fee-pass:${name}`, 3600, () => page(name))
+        .catch((pageError: unknown) => ctx.log.error({ err: pageError }, '[BILL-PRO] pro fee pass page failed'));
+    }
+  }
+  return out;
+}
+
 export async function opsPageOnce(
   ctx: Pick<JobContext, 'redis'>,
   key: string,
@@ -1096,27 +1129,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // fee). The charge path refuses a store-covered pro fee by itself (lockFeeCollectionAuthority), so neither
           // pass is load-bearing for "never charged twice". [M S4-1 · COORD] Each pass is isolated: a failure pages
           // the admins, and the next pass and the billing cycle always run.
-          const proFeePass = async (name: string, run: () => Promise<number>): Promise<number | 'failed'> => {
-            try {
-              return await run();
-            } catch (error) {
-              ctx.log.error({ err: error, pass: name }, '[BILL-PRO] pro fee pass failed; billing continues');
-              const { notifyAdmins } = await import('../modules/notification/notification.service');
-              await opsPageOnce(ctx, `pro-fee-pass:${name}`, 3600, () =>
-                notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
-                  tenantId: null,
-                  title: 'Pro weekly fee pass failed',
-                  body: `The hourly ${name} pass for pros' weekly fees failed this cycle. Billing ran on. Check the API logs.`,
-                  data: { kind: 'ops_billing_failures', proFeePass: name },
-                }),
-              ).catch((pageError: unknown) => ctx.log.error({ err: pageError }, '[BILL-PRO] pro fee pass page failed'));
-              return 'failed';
-            }
-          };
-          const proFees = {
-            born: await proFeePass('birth', async () => (await (await import('../modules/services/pro-fee')).birthDueProFees(ctx.prisma)).born),
-            oneFeeStopped: await proFeePass('one-fee', async () => (await billing.stopProFeesCoveredByStore()).length),
-          };
+          const proFees = await runProFeePasses(ctx, {
+            birth: async () => (await (await import('../modules/services/pro-fee')).birthDueProFees(ctx.prisma)).born,
+            'one-fee': async () => (await billing.stopProFeesCoveredByStore()).length,
+            // [REVIEW-M #2229 N2] A pro whose covering store fee ended is told their own fee applies again.
+            'cover-ended': async () => (await billing.notifyProFeesNoLongerCovered()).length,
+          });
           const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
