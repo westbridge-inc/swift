@@ -31,8 +31,6 @@ const V = '/api/v1/vendor';
 export const getVatReport = (from: string, to: string) =>
   apiFetch(`${V}/vat/report?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).then((r) => r.data as VatReport);
 
-/** Only what the settings link needs from the store's VAT (GET /vendor/vat, owner only). */
-export const getStoreVatStatus = () => apiFetch(`${V}/vat`).then((r) => (r.data as { status?: string } | undefined)?.status ?? 'NONE');
 
 /** A VAT return covers one calendar month (VAT Act s.2 "tax period"): the month as Guyana days. */
 export function monthPeriod(month: string): { from: string; to: string } {

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { getProfile } from '@/lib/vendor-api';
-import { getStoreVatStatus } from '@/lib/vat-report';
+import { getStoreVat, vatStatusOf } from '@/lib/store-vat-read';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { storeKey } from '@/lib/store-scope';
 
@@ -17,7 +17,8 @@ const HAD_VAT = new Set(['APPROVED', 'REVOKED']);
 export function VatReportLink({ storeId }: { storeId: string | null }) {
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
   const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
-  const status = useQuery({ queryKey: storeKey(storeId, 'vat-status'), queryFn: getStoreVatStatus, enabled: isOwner });
+  // [SPEED 30 Oct] The VAT card's own read (GET /vendor/vat): one request feeds both, and a change the card saves shows here at once.
+  const status = useQuery({ queryKey: storeKey(storeId, 'vat'), queryFn: getStoreVat, enabled: isOwner, select: vatStatusOf });
   if (!isOwner) return null;
   if (status.isError) return <DataUnavailable what="your VAT settings" error={status.error} onRetry={() => void status.refetch()} />;
   if (!status.data || !HAD_VAT.has(status.data)) return null;

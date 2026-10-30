@@ -30,6 +30,7 @@ import {
   useDeclineOffer,
   useVerificationStatus,
   useSelectMoverKind,
+  useEarnerPrefetch,
   type BoardJob,
   type DispatchOffer,
   type MoverKind,
@@ -444,6 +445,8 @@ export function MoverHomeScreen({ navigation }: any) {
   const selectMoverKind = useSelectMoverKind();
   const earnings = useEarningsToday(kind);
   const daily = useDailyEarnings<any>(kind); // DASH-03: server-aggregated 7-day trend
+  // [SPEED 30 Oct] Earnings opens with its figures: its first reads, once Home's have landed.
+  useEarnerPrefetch({ kind, preview: !!preview });
   const stats = useMoverStats(kind);
   const vstatus = useVerificationStatus<any>('MOVER');
   const active = useActiveJob(kind);

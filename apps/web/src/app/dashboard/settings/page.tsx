@@ -7,6 +7,7 @@ import { selectedProfileStore, storeCheckLabel, type ProfileData } from './store
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
 import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
@@ -148,6 +149,8 @@ function HoursEditor() {
 function SubscriptionCard({ isOwner }: { isOwner: boolean }) {
   const storeId = useStoreId();
   const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription, enabled: isOwner });
+  // [SPEED 30 Oct] The fee's standing from memory says it is being checked until Swift answers.
+  const checkingLatest = useCheckingLatest(sub);
   if (!isOwner) return null;
   if (sub.isError) return <DataUnavailable what="your subscription" error={sub.error} onRetry={() => void sub.refetch()} />;
   // isPending, not isLoading: a read paused offline has no data and is not "no subscription".
@@ -164,6 +167,7 @@ function SubscriptionCard({ isOwner }: { isOwner: boolean }) {
             Status: <b className={subscriptionInGoodStanding(s) ? 'text-green-600' : 'text-[var(--swift-red)]'}>{subscriptionStatusWord(s)}</b>
           </p>
           <p>{subscriptionLine(s)} — you keep 100% of every sale.</p>
+          <CheckingLatest show={checkingLatest} />
           <p className="text-[var(--swift-muted)]">
             <Link href="/dashboard/weekly-fee" className="font-semibold underline">Weekly fee — view and pay</Link>
           </p>
@@ -197,6 +201,8 @@ function SettlementsCard() {
     },
   });
   const ledger = readSettlementLedger(data, 'rider');
+  // [SPEED 30 Oct] What the store owes, from memory, says it is being checked until Swift answers.
+  const checkingLatest = useCheckingLatest(data);
   if (ledger.state === 'unavailable') {
     return <DataUnavailable what="what you owe riders" error={data.error} onRetry={() => void data.refetch()} />;
   }
@@ -204,6 +210,7 @@ function SettlementsCard() {
     <div className="sw-card p-6">
       <h2 className="font-bold">You owe riders</h2>
       <MutationNotice errors={[confirm.error]} className="mt-2" />
+      <CheckingLatest show={checkingLatest} />
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
         MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at
         pickup), then mark it paid. Both sides confirm; then it{'’'}s settled.

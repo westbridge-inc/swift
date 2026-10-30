@@ -5,6 +5,7 @@ import { getOverview, money } from '@/lib/vendor-api';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -27,6 +28,7 @@ export default function InsightsPage() {
   const { manager, known } = useStoreRole();
   const overview = useQuery({ queryKey: storeKey(storeId, 'overview'), queryFn: getOverview, enabled: manager, refetchInterval: 30_000 });
   const d = overview.data;
+  const checkingLatest = useCheckingLatest(overview);
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -38,6 +40,7 @@ export default function InsightsPage() {
       {known && !manager && <p className="sw-card p-6 text-sm text-[var(--swift-muted)]">Insights are for the store&apos;s owner and managers.</p>}
       {manager && overview.isLoading && <div role="status" className="sw-skeleton h-28"><span className="sr-only">Loading your figures…</span></div>}
       {manager && overview.isError && <DataUnavailable what="your figures" error={overview.error} onRetry={() => void overview.refetch()} />}
+      {manager && d && <CheckingLatest show={checkingLatest} />}
       {manager && d && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat label="Orders today" value={String(d.today.orders)} sub={`${d.week.orders} this week`} />

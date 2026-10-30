@@ -217,22 +217,20 @@ export function useEarningsToday(kind: MoverKind | null) {
   });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS_TODAY) : q;
 }
+/** [SPEED 30 Oct] The Earnings screen's first reads, shared by its hooks and the Home prefetch
+ *  (hooks/earnerPrefetch): the same key, the same call, the same shape. */
+export const moverRead = {
+  earningsSummary: <T = any>(kind: MoverKind | null) => ({ queryKey: ['mover', 'earnings-summary', kind], queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsSummary()) }),
+  earningsHistory: <T = any>(kind: MoverKind | null) => ({ queryKey: ['mover', 'earnings-history', kind], queryFn: () => unwrap<T>(svc(kind as MoverKind).earnings()) }),
+};
 export function useEarningsSummary<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
-  const q = useQuery<T>({
-    queryKey: ['mover', 'earnings-summary', kind],
-    queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsSummary()),
-    enabled: !!kind && !pv,
-  });
+  const q = useQuery<T>({ ...moverRead.earningsSummary<T>(kind), enabled: !!kind && !pv });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS_SUMMARY) : q;
 }
 export function useEarnings<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
-  const q = useQuery<T>({
-    queryKey: ['mover', 'earnings-history', kind],
-    queryFn: () => unwrap<T>(svc(kind as MoverKind).earnings()),
-    enabled: !!kind && !pv,
-  });
+  const q = useQuery<T>({ ...moverRead.earningsHistory<T>(kind), enabled: !!kind && !pv });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
 }
 /** [DOC-1 §31.4] The mover's guarantee claims — status, the evidence bundle as filed, the pay-out SLA, suspension. */

@@ -85,6 +85,7 @@ vi.mock('../../../hooks', () => {
     useGoOnline: () => ({ ...mutation(), mutateAsync: fx.goOnline }),
     useGoOffline: mutation, useAcceptJob: mutation, useAcceptOffer: mutation, useDeclineOffer: mutation, useSelectMoverKind: mutation,
     useVerificationStatus: () => ({ data: null }),
+    useEarnerPrefetch: () => undefined, // [SPEED 30 Oct] Home reads Earnings ahead (hooks/earnerPrefetch)
   };
 });
 vi.mock('../../../stores/locationStore', () => ({

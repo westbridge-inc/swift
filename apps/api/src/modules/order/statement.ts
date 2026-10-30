@@ -1,3 +1,4 @@
+import { color } from '@swift/ui';
 import { formatMoney } from '../../utils/currency-amount';
 import { aggregateSalesComponents, orderComponents } from '../billing/sales-components';
 /**
@@ -58,7 +59,7 @@ export function renderStatementHtml(input: StatementInput): string {
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; color: #111; margin: 0; background: #f6f6f6; }
   .sheet { max-width: 640px; margin: 24px auto; background: #fff; border-radius: 16px; padding: 32px; }
-  .brand { color: #e8192c; font-weight: 800; font-size: 22px; }
+  .brand { color: ${color.brand[500]}; font-weight: 800; font-size: 22px; }
   h1 { font-size: 16px; margin: 4px 0 0; font-weight: 600; color: #555; }
   .meta { margin: 16px 0; font-size: 14px; color: #555; line-height: 1.6; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
