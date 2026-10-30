@@ -1523,11 +1523,36 @@ export const vendorApi = {
   deletePromo: (id: string) => api.delete(`/vendor/promos/${id}`),
   // Staff & roles (owner-only)
   staff: () => api.get('/vendor/staff'),
-  addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
+  /** [CHAINS PR2] `vendorIds`: add one person to several of the owner's branches in one step (one daily add). */
+  addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF'; vendorIds?: string[] }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
   /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
   withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
+  // [CHAINS PR2 · owner 29 Oct 2026] One owner, many branches.
+  /** Every store this account works in; a store not live yet has `awaitingApproval` and `goLive` (whose turn it is). */
+  stores: () => api.get('/vendor/stores'),
+  /** What the add-a-branch screen shows first: the branch's weekly fee and its words, the shared trial, the deal. */
+  branchTerms: (vendorType: string) => api.get('/vendor/stores/branch-terms', { params: { vendorType } }),
+  /** Add a branch (owner; confirm-it's-you; the weekly fee ticked for this branch), with what go-live needs from the
+   *  owner: the number customers can call (required) and, for a restaurant, the food handlers tick (optional). */
+  addBranch: (data: {
+    business: Record<string, unknown>; weeklyFeeAck: { version: string; amount: number; currencyCode: string };
+    publicPhone: string; foodHandlers?: { accept: true; attestationVersion: string };
+  }) =>
+    api.post('/vendor/stores', data),
+  /** Sales per branch and in all (owner: every branch; a manager: the branches they manage). */
+  storesSummary: () => api.get('/vendor/stores/summary'),
+  /** Every branch's orders on one board, whichever store is selected; each order names its store. */
+  allBranchOrders: () => api.get('/vendor/orders', { params: { scope: 'all', limit: 100 } }),
+  /** Copy another branch's menu into `toStoreId` (named by its id, never the selected store by accident). */
+  copyMenu: (toStoreId: string, fromStoreId: string, copyKey: string) =>
+    api.post('/vendor/menu/copy', { fromStoreId, copyKey }, { headers: { [VENDOR_STORE_HEADER]: toStoreId } }),
+  /** One branch's own switches and hours, named by its id (bulk actions run these one branch at a time). */
+  toggleOrdersAt: (vendorId: string, acceptingOrders: boolean) =>
+    api.put('/vendor/vendor/toggle-orders', { acceptingOrders }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
+  setHoursAt: (vendorId: string, hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
+    api.put('/vendor/hours', { hours }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging

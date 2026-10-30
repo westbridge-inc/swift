@@ -19,7 +19,7 @@ vi.mock('@/lib/legal-acceptance', async () => {
   const actual = await vi.importActual<typeof import('@/lib/legal-acceptance')>('@/lib/legal-acceptance');
   return { ...actual, getLegalAcceptance: fx.get, acceptLegal: fx.accept };
 });
-vi.mock('@/lib/api', () => ({ LEGAL_URL: (doc: string) => `https://api.example/legal/${doc}` }));
+vi.mock('@/lib/legal-url', () => ({ LEGAL_URL: (doc: string) => `https://api.example/legal/${doc}` }));
 
 import { LegalAcceptanceGate, acceptLabel } from './legal-acceptance-gate';
 

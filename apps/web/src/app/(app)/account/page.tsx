@@ -6,7 +6,8 @@ import { SignOutButton } from '@/components/sign-out-button';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { AccountBoundary, useAccountQuery } from '@/components/account/account-frame';
 import { accountApi } from '@/components/account/account-api';
-import { Avatar, useSwitchApp } from '@/components/customer-shell';
+import { useSwitchApp } from '@/components/customer-shell';
+import { Avatar } from '@/components/account-chrome';
 import { Pictogram } from '@/components/glyphs';
 import { Bone } from '@/components/customer-skeletons';
 

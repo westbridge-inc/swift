@@ -18,7 +18,7 @@ const FILES = ['components/console-shell.tsx', 'components/schedule-block-time.t
   // Everything else a console draws: the new-order takeover, the Switch app
   // sheet, the error and notice blocks, and the API helpers whose messages
   // reach the screen.
-  'components/NewOrderTakeover.tsx', 'components/customer-shell.tsx', 'components/data-unavailable.tsx', 'components/mutation-notice.tsx',
+  'components/NewOrderTakeover.tsx', 'components/customer-shell.tsx', 'components/account-chrome.tsx', 'components/data-unavailable.tsx', 'components/mutation-notice.tsx',
   'lib/vendor-api.ts', 'lib/mover-api.ts', 'lib/partner-api.ts', 'lib/catalogue-name.ts',
   // The Orders home's cards and the app helpers they read (PR A).
   'components/orders-home.tsx', 'lib/vendor-hub.ts', 'lib/store-role.ts', 'lib/profile-store.ts', 'lib/mmg-pay-words.ts'];
