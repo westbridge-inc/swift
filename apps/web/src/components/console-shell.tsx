@@ -59,9 +59,9 @@ export function ConsoleShell({ children, home, title, description, navigation, s
     </div>
   </>;
   return <div className="swift-console min-h-dvh min-w-0 bg-[var(--swift-canvas)] text-[var(--swift-ink)] wide:flex">
-    <aside aria-label={`${title} sidebar`} className="hidden wide:sticky wide:top-0 wide:flex wide:h-dvh wide:w-[280px] wide:flex-none wide:flex-col wide:overflow-y-auto wide:border-r wide:border-[var(--swift-border)] wide:bg-[var(--swift-card)] wide:px-4 wide:py-6">{navigationContent(false)}</aside>
+    <aside aria-label={`${title} sidebar`} className="hidden print:!hidden wide:sticky wide:top-0 wide:flex wide:h-dvh wide:w-[280px] wide:flex-none wide:flex-col wide:overflow-y-auto wide:border-r wide:border-[var(--swift-border)] wide:bg-[var(--swift-card)] wide:px-4 wide:py-6">{navigationContent(false)}</aside>
     <div className="min-w-0 flex-1">
-      <header className="flex min-h-16 items-center gap-3 px-6 pt-[env(safe-area-inset-top)] wide:px-10">
+      <header className="flex min-h-16 items-center gap-3 print:hidden px-6 pt-[env(safe-area-inset-top)] wide:px-10">
         <button ref={menuButton} type="button" aria-label="Open menu" aria-expanded={open} aria-controls="console-menu" onClick={() => setOpen(true)} className="sw-icon-btn wide:hidden"><Menu size={20} aria-hidden /></button>
         <Link href={home} className="sw-label flex items-center wide:hidden">Swift {title}</Link>
         <div className="flex-1" />
@@ -76,12 +76,13 @@ export function ConsoleShell({ children, home, title, description, navigation, s
       </div>}
       <main key={contentKey} id="main" tabIndex={-1} className="sw-page sw-partner pb-6">
         {/* [UI-SWEEP U22] The consoles had no offline notice: the phone's words. */}
-        <OfflineNotice body="Some things may not load until you’re back online." />
+        {/* [ENTERPRISE E3 · REVIEW-F #2228 S3-2] Printing a page (a fee statement) prints the page, never the console. */}
+        <div className="print:hidden"><OfflineNotice body="Some things may not load until you’re back online." /></div>
         {children}
       </main>
-      <footer className="sw-caption px-6 pb-[calc(88px_+_env(safe-area-inset-bottom))] pt-6 wide:px-10 wide:pb-8">Prices in GYD</footer>
+      <footer className="sw-caption print:hidden px-6 pb-[calc(88px_+_env(safe-area-inset-bottom))] pt-6 wide:px-10 wide:pb-8">Prices in GYD</footer>
     </div>
-    <nav aria-label={`${title} tabs`} className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] wide:hidden">
+    <nav aria-label={`${title} tabs`} className="print:hidden fixed inset-x-0 bottom-0 z-40 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] wide:hidden">
       <ul className="mx-auto flex h-[60px] max-w-lg">{navigation.filter(n => n.dock !== false).map(item => <li key={item.href} className="min-w-0 flex-1">
         <Link href={item.href} aria-current={active(item) ? 'page' : undefined} className={`flex h-full flex-col items-center justify-center gap-0.5 text-[11px] ${active(item) ? 'font-semibold text-[var(--swift-red)]' : 'font-medium text-[var(--swift-muted)]'}`}>
           <item.icon size={24} aria-hidden /><span>{item.label}</span>

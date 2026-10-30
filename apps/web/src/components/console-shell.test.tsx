@@ -13,6 +13,20 @@ vi.mock('next/navigation', () => ({
 describe('ConsoleShell phone navigation', () => {
   beforeEach(() => { pathname = '/dashboard'; });
 
+  it('[ENTERPRISE E3 · REVIEW-F #2228 S3-2] printing prints the page alone: sidebar, header, offline notice, footer and the tab bar are hidden in print', () => {
+    const { container } = render(<ConsoleShell home="/dashboard" title="Business" contentKey="store-a"
+      navigation={[{ href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true }]}
+      switcher={<button>Store A</button>} signOutBody="End this browser session.">
+      <p>Statement content</p>
+    </ConsoleShell>);
+    const chrome = [
+      container.querySelector('aside'), container.querySelector('header'), container.querySelector('footer'),
+      screen.getByRole('navigation', { name: 'Business tabs' }), container.querySelector('main > div'),
+    ];
+    for (const el of chrome) expect(el?.className ?? '', el?.outerHTML.slice(0, 80)).toMatch(/(^|\s)print:!?hidden(\s|$)/);
+    expect(screen.getByText('Statement content').closest('[class*="print:hidden"]')).toBeNull();
+  });
+
   it('opens an accessible drawer with the same data-driven routes and store switcher', () => {
     render(<ConsoleShell home="/dashboard" title="Business" contentKey="store-a"
       navigation={[

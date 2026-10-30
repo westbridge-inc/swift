@@ -5365,6 +5365,18 @@ export async function vendorRoutes(app: FastifyInstance) {
   // subscription. Card rail v2 stays behind CARD_RAIL_V2 (default off).
   const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
 
+  /** [ENTERPRISE E3 · owner 29 Oct 2026] GET /subscription/chain-statement?month=YYYY-MM — the owner's fee statement
+   *  for one month: every branch, its weekly fee and deal, the weeks it paid, what it owes now and the receipts issued,
+   *  labelled "Not a VAT invoice" (billing/chain-statement.ts). The OWNER only (a manager or staff member never sees
+   *  the owner's fees); read-only. */
+  app.get('/subscription/chain-statement', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const store = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { ownerId: true } });
+    const { month } = z.object({ month: z.string().max(7).optional() }).parse(request.query ?? {});
+    const { chainStatement } = await import('../billing/chain-statement');
+    return { success: true, data: await chainStatement(app.prisma, { ownerId: store.ownerId, month }) };
+  });
+
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     // NO operability gate here, deliberately [PINV-8]. A suspended store must
