@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { STORE_ROLES, storeFeeAck, storeFeeCardEnabled, storeFeeKey, storeFeeToTick, tickHolds } from './storeWeeklyFee';
+import { STORE_ROLES, storeFeeAck, storeFeeCardEnabled, storeFeeCardView, storeFeeKey, storeFeeToTick, tickHolds } from './storeWeeklyFee';
 import { GO_LIVE_STEP_WORDS, ownerStepWords } from '../../lib/branches';
 
 // [RETIER PR-A2 · owner 30 Oct 2026] A store whose weekly fee follows its catalogue above the first step goes live
@@ -66,6 +66,23 @@ describe('[RETIER PR-A2] the store weekly-fee card reads only the server', () =>
     expect(storeFeeCardEnabled('MOVER', { vendorId: 'v1', isOwner: true })).toBe(false);
   });
 
+  it('[REVIEW-F S3-1] a failed read, or an answer that says a tick is needed but cannot be read, shows an error with Try again — never nothing', () => {
+    const owner = { vendorId: 'v1', isOwner: true };
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: undefined, isError: true })).toEqual({ kind: 'error' });
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: view({ weeklyFee: { amount: 45000.5, currencyCode: 'GYD', tier: 'department', version: 'v1' } }), isError: false })).toEqual({ kind: 'error' });
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: view({ terms: null }), isError: false })).toEqual({ kind: 'error' });
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: view(), isError: false })).toMatchObject({ kind: 'tick', fee: { amount: 45000 } });
+    // nothing to do, still loading, another store, or not the owner's: nothing
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: view({ required: false }), isError: false })).toEqual({ kind: 'none' });
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: undefined, isError: false })).toEqual({ kind: 'none' });
+    expect(storeFeeCardView('SUPERMARKET', owner, { data: view({ vendorId: 'v9' }), isError: false })).toEqual({ kind: 'none' });
+    expect(storeFeeCardView('SUPERMARKET', { vendorId: 'v1', isOwner: false }, { data: view(), isError: true })).toEqual({ kind: 'none' });
+  });
+
+  it('[REVIEW-F S4-1] a fee is whole currency units: a fractional amount is never offered to tick', () => {
+    expect(storeFeeToTick(view({ weeklyFee: { amount: 45000.5, currencyCode: 'GYD', tier: 'department', version: 'v1' } }), 'v1')).toBeNull();
+  });
+
   it('the go-live step is named for the owner', () => {
     expect(GO_LIVE_STEP_WORDS.WEEKLY_FEE).toBe('Read and tick its weekly fee');
     expect(ownerStepWords({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['WEEKLY_FEE'] } })).toEqual(['Read and tick its weekly fee']);
@@ -82,5 +99,10 @@ describe('[RETIER PR-A2] the store weekly-fee card reads only the server', () =>
     const card = read('StoreWeeklyFeeCard.tsx');
     expect(card).toContain('const checked = tickHolds(tickedKey, fee);');
     expect(card).toContain('onError: () => setTickedKey(null),');
+    // [REVIEW-G S4 M2] the card reads only when its own gate says so, and draws only what the view helper says
+    expect(card).toContain('const enabled = storeFeeCardEnabled(role, scope);');
+    expect(card).toMatch(/useQuery\(\{[\s\S]*enabled,\n {2}\}\);/);
+    expect(card).toContain('const view = storeFeeCardView(role, scope, { data: read.data, isError: read.isError });');
+    expect(card).toContain("<PillButton label=\"Try again\" variant=\"soft\" onPress={() => void read.refetch()} />");
   });
 });

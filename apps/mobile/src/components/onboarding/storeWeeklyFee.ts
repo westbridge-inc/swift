@@ -25,7 +25,8 @@ export function storeFeeToTick(view: unknown, vendorId: string | null | undefine
   if (!vendorId || v['vendorId'] !== vendorId) return null;
   const fee = v['weeklyFee'] as Record<string, unknown> | null | undefined;
   const terms = v['terms'] as Record<string, unknown> | null | undefined;
-  if (!fee || typeof fee['amount'] !== 'number' || !(fee['amount'] > 0) || typeof fee['currencyCode'] !== 'string' || typeof fee['version'] !== 'string') return null;
+  // A weekly fee is a whole number of currency units: the box is ticked to exactly the amount shown.
+  if (!fee || typeof fee['amount'] !== 'number' || !Number.isInteger(fee['amount']) || !(fee['amount'] > 0) || typeof fee['currencyCode'] !== 'string' || typeof fee['version'] !== 'string') return null;
   if (!terms || typeof terms['tick'] !== 'string' || !terms['tick'] || terms['version'] !== fee['version'] || !Array.isArray(terms['items'])) return null;
   const items = (terms['items'] as unknown[]).filter((i): i is StoreFeeItem => {
     const r = i as Partial<StoreFeeItem> | null;
@@ -55,6 +56,22 @@ export const STORE_ROLES: ReadonlySet<string> = new Set(['RESTAURANT', 'SUPERMAR
 /** The card reads anything only for a store role, a named store, and its OWNER (a manager never sees or ticks it). */
 export function storeFeeCardEnabled(role: string, scope: { vendorId?: string | null; isOwner?: boolean } | null | undefined): boolean {
   return STORE_ROLES.has(role) && scope?.isOwner === true && typeof scope.vendorId === 'string' && scope.vendorId.length > 0;
+}
+
+/** [REVIEW-F #2246 S3-1] What the card shows: nothing (not this person's to tick, still loading, nothing to tick, or
+ *  an answer about another store), the fee to tick, or — when the read FAILED, or the server says a tick is needed but
+ *  its answer cannot be read — an error with Try again. A failed read is never shown as nothing to do. */
+export type StoreFeeCardView = { kind: 'none' } | { kind: 'error' } | { kind: 'tick'; fee: StoreFeeToTick };
+export function storeFeeCardView(
+  role: string, scope: { vendorId?: string | null; isOwner?: boolean } | null | undefined, read: { data: unknown; isError: boolean },
+): StoreFeeCardView {
+  if (!storeFeeCardEnabled(role, scope)) return { kind: 'none' };
+  if (read.isError) return { kind: 'error' };
+  const v = read.data as Record<string, unknown> | null | undefined;
+  if (!v || typeof v !== 'object' || v['vendorId'] !== scope!.vendorId) return { kind: 'none' };
+  const fee = storeFeeToTick(v, scope!.vendorId);
+  if (fee) return { kind: 'tick', fee };
+  return v['required'] === true && v['ticked'] === false ? { kind: 'error' } : { kind: 'none' };
 }
 
 /** Is the box ticked for the fee on screen now? Only when the tick was given to exactly this store, version, amount and

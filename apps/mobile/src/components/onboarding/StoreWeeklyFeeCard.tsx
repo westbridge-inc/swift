@@ -5,7 +5,7 @@ import { space } from '@swift/ui';
 import { BrandCheckbox, Card, PillButton, T } from '../../kit';
 import { vendorApi } from '../../services/api';
 import { moneyIn } from '../../lib/money';
-import { storeFeeAck, storeFeeCardEnabled, storeFeeKey, storeFeeToTick, tickHolds, type StoreFeeToTick } from './storeWeeklyFee';
+import { storeFeeAck, storeFeeCardEnabled, storeFeeCardView, storeFeeKey, tickHolds, type StoreFeeToTick } from './storeWeeklyFee';
 
 /** The server's message for a refused tick, or a plain retry line. */
 function errorCopy(error: unknown): string {
@@ -20,21 +20,21 @@ export interface StoreFeeScope { vendorId: string; isOwner: boolean }
  * [RETIER PR-A2 · owner 30 Oct 2026] The store's weekly fee, on its go-live checklist, when it follows the store's
  * catalogue above the first step: the exact amount, why, the weekly-fee words and the tick. OWNER only, for the store
  * named (read and ticked with that store's id, never whichever store happens to be selected). The tick is given to the
- * exact fee on screen: if another amount, currency or version arrives, or the save fails, the box empties. The server
- * records the tick only for its own current quote and makes the store live. Nothing is charged before the tick.
+ * exact fee on screen: if another amount, currency or version arrives, or the save fails, the box empties. A read that
+ * failed shows an error with Try again, never nothing (REVIEW-F #2246 S3-1). Nothing is charged before the tick.
  */
 export function StoreWeeklyFeeCard({ role, scope }: { role: string; scope?: StoreFeeScope | null }) {
   const qc = useQueryClient();
   const [tickedKey, setTickedKey] = useState<string | null>(null);
   const vendorId = scope?.vendorId ?? null;
   const enabled = storeFeeCardEnabled(role, scope);
-  const view = useQuery({
+  const read = useQuery({
     queryKey: ['vendor', 'store-weekly-fee', vendorId],
     queryFn: () => vendorApi.storeWeeklyFee(vendorId!).then((r) => r.data?.data ?? null),
     enabled,
   });
-  const fee = enabled ? storeFeeToTick(view.data, vendorId) : null;
-  const key = fee ? storeFeeKey(fee) : null;
+  const view = storeFeeCardView(role, scope, { data: read.data, isError: read.isError });
+  const fee = view.kind === 'tick' ? view.fee : null;
   const checked = tickHolds(tickedKey, fee);
   const save = useMutation({
     mutationFn: (shown: StoreFeeToTick) => vendorApi.tickStoreWeeklyFee(storeFeeAck(shown)),
@@ -44,7 +44,24 @@ export function StoreWeeklyFeeCard({ role, scope }: { role: string; scope?: Stor
       void qc.invalidateQueries({ queryKey: ['verification', role] });
     },
   });
-  if (!fee || !key) return null;
+  if (save.isSuccess && view.kind === 'none') {
+    return (
+      <Card style={{ marginTop: space.md }}>
+        <T variant="caption" tone="muted">Saved. Your store goes live once Swift’s other checks are done.</T>
+      </Card>
+    );
+  }
+  if (view.kind === 'error') {
+    return (
+      <Card style={{ marginTop: space.md, gap: space.sm }}>
+        <T variant="label" weight="bold">Couldn’t load your weekly fee</T>
+        <T variant="caption" tone="muted">This is not an all-clear: we could not check it. Your store goes live only after you read and tick it.</T>
+        <PillButton label="Try again" variant="soft" onPress={() => void read.refetch()} />
+      </Card>
+    );
+  }
+  if (!fee) return null;
+  const key = storeFeeKey(fee);
   return (
     <Card style={{ marginTop: space.md, gap: space.sm }}>
       <T variant="label" weight="bold">Your weekly fee: {moneyIn(fee.amount, fee.currencyCode)} a week</T>

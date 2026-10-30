@@ -112,8 +112,8 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
     for (const vendorType of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
-      expect(text).toContain('Keep 100% of every sale — no commission on orders. This is the rate for a store with under 1,000 active items. '
-        + 'If yours has more by the time Swift approves the store, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. '
+      expect(text).toContain('Keep 100% of every sale — no commission on orders. This is the rate for a store with under 1,000 items. '
+        + 'If yours has more by the time Swift approves the store (counting items taken off sale or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. '
         + 'After that, the rate does not change as your catalogue grows.');
       expect(text).not.toMatch(/automatic/i);
       expect(text).not.toContain('$20,000');
@@ -129,8 +129,8 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
   it('[DEPT-PRICE] a shop is told, from the server, that a new store at department size gets 7 days free; the headline keeps 14', () => {
     const text = textOf(card({ kind: 'vendor', vendorType: 'SUPERMARKET' }));
     expect(text).toContain('14 days free, then $15,000/week');
-    expect(text).toContain('A new store with 10,000+ active items when Swift approves it gets 7 days free.');
-    expect(text).not.toContain('1,000+ active items when Swift approves it');
+    expect(text).toContain('A new store with 10,000+ items when Swift approves it gets 7 days free.');
+    expect(text).not.toContain('1,000+ items when Swift approves it');
     // A service provider and a mover are never told it.
     for (const props of [{ kind: 'vendor', vendorType: 'SERVICE' }, { kind: 'mover', vehicleType: 'CAR' }]) {
       expect(textOf(card(props))).not.toContain('when Swift approves it');
@@ -151,7 +151,7 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
     };
     const text = textOf(card({ kind: 'vendor', vendorType: 'STORE' }));
     expect(text).toContain('14 days free, then $12,000/week');
-    expect(text).toContain('A new store with 500+ active items when Swift approves it gets 7 days free.');
+    expect(text).toContain('A new store with 500+ items when Swift approves it gets 7 days free.');
     expect(text).not.toContain('1,000');
   });
 });

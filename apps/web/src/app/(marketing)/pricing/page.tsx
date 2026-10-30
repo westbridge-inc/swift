@@ -59,9 +59,9 @@ function typedList(pricing: CountryPricing | null) {
 function itemRange(catalogue: CataloguePriceBand[], i: number): string {
   const band = catalogue[i]!;
   const next = catalogue[i + 1];
-  if (!next) return i === 0 ? 'Any number of active items' : `${band.minItems.toLocaleString()}+ active items`;
-  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} active items`;
-  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} active items`;
+  if (!next) return i === 0 ? 'Any number of items' : `${band.minItems.toLocaleString()}+ items`;
+  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} items`;
+  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} items`;
 }
 
 /** A catalogue step's own free trial (a NEW store at that step when Swift approves it), else the list's. A value that
@@ -137,7 +137,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                     </p>
                     {trialDays !== list.pricing.trialDays && (
                       <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                        A new store with this many active items when Swift approves it gets {trialDays} days free.
+                        A new store with this many items when Swift approves it gets {trialDays} days free.
                       </p>
                     )}
                   </PriceCard>
@@ -159,10 +159,10 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                   anything is charged (api partner/store-fee.ts). [R27] The weekly re-tier is OFF on the server
                   (apps/api/src/modules/billing/weekly-retier.ts, WEEKLY_RETIER_ON = false): after that nothing
                   moves it. The page test pins the flag: turning the re-tier back on must revisit this sentence. */}
-              When Swift approves a new store, its weekly fee is the rate for the active items it has then (a
-              services business pays the Services rate). The store sees that exact fee, and its owner ticks it
-              before anything is charged. After that, Swift does not move a store to another rate as its active
-              items change. A rate agreed with Swift stays as agreed.
+              When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items
+              taken off sale or removed in the last 7 days (a services business pays the Services rate). The store
+              sees that exact fee, and its owner ticks it
+              before anything is charged. After that, Swift does not move a store to another rate as its items change. A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

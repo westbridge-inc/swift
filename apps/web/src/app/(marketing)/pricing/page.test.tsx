@@ -113,20 +113,20 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(within(cardOf('Services')).getByText(/8,000/)).toBeTruthy();
     const small = cardOf('Businesses');
     expect(within(small).getByText(/15,000/)).toBeTruthy();
-    expect(small.textContent).toContain('fewer than 1,000 active items');
+    expect(small.textContent).toContain('fewer than 1,000 items');
     const large = cardOf('Large catalogues');
     expect(within(large).getByText(/20,000/)).toBeTruthy();
-    expect(large.textContent).toContain('1,000–9,999 active items');
+    expect(large.textContent).toContain('1,000–9,999 items');
     const department = cardOf('Department stores');
     expect(within(department).getByText(/45,000/)).toBeTruthy();
-    expect(department.textContent).toContain('10,000+ active items');
+    expect(department.textContent).toContain('10,000+ items');
   });
 
   it('[DEPT-PRICE] each catalogue card shows its own free trial: 7 days for a new department store, 14 for the others', async () => {
     await renderPage();
     const department = cardOf('Department stores').textContent!;
     expect(department).toContain('7-day free trial');
-    expect(department).toContain('A new store with this many active items when Swift approves it gets 7 days free.');
+    expect(department).toContain('A new store with this many items when Swift approves it gets 7 days free.');
     expect(department).not.toContain('14-day');
     for (const title of ['Businesses', 'Large catalogues', 'Services', 'Taxi drivers', 'Delivery & courier riders']) {
       const card = cardOf(title).textContent!;
@@ -174,9 +174,9 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(page).not.toMatch(/automatic/i);
     expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
     expect(page).not.toMatch(/every new store starts on/i);
-    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the active items it has then (a services business pays the Services rate). '
+    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale or removed in the last 7 days (a services business pays the Services rate). '
       + 'The store sees that exact fee, and its owner ticks it before anything is charged. '
-      + 'After that, Swift does not move a store to another rate as its active items change.');
+      + 'After that, Swift does not move a store to another rate as its items change.');
     expect(page).toContain('A rate agreed with Swift stays as agreed.');
   });
 
@@ -191,8 +191,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
       vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 500, tier: 'large', rate: 20000 }] },
     };
     await renderPage();
-    expect(cardOf('Businesses').textContent).toContain('fewer than 500 active items');
-    expect(cardOf('Large catalogues').textContent).toContain('500+ active items');
+    expect(cardOf('Businesses').textContent).toContain('fewer than 500 items');
+    expect(cardOf('Large catalogues').textContent).toContain('500+ items');
     expect(document.body.textContent).not.toContain('1,000');
     expect(screen.queryByRole('heading', { name: 'Department stores' })).toBeNull();
   });
