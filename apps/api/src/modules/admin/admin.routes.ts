@@ -54,7 +54,7 @@ import {
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
-import { chainOf, setChainDeal } from '../vendor/chain-deal';
+import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -4444,7 +4444,59 @@ export async function adminRoutes(app: FastifyInstance) {
         data: { kind: 'billing_rate_change', change: 'CHAIN_DEAL', weeklyRate: result.dealWeeklyRate, currencyCode: result.currencyCode },
       }).catch((err: unknown) => request.log.error({ err, ownerId: id }, '[CHAINS] chain deal notice not delivered'));
     }
+    // [ENTERPRISE E2] A lower deal superseded a pending end or raise: a branch already told is told it will not happen.
+    if (result.droppedRises?.length) await billing.tellChainDealRisesDropped(result.droppedRises);
     return { success: true, data: result };
+  });
+
+  /**
+   * [ENTERPRISE E2 · owner 29 Oct 2026] POST /vendor-owners/:id/deal-change { kind: 'END' | 'RAISE', weeklyRate?,
+   * notBefore?, reason } — end the chain deal (each branch back to its own tier fee) or raise it, from its end date
+   * (`notBefore`, today when absent). It raises fees, so it goes through the 14-day fee-change notice: every branch
+   * still on the deal is told in the app at least 14 days ahead and pays the new fee only from its first weekly fee
+   * due on or after the end date and 14 days after it was told; a week already paid keeps its price
+   * (vendor/chain-deal.ts, billing fee-rise-notice.ts). Money (C4): a stated reason and a second person.
+   */
+  app.post('/vendor-owners/:id/deal-change', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      kind: z.enum(['END', 'RAISE']),
+      weeklyRate: z.number().int().positive().max(10_000_000).optional(),
+      notBefore: z.string().datetime().optional(),
+      reason: z.string().trim().min(8).max(500),
+    }).strict().parse(request.body ?? {});
+    const result = await changeChainDeal(
+      app.prisma,
+      {
+        ownerId: id, kind: body.kind, weeklyRate: body.weeklyRate ?? null, notBefore: body.notBefore ? new Date(body.notBefore) : null,
+        reason: body.reason, adminUserId: request.user.userId, tenantId: requireTenantId(),
+      },
+      (tx, done) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        reason: body.reason,
+        extra: {
+          kind: done.kind, dealFrom: done.dealFrom, dealTo: done.dealTo, notBefore: done.notBefore,
+          branches: done.branches.map((b) => `${b.vendorId}:${b.outcome}:${b.from ?? '-'}->${b.to ?? '-'}`).join(' '),
+        },
+      }),
+    );
+    return { success: true, data: result };
+  });
+
+  /** [ENTERPRISE E2] DELETE /vendor-owners/:id/deal-change { reason } — withdraw a pending end or raise before the
+   *  owner's deal moved (it raises nothing). Every held rise of it is dropped; a branch already told is told it will
+   *  not happen. Money (C4), like the change itself. */
+  app.delete('/vendor-owners/:id/deal-change', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ reason: z.string().trim().min(8).max(500) }).strict().parse(request.body ?? {});
+    const dropped = await cancelChainDealChange(
+      app.prisma,
+      { ownerId: id, reason: body.reason, adminUserId: request.user.userId, tenantId: requireTenantId() },
+      (tx, rises) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        reason: body.reason, extra: { droppedRises: rises.length, told: rises.filter((r) => r.held.noticeAt).length },
+      }),
+    );
+    await billing.tellChainDealRisesDropped(dropped);
+    return { success: true, data: { droppedRises: dropped.length } };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {

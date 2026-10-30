@@ -51,3 +51,53 @@ describe('[CHAINS] chain deal on the store page', () => {
     expect((await screen.findByRole('status')).textContent).toContain('1 branch(es) changed, 1 already pay less');
   });
 });
+
+// [ENTERPRISE E2 · owner 29 Oct 2026] Ending or raising a deal raises the branches' fees: the panel says each branch is
+// told in the app at least 14 days ahead, and sends the kind, the end date and the reason to the owner's deal-change route.
+describe('[E2] ending, raising and withdrawing a chain deal', () => {
+  const onDeal = { ...vendor, owner: { ...vendor.owner, dealWeeklyRate: '14000', dealSetAt: '2026-10-29T12:00:00.000Z', dealChangeKind: null } };
+  const routes = (data: unknown) => (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target') return { body: { success: true, data } };
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/activation-checklist') return { body: { success: true, data: checklist } };
+    if (request.url.pathname === '/api/v1/admin/vendor-owners/owner-row-1/deal-change') {
+      return { body: { success: true, data: request.method === 'DELETE' ? { droppedRises: 1 } : { kind: 'END', dealFrom: 14000, dealTo: null, notBefore: '2026-12-01T04:00:00.000Z', branches: [
+        { vendorId: 'vendor-target', vendorName: 'Royal North', from: 14000, to: 20000, outcome: 'WAITING' },
+        { vendorId: 'vendor-2', vendorName: 'Royal Camp', from: 12000, to: 12000, outcome: 'LEFT_DEAL' },
+      ] } } };
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+
+  it('end deal: says the 14-day notice, then sends END with the end date (start of that day in Guyana) and the reason', async () => {
+    const fetchMock = mockApi(routes(onDeal));
+    const { user } = renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
+    await user.click(await screen.findByRole('button', { name: 'End chain deal…' }));
+    const dialog = screen.getByRole('dialog', { name: 'End the chain deal for Chain Head?' });
+    expect(dialog.textContent).toContain('told in the app at least 14 days ahead');
+    expect(dialog.textContent).toContain('Weeks already paid keep their price');
+    await user.type(within(dialog).getByRole('textbox', { name: /End date/i }), '2026-12-01');
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Head office deal ends as signed');
+    await user.click(within(dialog).getByRole('button', { name: 'End chain deal' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/vendor-owners/owner-row-1/deal-change`);
+    expect(JSON.parse(String(init?.body))).toEqual({ kind: 'END', notBefore: '2026-12-01T04:00:00.000Z', reason: 'Head office deal ends as signed' });
+    expect((await screen.findByRole('status')).textContent).toContain('1 will be told 14 days before the end date, 1 already pay their own fee');
+  });
+
+  it('a pending change is shown and can be withdrawn; no raise or end is offered beside it', async () => {
+    const pending = { ...onDeal, owner: { ...onDeal.owner, dealChangeKind: 'RAISE', dealChangeTo: '17000', dealChangeNotBefore: '2026-12-01T04:00:00.000Z', dealChangeSwitchedAt: null } };
+    const fetchMock = mockApi(routes(pending));
+    const { user } = renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
+    const panel = (await screen.findByRole('heading', { name: 'Chain deal' })).parentElement!;
+    expect(panel.textContent).toContain('The deal goes up to G$17,000 a week');
+    expect(screen.queryByRole('button', { name: 'Raise chain deal…' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'End chain deal…' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Withdraw change…' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Head office renewed the deal');
+    await user.click(within(dialog).getByRole('button', { name: 'Withdraw change' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'DELETE')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'DELETE')[0]![1]?.body))).toEqual({ reason: 'Head office renewed the deal' });
+  });
+});

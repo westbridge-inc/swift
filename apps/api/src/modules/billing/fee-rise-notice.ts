@@ -62,8 +62,10 @@ export const feeRiseKey = (subscriptionId: string) => `${FEE_RISE_PREFIX}${subsc
 /** The notification kind the apps already route (alert-class.ts, notification-router.ts). */
 export const FEE_RISE_NOTICE_KIND = 'billing_rate_change';
 
-/** [R27] WEEKLY_RETIER: the weekly re-tier (billing.service runWeeklyRetier) found a higher card rate. */
-export type FeeRiseSource = 'MOVER_FEE_RESOLVED' | 'TAXI_ACTIVATION' | 'WEEKLY_RETIER';
+/** [R27] WEEKLY_RETIER: the weekly re-tier (billing.service runWeeklyRetier) found a higher card rate.
+ *  [ENTERPRISE E2] CHAIN_DEAL: the owner's chain deal ends or is raised (chain-deal.ts): the branch's NEGOTIATED
+ *  rate moves (customRate customFrom -> customTo, null = back to its own tier fee), never sooner than notBefore. */
+export type FeeRiseSource = 'MOVER_FEE_RESOLVED' | 'TAXI_ACTIVATION' | 'WEEKLY_RETIER' | 'CHAIN_DEAL';
 
 export interface HeldFeeRise {
   /** The weekly rate the partner pays now, when the rise was held (major units). */
@@ -82,10 +84,16 @@ export interface HeldFeeRise {
   inboxId: string | null;
   /** A week held paid at the old price already moved it once. */
   deferredOnce?: boolean;
+  /** [ENTERPRISE E2] CHAIN_DEAL only: the chain deal the branch is on now (its customRate) ... */
+  customFrom?: number;
+  /** ... and what its customRate becomes (null: the deal ends, the branch pays its own tier fee). */
+  customTo?: number | null;
+  /** ... and the deal's end date: no weekly fee due before it is charged the new fee (ISO). */
+  notBefore?: string;
 }
 
 const isIso = (v: unknown): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v));
-const SOURCES: readonly FeeRiseSource[] = ['MOVER_FEE_RESOLVED', 'TAXI_ACTIVATION', 'WEEKLY_RETIER'];
+const SOURCES: readonly FeeRiseSource[] = ['MOVER_FEE_RESOLVED', 'TAXI_ACTIVATION', 'WEEKLY_RETIER', 'CHAIN_DEAL'];
 
 /**
  * A stored held rise, or null for anything that is not one. A record that
@@ -104,10 +112,24 @@ export function readHeldFeeRise(value: unknown): HeldFeeRise | null {
   const appliesFrom = v['appliesFrom'] == null ? null : isIso(v['appliesFrom']) ? v['appliesFrom'] : undefined;
   if (noticeAt === undefined || appliesFrom === undefined || (noticeAt === null) !== (appliesFrom === null)) return null;
   if (noticeAt && appliesFrom && Date.parse(appliesFrom) < Date.parse(noticeAt) + FEE_RISE_NOTICE_DAYS * DAY_MS) return null;
+  // [ENTERPRISE E2] A chain-deal rise names the deal it moves from and to, and its end date: a told date before
+  // that end date, or a "change" that would not raise the deal, is not one.
+  let chain: Pick<HeldFeeRise, 'customFrom' | 'customTo' | 'notBefore'> = {};
+  if (v['source'] === 'CHAIN_DEAL') {
+    const customFrom = typeof v['customFrom'] === 'number' ? v['customFrom'] : NaN;
+    const customTo = v['customTo'] === null ? null : typeof v['customTo'] === 'number' ? v['customTo'] : NaN;
+    if (!Number.isFinite(customFrom) || customFrom <= 0 || (customTo !== null && !(Number.isFinite(customTo) && customTo > customFrom))) return null;
+    if (!isIso(v['notBefore'])) return null;
+    if (appliesFrom && Date.parse(appliesFrom) < Date.parse(v['notBefore'])) return null;
+    chain = { customFrom, customTo, notBefore: v['notBefore'] };
+  } else if ('customFrom' in v || 'customTo' in v || 'notBefore' in v) {
+    return null;
+  }
   return {
     from, to, currencyCode: v['currencyCode'], source: v['source'] as FeeRiseSource, heldAt: v['heldAt'], noticeAt, appliesFrom,
     inboxId: typeof v['inboxId'] === 'string' ? v['inboxId'] : null,
     ...(v['deferredOnce'] === true ? { deferredOnce: true } : {}),
+    ...chain,
   };
 }
 
@@ -122,9 +144,11 @@ export function firstFeeOnOrAfter(nextBillingDate: Date, earliest: Date): Date {
  *  inbox row lands a moment later (or on a database clock a little ahead). */
 export const FEE_RISE_NOTICE_MARGIN_MS = 3_600_000;
 
-/** The first weekly fee a rise told at `noticeAt` may apply to: never sooner than 14 days after it. */
-export function riseAppliesFrom(nextBillingDate: Date, noticeAt: Date): Date {
-  return firstFeeOnOrAfter(nextBillingDate, new Date(noticeAt.getTime() + FEE_RISE_NOTICE_DAYS * DAY_MS + FEE_RISE_NOTICE_MARGIN_MS));
+/** The first weekly fee a rise told at `noticeAt` may apply to: never sooner than 14 days after it, and
+ *  [ENTERPRISE E2] never before `notBefore` (a chain deal's end date). */
+export function riseAppliesFrom(nextBillingDate: Date, noticeAt: Date, notBefore?: Date | null): Date {
+  const notice = noticeAt.getTime() + FEE_RISE_NOTICE_DAYS * DAY_MS + FEE_RISE_NOTICE_MARGIN_MS;
+  return firstFeeOnOrAfter(nextBillingDate, new Date(Math.max(notice, notBefore ? notBefore.getTime() : notice)));
 }
 
 /** "Thursday 5 November", the day in Guyana. */
@@ -135,6 +159,15 @@ export function feeRiseDay(at: Date): string {
 /** The dedupe key of the one notice a held rise sends: a retry finds the first inbox row. */
 export const feeRiseDedupeKey = (subscriptionId: string, rise: Pick<HeldFeeRise, 'heldAt' | 'from' | 'to'>) =>
   `fee-rise:${subscriptionId}:${rise.heldAt}:${rise.from}->${rise.to}`;
+
+/** [ENTERPRISE E2] The words of a chain-deal rise: what happens to the deal, then the F2 notice exactly
+ *  (the old fee, the new fee, the first weekly fee it applies to, and how to say no). */
+export function chainDealRiseCopy(p: { from: number; to: number; currencyCode: string; date: Date | null; dealTo: number | null }): { title: string; body: string } {
+  const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
+  const rise = feeRiseCopy('RISE', p);
+  const deal = p.dealTo === null ? 'Your Swift chain deal is ending. ' : `Your Swift chain deal is changing to ${money(p.dealTo)} a week. `;
+  return { title: rise.title, body: deal + rise.body };
+}
 
 /** [R27] The words of a LOWER weekly fee: it applies from the next weekly fee; one already charged keeps its amount. */
 export function feeDecreaseCopy(p: { from: number; to: number; currencyCode: string }): { title: string; body: string } {
@@ -162,6 +195,43 @@ export function feeRiseCopy(kind: 'RISE' | 'CANCELLED', p: { from: number; to: n
     title: 'Your weekly fee is not changing',
     body: `The change to ${money(p.to)} we told you about${p.date ? ` for your weekly fee due ${feeRiseDay(p.date)}` : ''} will not happen: your Swift weekly fee stays ${money(p.from)}.`,
   };
+}
+
+/**
+ * [ENTERPRISE E2] Record a chain-deal change that RAISES one branch's weekly fee as held, never written: the deal it
+ * is on (`customFrom`, its customRate now) moves to `customTo` (null: the deal ends) from the branch's first weekly
+ * fee on or after `notBefore` and 14 days after the branch is told (the hourly billing run tells and applies it,
+ * exactly as any held rise). `from` and `to` are what the branch is CHARGED now and then (the lower of a deal and its
+ * own tier fee). The same change again is left as it is; a different one replaces it. Called under the owner's
+ * billing locks (chain-deal.ts).
+ */
+export async function holdChainDealRiseInTx(
+  tx: Prisma.TransactionClient,
+  p: { subscriptionId: string; from: number; to: number; customFrom: number; customTo: number | null; notBefore: Date; currencyCode: string; sourceRef?: string | null; now: Date },
+): Promise<'held' | 'unchanged' | 'not-a-rise'> {
+  if (!(p.from > 0) || !(p.to > p.from) || !(p.customFrom > 0) || (p.customTo !== null && !(p.customTo > p.customFrom))) return 'not-a-rise';
+  const sub = await tx.subscription.findUnique({ where: { id: p.subscriptionId }, select: { customRate: true, feeWaived: true } });
+  if (!sub || sub.feeWaived || sub.customRate === null || Number(sub.customRate) !== p.customFrom) return 'not-a-rise';
+  const key = feeRiseKey(p.subscriptionId);
+  const row = await tx.platformConfig.findUnique({ where: { key } });
+  const held = row ? readHeldFeeRise(row.value) : null;
+  if (held && held.source === 'CHAIN_DEAL' && held.from === p.from && held.to === p.to && held.customFrom === p.customFrom
+    && held.customTo === p.customTo && held.notBefore === p.notBefore.toISOString()) return 'unchanged';
+  const value: HeldFeeRise = {
+    from: p.from, to: p.to, currencyCode: p.currencyCode, source: 'CHAIN_DEAL', heldAt: p.now.toISOString(),
+    noticeAt: null, appliesFrom: null, inboxId: null, customFrom: p.customFrom, customTo: p.customTo, notBefore: p.notBefore.toISOString(),
+  };
+  const json = value as unknown as Prisma.InputJsonValue;
+  await tx.platformConfig.upsert({ where: { key }, update: { value: json }, create: { key, value: json } });
+  await tx.auditLog.create({ data: {
+    action: 'BILLING_FEE_RISE_HELD', entity: 'Subscription', entityId: p.subscriptionId,
+    changes: {
+      from: p.from, to: p.to, currencyCode: p.currencyCode, source: 'CHAIN_DEAL', sourceRef: p.sourceRef ?? null,
+      customFrom: p.customFrom, customTo: p.customTo, notBefore: p.notBefore.toISOString(), noticeDays: FEE_RISE_NOTICE_DAYS,
+      replaces: held ? { source: held.source, from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom } : null,
+    },
+  } });
+  return 'held';
 }
 
 /**
