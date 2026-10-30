@@ -138,6 +138,41 @@ describe('[E3] the chain fee statement', () => {
     expect(s.totals).toEqual({ weeksCharged: 28000, received: 14000, owedNow: 12000 });
   });
 
+  // [REVIEW-G note on #2228] The receipts are the chosen month's only: one issued in the last millisecond before the
+  // month, or at the first millisecond of the next (the bound is exclusive), is never on this month's statement; one
+  // in the month's last millisecond is. Each figure is its own amount, so the total names exactly which ones counted.
+  it('receipts are limited to the chosen month: one from the month before or the month after is left out', async () => {
+    const c = await chain();
+    const { from, to } = monthOf(new Date());
+    const receipt = async (issuedAt: Date, amount: number) => {
+      const ev = await app.prisma.billingEvent.create({ data: { subscriptionId: c.north.subId, type: 'PREPAID_TOPUP', amount, currencyCode: 'GYD', idempotencyKey: `stmt:${nanoid(10)}` } });
+      eventIds.push(ev.id);
+      await app.prisma.feeReceipt.create({ data: {
+        receiptNumber: `SWF-STMT-${RUN}-${nanoid(6)}`, subscriptionId: c.north.subId, billingEventId: ev.id, amount, channel: 'MMG_CHECKOUT', issuedAt } });
+    };
+    await receipt(new Date(from.getTime() - 1), 1111); // the previous month's last millisecond
+    await receipt(new Date(from.getTime() - 20 * DAY), 2222); // well inside the previous month
+    await receipt(to, 3333); // the next month's first millisecond
+    await receipt(new Date(to.getTime() + 20 * DAY), 4444); // well inside the next month
+    await receipt(new Date(to.getTime() - 1), 5555); // this month's last millisecond: in
+
+    const s = (await statementOf(c, c.north.vendorId)).json().data;
+    const north = s.branches.find((b: { branchName: string }) => b.branchName === `A North ${RUN}`);
+    expect(north.receipts.map((r: { amount: number }) => r.amount)).toEqual([14000, 5555]);
+    expect(north.receipts.every((r: { issuedAt: string }) => r.issuedAt >= s.from && r.issuedAt < s.to)).toBe(true);
+    expect(north.receiptsTotal).toBe(19555);
+    expect(s.totals.received).toBe(19555);
+
+    // The previous month's statement holds the two from before this month, and nothing from this one.
+    const prev = new Date(from.getTime() - DAY);
+    const prevMonth = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (prevMonth >= '2026-01') {
+      const p = (await statementOf(c, c.north.vendorId, prevMonth)).json().data;
+      const pn = p.branches.find((b: { branchName: string }) => b.branchName === `A North ${RUN}`);
+      expect(pn.receipts.map((r: { amount: number }) => r.amount)).toEqual([2222, 1111]);
+    }
+  });
+
   it('a month asked for that is malformed, in the future or before fees existed is refused', async () => {
     const c = await chain();
     for (const bad of ['2026-13', '26-10', '2099-01', '2025-12']) {
