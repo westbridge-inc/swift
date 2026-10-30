@@ -144,7 +144,7 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     }
   });
 
-  it('shows no multi-store discount — every store pays its own tier, even if an older server still sends the old rule', async () => {
+  it('shows no multi-store discount — every store pays its own fee, even if an older server still sends the old rule', async () => {
     pricing = { ...GY, franchise: { minLocations: 5, discountPct: 50 } };
     await renderPage();
     expect(screen.queryByRole('heading', { name: 'Franchises' })).toBeNull();
@@ -157,7 +157,9 @@ describe('public pricing page — every partner reads their own weekly fee', () 
 
   it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
     await renderPage();
-    expect(document.body.textContent).toContain('Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs.');
+    expect(document.body.textContent).toContain('Every store is its own account with its own weekly fee, however many stores its owner runs.');
+    // [REVIEW-F S3-1 on #2234] A store is priced at its first step whatever its catalogue (R27 off): never 'the rate for its own catalogue'.
+    expect(document.body.textContent).not.toMatch(/rate for its own catalogue/);
     cleanup();
     // A server from before multi-store pricing existed sends no key at all.
     pricing = { ...GY, franchise: undefined };

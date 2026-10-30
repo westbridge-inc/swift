@@ -8,8 +8,11 @@ import { site } from '@/site.config';
 export const metadata: Metadata = { title: 'Pricing' };
 
 // Every number on this page is the server's quote — resolved by the same
-// function signup and the weekly re-tier bill through — so what a partner reads
-// here is what they are billed. A mover reads the rate of the role their
+// function signup prices through — so what a partner reads here is what they
+// are billed. [R27] The weekly re-tier is OFF (no store moves between catalogue
+// steps), so the store steps above the first decide a NEW store's trial length
+// (and the fee of a store already on one before it went off); the paragraph
+// under the cards says so. A mover reads the rate of the role their
 // vehicle provisions: a taxi driver and a delivery rider never share a figure.
 // Only vehicles a mover can register today are shown (the server's `offered`
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
@@ -149,7 +152,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                   server that still sends the old rule bills it, so the page
                   must not claim otherwise; it shows no discount either way. */}
               {list.pricing.franchise == null && (
-                <>Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs. </>
+                <>Every store is its own account with its own weekly fee, however many stores its owner runs. </>
               )}
               {/* [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts,
                   WEEKLY_RETIER_ON = false): a store is born on the first catalogue step and nothing moves it to
