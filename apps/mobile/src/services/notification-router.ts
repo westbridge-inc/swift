@@ -85,6 +85,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   if (data['kind'] === 'billing_mmg_checkout' && data['audience'] === 'provider') {
     return { screen: 'ProviderWeeklyFee', params: typeof data['ref'] === 'string' ? { ref: data['ref'] } : {} };
   }
+  // [ENTERPRISE E1b] A pay-all payment's notice ({ ref, status, chainCheckout: true }, no subscription: it paid several
+  // branches) opens the owner's "Pay all my branches", which follows that ref. Never a mover's fee screen.
+  if (data['kind'] === 'billing_mmg_checkout' && (data['chainCheckout'] === true || data['chainCheckout'] === 'true')) {
+    return { screen: 'WeeklyFee', params: { feeFamily: 'vendor', payAll: true, ref: typeof data['ref'] === 'string' ? data['ref'] : undefined } };
+  }
   if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
@@ -108,6 +113,12 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // [BILL-PRO · REVIEW-G #2217 S4-2] A pro's fee notice under a partner kind (one the delivery rename missed) still
   // opens the pro fee screen: feeFamilyOf knows only store and mover, and would fall back to the open app's screen.
   if (PARTNER_FEE_KINDS.has(kind) && audience === 'provider') return { screen: 'ProviderWeeklyFee', params: {} };
+  // [ENTERPRISE E2 · REVIEW-F #2227] A notice that names its store (a chain branch's fee change carries vendorId and
+  // subscriptionId) opens THAT store's fee screen: the same checked switch a checkout push takes (resolveFeeNotification
+  // selects it only when the store's own subscription is the one named, else the selected store's screen).
+  if (PARTNER_FEE_KINDS.has(kind) && typeof data['vendorId'] === 'string' && typeof data['subscriptionId'] === 'string') {
+    return { screen: 'WeeklyFee', params: { vendorId: data['vendorId'], subscriptionId: data['subscriptionId'] } };
+  }
   if (PARTNER_FEE_KINDS.has(kind)) return { screen: 'WeeklyFee', params: { feeFamily: feeFamilyOf(audience, openApp) } };
 
   // [PUSH-ROUTING] DOCUMENTS. "Your document was rejected — fix it and

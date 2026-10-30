@@ -28,6 +28,7 @@ import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
 import { callsRoutes } from '../modules/calls/calls.routes';
+import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ async function buildTestApp() {
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
   await server.register(callsRoutes, { prefix: '/api/v1/calls' });
+  await server.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await server.ready();
   return server;
 }
@@ -176,6 +178,10 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/services/', wrongRoles: [] },
   { prefix: '/api/v1/partner/', wrongRoles: [] },
   { prefix: '/api/v1/statements/', wrongRoles: [] },
+  // [BILL-PRO PR4] A pro's own weekly fee. Being a pro is a profile, not a role (a customer, a store owner or a mover
+  // may also be a service provider), so no role token is wrong here by role; the gate is the person's OWN provider
+  // profile (no profile: refused, see PRO_FEE_NON_PRO below). The unauthenticated sweep applies to every route.
+  { prefix: '/api/v1/provider/', wrongRoles: [] },
 ];
 
 /** Routes that are UNAUTHENTICATED on purpose: a server-minted HMAC signature
@@ -309,6 +315,29 @@ describe('[T1] ops-only routes inside multi-role prefixes refuse every non-ops r
         if (!REJECTED.includes(res.statusCode)) offenders.push(`${route} -> ${res.statusCode}`);
       }
       expect(offenders, offenders.join('\n')).toEqual([]);
+    });
+  }
+});
+
+// [BILL-PRO PR4] /api/v1/provider reads and pays only the caller's OWN pro fee. The seeded customer, store owner and
+// mover have no provider profile, so every route here must refuse them: never a 2xx (no fee read, started or
+// paid), never a 5xx. GET /subscription says so with a 404 (no provider profile), as provider-fee-routes.test.ts pins.
+describe('[BILL-PRO] /api/v1/provider: a person with no provider profile never reads or pays a pro fee', () => {
+  for (const role of ['customer', 'vendor', 'mover']) {
+    it(`a ${role} token (no provider profile) is refused on every /api/v1/provider route`, async () => {
+      const routes = routeTable.filter((r) => r.url.startsWith('/api/v1/provider/'));
+      expect(routes.map((r) => `${r.method} ${r.url}`)).toEqual(expect.arrayContaining([
+        'GET /api/v1/provider/subscription', 'POST /api/v1/provider/weekly-fee-ack', 'PUT /api/v1/provider/subscription/billing-method',
+        'POST /api/v1/provider/subscription/mmg-checkout',
+      ]));
+      const offenders: string[] = [];
+      for (const r of routes) {
+        const res = await fire(r.method, r.url, tokens[role]);
+        if (res.statusCode < 400 || res.statusCode >= 500) offenders.push(`${r.method} ${r.url} -> ${res.statusCode}`);
+      }
+      expect(offenders, offenders.join('\n')).toEqual([]);
+      const own = await fire('GET', '/api/v1/provider/subscription', tokens[role]);
+      expect([own.statusCode, own.json().error?.code]).toEqual([404, 'NOT_FOUND']);
     });
   }
 });
