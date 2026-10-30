@@ -527,8 +527,9 @@ class JourneysOnCopy(unittest.TestCase):
         stores = sql[sql.index('UPDATE vendors'):]
         self.assertIn("AND \"suspensionSource\" = 'BILLING'", stores)
         self.assertIn('"acceptingOrders" = ("acceptingOrders" OR "isVerified")', stores)
-        # A new partner's trial: TRIAL, 14 days (SubscriptionService activation, TRIAL_DAYS).
-        days = re.search(r'export const TRIAL_DAYS = (\d+);', (REPO / 'apps/api/src/modules/subscription/subscription.service.ts').read_text())
+        # A new partner's trial: TRIAL, 14 days (SubscriptionService activation, TRIAL_DAYS; one definition in
+        # subscription/trial-length.ts since DEPT-PRICE). The roster's stores are small, never department-size.
+        days = re.search(r'export const TRIAL_DAYS = (\d+);', (REPO / 'apps/api/src/modules/subscription/trial-length.ts').read_text())
         self.assertEqual(sql.count(f"now() + interval '{days.group(1)} days'"), 3)
         self.assertIn("status = 'TRIAL'", sql)
         # Counts only.

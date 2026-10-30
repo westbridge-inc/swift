@@ -89,8 +89,12 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  certificate OPTIONAL (RESTAURANT and RESTAURANT_OWN_NAME no longer name it; RESTAURANT_OPTIONAL does): the owner
  *  ticks for the store's food handlers instead (vendor/food-handlers.ts, asked by code, on no list). The self-declared
  *  tier (RESTAURANT_UNREGISTERED), chef and caterer keep it required. Until the owner-signed seed lands, a stored
- *  RESTAURANT list that still names the certificate wins (stricter): the tick is asked either way. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-24.1';
+ *  RESTAURANT list that still names the certificate wins (stricter): the tick is asked either way.
+ *  2026-10-29.1 [DEPT-PRICE · owner 29 Oct ~22:31Z]: 2026-10-24.1 with Guyana's department-store weekly fee at
+ *  GY$45,000 (was 60,000). Nothing else moves. Production bills it only after the owner-signed seed applies this
+ *  version; stores already billed above it then move down from their next weekly fee (BillingService
+ *  applyCardPriceCuts), never a fee already charged. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-29.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -119,8 +123,13 @@ export const COMPLETE_CARD = 'complete';
 // offered (config/vehicle-classes LAUNCH_HIDDEN_VEHICLE_TYPES), so nobody can
 // sign up on that rate and no price list shows it; the rate stays here for the
 // day they return. The owner, 13 Oct 2026: no franchise discount — every store
-// is its own account and pays its own tier by its own catalogue.
-// Existing subscriptions move at the next weekly re-tier.
+// is its own account and pays its own tier by its own catalogue. The owner,
+// 29 Oct 2026: department stores (10,000+ active items) pay 45,000 a week, down
+// from 60,000 (and a NEW department-store signup gets a 7-day free trial:
+// subscription/trial-length.ts).
+// Existing subscriptions move at the next weekly re-tier; a card price that
+// goes DOWN moves every store billed above it at once, from its next weekly
+// fee (BillingService.applyCardPriceCuts).
 export const guyanaTiers = {
   card: COMPLETE_CARD,
   mover: 6000,
@@ -130,7 +139,7 @@ export const guyanaTiers = {
   serviceVendor: 8000,
   smallVendor: 15000,
   largeVendor: 20000,
-  departmentVendor: 60000,
+  departmentVendor: 45000,
   largeCatalogueThreshold: 1000,
   departmentCatalogueThreshold: 10000,
 };

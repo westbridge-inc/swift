@@ -44,7 +44,8 @@ describe('[FOOD-PERMIT] the restaurant lists', () => {
   });
 
   it('the config version moves above 2026-10-22.1 (an owner-signed seed carries the new lists)', () => {
-    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-24.1');
+    // [DEPT-PRICE] 2026-10-29.1 carries these lists on, with the department-store fee at 45,000 (dept-price.unit.test.ts)
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-29.1');
   });
 });
 

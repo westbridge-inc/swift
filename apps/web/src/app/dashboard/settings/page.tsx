@@ -12,6 +12,8 @@ import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } 
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
 import { BookingCapacityCard } from './booking-capacity-card';
+import { KitchenCapacityCard } from './kitchen-capacity-card';
+import { DeliveryStatusNotice } from '../delivery-status-notice';
 import { FoodHandlersCard } from './food-handlers-card';
 import { CallUsCard } from './call-us-card';
 import { StorePhotosCard } from './store-photos-card';
@@ -273,6 +275,7 @@ export default function SettingsPage() {
   return (
     <div className="max-w-3xl space-y-6">
       <h1 className="sw-title">Settings</h1>
+      <DeliveryStatusNotice storeId={storeId} />
 
       {profile.isError && <DataUnavailable what="your store details" error={profile.error} onRetry={() => void profile.refetch()} />}
       {p && (
@@ -303,6 +306,8 @@ export default function SettingsPage() {
       <StorePhotosCard storeId={storeId} />
       {/* [BOOK-S5b · owner C1] Services only, and only when the server sends the setting. */}
       <BookingCapacityCard storeId={storeId} />
+      {/* [RIDER-SAFE 4] How many orders the kitchen holds at once (stores that cook or pack). */}
+      <KitchenCapacityCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
       {/* [REVIEW-F #2220 S3-1] the number customers can call (a waiting store's go-live step) */}
       <CallUsCard storeId={storeId} />

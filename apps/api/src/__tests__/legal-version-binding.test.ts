@@ -312,6 +312,17 @@ const PUBLISHED: Record<
     driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
     vendor_agreement: '7a89f3321e109bd9f0082f77ea97b5457fb398b246c270b491038f3f84971ed8',
   },
+  // [BOOK-P3 · COORD ruling 29 Oct 2026 (b) · NON-material, customer-favourable · DRAFT until counsel] Terms s.7 adds
+  // one switched-on sentence: an appointment the Business or provider moves can be cancelled free in the app for 60
+  // minutes after the customer is told (APPOINTMENT_MOVED_FREE_CANCEL_MIN), or until it starts if sooner, even
+  // inside the 2-hour cut-off. The same day: LAST_UPDATED stays, so Privacy and both agreements keep their 2026-10-29
+  // hashes; taking that one sentence out of the Terms reproduces the 2026-10-29 Terms pin exactly.
+  '2026-10-29.1': {
+    terms: 'd70a9288cc77e6b7ecf880ceb434e3a60f1f9065020a2360c9f43745b77455b9',
+    privacy: 'cecd2b439bd410d76e79abc48f1f15fb62316ab2e0e2b2ebbf34011edfee473a',
+    driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
+    vendor_agreement: '7a89f3321e109bd9f0082f77ea97b5457fb398b246c270b491038f3f84971ed8',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

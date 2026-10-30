@@ -40,15 +40,16 @@ const GY = {
   vendors: {
     service: 8000,
     catalogue: [
-      { minItems: 0, tier: 'small', rate: 15000 },
-      { minItems: 1000, tier: 'large', rate: 20000 },
-      { minItems: 10000, tier: 'department', rate: 60000 },
+      { minItems: 0, tier: 'small', rate: 15000, trialDays: 14 },
+      { minItems: 1000, tier: 'large', rate: 20000, trialDays: 14 },
+      // [DEPT-PRICE · owner 29 Oct 2026] 45,000 (was 60,000); a NEW department-store signup gets 7 days free.
+      { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
     ],
   },
   // No multi-store pricing (owner, 13 Oct 2026): the server serves null.
   franchise: null,
   // What an older page reads; this page must not.
-  weekly: { mover: 8000, moverHeavy: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 60000, departmentVendor: 60000 },
+  weekly: { mover: 8000, moverHeavy: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 45000, departmentVendor: 45000 },
 };
 
 let pricing: unknown;
@@ -115,8 +116,30 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(within(large).getByText(/20,000/)).toBeTruthy();
     expect(large.textContent).toContain('1,000–9,999 active items');
     const department = cardOf('Department stores');
-    expect(within(department).getByText(/60,000/)).toBeTruthy();
+    expect(within(department).getByText(/45,000/)).toBeTruthy();
     expect(department.textContent).toContain('10,000+ active items');
+  });
+
+  it('[DEPT-PRICE] each catalogue card shows its own free trial: 7 days for a new department store, 14 for the others', async () => {
+    await renderPage();
+    const department = cardOf('Department stores').textContent!;
+    expect(department).toContain('7-day free trial');
+    expect(department).toContain('A new store with this many active items when Swift approves it gets 7 days free.');
+    expect(department).not.toContain('14-day');
+    for (const title of ['Businesses', 'Large catalogues', 'Services', 'Taxi drivers', 'Delivery & courier riders']) {
+      const card = cardOf(title).textContent!;
+      expect(card, title).toContain('14-day free trial');
+      expect(card, title).not.toContain('when Swift approves it gets');
+    }
+  });
+
+  it('[DEPT-PRICE] a server that predates the per-step trial, or sends a value that is not whole days, shows the list\'s own trial', async () => {
+    for (const trialDays of [undefined, 0, 2.5, '7']) {
+      pricing = { ...GY, vendors: { ...GY.vendors, catalogue: GY.vendors.catalogue.map((band) => ({ ...band, trialDays })) } };
+      await renderPage();
+      expect(cardOf('Department stores').textContent, String(trialDays)).toContain('14-day free trial');
+      cleanup();
+    }
   });
 
   it('shows no multi-store discount — every store pays its own tier, even if an older server still sends the old rule', async () => {

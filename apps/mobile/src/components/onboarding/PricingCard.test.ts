@@ -48,14 +48,15 @@ const GY = {
   vendors: {
     service: 8000,
     catalogue: [
-      { minItems: 0, tier: 'small', rate: 15000 },
-      { minItems: 1000, tier: 'large', rate: 20000 },
-      { minItems: 10000, tier: 'department', rate: 60000 },
+      { minItems: 0, tier: 'small', rate: 15000, trialDays: 14 },
+      { minItems: 1000, tier: 'large', rate: 20000, trialDays: 14 },
+      // [DEPT-PRICE · owner 29 Oct 2026] 45,000 (was 60,000); a NEW department-store signup gets 7 days free.
+      { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
     ],
   },
   franchise: { minLocations: 5, discountPct: 50 },
   // What an older app reads: the safe, conflated legacy numbers.
-  weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000 },
+  weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 45000 },
 };
 
 beforeEach(() => {
@@ -106,8 +107,26 @@ describe('PricingCard — vendors see their own tier and the automatic ladder', 
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
       expect(text).toContain('1,000+ active items $20,000/week');
-      expect(text).toContain('10,000+ $60,000/week');
+      expect(text).toContain('10,000+ $45,000/week');
       expect(text).toContain('automatically');
+    }
+  });
+
+  it('[DEPT-PRICE] a shop is told, from the server, that a new store at department size gets 7 days free; the headline keeps 14', () => {
+    const text = textOf(card({ kind: 'vendor', vendorType: 'SUPERMARKET' }));
+    expect(text).toContain('14 days free, then $15,000/week');
+    expect(text).toContain('A new store with 10,000+ active items when Swift approves it gets 7 days free.');
+    expect(text).not.toContain('1,000+ active items when Swift approves it');
+    // A service provider and a mover are never told it.
+    for (const props of [{ kind: 'vendor', vendorType: 'SERVICE' }, { kind: 'mover', vehicleType: 'CAR' }]) {
+      expect(textOf(card(props))).not.toContain('when Swift approves it');
+    }
+  });
+
+  it('[DEPT-PRICE] a server that predates the per-step trial, or sends a value that is not whole days, adds no trial line', () => {
+    for (const trialDays of [undefined, 0, 2.5, '7']) {
+      state.pricing = { ...GY, vendors: { ...GY.vendors, catalogue: GY.vendors.catalogue.map((band) => ({ ...band, trialDays })) } };
+      expect(textOf(card({ kind: 'vendor', vendorType: 'STORE' })), String(trialDays)).not.toContain('when Swift approves it');
     }
   });
 

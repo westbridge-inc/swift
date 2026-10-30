@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { lockVendorActivationBilling } from '../billing/billing-access';
-import { ACTIVE_CONFIRMATION_STATES, feeReversalOpenInTx, lateCardApprovalHeldInTx } from '../billing/dunning-clock';
+import { paymentInFlightInTx } from '../billing/payment-in-flight';
 import { CountryConfigService } from '../country/country-config.service';
 import { weeklyFeeAmount } from '../billing/subscription-fee';
 
@@ -60,15 +60,6 @@ export interface ChainDealResult {
 }
 
 const NOT_BILLED: readonly SubscriptionStatus[] = ['CANCELLED', 'CHURNED'];
-
-/** A payment of this subscription's weekly fee that is not settled yet: its quote must not change under it. */
-async function paymentInFlight(tx: Prisma.TransactionClient, subscriptionId: string): Promise<boolean> {
-  const [checkout, hold] = await Promise.all([
-    tx.mmgCheckoutIntent.findFirst({ where: { subscriptionId, status: { in: ['OPEN', 'CONFIRMING'] } }, select: { id: true } }),
-    tx.paymentConfirmationHold.findFirst({ where: { subscriptionId, status: { in: [...ACTIVE_CONFIRMATION_STATES] } }, select: { id: true } }),
-  ]);
-  return !!checkout || !!hold || await lateCardApprovalHeldInTx(tx, [subscriptionId]) || await feeReversalOpenInTx(tx, [subscriptionId]);
-}
 
 /** The owner's stores and what each pays per week, as the admin console shows a chain. Reads only. */
 export async function chainOf(prisma: PrismaClient, ownerId: string, tenantId: string) {
@@ -157,7 +148,7 @@ export async function setChainDeal(
       const to = weeklyFeeAmount({ weeklyRate: sub.weeklyRate, customRate: input.weeklyRate });
       // Never a rise: e.g. a branch on an older, lower custom rate keeps it.
       if (to > from) { branches.push(row('WOULD_RAISE', from)); continue; }
-      if (await paymentInFlight(tx, sub.id)) { branches.push(row('PAYMENT_IN_FLIGHT', from)); continue; }
+      if (await paymentInFlightInTx(tx, sub.id)) { branches.push(row('PAYMENT_IN_FLIGHT', from)); continue; }
       // The deal is a STANDING rule (REVIEW-G/M #2211 S3-1): written on every branch as its custom rate, so the branch
       // pays the lower of the deal and its own tier rate on every future week, whichever way its tier moves.
       await tx.subscription.update({ where: { id: sub.id }, data: { customRate: input.weeklyRate } });

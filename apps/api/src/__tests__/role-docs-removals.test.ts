@@ -67,8 +67,9 @@ describe('[ROLE-DOCS] the lists and the registry no longer ask for the removed d
     // the change carries its own config version (production picks it up with the next owner-signed seed)
     // (2026-10-21.2 adds the own-name store lists on top: own-name-declaration.test.ts; 2026-10-22.1 the solar
     // installer's GEI licence: role-docs-trades.unit.test.ts; 2026-10-24.1 a registered restaurant's food handler's
-    // certificate optional: food-handlers.unit.test.ts)
-    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-24.1');
+    // certificate optional: food-handlers.unit.test.ts; 2026-10-29.1 the department-store fee at 45,000:
+    // dept-price.unit.test.ts)
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-29.1');
   });
 
   it('no liquor licence, pharmacy authorisation or NIS registration is seeded, gated, disclosed or given an expiry', () => {

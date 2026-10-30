@@ -2340,6 +2340,10 @@ model Order {
   /// this value so delayed cleanup from generation N cannot erase N+1.
   fulfillmentModeVersion Int @default(0)
   appointmentSlot DateTime?
+  /// [BOOK-P3 · COORD 29 Oct 2026 (b)] When the BUSINESS last moved this appointment (its customer is told
+  /// at once). For APPOINTMENT_MOVED_FREE_CANCEL_MIN after it the customer cancels free in the app, even
+  /// inside the 2-hour cut-off (cancel-policy.ts; Terms s7). Null = never moved by the business.
+  appointmentMovedAt DateTime?
   /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
   /// vendor verifies it to close the order (no rider involved). Null otherwise.
   pickupCode      String?
@@ -3432,6 +3436,10 @@ model ServiceJob {
   /// Booking accept/decline (master plan §4.3): the provider confirms the
   /// customer's slot. Null on a SCHEDULED job = awaiting confirmation.
   providerConfirmedAt DateTime?
+  /// [BOOK-P3 · COORD 29 Oct 2026 (b)] When the PROVIDER last moved this job booked from their list (the
+  /// customer is told at once): the customer then cancels free in the app for
+  /// APPOINTMENT_MOVED_FREE_CANCEL_MIN, even inside the 2-hour cut-off (cancel-policy.ts; Terms s7).
+  providerMovedAt     DateTime?
   chatRoomId          String?
   completedAt         DateTime?
   cancelledAt         DateTime?

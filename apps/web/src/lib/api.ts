@@ -28,6 +28,9 @@ export interface CataloguePriceBand {
   minItems: number;
   tier: 'small' | 'large' | 'department';
   rate: number;
+  /** The free trial, in days, of a NEW store at this step when Swift approves it (7 at the department step, owner
+   *  29 Oct 2026). Absent from a server that predates it: the list's own `trialDays` stands. */
+  trialDays?: number;
 }
 
 export interface CountryPricing {

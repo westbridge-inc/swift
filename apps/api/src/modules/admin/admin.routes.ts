@@ -2226,7 +2226,7 @@ export async function adminRoutes(app: FastifyInstance) {
       request,
     );
 
-    // Verification is the founder-chosen trigger: start the 14-day trial.
+    // Verification is the founder-chosen trigger: start the free trial (subscription/trial-length.ts).
 
     await notifications.send({
       userId: rider.userId,
@@ -2399,7 +2399,7 @@ export async function adminRoutes(app: FastifyInstance) {
       request,
     );
 
-    // Verification is the founder-chosen trigger: start the 14-day trial.
+    // Verification is the founder-chosen trigger: start the free trial (subscription/trial-length.ts).
 
     await notifications.send({
       userId: driver.userId,

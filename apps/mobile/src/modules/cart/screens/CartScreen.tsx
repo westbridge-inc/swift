@@ -6,7 +6,8 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { createHomeRefreshGate, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { customerApi } from '../../../services/api';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { deliveryNoticeFor, riderBasketKey } from '../deliveryAvailability';
 import {
   useCart,
   useClearCart,
@@ -309,6 +310,19 @@ export function CartScreen() {
     [c?.paymentCapabilities],
   );
   const effectivePaySelection = reconcileCartPaymentSelection(paySelection, paymentCapabilities);
+  // [RIDER-SAFE 1] Told BEFORE ordering, in the server's words: riders busy
+  // ("about N min extra"), or delivery off for now — with pickup offered. A
+  // failed read says nothing (checkout still decides).
+  const riderStore: string | null = c?.vendor?.id ?? null;
+  const riderReadOn = !!riderStore && !!c?.deliveryAddress && !quoteBasis.bookingsOnly && fulfillment !== 'PICKUP';
+  const riderRead = useQuery({
+    queryKey: ['delivery-availability', riderStore, c?.deliveryAddress?.id ?? null, effectivePaySelection.method, riderBasketKey(c?.items)],
+    queryFn: async () => (await customerApi.getDeliveryAvailability(riderStore!, effectivePaySelection.method === 'MMG' ? 'MOBILE_MONEY' : 'CASH')).data?.data,
+    enabled: riderReadOn,
+    staleTime: 10_000,
+    retry: false,
+  });
+  const riderNotice = riderReadOn ? deliveryNoticeFor(riderRead.data) : null;
 
   // Tip intent belongs to one logical cart. Never reset it from tipAmount — a
   // late persistence response must not replace the customer's local choice.
@@ -1127,7 +1141,15 @@ export function CartScreen() {
               </T>
             </View>
           ) : null}
-          {noRiders ? (
+          {riderNotice && !noRiders ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }} accessibilityRole="text">
+              <Feather name="clock" size={14} color={color.warning} />
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
+                {riderNotice.text}
+              </T>
+            </View>
+          ) : null}
+          {noRiders || riderNotice?.offerPickup ? (
             <PillButton
               label="Order for pickup instead — no delivery fee"
               variant="outline"
