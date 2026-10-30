@@ -1,5 +1,5 @@
 import { apiFetch } from './auth';
-import { LEGAL_URL } from './api';
+import { LEGAL_URL } from './legal-url';
 
 /**
  * [Legal research G2 · R26] The fresh acceptance tick: GET /auth/legal-acceptance says whether the signed-in

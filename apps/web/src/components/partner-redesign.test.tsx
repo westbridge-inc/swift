@@ -2,7 +2,7 @@ import { render, screen, within, waitFor } from '@testing-library/react';
 import { describe, it, vi } from 'vitest';
 import { LayoutDashboard, Receipt } from 'lucide-react';
 import { ConsoleShell } from './console-shell';
-import { SwitchAppSheet } from './customer-shell';
+import { SwitchAppSheet } from './account-chrome';
 import { mockApi, renderWithQuery, stubAudioContext } from '@/test/test-utils';
 import { wireVendorOrder } from '@/test/vendor-wire-fixtures';
 import OrdersPage from '@/app/dashboard/orders/page';

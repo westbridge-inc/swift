@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import {
-  BRANCH_TRIAL_IS_THE_BUSINESS, branchLabel, branchOutcomeWords, branchTrialLine, copyResultWords, dealLine,
-  forEachBranch, isAwaitingApproval, newCopyKey, weeklyFeeWords, BRANCH_IS_CHECKED,
-} from './branches';
+import { BRANCH_TRIAL_IS_THE_BUSINESS, branchTrialLine, dealLine, weeklyFeeWords, BRANCH_IS_CHECKED } from './branches';
+import { branchLabel, isAwaitingApproval } from './branch-label';
+import { branchOutcomeWords, forEachBranch } from './branch-bulk';
+import { copyResultWords, newCopyKey } from './branch-menu-copy-words';
 import { ownerSteps } from './branch-go-live';
 
 // [CHAINS PR2] The branch words and the bulk rule the branch pages share.

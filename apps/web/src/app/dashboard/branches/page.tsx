@@ -11,8 +11,8 @@ import { storeKey, switchStore, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { normalizeHours, timeAgo } from '@/lib/vendor-hub';
 import { BUCKETS, bucketFor } from '@/lib/order-buckets';
-import { branchLabel, branchOutcomeWords, forEachBranch, isAwaitingApproval } from '@/lib/branches';
-import { waitingFor } from '@/lib/branch-label';
+import { branchOutcomeWords, forEachBranch } from '@/lib/branch-bulk';
+import { branchLabel, isAwaitingApproval, waitingFor } from '@/lib/branch-label';
 import { ownerSteps } from '@/lib/branch-go-live';
 import { DataUnavailable } from '@/components/data-unavailable';
 

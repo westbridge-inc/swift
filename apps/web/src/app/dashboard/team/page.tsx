@@ -7,7 +7,8 @@ import { addStaff, getStaff, removeStaff, updateStaffRole, type StaffMember } fr
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { useStepUp, isStepUpDismissed } from '@/lib/step-up';
-import { TEAM_ROLE_WORDS, branchLabel } from '@/lib/branches';
+import { TEAM_ROLE_WORDS } from '@/lib/team-roles';
+import { branchLabel } from '@/lib/branch-label';
 import { DataUnavailable } from '@/components/data-unavailable';
 
 const errorWords = (e: unknown, fallback: string) => (!e || isStepUpDismissed(e) ? null : e instanceof Error && e.message ? e.message : fallback);

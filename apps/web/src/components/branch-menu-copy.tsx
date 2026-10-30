@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import type { Store } from '@/lib/vendor-api';
 import { copyMenu, type MenuCopyResult } from '@/lib/branches-api';
-import { copyResultWords, newCopyKey } from '@/lib/branches';
+import { copyResultWords, newCopyKey } from '@/lib/branch-menu-copy-words';
 
 /**
  * [CHAINS PR2 · owner 29 Oct 2026] An empty branch menu can start as a copy of another branch's: its sections,
