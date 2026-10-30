@@ -2,11 +2,12 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatMoney } from '@/lib/money';
-import { getChainStatement, getMyRole, lastGuyanaMonth, statementDay, statementTime, thisGuyanaMonth, type ChainStatement, type ChainStatementBranch } from '@/lib/chain-statement';
+import { getChainStatement, lastGuyanaMonth, statementDay, statementTime, thisGuyanaMonth, type ChainStatement, type ChainStatementBranch } from '@/lib/chain-statement';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { storeKey, useStoreId } from '@/lib/store-scope';
+import { useStoreRole } from '@/lib/store-role';
 
 const money = (n: number) => formatMoney(n);
 
@@ -19,8 +20,10 @@ const money = (n: number) => formatMoney(n);
  */
 export default function FeeStatementPage() {
   const storeId = useStoreId();
-  const role = useQuery({ queryKey: storeKey(storeId, 'my-role'), queryFn: getMyRole });
-  const isOwner = role.data === 'OWNER';
+  const queryClient = useQueryClient();
+  // [REVIEW-F #2228 9a10328f S3-1] The console's one role read (same key, same shape as the shell's), never a second.
+  const role = useStoreRole();
+  const isOwner = role.role === 'OWNER';
   const [month, setMonth] = useState(() => lastGuyanaMonth());
   const statement = useQuery({ queryKey: storeKey(storeId, 'chain-statement', month), queryFn: () => getChainStatement(month), enabled: isOwner });
 
@@ -30,9 +33,9 @@ export default function FeeStatementPage() {
         <Link href="/dashboard/weekly-fee" className="text-sm text-[var(--swift-muted)] hover:underline">← Weekly fee</Link>
         <h1 className="sw-title mt-1">Fee statement</h1>
       </div>
-      {role.isLoading && <div className="sw-empty print:hidden" role="status">Loading…</div>}
-      {role.isError && <DataUnavailable what="your store details" error={role.error} onRetry={() => void role.refetch()} />}
-      {role.isSuccess && !isOwner && <div className="sw-card p-6 text-sm">Only the business owner sees the fee statement.</div>}
+      {!role.known && !role.failed && <div className="sw-empty print:hidden" role="status">Loading…</div>}
+      {role.failed && <DataUnavailable what="your store details" onRetry={() => void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'my-role') })} />}
+      {role.known && !isOwner && <div className="sw-card p-6 text-sm">Only the business owner sees the fee statement.</div>}
       {isOwner && (
         <>
           <div className="sw-card p-6 space-y-3 print:hidden">

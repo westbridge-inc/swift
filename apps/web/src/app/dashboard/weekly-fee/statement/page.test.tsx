@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
 import * as chainStatement from '@/lib/chain-statement';
+import * as vendorApi from '@/lib/vendor-api';
 import type { ChainStatement } from '@/lib/chain-statement';
 import FeeStatementPage from './page';
 
@@ -28,10 +29,12 @@ const statement: ChainStatement = {
 };
 
 afterEach(() => { vi.restoreAllMocks(); });
+// The console's own role read (useStoreRole: the stores list with this login's role at the selected store).
+const asRole = (myRole: string) => vi.spyOn(vendorApi, 'getStores').mockResolvedValue({ stores: [], selectedId: 'store-1', myRole } as never);
 
 describe('[E3] the fee statement page', () => {
   it('the owner sees the month: issuer, owner, each branch, totals and "Not a VAT invoice"', async () => {
-    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('OWNER');
+    asRole('OWNER');
     vi.spyOn(chainStatement, 'lastGuyanaMonth').mockReturnValue('2026-10');
     const get = vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
@@ -57,7 +60,7 @@ describe('[E3] the fee statement page', () => {
   });
 
   it('another month asks for exactly that month', async () => {
-    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('OWNER');
+    asRole('OWNER');
     vi.spyOn(chainStatement, 'lastGuyanaMonth').mockReturnValue('2026-10');
     const get = vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
@@ -66,7 +69,7 @@ describe('[E3] the fee statement page', () => {
   });
 
   it('[REVIEW-F #2228 S4-2] each branch says what it pays: its own lower fee is not the deal; waived, trial and not-billed are said', async () => {
-    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('OWNER');
+    asRole('OWNER');
     vi.spyOn(chainStatement, 'lastGuyanaMonth').mockReturnValue('2026-10');
     const base = statement.branches[1]!;
     const branch = (name: string, over: Partial<typeof base>) => ({ ...base, vendorId: name, branchName: name, owedNow: null, ...over });
@@ -87,20 +90,20 @@ describe('[E3] the fee statement page', () => {
   });
 
   it('[REVIEW-F #2228 S4-3] the month picker runs from 2026-01 to this month, and the page says it is loading while it checks the role', async () => {
-    let resolve: (_role: string) => void = () => undefined;
-    vi.spyOn(chainStatement, 'getMyRole').mockReturnValue(new Promise((r) => { resolve = r; }));
+    let resolve: (_v: Awaited<ReturnType<typeof vendorApi.getStores>>) => void = () => undefined;
+    vi.spyOn(vendorApi, 'getStores').mockReturnValue(new Promise((r) => { resolve = r; }));
     vi.spyOn(chainStatement, 'thisGuyanaMonth').mockReturnValue('2026-11');
     vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
     expect(screen.getByRole('status').textContent).toBe('Loading…');
-    resolve('OWNER');
+    resolve({ stores: [], selectedId: 'store-1', myRole: 'OWNER' } as never);
     const input = await screen.findByLabelText('Month');
     expect(input.getAttribute('min')).toBe('2026-01');
     expect(input.getAttribute('max')).toBe('2026-11');
   });
 
   it('a manager is told only the owner sees it, and the server is not asked', async () => {
-    vi.spyOn(chainStatement, 'getMyRole').mockResolvedValue('MANAGER');
+    asRole('MANAGER');
     const get = vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
     renderWithQuery(<FeeStatementPage />);
     expect(await screen.findByText('Only the business owner sees the fee statement.')).toBeTruthy();

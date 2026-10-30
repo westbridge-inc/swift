@@ -37,10 +37,6 @@ export interface ChainStatement {
 export const getChainStatement = (month: string): Promise<ChainStatement> =>
   apiFetch(`/api/v1/vendor/subscription/chain-statement?month=${encodeURIComponent(month)}`).then((r) => r.data as ChainStatement);
 
-/** The store owner's role on the selected store (the profile read the console already makes). */
-export const getMyRole = (): Promise<string | undefined> =>
-  apiFetch('/api/v1/vendor/profile').then((r) => (r.data as { myRole?: string } | undefined)?.myRole);
-
 /** A moment in Guyana, "29 Oct 2026, 3:05 pm". */
 export const statementTime = (iso: string) =>
   new Date(iso).toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
