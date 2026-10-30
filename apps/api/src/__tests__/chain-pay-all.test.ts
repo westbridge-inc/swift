@@ -37,7 +37,7 @@ import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 import { FakeMmgHistory, mmgTimeOf } from './helpers/mmg-history-fake';
-import { NO_REPLY_CHECK_ACTOR, NO_REPLY_CLOSE_AUDIT, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
+import { NO_REPLY_CHECK_ACTOR, NO_REPLY_CLOSE_AUDIT, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS, CONFIRMATION_RESOLVE_ACTION } from '../modules/billing/mmg-expired-hold-check';
 
 // ---------------------------------------------------------------------------
 // [ENTERPRISE E1 · owner 29 Oct 2026 "just do whats best"; COORD ruling
@@ -208,6 +208,7 @@ async function openPayAll(o: Owner) {
 }
 const partsOf = (ref: string) => app.prisma.mmgCheckoutPart.findMany({ where: { checkoutId: ref }, orderBy: { subscriptionId: 'asc' } });
 const holdsOf = (subscriptionId: string) => app.prisma.paymentConfirmationHold.findMany({ where: { subscriptionId }, orderBy: { createdAt: 'asc' } });
+const approvalIds: string[] = [];
 const activeHoldsOf = (subscriptionId: string) => app.prisma.paymentConfirmationHold.findMany({ where: { subscriptionId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } });
 const walletOf = async (subscriptionId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } })).balance);
 const checkoutTopups = (subscriptionId: string) => app.prisma.billingEvent.findMany({ where: { subscriptionId, type: 'PREPAID_TOPUP', idempotencyKey: { startsWith: 'mmg-checkout:' } } });
@@ -267,6 +268,7 @@ afterAll(async () => {
   await isolated(async () => {
     const chainIntents = await app.prisma.mmgCheckoutIntent.findMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { chainOwner: { userId: { in: userIds } } }] }, select: { id: true } });
     const intentIds = chainIntents.map((i) => i.id);
+    await app.prisma.privilegedApproval.deleteMany({ where: { id: { in: approvalIds } } });
     await cleanupBillingClocks(app.prisma, subIds);
     await app.prisma.mmgCheckoutPart.deleteMany({ where: { checkoutId: { in: intentIds } } });
     await app.prisma.mmgCheckoutObservation.deleteMany({ where: { OR: [{ intentId: { in: intentIds } }, { intentId: null, createdAt: { gte: startedAt } }] } });
@@ -672,6 +674,41 @@ describe('[REVIEW-M #2224 S3-1] an abandoned pay-all is closed by MMG\'s own rec
     await service.pollIntents(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
     expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('EXPIRED');
     for (const b of o.branches) expect(await activeHoldsOf(b.subId)).toHaveLength(1);
+  });
+
+  // [REVIEW-G #2224 H2] A second-admin request on ANY branch's hold (not only the first one found) leaves the whole
+  // pay-all to the admins: tried on each branch's hold in turn, the checkout is never closed while one is waiting.
+  it('a second-admin request on any one branch\'s hold leaves the whole pay-all to the admins', async () => {
+    await control();
+    for (const pick of [0, 1, 2]) {
+      const o = await makeChain([{}, {}, {}]);
+      const { ref, row } = await openPayAll(o);
+      const hold = (await activeHoldsOf(o.branches[pick]!.subId))[0]!;
+      const approval = await app.prisma.privilegedApproval.create({ data: {
+        tenantId: row.tenantId, action: CONFIRMATION_RESOLVE_ACTION, cls: 'C4', capability: 'billing.payment.attach', entityId: hold.id, fingerprint: `fp-${RUN}-${pick}`,
+        bodySnapshot: { params: { id: hold.id }, body: { decision: 'PAID', sourceId: ref }, query: {} },
+        status: 'PENDING', requestedBy: 'admin-fixture', reason: 'Partner sent an MMG receipt; checking it against the statement.',
+        expiresAt: new Date(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS).getTime() + 3 * 86_400_000),
+      } });
+      approvalIds.push(approval.id);
+      await service.pollIntents(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
+      expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status, `request on branch ${pick}`).toBe('EXPIRED');
+      for (const b of o.branches) expect(await activeHoldsOf(b.subId)).toHaveLength(1);
+    }
+  });
+
+  // [REVIEW-G #2224 H7] The close re-reads EVERY covered hold under the locks: one that is no longer ACTIVE (here a
+  // settlement being applied on one branch) stops the close for all of them (nothing is released for any branch).
+  it('a covered hold no longer active stops the close for every branch', async () => {
+    await control();
+    const o = await makeChain([{}, {}]);
+    const { ref, row } = await openPayAll(o);
+    const hold = (await activeHoldsOf(o.branches[1]!.subId))[0]!;
+    await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'SETTLEMENT_APPLY_PENDING', reason: 'SETTLEMENT_APPLY_PENDING' } });
+    await service.pollIntents(after(row, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
+    expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('EXPIRED');
+    const holds = await app.prisma.paymentConfirmationHold.findMany({ where: { checkoutPart: { is: { checkoutId: ref } } } });
+    expect(holds.some((h) => h.status === 'PROVEN_UNPAID')).toBe(false);
   });
 
   it('a record naming it after the close puts it back in front of a person: every branch paused again, nothing credited', async () => {
