@@ -71,6 +71,28 @@ describe('phone checkout lifecycle', () => {
     expect(host.read.mock.calls.length).toBeGreaterThan(before);
     expect(refresh).toHaveBeenCalled(); expect(render(sub)).toContain('Paid: GY$1,200');
   });
+  it('[ENTERPRISE E1b] shows the "Pay all my branches" door only when the owner\'s screen hands one in, and it opens it', () => {
+    const sub: FeeSubscription = { status: 'ACTIVE', payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] };
+    expect(render(sub)).not.toContain('Pay all my branches');
+    const onPayAll = vi.fn();
+    host.index = 0;
+    const tree = WeeklyFeeScreen({ family: 'vendor', sub, refresh, onPayAll }) as ReactElement<{ children?: unknown }>;
+    const words = text(tree);
+    expect(words).toContain('Pay all my branches');
+    expect(words).toContain('Optional: each branch can still pay on its own.');
+    // This branch's own Pay stays.
+    expect(words).toContain('Pay GY$1,200 with MMG');
+    type Node = { type?: unknown; props?: { label?: string; onPress?: () => void; children?: unknown } };
+    const find = (node: unknown): Node | undefined => {
+      if (Array.isArray(node)) return node.map(find).find(Boolean);
+      if (!node || typeof node !== 'object') return undefined;
+      const e = node as Node;
+      return e.type === 'PillButton' && e.props?.label === 'Pay all my branches' ? e : find(e.props?.children);
+    };
+    const door = find(tree);
+    door!.props!.onPress!();
+    expect(onPayAll).toHaveBeenCalledTimes(1);
+  });
   it('keeps Pay unavailable while a notification store is unresolved', () => {
     host.pending = true;
     expect(render({ status: 'ACTIVE', payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] })).not.toContain('Pay GY$1,200 with MMG');

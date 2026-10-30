@@ -15,9 +15,11 @@ import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/week
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
-export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false }: {
+export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false, onPayAll }: {
   family: FeeFamily; sub?: FeeSubscription | null; loading?: boolean; error?: boolean;
   refresh: () => unknown; checkoutRef?: string; contextPending?: boolean;
+  /** [ENTERPRISE E1b] The owner of several stores only: opens "Pay all my branches". */
+  onPayAll?: () => void;
 }) {
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   const resolvingStore = useStoreSwitcher((s) => s.feeContextPending);
@@ -125,6 +127,12 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
             })}
           /> : null}
         </Card>
+        {/* [ENTERPRISE E1b] Optional: this branch can still pay its own fee below. */}
+        {onPayAll ? <Card testID="weekly-fee-pay-all">
+          <T variant="heading">Pay all my branches</T>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>One MMG payment for every branch with a weekly fee due. Optional: each branch can still pay on its own.</T>
+          <PillButton label="Pay all my branches" variant="soft" style={{ marginTop: space.lg }} onPress={onPayAll} />
+        </Card> : null}
         {action && !blocked && card ? <T variant="heading" accessibilityRole="header">Choose how to pay</T> : null}
         {canReopen && reopen ? <Card>
           <T variant="heading">Back to MMG&apos;s page</T>
