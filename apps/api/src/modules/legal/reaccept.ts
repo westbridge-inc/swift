@@ -75,7 +75,7 @@ export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
     audience: 'provider',
     summary: [
       'Service providers: the Business Agreement now covers you as an independent provider (section 12). Read it and accept it to keep offering your services on Swift.',
-      'The weekly services fee: Swift tells you in the app before it starts for providers, and nothing is charged until you accept. You pay only on MMG’s checkout page, in the Swift app or on the Swift website. If you also own a Services store, you pay one fee while your store’s fee is paid.',
+      'The weekly services fee: Swift tells you in the app before it starts for providers. Nothing is charged until you accept this agreement and confirm you understand the fee, and your free trial starts no earlier than the day the fee starts for providers. You pay only on MMG’s checkout page, in the Swift app or on the Swift website. If you also own a Services store, its fee covers you: you pay one fee.',
       'If you publish a list of services with bookable times, you accept in advance the bookings customers make from it at the times it shows as free. Honour them, or cancel or move them in the app as early as you can.',
     ],
   },
@@ -236,7 +236,8 @@ export async function recordReacceptance(
   prisma: PrismaClient,
   input: { userId: string; roles: readonly UserRole[]; hadAccepted: boolean; surface: ConsentSurface; ip?: string | null },
 ): Promise<void> {
-  // [BILL-PRO] A pro accepts the Business Agreement with the tick. Read again inside the lock below.
+  // [BILL-PRO] A pro accepts the Business Agreement with the tick. (Whether they are a pro is read here, before the lock;
+  // their agreement is re-read inside it. A profile created in between is asked again on the next status read.)
   const isPro = !!(await prisma.serviceProvider.findUnique({ where: { userId: input.userId }, select: { id: true } }));
   const docs: Agreement[] = [
     { documentType: 'terms_of_service', subjectType: 'customer', renderedText: TERMS },

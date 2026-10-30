@@ -31,19 +31,24 @@ describe('the Business Agreement covers Providers (section 12)', () => {
   const text = flat(VENDOR_AGREEMENT);
   const s12 = text.slice(text.indexOf('12. Independent service providers'));
 
-  it('names the Provider in the opening, and how a Provider accepts it (profile, or when the app asks)', () => {
+  it('names the Provider in the opening, and how a Provider accepts it (when the app asks, after the profile is created)', () => {
     expect(text).toContain('including an independent professional who offers their own services in the Services tab ("Provider", see section 12)');
-    expect(text).toContain('when you create your store or your provider profile, or when the app asks you to accept this Agreement');
+    // [REVIEW-F #2225 S3-1] No box exists when a provider profile is created: a Provider accepts when the app asks.
+    expect(text).toContain('when you create your store, or when the app asks you to accept this Agreement (as it asks a Provider after they create their provider profile)');
+    expect(text).not.toContain('your provider profile, or when');
     expect(text).toContain('or, as a Provider, for yourself.');
   });
 
   it("states the owner's fee rulings: MMG checkout in the app or on the website, never before acceptance, trial, one fee, the 48-hour block", () => {
     expect(s12.length).toBeGreaterThan(500);
     expect(s12).toContain('only through MMG\'s checkout page in the Swift app or on the Swift website');
-    expect(s12).toContain('Nothing is charged until you have accepted this Agreement');
+    expect(s12).toContain('Nothing is charged until you have accepted this Agreement and confirmed in the app that you understand the weekly fee');
     expect(s12).toContain('once the weekly fee has started for Providers, you are not listed and cannot take new requests or bookings');
-    expect(s12).toContain('your free trial starts the day you accept it');
-    expect(s12).toContain('while your store\'s weekly fee is paid, your provider profile needs no separate fee');
+    // [REVIEW-F #2225 S3-2 · owner 30 Oct 00:14Z] The trial starts on the LATER of switch-on and the pro's own steps.
+    expect(s12).toContain('Your free trial, where offered, starts on the day the last of these happens: the weekly fee starts for Providers, Swift approves your documents, you accept this Agreement, and you confirm in the app that you understand the weekly fee.');
+    expect(s12).not.toContain('starts the day you accept it');
+    // [REVIEW-F S4-1] A live store fee covers the pro, unpaid or not: one fee, and its 48-hour rule.
+    expect(s12).toContain('your store\'s weekly fee covers your provider profile: you pay one fee, and the 48-hour rule below applies to it');
     expect(s12).toContain('unpaid 48 hours after it falls due, you are not listed and cannot receive new requests, send quotes or confirm new bookings');
     expect(s12).toContain('jobs already booked can still go ahead, and your chats stay open');
     expect(s12).toContain('A person at Swift checks them.');
@@ -160,6 +165,17 @@ describe('GET/POST /auth/legal-acceptance for a pro', () => {
     // A double tap records once.
     expect((await call('POST', pro.token, { version: LEGAL_VERSION, accept: true })).statusCode).toBe(200);
     expect(await rows(pro.id)).toHaveLength(1);
+  });
+
+  it('[REVIEW-G #2225 S4-2] a pro who withdrew the agreement is asked again (never stuck: unbookable and never asked)', async () => {
+    const pro = await mkPro(LEGAL_VERSION);
+    expect((await call('POST', pro.token, { version: LEGAL_VERSION, accept: true })).statusCode).toBe(200);
+    expect((await call('GET', pro.token)).json().data).toMatchObject({ needsAcceptance: false });
+    await new Promise((r) => setTimeout(r, 5)); // capturedAt orders the rows
+    await runWithoutTenant(() => app.prisma.consentRecord.create({
+      data: { subjectType: 'vendor_user', subjectId: pro.id, documentType: 'vendor_agreement', documentVersion: LEGAL_VERSION, documentContentHash: 'withdrawal', action: 'withdrawn', surface: 'ios' },
+    }), 'test-setup:pro-agreement');
+    expect((await call('GET', pro.token)).json().data).toMatchObject({ needsAcceptance: true, agreements: ['vendor_agreement'] });
   });
 
   it('a pro behind on the Terms accepts the Terms, the Privacy Policy and the Business Agreement together', async () => {
