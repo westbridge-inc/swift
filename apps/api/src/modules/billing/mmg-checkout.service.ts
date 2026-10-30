@@ -29,7 +29,7 @@ import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
-import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { liveServicesStoreFeeWhere, PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../providers/mmg/mmg-history';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
@@ -1587,7 +1587,13 @@ export class MmgCheckoutService {
       const userId = payerUserIdOf(sub);
       if (!userId) return;
       const amount = formatMoney(Number(intent.amount), 'GYD', { whole: true });
-      const copy = status === 'CONFIRMED'
+      // [BILL-PRO · REVIEW-M #2230 S4-2] A pro's own-fee payment confirmed after their Services store's fee went live is
+      // kept as credit on the pro's own fee (the store's fee is the one fee now): say that, never "paid".
+      const coveredPro = status === 'CONFIRMED' && !!sub?.serviceProvider
+        && (await this.prisma.subscription.count({ where: liveServicesStoreFeeWhere(sub.serviceProvider.userId) })) > 0;
+      const copy = coveredPro
+        ? { title: 'MMG payment kept as credit', body: `${amount} received with MMG. Your Services store\u2019s weekly fee covers your provider profile now, so this is kept as credit on your own provider weekly fee, never lost.` }
+        : status === 'CONFIRMED'
         ? { title: 'Weekly fee paid', body: `${amount} received with MMG. Thank you.` }
         : status === 'NOT_PAID'
           ? { title: 'MMG payment not completed', body: `MMG did not complete your ${amount} weekly-fee payment.` }
