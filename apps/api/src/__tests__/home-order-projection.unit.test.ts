@@ -87,6 +87,9 @@ async function harness(vendors = [vendor(1), vendor(2)]) {
         note('favorites', args, principal);
         return (state.favorites.get(principal) ?? []).map((id) => ({ id }));
       }
+      // [CHAINS PR3] brand.ts brandFactsFor: which of the stores this Home already chose belong to a brand Swift named.
+      // No fixture store belongs to one (the one-card-per-brand collapse is proven in chains-brand-card.test.ts).
+      if (args.where && 'brandListedAlone' in args.where) { note('brands', args); return []; }
       note('vendors', args); started.vendor.resolve();
       const snapshot = copy(state.vendorsByTenant.get(getTenantId() ?? '') ?? state.vendors);
       await state.vendorGate?.promise;

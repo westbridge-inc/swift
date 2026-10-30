@@ -1475,6 +1475,10 @@ model VendorOwner {
   dealSetAt        DateTime?
   dealSetBy        String?
   dealReason       String?
+  /// [CHAINS PR3 · owner 29 Oct 2026] The chain's name customers see ONCE for all its branches (one brand card that
+  /// opens the nearest open branch that delivers to them). Set by a person at Swift (admin, with a reason); null = no
+  /// brand, every store on its own card. CHECK vendor_owners_brand_name_shape: 2-60 characters, trimmed.
+  brandName        String?
   /// [ENTERPRISE E2 · owner 29 Oct 2026] A change to the chain deal that RAISES the branches' fees: the deal ENDS
   /// (each branch back to its own tier fee) or is RAISED to dealChangeTo. Never sooner than the fee-change notice
   /// allows: each branch is told in the app at least 14 days ahead and pays the new fee only from its first weekly
@@ -1527,6 +1531,8 @@ model Vendor {
   /// at Swift to approve it (its address and pin) before it can go live; the owner's documents are not asked again.
   /// Cleared when a person activates it (admin approve). False for every store made any other way.
   personApprovalRequired  Boolean                  @default(false)
+  /// [CHAINS PR3] Swift lists this branch on its own card even though its owner has a brand (admin "split").
+  brandListedAlone        Boolean                  @default(false)
   tenantId                String                   @default("swift-default")
   tenant                  Tenant                   @relation(fields: [tenantId], references: [id])
   ownerId                 String

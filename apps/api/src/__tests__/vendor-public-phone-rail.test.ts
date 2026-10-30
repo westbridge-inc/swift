@@ -271,6 +271,8 @@ describe('discovery publishes the public card, never the account row', () => {
         ...VENDOR_CARD_PUBLIC_FIELDS,
         'distanceKm', 'etaMin', 'deliveryFee', 'isFavorite',
         'displayRating', 'ratingBucket', 'ratingCount', 'topRated',
+        // [CHAINS PR3] One brand card per chain: the brand's name and branch count, or null.
+        'brand',
       ].sort();
 
       const browse = await inject('GET', '/api/v1/customer/vendors?cuisine=priv1-rail-test&limit=50');

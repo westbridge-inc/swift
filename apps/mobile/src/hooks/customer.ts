@@ -281,10 +281,11 @@ export function useSearchTrending<T = any>(enabled = true) {
   });
 }
 
-export function useVendor<T = any>(id: string) {
+export function useVendor<T = any>(id: string, point?: { lat: number; lng: number } | null) {
+  // [CHAINS PR3] The place rides the fetch, not the key: the favourite toggle writes this exact key.
   return useQuery<T>({
     queryKey: customerKeys.vendor(id),
-    queryFn: () => unwrap<T>(customerApi.getVendor(id)),
+    queryFn: () => unwrap<T>(customerApi.getVendor(id, point)),
     enabled: !!id,
   });
 }

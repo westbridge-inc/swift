@@ -34,15 +34,29 @@ async function fixture(status = 'ACTIVE') {
     id: 'store-fixture', tenantId: 'tenant-public', status, isVerified: true,
     tenant: { id: 'tenant-public', isActive: true, kind: 'PRODUCTION' }, subscription: null,
     name: 'Fixture Shop', slug: 'fixture-shop', addressLine1: 'Fixture business address', addressLine2: null,
-    ownerId: 'owner-fixture', owner: { userId: 'account-fixture', user: {
+    // [CHAINS PR3] The owner is a brand Swift named, so every read below also runs the storefront's branch switcher.
+    ownerId: 'owner-fixture', owner: { brandName: 'Fixture Brand', userId: 'account-fixture', user: {
       id: 'account-fixture', tenantId: 'tenant-public', status: 'ACTIVE', countryCode: 'GY',
       firstName: 'Fixture', lastName: 'Proprietor', phone: 'TEST_ACCOUNT_CONTACT', isPhoneVerified: true,
     } },
+    brandListedAlone: false, city: 'Fixture city', isCurrentlyOpen: true, acceptingOrders: true, deliveryRadius: null,
+    // the store's own account/ops line (never on the storefront: publicPhone is the published number)
+    phone: 'TEST_STORE_ACCOUNT_CONTACT',
     categories: [], operatingHours: [], images: [], publicPhone: null, vendorType: 'RESTAURANT',
     latitude: 0, longitude: 0, minOrderAmount: 0,
     // [R3] the seller block's own facts: no MMG link, no refund rule on file
     mmgPayUrl: null, mmgNumber: null, refundRule: null,
   };
+  // [CHAINS PR3] The brand's other branches (same owner, same operator): one live, one Swift suspended. Each carries
+  // private columns the switcher must never project (the account/ops line, the MMG number, its own records' IDs).
+  const branch = (id: string, status: string): Row => ({
+    ...vendor, id, status, name: `Fixture Branch ${id}`, slug: id, addressLine1: `Branch address ${id}`,
+    phone: 'TEST_BRANCH_ACCOUNT_CONTACT', mmgNumber: 'TEST_BRANCH_MMG_NUMBER', publicPhone: '+5926009999',
+    tenant: vendor['tenant'], owner: vendor['owner'],
+  });
+  const branches: Row[] = [vendor, branch('store-fixture-branch', 'ACTIVE'), branch('store-fixture-suspended', 'SUSPENDED')];
+  const readBranches = vi.fn(async (q: Query & { take?: number }) =>
+    branches.filter(r => matches(r, q.where)).map(r => project(r, q.select)).slice(0, q.take));
   const records: Row[] = [
     { id: 'private-identity-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-fixture',
       docType: 'owner_national_id', submissionId: 'identity-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
@@ -58,7 +72,9 @@ async function fixture(status = 'ACTIVE') {
   let afterInitialRead: (() => void) | undefined;
   let initialRead = true;
   const readVendor = async (q: Query) => {
-    const found = matches(vendor, q.where) ? project(vendor, q.select) : null;
+    // Every branch row is readable by id (a compile for another branch would find it), the fixture store first.
+    const row = branches.find(r => matches(r, q.where));
+    const found = row ? project(row, q.select) : null;
     // A committed change between the route read and compiler read is represented
     // by separate snapshots; no claim is made about real database ordering.
     const snapshot = found ? structuredClone(found) : null;
@@ -77,7 +93,7 @@ async function fixture(status = 'ACTIVE') {
         || sql === 'SELECT s."id" FROM "subscriptions" s JOIN "vendors" v ON v."id" = s."vendorId" JOIN "vendor_owners" o ON o."id" = v."ownerId" WHERE o."userId" = ? ORDER BY s."id" FOR UPDATE OF s /* vendor-activation-fee-subscriptions */') return [];
       throw new Error(`Unexpected projection query: ${sql}`);
     }),
-    vendor: { findFirst: readVendor, findUnique: readVendor,
+    vendor: { findFirst: readVendor, findUnique: readVendor, findMany: readBranches,
       update: vi.fn(async ({ data }: { data: Row }) => Object.assign(vendor, data)),
       updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {
         if (!matches(vendor, where)) return { count: 0 };
@@ -111,7 +127,7 @@ async function fixture(status = 'ACTIVE') {
     const projection = service as unknown as { projectVendorActivation: (db: typeof prisma, id: string) => Promise<void> };
     await runWithTenant('tenant-public', () => projection.projectVendorActivation(prisma, 'account-fixture'));
   };
-  return { vendor, prisma, records, extracted, audit, read, activate, afterInitial: (fn: () => void) => { afterInitialRead = fn; } };
+  return { vendor, prisma, records, extracted, audit, read, activate, readBranches, afterInitial: (fn: () => void) => { afterInitialRead = fn; } };
 }
 
 beforeEach(() => {
@@ -276,6 +292,68 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
       expect((await h.read('tenant-public')).data.disclosure).toMatchObject({ complete: true });
     }
     expect(crypto.unwrap).not.toHaveBeenCalled();
+  });
+
+  // [CHAINS PR3] The brand switcher on the public storefront: the brand's VISIBLE branches with what each store
+  // already publishes on its own storefront, and nothing private — no account/ops line, MMG number, owner or account,
+  // operator or record IDs, licence value — and it opens no branch's evidence (decrypts and audit rows unchanged).
+  const SWITCHER_KEYS = ['acceptingOrders', 'addressLine1', 'city', 'current', 'delivers', 'distanceKm', 'id', 'isCurrentlyOpen', 'name', 'slug'];
+  it('[CHAINS PR3] the branch switcher carries only store-published values of visible branches', async () => {
+    const h = await fixture();
+    h.vendor['publicPhone'] = '+5926001234';
+    const data = (await h.read()).data as unknown as { brand: { name: string; branches: Row[] } | null; disclosure: unknown };
+    expect(data.brand?.name).toBe('Fixture Brand');
+    expect(data.brand!.branches.map(b => b['id'])).toEqual(['store-fixture', 'store-fixture-branch']);
+    expect(data.brand!.branches.find(b => b['id'] === 'store-fixture-branch')).toEqual({
+      id: 'store-fixture-branch', name: 'Fixture Branch store-fixture-branch', slug: 'store-fixture-branch',
+      addressLine1: 'Branch address store-fixture-branch', city: 'Fixture city', isCurrentlyOpen: true, acceptingOrders: true,
+      distanceKm: null, delivers: null, current: false,
+    });
+    for (const b of data.brand!.branches) expect(Object.keys(b).sort()).toEqual(SWITCHER_KEYS);
+    const switcher = JSON.stringify(data.brand);
+    expect(JSON.stringify(data)).not.toMatch(/TEST_(STORE|BRANCH)_ACCOUNT_CONTACT|TEST_BRANCH_MMG_NUMBER/);
+    for (const secret of ['TEST_ACCOUNT_CONTACT', 'TEST_STORE_ACCOUNT_CONTACT', 'TEST_BRANCH_ACCOUNT_CONTACT', 'TEST_BRANCH_MMG_NUMBER', '+5926009999', 'owner-fixture',
+      'account-fixture', 'tenant-public', 'private-identity-record', 'private-personal-record', 'TEST_PERSONAL_LICENCE', 'store-fixture-suspended']) {
+      expect(switcher).not.toContain(secret);
+    }
+    // The switcher's one read is the storefront's own visible rule over this owner's listed branches, selecting only
+    // the shown values plus what ranks them (location, radius), never a private column.
+    expect(h.readBranches).toHaveBeenCalledTimes(1);
+    expect(Object.keys((h.readBranches.mock.calls[0]![0] as Query).select!).sort())
+      .toEqual(['acceptingOrders', 'addressLine1', 'city', 'deliveryRadius', 'id', 'isCurrentlyOpen', 'latitude', 'longitude', 'name', 'slug']);
+  });
+
+  it('[CHAINS PR3] a branded store compiles the same disclosure with the same evidence reads as an unbranded one', async () => {
+    const reads = async (brandName: string | null) => {
+      resetPublicDisclosureCacheForTests();
+      const h = await fixture();
+      (h.vendor['owner'] as Row)['brandName'] = brandName;
+      h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
+        docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
+        submission: { purgedAt: null, userId: 'account-fixture', docType: 'trade_licence', subjectId: 'subject-business' } });
+      (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'business_name' }] }];
+      crypto.decrypt.mockReturnValue(Buffer.from('Fixture Trading Ltd'));
+      h.extracted.mockResolvedValue([{ id: 'run-fixture', wrappedDek: Buffer.from('fixture-wrapped'), fields: [
+        { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'business_name', valueCt: Buffer.from('fixture-encrypted') },
+      ] }] as never);
+      const before = { decrypt: crypto.decrypt.mock.calls.length, unwrap: crypto.unwrap.mock.calls.length };
+      const data = (await h.read()).data as unknown as { brand: unknown; disclosure: unknown };
+      const documentReads = (h.prisma as unknown as { documentRecord: { findMany: { mock: { calls: unknown[] } } } }).documentRecord.findMany.mock.calls;
+      return { data, documentReads: JSON.stringify(documentReads), extracted: JSON.stringify(h.extracted.mock.calls), audit: JSON.stringify(h.audit.mock.calls),
+        decrypts: crypto.decrypt.mock.calls.length - before.decrypt, unwraps: crypto.unwrap.mock.calls.length - before.unwrap };
+    };
+    // One clock for both reads: the compile stamps its time and reads documents valid "now".
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-30T04:00:00Z'));
+      const plain = await reads(null);
+      const branded = await reads('Fixture Brand');
+      expect(plain.data.brand).toBeNull();
+      expect(branded.data.brand).not.toBeNull();
+      expect(branded.data.disclosure).toEqual(plain.data.disclosure);
+      expect(branded.decrypts).toBe(1);
+      expect({ ...branded, data: null }).toEqual({ ...plain, data: null });
+    } finally { vi.useRealTimers(); }
   });
 });
 

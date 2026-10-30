@@ -13,6 +13,7 @@ import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visib
 import { adsEnabled } from '../ads/ads-enabled';
 import { hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { publicStorefrontSeller } from '../verification/storefront-seller';
+import { brandBranchesFor } from '../vendor/brand';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -290,12 +291,16 @@ export async function publicRoutes(app: FastifyInstance) {
     // [P35 · board 4b] "Verified seller" on the website: PUBLIC_WHERE already requires isVerified, and the
     // documents' wall-clock bound must still hold (seller-verified.ts). The bound itself is not published.
     const { activationValidUntil, isSynthetic, owner, ...publicVendor } = vendor;
+    // [CHAINS PR3] The brand this store belongs to and the branches a visitor may switch to, under this page's own
+    // rule (public, this tenant, not filed under a banned category). No place is known here: the list keeps its order.
+    const brand = await brandBranchesFor(app.prisma, vendor.id, {}, { ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT, ...prohibitedStores });
     return {
       success: true,
       data: {
         ...publicVendor,
         isVerified: sellerVerifiedNow({ isVerified: true, activationValidUntil, isSynthetic, owner }),
         seller,
+        brand,
         // Present when the request arrived on a retired slug, so the caller can correct its URL.
         ...(vendor.slug === request.params.slug ? {} : { canonicalSlug: vendor.slug }),
         ...(surface ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),

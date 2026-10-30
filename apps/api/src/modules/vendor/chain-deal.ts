@@ -75,14 +75,14 @@ export async function chainOf(prisma: PrismaClient, ownerId: string, tenantId: s
   const owner = await prisma.vendorOwner.findUnique({
     where: { id: ownerId },
     select: {
-      id: true, dealWeeklyRate: true, dealCurrencyCode: true, dealSetAt: true, dealSetBy: true, dealReason: true,
+      id: true, dealWeeklyRate: true, dealCurrencyCode: true, dealSetAt: true, dealSetBy: true, dealReason: true, brandName: true,
       dealChangeKind: true, dealChangeFrom: true, dealChangeTo: true, dealChangeNotBefore: true, dealChangeReason: true,
       dealChangeSetBy: true, dealChangeSetAt: true, dealChangeSwitchedAt: true,
       user: { select: { tenantId: true } },
       vendors: {
         orderBy: { createdAt: 'asc' },
         select: {
-          id: true, name: true, status: true, city: true,
+          id: true, name: true, status: true, city: true, brandListedAlone: true,
           subscription: { select: { id: true, status: true, weeklyRate: true, customRate: true, feeWaived: true, currencyCode: true, trialEndDate: true, nextBillingDate: true } },
         },
       },
@@ -95,6 +95,8 @@ export async function chainOf(prisma: PrismaClient, ownerId: string, tenantId: s
   const riseOf = new Map(rises.map((r) => [r.key, readHeldFeeRise(r.value)]));
   return {
     ownerId: owner.id,
+    // [CHAINS PR3] The brand customers see once for these branches (null: none), and which branch is listed alone.
+    brandName: owner.brandName,
     deal: owner.dealWeeklyRate === null ? null : {
       weeklyRate: Number(owner.dealWeeklyRate), currencyCode: owner.dealCurrencyCode, setAt: owner.dealSetAt, setBy: owner.dealSetBy, reason: owner.dealReason,
     },
@@ -104,7 +106,7 @@ export async function chainOf(prisma: PrismaClient, ownerId: string, tenantId: s
       switchedAt: owner.dealChangeSwitchedAt,
     },
     branches: owner.vendors.map((v) => ({
-      vendorId: v.id, name: v.name, status: v.status, city: v.city,
+      vendorId: v.id, name: v.name, status: v.status, city: v.city, brandListedAlone: v.brandListedAlone,
       subscription: v.subscription ? {
         id: v.subscription.id, status: v.subscription.status, currencyCode: v.subscription.currencyCode, feeWaived: v.subscription.feeWaived,
         weeklyRate: Number(v.subscription.weeklyRate),

@@ -32,7 +32,9 @@ function store(id: string, tenant: Row): Row {
     isCurrentlyOpen: true, acceptingOrders: true, cuisineTypes: [], tags: [], latitude: 6.8013, longitude: -58.1551,
     addressLine1: 'Fixture business address', logoUrl: null, coverImageUrl: null, city: 'Fixture city',
     estimatedPrepTime: 10, averageRating: 4, totalRatings: 1, minOrderAmount: 0, totalOrders: 1,
-    deliveryRadius: 4, distanceKm: null };
+    deliveryRadius: 4, distanceKm: null,
+    // [CHAINS PR3] the brand columns every customer list reads to show one card per brand: this store has no brand
+    ownerId: `owner-${id}`, owner: { brandName: null }, brandListedAlone: false };
 }
 
 async function fixture() {
