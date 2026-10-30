@@ -1,0 +1,83 @@
+import { feeMoney } from './fee-status';
+import type { ProFeeAck, ProFeeTerms, ProFeeView } from './provider-fee-api';
+
+export { acknowledgeProviderFee, getProviderApproval, getProviderFee } from './provider-fee-api';
+export type { ProFeeAck, ProFeeStanding, ProFeeTerms, ProFeeView, ProFeeWhy } from './provider-fee-api';
+
+/**
+ * [BILL-PRO PR6 · owner A4/B3] A pro's own weekly fee on the website (Partner portal, Weekly fee), as the API states it
+ * (GET /api/v1/provider/subscription): the pro's own fee (null until it is due), where they stand (listed or why not),
+ * whether their Services store's fee covers them (one fee), and the words of "I understand the weekly fee" with the
+ * amount, until ticked. Paying is the shared WeeklyFee component with family "provider" (MMG's checkout page only).
+ * The same answers as the phone's lib/providerFee.ts (REVIEW-F #2231 S3/S4, REVIEW-G #2230 S3-1); a census reads both
+ * files and holds the words equal (provider-fee-parity.test.ts).
+ */
+export type ProFeeTick = { kind: 'none' } | { kind: 'tick'; key: string; terms: ProFeeTerms; ack: ProFeeAck };
+
+/** A fee amount in its own currency: GY$ for Guyana dollars (as every weekly-fee page), the code spelled out otherwise. */
+export function proFeeMoney(amount: number, currencyCode: string): string {
+  return currencyCode === 'GYD' ? feeMoney(amount) : `${currencyCode} ${amount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+}
+
+/** [BILL-PRO · Business Agreement s.12 · REVIEW-M #2229 N1] What a pro covered by their own Services store's fee reads
+ *  (the phone's PRO_FEE_COVERED_COPY, page for screen): one fee, and an in-flight provider-fee payment kept as credit. */
+export const PRO_FEE_COVERED_COPY = 'Your Services store’s weekly fee covers your provider profile: you pay one fee, on your store’s Weekly fee page. If a payment for your own provider fee was still being confirmed when your store’s fee started, it is kept as credit on your provider fee, never lost.';
+
+/** [REVIEW-F #2231 S3-3] A pro their store's fee covers is still asked to confirm their own fee (both ticks): say why,
+ *  so it never reads as a second charge. */
+export const PRO_FEE_COVERED_TICK_LINE = 'You are still asked to confirm your own provider fee below: it applies only if your store’s weekly fee ends. While your store’s fee is live you pay only that one.';
+
+/** [REVIEW-F #2231 S4-3] Where a covered (or not yet ticked) pro finds their own provider fee, its credit and receipts. */
+export const PRO_FEE_OWN_FEE_LINK = 'See your provider fee, credit and receipts';
+
+/** The tick to show: only while the fee is required (switch on) and the server says it is not given, with the
+ *  server's words and amount. Its `key` names the words AND the amount: the page keeps a tick only for that key, so a
+ *  new amount (WEEKLY_FEE_CHANGED) clears it and is never consented to with one click (REVIEW-F #2231 S3-1). */
+export function proFeeTick(view: ProFeeView | null | undefined): ProFeeTick {
+  const t = view?.feeTerms;
+  if (!view?.standing?.required) return { kind: 'none' };
+  if (!t || t.acknowledged || !t.items?.length || !t.tick) return { kind: 'none' };
+  return { kind: 'tick', key: `${t.version}:${t.amount}:${t.currencyCode}`, terms: t, ack: { version: t.version, amount: t.amount, currencyCode: t.currencyCode } };
+}
+
+/** [REVIEW-G #2230 S3-1] The pro ticked another amount than the one asked now: the fee changed, confirm again. */
+export function proFeeChangedLine(view: ProFeeView | null | undefined): string | null {
+  const t = view?.feeTerms;
+  if (!view?.standing?.required || !t || t.acknowledged || !t.changed || t.acknowledgedAmount == null) return null;
+  return `The weekly fee changed from ${proFeeMoney(t.acknowledgedAmount, t.acknowledgedCurrencyCode ?? t.currencyCode)} to ${proFeeMoney(t.amount, t.currencyCode)} a week. Read it again and tick “I understand the weekly fee” to confirm the new amount. Nothing starts at the new amount until you do.`;
+}
+
+/** [REVIEW-F #2231 S4-4] For a pro Swift has approved and who accepted the agreement, the tick itself starts the fee.
+ *  [REVIEW-F #2231 S4] Only when the server says the tick is the one thing missing (FEE_TERMS): with the Business
+ *  Agreement not accepted (AGREEMENT) the tick cannot start the fee, and saying so would be false. */
+export function proFeeTickStartsLine(view: ProFeeView | null | undefined, isVerified: boolean | undefined): string | null {
+  if (!isVerified || view?.coveredBy === 'STORE' || proFeeTick(view).kind !== 'tick') return null;
+  if (!view?.standing?.required || view.standing.why !== 'FEE_TERMS') return null;
+  return 'Ticking this starts your weekly fee today: first a 14-day free trial if you have not had one as a service provider, then the amount above each week.';
+}
+
+/** [REVIEW-F #2231 S4] The tick is asked but the Business Agreement is not accepted yet (the server's standing says
+ *  AGREEMENT): the page says the agreement comes first, with the Review button, next to the tick. */
+export function proFeeAgreementFirst(view: ProFeeView | null | undefined): { title: string; body: string } | null {
+  if (proFeeTick(view).kind !== 'tick' || !view?.standing?.required || view.standing.why !== 'AGREEMENT') return null;
+  return {
+    title: 'Accept the Business Agreement first',
+    body: 'Your weekly fee can start only after you accept the Business Agreement that covers service providers. Ticking here does not start it on its own, and you are not listed until both are done.',
+  };
+}
+
+/** [REVIEW-F #2231 S3-2] What the page says when the pro has no fee of their own and nothing to tick, from where the
+ *  server says they stand (never one sentence for every state). */
+export function proFeeNoFeeWords(view: ProFeeView | null | undefined, isVerified: boolean | undefined): { title: string; body: string; action: 'AGREEMENT' | null } {
+  const standing = view?.standing;
+  if (!standing?.required) {
+    return { title: 'No weekly fee yet', body: 'Swift tells you in the app before the weekly fee starts for service providers. Nothing is charged until then.', action: null };
+  }
+  if (standing.why === 'AGREEMENT') {
+    return { title: 'Accept the Business Agreement', body: 'Accept the Business Agreement that covers service providers to be listed and take new jobs. Your weekly fee is shown here after that.', action: 'AGREEMENT' };
+  }
+  if (!isVerified) {
+    return { title: 'Your weekly fee starts after approval', body: 'Your weekly fee starts only after Swift approves your documents, with a 14-day free trial if you have not had one as a service provider. You are not listed until then. Nothing is charged before it starts.', action: null };
+  }
+  return { title: 'Your weekly fee is being set up', body: 'You are not listed until it is set up, usually within the hour. It starts with a 14-day free trial if you have not had one as a service provider. Jobs already booked can still go ahead.', action: null };
+}

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { restoreSession, sessionProbe } from '@/lib/auth';
+import { hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
 
 /** The return document carries no identity. Resolve only from this session. */
 export function WeeklyFeeDestination() {
@@ -22,7 +22,9 @@ export function WeeklyFeeDestination() {
       if (vendor && mover) setChoice('both');
       else if (vendor) router.replace('/dashboard/weekly-fee');
       else if (mover) router.replace('/portal/weekly-fee');
-      else setChoice('none');
+      // [BILL-PRO PR6] A pro's MMG return lands on their own weekly fee (the portal's provider block).
+      else if (await hasProviderProfile()) { if (!cancelled) router.replace('/portal/weekly-fee'); }
+      else if (!cancelled) setChoice('none');
     })();
     return () => { cancelled = true; };
   }, [router]);

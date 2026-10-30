@@ -419,7 +419,18 @@ export async function sendOtp(phone: string) {
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'Could not send the code.');
 }
 
-/** OTP login for partners: businesses land on /dashboard, earners on /portal. */
+/** [BILL-PRO PR6] Does the signed-in person have a provider profile (a pro)? Read with the session cookie the
+ *  sign-in just set; any failure is "no". */
+export async function hasProviderProfile(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_URL}/api/v1/services/providers/me`, { credentials: 'include', headers: { ...clientHeaders } });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** OTP login for partners: businesses land on /dashboard, earners on /portal, pros on /portal/weekly-fee. */
 export async function verifyPartnerLogin(phone: string, code: string): Promise<{ user: unknown; home: string }> {
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
@@ -441,8 +452,15 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
   // vendorOwner relation on the login payload.
   const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!data.user?.vendorOwner;
   const isMover = roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r));
-  if (!isVendor && !isMover) {
+  // [BILL-PRO PR6 · owner A4] An independent service provider (a pro) holds no partner role but pays their own weekly
+  // fee here (Partner portal, Weekly fee): the server's own answer decides, never a role guess.
+  const isPro = !isVendor && !isMover && await hasProviderProfile();
+  if (!isVendor && !isMover && !isPro) {
     throw new Error('No business or earner profile on this account yet — sign up in the Swift app first.');
+  }
+  if (isPro) {
+    adoptSession(data.user.id);
+    return { user: data.user, home: '/portal/weekly-fee' };
   }
   adoptSession(data.user.id);
   // An account with both keeps the store dashboard as home; /portal stays a link away.

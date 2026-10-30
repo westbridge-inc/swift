@@ -28,3 +28,12 @@ export const AGREEMENT_LINKS: Record<LegalAcceptance['agreements'][number], { la
   driver_agreement: { label: 'Mover Agreement', href: LEGAL_URL('driver-agreement') },
   vendor_agreement: { label: 'Business Agreement', href: LEGAL_URL('vendor-agreement') },
 };
+
+/** [BILL-PRO PR6 · REVIEW-F #2231 S4] A page asks the site's legal-acceptance gate to read the server again (the pro fee
+ *  page's "Review the agreement"), and the gate says when a tick was recorded, so a page that depends on it (the pro's
+ *  standing and fee) reads its own data again (REVIEW-F #2231 S3-4). */
+export const LEGAL_RECHECK_EVENT = 'swift:legal-acceptance-recheck';
+export const LEGAL_ACCEPTED_EVENT = 'swift:legal-accepted';
+export function askLegalAcceptanceAgain(): void {
+  window.dispatchEvent(new Event(LEGAL_RECHECK_EVENT));
+}
