@@ -80,6 +80,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // so a page could only be stopped from a computer. Only ops pages carry an opsAlertId.
   const opsAlertId = data['opsAlertId'];
   if (typeof opsAlertId === 'string' && opsAlertId) return { screen: 'OpsAlerts', params: { opsAlertId } };
+  // [ENTERPRISE E1b] A pay-all payment's notice ({ ref, status, chainCheckout: true }, no subscription: it paid several
+  // branches) opens the owner's "Pay all my branches", which follows that ref. Never a mover's fee screen.
+  if (data['kind'] === 'billing_mmg_checkout' && (data['chainCheckout'] === true || data['chainCheckout'] === 'true')) {
+    return { screen: 'WeeklyFee', params: { feeFamily: 'vendor', payAll: true, ref: typeof data['ref'] === 'string' ? data['ref'] : undefined } };
+  }
   if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
@@ -94,6 +99,12 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // the one place the fee is seen and paid, on the family it is about. The
   // payload names the subscription, not the store, so a store fee opens on the
   // store the owner has selected; it carries no checkout ref to invent.
+  // [ENTERPRISE E2 · REVIEW-F #2227] A notice that names its store (a chain branch's fee change carries vendorId and
+  // subscriptionId) opens THAT store's fee screen: the same checked switch a checkout push takes (resolveFeeNotification
+  // selects it only when the store's own subscription is the one named, else the selected store's screen).
+  if (PARTNER_FEE_KINDS.has(kind) && typeof data['vendorId'] === 'string' && typeof data['subscriptionId'] === 'string') {
+    return { screen: 'WeeklyFee', params: { vendorId: data['vendorId'], subscriptionId: data['subscriptionId'] } };
+  }
   if (PARTNER_FEE_KINDS.has(kind)) return { screen: 'WeeklyFee', params: { feeFamily: feeFamilyOf(audience, openApp) } };
 
   // [PUSH-ROUTING] DOCUMENTS. "Your document was rejected — fix it and

@@ -69,6 +69,13 @@ describe('a weekly-fee notice keeps the family it names [PUSH-ROUTING]', () => {
     await vi.waitFor(() => expect(fx.navigate).toHaveBeenCalledExactlyOnceWith('WeeklyFee', { feeFamily: 'vendor' }));
   });
 
+  it('[ENTERPRISE E1b] a pay-all payment notice opens "Pay all my branches" on its ref, never a mover\'s fee, even with the Earner app open', async () => {
+    tap({ kind: 'billing_mmg_checkout', ref: 'chain-1', status: 'CONFIRMED', chainCheckout: true, audience: 'business' });
+    await vi.waitFor(() => expect(fx.navigate).toHaveBeenCalledExactlyOnceWith('WeeklyFee', { feeFamily: 'vendor', payAll: true, ref: 'chain-1' }));
+    expect(fx.subscription).not.toHaveBeenCalled();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+  });
+
   it('a mover checkout without a store is still a mover’s fee (the build 9 to 11 contract)', async () => {
     tap({ kind: 'billing_mmg_checkout', subscriptionId: 'subscription-M', ref: 'checkout-M', status: 'CONFIRMED', audience: 'earner' });
     await vi.waitFor(() => expect(fx.navigate).toHaveBeenCalledExactlyOnceWith('WeeklyFee', { ref: 'checkout-M', subscriptionId: 'subscription-M', vendorId: undefined, feeFamily: 'mover' }));

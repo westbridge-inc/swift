@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
@@ -13,13 +13,14 @@ import { lazyRetry } from '@/lib/chunk-retry';
 // and neither is its rule or its words (lib/weekly-fee-reopen).
 const WeeklyFeeReopen = lazyRetry(() => import('./weekly-fee-reopen'));
 
-export function WeeklyFee({ family }: { family: FeeFamily }) {
+/** `aside`: drawn under where the fee stands (the store owner's "Pay all my branches" door, ENTERPRISE E1b). */
+export function WeeklyFee({ family, aside }: { family: FeeFamily; aside?: ReactNode }) {
   const storeId = useStoreId();
   // A store change unmounts the whole checkout lifetime, including its view.
-  return <WeeklyFeeContext key={`${family}:${storeId ?? 'no-store'}`} family={family} storeId={storeId} />;
+  return <WeeklyFeeContext key={`${family}:${storeId ?? 'no-store'}`} family={family} storeId={storeId} aside={aside} />;
 }
 
-function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: string | null }) {
+function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; storeId: string | null; aside?: ReactNode }) {
   const client = useQueryClient();
   const queryKey = useMemo(() => ['weekly-fee', family, family === 'vendor' ? storeId : null], [family, storeId]);
   const base = `/api/v1/${family}/subscription`;
@@ -81,6 +82,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
         {checked.at ? <span role="status" className="text-sm text-[var(--swift-muted)]">{`Checked at ${new Date(checked.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Guyana' })}`}</span> : null}
       </div>
     </div>
+    {aside}
     {action && !blocked && card && <h2 className="text-lg font-bold">Choose how to pay</h2>}
     <div className={`grid gap-4 ${action && !blocked && card ? 'md:grid-cols-2' : ''}`}>
       {canReopen && <Suspense fallback={null}><WeeklyFeeReopen sub={sub} checkout={checkout} busy={view.busy} onBack={(ref) => void session.reopen(ref)} onExpired={q.refetch} /></Suspense>}

@@ -78,6 +78,7 @@ const PRIVATE_PAGES = [
   'dashboard/settings/vat-report/page.tsx', // [O-5] a store's own VAT report (its order numbers and VAT figures)
   'dashboard/weekly-fee/page.tsx',
   'dashboard/weekly-fee/statement/page.tsx', // [ENTERPRISE E3] the owner's fee statement (their own name and fees)
+  'dashboard/weekly-fee/pay-all/page.tsx', // [ENTERPRISE E1b] the owner pays every branch's fee (branch names and fees)
   'portal/page.tsx',
   'portal/account/page.tsx',
   'portal/documents/page.tsx',

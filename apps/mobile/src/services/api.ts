@@ -16,6 +16,7 @@ import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
 import { noticeSessionEnded } from '../lib/sessionEndedNotice';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
+import { CHAIN_FEE_PATH } from '../lib/chain-fee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -1637,6 +1638,35 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
       const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}
+
+/** [ENTERPRISE E1b] "Pay all my branches" (MMG-CHECKOUT-API section 12), the store owner's: the same captured principal
+ *  and store as weeklyFeeApi. The list the owner was shown goes back as the server sent it; the server prices it again
+ *  and never takes an amount from it. */
+export function chainFeeApi(session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = CHAIN_FEE_PATH;
+  const signedOut = async (): Promise<never> => { throw new Error('Sign in to pay.'); };
+  if (!session) return { list: signedOut, start: signedOut, read: signedOut };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || useStoreSwitcher.getState().selectedStoreId !== storeId) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => capturedVendorAuthConfig(current(), storeId, { headers });
+  return {
+    list: async (): Promise<import('../lib/chain-fee').ChainFees> => {
+      const response = await api.get(base, config());
+      current(); return response.data.data;
+    },
+    start: async (key: string, confirmed: import('../lib/chain-fee').ChainConfirmed): Promise<import('../lib/chain-fee').ChainCheckoutStart> => {
+      const response = await api.post(`${base}/mmg-checkout`, confirmed, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (ref: string): Promise<import('../lib/chain-fee').ChainCheckout> => {
+      const response = await api.get(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, config());
       current(); return response.data.data;
     },
   };

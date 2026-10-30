@@ -89,6 +89,7 @@ import {
   verificationApi,
   vendorApi,
   weeklyFeeApi,
+  chainFeeApi,
 } from './api';
 
 const originalAxiosAdapter = axios.defaults.adapter;
@@ -781,6 +782,34 @@ describe('weekly fee MMG transport', () => {
     await expect(request).rejects.toThrow('paying account changed');
     await expect(client.start('tap-key-2')).rejects.toThrow('paying account changed');
     auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
+  });
+  it('[ENTERPRISE E1b] pay-all: the owner\'s list, one checkout with the confirmed list and the tap key, and its follow, all for the selected store', async () => {
+    nativePlatform.OS = 'ios';
+    auth.current = accountA;
+    auth.selectedStoreId = 'store-a';
+    const seen: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => { seen.push(config); return response(config, 200, { success: true, data: { ref: 'chain-1', status: 'OPEN' } }); });
+    const client = chainFeeApi(accountA, 'store-a');
+    const confirmed = { branches: [{ subscriptionId: 's1', amountGyd: 12000 }, { subscriptionId: 's2', amountGyd: 9000 }], totalGyd: 21000 };
+    await client.list();
+    expect(await client.start('tap-key-1', confirmed)).toMatchObject({ ref: 'chain-1' });
+    await client.read('chain/1');
+    expect(seen.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'get /vendor/subscription/chain-fees', 'post /vendor/subscription/chain-fees/mmg-checkout', 'get /vendor/subscription/chain-fees/mmg-checkout/chain%2F1',
+    ]);
+    expect(JSON.parse(String(seen[1]!.data))).toEqual(confirmed);
+    expect(seen[1]!.headers.get('Idempotency-Key')).toBe('tap-key-1');
+    for (const request of seen) {
+      expect(request.headers.get('x-client-platform')).toBe('ios');
+      expect(request.headers.get('x-vendor-id')).toBe('store-a');
+      expect(authorization(request)).toBe(`Bearer ${accountA.accessToken}`);
+    }
+    // Another store or another account never pays with this client.
+    auth.selectedStoreId = 'store-b';
+    await expect(client.start('tap-key-2', confirmed)).rejects.toThrow('paying account changed');
+    auth.selectedStoreId = 'store-a'; auth.current = accountB;
+    await expect(client.read('chain-1')).rejects.toThrow('paying account changed');
+    await expect(chainFeeApi(null, 'store-a').list()).rejects.toThrow('Sign in to pay.');
   });
 });
 
