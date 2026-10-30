@@ -147,7 +147,7 @@ export class SubscriptionService {
     const priced: PartnerRate = { rate: quote.cardRate, tier: quote.tier };
     return {
       existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: quote.currencyCode,
-      trialDays: trialDaysFor({ tier: quote.tier, storeCreatedAt: vendor.createdAt }), storeSignupAmount: quote.signupAmount,
+      trialDays: trialDaysFor({ tier: quote.catalogueTier, storeCreatedAt: vendor.createdAt }), storeSignupAmount: quote.signupAmount,
     };
   }
 

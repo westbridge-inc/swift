@@ -3,6 +3,7 @@ import { AppError } from '../../utils/errors';
 import { formatMoney } from '../../utils/currency-amount';
 import { PricingConfigError, partnerRateFor, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
+import { awaitingFirstGoLive } from '../vendor/go-live';
 import { assertSawQuote, assertWeeklyFeeAck, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck } from './weekly-fee-ack';
 
 // ---------------------------------------------------------------------------
@@ -39,9 +40,11 @@ export const STORE_FEE_TICK_REQUIRED = 'STORE_FEE_TICK_REQUIRED';
 export const STORE_FEE_ALREADY_SET = 'STORE_FEE_ALREADY_SET';
 
 /** The store's catalogue as its fee and trial are priced from it: available now, or made unavailable or edited in
- *  the last 7 days (the re-tier's lower-tier count, billing.service recalculateVendorTiers). */
+ *  the last 7 days (the re-tier's lower-tier count, billing.service recalculateVendorTiers). [REVIEW-M #2245 S3-1] A
+ *  DELETED listing is archived (archivedAt set, never available again): it is not the store's catalogue and never
+ *  counts, however recently it was deleted. */
 export function storeCatalogueCount(db: Db, vendorId: string, now = new Date()): Promise<number> {
-  return db.item.count({ where: { vendorId, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } }] } });
+  return db.item.count({ where: { vendorId, archivedAt: null, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } }] } });
 }
 
 export interface StoreFeeQuote {
@@ -51,8 +54,10 @@ export interface StoreFeeQuote {
   /** What the store would be charged a week if its fee were born now: the lower of its chain deal and its step. */
   amount: number;
   currencyCode: string;
-  /** The step its catalogue reaches (or 'service'). */
+  /** The step the fee is priced on (or 'service'): its catalogue's step for a never-live store, else the first step. */
   tier: PartnerTier;
+  /** [DEPT-PRICE] The step its own catalogue reaches now, whatever it is priced on: its free trial follows it. */
+  catalogueTier: PartnerTier;
   /** The step's own rate (the subscription's weeklyRate). */
   cardRate: number;
   /** The listings counted (null for a Services business: no catalogue). */
@@ -82,7 +87,7 @@ export function storeFeeTickNeeded(amount: number, signupAmount: number): boolea
 export async function storeFeeQuote(db: Db, vendorId: string, now = new Date()): Promise<StoreFeeQuote> {
   const vendor = await db.vendor.findUnique({
     where: { id: vendorId },
-    select: { vendorType: true, owner: { select: { userId: true, dealWeeklyRate: true, dealCurrencyCode: true, user: { select: { countryCode: true } } } } },
+    select: { vendorType: true, status: true, owner: { select: { userId: true, dealWeeklyRate: true, dealCurrencyCode: true, user: { select: { countryCode: true } } } } },
   });
   if (!vendor) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Store not found');
   const config = await db.countryConfig.findUnique({ where: { code: vendor.owner.user.countryCode }, select: { currencyCode: true, subscriptionTiers: true } });
@@ -91,13 +96,17 @@ export async function storeFeeQuote(db: Db, vendorId: string, now = new Date()):
   const isService = vendor.vendorType === 'SERVICE';
   const signup = partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: 0 });
   const items = isService ? null : await storeCatalogueCount(db, vendorId, now);
-  const step = isService ? signup : partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: items ?? 0 });
+  const catalogue = isService ? signup : partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: items ?? 0 });
+  // [REVIEW-M #2245 S4-2 · COORD ruling: existing partners are not moved] Only a store that has never been live
+  // (waiting for its first go-live) is priced on its catalogue and asked to tick. A store that has been live and has
+  // no fee on record (documents lapsed and came back) is born as before: the first step, no tick, never held offline.
+  const step = awaitingFirstGoLive(vendor) ? catalogue : signup;
   // The owner's chain deal, as the birth reads it (subscription.service chainDealFor): same currency, above zero.
   const deal = vendor.owner.dealWeeklyRate;
   const dealRate = deal !== null && deal !== undefined && vendor.owner.dealCurrencyCode === config.currencyCode && Number(deal) > 0 ? Number(deal) : null;
   const amount = chargedFor(step.rate, dealRate);
   return {
-    vendorId, ownerUserId: vendor.owner.userId, amount, currencyCode: config.currencyCode, tier: step.tier, cardRate: step.rate, items, dealRate,
+    vendorId, ownerUserId: vendor.owner.userId, amount, currencyCode: config.currencyCode, tier: step.tier, catalogueTier: catalogue.tier, cardRate: step.rate, items, dealRate,
     signupAmount: signup.rate, tickRequired: storeFeeTickNeeded(amount, signup.rate),
   };
 }

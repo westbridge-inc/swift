@@ -114,7 +114,7 @@ afterAll(async () => {
 type Owner = { userId: string; vendorId: string; token: string };
 
 /** A store owner with one store waiting for its first go-live. */
-async function owner(opts: { vendorType?: VendorType; deal?: number } = {}): Promise<Owner> {
+async function owner(opts: { vendorType?: VendorType; deal?: number; status?: 'PENDING_APPROVAL' | 'ACTIVE' } = {}): Promise<Owner> {
   seq += 1;
   const user = await system(() => app.prisma.user.create({ data: {
     phone: `+5928${NUM}${String(seq).padStart(2, '0')}`, firstName: 'Mala', lastName: `Shop${seq}`, roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER',
@@ -128,7 +128,7 @@ async function owner(opts: { vendorType?: VendorType; deal?: number } = {}): Pro
     vendors: { create: {
       name: `Big Mart ${seq}`, slug: `store-fee-${RUN.toLowerCase()}-${seq}`, vendorType: opts.vendorType ?? 'SUPERMARKET',
       phone: `+5928${NUM}9${seq}`, addressLine1: '1 Water Street', city: 'Georgetown', region: 'Demerara-Mahaica',
-      latitude: 6.8, longitude: -58.16, status: 'PENDING_APPROVAL', isVerified: false, publicPhone: '+5926001234',
+      latitude: 6.8, longitude: -58.16, status: opts.status ?? 'PENDING_APPROVAL', isVerified: false, publicPhone: '+5926001234',
     } },
   }, include: { vendors: true } }));
   const token = app.jwt.sign({ userId: user.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
@@ -270,6 +270,51 @@ describe('[RETIER PR-A] a department-size store is born on the department fee, o
     expect((await tick(o, dept)).statusCode).toBe(201);
     expect(await store(o)).toEqual({ status: 'ACTIVE', isVerified: true });
     expect(Number((await subOf(o))!.weeklyRate)).toBe(dept);
+  });
+});
+
+describe('[REVIEW-M #2245] what the quote counts, and which tick counts', () => {
+  it('S3-1 deleted listings are not the store\'s catalogue: 10,000 listed with 2,000 deleted today is priced for 8,000 (large), and says so', async () => {
+    const o = await owner();
+    await addItems(o.vendorId, deptFloor);
+    await system(() => app.prisma.$executeRaw`
+      UPDATE "items" SET "archivedAt" = now(), "isAvailable" = false, "updatedAt" = now()
+      WHERE "id" IN (SELECT "id" FROM "items" WHERE "vendorId" = ${o.vendorId} ORDER BY "id" LIMIT 2000)`);
+    const view = await feeView(o);
+    expect(view).toMatchObject({ items: deptFloor - 2000, required: true, weeklyFee: { amount: large, tier: 'large' } });
+    expect(view.why).toContain(`It has ${(deptFloor - 2000).toLocaleString('en-US')} items for sale`);
+    expect((await tick(o, large)).statusCode).toBe(201);
+    const sub = await birth(o);
+    expect(Number(sub.weeklyRate)).toBe(large);
+    // and the trial follows the same count: not the department store's 7 days
+    expect(Math.round((sub.trialEndDate!.getTime() - sub.currentPeriodStart.getTime()) / DAY)).toBe(14);
+  });
+
+  it('S4-1 a tick to OTHER words (an older version) at the right amount is no tick: nothing is born', async () => {
+    const o = await owner();
+    await addItems(o.vendorId, largeFloor);
+    await system(() => publishLegalDocumentOnce(app.prisma, { documentType: 'weekly_fee_acknowledgement', version: 'v0', renderedText: 'Older weekly fee words.' }));
+    await system(() => app.prisma.$transaction((tx) => recordConsent(tx, {
+      subjectType: 'vendor_user', subjectId: o.userId, documentType: 'weekly_fee_acknowledgement', version: 'v0', action: 'granted', surface: 'web', ip: null,
+      evidence: { control: 'weekly_fee_checkbox', path: STORE_FEE_ACK_PATH, kind: 'STORE', vendorId: o.vendorId, weeklyFee: { amount: large, currencyCode: 'GYD', tier: 'large' } },
+    })));
+    expect(await feeView(o)).toMatchObject({ required: true, ticked: false });
+    await expect(birth(o)).rejects.toMatchObject({ code: 'STORE_FEE_TICK_REQUIRED' });
+    expect(await subOf(o)).toBeNull();
+  });
+
+  it('S4-2 a store that has been live, with no fee on record, whose documents lapsed and came back: re-verified on the first step as before, never asked or held', async () => {
+    const o = await owner({ status: 'ACTIVE' });
+    await addItems(o.vendorId, deptFloor);
+    expect(await feeView(o)).toMatchObject({ required: false, ticked: false, weeklyFee: { amount: small, tier: 'small' } });
+    await approveAll(o);
+    expect(await store(o)).toEqual({ status: 'ACTIVE', isVerified: true });
+    const sub = (await subOf(o))!;
+    expect(Number(sub.weeklyRate)).toBe(small);
+    // its trial still follows its own catalogue, exactly as on main ([DEPT-PRICE]: department size -> 7 days)
+    expect(Math.round((sub.trialEndDate!.getTime() - sub.currentPeriodStart.getTime()) / DAY)).toBe(7);
+    expect(await notices(o)).toHaveLength(0);
+    expect(await ticks(o)).toHaveLength(0);
   });
 });
 
