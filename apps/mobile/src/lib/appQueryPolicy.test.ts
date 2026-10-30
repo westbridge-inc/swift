@@ -201,3 +201,44 @@ describe('app query policy with the real QueryClient', () => {
     },
   );
 });
+
+// [SPEED 30 Oct · owner] Switching between a business's screens feels instant: a store, earner or
+// pro screen opened again after a while shows what it showed and re-reads behind it (never stale
+// money as current: these families stay at zero freshness, so the re-read always happens). A
+// customer family keeps the ordinary five minutes.
+describe('[SPEED 30 Oct] business screens keep their last answers for half an hour', () => {
+  it.each([
+    [['vendor', 'analytics', 'popular', 8]], [['vendor', 'subscription', 'store-1', 'u1', 1]], [['mover', 'earnings-summary', 'RIDER']],
+    [['services', 'jobs']], [['services', 'provider-me', 'u1']], [['provider', 'fee', 'u1']],
+  ])('%j opened again after 20 minutes away: cached at once, one background read', async (queryKey) => {
+    vi.useFakeTimers();
+    client.setQueryData(queryKey, { shown: 'before' });
+    const first = new QueryObserver(client, { queryKey, refetchOnMount: false });
+    first.subscribe(() => {})();
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+    let finish!: (value: { shown: string }) => void;
+    const load = vi.fn(() => new Promise<{ shown: string }>((resolve) => { finish = resolve; }));
+    const observer = new QueryObserver(client, { queryKey, queryFn: load });
+    const off = observer.subscribe(() => {});
+    try {
+      expect(load).toHaveBeenCalledOnce();
+      expect(observer.getCurrentResult()).toMatchObject({ data: { shown: 'before' }, isLoading: false, isFetching: true });
+      finish({ shown: 'after' });
+      await tick();
+      expect(observer.getCurrentResult().data).toEqual({ shown: 'after' });
+    } finally { off(); }
+  });
+
+  it('a business screen away for more than half an hour loads afresh; a customer family keeps five minutes', async () => {
+    vi.useFakeTimers();
+    for (const queryKey of [['vendor', 'standing'], ['customer', 'vendor', 'x']]) {
+      client.setQueryData(queryKey, { shown: 'before' });
+      new QueryObserver(client, { queryKey, refetchOnMount: false }).subscribe(() => {})();
+    }
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(client.getQueryData(['vendor', 'standing'])).toEqual({ shown: 'before' });
+    expect(client.getQueryData(['customer', 'vendor', 'x'])).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(25 * 60_000);
+    expect(client.getQueryData(['vendor', 'standing'])).toBeUndefined();
+  });
+});

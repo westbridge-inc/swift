@@ -17,6 +17,7 @@ import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { useVendorProfile, useVendorOrdersLive } from '../../hooks/vendorops';
+import { useVendorTabPrefetch } from '../../hooks/vendorTabPrefetch';
 import { track } from '../../lib/analytics';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
@@ -197,6 +198,9 @@ function VendorTabs() {
   const manager = myRole === 'OWNER' || myRole === 'MANAGER';
   const cat = catalogueMeta(store?.vendorType); // R1: the catalogue tab is named for the type
   const isService = store?.vendorType === 'SERVICE';
+  // [SPEED 30 Oct] The other tabs' first reads, once the board's have landed (role-scoped; never in a preview).
+  const preview = useVendorPreview((s) => s.previewType) != null;
+  useVendorTabPrefetch({ storeId: store?.id, role: myRole, isService, preview });
   return (
     <VTab.Navigator
       screenOptions={{
