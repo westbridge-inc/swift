@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -135,6 +135,33 @@ describe('[Item 7] the front door itself', () => {
     }
     expect(images[0]!.getAttribute('loading')).not.toBe('lazy');
     expect(images.slice(1).map((img) => img.getAttribute('loading'))).toEqual(['lazy', 'lazy', 'lazy']);
+  });
+
+  // [WEBSITE 30 Oct · owner] "blurry when you zoom in": a card draws its screen about 400 px wide, so a Retina
+  // screen needs about 800 real pixels. Each card offers the phone's full 1206-pixel screen too, and that file
+  // really is 1206 pixels wide (read from the WebP header, not trusted from the name).
+  it('each card screen offers a full 1206-pixel file for Retina screens and zoom', async () => {
+    const view = await frontDoor();
+    const cards = [...view.container.querySelectorAll('img')].slice(1);
+    const dir = join(SRC, 'app/(marketing)/launching-soon');
+    const webpWidth = (file: string) => {
+      const b = readFileSync(join(dir, file));
+      expect(b.toString('ascii', 0, 4) + b.toString('ascii', 8, 12), file).toBe('RIFFWEBP');
+      const chunk = b.toString('ascii', 12, 16);
+      if (chunk === 'VP8 ') return b.readUInt16LE(26) & 0x3fff;
+      if (chunk === 'VP8X') return 1 + b.readUIntLE(24, 3);
+      if (chunk === 'VP8L') return 1 + (b.readUInt16LE(21) & 0x3fff);
+      throw new Error(`${file}: unknown WebP chunk ${chunk}`);
+    };
+    expect(cards).toHaveLength(3);
+    for (const img of cards) {
+      expect(img.getAttribute('sizes'), img.alt).toBeTruthy();
+      const large = (img.getAttribute('srcset') ?? '').split(',').map((s) => s.trim().split(/\s+/)).find(([, w]) => w === '1206w');
+      expect(large, img.alt).toBeDefined();
+    }
+    for (const name of ['app-tracking', 'app-taxi', 'app-partner']) {
+      expect(webpWidth(`${name}-1206.webp`), name).toBe(1206);
+    }
   });
 
   it('the screens never carry a name, a rating, a review or earnings in their words', async () => {
