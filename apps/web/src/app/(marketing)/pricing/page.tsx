@@ -18,8 +18,8 @@ export const metadata: Metadata = { title: 'Pricing' };
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
 // 13 Oct 2026), so its card appears only once the server offers them again.
 const MOVER_CLASSES: ReadonlyArray<{ tier: MoverPriceQuote['tier']; label: string; blurb: string }> = [
-  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels — every delivery fee and tip is yours.' },
-  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One taxi rate, whatever you drive — every fare and tip is yours.' },
+  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels. Every delivery fee and tip is yours.' },
+  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One rate, whatever you drive. Every fare and tip is yours.' },
   { tier: 'courierHeavy', label: 'Heavy delivery', blurb: 'Canters and box trucks for large and bulky loads.' },
 ];
 
@@ -94,8 +94,8 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
       <Section>
         <h1 className="text-4xl font-extrabold tracking-tight">Simple, flat pricing</h1>
         <p className="mt-3 max-w-2xl text-lg text-[var(--swift-muted)]">
-          One weekly subscription. Zero commission. Customers pay nothing to Swift — partners keep
-          100% of every sale, fare and tip.
+          One flat weekly fee and no commission. Partners keep 100% of every sale, fare and tip, and customers pay
+          Swift nothing.
         </p>
       </Section>
       <Section tint>
@@ -125,7 +125,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               })}
               <PriceCard title="Services" price={amount(list.service)} trialDays={list.pricing.trialDays}>
                 <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                  Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.
+                  Plumbers, electricians, mechanics, barbers and other trades that book work.
                 </p>
               </PriceCard>
               {list.catalogue.map((band, i) => {
@@ -144,23 +144,22 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                 );
               })}
             </div>
-            <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the
-              vehicle they register.{' '}
+            {/* [WEBSITE 30 Oct · owner] The note is short: the taxi and rider rules already sit on their cards. */}
+            <p className="mt-6 max-w-3xl text-sm leading-relaxed text-[var(--swift-muted)]">
               {/* Said only when the server confirms it bills no multi-store
                   discount (franchise: null, owner ruling of 13 Oct 2026). A
                   server that still sends the old rule bills it, so the page
                   must not claim otherwise; it shows no discount either way. */}
               {list.pricing.franchise == null && (
-                <>Every store is its own account with its own weekly fee, however many stores its owner runs. </>
+                <>Each store pays its own weekly fee, however many stores its owner runs. </>
               )}
               {/* [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts,
                   WEEKLY_RETIER_ON = false): a store is born on the first catalogue step and nothing moves it to
                   another. Only its free trial follows its catalogue. The page test pins the flag: turning the
                   re-tier back on must revisit this sentence. */}
-              Today every new store starts on the {CATALOGUE_CLASSES[list.catalogue[0]!.tier]?.label ?? 'Businesses'} rate
-              (a services business on the Services rate), whatever the size of its catalogue, and Swift does not
-              move a store to another rate as its active items change. A rate agreed with Swift stays as agreed.
+              Today every new store pays the {CATALOGUE_CLASSES[list.catalogue[0]!.tier]?.label ?? 'Businesses'} rate (a
+              services business pays the Services rate), whatever its size, and Swift does not move stores between rates.
+              A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (
@@ -169,16 +168,15 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
              something true and actionable — and must not point at an app that
              does not exist yet [AC-10]. */
           <p className="text-[var(--swift-muted)]">
-            We could not load this week&apos;s exact rates just now. The model does not change:{' '}
-            <b>one flat weekly fee</b>, a free trial that starts the day you are approved, and{' '}
-            <b>zero commission</b> on anything you sell or earn. Email{' '}
+            We could not load this week&apos;s rates just now. The model stays the same: <b>one flat weekly fee</b>, a
+            free trial from the day you are approved, and <b>zero commission</b> on anything you sell or earn. Email{' '}
             <a
               className="font-medium text-[var(--swift-red)] underline underline-offset-2"
               href={`mailto:${site.supportEmail}`}
             >
               {site.supportEmail}
             </a>{' '}
-            and we will send the current rate card for your market.
+            for the current rates.
           </p>
         )}
       </Section>

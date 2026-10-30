@@ -59,17 +59,77 @@ afterEach(() => {
 });
 
 describe('[Item 7] the front door itself', () => {
-  it('says "Launching soon in Georgetown" and links to /welcome and the company and legal pages', async () => {
+  // [WEBSITE 30 Oct · owner] The front door is a real launch page: a headline naming Georgetown, the app's own
+  // screen, Order / Ride / Earn, and a short trust strip. It leads to how Swift works, pricing and partner
+  // sign-up, never into ordering. The company and policy links live once, in the footer every marketing page
+  // carries; the page no longer repeats them as rows of pills.
+  async function frontDoor() {
     await configWith('');
     const { default: FrontDoor } = await load<{ default: () => React.ReactNode }>('app/(marketing)/launching-soon/page.tsx');
-    render(<>{FrontDoor()}</>);
-    expect(screen.getByRole('heading', { level: 1, name: 'Launching soon in Georgetown' })).toBeTruthy();
+    return render(<>{FrontDoor()}</>);
+  }
+
+  it('names Georgetown in its one headline and leads to how it works, pricing, partner sign-up and support', async () => {
+    await frontDoor();
+    expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual(['Georgetown, in one app.']);
     const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href'));
-    for (const href of ['/welcome', '/about', '/contact', '/pricing', '/legal/refunds', '/legal/delivery', '/legal/terms', '/legal/privacy']) {
-      expect(hrefs, href).toContain(href);
-    }
+    for (const href of ['/how-it-works', '/faq', '/pricing', '/signup', '/contact']) expect(hrefs, href).toContain(href);
     expect(hrefs).not.toContain('/cart');
     expect(hrefs).not.toContain('/');
+  });
+
+  it('has an Order, a Ride and an Earn section, and a trust strip whose words the Terms back', async () => {
+    const view = await frontDoor();
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(['Order', 'Ride', 'Earn with Swift', 'Why people trust Swift']);
+    const words = view.container.textContent ?? '';
+    // Terms §4: paid in cash or straight to the business's own MMG; Swift holds no money.
+    expect(words).toContain('Pay in cash, or by MMG straight to the business. Swift never holds your money.');
+    // Terms §11 + Privacy: a person checks every partner's documents before they operate (GUARDRAILS §7(4)).
+    expect(words).toContain('Every business, rider and driver has their documents checked by a person on our team before they go live.');
+    // Terms §10: the PIN handshake and live trip sharing.
+    expect(words).toContain('A PIN check before every ride, and the trip live on the map.');
+    expect(words).toContain('Keep 100% of every sale, fare and tip. One flat weekly fee, no commission.');
+  });
+
+  it('repeats no footer link: no policy or company page is linked from the page itself', async () => {
+    await frontDoor();
+    const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href') ?? '');
+    expect(hrefs.filter((href) => href.startsWith('/legal/') || href === '/about' || href === '/welcome')).toEqual([]);
+  });
+
+  it('the footer under it still carries every company and policy link', async () => {
+    await configWith('');
+    const { SiteFooter } = await import('@/components/site');
+    const view = render(<SiteFooter />);
+    const hrefs = [...view.container.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+    for (const href of ['/about', '/contact', '/legal/refunds', '/legal/delivery', '/legal/terms', '/legal/privacy', '/legal/child-safety', '/account/delete']) {
+      expect(hrefs, href).toContain(href);
+    }
+  });
+
+  it('reads as a launch page, not a disclaimer: no hedging line and no em dash', async () => {
+    const view = await frontDoor();
+    const words = view.container.textContent ?? '';
+    expect(words).not.toMatch(/nothing can be ordered|Ordering opens on this site/);
+    expect(words).not.toContain('—');
+  });
+
+  it('shows the real app in a phone frame, described for a screen reader, sized so the page does not jump', async () => {
+    const view = await frontDoor();
+    const images = [...view.container.querySelectorAll('img')];
+    expect(images.length).toBe(1);
+    expect(images[0]!.getAttribute('alt')).toBe('The Swift app’s Home screen: search, and tiles for Food, Groceries, Taxi, Send, Services, Orders, Favourites and Scan.');
+    expect(Number(images[0]!.getAttribute('width'))).toBeGreaterThan(0);
+    expect(Number(images[0]!.getAttribute('height'))).toBeGreaterThan(0);
+  });
+
+  it('no heading skips a level, and axe finds nothing', async () => {
+    const view = await frontDoor();
+    const levels = [...view.container.querySelectorAll('h1, h2, h3, h4')].map((h) => Number(h.tagName.slice(1)));
+    expect(levels[0]).toBe(1);
+    levels.forEach((level, i) => { if (i > 0) expect(level - levels[i - 1]!).toBeLessThanOrEqual(1); });
+    const { axeViolations } = await import('@/test/axe');
+    expect(await axeViolations(view.container)).toEqual([]);
   });
 });
 

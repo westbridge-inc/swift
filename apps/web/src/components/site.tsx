@@ -45,8 +45,8 @@ export function SiteFooter() {
         <div>
           <SwiftLogo />
           <p className="mt-3 max-w-xs text-[13px] leading-[18px] text-[var(--swift-muted)]">
-            One app for food, groceries, shops, couriers, rides and trades — where the people doing
-            the work keep 100% of what they earn.
+            One app for food, groceries, shops, couriers, rides and trades. The people doing the work
+            keep 100% of what they earn.
           </p>
           <p className="mt-4 text-xs text-[var(--swift-muted)]">
             <BrowserOrderingNote /> Taxi rides require the Swift mobile app.
