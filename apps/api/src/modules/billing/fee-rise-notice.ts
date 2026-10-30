@@ -230,6 +230,8 @@ export async function holdChainDealRiseInTx(
   const key = feeRiseKey(p.subscriptionId);
   const row = await tx.platformConfig.findUnique({ where: { key } });
   const held = row ? readHeldFeeRise(row.value) : null;
+  // [REVIEW-G #2227 N2] A rise of another source held for this branch is never replaced here (it would lose its notice).
+  if (held && held.source !== 'CHAIN_DEAL') return 'not-a-rise';
   if (held && held.source === 'CHAIN_DEAL' && held.from === p.from && held.to === p.to && held.customFrom === p.customFrom
     && held.customTo === p.customTo && held.notBefore === p.notBefore.toISOString()) return 'unchanged';
   const value: HeldFeeRise = {
