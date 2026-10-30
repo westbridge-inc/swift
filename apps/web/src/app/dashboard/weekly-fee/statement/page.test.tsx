@@ -87,7 +87,7 @@ describe('[E3] the fee statement page', () => {
   });
 
   it('[REVIEW-F #2228 S4-3] the month picker runs from 2026-01 to this month, and the page says it is loading while it checks the role', async () => {
-    let resolve: (role: string) => void = () => undefined;
+    let resolve: (_role: string) => void = () => undefined;
     vi.spyOn(chainStatement, 'getMyRole').mockReturnValue(new Promise((r) => { resolve = r; }));
     vi.spyOn(chainStatement, 'thisGuyanaMonth').mockReturnValue('2026-11');
     vi.spyOn(chainStatement, 'getChainStatement').mockResolvedValue(statement);
