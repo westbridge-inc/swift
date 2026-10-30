@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from './legal.routes';
-import { publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
+import { currentConsentDetailed, publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
 import { OPERATOR } from './operator';
 
 /**
@@ -11,8 +11,11 @@ import { OPERATOR } from './operator';
  * MATERIAL_CHANGES lists every version that needs a fresh tick, newest last, with the short summary shown above the
  * tick. An entry only takes effect once that version is the served LEGAL_VERSION, so a summary can land before its
  * words do. A version not listed here (wording polish) needs no fresh tick.
+ *
+ * [BILL-PRO] An entry with `audience: 'provider'` changes only what an independent service provider (a pro: a person
+ * with a provider profile) agrees to. It asks pros, and nobody else, for a fresh tick, and only a pro sees its summary.
  */
-export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonly string[] }> = [
+export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
   {
     version: '2026-10-16',
     summary: [
@@ -66,7 +69,21 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
       'Privacy: Swift keeps that record (which booking it was, when the business recorded it, and who at the business recorded it) with the order’s record, for as long as the order’s record is kept.',
     ],
   },
+  {
+    // [BILL-PRO · owner 28 Oct 2026 B3: MATERIAL, a fresh tick; for Providers only (the Business Agreement s.12)]
+    version: '2026-10-29.2',
+    audience: 'provider',
+    summary: [
+      'Service providers: the Business Agreement now covers you as an independent provider (section 12). Read it and accept it to keep offering your services on Swift.',
+      'The weekly services fee: Swift tells you in the app before it starts for providers. Nothing is charged until you accept this agreement and confirm you understand the fee, and your free trial starts no earlier than the day the fee starts for providers. You pay only on MMG’s checkout page, in the Swift app or on the Swift website. If you also own a Services store, its fee covers you: you pay one fee.',
+      'If you publish a list of services with bookable times, you accept in advance the bookings customers make from it at the times it shows as free. Honour them, or cancel or move them in the app as early as you can.',
+    ],
+  },
 ];
+
+/** [BILL-PRO · COORD 29 Oct 16:13Z] The first version whose Business Agreement covers a Provider (s.12), including
+ *  the clause that a published list of services with bookable times is their advance acceptance of bookings. */
+export const PRO_AGREEMENT_VERSION = '2026-10-29.2';
 
 /**
  * Versions deliberately classed NOT material: no fresh tick, nobody is asked again. Each says why. Listing a version
@@ -133,23 +150,45 @@ export function compareLegalVersions(a: string, b: string): number {
   return Number(x[2] ?? 0) - Number(y[2] ?? 0);
 }
 
-type MaterialChange = { version: string; summary: readonly string[] };
+type MaterialChange = { version: string; summary: readonly string[]; audience?: 'provider' };
 
-/** The newest material version that is already being served, or null. */
+/** The newest material version for everyone that is already being served, or null (provider-only entries excluded). */
 export function materialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
-  const live = changes.filter((c) => compareLegalVersions(c.version, current) <= 0);
+  const live = changes.filter((c) => !c.audience && compareLegalVersions(c.version, current) <= 0);
   return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
 }
 
 type Agreement = { documentType: ConsentDocumentType; subjectType: ConsentSubjectType; renderedText: string };
 
-/** The partner agreements a person re-accepts with the Terms, by the roles they hold. */
-function agreementsFor(roles: readonly UserRole[]): Agreement[] {
+/** The partner agreements a person re-accepts with the Terms, by the roles they hold. A pro (a person with a
+ *  provider profile, who holds no partner role) accepts the Business Agreement, as a store owner does. */
+function agreementsFor(roles: readonly UserRole[], isPro = false): Agreement[] {
   const out: Agreement[] = [];
   // [REVIEW-F S3-1 on #1763] legacy RIDER / DRIVER accounts are movers too
   if (roles.some((r) => r === 'MOVER' || r === 'RIDER' || r === 'DRIVER')) out.push({ documentType: 'driver_agreement', subjectType: 'driver', renderedText: DRIVER_AGREEMENT });
-  if (roles.includes('VENDOR_OWNER' as UserRole)) out.push({ documentType: 'vendor_agreement', subjectType: 'vendor_user', renderedText: VENDOR_AGREEMENT });
+  if (roles.includes('VENDOR_OWNER' as UserRole) || isPro) out.push({ documentType: 'vendor_agreement', subjectType: 'vendor_user', renderedText: VENDOR_AGREEMENT });
   return out;
+}
+
+/** [BILL-PRO] A pro's Business Agreement: the version they last accepted (null: never, or withdrawn). Null for a
+ *  person with no provider profile. */
+export interface ProAgreementState { acceptedVersion: string | null }
+
+export async function proAgreementState(db: PrismaClient | Prisma.TransactionClient, userId: string): Promise<ProAgreementState | null> {
+  const pro = await db.serviceProvider.findUnique({ where: { userId }, select: { id: true } });
+  if (!pro) return null;
+  const latest = await currentConsentDetailed(db, 'vendor_user', userId, 'vendor_agreement');
+  return { acceptedVersion: latest && latest.action !== 'withdrawn' ? latest.version : null };
+}
+
+/** Has this pro accepted a Business Agreement that covers Providers (PRO_AGREEMENT_VERSION or later)? */
+export function proAgreementAccepted(state: ProAgreementState | null): boolean {
+  return !!state?.acceptedVersion && compareLegalVersions(state.acceptedVersion, PRO_AGREEMENT_VERSION) >= 0;
+}
+
+/** A pro must give the fresh tick while a served version covering Providers is one they have not accepted. */
+function proNeedsAcceptance(pro: ProAgreementState | null | undefined, current: string): boolean {
+  return !!pro && compareLegalVersions(PRO_AGREEMENT_VERSION, current) <= 0 && !proAgreementAccepted(pro);
 }
 
 export interface AcceptanceStatus {
@@ -163,25 +202,29 @@ export interface AcceptanceStatus {
 }
 
 export function acceptanceStatus(
-  user: { tosVersion: string | null; roles: readonly UserRole[] },
+  user: { tosVersion: string | null; roles: readonly UserRole[]; pro?: ProAgreementState | null },
   current: string = LEGAL_VERSION,
   changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES,
 ): AcceptanceStatus {
   const material = materialVersion(current, changes);
   const accepted = user.tosVersion;
-  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0);
+  const proNeeds = proNeedsAcceptance(user.pro, current);
+  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0) || proNeeds;
   // Every material change since the version this person accepted, oldest first — someone who skipped
-  // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest.
-  const summary = accepted !== null
-    ? changes.filter((c) => compareLegalVersions(c.version, accepted) > 0 && compareLegalVersions(c.version, current) <= 0)
-      .sort((a, b) => compareLegalVersions(a.version, b.version)).flatMap((c) => c.summary)
-    : [];
+  // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest. A provider-only change is
+  // shown to a pro who has not accepted it (their own Business Agreement version), and to nobody else.
+  const served = (c: MaterialChange) => compareLegalVersions(c.version, current) <= 0;
+  const proAccepted = user.pro?.acceptedVersion ?? null;
+  const summary = changes.filter((c) => served(c) && (c.audience
+    ? proNeeds && (proAccepted === null || compareLegalVersions(c.version, proAccepted) > 0)
+    : accepted !== null && compareLegalVersions(c.version, accepted) > 0))
+    .sort((a, b) => compareLegalVersions(a.version, b.version)).flatMap((c) => c.summary);
   return {
     currentVersion: current,
     acceptedVersion: accepted,
     needsAcceptance,
     summary,
-    agreements: agreementsFor(user.roles).map((a) => a.documentType as 'driver_agreement' | 'vendor_agreement'),
+    agreements: agreementsFor(user.roles, !!user.pro).map((a) => a.documentType as 'driver_agreement' | 'vendor_agreement'),
   };
 }
 
@@ -193,10 +236,13 @@ export async function recordReacceptance(
   prisma: PrismaClient,
   input: { userId: string; roles: readonly UserRole[]; hadAccepted: boolean; surface: ConsentSurface; ip?: string | null },
 ): Promise<void> {
+  // [BILL-PRO] A pro accepts the Business Agreement with the tick. (Whether they are a pro is read here, before the lock;
+  // their agreement is re-read inside it. A profile created in between is asked again on the next status read.)
+  const isPro = !!(await prisma.serviceProvider.findUnique({ where: { userId: input.userId }, select: { id: true } }));
   const docs: Agreement[] = [
     { documentType: 'terms_of_service', subjectType: 'customer', renderedText: TERMS },
     { documentType: 'privacy_policy', subjectType: 'customer', renderedText: PRIVACY },
-    ...agreementsFor(input.roles),
+    ...agreementsFor(input.roles, isPro),
   ];
   for (const d of docs) {
     await publishLegalDocumentOnce(prisma, { documentType: d.documentType, version: LEGAL_VERSION, renderedText: d.renderedText });
@@ -205,14 +251,21 @@ export async function recordReacceptance(
     // One acceptance per person at a time; a double tap records once.
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`legal:reaccept:${input.userId}`}, 0))`);
     const now = await tx.user.findUnique({ where: { id: input.userId }, select: { tosVersion: true } });
-    if (now?.tosVersion === LEGAL_VERSION) return;
-    for (const d of docs) {
+    // A person already at the served version records nothing again, except a pro whose Business Agreement is not
+    // yet at it (a pro who signed up at this version as a customer, then opened a provider profile).
+    const agreement = isPro ? await currentConsentDetailed(tx, 'vendor_user', input.userId, 'vendor_agreement') : null;
+    const proAgreementMissing = isPro && !(agreement && agreement.action !== 'withdrawn' && agreement.version === LEGAL_VERSION);
+    if (now?.tosVersion === LEGAL_VERSION && !proAgreementMissing) return;
+    const toRecord = now?.tosVersion === LEGAL_VERSION ? docs.filter((d) => d.documentType === 'vendor_agreement') : docs;
+    for (const d of toRecord) {
+      // A pro's first Business Agreement is a grant, whatever they accepted before as a customer.
+      const firstAgreement = d.documentType === 'vendor_agreement' && isPro && !agreement;
       await recordConsent(tx, {
         subjectType: d.subjectType,
         subjectId: input.userId,
         documentType: d.documentType,
         version: LEGAL_VERSION,
-        action: input.hadAccepted ? 're_granted' : 'granted',
+        action: input.hadAccepted && !firstAgreement ? 're_granted' : 'granted',
         surface: input.surface,
         ip: input.ip ?? null,
         evidence: { control: 'reaccept_checkbox', path: 'auth/legal-acceptance' },

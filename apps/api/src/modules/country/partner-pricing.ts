@@ -8,6 +8,7 @@ import {
   type SubscriptionTiers,
   type VendorRateReason,
 } from './country-config.service';
+import { trialDaysForTier } from '../subscription/trial-length';
 
 /** One vehicle a mover can register, priced for the role it provisions. */
 export interface MoverQuote {
@@ -28,6 +29,10 @@ export interface CatalogueBand {
   minItems: number;
   tier: Exclude<VendorRateReason, 'service'>;
   rate: number;
+  /** [DEPT-PRICE · owner 29 Oct 2026] The free trial, in days, of a NEW store whose own catalogue is at this step when
+   *  Swift approves it: 7 at the department step, else 14 (subscription/trial-length.ts). Additive: an app that predates
+   *  it reads the list's one `trialDays`, the 14 days every new store starts on. */
+  trialDays: number;
 }
 
 /**
@@ -101,7 +106,7 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   // through the biller, so a quoted step is a billed step.
   const catalogue = catalogueStepsFor(tiers).map(({ minItems }): CatalogueBand => {
     const { rate, tier } = vendorAt(false, minItems);
-    return { minItems, tier: tier as CatalogueBand['tier'], rate };
+    return { minItems, tier: tier as CatalogueBand['tier'], rate, trialDays: trialDaysForTier(tier) };
   });
   const service = vendorAt(true, 0).rate;
 
