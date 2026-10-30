@@ -468,6 +468,7 @@ const APP_ROLE_MIGRATION_REVOCATIONS: ReadonlyArray<{ readonly table: string; re
   { table: 'public.billing_obligation_transitions', privileges: 'UPDATE, DELETE' },
   { table: 'public.erasure_ledger_entry', privileges: 'INSERT, UPDATE, DELETE' }, // 20261021140000
   { table: 'public.erasure_ledger_shipment', privileges: 'INSERT, UPDATE, DELETE' },
+  { table: 'public.mmg_checkout_parts', privileges: 'UPDATE, DELETE' }, // 20261029070000 (ENTERPRISE E1: a chain checkout's branch shares)
   { table: 'swift_qr.token_identities', privileges: 'ALL' }, // 20261005210300
 ];
 
