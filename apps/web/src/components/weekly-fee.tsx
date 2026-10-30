@@ -8,6 +8,7 @@ import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, F
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
+import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
 
 // [MMG reopen] Loaded only when the server grants a reopen (switch off by default): not in the first load,
 // and neither is its rule or its words (lib/weekly-fee-reopen).
@@ -31,6 +32,8 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
   // [FEE-STATUS · owner 25 Oct] Refresh status says it is checking, then when it last checked. A failed
   // re-read shows the page's own error (the query's), never "Checked at".
   const [checked, setChecked] = useState<{ busy: boolean; at: number | null }>({ busy: false, at: null });
+  // [SPEED 30 Oct] Opened again: the last known status at once, said to be checking until Swift answers (no paying on it meanwhile).
+  const checkingLatest = useCheckingLatest(q);
   const refreshStatus = async () => {
     if (checked.busy) return;
     setChecked((c) => ({ ...c, busy: true }));
@@ -74,6 +77,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
       <p className="text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]">Your weekly fee</p>
       <p className="text-2xl font-extrabold sm:text-3xl" data-testid="weekly-fee-status">{status.headline}</p>
       {status.detail && <p className="text-sm">{status.detail}</p>}
+      <CheckingLatest show={checkingLatest && !checked.busy} />
       {checkout && <p role="status">{checkoutWords(checkout, view.returned)}</p>}
       {view.returned && !checkout && <p role="status">Waiting for MMG…</p>}
       {view.error && <p role="alert">{view.error}</p>}
@@ -94,7 +98,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
             <p className="text-sm text-[var(--swift-muted)]">Opens MMG&apos;s page, then brings you back to Swift.</p>
           </div>
         </div>
-        <button disabled={view.busy} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
+        <button disabled={view.busy || checkingLatest} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
           {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
         </button>
       </section>}
