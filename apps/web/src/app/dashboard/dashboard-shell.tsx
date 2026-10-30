@@ -101,6 +101,33 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
   );
 }
 
+/**
+ * [SPEED 30 Oct · owner] A first tap on a tab shows its content: once the board's own reads have
+ * landed (nothing on its way), the reads the other tabs of this login make on their first draw are
+ * made once (lib/dashboard-tab-reads, its own chunk, loaded only then). Staff prefetch only what
+ * they can see; a store switch or a role change starts again for the new store or role.
+ */
+function useTabPrefetch(storeId: string | null, role: VendorMemberRole | undefined, vendorType: string | undefined, roleKnown: boolean) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!storeId || !roleKnown) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      timer = undefined;
+      if (!live || queryClient.isFetching() > 0) return;
+      live = false;
+      unsubscribe();
+      void import('@/lib/dashboard-tab-reads')
+        .then(({ dashboardTabReads, prefetchDashboardTabs }) => prefetchDashboardTabs(queryClient, dashboardTabReads(storeId, role, vendorType)))
+        .catch(() => undefined);
+    };
+    const unsubscribe = queryClient.getQueryCache().subscribe(() => { if (live && !timer) timer = setTimeout(check, 0); });
+    timer = setTimeout(check, 0);
+    return () => { live = false; unsubscribe(); if (timer) clearTimeout(timer); };
+  }, [queryClient, storeId, role, vendorType, roleKnown]);
+}
+
 function StoreShell({ children, person }: { children: React.ReactNode; person: ShellPerson | null }) {
   const queryClient = useQueryClient();
   // The store is React state as well as localStorage: the shell must RE-RENDER
@@ -148,11 +175,13 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
   const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
-  const { role } = useStoreRole();
+  const { role, known: roleKnown } = useStoreRole();
   const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role, selected?.vendorType), [selected?.vendorType, role]);
 
   // [PERF row 8] The store's live feed, for a store the server listed for this account.
   const feedStore = storeId && list.some((s) => s.id === storeId) ? storeId : null;
+  // [SPEED 30 Oct] The other tabs' first reads, made once the board is idle (role- and store-type-scoped).
+  useTabPrefetch(feedStore, role, selected?.vendorType, roleKnown);
   return (<>
     {feedStore && <StoreLiveFeed key={feedStore} storeId={feedStore} />}
     <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
@@ -176,6 +205,9 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   </>);
 }
 
+/** [SPEED 30 Oct] A tab's last answers stay for half an hour after it closes (react-query's default is 5 minutes). */
+const KEEP_TABS_FOR = 30 * 60_000;
+
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
   // a check that could not reach Swift says so instead (components/console-session).
@@ -183,7 +215,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
   if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
-    <Providers offline="fail">
+    <Providers offline="fail" keepFor={KEEP_TABS_FOR}>
       <StoreShell person={gate.person}>{children}</StoreShell>
     </Providers>
   );
