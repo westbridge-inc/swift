@@ -297,7 +297,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'mmgCheckouts', model: 'MmgCheckoutIntent', by: ['createdByUserId'], key: 'id', omit: { candidates: 'SYSTEM' },
-    fields: ['id', 'subscriptionId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
+    fields: ['id', 'subscriptionId', 'chainOwnerId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
   },
   {
     category: 'feeNotices', model: 'BillingFeeNotice', by: ['userId'], key: 'id', omit: { payload: 'SYSTEM' },
@@ -345,8 +345,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     category: 'storeOwnership', model: 'VendorOwner', by: ['userId'], key: 'id',
     // [CHAINS] The chain deal is the owner's own commercial term: its weekly fee, currency and when it was set. Who at
     // Swift set it and the staff's reason are Swift's internal record.
-    fields: ['id', 'userId', 'createdAt', 'dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt'],
-    omit: { dealReason: 'INTERNAL_NOTE', dealSetBy: 'OTHER_PERSON' },
+    fields: ['id', 'userId', 'createdAt', 'dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'dealChangeKind', 'dealChangeFrom', 'dealChangeTo', 'dealChangeNotBefore', 'dealChangeSetAt', 'dealChangeSwitchedAt'],
+    omit: { dealReason: 'INTERNAL_NOTE', dealSetBy: 'OTHER_PERSON', dealChangeReason: 'INTERNAL_NOTE', dealChangeSetBy: 'OTHER_PERSON' },
   },
   {
     // [REVIEW-M S3 on #2027 · follow-up] The record of each store the person OWNS, read through the ownership

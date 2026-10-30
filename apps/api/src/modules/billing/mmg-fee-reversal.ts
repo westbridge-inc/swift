@@ -62,7 +62,7 @@ export const REVERSAL_LATE_WATCH_MS = 7 * 24 * 3_600_000;
 
 export type ReversalRefusal =
   | 'NOT_CONFIRMED' | 'NOT_PROVEN' | 'IDENTITY_CONFLICT' | 'AMOUNT_MISMATCH' | 'ALREADY_REVERSING'
-  | 'ALREADY_REVERSED' | 'MONEY_ALREADY_USED' | 'PAYMENT_CONFIRMING';
+  | 'ALREADY_REVERSED' | 'MONEY_ALREADY_USED' | 'PAYMENT_CONFIRMING' | 'CHAIN_CHECKOUT';
 
 const REFUSAL_COPY: Record<ReversalRefusal, string> = {
   NOT_CONFIRMED: 'Only a weekly-fee payment Swift confirmed with MMG can be returned this way.',
@@ -73,6 +73,9 @@ const REFUSAL_COPY: Record<ReversalRefusal, string> = {
   ALREADY_REVERSED: 'This payment has already been returned to the partner.',
   MONEY_ALREADY_USED: 'This payment has already paid, in whole or in part, for a week of the partner\'s fee. It is not returned here; follow the refund procedure.',
   PAYMENT_CONFIRMING: 'Another payment for this fee is being confirmed or reviewed. Try again once it is settled.',
+  // [ENTERPRISE E1] One MMG payment credited to several branches: MMG returns it in full only, and that would take
+  // money back from every branch's wallet at once. Not built here: follow the refund procedure.
+  CHAIN_CHECKOUT: 'This payment paid several branches ("pay all my branches"). It cannot be returned here; follow the refund procedure.',
 };
 
 export function reversalRefusal(code: ReversalRefusal): AppError {
@@ -98,6 +101,7 @@ export interface ReversalDeps {
 export async function reversalEligibilityInTx(
   tx: Tx, intent: MmgCheckoutIntent, expectAmount: number | null, now: Date,
 ): Promise<{ ok: true } | { ok: false; code: ReversalRefusal }> {
+  if (!intent.subscriptionId) return { ok: false, code: 'CHAIN_CHECKOUT' };
   if (intent.status !== 'CONFIRMED' || !intent.providerPaymentId || !intent.mmgTransactionId || !intent.confirmedAt) {
     return { ok: false, code: 'NOT_CONFIRMED' };
   }
@@ -396,11 +400,13 @@ export class MmgFeeReversalService {
     const claim = await this.deps.prisma.$transaction(async (tx) => {
       const found = await tx.mmgCheckoutIntent.findFirst({ where: { id: input.checkoutId, tenantId: input.tenantId }, select: { subscriptionId: true } });
       if (!found) throw new NotFoundError('MMG checkout', input.checkoutId);
+      if (!found.subscriptionId) throw reversalRefusal('CHAIN_CHECKOUT');
       await lockBillingAuthority(tx, found.subscriptionId);
       await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${input.checkoutId} FOR UPDATE`;
       const intent = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: input.checkoutId } });
       const eligible = await reversalEligibilityInTx(tx, intent, input.amountGyd, now);
       if (!eligible.ok) throw reversalRefusal(eligible.code);
+      if (!intent.subscriptionId) throw reversalRefusal('CHAIN_CHECKOUT');
       const row = await tx.mmgFeeReversal.create({ data: {
         tenantId: intent.tenantId, subscriptionId: intent.subscriptionId, checkoutId: intent.id,
         providerPaymentId: intent.providerPaymentId!, mmgTransactionId: intent.mmgTransactionId!,
