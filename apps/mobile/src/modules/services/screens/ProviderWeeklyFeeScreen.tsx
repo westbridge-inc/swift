@@ -7,6 +7,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { WeeklyFeeScreen } from '../../billing/screens/WeeklyFeeScreen';
 import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { useAcknowledgeProviderFee, useProviderFee, useServiceProviderProfile } from '../../../hooks';
+import { useCheckingLatest } from '../../../lib/checkingLatest';
 import {
   PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, proFeeAgreementFirst, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickRunningLine, proFeeTickStartsLine,
 } from '../../../lib/providerFee';
@@ -38,6 +39,7 @@ function ReviewAgreementButton() {
 
 export function ProviderWeeklyFeeScreen({ route }: { route?: { params?: { ref?: string } } }) {
   const q = useProviderFee();
+  const checkingLatest = useCheckingLatest(q);
   const me = useServiceProviderProfile<{ isVerified?: boolean }>();
   const ack = useAcknowledgeProviderFee();
   const [tickedFor, setTickedFor] = useState<string | null>(null);
@@ -53,7 +55,7 @@ export function ProviderWeeklyFeeScreen({ route }: { route?: { params?: { ref?: 
   const noFee = proFeeNoFeeWords(view, isVerified);
 
   if (view?.data && (showOwnFee || (tick.kind === 'none' && !view.coveredBy))) {
-    return <WeeklyFeeScreen family="provider" sub={view.data} loading={q.isLoading} error={q.isError} refresh={q.refetch} checkoutRef={route?.params?.ref} />;
+    return <WeeklyFeeScreen family="provider" sub={view.data} loading={q.isLoading} error={q.isError} refresh={q.refetch} checkoutRef={route?.params?.ref} checkingLatest={checkingLatest} />;
   }
   return (
     <Screen>

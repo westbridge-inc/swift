@@ -6,6 +6,7 @@ export * from './providerFee';
 export * from './verification';
 export * from './mover';
 export * from './vendorops';
+export * from './earnerPrefetch';
 export * from './useDeviceLocation';
 export * from './usePlacesAutocomplete';
 export * from './safety';

@@ -15,8 +15,10 @@ import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/week
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
-export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false, onPayAll }: {
+export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false, onPayAll, checkingLatest = false }: {
   family: FeeFamily; sub?: FeeSubscription | null; loading?: boolean; error?: boolean;
+  /** [SPEED 30 Oct] The fee shown is the last known answer and Swift's new one is on its way (lib/checkingLatest): say so; Pay waits. */
+  checkingLatest?: boolean;
   refresh: () => unknown; checkoutRef?: string; contextPending?: boolean;
   /** [ENTERPRISE E1b] The owner of several stores only: opens "Pay all my branches". */
   onPayAll?: () => void;
@@ -107,6 +109,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           {/* [FEE-STATUS] The API's words for where the fee stands: never a passed date as a next bill. */}
           <T variant="heading" testID="weekly-fee-status">{feeStatus?.headline}</T>
           {feeStatus?.detail ? <T variant="body" style={{ marginTop: space.md }}>{feeStatus.detail}</T> : null}
+          {checkingLatest && !checked.busy ? <T variant="caption" tone="muted" testID="weekly-fee-checking" style={{ marginTop: space.sm }}>Checking for the latest…</T> : null}
           {checkout ? <T variant="body" style={{ marginTop: space.md }}>{checkoutWords(checkout, view.returned)}</T> : null}
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
           {view.error ? <T variant="caption" tone="error" style={{ marginTop: space.md }}>{view.error}</T> : null}
@@ -143,7 +146,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         {action && !blocked ? <Card>
           <T variant="heading">Pay with MMG</T>
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>
-          <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
+          <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} disabled={checkingLatest} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
         </Card> : null}
         {showCard ? <CardPaySection family={family} card={card} latestSession={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
