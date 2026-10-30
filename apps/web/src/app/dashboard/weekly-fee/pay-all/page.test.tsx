@@ -42,6 +42,27 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 describe('[E1b] the pay-all page', () => {
   beforeEach(() => { setSelectedStore('store-1'); });
+  it('[SPEED 30 Oct] opened again: the last known fees at once, "Checking for the latest…", and no paying on them until Swift answers', async () => {
+    const gate = { hold: false, held: [] as Array<() => void> };
+    api('OWNER', ({ url }) => {
+      if (url.pathname !== '/api/v1/vendor/subscription/chain-fees') return undefined;
+      return (gate.hold ? new Promise((resolve) => { gate.held.push(() => resolve(ok(fees()))); }) : ok(fees())) as never;
+    });
+    const view = renderWithQuery(<PayAllBranchesPage />);
+    await screen.findByRole('list', { name: 'Your branches' });
+    view.rerender(<p>another tab</p>);
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+    gate.hold = true;
+    view.rerender(<PayAllBranchesPage />);
+    expect(screen.getByRole('list', { name: 'Your branches' }).textContent).toContain('GY$12,000');
+    expect(screen.getByText('Checking for the latest…')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Pay GY$21,000 with MMG' }) as HTMLButtonElement).disabled).toBe(true);
+    gate.held.splice(0).forEach((release) => release());
+    await waitFor(() => expect(screen.queryByText('Checking for the latest…')).toBeNull());
+    expect((screen.getByRole('button', { name: 'Pay GY$21,000 with MMG' }) as HTMLButtonElement).disabled).toBe(false);
+    view.unmount();
+  });
+
   it('the owner sees each branch, the server\'s total, and pays it in one MMG checkout with the list as shown', async () => {
     setSelectedStore('store-1');
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});

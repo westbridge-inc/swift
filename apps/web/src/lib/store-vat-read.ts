@@ -20,3 +20,5 @@ export interface StoreVatView {
   sources: string[];
 }
 export const getStoreVat = () => apiFetch('/api/v1/vendor/vat').then((r) => r.data as StoreVatView);
+/** [SPEED 30 Oct] What the settings page's VAT report link needs from the same read: the store's VAT status ('NONE' when unanswered). */
+export const vatStatusOf = (view: StoreVatView | undefined): string => (view as { status?: string } | undefined)?.status ?? 'NONE';
