@@ -50,3 +50,35 @@ export function AppStoreSentence() {
     </>
   );
 }
+
+/**
+ * [WEBSITE 30 Oct · G11] The front door's store area. While the switch is off (and while its answer is on the way,
+ * or if the question fails) it is one calm line saying where the app is coming: no dead badge, no disclaimer. Once
+ * the switch says live (on the public site only), the line becomes the two real store buttons. The buttons are one
+ * 56 px row that never wraps (two short labels fit a 320 px phone), and the page reserves that row's height
+ * (min-h-14 around this), so turning the stores on moves nothing on the page.
+ * It lives beside AppStoreLinks so the page reuses the footer's code instead of shipping its own copy.
+ */
+export function StoreButtons() {
+  const live = useAppStoresLive();
+  if (!live) {
+    return (
+      <p className="inline-flex items-center gap-2.5 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 py-2.5 text-sm font-medium text-[var(--swift-ink)]">
+        <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-[var(--swift-red)]" />
+        Coming to the App Store and Google Play
+      </p>
+    );
+  }
+  return (
+    <ul aria-label="Get the Swift app" className={`flex flex-nowrap gap-3`}>
+      {STORES.map(({ href }, i) => (
+        <li key={href}>
+          <a href={href} className="sw-btn sw-btn-ink flex-col gap-0 px-5 leading-none">
+            <span className="text-[11px] font-medium">{i === 0 ? 'Download on the ' : 'Get it on '}</span>
+            <span className="text-[17px]">{i === 0 ? 'App Store' : 'Google Play'}</span>
+          </a>
+        </li>
+      ))}
+    </ul>
+  );
+}

@@ -124,7 +124,7 @@ export function DocumentChecklist({
       </T>
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
         {/* [Owner 15 Oct 2026] no promise faster than the support hours allow */}
-        Upload these to activate your account. We review them Monday to Saturday, 8:00–20:00 Guyana time.
+        Upload these to activate your account. We review them Monday to Saturday, 8:00–16:00 Guyana time.
       </T>
       {/* [R17 · legal research D2/B1] a tick before any upload; the API records it in the consent ledger.
           [DOC-CONSENT] ticked only by the person: on this visit, or their own grant on record. */}

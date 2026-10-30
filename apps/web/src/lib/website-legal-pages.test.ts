@@ -24,7 +24,9 @@ describe('company facts come from the legal texts’ operator', () => {
     expect(site).toMatchObject({
       legalEntityName: OPERATOR.name, registrationNo: '17703', phone: '+592 716 3534', supportEmail: 'support@swiftgy.com',
       address: 'Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana',
-      supportHours: 'Monday to Saturday, 8:00–20:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
+      // [Owner 30 Oct 2026] 8:00–16:00 (was 20:00).
+      supportHours: 'Monday to Saturday, 8:00–16:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
+      supportDays: 'Monday to Saturday, 8:00–16:00 Guyana time',
     });
   });
 
