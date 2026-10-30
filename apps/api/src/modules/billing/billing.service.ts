@@ -28,6 +28,8 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
+import { catalogueCardTop } from './card-price-cut';
+import { paymentInFlightInTx } from './payment-in-flight';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
 import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
@@ -442,6 +444,9 @@ export class BillingService {
     // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
     // rise whose date the next fee has reached moved in, before anything due is priced.
     await this.sweepFeeRises(now).catch((err) => log().error({ err }, '[F2] the pass over held fee rises failed; billing goes on at the rates on record'));
+    // [DEPT-PRICE · card-price-cut.ts] A card price that went DOWN reaches every store billed above it before anything
+    // due is priced. A failed pass bills at the rates on record (never more than before) and the next run retries.
+    await this.applyCardPriceCuts(now).catch((err) => log().error({ err }, '[DEPT-PRICE] the card price-cut pass failed; billing goes on at the rates on record'));
     const due = await this.prisma.subscription.findMany({
       where: {
         autoRenew: true,
@@ -5190,6 +5195,75 @@ export class BillingService {
       }
     }
     return changed;
+  }
+
+  /**
+   * [DEPT-PRICE · owner 29 Oct 2026 · card-price-cut.ts] Every catalogue store billed ABOVE its market's highest
+   * catalogue fee (the department step: 60,000 -> 45,000) moves down to it from its next weekly fee: one transaction
+   * under the payer's lock (the new tier rate, a TIER_CHANGE event, an audit row; a held rise above it dropped), then
+   * the payer is told. A store with a payment in flight is left until it settles (the next hourly pass moves it); a
+   * negotiated rate is kept (only the tier rate under it moves); a service business is not on the catalogue card.
+   * Idempotent: a moved store is no longer above the card. Returns how many stores moved.
+   */
+  async applyCardPriceCuts(now = new Date()): Promise<number> {
+    let moved = 0;
+    const markets = await this.prisma.countryConfig.findMany({ select: { code: true, currencyCode: true, subscriptionTiers: true } });
+    for (const market of markets) {
+      let top: number;
+      try {
+        top = catalogueCardTop(market.subscriptionTiers as unknown as SubscriptionTiers);
+      } catch (error) {
+        if (!(error instanceof PricingConfigError)) throw error;
+        log().error({ country: market.code, key: error.details?.['key'] }, '[DEPT-PRICE] card price cut held: this market\'s weekly-fee config cannot price a store');
+        continue;
+      }
+      const above = await this.prisma.subscription.findMany({
+        where: {
+          status: { in: RETIER_STATUSES }, weeklyRate: { gt: top }, currencyCode: market.currencyCode,
+          vendor: { vendorType: { not: 'SERVICE' }, owner: { user: { countryCode: market.code } } },
+        },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+      });
+      for (const candidate of above) {
+        try {
+          const move = await this.prisma.$transaction(async (tx): Promise<RetierMove | false> => {
+            await lockSubscriptionPayer(tx, candidate.id);
+            const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id } });
+            const from = Number(sub.weeklyRate);
+            if (!RETIER_STATUSES.includes(sub.status) || !(from > top) || sub.currencyCode !== market.currencyCode) return false;
+            if (await paymentInFlightInTx(tx, sub.id)) {
+              log().info({ subscriptionId: sub.id, from, to: top }, '[DEPT-PRICE] card price cut waits: a payment is in flight; the next pass moves it');
+              return false;
+            }
+            const feeBefore = weeklyFeeAmount(sub);
+            const won = await tx.subscription.updateMany({ where: { id: sub.id, weeklyRate: sub.weeklyRate }, data: { weeklyRate: top } });
+            if (won.count === 0) return false;
+            const seq = (await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } })) + 1;
+            await tx.billingEvent.create({ data: {
+              subscriptionId: sub.id, type: 'TIER_CHANGE', amount: top, currencyCode: sub.currencyCode,
+              idempotencyKey: `tier:${sub.id}:${seq}:${from}->${top}`,
+              note: `Card price cut: the highest catalogue weekly fee is now ${top}; this store's tier rate moves ${from} -> ${top} from its next weekly fee. Issued charges and paid weeks keep their amount.`,
+            } });
+            await tx.auditLog.create({ data: { action: 'BILLING_CARD_PRICE_CUT', entity: 'Subscription', entityId: sub.id,
+              changes: { from, to: top, customRate: sub.customRate === null ? null : Number(sub.customRate), feeWaived: sub.feeWaived,
+                country: market.code, at: now.toISOString() } as unknown as Prisma.InputJsonValue } });
+            const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, top);
+            const feeAfter = weeklyFeeAmount({ weeklyRate: top, customRate: sub.customRate });
+            return {
+              ...(!sub.feeWaived && feeAfter < feeBefore ? { lowered: { from: feeBefore, to: feeAfter } } : {}),
+              ...(dropped ? { dropped } : {}),
+            };
+          });
+          if (move === false) continue;
+          moved += 1;
+          await this.afterRetier(candidate.id, move);
+        } catch (error) {
+          log().error({ err: error, subscriptionId: candidate.id }, '[DEPT-PRICE] card price cut held for this subscription; the run continued and the next one retries');
+        }
+      }
+    }
+    return moved;
   }
 
   private payerUserId(sub: SubWithRelations): string {
