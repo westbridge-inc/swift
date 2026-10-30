@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The onboarding price card is role-specific: a taxi driver, a delivery rider,
@@ -94,7 +96,7 @@ describe('PricingCard — movers see the rate for the vehicle they register', ()
   });
 });
 
-describe('PricingCard — vendors see their own tier and the automatic ladder', () => {
+describe('PricingCard — vendors see the rate a new store starts on, and that it does not move with the catalogue', () => {
   it('a service provider is quoted 8,000 and no catalogue ladder', () => {
     const text = textOf(card({ kind: 'vendor', vendorType: 'SERVICE' }));
     expect(text).toContain('14 days free, then $8,000/week');
@@ -102,14 +104,23 @@ describe('PricingCard — vendors see their own tier and the automatic ladder', 
     expect(text).not.toContain('items');
   });
 
-  it('a restaurant, grocery or shop starts at 15,000 and sees the 1,000 / 10,000 steps from the server', () => {
+  // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
+  // born on the first catalogue step whatever its size, and nothing moves it. The card must not promise a move, nor
+  // show the larger steps' fees as if they were this store's.
+  it('[R27] a restaurant, grocery or shop starts at 15,000, and is told the rate does not change as its catalogue grows', () => {
     for (const vendorType of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
-      expect(text).toContain('1,000+ active items $20,000/week');
-      expect(text).toContain('10,000+ $45,000/week');
-      expect(text).toContain('automatically');
+      expect(text).toContain('Keep 100% of every sale — no commission on orders. This rate does not change as your catalogue grows.');
+      expect(text).not.toMatch(/automatic/i);
+      expect(text).not.toContain('$20,000');
+      expect(text).not.toContain('$45,000');
     }
+  });
+
+  it('[R27] the card says so only while the server\'s weekly re-tier is off — turning it on must revisit this card', () => {
+    const flag = readFileSync(join(__dirname, '..', '..', '..', '..', 'api', 'src', 'modules', 'billing', 'weekly-retier.ts'), 'utf8');
+    expect(flag).toMatch(/^export const WEEKLY_RETIER_ON = false;$/m);
   });
 
   it('[DEPT-PRICE] a shop is told, from the server, that a new store at department size gets 7 days free; the headline keeps 14', () => {
@@ -133,10 +144,11 @@ describe('PricingCard — vendors see their own tier and the automatic ladder', 
   it('the steps are the server boundaries, not copy frozen into the app', () => {
     state.pricing = {
       ...GY,
-      vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 500, tier: 'large', rate: 20000 }] },
+      vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 12000 }, { minItems: 500, tier: 'large', rate: 20000, trialDays: 7 }] },
     };
     const text = textOf(card({ kind: 'vendor', vendorType: 'STORE' }));
-    expect(text).toContain('500+ active items $20,000/week');
+    expect(text).toContain('14 days free, then $12,000/week');
+    expect(text).toContain('A new store with 500+ active items when Swift approves it gets 7 days free.');
     expect(text).not.toContain('1,000');
   });
 });
