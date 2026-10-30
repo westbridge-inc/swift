@@ -1817,6 +1817,8 @@ export async function adminRoutes(app: FastifyInstance) {
         ready: goLive.ready,
         // [FOOD-PERMIT] a registered restaurant's owner tick (required to go live), never its words or ledger row
         foodHandlers: goLive.foodHandlers,
+        // [RETIER PR-A] a store's weekly-fee tick (required to go live when its fee is above the first step)
+        weeklyFee: goLive.weeklyFee,
         next,
       },
     };

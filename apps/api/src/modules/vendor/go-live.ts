@@ -42,8 +42,9 @@ export function awaitingFirstGoLive(vendor: { status: string }): boolean {
 // is complete, the rest is Swift's: reading a document, or (for a branch) a person approving it.
 // ---------------------------------------------------------------------------
 
-/** An owner's step before a store can go live, as the apps name it (each opens where it is done). */
-export type GoLiveStep = 'DOCUMENTS' | 'PUBLISHED_PHONE' | 'FOOD_HANDLERS';
+/** An owner's step before a store can go live, as the apps name it (each opens where it is done).
+ *  [RETIER PR-A] WEEKLY_FEE: read and tick the store's weekly fee, born above the first step (partner/store-fee.ts). */
+export type GoLiveStep = 'DOCUMENTS' | 'PUBLISHED_PHONE' | 'FOOD_HANDLERS' | 'WEEKLY_FEE';
 
 /** A never-live store's go-live: whose turn it is, and the owner's steps still to do (empty when it is Swift's). */
 export interface StoreGoLive { waitingFor: 'OWNER' | 'SWIFT'; steps: GoLiveStep[] }
@@ -54,11 +55,12 @@ const OWNER_DOCUMENT_STATES: ReadonlySet<string> = new Set(['MISSING', 'REJECTED
 
 export function storeGoLive(
   store: { status: string; publicPhone: string | null | undefined },
-  facts: { documentStates: readonly string[]; foodHandlers: { required: boolean; attested: boolean } },
+  facts: { documentStates: readonly string[]; foodHandlers: { required: boolean; attested: boolean }; weeklyFee?: { required: boolean; ticked: boolean } },
 ): StoreGoLive {
   const steps: GoLiveStep[] = [];
   if (facts.documentStates.some((state) => OWNER_DOCUMENT_STATES.has(state))) steps.push('DOCUMENTS');
   if (awaitingFirstGoLive(store) && goLiveMissing(store).length > 0) steps.push('PUBLISHED_PHONE');
   if (facts.foodHandlers.required && !facts.foodHandlers.attested) steps.push('FOOD_HANDLERS');
+  if (facts.weeklyFee?.required && !facts.weeklyFee.ticked) steps.push('WEEKLY_FEE');
   return { waitingFor: steps.length > 0 ? 'OWNER' : 'SWIFT', steps };
 }

@@ -35,6 +35,7 @@ import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND, storeGoLive, type StoreGoLive } from '../vendor/go-live';
+import { storeFeeNotice, storeFeeNoticeDedupeKey, storeFeeStanding, type StoreFeeQuote } from '../partner/store-fee';
 import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
@@ -107,6 +108,10 @@ export interface VendorGoLive {
    *  who handles food there holds a current food handler's certificate (vendor/food-handlers.ts). Making it live
    *  needs the tick; `ready` includes it. */
   foodHandlers: { required: boolean; attested: boolean };
+  /** [RETIER PR-A · owner 30 Oct 2026] A store with no weekly fee yet whose fee would be born ABOVE the first step
+   *  (its catalogue's step, partner/store-fee.ts): its owner ticks that exact amount first (required), and whether they
+   *  have (ticked). Making it live needs the tick; `ready` includes it. */
+  weeklyFee: { required: boolean; ticked: boolean };
 }
 
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
@@ -2574,14 +2579,18 @@ export class VerificationService {
     // [FOOD-PERMIT] the projection's own rule: a registered restaurant is made live only with its owner's tick
     const foodHandlersRequired = foodHandlerTickApplies(vendor);
     const foodHandlers = { required: foodHandlersRequired, attested: foodHandlersRequired && await storeAttested(db, ownerUserId, vendorId) };
+    // [RETIER PR-A] the projection's own rule: a fee born above the first step is born only on its owner's tick
+    const fee = await storeFeeStanding(db, vendorId);
+    const weeklyFee = { required: fee.required, ticked: fee.required && fee.ticked };
     return {
       ownerUserId,
       role,
       checklist,
       disclosure: { engaged, complete: block ? block.complete : null, missing: block ? block.missing : [] },
-      ready: checklist.complete && (!block || block.complete) && (!foodHandlers.required || foodHandlers.attested),
+      ready: checklist.complete && (!block || block.complete) && (!foodHandlers.required || foodHandlers.attested) && (!weeklyFee.required || weeklyFee.ticked),
       publishedPhone: goLiveMissing(vendor).length === 0,
       foodHandlers,
+      weeklyFee,
     };
   }
 
@@ -2605,9 +2614,11 @@ export class VerificationService {
     for (const store of stores) {
       const checklist = await this.activationChecklist(store.owner.userId, store.vendorType as ChecklistRole, { db, vendorId: store.id });
       const required = foodHandlerTickApplies(store);
+      const fee = await storeFeeStanding(db, store.id);
       out.set(store.id, storeGoLive(store, {
         documentStates: checklist.items.map((item) => item.state),
         foodHandlers: { required, attested: required && await storeAttested(db, store.owner.userId, store.id) },
+        weeklyFee: { required: fee.required, ticked: fee.required && fee.ticked },
       }));
     }
     return out;
@@ -2728,6 +2739,16 @@ export class VerificationService {
         await this.askForFoodHandlerTick(db, userId, vendor, goingLive);
         if (goingLive) continue;
       }
+      // [RETIER PR-A · owner 30 Oct 2026] A store whose weekly fee would be born above the first step (its own
+      // catalogue's step, partner/store-fee.ts) is never MADE live before its owner ticks that exact amount for it: it
+      // waits, and the owner is told once per amount. The birth re-checks the tick under its own locks.
+      if (verified && (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL')) {
+        const fee = await storeFeeStanding(db, vendor.id);
+        if (fee.required && !fee.ticked && fee.quote) {
+          await this.askForStoreFeeTick(db, userId, vendor, fee.quote);
+          continue;
+        }
+      }
       // [CHAINS] A branch goes live only when a person approves it (activateStore passes personApproved).
       if (verified && vendor.personApprovalRequired && !scope.personApproved && (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL')) continue;
       if (verified) {
@@ -2817,6 +2838,33 @@ export class VerificationService {
       dedupeKey,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_food_handler_tick', vendorId: vendor.id },
+    });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [RETIER PR-A] The one notice that asks a store's owner to read and tick its weekly fee before it goes live: once
+   *  per store and amount, however often the projection runs. Delivered after the projection commits. */
+  private async askForStoreFeeTick(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+    quote: StoreFeeQuote,
+  ): Promise<void> {
+    const dedupeKey = storeFeeNoticeDedupeKey(vendor.id, quote);
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const held = ownerRlsBindEnabled()
+      ? await noticeHeld(db, userId, dedupeKey)
+      : (await db.notification.findFirst({ where: { userId, dedupeKey }, select: { id: true } })) !== null;
+    if (held) return;
+    const words = storeFeeNotice(vendor.name, quote);
+    const notice = await insertNoticeFor(db, {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: words.title,
+      body: words.body,
+      dedupeKey,
+      // The literal keeps the kind visible to the cross-app notification census.
+      data: { kind: 'vendor_needs_weekly_fee_tick', vendorId: vendor.id, weeklyFee: quote.amount, currencyCode: quote.currencyCode },
     });
     this.projectionNotices.get(db)?.push(notice.id);
   }

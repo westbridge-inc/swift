@@ -110,6 +110,9 @@ async function fixture(status = 'ACTIVE') {
     // [FOOD-PERMIT · owner 24 Oct 2026] This fixture is a registered restaurant: its owner has given the food handlers
     // tick (the ledger row POST /vendor/onboarding/food-handlers writes), so the disclosure block alone decides here.
     consentRecord: { findMany: async () => [{ action: 'granted', documentVersion: 'v1', evidence: { vendorId: 'store-fixture' } }] },
+    // [RETIER PR-A] The weekly-fee tick gate (partner/store-fee.ts storeFeeStanding) is graded in store-fee-catalogue-quote.test.ts:
+    // here the store's fee is modelled as already ruled (a fee on record is never asked for a tick), so the block alone decides.
+    subscription: { findUnique: async () => ({ id: 'subscription-fixture' }) },
   });
   const host = await hostRoutes(customerRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
   const read = async (tenant?: string) => {

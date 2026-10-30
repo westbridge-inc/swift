@@ -602,7 +602,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
       // + [FOOD-PERMIT] the food handlers tick notice (askForFoodHandlerTick)
-      'modules/verification/verification.service.ts insertNoticeFor': 6,
+      // + [RETIER PR-A] the store weekly-fee tick notice (askForStoreFeeTick)
+      'modules/verification/verification.service.ts insertNoticeFor': 7,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
@@ -611,7 +612,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/vendor/staff-invites.ts pendingStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts staffInviteesOf': 1,
       // [FOOD-PERMIT] the food handlers notice's once-only check, inside the projection's transaction
-      'modules/verification/verification.service.ts noticeHeld': 1,
+      // + [RETIER PR-A] the store weekly-fee notice's once-only check, the same way
+      'modules/verification/verification.service.ts noticeHeld': 2,
       'modules/verification/verification.service.ts publicPhoneAsked': 1,
     });
     // Plain accessors left: the person's own inbox (customer routes, the service's mark-read/count, the vendor's own alerts,
@@ -622,7 +624,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/vendor/staff-invites.ts': 8,
       'modules/vendor/vendor.routes.ts': 2,
       // + [FOOD-PERMIT] the wall-OFF branch of the food handlers notice's once-only check (askForFoodHandlerTick)
-      'modules/verification/verification.service.ts': 2,
+      // + [RETIER PR-A] the wall-OFF branch of the store weekly-fee notice's once-only check (askForStoreFeeTick)
+      'modules/verification/verification.service.ts': 3,
     });
     // Raw SQL: the retention sweep (a system job) and the invitee's own invite lock.
     expect(rawSql).toEqual({ 'modules/compliance/retention.service.ts': 2, 'modules/vendor/staff-invites.ts': 1 });
