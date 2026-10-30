@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, setChainBrand, setBranchListedAlone, fetchVendorChain, type ChainDealOutcome, type VendorActivationChecklist } from '@/lib/api';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, setChainBrand, setBranchListedAlone, changeChainDeal, withdrawChainDealChange, fetchVendorChain, type ChainDealOutcome, type DealChangeOutcome, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
 import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
 import type { ProhibitedClass } from '@/lib/api';
@@ -327,6 +327,65 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     success: () => (alone ? `${name} is listed on its own.` : `${name} is listed under the brand.`),
   }));
 
+  // [ENTERPRISE E2 · owner 29 Oct 2026] Ending or raising a deal raises the branches' fees, so it goes through the
+  // fee-change notice: each branch is told in the app at least 14 days ahead and pays the new fee only from its first
+  // weekly fee after that (and after the end date). A second admin approves it; a pending change can be withdrawn.
+  const change = v.owner?.dealChangeKind ? {
+    kind: v.owner.dealChangeKind as 'END' | 'RAISE', to: v.owner.dealChangeTo != null ? Number(v.owner.dealChangeTo) : null,
+    notBefore: v.owner.dealChangeNotBefore as string, inForce: v.owner.dealChangeSwitchedAt != null,
+  } : null;
+  const endDateField = { kind: 'text' as const, name: 'notBefore', label: 'End date (YYYY-MM-DD, empty for today)', pattern: /^\d{4}-\d{2}-\d{2}$/, patternMessage: 'Write the date as YYYY-MM-DD.' };
+  /** A date in Guyana (UTC-4, no daylight saving): its first moment. */
+  const guyanaDayStart = (day: unknown) => (typeof day === 'string' && day ? `${day}T04:00:00.000Z` : undefined);
+  const changeWords = (rows: Array<{ outcome: DealChangeOutcome }>) => {
+    const count = (o: DealChangeOutcome) => rows.filter((b) => b.outcome === o).length;
+    return `${count('HELD')} branch(es) will be told within the hour, ${count('WAITING')} will be told about 15 days before the end date (at least 14), ${count('LEFT_DEAL')} already pay their own fee.`;
+  };
+  const endDeal = async () => show(await dialog.run({
+    title: `End the chain deal for ${ownerName || 'this owner'}?`,
+    body: (
+      <p>
+        Each branch goes back to its own weekly fee. It is a fee rise, so each branch on the deal is told in the app at least
+        14 days ahead and pays its own fee only from its first weekly fee due on or after the end date and 14 days after it
+        was told. Weeks already paid keep their price. A branch whose own fee is already at or under the deal just leaves
+        it. A second admin approves it.
+      </p>
+    ),
+    confirmLabel: 'End chain deal',
+    fields: [endDateField],
+    reason: { hint: 'Why the deal ends (the agreement). Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason, values }) => changeChainDeal(v.owner.id, { kind: 'END', ...(guyanaDayStart(values['notBefore']) ? { notBefore: guyanaDayStart(values['notBefore'])! } : {}) }, reason),
+    success: (res) => `Deal ending. ${changeWords((res as { data?: { branches?: Array<{ outcome: DealChangeOutcome }> } })?.data?.branches ?? [])}`,
+  }));
+  const raiseDeal = async () => show(await dialog.run({
+    title: `Raise the chain deal for ${ownerName || 'this owner'}?`,
+    body: (
+      <p>
+        Each branch on the deal pays the new deal (or its own fee, if lower). It is a fee rise, so each branch is told in the
+        app at least 14 days ahead and pays the new fee only from its first weekly fee due on or after the date and 14 days
+        after it was told. Weeks already paid keep their price. A second admin approves it.
+      </p>
+    ),
+    confirmLabel: 'Raise chain deal',
+    fields: [{ kind: 'amount', name: 'weeklyRate', label: 'New weekly fee per branch (GYD)' }, endDateField],
+    reason: { hint: 'Why the deal goes up (the agreement). Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason, values }) => changeChainDeal(v.owner.id, {
+      kind: 'RAISE', weeklyRate: Number(values['weeklyRate']), ...(guyanaDayStart(values['notBefore']) ? { notBefore: guyanaDayStart(values['notBefore'])! } : {}),
+    }, reason),
+    success: (res) => `Deal rising. ${changeWords((res as { data?: { branches?: Array<{ outcome: DealChangeOutcome }> } })?.data?.branches ?? [])}`,
+  }));
+  const withdrawChange = async () => show(await dialog.run({
+    title: `Withdraw the pending change to ${ownerName || 'this owner'}'s chain deal?`,
+    body: <p>The deal stays as it is. Every branch already told about the change is told it will not happen. A second admin approves it.</p>,
+    confirmLabel: 'Withdraw change',
+    reason: { hint: 'Why the change is withdrawn. Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason }) => withdrawChainDealChange(v.owner.id, reason),
+    success: () => 'Change withdrawn. The deal stays as it is.',
+  }));
+
   const toggleFeatured = async () => {
     const featuring = !v.isFeatured;
     show(await dialog.run({
@@ -429,7 +488,18 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                   ? `Every branch pays ${gyd(deal)} a week (or its own fee, if lower). Set ${when(v.owner.dealSetAt)}.`
                   : 'No chain deal: each branch pays its own weekly fee.'}
               </p>
-              <button type="button" className="mc-btn mt-2" onClick={setDeal}>{deal != null ? 'Lower chain deal…' : 'Set chain deal…'}</button>
+              {change ? (
+                <p className="mc-muted mt-1">
+                  {change.kind === 'END' ? 'The deal ends' : `The deal goes up to ${gyd(change.to)} a week`} from {when(change.notBefore)}
+                  {change.inForce ? ' (in force: branches move from their own told dates).' : '. Each branch is told at least 14 days before its fee changes.'}
+                </p>
+              ) : null}
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button type="button" className="mc-btn" onClick={setDeal}>{deal != null ? 'Lower chain deal…' : 'Set chain deal…'}</button>
+                {deal != null && !change ? <button type="button" className="mc-btn" onClick={raiseDeal}>Raise chain deal…</button> : null}
+                {deal != null && !change ? <button type="button" className="mc-btn" onClick={endDeal}>End chain deal…</button> : null}
+                {change && !change.inForce ? <button type="button" className="mc-btn" onClick={withdrawChange}>Withdraw change…</button> : null}
+              </div>
             </section>
           ) : null}
 

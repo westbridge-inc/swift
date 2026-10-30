@@ -195,6 +195,8 @@ const E = {
   chainDeal: { model: 'vendorOwner', fields: ['dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'dealSetBy', 'dealReason'], tenantVia: ['user'] },
   // [CHAINS PR3] The chain's name customers see once for all its branches (walled through the owner's user).
   chainBrand: { model: 'vendorOwner', fields: ['brandName'], tenantVia: ['user'] },
+  // [ENTERPRISE E2] A chain deal's end date, or its end / raise, through the 14-day fee-change notice.
+  chainDealChange: { model: 'vendorOwner', fields: ['dealChangeKind', 'dealChangeFrom', 'dealChangeTo', 'dealChangeNotBefore', 'dealChangeReason', 'dealChangeSetBy', 'dealChangeSwitchedAt'], tenantVia: ['user'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
@@ -400,6 +402,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [CHAINS PR3] One brand card per chain (no money; it changes which branch a customer reaches first): a reason.
   'PUT /vendor-owners/:id/brand': c('C3', 'vendor.brand', E.chainBrand),
   'PUT /vendors/:id/brand-listing': c('C3', 'vendor.brand', E.vendor),
+  'POST /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
+  'DELETE /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
   'POST /subscriptions/:id/refund-credit/set-aside': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/paid': c('C4', 'subscription.refund', E.subscription),

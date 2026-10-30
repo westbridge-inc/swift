@@ -1479,6 +1479,21 @@ model VendorOwner {
   /// opens the nearest open branch that delivers to them). Set by a person at Swift (admin, with a reason); null = no
   /// brand, every store on its own card. CHECK vendor_owners_brand_name_shape: 2-60 characters, trimmed.
   brandName        String?
+  /// [ENTERPRISE E2 · owner 29 Oct 2026] A change to the chain deal that RAISES the branches' fees: the deal ENDS
+  /// (each branch back to its own tier fee) or is RAISED to dealChangeTo. Never sooner than the fee-change notice
+  /// allows: each branch is told in the app at least 14 days ahead and pays the new fee only from its first weekly
+  /// fee due on or after dealChangeNotBefore and 14 days after it was told (fee-rise-notice.ts, source CHAIN_DEAL);
+  /// a week already paid keeps its price. dealChangeFrom is the deal it changes (the branches still on it move).
+  /// The owner's own deal moves to the new terms at dealChangeNotBefore (dealChangeSwitchedAt); the columns clear
+  /// once no branch is left on the old deal. All stated or all absent (CHECK).
+  dealChangeKind        String?
+  dealChangeFrom        Decimal?  @db.Decimal(10, 2)
+  dealChangeTo          Decimal?  @db.Decimal(10, 2)
+  dealChangeNotBefore   DateTime?
+  dealChangeReason      String?
+  dealChangeSetBy       String?
+  dealChangeSetAt       DateTime?
+  dealChangeSwitchedAt  DateTime?
 
   @@map("vendor_owners")
 }
