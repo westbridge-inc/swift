@@ -30,6 +30,8 @@ import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { BookingCapacityCard, storedBookingCapacity } from '../../../components/BookingCapacityCard';
+import { KitchenCapacityCard } from '../../../components/KitchenCapacityCard';
+import { storedKitchenCapacity } from '../../../lib/kitchenCapacity';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { StoreVatSection } from '../StoreVatSection';
@@ -180,6 +182,19 @@ export function VendorAccountScreen() {
     ),
   });
   const bookingCapacity = store?.vendorType === 'SERVICE' ? storedBookingCapacity(store) : null;
+  // [RIDER-SAFE 4] How many orders the kitchen holds at once (stores that cook or pack; no limit by default).
+  const [kitchenError, setKitchenError] = useState<string | null>(null);
+  const saveKitchen = useVendorMutation({
+    mutationFn: (maxConcurrentOrders: number | null) => vendorApi.updateProfile({ maxConcurrentOrders }),
+    onMutate: () => setKitchenError(null),
+    onSuccess: () => {
+      setKitchenError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setKitchenError(
+      e?.response?.data?.error?.message ?? 'That could not be saved. Check your connection and try again.',
+    ),
+  });
 
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
@@ -307,6 +322,15 @@ export function VendorAccountScreen() {
             saving={saveCapacity.isPending}
             error={capacityError}
             onSave={(n) => saveCapacity.mutate(n)}
+          />
+        ) : null}
+
+        {isManager && store && !samplePreview && store.vendorType !== 'SERVICE' ? (
+          <KitchenCapacityCard
+            value={storedKitchenCapacity(store)}
+            saving={saveKitchen.isPending}
+            error={kitchenError}
+            onSave={(n) => saveKitchen.mutate(n)}
           />
         ) : null}
 

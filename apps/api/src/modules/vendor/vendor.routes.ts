@@ -117,7 +117,7 @@ import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignme
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
-import { storeRiderBacklog } from '../dispatch/delivery-capacity';
+import { storeBacklogSentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
 
 // ---------------------------------------------------------------------------
@@ -2141,7 +2141,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         message: reason === 'SWIFT_PAUSED'
           ? 'Swift has paused delivery in your area for now. Customers can still order for pickup.'
           : reason === 'STORE_BUSY'
-            ? `${backlog.waiting} of your orders are waiting for a rider, so new delivery orders are paused. They restart by themselves when a rider takes one. Customers can still order for pickup.`
+            ? storeBacklogSentence(backlog.waiting)
             : null,
       },
     };
