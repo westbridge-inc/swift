@@ -7,7 +7,7 @@ import { WeeklyFee } from '@/components/weekly-fee';
 import { askLegalAcceptanceAgain } from '@/lib/legal-acceptance';
 import {
   acknowledgeProviderFee, PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK,
-  proFeeAgreementFirst, proFeeChangedLine, proFeeMoney, proFeeNoFeeWords, proFeeTick, proFeeTickStartsLine, type ProFeeView,
+  proFeeAgreementFirst, proFeeChangedLine, proFeeMoney, proFeeNoFeeWords, proFeeTick, proFeeTickRunningLine, proFeeTickStartsLine, type ProFeeView,
 } from '@/lib/provider-fee';
 
 /**
@@ -36,6 +36,7 @@ export function ProviderFeeBlock({ view, isVerified }: { view: ProFeeView; isVer
   const ticked = tick.kind === 'tick' && tickedFor === tick.key;
   const changed = proFeeChangedLine(view);
   const startsLine = proFeeTickStartsLine(view, isVerified);
+  const runningLine = proFeeTickRunningLine(view);
   const agreementFirst = proFeeAgreementFirst(view);
   const noFee = proFeeNoFeeWords(view, isVerified);
   const ack = useMutation({
@@ -68,6 +69,7 @@ export function ProviderFeeBlock({ view, isVerified }: { view: ProFeeView; isVer
         <span>{tick.terms.tick}</span>
       </label>
       {startsLine ? <p>{startsLine}</p> : null}
+      {runningLine ? <p>{runningLine}</p> : null}
       {failure ? <p role="alert">{failure}</p> : null}
       <button className="sw-btn sw-btn-md" disabled={!ticked || ack.isPending} onClick={() => ack.mutate(tick.ack)}>Continue</button>
     </div> : null}

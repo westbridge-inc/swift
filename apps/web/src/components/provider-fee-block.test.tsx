@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 import { LEGAL_RECHECK_EVENT } from '@/lib/legal-acceptance';
-import { PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, type ProFeeStanding, type ProFeeView } from '@/lib/provider-fee';
+import { PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, PRO_FEE_RUNNING_TICK_LINE, type ProFeeStanding, type ProFeeView } from '@/lib/provider-fee';
 
 vi.mock('@/components/weekly-fee', () => ({ WeeklyFee: ({ family }: { family: string }) => <p>The {family} weekly fee</p> }));
 import { ProviderFeeBlock } from './provider-fee';
@@ -102,6 +102,17 @@ describe('[S3-3 · S4-1 · S4-3] a covered pro, and a fee behind the tick', () =
     renderWithQuery(block({ data: { id: 's1' }, standing: FEE_TERMS, feeTerms: TERMS }));
     expect(screen.getByRole('checkbox')).toBeTruthy();
     expect(screen.getByRole('button', { name: PRO_FEE_OWN_FEE_LINK })).toBeTruthy();
+    // [REVIEW-M #2238 S4-1] The fee already runs: never "Ticking this starts your weekly fee today" (no new trial).
+    expect(screen.queryByText(STARTS)).toBeNull();
+    expect(screen.getByText(PRO_FEE_RUNNING_TICK_LINE)).toBeTruthy();
+  });
+
+  it('[REVIEW-M #2238 S4-1] a running fee and the agreement not accepted: the card never says the fee "can start only after"', () => {
+    renderWithQuery(block({ data: { id: 's1' }, standing: AGREEMENT, feeTerms: TERMS }));
+    expect(screen.getByText('Accept the Business Agreement first')).toBeTruthy();
+    expect(screen.queryByText(/can start only after/)).toBeNull();
+    expect(screen.getByText(/^You are not listed and take no new jobs until you accept the Business Agreement/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review the agreement' })).toBeTruthy();
   });
 
   it('a fee and nothing to tick: the fee itself', () => {

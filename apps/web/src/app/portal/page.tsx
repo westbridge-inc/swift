@@ -9,6 +9,7 @@ import { formatMoney as money } from '@/lib/money';
 import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { NoEarnerProfile } from '@/components/pro-office-note';
 import {
   confirmRiderSettlement, getDriverProfile, getDriverSubscription, getDriverSummary, getEarningsStatementPath,
   getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary, type EarningsSummary,
@@ -160,10 +161,13 @@ export default function PortalHome() {
     );
   }
   if (!isRider && !isDriver) {
+    // [REVIEW-F #2238 S4-1] A pro is told what this office is for and where their fee is.
     return (
-      <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
-        No earner profile on this account — start driving or delivering from the Swift app.
-      </p>
+      <NoEarnerProfile>
+        <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
+          No earner profile on this account — start driving or delivering from the Swift app.
+        </p>
+      </NoEarnerProfile>
     );
   }
 

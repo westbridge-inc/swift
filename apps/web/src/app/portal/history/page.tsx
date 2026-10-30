@@ -6,6 +6,7 @@ import { getDriverProfile, getDriverRides, getRiderDeliveries, getRiderProfile }
 import { OrderStatus } from '@swift/types';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { formatMoney as money, parseAmount } from '@/lib/money';
+import { NoEarnerProfile } from '@/components/pro-office-note';
 
 const when = (iso: unknown) => (iso ? new Date(String(iso)).toLocaleString() : '—');
 
@@ -209,7 +210,7 @@ export default function HistoryPage() {
       ) : driver.data ? (
         <RidesTable />
       ) : (
-        <p className="text-sm text-[var(--swift-muted)]">No earner profile on this account.</p>
+        <NoEarnerProfile><p className="text-sm text-[var(--swift-muted)]">No earner profile on this account.</p></NoEarnerProfile>
       )}
     </div>
   );

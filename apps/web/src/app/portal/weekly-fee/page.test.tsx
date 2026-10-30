@@ -68,4 +68,15 @@ describe('the portal weekly-fee page for a service provider', () => {
     renderWithQuery(<MoverWeeklyFeePage />);
     expect(await screen.findByText('No earner profile on this account.')).toBeTruthy();
   });
+
+  it('[REVIEW-F/M #2238 N1] an approval read that fails says so, never "starts after approval" to an approved pro', async () => {
+    mockApi(({ url }) => absentMover(url.pathname) ?? (url.pathname === '/api/v1/services/providers/me'
+      ? { status: 500, body: { success: false, error: { message: 'down' } } }
+      : url.pathname === '/api/v1/provider/subscription'
+        ? { body: { success: true, data: null, standing: { ...FEE_TERMS, why: 'MISSING' }, coveredBy: null, feeTerms: { ...TERMS, acknowledged: true } } }
+        : (() => { throw new Error(url.pathname); })()));
+    renderWithQuery(<MoverWeeklyFeePage />);
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Could not load/);
+    expect(screen.queryByText('Your weekly fee starts after approval')).toBeNull();
+  });
 });
