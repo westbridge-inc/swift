@@ -39,6 +39,7 @@ import type { NewAddress } from '@/components/checkout/new-address-form';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { photo } from '@/lib/media';
 import { ApiRequestError } from '@/lib/auth';
+import { addressPoint, getDeliveryAvailability, deliveryNoticeShown, riderBasketKey, type DeliveryAvailability } from '@/lib/delivery-availability';
 import {
   cartPaymentOptions,
   checkoutPaymentFields,
@@ -124,7 +125,8 @@ export function CheckoutPanel() {
   const [cartSafetyMessage, setCartSafetyMessage] = useState('Swift is checking this saved cart against the live store menu.');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [noRiders, setNoRiders] = useState(false);
+  // The server's own words when it refused delivery (409 DELIVERY_NO_RIDERS), or null.
+  const [noRiders, setNoRiders] = useState<string | null>(null);
   const [addingAddr, setAddingAddr] = useState(false);
   // [WEB-PIN] The server's own words when it will not price a just-pinned
   // address (e.g. past the store's delivery radius), shown where it was chosen.
@@ -341,6 +343,28 @@ export function CheckoutPanel() {
   // The phone app's own payment cards; pickup is paid at the counter.
   const paymentOptions = cartPaymentOptions(paymentCapabilities, { appointmentOnly: booking, pickup });
   const payByMmg = effectivePaySelection.method === 'MMG';
+  // [RIDER-SAFE 1] Before ordering delivery the customer is told, in the
+  // server's words, when riders are busy ("about N min extra") or delivery is
+  // off for now (no riders near, Swift paused it, or the store has orders
+  // waiting for riders) — with pickup one tap away. A failed read shows nothing.
+  // [REVIEW-F #2214 S4-1] Read for the address chosen HERE (its own point), not
+  // the cart's saved one, which lags a new pick while it is being saved; and
+  // [REVIEW-G N1] again when the basket changes (its size and cash band count).
+  const riderStore = cart?.vendor?.id ?? null;
+  const riderPoint = addressPoint(addresses.find((a) => a?.id === addrId));
+  const riderLat = riderPoint?.lat ?? null;
+  const riderLng = riderPoint?.lng ?? null;
+  const riderBasket = riderBasketKey(cart?.items);
+  const [riderNotice, setRiderNotice] = useState<DeliveryAvailability | null>(null);
+  useEffect(() => {
+    if (pickup || booking || !riderStore || !addrId) { setRiderNotice(null); return; }
+    let live = true;
+    getDeliveryAvailability(riderStore, payByMmg ? 'MOBILE_MONEY' : 'CASH', riderLat != null && riderLng != null ? { lat: riderLat, lng: riderLng } : null)
+      .then((a) => { if (live) setRiderNotice(a); })
+      .catch(() => { if (live) setRiderNotice(null); });
+    return () => { live = false; };
+  }, [pickup, booking, riderStore, addrId, riderLat, riderLng, riderBasket, payByMmg]);
+  const riderBanner = riderNotice && deliveryNoticeShown(riderNotice) ? riderNotice : null;
 
   function resetCheckoutReplay() {
     checkoutAttempt.current = null;
@@ -383,7 +407,7 @@ export function CheckoutPanel() {
     if (next === orderingMode || checkoutBusy.current || cartMutationLockedByCheckout()) return;
     resetCheckoutReplay();
     setError(null);
-    setNoRiders(false);
+    setNoRiders(null);
     setOrderingMode(next);
   }
 
@@ -454,7 +478,7 @@ export function CheckoutPanel() {
     // [BOOK-S6b] A booking is sent with its time, or not at all (the server's SLOT_REQUIRED).
     if (booking && !heldTime) return;
     checkoutBusy.current = true;
-    setBusy(true); setError(null); setNoRiders(false);
+    setBusy(true); setError(null); setNoRiders(null);
     try {
       const proof = await refresh({ announceChecking: false });
       if (!proof?.safe) {
@@ -596,7 +620,7 @@ export function CheckoutPanel() {
         setChangingTime(true);
       }
       // The server's own answer (order.service.ts): 409 DELIVERY_NO_RIDERS.
-      if (e instanceof ApiRequestError && e.code === 'DELIVERY_NO_RIDERS') setNoRiders(true);
+      if (e instanceof ApiRequestError && e.code === 'DELIVERY_NO_RIDERS') setNoRiders(message);
       else setError(message);
       window.requestAnimationFrame(() => (errorMessage.current ?? checkoutRail.current)?.focus());
     } finally { checkoutBusy.current = false; setBusy(false); }
@@ -849,9 +873,17 @@ export function CheckoutPanel() {
           {booking ? (
             <Suspense fallback={null}><BookingPart part="notes" instant={heldTime?.instant === true} payingCash={!payByMmg} place="summary" /></Suspense>
           ) : null}
+          {riderBanner && !noRiders && !pickup && !booking ? (
+            <div className={styles.noRiders} role="status" aria-label="Delivery right now">
+              <p className={styles.noRidersCopy}>{riderBanner.message}</p>
+              {riderBanner.level === 'BUSY' ? null : (
+                <button type="button" onClick={() => chooseFulfilment('PICKUP')} disabled={busy} className={`${styles.button} ${styles.buttonSecondary}`}>Order for pickup instead</button>
+              )}
+            </div>
+          ) : null}
           {noRiders && !pickup && !booking ? (
             <div className={styles.noRiders}>
-              <p className={styles.noRidersCopy}>No delivery riders are online right now.</p>
+              <p className={styles.noRidersCopy}>{noRiders}</p>
               {/* [W5] The phone app's answer: collect it yourself. Switching
                   places nothing; the pickup quote is shown before any order. */}
               <button type="button" onClick={() => chooseFulfilment('PICKUP')} disabled={busy} className={`${styles.button} ${styles.buttonPrimary}`}>Order for pickup instead</button>

@@ -265,6 +265,11 @@ export async function storeRiderBacklog(prisma: PrismaClient, vendorId: string, 
   return { waiting, cap, paused: cap > 0 && waiting >= cap };
 }
 
+/** [RIDER-SAFE 4] What the store is told when its own orders waiting for riders pause new delivery orders. */
+export function storeBacklogSentence(waiting: number): string {
+  return `${waiting} of your orders ${waiting === 1 ? 'is' : 'are'} waiting for a rider, so new delivery orders are paused. They restart by themselves when a rider takes one. Customers can still order for pickup.`;
+}
+
 /** The honest words, once, for every surface (checkout refusal, cart banner). */
 export function capacitySentence(c: { level: DeliveryLevel; reason: DeliveryNoneReason | null; riderWaitMinutes: number }): string | null {
   if (c.level === 'BUSY') return `Riders are busy — about ${c.riderWaitMinutes} min extra for delivery.`;

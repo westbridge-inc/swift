@@ -293,6 +293,18 @@ export function useUpdateStaffRole(guard: MutationGuard = passThrough) {
   });
 }
 
+/** [RIDER-SAFE 4/5] Why customers cannot order delivery from this store right now (null data = unknown). */
+export function useDeliveryStatus(enabled: boolean) {
+  const pv = usePreviewDataset();
+  return useQuery({
+    queryKey: ['vendor', 'delivery-status'],
+    queryFn: () => unwrap(vendorApi.deliveryStatus()),
+    enabled: enabled && !pv,
+    refetchInterval: enabled && !pv ? 60_000 : false,
+    retry: false,
+  });
+}
+
 export function useVendorOrders(enabled: boolean) {
   const pv = usePreviewDataset();
   const q = useQuery({

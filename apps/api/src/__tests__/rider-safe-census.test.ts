@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { ALGO_DEFAULTS } from '../modules/algo/algo-config';
 import { ADMIN_ROUTE_AUTHORITY, ADMIN_ACTION_CLASSES } from '../modules/admin/admin-authority';
 import { ALERT_CLASS_KINDS } from '../providers/notifications/alert-class';
+import { storeBacklogSentence } from '../modules/dispatch/delivery-capacity';
 
 // ---------------------------------------------------------------------------
 // [RIDER-SAFE · COORD rulings 29 Oct 2026] The wiring a DB test cannot see:
@@ -77,5 +78,19 @@ describe('[RIDER-SAFE] the wiring', () => {
     const route = routes.slice(routes.indexOf("app.get('/delivery-availability'"), routes.indexOf("app.post('/orders/:id/convert-to-pickup'"));
     expect(route.length).toBeGreaterThan(100);
     expect(route).not.toMatch(/counts/);
+  });
+});
+
+// [REVIEW-F #2214 S4-2] The store's own words when its orders waiting for riders pause new delivery
+// orders: counted right at one (a backlog cap of 1 is a valid dial), and the one sentence the route sends.
+describe('[RIDER-SAFE 4] the store backlog sentence', () => {
+  it('reads right at one and at many', () => {
+    expect(storeBacklogSentence(1)).toBe('1 of your orders is waiting for a rider, so new delivery orders are paused. They restart by themselves when a rider takes one. Customers can still order for pickup.');
+    expect(storeBacklogSentence(3)).toBe('3 of your orders are waiting for a rider, so new delivery orders are paused. They restart by themselves when a rider takes one. Customers can still order for pickup.');
+  });
+  it('GET /vendor/delivery-status sends it', () => {
+    const vendor = src('modules/vendor/vendor.routes.ts');
+    expect(vendor).toMatch(/\? storeBacklogSentence\(backlog\.waiting\)/);
+    expect(vendor).not.toMatch(/of your orders are waiting for a rider/);
   });
 });

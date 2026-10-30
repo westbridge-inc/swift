@@ -11,17 +11,20 @@ import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { previewTrial } from '../integrity/enforcement';
+import { TRIAL_DAYS, trialDaysFor } from './trial-length';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
-// SubscriptionService — a subscription is BORN as a 14-day free trial the
-// moment a participant goes live (mover documents verified / vendor approved).
+// SubscriptionService — a subscription is BORN as a free trial (14 days; a NEW
+// department-store signup 7, trial-length.ts) the moment a participant goes
+// live (mover documents verified / vendor approved).
 // That is the only entry point into billing (BillingService just charges what
 // exists). Per-entity, idempotent. Cash-first: trials bill from the prepaid
 // balance; a missed payment flows through the normal grace → suspend path.
 // ---------------------------------------------------------------------------
 
-export const TRIAL_DAYS = 14;
+/** Re-exported for the readers that predate trial-length.ts: every partner's trial, in days. */
+export { TRIAL_DAYS };
 /** The trial ledger tenant every store's trial grant is written under (withActivation -> createRow). */
 export const STORE_TRIAL_TENANT = 'swift-default';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -40,10 +43,11 @@ type Db = PrismaClient | Prisma.TransactionClient;
 export type ActivationEntity = { riderId: string } | { driverId: string } | { vendorId: string } | { serviceProviderId: string };
 
 /** What activating a partner would price: the subscription they already
- *  hold (nothing to price), or the type, market and rate a new trial is born on. */
+ *  hold (nothing to price), or the type, market, rate and trial length a new
+ *  trial is born on. */
 type ActivationPricing =
   | { existing: Subscription }
-  | { existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string };
+  | { existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string; trialDays: number };
 
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
@@ -77,7 +81,7 @@ export class SubscriptionService {
     // A rider's fee follows the VEHICLE, not the service: a canter doing
     // deliveries bills heavy delivery exactly like a canter doing courier work.
     const priced = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: rider.vehicleType });
-    return { existing: null, type, priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    return { existing: null, type, priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
   }
 
   private async driverActivation(driverId: string, db: Db): Promise<ActivationPricing> {
@@ -105,7 +109,7 @@ export class SubscriptionService {
     // A minibus driver is a taxi driver: where the market prices taxis apart
     // the role decides the fee, car or bus; otherwise the vehicle band does.
     const priced = partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
-    return { existing: null, type: 'TAXI_DRIVER', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    return { existing: null, type: 'TAXI_DRIVER', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
   }
 
   private async vendorActivation(vendorId: string, db: Db): Promise<ActivationPricing> {
@@ -113,6 +117,7 @@ export class SubscriptionService {
       where: { id: vendorId },
       select: {
         vendorType: true,
+        createdAt: true,
         subscription: true,
         owner: {
           select: {
@@ -130,12 +135,21 @@ export class SubscriptionService {
     // and the weekly re-tier moves it up once its listings are counted. Each
     // store is its own account with its own tier: how many other stores its
     // owner has never changes its price (owner, 13 Oct 2026).
-    const priced = partnerRateFor(tiers, {
-      kind: 'VENDOR',
-      isService: vendor.vendorType === 'SERVICE',
-      activeListings: 0,
-    });
-    return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    const isService = vendor.vendorType === 'SERVICE';
+    const priced = partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: 0 });
+    // [DEPT-PRICE · owner 29 Oct 2026] The trial, though, follows the tier the store's OWN catalogue reaches now, when
+    // Swift approves it: a NEW department-store signup gets 7 days, everyone else 14 (trial-length.ts). Counted as the
+    // weekly re-tier counts a lower tier — available now, or made unavailable or edited in the last 7 days — so hiding
+    // listings just before approval does not count them out. A service business has no catalogue to count.
+    const trialTier = isService ? priced.tier : partnerRateFor(tiers, {
+      kind: 'VENDOR', isService, activeListings: await db.item.count({
+        where: { vendorId, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(Date.now() - 7 * DAY_MS) } }] },
+      }),
+    }).tier;
+    return {
+      existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db),
+      trialDays: trialDaysFor({ tier: trialTier, storeCreatedAt: vendor.createdAt }),
+    };
   }
 
   /** [BILL-PRO PR3] A pro is priced like a Services store: the flat services rate (serviceVendor), never re-tiered.
@@ -154,7 +168,8 @@ export class SubscriptionService {
     const countryCode = pro.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     const priced = partnerRateFor(tiers, { kind: 'VENDOR', isService: true, activeListings: 0 });
-    return { existing: null, type: 'INDEPENDENT_PRO', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    // A pro's trial is always the full TRIAL_DAYS (the department-store 7-day rule is a store tier's; owner 30 Oct 00:14Z).
+    return { existing: null, type: 'INDEPENDENT_PRO', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
   }
 
   private activation(entity: ActivationEntity, db: Db): Promise<ActivationPricing> {
@@ -205,7 +220,7 @@ export class SubscriptionService {
         ? await this.moverRow(entity, payer, activation, tx)
         : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx,
           // [BILL-PRO] A pro's trial is decided in their own user's tenant (stores keep STORE_TRIAL_TENANT, as before).
-          'serviceProviderId' in entity ? (await this.humanTenant(entity, tx)) : STORE_TRIAL_TENANT);
+          'serviceProviderId' in entity ? (await this.humanTenant(entity, tx)) : STORE_TRIAL_TENANT, activation.trialDays);
       return apply(tx, sub);
     };
     return '$transaction' in db ? db.$transaction(run) : run(db);
@@ -297,7 +312,7 @@ export class SubscriptionService {
       }
       return sub;
     }
-    const sub = await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, payer.tenantId);
+    const sub = await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, payer.tenantId, activation.trialDays);
     await lockMoverFeeAuthority(tx, payer);
     return sub;
   }
@@ -332,7 +347,7 @@ export class SubscriptionService {
 
   private async createRow(
     entity: ActivationEntity, type: SubscriptionType, weeklyRate: number, currencyCode: string,
-    tx: Prisma.TransactionClient, tenantId: string,
+    tx: Prisma.TransactionClient, tenantId: string, trialDays: number,
   ) {
     const human = await this.humanFor(entity, tx);
     // [REVIEW-PARTNER · DL-5] No weekly fee is ever born for the store-review fiction: it has no
@@ -347,7 +362,7 @@ export class SubscriptionService {
     const now = new Date();
     // [CHAINS · owner 29 Oct 2026] A store whose owner ALREADY holds a running store trial of their own (ordinary
     // or a founder exception's) is a branch of that owner: it shares the running trial (same end day) while another
-    // of the owner's stores is in it, and is billed from approval after. Never a fresh 14 days, never a second
+    // of the owner's stores is in it, and is billed from approval after. Never a fresh trial, never a second
     // grant (REVIEW-M #2211 S3-2: a second exception grant for the same account collides with the first). Only an
     // account with no running trial of its own may be granted one (FIRST_TRIAL, or a founder exception).
     // FIRST_TRIAL means the cluster holds no store trial at all, so there is no own trial to share.
@@ -371,7 +386,9 @@ export class SubscriptionService {
       : null;
     const fresh = decision.grant && !ownGrant && !ownEver;
     const trial = fresh || shared !== null;
-    const end = fresh ? new Date(now.getTime() + TRIAL_DAYS * DAY_MS) : shared ?? now;
+    // [DEPT-PRICE · owner 29 Oct 2026] A fresh trial is `trialDays` long (7 for a NEW department-store signup, else 14:
+    // trial-length.ts); a branch sharing its owner's running trial keeps the owner's end day, whatever its own size.
+    const end = fresh ? new Date(now.getTime() + trialDays * DAY_MS) : shared ?? now;
     if (!trial && !decision.grant && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
       await tx.enforcementAction.create({ data: {
         accountId: human.userId, clusterId: decision.clusterId, level: 'DENY_TRIAL', reasonCode: decision.reason,
@@ -397,13 +414,13 @@ export class SubscriptionService {
     } });
     if (fresh) await law.recordGrant(tx, {
       accountId: human.userId, clusterId: decision.clusterId, role: human.role,
-      tenantId, trialDays: TRIAL_DAYS, exception: decision.reason === 'EXCEPTION_GRANT',
+      tenantId, trialDays, exception: decision.reason === 'EXCEPTION_GRANT',
     });
     return sub;
   }
 
   /**
-   * Day-15 conversion: a trial whose 14 days have elapsed becomes ACTIVE and
+   * Trial conversion: a trial whose days have elapsed becomes ACTIVE and
    * immediately due, so the hourly billing cycle charges it next run. Returns
    * the number converted. Idempotent (only TRIAL rows past their end match).
    */

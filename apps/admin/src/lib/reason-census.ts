@@ -136,6 +136,9 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /zone-fares/:id', helper: 'updateZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12500 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
   { route: 'DELETE /zone-fares/:id', helper: 'deleteZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b' }], requiredBodyKeys: ['fromZoneId', 'toZoneId'] },
 
+  // [RIDER-SAFE 5] Swift's delivery pause (C3: the reason in the header; the body repeats it for the switch's own audit row)
+  { route: 'PUT /delivery-pause', helper: 'setDeliveryPause', args: [{ platform: true, zoneIds: [], expectedVersion: 0 }], requiredBodyKeys: ['platform', 'zoneIds', 'expectedVersion', 'reason'] },
+
   // ── The decision itself ────────────────────────────────────────────────
   { route: 'POST /approvals/:id/decide', helper: 'decideApproval', args: ['apr_1', true], requiredBodyKeys: ['approve'] },
 ] as const;

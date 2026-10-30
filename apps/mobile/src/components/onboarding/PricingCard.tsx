@@ -5,7 +5,7 @@ import { Card, T } from '../../kit';
 import { usePartnerPricing } from '../../hooks/verification';
 import { useAuthStore } from '../../stores/authStore';
 import { moneyIn } from '../../lib/money';
-import { moverQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
+import { bandTrialDays, moverQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
 
 /** Who the rate is for, in the partner's own words. */
 const MOVER_RATE_LABEL: Record<MoverTier, string> = {
@@ -48,10 +48,16 @@ export function PricingCard(props: PricingCardProps) {
     const steps = quote.ladder
       .slice(1)
       .map((step, i) => `${step.minItems.toLocaleString()}+${i === 0 ? ' active items' : ''} ${fee(step.rate)}/week`);
+    // [DEPT-PRICE · owner 29 Oct 2026] A step with its own free trial (7 days for a NEW department store) says so,
+    // from the server's number: the headline keeps the trial every new store starts on.
+    const trials = quote.ladder
+      .slice(1)
+      .filter((step) => bandTrialDays(step, p.trialDays) !== p.trialDays)
+      .map((step) => ` A new store with ${step.minItems.toLocaleString()}+ active items when Swift approves it gets ${bandTrialDays(step, p.trialDays)} days free.`);
     detail =
       quote.tier === 'service'
         ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'
-        : `Keep 100% of every sale — no commission on orders.${steps.length ? ` Your rate moves automatically as your catalogue grows: ${steps.join(' · ')}.` : ''}`;
+        : `Keep 100% of every sale — no commission on orders.${steps.length ? ` Your rate moves automatically as your catalogue grows: ${steps.join(' · ')}.` : ''}${trials.join('')}`;
   }
 
   return (
