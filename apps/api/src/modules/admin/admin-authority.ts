@@ -193,6 +193,8 @@ const E = {
   // [CHAINS] A chain deal: the owner's negotiated weekly fee per branch, who set it and why. VendorOwner has no tenant
   // column: walled through its user.
   chainDeal: { model: 'vendorOwner', fields: ['dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'dealSetBy', 'dealReason'], tenantVia: ['user'] },
+  // [ENTERPRISE E2] A chain deal's end date, or its end / raise, through the 14-day fee-change notice.
+  chainDealChange: { model: 'vendorOwner', fields: ['dealChangeKind', 'dealChangeFrom', 'dealChangeTo', 'dealChangeNotBefore', 'dealChangeReason', 'dealChangeSetBy', 'dealChangeSwitchedAt'], tenantVia: ['user'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
@@ -395,6 +397,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [CHAINS · owner 29 Oct 2026] A chain's negotiated weekly fee per branch: money, so a reason and a second person.
   'GET /vendor-owners/:id/chain': c('C0', 'subscription.read'),
   'PUT /vendor-owners/:id/deal-rate': c('C4', 'subscription.deal', E.chainDeal),
+  'POST /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
+  'DELETE /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
   'POST /subscriptions/:id/refund-credit/set-aside': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/paid': c('C4', 'subscription.refund', E.subscription),
