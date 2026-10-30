@@ -77,23 +77,43 @@ export default function createNextConfig(phase: string): NextConfig {
     // icons, skeletons and routes) were copied into each page's own chunk as well as the
     // layout's: 2.5 to 4.5 kB loaded twice on every customer page. This group puts the app's own
     // code (and lucide's icons) that at least 12 of the customer pages use into one chunk they all
-    // load. Customer pages only (app/(app)/...); the partner consoles, sign-in and legal pages keep
+    // load (and, second group, what the layout shares with any customer page). Customer pages only
+    // (app/(app)/...); the partner consoles, sign-in and legal pages keep
     // Next's defaults. JavaScript only: CSS keeps Next's own chunking and order.
     webpack: (config, { isServer }) => {
       if (isServer) return config;
       const splitChunks = config.optimization?.splitChunks;
       if (!splitChunks || typeof splitChunks !== 'object') return config;
       const appOwnCode = /[\\/](src[\\/]|lucide-react[\\/])/;
+      type ChunkModule = { type?: string; nameForCondition?: () => string | null };
+      const customerChunk = (chunk: { name?: string | null }) => /^app\/\(app\)\//.test(chunk.name ?? '');
+      const appOwnJs = (module: ChunkModule) => !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? '');
       splitChunks.cacheGroups = {
         ...(splitChunks.cacheGroups ?? {}),
         customerAppShared: {
           name: 'customer-app-shared',
-          chunks: (chunk: { name?: string | null }) => /^app\/\(app\)\//.test(chunk.name ?? ''),
-          test: (module: { type?: string; nameForCondition?: () => string | null }) =>
-            !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? ''),
+          chunks: customerChunk,
+          test: appOwnJs,
           minChunks: 12,
           minSize: 0,
           priority: 25,
+          reuseExistingChunk: true,
+        },
+        // [Size budget, CI perf #2222] The same copy, from the layout's side: a module the customer
+        // layout loads AND fewer than 12 customer pages load too (the chunk-retry helper, the shell's
+        // person and basket state, the Home feed check) was still in the layout's chunk and again in
+        // each of those pages' own chunks: about 1.5 kB twice on Home, 1 kB on a store page. The
+        // layout always loads customer-app-shared, so moving such a module there costs no page
+        // anything and loads it once.
+        customerAppLayoutShared: {
+          name: 'customer-app-shared',
+          chunks: customerChunk,
+          test: (module: ChunkModule, context?: { chunkGraph?: { getModuleChunksIterable: (_m: unknown) => Iterable<{ name?: string | null }> } }) =>
+            appOwnJs(module)
+            && [...(context?.chunkGraph?.getModuleChunksIterable(module) ?? [])].some((chunk) => chunk.name === 'app/(app)/layout'),
+          minChunks: 2,
+          minSize: 0,
+          priority: 24,
           reuseExistingChunk: true,
         },
       };

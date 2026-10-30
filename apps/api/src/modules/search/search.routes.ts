@@ -17,6 +17,7 @@ import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from '
 import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-text';
 import { SEARCH_DB_BUDGET_MS, boundedRead, isOutOfTime } from './search-budget';
 import { consoleRoleOf } from '../auth/console-role';
+import { brandFactsFor, collapseBrands } from '../vendor/brand';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -321,6 +322,11 @@ export async function searchRoutes(app: FastifyInstance) {
   }
 
   // Universal search — searches vendors AND items
+  /** [CHAINS PR3] A brand's branches in one list become ONE card, opening the branch best for this customer
+   *  (modules/vendor/brand). Runs over rows the list already chose: it only removes repeats. */
+  const oneCardPerBrand = async <T extends { id: string }>(rows: T[], lat: number | undefined, lng: number | undefined) =>
+    collapseBrands(rows, await brandFactsFor(app.prisma, rows.map((r) => r.id)), { lat, lng });
+
   app.get('/search', { preHandler: [browseSearch] }, async (request) => {
     const { q, type, cuisine, lat, lng, limit: parsedLimit } = customerPoint(searchQuerySchema.parse(request.query));
     // [R048-003] ONE tenant per request — the caller's, as auth bound it. Carried into the
@@ -420,7 +426,8 @@ export async function searchRoutes(app: FastifyInstance) {
             ? dbItems({ q, tenantId, publicMode: false, hiddenOnly, limit: parsedLimit - visibleItems.length, exclude: itemHits.map((i) => i.id), slips: TOP_UP_TIERS.slips })
             : Promise.resolve([]),
         ]);
-        const vendors = openFirst([...visibleVendors, ...moreVendors], storeOpen);
+        // [CHAINS PR3] One card per brand, opening its best branch for this customer.
+        const vendors = await oneCardPerBrand(openFirst([...visibleVendors, ...moreVendors], storeOpen), lat, lng);
         const items = openFirst([...visibleItems, ...moreItems], itemStoreOpen);
         return {
           success: true,
@@ -442,13 +449,14 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     // DB path (every guest; a signed-in caller while the index is absent or failing)
-    const [vendors, items] = await Promise.all([
+    const [listed, items] = await Promise.all([
       dbVendors({
         q, tenantId, publicMode, type, cuisine, limit: parsedLimit,
         near: lat != null && lng != null ? { lat, lng } : undefined,
       }),
       dbItems({ q, tenantId, publicMode, hiddenOnly, limit: parsedLimit }),
     ]);
+    const vendors = await oneCardPerBrand(listed, lat, lng);
 
     return {
       success: true,
@@ -647,8 +655,9 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     // [DS982] A store whose committed pin lies outside the launch market is never nearby.
-    const nearby = sortByDistance(vendors.filter(inLaunchMarket), userLat, userLng)
-      .filter((v) => v.distance <= radiusKm)
+    const inRadius = sortByDistance(vendors.filter(inLaunchMarket), userLat, userLng).filter((v) => v.distance <= radiusKm);
+    // [CHAINS PR3] One card per brand (its best branch for this customer), before the page is cut.
+    const nearby = (await oneCardPerBrand(inRadius, userLat, userLng))
       .slice(0, limit)
       .map((v) => ({
         ...v,

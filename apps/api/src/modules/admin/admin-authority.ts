@@ -173,7 +173,7 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
-  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
   rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },
@@ -193,6 +193,8 @@ const E = {
   // [CHAINS] A chain deal: the owner's negotiated weekly fee per branch, who set it and why. VendorOwner has no tenant
   // column: walled through its user.
   chainDeal: { model: 'vendorOwner', fields: ['dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'dealSetBy', 'dealReason'], tenantVia: ['user'] },
+  // [CHAINS PR3] The chain's name customers see once for all its branches (walled through the owner's user).
+  chainBrand: { model: 'vendorOwner', fields: ['brandName'], tenantVia: ['user'] },
   // [ENTERPRISE E2] A chain deal's end date, or its end / raise, through the 14-day fee-change notice.
   chainDealChange: { model: 'vendorOwner', fields: ['dealChangeKind', 'dealChangeFrom', 'dealChangeTo', 'dealChangeNotBefore', 'dealChangeReason', 'dealChangeSetBy', 'dealChangeSwitchedAt'], tenantVia: ['user'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
@@ -397,6 +399,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [CHAINS · owner 29 Oct 2026] A chain's negotiated weekly fee per branch: money, so a reason and a second person.
   'GET /vendor-owners/:id/chain': c('C0', 'subscription.read'),
   'PUT /vendor-owners/:id/deal-rate': c('C4', 'subscription.deal', E.chainDeal),
+  // [CHAINS PR3] One brand card per chain (no money; it changes which branch a customer reaches first): a reason.
+  'PUT /vendor-owners/:id/brand': c('C3', 'vendor.brand', E.chainBrand),
+  'PUT /vendors/:id/brand-listing': c('C3', 'vendor.brand', E.vendor),
   'POST /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'DELETE /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
