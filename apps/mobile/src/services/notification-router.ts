@@ -94,9 +94,15 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // the one place the fee is seen and paid, on the family it is about. The
   // payload names the subscription, not the store, so a store fee opens on the
   // store the owner has selected; it carries no checkout ref to invent.
-  // [BILL-PRO PR4] A pro's own weekly-fee notices (API notification/provider-fee-kinds.ts) open the pro's dashboard:
-  // the store and mover fee screens cannot load a pro's fee. BILL-PRO PR5 points them at the pro fee screen.
-  if (kind.startsWith('provider_fee_')) return { screen: 'ServiceProvider' };
+  // [BILL-PRO PR5] A pro's own weekly-fee notices (API notification/provider-fee-kinds.ts) open the pro fee screen
+  // (the store and mover fee screens cannot load a pro's fee); a checkout notice opens on its checkout.
+  if (kind.startsWith('provider_fee_')) {
+    const ref = typeof data['ref'] === 'string' ? data['ref'] : undefined;
+    return { screen: 'ProviderWeeklyFee', params: ref ? { ref } : {} };
+  }
+  // [BILL-PRO · REVIEW-G #2217 S4-2] A pro's fee notice under a partner kind (one the delivery rename missed) still
+  // opens the pro fee screen: feeFamilyOf knows only store and mover, and would fall back to the open app's screen.
+  if (PARTNER_FEE_KINDS.has(kind) && audience === 'provider') return { screen: 'ProviderWeeklyFee', params: {} };
   if (PARTNER_FEE_KINDS.has(kind)) return { screen: 'WeeklyFee', params: { feeFamily: feeFamilyOf(audience, openApp) } };
 
   // [PUSH-ROUTING] DOCUMENTS. "Your document was rejected — fix it and

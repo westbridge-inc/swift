@@ -916,6 +916,14 @@ function serviceJobLifecycleConfig(): AxiosRequestConfig {
   };
 }
 
+// [BILL-PRO PR5] A pro's own weekly fee (API /api/v1/provider, BILL-PRO PR4): the fee view (with where it stands and
+// the words to tick) and "I understand the weekly fee". Paying uses weeklyFeeApi('provider', ...).
+export const providerFeeApi = {
+  subscription: (session?: AuthSessionSnapshot) => api.get('/provider/subscription', capturedAuthConfig(session)),
+  acknowledge: (body: { version: string; amount: number; currencyCode: string }, session?: AuthSessionSnapshot) =>
+    api.post('/provider/weekly-fee-ack', body, capturedAuthConfig(session)),
+};
+
 export const servicesApi = {
   providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
   providerMe: (session?: AuthSessionSnapshot) =>

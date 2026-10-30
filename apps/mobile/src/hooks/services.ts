@@ -58,6 +58,8 @@ export function useSaveServiceProvider() {
       void qc.invalidateQueries({ queryKey: ['services', 'provider-me'] });
       void qc.invalidateQueries({ queryKey: ['services', 'providers'] });
       void qc.invalidateQueries({ queryKey: ['verification', 'SERVICE_PROVIDER'] });
+      // [BILL-PRO PR5] A new pro is asked for the Business Agreement that covers Providers right away.
+      void qc.invalidateQueries({ queryKey: ['legal-acceptance'] });
     },
   });
 }

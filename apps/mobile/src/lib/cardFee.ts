@@ -2,7 +2,7 @@
 // Kept identical across the two independently built apps (a census compares the bytes).
 // No card number, security code or PIN ever passes through this code. The card is typed
 // only on the hosted page the server opens; Swift shows a card as brand, last 4 and expiry.
-export type CardFamily = 'vendor' | 'rider' | 'driver';
+export type CardFamily = 'vendor' | 'rider' | 'driver' | 'provider';
 export type CardPurpose = 'ENROLL' | 'PAY_NOW';
 export type CardStatus = 'ACTIVE' | 'REPLACED' | 'EXPIRED' | 'REVOKED';
 export type CardSessionState = 'OPEN' | 'UNKNOWN' | 'SUCCEEDED' | 'FAILED' | 'EXPIRED' | 'CANCELLED' | 'HELD';
