@@ -104,14 +104,17 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
     expect(text).not.toContain('items');
   });
 
-  // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
-  // born on the first catalogue step whatever its size, and nothing moves it. The card must not promise a move, nor
-  // show the larger steps' fees as if they were this store's.
-  it('[R27] a restaurant, grocery or shop starts at 15,000, and is told the rate does not change as its catalogue grows', () => {
+  // [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on its own catalogue's step;
+  // above the first step its owner sees that exact fee and ticks it first. [R27] The weekly re-tier is OFF on the
+  // server (apps/api/src/modules/billing/weekly-retier.ts): after that nothing moves it. The card must not promise a
+  // move, nor show the larger steps' fees as if they were this store's.
+  it('[RETIER PR-A · R27] a restaurant, grocery or shop is quoted 15,000 under 1,000 items, told a bigger catalogue at approval is priced for its size and ticked first, and that nothing moves it after', () => {
     for (const vendorType of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
-      expect(text).toContain('Keep 100% of every sale — no commission on orders. This rate does not change as your catalogue grows.');
+      expect(text).toContain('Keep 100% of every sale — no commission on orders. This is the rate for a store with under 1,000 active items. '
+        + 'If yours has more by the time Swift approves the store, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. '
+        + 'After that, the rate does not change as your catalogue grows.');
       expect(text).not.toMatch(/automatic/i);
       expect(text).not.toContain('$20,000');
       expect(text).not.toContain('$45,000');

@@ -112,7 +112,8 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   });
 
   it('[REVIEW-F S3-2] a catalogue store is told, beside the amount, that it is the starting rate; a services business is not', async () => {
-    const LADDER = 'This is the starting rate; it steps up as you list more items.';
+    // [RETIER PR-A · R27] priced for its size when approved, ticked first; never "it steps up as you list more items"
+    const LADDER = 'This is the starting rate. If your store has more active items by the time Swift approves it, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.';
     await throughName(/Put my business on Swift/);
     expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: $9,000/week${LADDER}`);
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });

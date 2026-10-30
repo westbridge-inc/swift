@@ -7,6 +7,7 @@ import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { OwnNameCard } from './OwnNameCard';
 import { FoodHandlersCard } from './FoodHandlersCard';
+import { StoreWeeklyFeeCard, type StoreFeeScope } from './StoreWeeklyFeeCard';
 import { FOOD_HANDLERS_DOC } from './foodHandlers';
 import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
@@ -35,11 +36,14 @@ export function DocumentChecklist({
   isError,
   onRetry,
   storeName,
+  storeFee,
 }: {
   role: string;
   status: any;
   /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
   storeName?: string | null;
+  /** [RETIER PR-A2] the store whose weekly fee may need its owner's tick, and whether the person looking owns it */
+  storeFee?: StoreFeeScope | null;
   isLoading?: boolean;
   isError?: boolean;
   onRetry?: () => void;
@@ -224,6 +228,8 @@ export function DocumentChecklist({
           />
         );
       })}
+      {/* [RETIER PR-A2] a store whose fee follows its catalogue above the first step ticks it here before it goes live */}
+      <StoreWeeklyFeeCard role={role} scope={storeFee} />
       {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
       {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
         ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}

@@ -52,7 +52,7 @@ export function branchDealLine(deal: number | null | undefined, fee: (amount: nu
 }
 
 /** An owner's step before a store can go live (the server's `goLive.steps`). */
-export type GoLiveStep = 'DOCUMENTS' | 'PUBLISHED_PHONE' | 'FOOD_HANDLERS';
+export type GoLiveStep = 'DOCUMENTS' | 'PUBLISHED_PHONE' | 'FOOD_HANDLERS' | 'WEEKLY_FEE';
 /** The server's word on a store not live yet: whose turn it is, and the owner's steps still to do. */
 export type StoreGoLive = { waitingFor: 'OWNER' | 'SWIFT'; steps: GoLiveStep[] };
 
@@ -61,6 +61,8 @@ export const GO_LIVE_STEP_WORDS: Readonly<Record<GoLiveStep, string>> = {
   DOCUMENTS: 'Add the documents it still needs',
   PUBLISHED_PHONE: 'Add the number customers can call',
   FOOD_HANDLERS: 'Confirm your food handlers',
+  // [RETIER PR-A2] the store's fee follows its catalogue above the first step: its owner reads and ticks it
+  WEEKLY_FEE: 'Read and tick its weekly fee',
 };
 
 type StoreLike = {
