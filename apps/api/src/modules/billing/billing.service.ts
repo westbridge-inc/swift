@@ -30,7 +30,7 @@ import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor
 import { WEEKLY_RETIER_ON } from './weekly-retier';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, guyanaDay, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -5287,7 +5287,7 @@ export class BillingService {
     const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at, held.notBefore ? new Date(held.notBefore) : null);
     const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
     const copy = held.source === 'CHAIN_DEAL'
-      ? chainDealRiseCopy({ from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, dealTo: held.customTo ?? null })
+      ? chainDealRiseCopy({ branch: await this.branchName(sub?.vendor?.id), from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, dealTo: held.customTo ?? null })
       : feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
     const userId = this.payerUserId(sub as SubWithRelations);
     const inboxId = await this.notifications.send({
@@ -5295,6 +5295,8 @@ export class BillingService {
       data: {
         kind: FEE_RISE_NOTICE_KIND, change: 'RISE', subscriptionId, weeklyFee: held.to, previousWeeklyFee: held.from,
         currencyCode: held.currencyCode, appliesFrom: appliesFrom.toISOString(), toldAt: at.toISOString(),
+        // [REVIEW-F #2227 S3-1] A chain branch's notice opens THAT branch's fee screen (the router selects vendorId).
+        ...(held.source === 'CHAIN_DEAL' && sub?.vendor ? { vendorId: sub.vendor.id } : {}),
       },
       dedupeKey,
     });
@@ -5421,6 +5423,13 @@ export class BillingService {
     }
   }
 
+  /** [ENTERPRISE E2] A branch's name for its own fee notices. */
+  private async branchName(vendorId: string | null | undefined): Promise<string> {
+    if (!vendorId) return 'Your branch';
+    const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true } });
+    return vendor?.name ?? 'Your branch';
+  }
+
   /** A told rise that will not happen: the payer is told so, best-effort (it never raises what they pay). */
   private async tellFeeRiseCancelled(subscriptionId: string, held: HeldFeeRise, feeNow: number | null): Promise<void> {
     if (feeNow === null || !(feeNow < held.to)) return;
@@ -5430,10 +5439,15 @@ export class BillingService {
         include: PAYER_INCLUDE,
       });
       if (!sub) return;
-      const copy = feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date: held.appliesFrom ? new Date(held.appliesFrom) : null });
+      const date = held.appliesFrom ? new Date(held.appliesFrom) : null;
+      // [REVIEW-F #2227 S3-1] A chain branch's notice names its branch and opens that branch's fee screen.
+      const chainVendorId = held.source === 'CHAIN_DEAL' ? sub.vendor?.id ?? null : null;
+      const copy = chainVendorId
+        ? chainDealCancelledCopy({ branch: await this.branchName(chainVendorId), from: feeNow, to: held.to, currencyCode: held.currencyCode, date })
+        : feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date });
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
-        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode },
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode, ...(chainVendorId ? { vendorId: chainVendorId } : {}) },
         dedupeKey: `${feeRiseDedupeKey(subscriptionId, held)}:cancelled`,
       });
     } catch (error) {

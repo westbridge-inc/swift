@@ -82,7 +82,7 @@ describe('[E2] ending, raising and withdrawing a chain deal', () => {
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/vendor-owners/owner-row-1/deal-change`);
     expect(JSON.parse(String(init?.body))).toEqual({ kind: 'END', notBefore: '2026-12-01T04:00:00.000Z', reason: 'Head office deal ends as signed' });
-    expect((await screen.findByRole('status')).textContent).toContain('1 will be told 14 days before the end date, 1 already pay their own fee');
+    expect((await screen.findByRole('status')).textContent).toContain('1 will be told about 15 days before the end date (at least 14), 1 already pay their own fee');
   });
 
   it('a pending change is shown and can be withdrawn; no raise or end is offered beside it', async () => {

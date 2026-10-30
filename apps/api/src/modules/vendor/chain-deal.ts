@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
+import { guyanaDayKey } from '../../utils/guyana-day';
 import { lockVendorActivationBilling } from '../billing/billing-access';
 import { ACTIVE_CONFIRMATION_STATES, feeReversalOpenInTx, lateCardApprovalHeldInTx } from '../billing/dunning-clock';
 import { CountryConfigService } from '../country/country-config.service';
@@ -263,7 +264,9 @@ export async function changeChainDeal(
   audit: (tx: Prisma.TransactionClient, result: DealChangeResult) => Promise<void>,
 ): Promise<DealChangeResult> {
   const now = input.now ?? new Date();
-  const notBefore = input.notBefore ?? now;
+  // [REVIEW-F #2227 S4-1] Today's date (the start of today in Guyana, as the console sends it) means now.
+  const asked = input.notBefore ?? now;
+  const notBefore = !Number.isNaN(asked.getTime()) && asked < now && guyanaDayKey(asked) === guyanaDayKey(now) ? now : asked;
   if (Number.isNaN(notBefore.getTime()) || notBefore.getTime() < now.getTime() - 60_000 || notBefore.getTime() > now.getTime() + DEAL_CHANGE_MAX_AHEAD_DAYS * DAY_MS) {
     throw new AppError(400, 'DEAL_CHANGE_DATE_INVALID', `The end date is today or a day within the next ${DEAL_CHANGE_MAX_AHEAD_DAYS} days. A fee never changes for a past week.`);
   }
@@ -380,6 +383,9 @@ async function holdBranchesInTx(tx: Prisma.TransactionClient, ownerId: string, n
     const to = weeklyFeeAmount({ weeklyRate: sub.weeklyRate, customRate: dealTo });
     // Nothing moves before the notice period of the end date begins: the branch stays on the deal.
     if (!due) { rows.push(row('WAITING', from, to)); continue; }
+    // [REVIEW-M #2227 S4-1] A branch not billed now (churned, cancelled, waived) whose fee on the new terms would be
+    // higher never leaves the deal before the end date: rejoined or un-waived inside the window, it still pays the deal.
+    if ((NOT_BILLED.includes(sub.status) || sub.feeWaived) && to > from && now.getTime() < notBefore.getTime()) { rows.push(row('WAITING', from, to)); continue; }
     if (NOT_BILLED.includes(sub.status) || sub.feeWaived || !(to > from)) {
       // Nothing it is charged goes up (not billed, waived, or its own tier fee is at or under the deal): it leaves
       // the deal for the new terms now, with no notice to give and no fee changed.

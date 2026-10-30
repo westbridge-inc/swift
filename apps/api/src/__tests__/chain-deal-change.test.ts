@@ -54,7 +54,7 @@ const call = (m: string, u: string, p?: unknown) => injectWithApproval(app, {
   headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
   ...(p === undefined ? {} : { payload: p as Record<string, unknown> }) });
 
-type Fee = { weeklyRate: number; status?: 'ACTIVE' | 'TRIAL' | 'CHURNED'; customRate?: number | null; prepaid?: number; due?: Date };
+type Fee = { weeklyRate: number; status?: 'ACTIVE' | 'TRIAL' | 'CHURNED'; customRate?: number | null; prepaid?: number; due?: Date; feeWaived?: boolean };
 /** An owner on a chain deal of `deal` a week, one branch per fee (customRate defaults to the deal). */
 async function chain(deal: number, fees: Fee[]) {
   const u = await app.prisma.user.create({ data: {
@@ -64,7 +64,7 @@ async function chain(deal: number, fees: Fee[]) {
     userId: u.id, dealWeeklyRate: deal, dealCurrencyCode: 'GYD', dealSetAt: new Date(), dealSetBy: 'test-admin', dealReason: 'test deal',
   } });
   ownerIds.push(owner.id);
-  const branches: Array<{ vendorId: string; subId: string }> = [];
+  const branches: Array<{ vendorId: string; subId: string; name: string }> = [];
   for (const fee of fees) {
     const v = await app.prisma.vendor.create({ data: {
       ownerId: owner.id, name: `Deal Branch ${RUN} ${wordFreeTag(6)}`, slug: `deal-change-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
@@ -74,11 +74,11 @@ async function chain(deal: number, fees: Fee[]) {
     const next = fee.due ?? new Date(Date.now() + 5 * DAY);
     const sub = await app.prisma.subscription.create({ data: {
       vendorId: v.id, type: 'RESTAURANT', status: fee.status ?? 'ACTIVE', weeklyRate: fee.weeklyRate,
-      customRate: fee.customRate === undefined ? deal : fee.customRate, currencyCode: 'GYD', billingMethod: 'CASH', autoRenew: true,
+      customRate: fee.customRate === undefined ? deal : fee.customRate, currencyCode: 'GYD', billingMethod: 'CASH', autoRenew: true, feeWaived: fee.feeWaived ?? false,
       currentPeriodStart: new Date(next.getTime() - 7 * DAY), currentPeriodEnd: next, nextBillingDate: next,
       prepaidBalance: { create: { balance: fee.prepaid ?? 0, currencyCode: 'GYD' } } } });
     subIds.push(sub.id);
-    branches.push({ vendorId: v.id, subId: sub.id });
+    branches.push({ vendorId: v.id, subId: sub.id, name: v.name });
   }
   return { ownerId: owner.id, userId: u.id, branches };
 }
@@ -180,10 +180,10 @@ describe('[E2] ending a deal now', () => {
     await billing.sweepFeeRises(new Date());
     const sent = await notices(c.userId);
     expect(sent).toHaveLength(2);
-    expect(sent[0]!.body).toContain('Your Swift chain deal is ending.');
+    expect(sent[0]!.body).toContain(`${up.name}: your Swift chain deal is ending.`);
     expect(sent[0]!.body).toMatch(/GY\$20,000/);
     expect(sent[0]!.body).toMatch(/GY\$14,000/);
-    expect(sent[0]!.body).toContain('tap Stop weekly billing');
+    expect(sent[0]!.body).toContain(`tap Stop weekly billing on ${up.name}'s weekly-fee screen`);
     const after = (await heldOf(up.subId))!;
     expect(Date.parse(after.appliesFrom!)).toBeGreaterThanOrEqual(Date.parse(after.noticeAt!) + FEE_RISE_NOTICE_DAYS * DAY);
     // The owner's deal moves now (the end date is today): a branch approved from now on pays its own tier fee.
@@ -236,6 +236,45 @@ describe('[E2] ending a deal now', () => {
   });
 });
 
+describe('[REVIEW-F #2227 S3-1] each branch\'s notice names its branch, with its own numbers, and opens its own fee screen', () => {
+  it('an owner with two branches on different tiers gets two notices, each naming its branch', async () => {
+    const c = await chain(14000, [{ weeklyRate: 20000 }, { weeklyRate: 16000 }]);
+    const [a, b] = c.branches as [typeof c.branches[0], typeof c.branches[0]];
+    await change(c.ownerId, { kind: 'END' });
+    await billing.sweepFeeRises(new Date());
+    const sent = await notices(c.userId);
+    expect(sent).toHaveLength(2);
+    const of = (vendorId: string) => sent.find((n) => (n.data as Record<string, unknown>)['vendorId'] === vendorId)!;
+    expect(of(a.vendorId).title).toBe(`${a.name}: your weekly fee is changing`);
+    expect(of(a.vendorId).body).toContain(`its Swift weekly fee will be GY$20,000 (it is GY$14,000 now)`);
+    expect(of(b.vendorId).title).toBe(`${b.name}: your weekly fee is changing`);
+    expect(of(b.vendorId).body).toContain(`its Swift weekly fee will be GY$16,000 (it is GY$14,000 now)`);
+    expect(of(b.vendorId).body).toContain(`If you do not want the new fee for ${b.name}`);
+  });
+});
+
+describe('[REVIEW-M #2227 S4-1 · REVIEW-F S4-1] edges of the end date', () => {
+  it('a waived branch whose fee would go up stays on the deal until the end date, then leaves it', async () => {
+    const c = await chain(14000, [{ weeklyRate: 20000, feeWaived: true }]);
+    const sub = c.branches[0]!.subId;
+    const endsAt = new Date(Date.now() + 5 * DAY);
+    const res = await change(c.ownerId, { kind: 'END', notBefore: endsAt.toISOString() });
+    expect(res.json().data.branches[0].outcome).toBe('WAITING');
+    expect(Number((await subOf(sub)).customRate)).toBe(14000);
+    await sweepChainDealChanges(app.prisma, new Date(endsAt.getTime() + 1000));
+    expect((await subOf(sub)).customRate).toBeNull();
+  });
+
+  it('today\'s date from the console (the start of today in Guyana) means now', async () => {
+    const c = await chain(14000, [{ weeklyRate: 20000 }]);
+    const gy = new Date(Date.now() - 4 * 3_600_000);
+    const startOfToday = new Date(Date.UTC(gy.getUTCFullYear(), gy.getUTCMonth(), gy.getUTCDate()) + 4 * 3_600_000);
+    const res = await change(c.ownerId, { kind: 'END', notBefore: startOfToday.toISOString() });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(Date.parse(res.json().data.notBefore)).toBeGreaterThanOrEqual(Date.now() - 60_000);
+  });
+});
+
 describe('[E2] an end date and a raise', () => {
   it('a deal ending in 60 days: nothing is held or told until its notice period, and no fee moves before the end date', async () => {
     const c = await chain(14000, [{ weeklyRate: 20000 }]);
@@ -257,7 +296,7 @@ describe('[E2] an end date and a raise', () => {
     await billing.sweepFeeRises(new Date());
     const held = (await heldOf(sub))!;
     expect(Date.parse(held.appliesFrom!)).toBeGreaterThanOrEqual(endsAt.getTime());
-    expect((await notices(c.userId))[0]!.body).toContain('Your Swift chain deal is changing to GY$17,000 a week.');
+    expect((await notices(c.userId))[0]!.body).toContain(`${c.branches[0]!.name}: your Swift chain deal is changing to GY$17,000 a week.`);
     // At the end date the owner's deal is the raised one.
     await sweepChainDealChanges(app.prisma, new Date(endsAt.getTime() + 1000));
     expect(Number((await ownerOf(c.ownerId)).dealWeeklyRate)).toBe(17000);
@@ -291,7 +330,9 @@ describe('[E2] withdrawing a change, or a lower deal, raises nothing', () => {
     expect((await ownerOf(c.ownerId)).dealChangeKind).toBeNull();
     expect(Number((await ownerOf(c.ownerId)).dealWeeklyRate)).toBe(14000);
     const sent = await notices(c.userId);
-    expect(sent.map((n) => n.title)).toEqual(['Your weekly fee is changing', 'Your weekly fee is not changing']);
+    const name = c.branches[0]!.name;
+    expect(sent.map((n) => n.title)).toEqual([`${name}: your weekly fee is changing`, `${name}: your weekly fee is not changing`]);
+    expect((sent[1]!.data as Record<string, unknown>)['vendorId']).toBe(c.branches[0]!.vendorId);
     expect((await withdraw(c.ownerId)).json().error.code).toBe('NO_DEAL_CHANGE');
   });
 
@@ -307,7 +348,7 @@ describe('[E2] withdrawing a change, or a lower deal, raises nothing', () => {
     expect(await heldOf(sub)).toBeNull();
     expect((await ownerOf(c.ownerId)).dealChangeKind).toBeNull();
     expect(Number((await subOf(sub)).customRate)).toBe(12000);
-    expect((await notices(c.userId)).some((n) => n.title === 'Your weekly fee is not changing')).toBe(true);
+    expect((await notices(c.userId)).some((n) => n.title === `${c.branches[0]!.name}: your weekly fee is not changing`)).toBe(true);
   });
 
   it('the console shows the pending change and each branch held change', async () => {

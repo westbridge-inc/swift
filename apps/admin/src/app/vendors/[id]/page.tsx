@@ -297,7 +297,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
   const guyanaDayStart = (day: unknown) => (typeof day === 'string' && day ? `${day}T04:00:00.000Z` : undefined);
   const changeWords = (rows: Array<{ outcome: DealChangeOutcome }>) => {
     const count = (o: DealChangeOutcome) => rows.filter((b) => b.outcome === o).length;
-    return `${count('HELD')} branch(es) will be told now, ${count('WAITING')} will be told 14 days before the end date, ${count('LEFT_DEAL')} already pay their own fee.`;
+    return `${count('HELD')} branch(es) will be told within the hour, ${count('WAITING')} will be told about 15 days before the end date (at least 14), ${count('LEFT_DEAL')} already pay their own fee.`;
   };
   const endDeal = async () => show(await dialog.run({
     title: `End the chain deal for ${ownerName || 'this owner'}?`,
@@ -449,7 +449,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
               {change ? (
                 <p className="mc-muted mt-1">
                   {change.kind === 'END' ? 'The deal ends' : `The deal goes up to ${gyd(change.to)} a week`} from {when(change.notBefore)}
-                  {change.inForce ? ' (in force: branches move from their own told dates).' : '. Each branch is told 14 days before its fee changes.'}
+                  {change.inForce ? ' (in force: branches move from their own told dates).' : '. Each branch is told at least 14 days before its fee changes.'}
                 </p>
               ) : null}
               <div className="mt-2 flex flex-wrap gap-2">
