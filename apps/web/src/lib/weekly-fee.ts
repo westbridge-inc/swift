@@ -3,7 +3,7 @@ import { feeDate, feeMoney, feeStatusOf, type FeeStatus, type FeeStatusState } f
 // [REVIEW-F S4-1 · FEE-STATUS] The fee status words live in ./fee-status (small, so the web's Orders home can use them).
 export { feeDate, feeMoney, feeStatusOf };
 export type { FeeStatus, FeeStatusState };
-export type FeeFamily = 'vendor' | 'rider' | 'driver';
+export type FeeFamily = 'vendor' | 'rider' | 'driver' | 'provider';
 export type CheckoutState = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
 export interface CheckoutStatus {

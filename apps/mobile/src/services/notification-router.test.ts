@@ -591,27 +591,27 @@ const CENSUS: Case[] = [
   { k: 'ad_refund_payout_task', d: { campaignId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_campaign_paid', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'admins' },
   { k: 'sos_marked_safe', d: { sosAlertId: 'a1' }, to: null, why: 'admins' },
-  // [BILL-PRO PR4] A pro's weekly-fee notices (API notification/provider-fee-kinds.ts, audience 'provider'). The
-  // store and mover fee screens cannot load a pro's fee, so these open the pro's own dashboard (builds 9-12 do not
-  // know these kinds and open the app where it was). The pro fee screen routes them in BILL-PRO PR5.
-  { k: 'provider_fee_mmg_checkout', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_mmg_pending', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_success', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_failed', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_final_warning', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_suspended', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_suspended_nudge', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_reminder', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_banked', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_churned', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_topup', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_card_action_required', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_trial', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_fx_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_rate_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_usd_migration', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
-  { k: 'provider_fee_cover_ended', d: { subscriptionId: 's1', audience: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'the store fee that covered a pro ended: their own fee applies again (REVIEW-M #2229 N2)' },
-  { k: 'provider_fee_notice', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ServiceProvider' }, why: 'a pro\'s own weekly fee: their dashboard, until the pro fee screen (BILL-PRO PR5)' },
+  // [BILL-PRO PR4/PR5] A pro's weekly-fee notices (API notification/provider-fee-kinds.ts, audience 'provider') open
+  // the pro fee screen (the store and mover fee screens cannot load a pro's fee). Builds 9-12 do not know these kinds
+  // and open the app where it was.
+  { k: 'provider_fee_mmg_checkout', d: { subscriptionId: 's1', ref: 'checkout-1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: { ref: 'checkout-1' } }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_mmg_pending', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_success', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_failed', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_final_warning', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_suspended', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_suspended_nudge', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_reminder', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_banked', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_churned', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_topup', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_card_action_required', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_trial', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_fx_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_rate_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_usd_migration', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_cover_ended', d: { subscriptionId: 's1', audience: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'the store fee that covered a pro ended: their own fee applies again (REVIEW-M #2229 N2), on the pro fee screen' },
+  { k: 'provider_fee_notice', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
 ];
 
 // ── [PUSH-ROUTING] The census keeps ONE payload per kind. The kinds below go to
@@ -1055,5 +1055,20 @@ describe('census drift vs apps/api/src', () => {
     // The other direction: a census entry nothing sends is dead weight.
     const phantom = CENSUS.filter((c) => c.scan !== false && !sent.has(c.k)).map((c) => c.k).sort();
     expect(phantom, 'census entries the API no longer sends').toEqual([]);
+  });
+});
+
+describe('[BILL-PRO · REVIEW-G #2217 S4-2] a pro\'s fee notice under a partner kind', () => {
+  it.each(['billing_failed', 'trial_fee_education', 'billing_rate_change'])('%s tagged provider opens the pro fee screen, whatever app is open', (kind) => {
+    for (const open of ['vendor', 'mover', 'customer'] as const) {
+      expect(destinationFor({ kind, subscriptionId: 's1', audience: 'provider' }, () => open)).toEqual({ screen: 'ProviderWeeklyFee', params: {} });
+    }
+  });
+  it('[REVIEW-F #2231 S4-2] a provider-tagged checkout notice opens the pro fee screen on its checkout, never the store/mover one', () => {
+    for (const open of ['vendor', 'mover', 'customer'] as const) {
+      expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'c1', status: 'CONFIRMED', audience: 'provider' }, () => open)).toEqual({ screen: 'ProviderWeeklyFee', params: { ref: 'c1' } });
+    }
+    // A store's or mover's checkout notice is unchanged.
+    expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'c1', audience: 'business' })).toMatchObject({ screen: 'WeeklyFee', params: { ref: 'c1' } });
   });
 });

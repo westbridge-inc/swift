@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import { ScrollView, View } from 'react-native';
 import { color, space } from '@swift/ui';
 import {
@@ -25,6 +26,8 @@ import {
   useVerificationStatus,
 } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
+import { useQueryClient } from '@tanstack/react-query';
+import { proFeeBanner, type ProFeeStanding } from '../../../lib/providerFee';
 import { useServiceCatalog } from '../useServiceCatalog';
 import { licenceLabel } from '../licenceLabel';
 import { customerServiceCategories, providerVerificationPresentation, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
@@ -42,6 +45,9 @@ interface ProviderProfile {
   /** [R7] the latest day a person checked a licence (from /me; older servers omit it = no label) */
   licenceCheckedOn?: string | null;
   portfolioPhotos?: string[];
+  /** [BILL-PRO PR5] whether customers can find the pro now, and the weekly-fee standing (older servers omit both) */
+  listed?: boolean;
+  fee?: ProFeeStanding;
 }
 
 function ProviderProfileForm({
@@ -142,8 +148,17 @@ function ProviderDashboard({
   const [editing, setEditing] = useState(false);
   const statusQuery = useVerificationStatus<any>('SERVICE_PROVIDER', undefined, { poll: true });
   const status = statusQuery.data;
-  const presentation = providerVerificationPresentation(status, provider.isVerified);
+  const presentation = providerVerificationPresentation(status, provider.isVerified, provider.listed);
+  const banner = proFeeBanner(provider);
+  const qc = useQueryClient();
   const bookableQ = useMyBookable<{ bookable?: boolean }>();
+
+  // [BILL-PRO · REVIEW-F #2231 S3-4] Back from the fee screen (a tick, a payment) or the agreement: where the pro stands
+  // is read again on focus, so "Not listed" and the button never go stale.
+  useFocusEffect(useCallback(() => {
+    void refetchProfile();
+    void qc.invalidateQueries({ queryKey: ['provider', 'fee'] });
+  }, [refetchProfile, qc]));
 
   // The approval path persists public listability before returning. Refresh the
   // profile projection as soon as the shared checklist reports completion.
@@ -181,6 +196,23 @@ function ProviderDashboard({
           ) : null}
         </View>
       </Card>
+
+      {banner ? (
+        <Card>
+          <T variant="label" weight="semibold">{banner.title}</T>
+          <T variant="caption" tone="muted" style={{ marginTop: 4 }}>{banner.body}</T>
+          <PillButton
+            label={banner.action === 'AGREEMENT' ? 'Review the agreement' : 'Weekly fee'}
+            // The agreement is asked by the app's own legal-acceptance screen: ask the server again now.
+            onPress={() => (banner.action === 'AGREEMENT'
+              ? void qc.invalidateQueries({ queryKey: ['legal-acceptance'] })
+              : navigation?.navigate?.('ProviderWeeklyFee'))}
+            style={{ marginTop: space.md }}
+          />
+        </Card>
+      ) : provider.fee?.required ? (
+        <PillButton label="Weekly fee" variant="soft" onPress={() => navigation?.navigate?.('ProviderWeeklyFee')} />
+      ) : null}
 
       <View style={{ flexDirection: 'row', gap: space.md }}>
         <PillButton

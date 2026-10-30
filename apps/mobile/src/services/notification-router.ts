@@ -80,6 +80,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // so a page could only be stopped from a computer. Only ops pages carry an opsAlertId.
   const opsAlertId = data['opsAlertId'];
   if (typeof opsAlertId === 'string' && opsAlertId) return { screen: 'OpsAlerts', params: { opsAlertId } };
+  // [BILL-PRO · REVIEW-F #2231 S4-2] A pro's checkout notice the delivery rename missed opens the PRO fee screen, on
+  // its checkout: the store/mover WeeklyFee cannot load a pro's fee.
+  if (data['kind'] === 'billing_mmg_checkout' && data['audience'] === 'provider') {
+    return { screen: 'ProviderWeeklyFee', params: typeof data['ref'] === 'string' ? { ref: data['ref'] } : {} };
+  }
   // [ENTERPRISE E1b] A pay-all payment's notice ({ ref, status, chainCheckout: true }, no subscription: it paid several
   // branches) opens the owner's "Pay all my branches", which follows that ref. Never a mover's fee screen.
   if (data['kind'] === 'billing_mmg_checkout' && (data['chainCheckout'] === true || data['chainCheckout'] === 'true')) {
@@ -99,9 +104,15 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // the one place the fee is seen and paid, on the family it is about. The
   // payload names the subscription, not the store, so a store fee opens on the
   // store the owner has selected; it carries no checkout ref to invent.
-  // [BILL-PRO PR4] A pro's own weekly-fee notices (API notification/provider-fee-kinds.ts) open the pro's dashboard:
-  // the store and mover fee screens cannot load a pro's fee. BILL-PRO PR5 points them at the pro fee screen.
-  if (kind.startsWith('provider_fee_')) return { screen: 'ServiceProvider' };
+  // [BILL-PRO PR5] A pro's own weekly-fee notices (API notification/provider-fee-kinds.ts) open the pro fee screen
+  // (the store and mover fee screens cannot load a pro's fee); a checkout notice opens on its checkout.
+  if (kind.startsWith('provider_fee_')) {
+    const ref = typeof data['ref'] === 'string' ? data['ref'] : undefined;
+    return { screen: 'ProviderWeeklyFee', params: ref ? { ref } : {} };
+  }
+  // [BILL-PRO · REVIEW-G #2217 S4-2] A pro's fee notice under a partner kind (one the delivery rename missed) still
+  // opens the pro fee screen: feeFamilyOf knows only store and mover, and would fall back to the open app's screen.
+  if (PARTNER_FEE_KINDS.has(kind) && audience === 'provider') return { screen: 'ProviderWeeklyFee', params: {} };
   // [ENTERPRISE E2 · REVIEW-F #2227] A notice that names its store (a chain branch's fee change carries vendorId and
   // subscriptionId) opens THAT store's fee screen: the same checked switch a checkout push takes (resolveFeeNotification
   // selects it only when the store's own subscription is the one named, else the selected store's screen).
