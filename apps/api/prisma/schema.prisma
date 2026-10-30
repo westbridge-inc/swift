@@ -1490,6 +1490,8 @@ model VendorOwner {
   dealChangeSetBy       String?
   dealChangeSetAt       DateTime?
   dealChangeSwitchedAt  DateTime?
+  /// [ENTERPRISE · E1] The owner's "pay all my branches" MMG checkouts (one MMG page for several branch fees).
+  chainCheckouts   MmgCheckoutIntent[]
 
   @@map("vendor_owners")
 }
@@ -3551,6 +3553,8 @@ model Subscription {
   obligationTransitions BillingObligationTransition[] @relation("ObligationSource")
   priorObligationTransitions BillingObligationTransition[] @relation("ObligationPreviousSource")
   confirmationHolds PaymentConfirmationHold[]
+  /// [ENTERPRISE · E1] This branch's share of an owner's "pay all my branches" checkouts.
+  mmgCheckoutParts MmgCheckoutPart[]
   billingFeeNotices BillingFeeNotice[]
   moverFeeAuthority MoverFeeAuthority? @relation("CanonicalMoverFee")
   moverFeeMembership MoverFeeSubscription?
@@ -3772,6 +3776,10 @@ model PaymentConfirmationHold {
   checkout MmgCheckoutIntent? @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
   cardSessionId String? @unique
   cardSession CardSession? @relation(fields: [cardSessionId], references: [id], onDelete: Restrict)
+  /// [ENTERPRISE · E1] One branch's share of an owner's "pay all my branches" checkout: each covered branch's
+  /// clock is paused by its own hold, exactly as a single-branch checkout pauses it.
+  checkoutPartId String? @unique
+  checkoutPart MmgCheckoutPart? @relation(fields: [checkoutPartId], references: [id], onDelete: Restrict)
   /// ACTIVE | SETTLEMENT_APPLY_PENDING | PAID | PROVEN_UNPAID | PROVEN_NO_EFFECT
   status String @default("ACTIVE")
   reason String
@@ -3963,7 +3971,13 @@ model ProviderPayment {
 model MmgCheckoutIntent {
   id                    String    @id @default(cuid())
   tenantId              String    @default("swift-default")
-  subscriptionId        String
+  /// The one subscription a single-branch checkout pays. NULL exactly when the checkout is an owner's
+  /// "pay all my branches" checkout (chainOwnerId set): its branches and amounts are its `parts` [ENTERPRISE · E1].
+  subscriptionId        String?
+  /// [ENTERPRISE · E1] The store owner whose "pay all my branches" checkout this is (CHECK: exactly one of
+  /// subscriptionId and chainOwnerId). One OPEN or CONFIRMING per owner (a partial unique in the migration).
+  chainOwnerId          String?
+  chainOwner            VendorOwner? @relation(fields: [chainOwnerId], references: [id], onDelete: Restrict)
   /// Ours, sent to MMG: 18 digits (providers/mmg newMerchantTransactionId).
   merchantTransactionId String    @unique
   /// Exactly what MMG was asked for, in whole GYD [I1].
@@ -4004,9 +4018,12 @@ model MmgCheckoutIntent {
   /// [MMG REVERSAL] Attempts to return this payment to the partner (one live at a time).
   reversals             MmgFeeReversal[]
   confirmationHold      PaymentConfirmationHold?
+  /// [ENTERPRISE · E1] A chain checkout's branches: who it pays and how much of the one MMG payment each gets.
+  parts                 MmgCheckoutPart[]
 
   @@index([tenantId])
   @@index([subscriptionId, createdAt])
+  @@index([chainOwnerId, createdAt])
   @@index([status, nextCheckAt])
   // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
   @@index([candidates], type: Gin)
@@ -4070,6 +4087,29 @@ model MmgFeeReversal {
   @@index([subscriptionId, state])
   @@index([checkoutId])
   @@map("mmg_fee_reversals")
+}
+
+/// [ENTERPRISE · E1 · 29 Oct 2026] One branch's share of an owner's "pay all my branches" MMG checkout. Written
+/// with the checkout, before its page leaves the server, and never changed: the branch's subscription and the whole
+/// GYD amount of the one MMG payment that is credited to that branch's fee once MMG's own lookup confirms the
+/// payment. The parts of a checkout add up exactly to its amount (a deferred check in the migration).
+model MmgCheckoutPart {
+  id             String            @id @default(cuid())
+  tenantId       String            @default("swift-default")
+  checkoutId     String
+  checkout       MmgCheckoutIntent @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  subscriptionId String
+  subscription   Subscription      @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  /// Whole GYD, positive (CHECKed).
+  amount         Decimal           @db.Decimal(12, 2)
+  currencyCode   String            @db.Char(3)
+  createdAt      DateTime          @default(now())
+  confirmationHold PaymentConfirmationHold?
+
+  @@unique([checkoutId, subscriptionId])
+  @@index([subscriptionId, createdAt])
+  @@index([tenantId])
+  @@map("mmg_checkout_parts")
 }
 
 /// [MMG checkout F3] Every Idempotency-Key a checkout answered. Once a key has

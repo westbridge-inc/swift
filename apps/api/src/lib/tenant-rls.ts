@@ -117,7 +117,7 @@ export const TENANT_TABLES = [
   'mmg_agent_payments',
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
   // walled like the provider payment that credits it.
-  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations', 'mmg_checkout_parts',
   // [MMG REVERSAL] returning a whole weekly-fee payment: the payer's operator's money.
   'mmg_fee_reversals',
   'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
@@ -468,6 +468,7 @@ const APP_ROLE_MIGRATION_REVOCATIONS: ReadonlyArray<{ readonly table: string; re
   { table: 'public.billing_obligation_transitions', privileges: 'UPDATE, DELETE' },
   { table: 'public.erasure_ledger_entry', privileges: 'INSERT, UPDATE, DELETE' }, // 20261021140000
   { table: 'public.erasure_ledger_shipment', privileges: 'INSERT, UPDATE, DELETE' },
+  { table: 'public.mmg_checkout_parts', privileges: 'UPDATE, DELETE' }, // 20261029070000 (ENTERPRISE E1: a chain checkout's branch shares)
   { table: 'swift_qr.token_identities', privileges: 'ALL' }, // 20261005210300
 ];
 

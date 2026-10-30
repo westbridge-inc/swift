@@ -297,7 +297,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'mmgCheckouts', model: 'MmgCheckoutIntent', by: ['createdByUserId'], key: 'id', omit: { candidates: 'SYSTEM' },
-    fields: ['id', 'subscriptionId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
+    fields: ['id', 'subscriptionId', 'chainOwnerId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
   },
   {
     category: 'feeNotices', model: 'BillingFeeNotice', by: ['userId'], key: 'id', omit: { payload: 'SYSTEM' },
