@@ -15,6 +15,7 @@ import { categoryTakesAppointments, publicServiceCatalog, SERVICE_TRADE_CATALOG,
 import { instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { providerAcceptedMenuAgreement } from '../modules/services/pro-menu-agreement';
 import { PRO_MENU_AGREEMENT } from '../modules/services/pro-menu-agreement-version';
+import { PRO_AGREEMENT_VERSION } from '../modules/legal/reaccept';
 
 // ---------------------------------------------------------------------------
 // [BOOK-P2 Track P] The pure rules of booking a pro: which categories take
@@ -147,10 +148,16 @@ describe('[BOOK-P3 · COORD 16:13Z] the agreement gate: fail-closed until BILL-P
     };
   };
 
-  it('no agreement version carries the clause yet: nobody is bookable from a list, whatever they accepted', async () => {
-    expect(PRO_MENU_AGREEMENT).toEqual({ documentType: 'vendor_agreement', sinceVersion: null });
+  it('[BILL-PRO PR7] the clause version is the Business Agreement with section 12 (PRO_AGREEMENT_VERSION)', async () => {
+    expect(PRO_MENU_AGREEMENT).toEqual({ documentType: 'vendor_agreement', sinceVersion: PRO_AGREEMENT_VERSION });
+    // 2026-10-29 is the last version before the pro agreement had the clause: not enough.
+    expect(await providerAcceptedMenuAgreement(fakeDb({ action: 'granted', documentVersion: '2026-10-29' }).db, 'u1')).toBe(false);
+    expect(await providerAcceptedMenuAgreement(fakeDb({ action: 'granted', documentVersion: PRO_AGREEMENT_VERSION }).db, 'u1')).toBe(true);
+  });
+
+  it('no agreement version named: nobody is bookable from a list, whatever they accepted (fail-closed)', async () => {
     const { db, calls } = fakeDb({ action: 'granted', documentVersion: '2099-01-01' });
-    expect(await providerAcceptedMenuAgreement(db, 'u1')).toBe(false);
+    expect(await providerAcceptedMenuAgreement(db, 'u1', { documentType: 'vendor_agreement', sinceVersion: null })).toBe(false);
     expect(calls).toEqual([]);
   });
 

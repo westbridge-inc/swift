@@ -137,7 +137,20 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // sooner, even inside the 2-hour cut-off (order/cancel-policy.ts movedWindowEnd: orders.appointmentMovedAt written by a
 // business's move, service_jobs.providerMovedAt by a provider's). Customer-favourable, NON-material (reaccept.ts
 // NON_MATERIAL_CHANGES says why), the same day: LAST_UPDATED stays.
-export const LEGAL_VERSION = '2026-10-29.1';
+// [2026-10-29.2 · BILL-PRO · owner 28 Oct 2026 Rounds A+B (A1, A3, A4, B1, B2, B3) + COORD 29 Oct 16:13Z · DRAFT until
+// counsel verifies] The Business Agreement covers independent service providers ("Provider": a pro in the Services
+// tab, services/services.routes.ts): accepted when you create your provider profile or when the app asks you
+// (reaccept.ts asks a pro for it); new section 12: the trade documents a person checks; the weekly services fee
+// (section 2, the services rate, partnerRateFor serviceVendor) paid only on MMG's checkout page in the app or on the
+// website, never charged before acceptance, an existing pro's trial starting at acceptance (A1), a new pro's at
+// document approval (A2), one fee for a Services-store owner who is also a pro while the store fee is paid (B1),
+// the unpaid-fee block after 48 hours with booked jobs still going ahead and chat open (B2), not listed without
+// acceptance once the fee has started for Providers (A3, behind PRO_WEEKLY_FEE); and the provider's side of Terms
+// section 5: publishing a list of services with bookable times is their standing advance acceptance of bookings made
+// from it (COORD 16:13Z), which the server enforces (services/pro-menu-agreement.ts, BOOK-P3: no booking from a
+// pro's list until they accepted a version with this clause). MATERIAL for Providers only (owner B3: a fresh tick):
+// reaccept.ts asks a pro, and nobody else, for it. Same day as 2026-10-29: LAST_UPDATED is unchanged.
+export const LEGAL_VERSION = '2026-10-29.2';
 const LAST_UPDATED = '29 October 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
@@ -345,7 +358,7 @@ export const DRIVER_AGREEMENT = page(
 export const VENDOR_AGREEMENT = page(
   'Business Agreement',
   `
-<p>This Business Agreement applies in addition to the Terms of Service when you list and operate a business ("<b>Business</b>") on the Swift platform — a restaurant, supermarket, shop or service provider. By ticking the acceptance box when you create your store, you accept it on behalf of the Business you are authorised to represent. If it conflicts with the Terms of Service on a Business matter, this Agreement governs. You confirm you are authorised to accept this Agreement for the business.</p>
+<p>This Business Agreement applies in addition to the Terms of Service when you list and operate a business ("<b>Business</b>") on the Swift platform — a restaurant, supermarket, shop or service provider, including an independent professional who offers their own services in the Services tab ("<b>Provider</b>", see section 12). By ticking the acceptance box when you create your store, or when the app asks you to accept this Agreement (as it asks a Provider after they create their provider profile), you accept it on behalf of the Business you are authorised to represent or, as a Provider, for yourself. If it conflicts with the Terms of Service on a Business matter, this Agreement governs. You confirm you are authorised to accept this Agreement for the business.</p>
 
 <h2>1. Independence</h2>
 <p>Your Business is an independent seller. Swift provides the software that publishes your listings, transmits orders and arranges delivery; Swift is not your employer, franchisor, agent or reseller, and the sale contract for every order is between your Business and the customer.</p>
@@ -381,6 +394,12 @@ export const VENDOR_AGREEMENT = page(
 
 <h2>11. General</h2>
 <p>This Agreement is governed by the laws of the Co-operative Republic of Guyana. Changes are announced in the app before they take effect, and each version is recorded with its date and integrity hash. Questions: Help &amp; Support in the app.</p>
+
+<h2>12. Independent service providers</h2>
+<p>This section applies to you as a Provider. The rest of this Agreement applies to you too, except where it only makes sense for a store (such as a storefront, a team or delivery). Your profile, your trade and the services you list are your representations to customers and must be accurate.</p>
+<p>Before you are listed, and for as long as you are, you must hold the documents the app lists for your trade (for example your national ID or Digital ID card, a police clearance, and any licence your trade requires). A person at Swift checks them. Expired required documents stop new requests and bookings until you renew them.</p>
+<p>As a Provider you pay the weekly services fee described in section 2, only through MMG's checkout page in the Swift app or on the Swift website. Swift tells you in the app before the weekly fee starts for Providers. Nothing is charged until you have accepted this Agreement and confirmed in the app that you understand the weekly fee; until you have, once the weekly fee has started for Providers, you are not listed and cannot take new requests or bookings. Your free trial, where offered, starts on the day the last of these happens: the weekly fee starts for Providers, Swift approves your documents, you accept this Agreement, and you confirm in the app that you understand the weekly fee. If you also own a Services store on Swift, your store's weekly fee covers your provider profile: you pay one fee, and the 48-hour rule below applies to it. If your weekly fee is still unpaid 48 hours after it falls due, you are not listed and cannot receive new requests, send quotes or confirm new bookings until it is paid; jobs already booked can still go ahead, and your chats stay open.</p>
+<p>If you publish a list of services with bookable times, you accept in advance every booking a customer makes from it at a time the app shows as free, and the app confirms that booking to the customer when it is made. Keep your list, your weekly hours and your time off current. Honour every booking confirmed this way; if you cannot, cancel or move it in the app as early as you can, so the customer is told.</p>
 `,
 );
 

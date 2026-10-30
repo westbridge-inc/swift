@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
-import { LEGAL_URL } from '@/lib/api';
+import { LEGAL_URL } from '@/lib/legal-url';
 import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
 import { ownNameStoreType } from '@/lib/own-name-store-type';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';

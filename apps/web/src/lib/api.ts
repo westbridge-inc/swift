@@ -69,7 +69,8 @@ export async function fetchPricing(country?: string): Promise<CountryPricing | n
   }
 }
 
-export const LEGAL_URL = (doc: 'terms' | 'privacy' | 'vendor-agreement' | 'driver-agreement') => `${API_URL}/legal/${doc}`;
+// The legal texts' address (LEGAL_URL) lives in lib/legal-url: client code imports it from there, never from this
+// server module (its top-level React `cache(...)` read would ride into every console page's first load).
 
 // ── Public storefronts (SEO surface — ACTIVE + verified stores only) ────────
 export interface StorefrontSummary {

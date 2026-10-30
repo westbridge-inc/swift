@@ -1,11 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 
 // [BOOK-P3 · COORD 16:13Z] A pro is bookable from their list only after accepting the agreement version with the
-// advance-acceptance clause; no such version exists on main yet (fail-closed), so this suite names one and every
-// pro it makes accepted it (makePro). The gate itself: pro-booking-followups.test.ts + pro-booking.unit.test.ts.
-vi.mock('../modules/services/pro-menu-agreement-version', () => ({
-  PRO_MENU_AGREEMENT: { documentType: 'vendor_agreement', sinceVersion: '2026-10-29' },
-}));
+// advance-acceptance clause ([BILL-PRO PR7] the Business Agreement's section 12, PRO_AGREEMENT_VERSION); every pro
+// this suite makes accepted it (makePro). The gate itself: pro-booking-followups.test.ts + pro-booking.unit.test.ts.
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Prisma } from '@prisma/client';
@@ -28,6 +25,7 @@ import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { testPhone } from './helpers/fixture-ids';
 import { installDdl } from './helpers/install-ddl';
 import { runWithoutTenant } from '../plugins/tenant-context';
+import { PRO_AGREEMENT_VERSION } from '../modules/legal/reaccept';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 
 // The heal below is raw DDL (idempotent; a no-op on a migrated database).
@@ -89,10 +87,10 @@ async function makePro(trade = 'tutor', opts: { hours?: unknown; tenantId?: stri
       data: { userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}.jpg`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
     }));
   }
-  // [BOOK-P3] The pro accepted the agreement with the advance-acceptance clause (the mocked version above).
+  // [BOOK-P3] The pro accepted the agreement with the advance-acceptance clause (PRO_AGREEMENT_VERSION).
   await runWithoutTenant(() => app.prisma.consentRecord.create({
     data: {
-      subjectType: 'vendor_user', subjectId: u.userId, documentType: 'vendor_agreement', documentVersion: '2026-10-29',
+      subjectType: 'vendor_user', subjectId: u.userId, documentType: 'vendor_agreement', documentVersion: PRO_AGREEMENT_VERSION,
       documentContentHash: 'book-p3-test', action: 'granted', surface: 'ios',
     },
   }));
