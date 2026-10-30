@@ -72,7 +72,7 @@ import { DeliveryCashSettlementService, assertSettlementId, settlementAttestatio
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
-import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
+import { registerChainMmgCheckoutRoutes, registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { keepPublicPhoto } from '../../utils/owned-photo-upload';
 import { IMPORT_PHOTO_ADDRESS_NOTE, uploadOnlyPhotoField } from '../../utils/photo-address';
 import { retryStorageOrphan } from '../../lib/storage-orphans';
@@ -5352,6 +5352,14 @@ export async function vendorRoutes(app: FastifyInstance) {
     return app.prisma.subscription.findFirst({ where: { vendorId } });
   };
   const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [ENTERPRISE E1] "Pay all my branches": the owner of the selected store pays every branch fee due in one checkout.
+  registerChainMmgCheckoutRoutes(app, {
+    ownerFor: async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'OWNER');
+      const store = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { ownerId: true } });
+      return { ownerId: store.ownerId };
+    },
+  });
   // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the store's
   // OWNER lists, removes, adds and pays by card for the selected store's
   // subscription. Card rail v2 stays behind CARD_RAIL_V2 (default off).

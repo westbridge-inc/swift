@@ -471,7 +471,9 @@ export const customerApi = {
     api.get('/search', { params: { q, ...opts } }),
   searchSuggestions: (q: string) => api.get('/search/suggestions', { params: { q } }),
   searchTrending: () => api.get('/search/trending'),
-  getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
+  /** [CHAINS PR3] With the customer's place, the storefront's branch switcher says which branch delivers to them. */
+  getVendor: (id: string, point?: { lat: number; lng: number } | null) =>
+    api.get(`/customer/vendors/${id}`, point ? { params: { lat: point.lat, lng: point.lng } } : undefined),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
   getItemSlots: (itemId: string, date: string, config?: AxiosRequestConfig) =>
     api.get(`/customer/items/${itemId}/slots`, {

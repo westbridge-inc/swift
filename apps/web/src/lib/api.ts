@@ -2,6 +2,7 @@
 // another client on the same backend, never a second source of truth.
 import { cache } from 'react';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import type { StorefrontBrand } from './brand-card';
 
 // The server-side fetch origin may be overridden (an internal address on the
 // same network); the browser side is the one authority, never a fallback.
@@ -114,6 +115,8 @@ export interface StorefrontSeller {
 
 export interface StorefrontDetail extends StorefrontSummary {
   addressLine1: string;
+  /** [CHAINS PR3] The brand this store belongs to and its branches a visitor may switch to (absent: none / older API). */
+  brand?: StorefrontBrand;
   /** [P35 · board 4b] A person approved the store's documents and they are still current (server-computed).
    *  Absent from an older API: the page then says nothing about verification. */
   isVerified?: boolean;

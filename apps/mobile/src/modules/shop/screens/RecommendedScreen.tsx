@@ -53,6 +53,8 @@ export function RecommendedScreen() {
               width={CARD_W}
               image={vendorPhoto(v)}
               name={v.name}
+              brand={v.brand}
+              place={v.addressLine1 ?? v.city}
               rating={v.displayRating ?? null}
               ratingBucket={v.ratingBucket}
               topRated={v.topRated}

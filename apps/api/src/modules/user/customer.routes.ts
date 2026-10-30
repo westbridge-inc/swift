@@ -33,6 +33,7 @@ import { storeVatEffective } from '../store-vat/store-vat';
 import { STORE_VAT_RATE_PERCENT } from '../store-vat/vat-rate';
 import { cartVatByVendor } from '../store-vat/order-vat';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
+import { MAX_DELIVERY_RADIUS_KM, brandBranchesFor, brandFactsFor, collapseBrands, oneDishPerBrand } from '../vendor/brand';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
 import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
@@ -348,7 +349,7 @@ const REFERRAL_CODE_SHAPE = /^[A-Za-z0-9]{3,64}$/;
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_DELIVERY_RADIUS_KM = 25;
+// [CHAINS PR3] One reach rule: the cart's gate and the brand card's "delivers to you" (modules/vendor/brand).
 // The cancel rule is imported from the ONE policy module [UG-CRAFT-01] —
 // the "must match order.service" comment era is over: the preview and the
 // cancel read the same verdict by construction.
@@ -1440,7 +1441,11 @@ export async function customerRoutes(app: FastifyInstance) {
     // A failed order read rejects the request. Never return cached order state
     // or turn a read failure into an empty active/recent-order projection.
     const [discovery, [activeOrder, recentOrders]] = await Promise.all([loadDiscovery(), loadOrders()]);
-    const enriched = discovery.vendors;
+    // [CHAINS PR3] One card per brand, opening its best branch for this customer (modules/vendor/brand). Read per
+    // request over the cached candidates: a brand set or split by Swift shows at once, and the cache keeps its shape.
+    const recentIds = recentOrders.map((o) => o.vendorId).filter((id): id is string => !!id);
+    const brandFacts = await brandFactsFor(app.prisma, [...discovery.vendors.map((v) => v.id), ...recentIds, ...discovery.popularItems.map((it) => it.vendorId)]);
+    const enriched = collapseBrands(discovery.vendors, brandFacts, { lat, lng });
 
     // Sections. "Orderable" must match the checkout gate exactly
     // (order.service.ts: isCurrentlyOpen && acceptingOrders && status ACTIVE —
@@ -1466,13 +1471,16 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Order again: vendors from recent orders
     const recentVendorIds = new Set(recentOrders.map((o) => o.vendorId).filter(Boolean));
-    const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
+    // [CHAINS PR3] A branch ordered from before brings back its brand's card (the brand's best branch for now).
+    const recentBrands = new Set(recentIds.map((id) => brandFacts.get(id)?.ownerId).filter(Boolean));
+    const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id) || (v.brand !== null && recentBrands.has(brandFacts.get(v.id)?.ownerId))).slice(0, 6);
 
     const feed = {
       // The declared vertical rides with the card: SERVICE for a service
       // business's booking, otherwise the persisted type — never a client guess.
       activeOrder: activeOrder ? { ...activeOrder, vertical: orderVertical(activeOrder), promise: promiseView(activeOrder) } : activeOrder,
-      popularItems: discovery.popularItems,
+      // [CHAINS PR3] A chain sells the same dish at every branch: the rail shows it once (its most-ordered branch's).
+      popularItems: oneDishPerBrand(discovery.popularItems, brandFacts),
       featured,
       nearby,
       orderAgain,
@@ -1679,10 +1687,13 @@ export async function customerRoutes(app: FastifyInstance) {
     if (userLat != null && userLng != null && sort === 'distance') {
       enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
     }
+    // [CHAINS PR3] One card per brand on this page, opening its best branch for this customer. (The page's total
+    // still counts stores; a brand whose branches fall on two pages shows once on each.)
+    const browsed = collapseBrands(enriched, await brandFactsFor(app.prisma, enriched.map((v) => v.id)), { lat: userLat, lng: userLng });
 
     return {
       success: true,
-      ...paginatedResponse(enriched, total, { page, limit, skip }),
+      ...paginatedResponse(browsed, total, { page, limit, skip }),
     };
   });
 
@@ -1798,6 +1809,12 @@ export async function customerRoutes(app: FastifyInstance) {
     // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
     // records on every read — never hand-written prose; incomplete blocks say what is missing.
     const disclosure = await compilePublicStorefrontDisclosure(app.prisma, id);
+    // [CHAINS PR3] The brand this store belongs to and its branches the customer may switch to (the same list rule
+    // as Home and browse: visible, not filed under a banned category), the best for them first.
+    const brand = await brandBranchesFor(app.prisma, id, { lat, lng }, {
+      ...visibleVendorForCaller(await readFeePause(app.prisma)),
+      ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)),
+    });
 
     return {
       success: true,
@@ -1805,6 +1822,7 @@ export async function customerRoutes(app: FastifyInstance) {
         id: vendor.id,
         name: vendor.name,
         slug: vendor.slug,
+        brand,
         description: vendor.description,
         vendorType: vendor.vendorType,
         cuisineTypes: vendor.cuisineTypes,

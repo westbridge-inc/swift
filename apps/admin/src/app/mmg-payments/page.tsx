@@ -264,7 +264,7 @@ function Detail({ id }: { id: string }) {
             <Field label="Amount">{gyd(d.amount)} {d.currencyCode}</Field>
             <Field label="Started on">{PLATFORM_WORDS[d.platform] ?? d.platform}</Field>
             <Field label="Partner">{d.partner.displayName ?? '—'} · {KIND_WORDS[d.partner.kind]}{d.partner.maskedPhone ? ` · ${d.partner.maskedPhone}` : ''}</Field>
-            <Field label="Subscription"><span className="font-mono text-xs break-all">{d.partner.subscriptionId}</span></Field>
+            <Field label="Subscription"><span className="font-mono text-xs break-all">{d.partner.subscriptionId ?? 'Several branches (pay all)'}</span></Field>
             <Field label="Created">{when(d.createdAt)}</Field>
             <Field label="MMG replied">{when(d.replyAt)}</Field>
             <Field label="Confirmed">{when(d.confirmedAt)}</Field>

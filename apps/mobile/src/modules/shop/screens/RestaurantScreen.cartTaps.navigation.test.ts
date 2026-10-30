@@ -35,6 +35,8 @@ vi.mock('@expo/vector-icons', () => ({ Feather: () => null }));
 vi.mock('@react-navigation/native', () => ({ useRoute: () => fx.route, useNavigation: () => ({ navigate: fx.navigate, goBack: vi.fn() }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock('@swift/ui', () => ({ color: fx.token, font: fx.token, fontSize: fx.token, radius: fx.token, space: fx.token, withAlpha: () => 'c' }));
+// [CHAINS PR3] The storefront asks with the customer's place; no place here (the device store is native).
+vi.mock('../../../stores/locationStore', () => ({ useLocationStore: () => ({ latitude: null, longitude: null, status: 'denied' }) }));
 vi.mock('../../../hooks/customer', () => {
   const idle = () => ({ mutate: vi.fn(), isPending: false });
   // A cart write that is still out (isPending true, as the shared hook reads while ANY add is on its way).

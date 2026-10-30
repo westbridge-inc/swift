@@ -33,6 +33,7 @@ import {
   resultCodeOf,
 } from './mmg-checkout-reply';
 import { ReplyGateBusyError } from './mmg-reply-gate';
+import { requireStepUp } from '../auth/step-up';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout ROUTES [mmg checkout 3/6] — MMG-CHECKOUT-API.md
@@ -293,6 +294,75 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
   });
 
   return { feePayload };
+}
+
+// ---------------------------------------------------------------------------
+// [ENTERPRISE E1 · 29 Oct 2026] "Pay all my branches" (MMG-CHECKOUT-API.md
+// section 12), mounted under /vendor so the store gates run first:
+//   GET  /api/v1/vendor/subscription/chain-fees                   the list: every
+//        branch, what its own Pay would charge now, the total, recent checkouts
+//   POST /api/v1/vendor/subscription/chain-fees/mmg-checkout      ONE checkout for
+//        the DUE branches the owner confirmed (OWNER only, step-up, Idempotency-Key)
+//   GET  /api/v1/vendor/subscription/chain-fees/mmg-checkout/:ref follow it
+// Each branch's own checkout keeps working; while a pay-all checkout is
+// unresolved, the branches it pays are paused exactly as their own checkout
+// would pause them, so no fee is paid twice.
+// ---------------------------------------------------------------------------
+
+export interface ChainCheckoutRouteOptions {
+  /** The store owner (VendorOwner id) of the caller, after the family's OWNER gate (anyone else throws there). */
+  ownerFor: (request: FastifyRequest) => Promise<{ ownerId: string }>;
+}
+
+/** The body: the list the owner was shown and confirmed. The server never takes an amount from it: it only compares. */
+const chainCheckoutBody = z.object({
+  branches: z.array(z.object({ subscriptionId: z.string().min(1).max(64), amountGyd: z.number().int().positive().max(10_000_000) }).strict()).min(1).max(200),
+  totalGyd: z.number().int().positive().max(1_000_000_000),
+}).strict();
+
+/** Whether this owner's account is in a PRODUCTION tenant (a store-review demo never opens a real MMG page). */
+async function ownerIsProduction(prisma: PrismaClient, ownerId: string): Promise<boolean> {
+  const owner = await prisma.vendorOwner.findUnique({ where: { id: ownerId }, select: { user: { select: { tenantId: true } } } });
+  if (!owner) return false;
+  const tenant = await prisma.tenant.findUnique({ where: { id: owner.user.tenantId }, select: { kind: true } });
+  return tenant?.kind === 'PRODUCTION';
+}
+
+export function registerChainMmgCheckoutRoutes(app: FastifyInstance, options: ChainCheckoutRouteOptions): void {
+  let runtime: MmgCheckoutRuntime | null = null;
+  const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
+
+  app.get('/subscription/chain-fees', { preHandler: [app.authenticate] }, async (request) => {
+    const { ownerId } = await options.ownerFor(request);
+    const production = mmgCheckoutEnabled() && await ownerIsProduction(app.prisma, ownerId);
+    const quote = await rt().service.chainQuote({ ownerId, platform: clientPlatform(request.headers), production });
+    const recentCheckouts = mmgCheckoutEnabled() ? await rt().service.recentChainCheckouts(ownerId) : [];
+    return { success: true, data: { ...quote, recentCheckouts } };
+  });
+
+  app.post('/subscription/chain-fees/mmg-checkout', { preHandler: [app.authenticate], config: { rateLimit: { ...MMG_CHECKOUT_START_RATE, ...rateLimited } } }, async (request, reply) => {
+    const { ownerId } = await options.ownerFor(request);
+    if (!mmgCheckoutEnabled()) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    // [store review] A demo owner never reaches MMG: refused before any key, price, step-up or page.
+    if (!(await ownerIsProduction(app.prisma, ownerId))) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    const confirmed = chainCheckoutBody.parse(request.body);
+    // One MMG page for several weekly fees in the owner's name: a fresh "confirm it's you" first.
+    await requireStepUp(app, request);
+    const { created, checkout, branches } = await rt().service.createChainCheckout({
+      ownerId,
+      userId: request.user.userId,
+      platform: clientPlatform(request.headers),
+      clientKey: request.headers['idempotency-key'],
+      confirmed,
+    });
+    return reply.status(created ? 201 : 200).send({ success: true, data: { ...checkout, branches } });
+  });
+
+  app.get<{ Params: { ref: string } }>('/subscription/chain-fees/mmg-checkout/:ref', { preHandler: [app.authenticate] }, async (request) => {
+    const { ownerId } = await options.ownerFor(request);
+    if (!mmgCheckoutEnabled() || !REF_SHAPE.test(request.params.ref)) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
+    return { success: true, data: await rt().service.getChainCheckout({ ref: request.params.ref, ownerId }) };
+  });
 }
 
 // ---------------------------------------------------------------------------

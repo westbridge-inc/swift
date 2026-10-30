@@ -23,6 +23,10 @@ import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import { STORE_PICKS_TITLE } from '../../../lib/storePick';
+import { useLocationStore } from '../../../stores/locationStore';
+import { afterDismiss } from '../../../kit/after-dismiss';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { branchAddress, branchFactsLine, currentBranchLabel, showsBranchSwitcher, type BrandBranch } from '../../../lib/brandCard';
 import {
   AddMorph,
   CartBar,
@@ -245,7 +249,11 @@ function RestaurantStore() {
   const vendorId: string = route.params?.vendorId;
   const { isAuthenticated, wantsAuth, promptLogin } = useAuthStore();
 
-  const vendor = useVendor<any>(vendorId);
+  // [CHAINS PR3] With the customer's place, the branch switcher can say which branch delivers to them.
+  const { latitude: hereLat, longitude: hereLng, status: hereStatus } = useLocationStore();
+  const here = grantedLocationFix(hereLat, hereLng, hereStatus);
+  const vendor = useVendor<any>(vendorId, here ? { lat: here.latitude, lng: here.longitude } : null);
+  const [showBranches, setShowBranches] = useState(false);
   const toggleFav = useToggleFavorite();
   const [showHours, setShowHours] = useState(false);
   const [showPromos, setShowPromos] = useState(false);
@@ -525,6 +533,28 @@ function RestaurantStore() {
                 {v.addressLine1}
               </T>
             </View>
+          ) : null}
+
+          {/* [CHAINS PR3 · owner 29 Oct 2026] One brand card opened this branch (the best for this customer); they can
+              pick another branch of the same brand. */}
+          {showsBranchSwitcher(v.brand) ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${currentBranchLabel(v.brand, v.addressLine1 ?? v.name)}. Change branch`}
+              onPress={() => setShowBranches(true)}
+            >
+              {({ pressed }) => (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: GUTTER, marginTop: space.sm, minHeight: 44, opacity: pressed ? 0.75 : 1 }}>
+                  <Feather name="git-branch" size={13} color={color.text.muted} />
+                  <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+                    {`${v.brand.name} · ${currentBranchLabel(v.brand, v.addressLine1 ?? v.name)}`}
+                  </T>
+                  <T variant="caption" weight="semibold" tone="brand">
+                    Change
+                  </T>
+                </View>
+              )}
+            </Pressable>
           ) : null}
 
           {/* Live promos (real active codes) */}
@@ -820,6 +850,44 @@ function RestaurantStore() {
       {/* [E09] One pinned cart bar for every surface: the storefront passes its
           vendorId so the bar only shows for THIS store's basket. */}
       <CartBar vendorId={vendorId} />
+
+      {/* [CHAINS PR3] The brand's branches, the best for this customer first. */}
+      <PopupCard visible={showBranches} onClose={() => setShowBranches(false)}>
+        <IconChip icon="map-pin" size={56} />
+        <PopupTitle variant="heading" style={{ marginTop: space.md }}>
+          {v.brand ? `${v.brand.name} branches` : 'Branches'}
+        </PopupTitle>
+        <View style={{ alignSelf: 'stretch', marginTop: space.lg }}>
+          {((v.brand?.branches ?? []) as BrandBranch[]).map((b) => (
+            <Pressable
+              key={b.id}
+              accessibilityRole="button"
+              accessibilityLabel={`${b.name}. ${branchAddress(b)}. ${branchFactsLine(b)}`}
+              disabled={b.current}
+              onPress={() => {
+                setShowBranches(false);
+                // The popup tears down first (kit/after-dismiss), then the other branch's page opens.
+                afterDismiss(() => navigation.navigate('Restaurant', { vendorId: b.id }));
+              }}
+            >
+              {({ pressed }) => (
+                <View style={{ paddingVertical: space.sm, opacity: pressed ? 0.75 : 1 }}>
+                  <T variant="label" weight="semibold" numberOfLines={1}>
+                    {b.current ? `${b.name} (this branch)` : b.name}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={1}>
+                    {branchAddress(b)}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={1}>
+                    {branchFactsLine(b)}
+                  </T>
+                </View>
+              )}
+            </Pressable>
+          ))}
+        </View>
+        <PillButton label="Done" size="md" onPress={() => setShowBranches(false)} style={{ alignSelf: 'stretch', marginTop: space.lg }} />
+      </PopupCard>
 
       {/* Operating hours (kit 17) */}
       <PopupCard visible={showHours} onClose={() => setShowHours(false)}>
