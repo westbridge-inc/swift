@@ -126,7 +126,7 @@ describe('[Item 7] the front door itself', () => {
     expect(images.map((img) => img.getAttribute('alt'))).toEqual([
       'The Swift app’s Home screen: a Good afternoon greeting, search, and tiles for Food, Groceries, Taxi, Send, Services, Orders, Favourites and Scan.',
       'Live order tracking in the Swift app: the rider on the map and where the order stands.',
-      'Booking a taxi in the Swift app: pickup, destination and the fare for each ride before you request it.',
+      'Booking a taxi in the Swift app: the destination pinned on the map, and the pickup and destination fields.',
       'The rider’s side of the Swift app: a map of Georgetown and the button to go online for jobs.',
     ]);
     for (const img of images) {
@@ -140,7 +140,8 @@ describe('[Item 7] the front door itself', () => {
   it('the screens never carry a name, a rating, a review or earnings in their words', async () => {
     const view = await frontDoor();
     const alts = [...view.container.querySelectorAll('img')].map((img) => img.alt).join(' ');
-    expect(alts).not.toMatch(/Demo|Kezia|rating|review|earn(ed|ings)/i);
+    // [Owner 30 Oct, round 3] "dont show prices": no screen shows a fare or a price.
+    expect(alts).not.toMatch(/Demo|Kezia|rating|review|earn(ed|ings)|fare|price|\$/i);
   });
 
   it('on a phone the Order / Ride / Earn cards are one swipe row; on a wide screen, three columns', async () => {

@@ -11,7 +11,8 @@ import { launchCity } from '@/lib/web-ordering';
 //    monogram is the app's own no-name "S" (HomeScreen.tsx greetingLine + monogram), as for an account with no
 //    first name;
 //  - live order tracking, cut above the timeline's store name;
-//  - the taxi booking sheet: pickup, destination and the fare of each ride before you request it;
+//  - the taxi booking screen: the destination on the map, and the pickup and destination, cut above the ride choices so no
+//    fare shows (owner 30 Oct: "dont show prices");
 //  - the rider's home, offline, cut above the earnings card.
 import appHome600 from './app-home-600.webp';
 import appHome880 from './app-home-880.webp';
@@ -177,7 +178,7 @@ export default function LaunchingSoonPage() {
             job. Follow every order live on the map.
           </Card>
           <Card
-            shot={{ image: appTaxi, alt: 'Booking a taxi in the Swift app: pickup, destination and the fare for each ride before you request it.' }}
+            shot={{ image: appTaxi, alt: 'Booking a taxi in the Swift app: the destination pinned on the map, and the pickup and destination fields.' }}
             title="Ride"
             more={<MoreLink href="/faq">Common questions</MoreLink>}
           >
