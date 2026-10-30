@@ -103,28 +103,20 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
 
 /**
  * [SPEED 30 Oct · owner] A first tap on a tab shows its content: once the board's own reads have
- * landed (nothing on its way), the reads the other tabs of this login make on their first draw are
- * made once (lib/dashboard-tab-reads, its own chunk, loaded only then). Staff prefetch only what
- * they can see; a store switch or a role change starts again for the new store or role.
+ * landed, the reads the other tabs of this login make on their first draw are made once. All of it
+ * lives in lib/dashboard-tab-reads, its own chunk (no page's first load carries it). Staff prefetch
+ * only what they can see; a store switch or a role change starts again for the new store or role.
  */
 function useTabPrefetch(storeId: string | null, role: VendorMemberRole | undefined, vendorType: string | undefined, roleKnown: boolean) {
   const queryClient = useQueryClient();
   useEffect(() => {
     if (!storeId || !roleKnown) return;
+    let stop: (() => void) | undefined;
     let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const check = () => {
-      timer = undefined;
-      if (!live || queryClient.isFetching() > 0) return;
-      live = false;
-      unsubscribe();
-      void import('@/lib/dashboard-tab-reads')
-        .then(({ dashboardTabReads, prefetchDashboardTabs }) => prefetchDashboardTabs(queryClient, dashboardTabReads(storeId, role, vendorType)))
-        .catch(() => undefined);
-    };
-    const unsubscribe = queryClient.getQueryCache().subscribe(() => { if (live && !timer) timer = setTimeout(check, 0); });
-    timer = setTimeout(check, 0);
-    return () => { live = false; unsubscribe(); if (timer) clearTimeout(timer); };
+    void import('@/lib/dashboard-tab-reads')
+      .then((reads) => { if (live) stop = reads.prefetchWhenIdle(queryClient, reads.dashboardTabReads(storeId, role, vendorType)); })
+      .catch(() => undefined);
+    return () => { live = false; stop?.(); };
   }, [queryClient, storeId, role, vendorType, roleKnown]);
 }
 

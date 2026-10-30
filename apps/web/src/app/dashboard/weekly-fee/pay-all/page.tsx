@@ -8,7 +8,6 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { isStepUpDismissed, useStepUp } from '@/lib/step-up';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
 import { feeDate, feeMoney } from '@/lib/fee-status';
 import {
   CHAIN_COPY, CHAIN_FEE_PATH, ChainCheckoutSession, branchCount, chainBranchWords, chainCheckoutReferences, chainCheckoutWords, chainConfirmed,
@@ -48,8 +47,11 @@ function PayAll({ storeId }: { storeId: string | null }) {
   const path = `/api/v1${CHAIN_FEE_PATH}`;
   const q = useQuery<ChainFees>({ queryKey, queryFn: () => apiFetch(path, undefined, { storeId }).then((r) => r.data), staleTime: 0, refetchInterval: 60_000 });
   const { withStepUp, dialog } = useStepUp();
-  // [SPEED 30 Oct] Opened again: the branches' last known fees at once, said to be checking (no paying on them) until Swift answers.
-  const checkingLatest = useCheckingLatest(q);
+  // [SPEED 30 Oct] Opened again: the branches' last known fees at once, said to be checking (no paying on them) until Swift
+  // answers: an answer from before this page opened while the re-read is on its way (components/checking-latest, inlined
+  // here for this page's size budget).
+  const [openedAt] = useState(Date.now);
+  const checkingLatest = q.data !== undefined && q.isFetching && q.dataUpdatedAt < openedAt;
   const [view, setView] = useState<ChainView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   const session = useMemo(() => new ChainCheckoutSession({
     // One MMG page for several fees: the server asks for a fresh "Confirm it's you" first (403 STEP_UP_REQUIRED).
@@ -81,7 +83,7 @@ function PayAll({ storeId }: { storeId: string | null }) {
         <p className="text-base font-semibold">{CHAIN_COPY.intro}</p>
         <p>{CHAIN_COPY.optional}</p>
         <p className="text-[var(--swift-muted)]">{CHAIN_COPY.notCharged}</p>
-        <CheckingLatest show={checkingLatest} />
+        {checkingLatest && <p role="status" className="text-sm text-[var(--swift-muted)]">Checking for the latest…</p>}
       </div>
       <ul aria-label="Your branches" className="divide-y divide-black/5 rounded-2xl border border-black/5 bg-white shadow-sm">
         {fees.branches.map((b) => (

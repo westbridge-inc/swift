@@ -71,3 +71,22 @@ export function prefetchDashboardTabs(client: QueryClient, reads: readonly TabRe
     }
   })).then(() => undefined);
 }
+
+/**
+ * Starts `prefetchDashboardTabs(reads)` once nothing is on its way (the board's own reads first),
+ * once. Returns the stop the console calls when the store, the role or the page goes away.
+ */
+export function prefetchWhenIdle(client: QueryClient, reads: readonly TabRead[]): () => void {
+  let live = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const check = () => {
+    timer = undefined;
+    if (!live || client.isFetching() > 0) return;
+    live = false;
+    unsubscribe();
+    void prefetchDashboardTabs(client, reads);
+  };
+  const unsubscribe = client.getQueryCache().subscribe(() => { if (live && !timer) timer = setTimeout(check, 0); });
+  timer = setTimeout(check, 0);
+  return () => { live = false; unsubscribe(); if (timer) clearTimeout(timer); };
+}

@@ -1,6 +1,6 @@
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
-import { dashboardTabReads, prefetchDashboardTabs } from './dashboard-tab-reads';
+import { dashboardTabReads, prefetchDashboardTabs, prefetchWhenIdle } from './dashboard-tab-reads';
 import { storeKey } from './store-scope';
 
 // [SPEED 30 Oct · owner] What the business console reads ahead for the other tabs, by role and
@@ -49,5 +49,35 @@ describe('reading ahead', () => {
     await prefetchDashboardTabs(qc, [{ queryKey: storeKey('store-1', 'categories'), queryFn: failing }]);
     expect(failing).toHaveBeenCalledOnce();
     expect(qc.getQueryState(storeKey('store-1', 'categories'))).toBeUndefined();
+  });
+});
+
+describe('when the console reads ahead', () => {
+  const settle = () => new Promise((resolve) => { setTimeout(resolve, 20); });
+
+  it('only once nothing is on its way (the board\'s own reads first), and only once', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let release!: () => void;
+    void qc.fetchQuery({ queryKey: storeKey('store-1', 'orders'), queryFn: () => new Promise((resolve) => { release = () => resolve([]); }) });
+    // A read that fails is forgotten (above), so only "once" stops it being asked again on the board's next poll.
+    const ahead = vi.fn(async () => { throw new Error('offline'); });
+    prefetchWhenIdle(qc, [{ queryKey: storeKey('store-1', 'categories'), queryFn: ahead }]);
+    await settle();
+    expect(ahead, 'nothing while the board is loading').not.toHaveBeenCalled();
+    release();
+    await settle();
+    expect(ahead).toHaveBeenCalledOnce();
+    await qc.invalidateQueries({ queryKey: storeKey('store-1', 'orders') });
+    await settle();
+    expect(ahead, 'not again').toHaveBeenCalledOnce();
+  });
+
+  it('a store switch or a closed console before then stops it', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const ahead = vi.fn(async () => []);
+    const stop = prefetchWhenIdle(qc, [{ queryKey: storeKey('store-1', 'categories'), queryFn: ahead }]);
+    stop();
+    await settle();
+    expect(ahead).not.toHaveBeenCalled();
   });
 });
