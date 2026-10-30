@@ -120,6 +120,33 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
     }
   });
 
+  it('[BILL-PRO] a pro\'s paid weekly fee is fee revenue too: it provisions the reserve in the pro\'s country, only in the default tenant', async () => {
+    const tag = RUN.replace(/[^a-z]/g, 'q').toUpperCase();
+    const CO_B = `W${tag[2] ?? 'Q'}`;
+    const CO_A = `V${tag[3] ?? 'Q'}`;
+    let year = 2041;
+    while (await sys(() => app.prisma.rlpReserveEntry.count({ where: { countryCode: { in: [CO_A, CO_B] }, kind: 'PROVISION', periodKey: `${year}-05` } })) > 0) year += 1;
+    const period = new Date(Date.UTC(year, 5, 1));
+    const providerIds: string[] = [];
+    const proPayer = async (tenantId: string, countryCode: string) => {
+      const u = await user(tenantId, ['CUSTOMER'], 'CUSTOMER', { countryCode });
+      const p = await sys(() => app.prisma.serviceProvider.create({ data: { userId: u.id, trade: 'tutor', isVerified: true } }));
+      providerIds.push(p.id);
+      const sub = await sys(() => app.prisma.subscription.create({ data: { serviceProviderId: p.id, type: 'INDEPENDENT_PRO', status: 'ACTIVE', weeklyRate: 8000, currentPeriodStart: new Date(Date.UTC(year, 4, 1)), currentPeriodEnd: new Date(Date.UTC(year, 4, 8)), nextBillingDate: new Date(Date.UTC(year, 4, 8)) } as never }));
+      await sys(() => app.prisma.subscriptionPayment.create({ data: { subscriptionId: sub.id, amount: 8000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 4, 1)), periodEnd: new Date(Date.UTC(year, 4, 8)), paidAt: new Date(Date.UTC(year, 4, 3)) } as never }));
+      return sub;
+    };
+    const subs = [await proPayer(TENANT_B, CO_B), await proPayer('swift-default', CO_A)];
+    try {
+      const run = await sys(() => provisionReserveForPreviousMonth(app.prisma, { now: period, rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS, rlpReserveRatePct: 2 }), notifications }));
+      expect(run.find((r) => r.countryCode === CO_B)).toBeUndefined();
+      expect(run.find((r) => r.countryCode === CO_A)).toMatchObject({ created: true, revenue: 8000, provisioned: 160 });
+    } finally {
+      for (const sub of subs) await sys(() => app.prisma.subscription.delete({ where: { id: sub.id } }));
+      await sys(() => app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } }));
+    }
+  });
+
   it('no loss-protection notice is platform-wide: each pages the default tenant (census of rlp.ts)', () => {
     const rlp = readFileSync(join(__dirname, '..', 'modules', 'cash', 'rlp.ts'), 'utf8');
     const calls = rlp.split('notifyAdmins(prisma').length - 1;
