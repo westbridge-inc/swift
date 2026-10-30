@@ -160,6 +160,34 @@ export function feeRiseDay(at: Date): string {
 export const feeRiseDedupeKey = (subscriptionId: string, rise: Pick<HeldFeeRise, 'heldAt' | 'from' | 'to'>) =>
   `fee-rise:${subscriptionId}:${rise.heldAt}:${rise.from}->${rise.to}`;
 
+/** [R27] The words of a LOWER weekly fee: it applies from the next weekly fee; one already charged keeps its amount. */
+export function feeDecreaseCopy(p: { from: number; to: number; currencyCode: string }): { title: string; body: string } {
+  const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
+  return {
+    title: 'Your weekly fee is going down',
+    body: `From your next weekly fee, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). A weekly fee already charged keeps its amount.`,
+  };
+}
+
+/** The words of each notice: the old fee, the new fee and the date, plainly, as the Agreements promise. */
+export function feeRiseCopy(kind: 'RISE' | 'CANCELLED', p: { from: number; to: number; currencyCode: string; date: Date | null }): { title: string; body: string } {
+  const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
+  if (kind === 'RISE') {
+    return {
+      title: 'Your weekly fee is changing',
+      // [REVIEW-F #1884 S4-1/S4-2] Name the phone's own control, and a dateless notice (never sent:
+      // the run always dates it) still promises only what F2 does.
+      body: `From your ${p.date ? `weekly fee due ${feeRiseDay(p.date)}` : `first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`}, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
+        + 'Until then nothing changes, and any week you have already paid keeps the price you paid. '
+        + 'If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.',
+    };
+  }
+  return {
+    title: 'Your weekly fee is not changing',
+    body: `The change to ${money(p.to)} we told you about${p.date ? ` for your weekly fee due ${feeRiseDay(p.date)}` : ''} will not happen: your Swift weekly fee stays ${money(p.from)}.`,
+  };
+}
+
 /** [ENTERPRISE E2 · REVIEW-F #2227 S3-1] The words of a chain-deal rise. The owner gets one notice per branch (each
  *  branch has its own fee and its own "say no"), so each notice names its branch first: what happens to the deal,
  *  the branch's old fee, its new fee, the first weekly fee it applies to, and how to say no for THAT branch. */
