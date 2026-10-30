@@ -22,6 +22,7 @@ vi.mock('@/lib/legal-acceptance', async () => {
 vi.mock('@/lib/legal-url', () => ({ LEGAL_URL: (doc: string) => `https://api.example/legal/${doc}` }));
 
 import { LegalAcceptanceGate, acceptLabel } from './legal-acceptance-gate';
+import { askLegalAcceptanceAgain, LEGAL_ACCEPTED_EVENT } from '@/lib/legal-acceptance';
 
 const UPDATED = { currentVersion: '2026-10-16', acceptedVersion: '2026-10-15', needsAcceptance: true, summary: ['The company behind Swift is named.', 'Swift never carries letters, documents or mail.'], agreements: [] as Array<'driver_agreement' | 'vendor_agreement'> };
 
@@ -99,5 +100,44 @@ describe('the fresh acceptance tick on the website', () => {
     // the page, so it costs those pages (cart, checkout, browse) nothing up front. [PERF #7] Tried twice (lib/chunk-retry).
     expect(app('(app)', 'layout.tsx')).toMatch(/const LegalAcceptanceGate = lazyRetry\(\(\) => import\('@\/components\/legal-acceptance-gate'\)\.then\(module => \(\{ default: module\.LegalAcceptanceGate \}\)\)\);/);
     expect(app('(app)', 'layout.tsx')).toMatch(/<Suspense fallback=\{null\}><LegalAcceptanceGate \/><\/Suspense>/);
+  });
+});
+
+// [BILL-PRO PR6 · REVIEW-F #2231 S4 / S3-4] The pro fee page's "Review the agreement" asks the server again, and the gate
+// comes up when the agreement is owed; a recorded tick tells the page, so the pro's standing and fee are read again.
+describe('the gate, asked again by a page', () => {
+  it('"Review the agreement" reads the server again and brings the gate up when the agreement is owed', async () => {
+    fx.principal = 'u1';
+    fx.get.mockResolvedValueOnce({ ...UPDATED, needsAcceptance: false, summary: [] })
+      .mockResolvedValueOnce({ ...UPDATED, acceptedVersion: null, agreements: ['vendor_agreement'] });
+    render(<LegalAcceptanceGate />);
+    await waitFor(() => expect(fx.get).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    askLegalAcceptanceAgain();
+    expect(await screen.findByRole('checkbox', { name: 'I agree to the Terms of Service, Privacy Policy and Business Agreement.' })).toBeTruthy();
+    expect(fx.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('a recorded tick is announced to the page; a refused one is not', async () => {
+    const heard = vi.fn();
+    window.addEventListener(LEGAL_ACCEPTED_EVENT, heard);
+    try {
+      fx.principal = 'u1';
+      fx.get.mockResolvedValue(UPDATED);
+      fx.accept.mockRejectedValueOnce(new Error('That did not go through.')).mockResolvedValueOnce({ ...UPDATED, acceptedVersion: '2026-10-16', needsAcceptance: false });
+      const user = userEvent.setup();
+      render(<LegalAcceptanceGate />);
+      await user.click(await screen.findByRole('checkbox'));
+      await user.click(screen.getByRole('button', { name: 'Accept and continue' }));
+      expect(await screen.findByRole('alert')).toBeTruthy();
+      expect(heard).not.toHaveBeenCalled();
+      await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false));
+      await user.click(screen.getByRole('checkbox'));
+      await user.click(screen.getByRole('button', { name: 'Accept and continue' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(LEGAL_ACCEPTED_EVENT, heard);
+    }
   });
 });
