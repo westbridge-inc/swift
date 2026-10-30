@@ -43,11 +43,10 @@ export function PricingCard(props: PricingCardProps) {
     const quote = vendorQuote(p, props.vendorType);
     if (!quote) return null;
     rate = quote.rate;
-    // The steps above the one a new store starts on, exactly as the server
-    // bounds them; the weekly re-tier moves a store between them on its own.
-    const steps = quote.ladder
-      .slice(1)
-      .map((step, i) => `${step.minItems.toLocaleString()}+${i === 0 ? ' active items' : ''} ${fee(step.rate)}/week`);
+    // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
+    // born on the first step, whatever its catalogue, and nothing moves it. So the card quotes that one rate and
+    // says it does not move with the catalogue; the larger steps' fees are not this store's and are not listed.
+    // The card test pins the server flag: turning the re-tier back on must revisit these words.
     // [DEPT-PRICE · owner 29 Oct 2026] A step with its own free trial (7 days for a NEW department store) says so,
     // from the server's number: the headline keeps the trial every new store starts on.
     const trials = quote.ladder
@@ -57,7 +56,7 @@ export function PricingCard(props: PricingCardProps) {
     detail =
       quote.tier === 'service'
         ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'
-        : `Keep 100% of every sale — no commission on orders.${steps.length ? ` Your rate moves automatically as your catalogue grows: ${steps.join(' · ')}.` : ''}${trials.join('')}`;
+        : `Keep 100% of every sale — no commission on orders. This rate does not change as your catalogue grows.${trials.join('')}`;
   }
 
   return (
