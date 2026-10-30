@@ -7,9 +7,11 @@ import { ACTIVE_CONFIRMATION_STATES, feeReversalOpenInTx, lateCardApprovalHeldIn
  * path that moves a fee outside a charge: a chain deal (vendor/chain-deal.ts) and a card price cut (card-price-cut.ts).
  */
 export async function paymentInFlightInTx(tx: Prisma.TransactionClient, subscriptionId: string): Promise<boolean> {
-  const [checkout, hold] = await Promise.all([
+  const [checkout, chainShare, hold] = await Promise.all([
     tx.mmgCheckoutIntent.findFirst({ where: { subscriptionId, status: { in: ['OPEN', 'CONFIRMING'] } }, select: { id: true } }),
+    // [ENTERPRISE E1] This branch's share of an owner's "pay all my branches" checkout.
+    tx.mmgCheckoutPart.findFirst({ where: { subscriptionId, checkout: { status: { in: ['OPEN', 'CONFIRMING'] } } }, select: { id: true } }),
     tx.paymentConfirmationHold.findFirst({ where: { subscriptionId, status: { in: [...ACTIVE_CONFIRMATION_STATES] } }, select: { id: true } }),
   ]);
-  return !!checkout || !!hold || await lateCardApprovalHeldInTx(tx, [subscriptionId]) || await feeReversalOpenInTx(tx, [subscriptionId]);
+  return !!checkout || !!chainShare || !!hold || await lateCardApprovalHeldInTx(tx, [subscriptionId]) || await feeReversalOpenInTx(tx, [subscriptionId]);
 }

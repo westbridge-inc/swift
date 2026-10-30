@@ -10,7 +10,9 @@ export const FULL_FEE_GRACE_MS = 48 * 3_600_000;
 export const FEE_RETRY_MS = 24 * 3_600_000;
 export const ACTIVE_CONFIRMATION_STATES = ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'];
 type Tx = Prisma.TransactionClient;
-export type ConfirmationSource = { paymentId: string } | { checkoutId: string } | { cardSessionId: string };
+/** [ENTERPRISE E1] `checkoutPartId`: one branch's share of an owner's "pay all my branches" checkout; each
+ *  covered branch's clock is held by its own part, exactly as a single checkout holds its one clock. */
+export type ConfirmationSource = { paymentId: string } | { checkoutId: string } | { cardSessionId: string } | { checkoutPartId: string };
 export type ConfirmationResolution = 'PAID' | 'PROVEN_UNPAID' | 'PROVEN_NO_EFFECT';
 
 /** The same payer -> subscriptions -> clock/source order is used by collection,
@@ -242,9 +244,12 @@ export async function beginConfirmationInTx(
  * Local expiry is never negative payment evidence. */
 export async function confirmationSources(tx: Tx | PrismaClient, sourceIds: string[]) {
   const sourceSubscription = { in: sourceIds };
-  const [checkouts, sessions, payments, legacyTerminal] = await Promise.all([
+  const [checkouts, parts, sessions, payments, legacyTerminal] = await Promise.all([
     tx.mmgCheckoutIntent.findMany({ where: { subscriptionId: sourceSubscription, status: { in: ['OPEN', 'CONFIRMING', 'HELD', 'EXPIRED'] } },
       select: { id: true, subscriptionId: true, createdAt: true, reason: true } }),
+    // [ENTERPRISE E1] A chain checkout is unresolved for each branch it pays, through that branch's part.
+    tx.mmgCheckoutPart.findMany({ where: { subscriptionId: sourceSubscription, checkout: { status: { in: ['OPEN', 'CONFIRMING', 'HELD', 'EXPIRED'] } } },
+      select: { id: true, subscriptionId: true, checkout: { select: { createdAt: true, reason: true } } } }),
     tx.cardSession.findMany({ where: { subscriptionId: sourceSubscription, purpose: 'PAY_NOW', OR: [
       { status: { in: ['OPEN', 'UNKNOWN', 'HELD'] } },
       { status: 'EXPIRED', OR: [{ failureCode: null }, { failureCode: { not: 'PROVIDER_PAGE_UNAVAILABLE' } }] },
@@ -267,7 +272,9 @@ export async function confirmationSources(tx: Tx | PrismaClient, sourceIds: stri
   }
   const sessionPayments = new Set(sessions.map((s) => s.paymentId).filter(Boolean));
   const sources: Array<{ subscriptionId: string; source: ConfirmationSource; at: Date; reason: string }> = [
-    ...checkouts.map((s) => ({ subscriptionId: s.subscriptionId, source: { checkoutId: s.id }, at: s.createdAt, reason: s.reason ?? 'MMG_CONFIRMATION_PENDING' })),
+    // A single checkout always names its subscription (only a chain checkout has none, and pays through parts).
+    ...checkouts.flatMap((s) => s.subscriptionId ? [{ subscriptionId: s.subscriptionId, source: { checkoutId: s.id }, at: s.createdAt, reason: s.reason ?? 'MMG_CONFIRMATION_PENDING' }] : []),
+    ...parts.map((p) => ({ subscriptionId: p.subscriptionId, source: { checkoutPartId: p.id }, at: p.checkout.createdAt, reason: p.checkout.reason ?? 'MMG_CONFIRMATION_PENDING' })),
     ...sessions.map((s) => ({ subscriptionId: s.subscriptionId, source: { cardSessionId: s.id }, at: s.createdAt, reason: s.failureCode ?? 'CARD_CONFIRMATION_PENDING' })),
     ...payments.filter((p) => {
       const raw = p.failureRaw as Record<string, unknown> | null;
@@ -399,7 +406,7 @@ export async function resolveConfirmationInTx(
  * decision 2, a HELD payment is never dunned. Only the SAME obligation is
  * paused again; an older instruction never restarts or extends a newer one.
  * The database admits exactly this transition (LATE_POSITIVE_REVIEW). */
-export async function reopenConfirmationForReviewInTx(tx: Tx, subscriptionId: string, source: { checkoutId: string } | { cardSessionId: string }, reason: string, now: Date) {
+export async function reopenConfirmationForReviewInTx(tx: Tx, subscriptionId: string, source: { checkoutId: string } | { cardSessionId: string } | { checkoutPartId: string }, reason: string, now: Date) {
   const clock = await clockRow(tx, subscriptionId, now);
   const hold = await tx.paymentConfirmationHold.findFirst({ where: sourceWhere(source) });
   if (!hold || hold.clockId !== clock.id || hold.status !== 'PROVEN_UNPAID' || hold.sourceEpoch !== clock.epoch) return hold;
@@ -422,13 +429,19 @@ export async function markSettlementApplying(tx: Tx, subscriptionId: string, sou
   const hold = await beginConfirmationInTx(tx, subscriptionId, source, 'SETTLEMENT_APPLY_PENDING', now);
   if (ACTIVE_CONFIRMATION_STATES.includes(hold.status)) {
     await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'SETTLEMENT_APPLY_PENDING', reason: 'SETTLEMENT_APPLY_PENDING' } });
-  } else if (hold.status === 'PROVEN_UNPAID' && 'checkoutId' in source) {
+  } else if (hold.status === 'PROVEN_UNPAID' && ('checkoutId' in source || 'checkoutPartId' in source)) {
     const clock = await tx.billingDunningClock.findUniqueOrThrow({ where: { id: hold.clockId } });
     // An older instruction cannot restart or extend a newer obligation.
     if (hold.sourceEpoch !== clock.epoch) return;
-    const checkout = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: source.checkoutId } });
-    const { verifiedCheckoutCredit } = await import('./confirmation-finance');
-    const proof = checkout.status === 'CONFIRMED' ? await verifiedCheckoutCredit(tx, checkout) : null;
+    const { verifiedCheckoutCredit, verifiedChainPartCredit } = await import('./confirmation-finance');
+    let proof: Awaited<ReturnType<typeof verifiedCheckoutCredit>> = null;
+    if ('checkoutId' in source) {
+      const checkout = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: source.checkoutId } });
+      proof = checkout.status === 'CONFIRMED' ? await verifiedCheckoutCredit(tx, checkout) : null;
+    } else {
+      // [ENTERPRISE E1] A branch's share of a chain checkout MMG confirmed late (after an MMG not-paid answer).
+      proof = await verifiedChainPartCredit(tx, source.checkoutPartId);
+    }
     if (!proof) throw new AppError(409, 'SETTLEMENT_EVIDENCE_REQUIRED', 'The payment needs verified settlement evidence.');
     await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: {
       status: 'SETTLEMENT_APPLY_PENDING', reason: 'VERIFIED_POSITIVE_CORRECTION',

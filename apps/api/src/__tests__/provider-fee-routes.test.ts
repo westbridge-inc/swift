@@ -9,7 +9,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { providerChecklist } from '../modules/services/services.service';
-import { ensureProFeeBorn, proFeeQuote, recordProFeeAck } from '../modules/services/pro-fee';
+import { birthDueProFees, ensureProFeeBorn, proFeeQuote, recordProFeeAck } from '../modules/services/pro-fee';
+import { PRO_FEE_COVERED_CODE } from '../modules/services/provider-fee.routes';
 import { WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 import { recordReacceptance } from '../modules/legal/reaccept';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -169,6 +170,79 @@ describe('POST /api/v1/provider/weekly-fee-ack — "I understand the weekly fee"
     const rows = await sys(() => app.prisma.consentRecord.findMany({ where: { subjectId: pro.userId, documentType: 'weekly_fee_acknowledgement' }, select: { evidence: true } }));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.evidence).toMatchObject({ path: 'provider/weekly-fee-ack', kind: 'PROVIDER', weeklyFee: { amount: 8000, currencyCode: 'GYD' } });
+  });
+});
+
+describe('[REVIEW-G #2230 S3-1 · owner B3] a fee tick is consent to ONE amount: the fee is born only at the amount ticked', () => {
+  const setServicesRate = async (rate: number | null, saved: unknown) => sys(() => app.prisma.countryConfig.update({
+    where: { code: 'GY' }, data: { subscriptionTiers: (rate === null ? saved : { ...(saved as object), serviceVendor: rate }) as never },
+  }));
+
+  it('ticked at 8,000 with the switch off; the rate becomes 9,000; switch on: not born, asked again at 9,000; the re-tick at 9,000 is recorded and births at 9,000', async () => {
+    const saved = (await sys(() => app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } }))).subscriptionTiers;
+    try {
+      const pro = await makePro();
+      await sys(() => recordReacceptance(app.prisma, { userId: pro.userId, roles: ['CUSTOMER'], hadAccepted: false, surface: 'mobile' }));
+      // Switch off: the tick is recorded (at the amount shown then), nothing is born.
+      const first = await post(pro.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 8000, currencyCode: 'GYD' });
+      expect(first.statusCode, first.body).toBe(200);
+      await setServicesRate(9000, saved);
+      on();
+      // Not born at an amount never ticked: by the tick's own birth, the hourly switch-on pass, or the activation itself.
+      expect(await ensureProFeeBorn(app.prisma, pro.userId)).toBeNull();
+      await sys(() => birthDueProFees(app.prisma));
+      expect(await sys(() => app.prisma.subscription.findUnique({ where: { serviceProviderId: pro.providerId } }))).toBeNull();
+      // GET asks again, naming the new amount and the one they ticked.
+      const asked = (await get(pro.token, '/subscription')).json();
+      expect(asked).toMatchObject({
+        data: null, standing: { required: true, operable: false, why: 'FEE_TERMS' },
+        feeTerms: { amount: 9000, currencyCode: 'GYD', acknowledged: false, acknowledgedAmount: 8000, acknowledgedCurrencyCode: 'GYD', changed: true },
+      });
+      // The old amount is refused now; the new one is a new consent (never swallowed as "already ticked").
+      const stale = await post(pro.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 8000, currencyCode: 'GYD' });
+      expect([stale.statusCode, stale.json().error?.code]).toEqual([409, 'WEEKLY_FEE_CHANGED']);
+      const again = await post(pro.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 9000, currencyCode: 'GYD' });
+      expect(again.statusCode, again.body).toBe(200);
+      expect(again.json().data).toMatchObject({ acknowledged: true, standing: { operable: true, source: 'OWN' } });
+      const born = await sys(() => app.prisma.subscription.findUniqueOrThrow({ where: { serviceProviderId: pro.providerId } }));
+      expect([Number(born.weeklyRate), born.currencyCode, born.status]).toEqual([9000, 'GYD', 'TRIAL']);
+      const ticks = await sys(() => app.prisma.consentRecord.findMany({ where: { subjectId: pro.userId, documentType: 'weekly_fee_acknowledgement' }, orderBy: { capturedAt: 'asc' }, select: { evidence: true } }));
+      expect(ticks.map((t) => (t.evidence as { weeklyFee: { amount: number } }).weeklyFee.amount)).toEqual([8000, 9000]);
+      // The same amount again writes nothing more.
+      expect((await post(pro.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 9000, currencyCode: 'GYD' })).statusCode).toBe(200);
+      expect(await sys(() => app.prisma.consentRecord.count({ where: { subjectId: pro.userId, documentType: 'weekly_fee_acknowledgement' } }))).toBe(2);
+      expect((await get(pro.token, '/subscription')).json().feeTerms).toMatchObject({ acknowledged: true, acknowledgedAmount: 9000, changed: false });
+      // Once born, the tick that bore it holds: a later services-rate change never unlists a pro with a fee (a born
+      // fee's own price changes follow the told-in-advance fee-rise rules).
+      await setServicesRate(10000, saved);
+      expect((await get(pro.token, '/subscription')).json()).toMatchObject({ standing: { operable: true, source: 'OWN' }, feeTerms: { acknowledged: true } });
+    } finally {
+      await setServicesRate(null, saved);
+    }
+  });
+
+  it('[REVIEW-F #2231 S3-3 · REVIEW-G #2230 N2] a pro their Services store\'s fee covers is told so before any tick, and cannot "resume" a fee of their own', async () => {
+    on();
+    const pro = await makePro();
+    await sys(() => recordReacceptance(app.prisma, { userId: pro.userId, roles: ['CUSTOMER'], hadAccepted: false, surface: 'mobile' }));
+    await sys(async () => {
+      const owner = await app.prisma.vendorOwner.create({ data: { userId: pro.userId } });
+      const vendor = await app.prisma.vendor.create({ data: {
+        ownerId: owner.id, name: `Pro Cover Store ${wordFreeTag(8)}`, slug: `pro-cover-${nanoid(8).toLowerCase()}`, vendorType: 'SERVICE',
+        phone: '+5920000577', addressLine1: '1 St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE',
+      } });
+      vendorIds.push(vendor.id);
+      await app.prisma.subscription.create({ data: {
+        vendorId: vendor.id, type: 'SERVICE_PROVIDER', weeklyRate: 8000, status: 'ACTIVE', currencyCode: 'GYD',
+        currentPeriodStart: new Date(Date.now() - DAY), currentPeriodEnd: new Date(Date.now() + 6 * DAY), nextBillingDate: new Date(Date.now() + 6 * DAY),
+      } });
+    });
+    expect((await get(pro.token, '/subscription')).json()).toMatchObject({ data: null, coveredBy: 'STORE', standing: { why: 'FEE_TERMS' }, feeTerms: { acknowledged: false, changed: false } });
+    const resume = await app.inject({ method: 'PUT', url: '/api/v1/provider/subscription/billing-method', headers: { authorization: `Bearer ${pro.token}` }, payload: { method: 'CASH' } });
+    expect([resume.statusCode, resume.json().error?.code]).toEqual([409, PRO_FEE_COVERED_CODE]);
+    // Switch off: nothing is covered or required.
+    delete process.env['PRO_WEEKLY_FEE'];
+    expect((await get(pro.token, '/subscription')).json()).toMatchObject({ coveredBy: null, standing: { required: false } });
   });
 });
 

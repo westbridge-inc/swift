@@ -409,6 +409,37 @@ export interface ChainDealResult {
 }
 export const setChainDeal = (ownerId: string, weeklyRate: number, reason: string): Promise<Envelope<ChainDealResult>> =>
   apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/deal-rate`, { method: 'PUT', body: JSON.stringify({ weeklyRate, reason }), reason });
+/** [ENTERPRISE E2] End a chain deal, or raise it, from an end date (today when absent). It raises fees, so every
+ *  branch is told 14 days ahead and pays the new fee only from its first weekly fee after that; a second admin approves. */
+export type DealChangeOutcome = 'HELD' | 'UNCHANGED' | 'LEFT_DEAL' | 'NOT_ON_DEAL' | 'NOT_BILLED' | 'NO_FEE_YET' | 'WAITING';
+export interface DealChangeResult {
+  kind: 'END' | 'RAISE';
+  dealFrom: number;
+  dealTo: number | null;
+  notBefore: string;
+  branches: Array<{ vendorId: string; vendorName: string; from: number | null; to: number | null; outcome: DealChangeOutcome }>;
+}
+export const changeChainDeal = (ownerId: string, change: { kind: 'END' | 'RAISE'; weeklyRate?: number; notBefore?: string }, reason: string): Promise<Envelope<DealChangeResult>> =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/deal-change`, { method: 'POST', body: JSON.stringify({ ...change, reason }), reason });
+/** [ENTERPRISE E2] Withdraw a pending end or raise before it takes effect (it raises nothing). */
+export const withdrawChainDealChange = (ownerId: string, reason: string): Promise<Envelope<{ droppedRises: number }>> =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/deal-change`, { method: 'DELETE', body: JSON.stringify({ reason }), reason });
+
+/** [CHAINS PR3] The chain's brand: the name customers see ONCE for all its branches (one card opening the branch best
+ *  for them). null removes it (every branch on its own card again). A stated reason; no money moves. */
+export const setChainBrand = (ownerId: string, brandName: string | null, reason: string) =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/brand`, { method: 'PUT', body: JSON.stringify({ brandName, reason }), reason });
+/** [CHAINS PR3] List one branch on its own card although its owner has a brand (true), or back under the brand. */
+export const setBranchListedAlone = (vendorId: string, alone: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${vendorId}/brand-listing`, { method: 'PUT', body: JSON.stringify({ alone, reason }), reason });
+/** [CHAINS] One owner's branches as the chain view reads them (with each branch's brand listing). */
+export interface ChainView {
+  ownerId: string;
+  brandName: string | null;
+  branches: Array<{ vendorId: string; name: string; status: string; city: string | null; brandListedAlone: boolean }>;
+}
+export const fetchVendorChain = (ownerId: string): Promise<Envelope<ChainView>> =>
+  apiFetch(`/api/v1/admin/vendor-owners/${ownerId}/chain`);
 
 export const waiveSubscriptionFee = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }), reason });

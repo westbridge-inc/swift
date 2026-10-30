@@ -14,6 +14,7 @@ import { Scrim } from './scrim';
 import { HeartBadge, Stars } from './controls';
 import { PillButton } from './button';
 import { T } from './text';
+import { brandLine, brandTitle, type BrandCard } from '../lib/brandCard';
 
 /** The separator between meta segments. Only ever drawn BETWEEN two of them —
  *  never before the first, which is how "· Mauby's Snackette" happened. */
@@ -123,11 +124,16 @@ export function FoodCard({
   onToggleFavorite,
   onPress,
   width,
+  brand,
+  place,
 }: {
   /** null ⇒ this thing genuinely has no photo; draw the honest placeholder
    *  rather than a stranger's dinner [F-264]. */
   image: string | null;
   name: string;
+  /** [CHAINS PR3] A store card standing for a whole chain: the brand's name, and the branch it opens (`place`). */
+  brand?: BrandCard;
+  place?: string | null;
   priceLabel?: string;
   /** [STORE-VAT · owner O-5] A short note under the price ("incl. VAT"), from lib/storeVat. */
   priceNote?: string | null;
@@ -147,8 +153,10 @@ export function FoodCard({
   // read as a shelf of BOXES — the chrome competed with the only thing worth
   // looking at. Now the photograph carries its own corner radius and the name
   // and price sit on the page ground beneath it.
+  const title = brandTitle(name, brand);
+  const branchLine = brandLine(brand, place);
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={name}>
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={branchLine ? `${title}. ${branchLine}` : title}>
       {({ pressed }) => (
       <View style={{ width, opacity: pressed ? 0.85 : 1 }}>
         <View style={{ borderRadius: radius.lg, overflow: 'hidden' }}>
@@ -161,7 +169,7 @@ export function FoodCard({
               contentFit="cover"
             />
           ) : (
-            <PhotoPlaceholder label={name} style={{ width: '100%', aspectRatio: 1 }} />
+            <PhotoPlaceholder label={title} style={{ width: '100%', aspectRatio: 1 }} />
           )}
           {onToggleFavorite ? (
             <View style={{ position: 'absolute', top: space.md, right: space.md }}>
@@ -181,8 +189,9 @@ export function FoodCard({
             so no text can paint into a neighbour. */}
         <View style={{ paddingTop: space.sm, gap: 4, overflow: 'hidden' }}>
           <T variant="label" weight="semibold" numberOfLines={1}>
-            {name}
+            {title}
           </T>
+          {branchLine ? <T variant="micro" tone="muted" numberOfLines={1}>{branchLine}</T> : null}
           {priceLabel ? (
             // MONEY IN INK [100x pass §5]: "Prices were brand-red everywhere
             // — red stops meaning 'act' when it also means '$2,500'. Money is
@@ -221,10 +230,15 @@ export function VendorRow({
   style,
   wide = false,
   closed = false,
+  brand,
+  place,
 }: {
   /** null ⇒ no real photo; the placeholder names the merchant [F-264]. */
   image: string | null;
   name: string;
+  /** [CHAINS PR3] A store card standing for a whole chain: the brand's name, and the branch it opens (`place`). */
+  brand?: BrandCard;
+  place?: string | null;
   meta?: React.ReactNode;
   sub?: string;
   trailing?: React.ReactNode;
@@ -233,11 +247,14 @@ export function VendorRow({
   wide?: boolean;
   closed?: boolean;
 }) {
+  const title = brandTitle(name, brand);
+  const branchLine = brandLine(brand, place);
+  const spoken = branchLine ? `${title}. ${branchLine}` : title;
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={closed ? `${name}. Closed right now` : sub ? `${name}. ${sub}` : name}
+      accessibilityLabel={closed ? `${spoken}. Closed right now` : sub ? `${spoken}. ${sub}` : spoken}
     >
       {({ pressed }) => (
       <Card style={[{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md, opacity: pressed ? 0.85 : 1 }, style]}>
@@ -267,8 +284,9 @@ export function VendorRow({
         )}
         <View style={{ flex: 1, gap: 4 }}>
           <T variant="body" weight="semibold" tone={closed ? 'muted' : 'ink'} numberOfLines={1}>
-            {name}
+            {title}
           </T>
+          {branchLine ? <T variant="caption" tone="muted" numberOfLines={1}>{branchLine}</T> : null}
           {meta}
           {closed ? (
             <T variant="micro" tone="faint">
@@ -388,10 +406,15 @@ export function MerchantCard({
   onToggleFavorite,
   onPress,
   width,
+  brand,
+  place,
 }: {
   /** null ⇒ no real storefront photo; never invent one [F-264]. */
   image: string | null;
   name: string;
+  /** [CHAINS PR3] A store card standing for a whole chain: the brand's name, and the branch it opens (`place`). */
+  brand?: BrandCard;
+  place?: string | null;
   meta?: string;
   rating?: number | null;
   ratingBucket?: string;
@@ -401,8 +424,11 @@ export function MerchantCard({
   onPress?: () => void;
   width: number;
 }) {
+  const title = brandTitle(name, brand);
+  const branchLine = brandLine(brand, place);
+  const spoken = branchLine ? `${title}. ${branchLine}` : title;
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={meta ? `${name}. ${meta}` : name}>
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={meta ? `${spoken}. ${meta}` : spoken}>
       {({ pressed }) => (
         <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1, overflow: 'hidden' }}>
           <View>
@@ -427,8 +453,9 @@ export function MerchantCard({
             ) : null}
             <View style={{ position: 'absolute', left: space.lg, right: space.lg, bottom: space.md, gap: 4 }}>
               <T variant="title" tone="onBrand" numberOfLines={1}>
-                {name}
+                {title}
               </T>
+              {branchLine ? <T variant="micro" tone="onBrand" numberOfLines={1}>{branchLine}</T> : null}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
                 {rating !== undefined ? (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 7, paddingVertical: 2, borderRadius: radius.full }}>

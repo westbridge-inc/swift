@@ -54,7 +54,7 @@ import {
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
-import { chainOf, setChainDeal } from '../vendor/chain-deal';
+import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -110,7 +110,7 @@ import { readFeePause } from '../billing/mmg-pause';
 import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
-import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
+import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
@@ -4444,7 +4444,96 @@ export async function adminRoutes(app: FastifyInstance) {
         data: { kind: 'billing_rate_change', change: 'CHAIN_DEAL', weeklyRate: result.dealWeeklyRate, currencyCode: result.currencyCode },
       }).catch((err: unknown) => request.log.error({ err, ownerId: id }, '[CHAINS] chain deal notice not delivered'));
     }
+    // [ENTERPRISE E2] A lower deal superseded a pending end or raise: a branch already told is told it will not happen.
+    if (result.droppedRises?.length) await billing.tellChainDealRisesDropped(result.droppedRises);
     return { success: true, data: result };
+  });
+
+  /**
+   * [CHAINS PR3 · owner 29 Oct 2026] PUT /vendor-owners/:id/brand { brandName | null, reason } — the chain's name
+   * customers see ONCE for all its branches (modules/vendor/brand: one card opening the nearest open branch that
+   * delivers to them). null ends the brand: every branch is listed on its own again. A reason (C3); the audit row
+   * records the name before and after. A name that is banned goods is refused like a store name.
+   */
+  app.put('/vendor-owners/:id/brand', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      brandName: z.string().trim().min(2).max(60).nullable(),
+      reason: z.string().trim().min(8).max(500),
+    }).parse(request.body ?? {});
+    const owner = await app.prisma.vendorOwner.findUnique({ where: { id }, select: { id: true, user: { select: { tenantId: true } }, vendors: { select: { id: true } } } });
+    if (!owner || owner.user.tenantId !== requireTenantId()) throw new NotFoundError('VendorOwner', id);
+    if (body.brandName !== null) assertNotBannedGoods([body.brandName]);
+    await app.prisma.vendorOwner.update({ where: { id }, data: { brandName: body.brandName } });
+    for (const v of owner.vendors) scheduleVendorSearchSync(app, v.id);
+    return { success: true, data: { ownerId: id, brandName: body.brandName } };
+  });
+
+  /** [CHAINS PR3] PUT /vendors/:id/brand-listing { alone, reason } — list this branch on its own card even though its
+   *  owner has a brand (a "split"), or put it back under the brand. A reason (C3). */
+  app.put('/vendors/:id/brand-listing', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ alone: z.boolean(), reason: z.string().trim().min(8).max(500) }).parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findFirst({ where: { id, tenantId: requireTenantId() }, select: { id: true } });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    await app.prisma.vendor.update({ where: { id }, data: { brandListedAlone: body.alone } });
+    scheduleVendorSearchSync(app, id);
+    return { success: true, data: { vendorId: id, brandListedAlone: body.alone } };
+  });
+
+  /**
+   * [ENTERPRISE E2 · owner 29 Oct 2026] POST /vendor-owners/:id/deal-change { kind: 'END' | 'RAISE', weeklyRate?,
+   * notBefore?, reason } — end the chain deal (each branch back to its own tier fee) or raise it, from its end date
+   * (`notBefore`, today when absent). It raises fees, so it goes through the 14-day fee-change notice: every branch
+   * still on the deal is told in the app at least 14 days ahead and pays the new fee only from its first weekly fee
+   * due on or after the end date and 14 days after it was told; a week already paid keeps its price
+   * (vendor/chain-deal.ts, billing fee-rise-notice.ts). Money (C4): a stated reason and a second person.
+   */
+  app.post('/vendor-owners/:id/deal-change', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      kind: z.enum(['END', 'RAISE']),
+      weeklyRate: z.number().int().positive().max(10_000_000).optional(),
+      notBefore: z.string().datetime().optional(),
+      reason: z.string().trim().min(8).max(500),
+    }).strict().parse(request.body ?? {});
+    const result = await changeChainDeal(
+      app.prisma,
+      {
+        ownerId: id, kind: body.kind, weeklyRate: body.weeklyRate ?? null, notBefore: body.notBefore ? new Date(body.notBefore) : null,
+        reason: body.reason, adminUserId: request.user.userId, tenantId: requireTenantId(),
+      },
+      (tx, done) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        reason: body.reason,
+        extra: {
+          kind: done.kind, dealFrom: done.dealFrom, dealTo: done.dealTo, notBefore: done.notBefore,
+          branches: done.branches.map((b) => `${b.vendorId}:${b.outcome}:${b.from ?? '-'}->${b.to ?? '-'}`).join(' '),
+        },
+      }),
+    );
+    return { success: true, data: result };
+  });
+
+  /** [ENTERPRISE E2] DELETE /vendor-owners/:id/deal-change { reason } — withdraw a pending end or raise before the
+   *  owner's deal moved (it raises nothing). Every held rise of it is dropped; a branch already told is told it will
+   *  not happen. Money (C4), like the change itself. */
+  app.delete('/vendor-owners/:id/deal-change', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    // A DELETE carries its stated reason in the x-swift-reason header (the console's one transport, as every C4 call);
+    // a body reason is accepted too. Either way it is required.
+    const body = z.object({ reason: z.string().trim().min(8).max(500).optional() }).strict().parse(request.body ?? {});
+    const header = request.headers['x-swift-reason'];
+    const reason = (typeof header === 'string' && header.trim() ? header.trim() : body.reason ?? '').slice(0, 500);
+    if (reason.length < 8) throw new ValidationError('State why the change is withdrawn (at least 8 characters).');
+    const dropped = await cancelChainDealChange(
+      app.prisma,
+      { ownerId: id, reason, adminUserId: request.user.userId, tenantId: requireTenantId() },
+      (tx, rises) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        reason, extra: { droppedRises: rises.length, told: rises.filter((r) => r.held.noticeAt).length },
+      }),
+    );
+    await billing.tellChainDealRisesDropped(dropped);
+    return { success: true, data: { droppedRises: dropped.length } };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {

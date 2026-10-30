@@ -19,6 +19,7 @@ import { asFastifyTrustProxy } from '../config/trust-proxy';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
+import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
@@ -117,6 +118,7 @@ const echoOf = (row: { merchantTransactionId: string }): Partial<Found> => ({ ec
 
 const userIds: string[] = [];
 const vendorIds: string[] = [];
+const providerIds: string[] = [];
 const subIds: string[] = [];
 const tenantIds: string[] = [];
 let seq = 0;
@@ -217,6 +219,40 @@ async function makeDriver(opts: SubOpts = {}) {
   });
   return mappedUnless({ ...actor, subId, family: 'driver' as const }, opts);
 }
+/** [BILL-PRO PR4 · REVIEW-M #2230 S4-3] An independent pro (a person with a provider profile) and their own
+ *  INDEPENDENT_PRO weekly fee, paid through /api/v1/provider. `coveredBy: 'store'` also gives the same person a live
+ *  Services store fee (one fee, owner B1). */
+async function makePro(opts: SubOpts & { coveredBy?: 'store' } = {}) {
+  const actor = await makeUser(['CUSTOMER'], 'CUSTOMER', opts.tenantId);
+  const subId = await inTenant(opts.tenantId, async () => {
+    const pro = await app.prisma.serviceProvider.create({ data: { userId: actor.userId, trade: 'tutor', isVerified: true } });
+    providerIds.push(pro.id);
+    const sub = await app.prisma.subscription.create({
+      data: { serviceProviderId: pro.id, type: 'INDEPENDENT_PRO', status: opts.status ?? 'ACTIVE', weeklyRate: 2100, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
+    });
+    subIds.push(sub.id);
+    return sub.id;
+  });
+  if (opts.coveredBy === 'store') await servicesStoreFeeFor(actor.userId, opts.tenantId);
+  return mappedUnless({ ...actor, subId, family: 'provider' as const }, opts);
+}
+/** A live Services store fee owned by `userId` (it covers their pro fee: one fee). */
+async function servicesStoreFeeFor(userId: string, tenantId?: string) {
+  return inTenant(tenantId, async () => {
+    const ownerRow = await app.prisma.vendorOwner.upsert({ where: { userId }, create: { userId }, update: {} });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: ownerRow.id, name: `Pay Services ${seq}`, slug: `pay-services-${nanoid(6).toLowerCase()}`,
+        vendorType: 'SERVICE', phone: `+${phoneBase + 7000 + seq}`, addressLine1: '1 Pay Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+        latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true, ...(tenantId ? { tenantId } : {}),
+      },
+    });
+    vendorIds.push(vendor.id);
+    const sub = await app.prisma.subscription.create({ data: { vendorId: vendor.id, type: 'SERVICE_PROVIDER', status: 'ACTIVE', weeklyRate: 8000, ...period({}) } });
+    subIds.push(sub.id);
+    return sub.id;
+  });
+}
 /** A tenant of another kind. REVIEW is the store-review demo: its requests pass the review gate only while a
  *  review session is live, as review:provision creates one. */
 async function makeTenant(kind: 'REVIEW' | 'CRAWLER') {
@@ -229,7 +265,7 @@ async function makeTenant(kind: 'REVIEW' | 'CRAWLER') {
 /** A request (or read) in its own tenant context. Fastify's inject runs the auth hook in the caller's context,
  *  so without this a request's tenant would carry over to whatever the test creates next. */
 const isolated = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'mmgpr3-test-isolation');
-type Partner = { token: string; userId: string; subId: string; family: 'vendor' | 'rider' | 'driver'; vendorId?: string };
+type Partner = { token: string; userId: string; subId: string; family: 'vendor' | 'rider' | 'driver' | 'provider'; vendorId?: string };
 
 const headersOf = (p: Partner, extra: Record<string, string> = {}) => ({
   authorization: `Bearer ${p.token}`, 'x-client-platform': 'ios', ...(p.vendorId ? { 'x-vendor-id': p.vendorId } : {}), ...extra,
@@ -294,6 +330,7 @@ async function buildApp(options: { trustProxy?: ReturnType<typeof asFastifyTrust
   await server.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await server.register(riderRoutes, { prefix: '/api/v1/rider' });
   await server.register(driverRoutes, { prefix: '/api/v1/driver' });
+  await server.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await server.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
   await server.ready();
   return server;
@@ -361,6 +398,7 @@ afterAll(async () => {
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -1567,5 +1605,66 @@ describe('[SEC-DOS F8] a reply is opened once, from its token field, and the pri
     expect(busy.length).toBeGreaterThan(0);
     for (const a of busy) expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN' } });
     for (const a of answers.filter((x) => x.statusCode !== 503)) expect(a.json()).toEqual({ success: true });
+  });
+});
+
+describe('[BILL-PRO PR4 · REVIEW-M #2230 S4-3] a pro pays their OWN weekly fee on MMG\'s checkout page (/api/v1/provider)', () => {
+  beforeEach(() => enable(true));
+  const proToldOf = (userId: string) => app.prisma.notification.findMany({
+    where: { userId, data: { path: ['kind'], equals: 'provider_fee_mmg_checkout' } }, select: { title: true, body: true, data: true },
+  });
+
+  it('start -> MMG\'s success answer + lookup -> CONFIRMED, exactly one credit to the pro\'s own fee, told under the pro kind', async () => {
+    const p = await makePro({ balance: 600, status: 'PAST_DUE' });
+    expect((await isolated(() => subscriptionOf(p))).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD' });
+    const { ref, row } = await isolated(() => started(p));
+    expect(row).toMatchObject({ subscriptionId: p.subId, amount: expect.anything() });
+    const txn = tx('PRO0');
+    approved(row, txn, 1500, echoOf(row));
+    const res = await isolated(() => ret('success', { token: officialReply(row, '0', txn) }));
+    expect(res.json()).toEqual({ success: true, data: { state: 'CONFIRMED' } });
+    expect((await isolated(() => follow(p, ref))).json().data).toMatchObject({ status: 'CONFIRMED', amountGyd: 1500 });
+    expect(await isolated(() => identitiesOf(txn))).toBe(1);
+    expect(await isolated(() => creditsOf(p.subId))).toBe(1);
+    expect(await isolated(() => walletOf(p.subId))).toBe(600 + 1500 - 2100); // credited, then re-billed at once [I5]
+    const told = await isolated(() => proToldOf(p.userId));
+    expect(told.map((n) => [n.title, (n.data as { status?: string }).status])).toEqual([['Weekly fee paid', 'CONFIRMED']]);
+  });
+
+  it('a pro their Services store\'s fee covers: no pay button, and starting a checkout is refused at the route with nothing written', async () => {
+    const p = await makePro({ balance: 600, status: 'PAST_DUE', coveredBy: 'store' });
+    const view = (await isolated(() => subscriptionOf(p))).json().data;
+    expect(view.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    const res = await isolated(() => start(p));
+    expect(res.statusCode, res.body).toBe(409);
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }))).toBe(0);
+    expect(await isolated(() => creditsOf(p.subId))).toBe(0);
+  });
+
+  it('[REVIEW-G #2230 S4-3] a pro in the store-review fiction: changing how the fee is paid is refused before any step-up', async () => {
+    const review = await makeTenant('REVIEW');
+    const p = await makePro({ tenantId: review });
+    for (const method of ['CASH', 'NONE']) {
+      const res = await isolated(() => app.inject({ method: 'PUT', url: '/api/v1/provider/subscription/billing-method', headers: { ...headersOf(p), 'content-type': 'application/json' }, payload: { method } }));
+      expect([res.statusCode, res.json().error?.code], method).toEqual([403, 'REVIEW_DEMO_NO_MONEY']);
+    }
+    expect((await isolated(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } }))).autoRenew).toBe(true);
+  });
+
+  it('[REVIEW-M #2230 S4-2] a payment confirmed after the store\'s fee went live is kept as credit, and the push says so (never "paid")', async () => {
+    const p = await makePro({ balance: 600, status: 'PAST_DUE' });
+    const { row } = await isolated(() => started(p));
+    await servicesStoreFeeFor(p.userId);
+    const txn = tx('PRO1');
+    approved(row, txn, 1500, echoOf(row));
+    expect((await isolated(() => ret('success', { token: officialReply(row, '0', txn) }))).json().data.state).toBe('CONFIRMED');
+    expect(await isolated(() => creditsOf(p.subId))).toBe(1);
+    // Kept on the pro's own fee, never applied while the store's fee covers them (one fee).
+    expect(await isolated(() => walletOf(p.subId))).toBe(600 + 1500);
+    const told = await isolated(() => proToldOf(p.userId));
+    expect(told).toHaveLength(1);
+    expect(told[0]!.title).toBe('MMG payment kept as credit');
+    expect(told[0]!.body).toContain('kept as credit on your own provider weekly fee, never lost');
+    expect(told[0]!.body).not.toMatch(/paid/i);
   });
 });

@@ -2,7 +2,7 @@ import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutov
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
 import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
-import { verifiedCheckoutCredit } from './confirmation-finance';
+import { verifiedChainPartCredit, verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash, randomUUID } from 'node:crypto';
@@ -32,7 +32,7 @@ import { catalogueCardTop } from './card-price-cut';
 import { paymentInFlightInTx } from './payment-in-flight';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, guyanaDay, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -54,6 +54,7 @@ import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirm
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { moverUserIdOf, PAYER_INCLUDE, payerAudienceOf, payerOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { sweepChainDealChanges } from '../vendor/chain-deal';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -394,8 +395,15 @@ function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: str
 
 /** [BILL-PRO · owner B1] The billing event note when a pro's own fee stops because their store's fee covers them. */
 export const PRO_FEE_COVERED_BY_STORE_NOTE = 'Weekly billing stopped: your Services store fee covers your provider profile (one fee)';
-/** [BILL-PRO · REVIEW-M #2229 N2] What a pro is told when the Services store fee that covered them ends. */
-export const PRO_FEE_COVER_ENDED_BODY = 'Your Services store\u2019s weekly fee has ended, so it no longer covers your provider profile. Your own provider weekly fee applies again: to stay listed and take new requests and bookings after any week you have already paid, pay it with MMG in the Swift app or on the Swift website. Jobs already booked can still go ahead.';
+/** [BILL-PRO · REVIEW-M #2229 N2 · REVIEW-M/G #2230 S4-1] What a pro is told when the Services store fee that covered
+ *  them ends. Their own fee is stopped (and PAUSED once its paid week ran out), and a stopped fee does not pay, so the
+ *  words say to resume it first; the MMG sentence only when MMG checkout is live once resumed (as every fee notice). */
+export function proFeeCoverEndedBody(mmgLive: boolean): string {
+  return 'Your Services store\u2019s weekly fee has ended, so it no longer covers your provider profile. Your own provider weekly fee applies again. '
+    + 'To stay listed and take new requests and bookings after any week you have already paid, open your provider Weekly fee screen in the Swift app and tap Resume'
+    + (mmgLive ? ', then pay it with MMG in the Swift app or on the Swift website.' : '.')
+    + ' Jobs already booked can still go ahead.';
+}
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -446,6 +454,8 @@ export class BillingService {
     const now = at ?? new Date();
     const clock = batchClock(at);
     await this.recoverConfirmationSettlements(undefined, now);
+    // [ENTERPRISE E2] Chain deal ends and raises first: the branches due their notice are held, to be told below.
+    await sweepChainDealChanges(this.prisma, now).catch((err) => log().error({ err }, '[E2] the pass over chain deal changes failed; billing goes on at the rates on record'));
     // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
     // rise whose date the next fee has reached moved in, before anything due is priced.
     await this.sweepFeeRises(now).catch((err) => log().error({ err }, '[F2] the pass over held fee rises failed; billing goes on at the rates on record'));
@@ -3727,7 +3737,7 @@ export class BillingService {
    * the audit names no person. Only a pro fee is ever touched, and only while that person's store fee is live.
    * Returns the ids stopped. The hourly billing job runs it before any charge.
    */
-  async stopProFeesCoveredByStore(batchSize = 200): Promise<string[]> {
+  async stopProFeesCoveredByStore(batchSize = 200, seam: { beforeLock?: (subscriptionId: string) => Promise<void> } = {}): Promise<string[]> {
     const { liveServicesStoreFee } = await import('../services/pro-fee');
     // [COORD security review] Only pro fees whose person HAS a live Services store fee are read (a relation filter),
     // and every one of them is reached (cursor pages): no fixed window that leaves the 501st pro billing twice.
@@ -3752,6 +3762,8 @@ export class BillingService {
         const userId = row.serviceProvider?.userId;
         if (!userId || !(await liveServicesStoreFee(this.prisma, userId))) continue;
         try {
+          // (A test seam: the window between this read and the locks, REVIEW-G #2229 W4.)
+          await seam.beforeLock?.(row.id);
           const done = await this.prisma.$transaction(async (tx) => {
             const payer = await lockSubscriptionPayer(tx, row.id);
             if (payer.kind !== 'PROVIDER') return false;
@@ -3786,39 +3798,57 @@ export class BillingService {
    * covered it has ended, the pro is told, once per stop, that their own fee applies again and how to pay it. Returns
    * the ids told.
    */
-  async notifyProFeesNoLongerCovered(batchSize = 200): Promise<string[]> {
-    const { liveServicesStoreFee } = await import('../services/pro-fee');
+  async notifyProFeesNoLongerCovered(batchSize = 200, env: Record<string, string | undefined> = process.env): Promise<string[]> {
+    const { liveServicesStoreFee, proWeeklyFeeEnabled } = await import('../services/pro-fee');
     const told: string[] = [];
+    // [REVIEW-G #2230 S4-1] Off: nobody is told to pay a fee nothing enforces.
+    if (!proWeeklyFeeEnabled(env)) return told;
     let cursor: string | undefined;
     for (;;) {
+      // [REVIEW-M/G #2230 N1] Bounded: only stops whose pro fee is STILL stopped (not resumed, cancelled or churned)
+      // are read, and stops already told are skipped with one read per page (no store read, no insert retried).
       const stops = await this.prisma.billingEvent.findMany({
-        where: { note: PRO_FEE_COVERED_BY_STORE_NOTE, ...(cursor ? { id: { gt: cursor } } : {}) },
+        where: {
+          type: 'TIER_CHANGE', note: PRO_FEE_COVERED_BY_STORE_NOTE,
+          subscription: { serviceProviderId: { not: null }, autoRenew: false, status: { notIn: ['CANCELLED', 'CHURNED'] } },
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
         orderBy: { id: 'asc' },
         take: batchSize,
-        select: { id: true, subscriptionId: true, currencyCode: true, subscription: { select: { status: true, autoRenew: true, serviceProvider: { select: { userId: true } } } } },
+        select: {
+          id: true, subscriptionId: true, currencyCode: true,
+          subscription: { select: { status: true, autoRenew: true, feeWaived: true, currencyCode: true, weeklyRate: true, customRate: true, serviceProvider: { select: { userId: true } } } },
+        },
       });
       if (stops.length === 0) return told;
       cursor = stops[stops.length - 1]!.id;
+      const keyOf = (stop: { id: string; subscriptionId: string }) => `one-fee-ended:${stop.subscriptionId}:${stop.id}`;
+      const toldBefore = new Set((await this.prisma.billingEvent.findMany({
+        where: { idempotencyKey: { in: stops.map(keyOf) } }, select: { idempotencyKey: true },
+      })).map((e) => e.idempotencyKey));
       for (const stop of stops) {
         const userId = stop.subscription.serviceProvider?.userId;
-        if (!userId || stop.subscription.autoRenew || ['CANCELLED', 'CHURNED'].includes(stop.subscription.status)) continue;
+        if (!userId || toldBefore.has(keyOf(stop))) continue;
+        if (stop.subscription.autoRenew || ['CANCELLED', 'CHURNED'].includes(stop.subscription.status)) continue;
         if (await liveServicesStoreFee(this.prisma, userId)) continue;
         try {
           // Once per stop: the event's unique key is the claim.
           await this.prisma.billingEvent.create({ data: {
             subscriptionId: stop.subscriptionId, type: 'REMINDER', currencyCode: stop.currencyCode,
-            idempotencyKey: `one-fee-ended:${stop.subscriptionId}:${stop.id}`,
+            idempotencyKey: keyOf(stop),
             note: 'Told the pro their own weekly fee applies again (their Services store fee ended)',
           } });
         } catch (err) {
           if ((err as { code?: string }).code === 'P2002') continue;
           throw err;
         }
+        // Whether MMG checkout is live for this fee once the pro resumes it (a stopped fee does not pay until then).
+        const mmgLive = await mmgCheckoutLive(this.prisma, { ...stop.subscription, status: 'ACTIVE' }, 'unknown').catch(() => false);
         await this.notifications.send({
           userId,
           type: 'SYSTEM_ANNOUNCEMENT',
           title: 'Your provider weekly fee applies again',
-          body: PRO_FEE_COVER_ENDED_BODY,
+          body: proFeeCoverEndedBody(mmgLive),
           audience: 'provider',
           data: { kind: 'provider_fee_cover_ended', subscriptionId: stop.subscriptionId },
         });
@@ -4578,8 +4608,10 @@ export class BillingService {
   /** Finish an already credited checkout using wallet funds only. Its pause
    * stays durable until the paid period or bank-only disposition commits. */
   async recoverConfirmationSettlements(subscriptionId?: string, now = new Date()): Promise<number> {
+    // [ENTERPRISE E1] A branch's share of a chain checkout settles exactly like a single checkout, on its own clock.
     const pending = await this.prisma.paymentConfirmationHold.findMany({ where: {
-      ...(subscriptionId ? { subscriptionId } : {}), status: 'SETTLEMENT_APPLY_PENDING', checkoutId: { not: null },
+      ...(subscriptionId ? { subscriptionId } : {}), status: 'SETTLEMENT_APPLY_PENDING',
+      OR: [{ checkoutId: { not: null } }, { checkoutPartId: { not: null } }],
     }, orderBy: { beganAt: 'asc' }, take: 100 });
     const usd = await this.loadUsdPricing();
     let recovered = 0;
@@ -4592,10 +4624,18 @@ export class BillingService {
       done = await this.prisma.$transaction(async (tx) => {
         const clock = await currentDunningClock(tx, candidate.subscriptionId, now);
         const hold = await tx.paymentConfirmationHold.findUnique({ where: { id: candidate.id } });
-        if (hold?.status !== 'SETTLEMENT_APPLY_PENDING' || !hold.checkoutId) return false;
-        const checkout = await tx.mmgCheckoutIntent.findUnique({ where: { id: hold.checkoutId } });
-        if (!checkout || checkout.status !== 'CONFIRMED' || !checkout.providerPaymentId) return false;
-        const proof = await verifiedCheckoutCredit(tx, checkout);
+        if (hold?.status !== 'SETTLEMENT_APPLY_PENDING' || (!hold.checkoutId && !hold.checkoutPartId)) return false;
+        let source: { checkoutId: string } | { checkoutPartId: string };
+        let proof: Awaited<ReturnType<typeof verifiedCheckoutCredit>>;
+        if (hold.checkoutId) {
+          const checkout = await tx.mmgCheckoutIntent.findUnique({ where: { id: hold.checkoutId } });
+          if (!checkout || checkout.status !== 'CONFIRMED' || !checkout.providerPaymentId) return false;
+          source = { checkoutId: checkout.id };
+          proof = await verifiedCheckoutCredit(tx, checkout);
+        } else {
+          source = { checkoutPartId: hold.checkoutPartId! };
+          proof = await verifiedChainPartCredit(tx, hold.checkoutPartId!);
+        }
         if (!proof) return false;
         const identity = proof.identity;
         const sub = await tx.subscription.findUniqueOrThrow({ where: { id: hold.subscriptionId }, include: PAYER_INCLUDE });
@@ -4603,16 +4643,16 @@ export class BillingService {
         const evidence = { actor: 'checkout-settlement', reference: identity.id };
         if (!await billingEffectsReady(tx)) return false; // Credit is recorded; preserve application protection through cutover.
         if (clock.epoch > hold.sourceEpoch || authority.bankInsteadOfAdvance || sub.nextBillingDate > now) {
-          await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
+          await resolveConfirmationInTx(tx, sub.id, source, 'PAID', evidence, now);
           return true;
         }
-        if (await hasConfirmationInTx(tx, sub.id, now, { checkoutId: checkout.id })) return false;
+        if (await hasConfirmationInTx(tx, sub.id, now, source)) return false;
         // [BILLING-REANCHOR] A return buys the week from the due date moved on by the time suspended: price that week.
         const priced = await this.priceEligibleFor(await returnReanchorProof(tx, sub, now) ? { ...sub, nextBillingDate: returnWeekStart(sub, now) } : sub, usd);
         const amount = sub.feeWaived ? 0 : Number(priced.amount);
         const balance = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } });
         if (amount > 0 && (!balance || balance.currencyCode !== sub.currencyCode || Number(balance.balance) < amount)) return false;
-        await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
+        await resolveConfirmationInTx(tx, sub.id, source, 'PAID', evidence, now);
         const result = await this.applySuccessfulChargeInTx(tx, sub, amount, amount > 0 ? 'prepaid' : 'fee-waived', now,
           sub.nextBillingDate.toISOString().slice(0, 10), undefined, priced.usdTrio, amount);
         if (result !== 'advanced') throw new Error('Verified checkout balance was not applied');
@@ -5429,6 +5469,15 @@ export class BillingService {
   private feeRiseObstacle(sub: Subscription | null, held: HeldFeeRise): string | null {
     if (!sub) return 'GONE';
     if (sub.status === 'CANCELLED') return 'PLAN_ENDED';
+    // [ENTERPRISE E2] A chain-deal rise moves the NEGOTIATED rate it was held for, and only that one, while the branch
+    // is still charged what it was told it pays now (a deal lowered, or the branch's tier moved, drops it: the owner's
+    // deal change holds it again with the new numbers, told again).
+    if (held.source === 'CHAIN_DEAL') {
+      if (sub.customRate === null || Number(sub.customRate) !== held.customFrom) return 'DEAL_MOVED';
+      // What it pays now, and what it would pay then, are still the two fees it was told.
+      if (weeklyFeeAmount(sub) !== held.from || weeklyFeeAmount({ weeklyRate: sub.weeklyRate, customRate: held.customTo ?? null }) !== held.to) return 'RATE_MOVED';
+      return null;
+    }
     if (sub.customRate !== null) return 'NEGOTIATED_RATE';
     if (Number(sub.weeklyRate) !== held.from) return 'RATE_MOVED';
     return null;
@@ -5459,15 +5508,20 @@ export class BillingService {
     }
     // A fresh clock: a long run's start time never dates a notice sent later.
     const at = new Date(Math.max(now.getTime(), Date.now()));
-    const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at);
+    // [ENTERPRISE E2] A chain deal's end date: never a weekly fee due before it.
+    const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at, held.notBefore ? new Date(held.notBefore) : null);
     const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
-    const copy = feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
+    const copy = held.source === 'CHAIN_DEAL'
+      ? chainDealRiseCopy({ branch: await this.branchName(sub?.vendor?.id), from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, dealTo: held.customTo ?? null })
+      : feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
     const userId = this.payerUserId(sub as SubWithRelations);
     const inboxId = await this.notifications.send({
       userId, type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
       data: {
         kind: FEE_RISE_NOTICE_KIND, change: 'RISE', subscriptionId, weeklyFee: held.to, previousWeeklyFee: held.from,
         currencyCode: held.currencyCode, appliesFrom: appliesFrom.toISOString(), toldAt: at.toISOString(),
+        // [REVIEW-F #2227 S3-1] A chain branch's notice opens THAT branch's fee screen (the router selects vendorId).
+        ...(held.source === 'CHAIN_DEAL' && sub?.vendor ? { vendorId: sub.vendor.id } : {}),
       },
       dedupeKey,
     });
@@ -5563,20 +5617,42 @@ export class BillingService {
         return 'deferred';
       }
     }
-    const won = await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: null }, data: { weeklyRate: held.to } });
+    // [ENTERPRISE E2] A chain-deal rise moves the branch's negotiated rate (compare-and-set on the deal it was told
+    // it leaves, and on its tier rate); every other rise moves the card rate, as before.
+    const won = held.source === 'CHAIN_DEAL'
+      ? await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: held.customFrom! }, data: { customRate: held.customTo ?? null } })
+      : await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: null }, data: { weeklyRate: held.to } });
     if (won.count !== 1) return 'waiting';
     await tx.platformConfig.delete({ where: { key } });
     const sequence = await tx.billingEvent.count({ where: { subscriptionId, type: 'TIER_CHANGE' } }) + 1;
     await tx.billingEvent.create({ data: {
       subscriptionId, type: 'TIER_CHANGE', amount: held.to, currencyCode: sub!.currencyCode,
       idempotencyKey: `tier:${subscriptionId}:${sequence}:${held.from}->${held.to}`,
-      note: `Weekly fee rise told ${held.noticeAt.slice(0, 10)} (14-day notice) applies from the fee due ${sub!.nextBillingDate.toISOString().slice(0, 10)}: ${held.from} -> ${held.to}; weeks before it kept their price.`,
+      note: `${held.source === 'CHAIN_DEAL' ? (held.customTo === null ? 'Chain deal ended: w' : `Chain deal raised to ${held.customTo}: w`) : 'W'}eekly fee rise told ${held.noticeAt.slice(0, 10)} (14-day notice) applies from the fee due ${sub!.nextBillingDate.toISOString().slice(0, 10)}: ${held.from} -> ${held.to}; weeks before it kept their price.`,
     } });
     await tx.auditLog.create({ data: {
       action: 'BILLING_FEE_RISE_APPLIED', entity: 'Subscription', entityId: subscriptionId,
-      changes: { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom, firstFeeAtNewRate: sub!.nextBillingDate.toISOString(), at: now.toISOString() },
+      changes: { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom, firstFeeAtNewRate: sub!.nextBillingDate.toISOString(), at: now.toISOString(),
+        ...(held.source === 'CHAIN_DEAL' ? { source: 'CHAIN_DEAL', customFrom: held.customFrom, customTo: held.customTo ?? null, notBefore: held.notBefore } : {}) },
     } });
     return 'applied';
+  }
+
+  /** [ENTERPRISE E2] Chain-deal rises a withdrawn or superseded deal change dropped (chain-deal.ts): each branch that
+   *  was already told is told it will not happen, at the fee it pays now. Best-effort, after the commit. */
+  async tellChainDealRisesDropped(dropped: ReadonlyArray<{ subscriptionId: string; held: HeldFeeRise }>): Promise<void> {
+    for (const { subscriptionId, held } of dropped) {
+      if (!held.noticeAt) continue;
+      const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } }).catch(() => null);
+      await this.tellFeeRiseCancelled(subscriptionId, held, sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null);
+    }
+  }
+
+  /** [ENTERPRISE E2] A branch's name for its own fee notices. */
+  private async branchName(vendorId: string | null | undefined): Promise<string> {
+    if (!vendorId) return 'Your branch';
+    const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true } });
+    return vendor?.name ?? 'Your branch';
   }
 
   /** A told rise that will not happen: the payer is told so, best-effort (it never raises what they pay). */
@@ -5588,10 +5664,15 @@ export class BillingService {
         include: PAYER_INCLUDE,
       });
       if (!sub) return;
-      const copy = feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date: held.appliesFrom ? new Date(held.appliesFrom) : null });
+      const date = held.appliesFrom ? new Date(held.appliesFrom) : null;
+      // [REVIEW-F #2227 S3-1] A chain branch's notice names its branch and opens that branch's fee screen.
+      const chainVendorId = held.source === 'CHAIN_DEAL' ? sub.vendor?.id ?? null : null;
+      const copy = chainVendorId
+        ? chainDealCancelledCopy({ branch: await this.branchName(chainVendorId), from: feeNow, to: held.to, currencyCode: held.currencyCode, date })
+        : feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date });
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
-        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode },
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode, ...(chainVendorId ? { vendorId: chainVendorId } : {}) },
         dedupeKey: `${feeRiseDedupeKey(subscriptionId, held)}:cancelled`,
       });
     } catch (error) {

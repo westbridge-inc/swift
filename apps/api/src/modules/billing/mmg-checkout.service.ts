@@ -29,7 +29,7 @@ import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
-import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { liveServicesStoreFeeWhere, PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../providers/mmg/mmg-history';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
@@ -37,6 +37,7 @@ import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { openReply, type OpenedReply } from './mmg-checkout-reply';
 import { FEE_SELLER, type FeeSeller } from './fee-seller';
 import { AUTO_CLOSE_LATE_PAYMENT_LIKELY, AUTO_CLOSE_POSSIBLE_MATCH, checkExpiredNoReplyHolds, watchAutoClosedCheckouts } from './mmg-expired-hold-check';
+import { chainFeeQuote, coveredFees, lockCheckoutAuthority, type ChainFeeQuote } from './chain-checkout';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
@@ -119,6 +120,23 @@ function checkoutQuoteBasis(sub: Subscription) {
     sub.currentPeriodStart.toISOString(), sub.currentPeriodEnd.toISOString()]);
 }
 
+/** [ENTERPRISE E1] The pay-all list the owner confirmed is exactly the list priced now: the same branches, each
+ *  at the same amount, and the same total. Never "close enough": a changed list is shown again. */
+export function sameChainQuote(
+  due: ReadonlyArray<{ subscriptionId: string | null; amountGyd: number | null }>, totalGyd: number,
+  confirmed: { branches: ReadonlyArray<{ subscriptionId: string; amountGyd: number }>; totalGyd: number },
+): boolean {
+  if (confirmed.totalGyd !== totalGyd || confirmed.branches.length !== due.length) return false;
+  const priced = new Map(due.map((b) => [b.subscriptionId, b.amountGyd]));
+  const seen = new Set<string>();
+  for (const branch of confirmed.branches) {
+    if (seen.has(branch.subscriptionId) || priced.get(branch.subscriptionId) !== branch.amountGyd) return false;
+    seen.add(branch.subscriptionId);
+  }
+  return true;
+}
+const quoteChanged = () => new AppError(409, 'PAYMENT_QUOTE_CHANGED', 'The weekly fees changed. Reload the list before opening a payment page.');
+
 export type CheckoutStatus = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type ReturnState = 'CONFIRMED' | 'CONFIRMING' | 'NOT_PAID' | 'UNKNOWN';
 
@@ -138,6 +156,22 @@ export interface CheckoutView {
   /** [Owner 15 Oct 2026 · ruling #63] Who sold the weekly fee: Swift's operator (legal/operator.ts), on every receipt. */
   seller: FeeSeller;
 }
+
+/** [ENTERPRISE E1] One branch a chain checkout pays, and its share. */
+export interface ChainCheckoutBranch {
+  vendorId: string;
+  branchName: string;
+  subscriptionId: string;
+  amountGyd: number;
+}
+
+/** [ENTERPRISE E1] A chain ("pay all my branches") checkout as its owner sees it. */
+export interface ChainCheckoutView extends Omit<CheckoutView, 'subscriptionStatus'> {
+  branches: ChainCheckoutBranch[];
+}
+
+/** Who a Pay tap's Idempotency-Key belongs to: one subscription, or an owner's chain checkout. */
+type KeyOwner = { userId: string; clientKey: string; subscriptionId: string | null; chainOwnerId: string | null };
 
 export interface StartedCheckout {
   ref: string;
@@ -591,7 +625,7 @@ export class MmgCheckoutService {
       throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Starting a checkout needs an Idempotency-Key header of 8-128 letters, digits, - or _. The same key on a retry returns the same checkout.');
     }
     const now = input.now ?? new Date();
-    const who = { userId: input.userId, subscriptionId: input.subscriptionId, clientKey };
+    const who: KeyOwner = { userId: input.userId, subscriptionId: input.subscriptionId, chainOwnerId: null, clientKey };
 
     // [F3] A key that was ever answered keeps its answer: never a new checkout.
     const replay = await this.answerForKey(who, now);
@@ -710,6 +744,184 @@ export class MmgCheckoutService {
     throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
   }
 
+  /** [ENTERPRISE E1] The pay-all list for one owner (chain-checkout.ts), with this service's checkout provider. */
+  async chainQuote(input: { ownerId: string; platform: ClientPlatform; production: boolean; now?: Date }): Promise<ChainFeeQuote> {
+    return chainFeeQuote(this.prisma, { ...input, checkout: this.checkout });
+  }
+
+  /**
+   * [ENTERPRISE E1] "Pay all my branches": ONE MMG checkout for every branch fee that is due, or the owner's chain
+   * checkout already open. `confirmed` is the list the owner was shown and confirmed (each branch's subscription and
+   * amount, and the total). The server prices it again, first without locks and then under every branch's billing
+   * locks, BEFORE any MMG page exists: any difference is 409 PAYMENT_QUOTE_CHANGED and nothing is created, so a
+   * branch paid on its own meanwhile is never paid twice. Each branch's clock is held by its own part from the same
+   * transaction that writes the checkout, so the branch's own Pay is refused while this one is unresolved.
+   */
+  async createChainCheckout(input: {
+    ownerId: string; userId: string; platform: ClientPlatform; clientKey: unknown;
+    confirmed: { branches: ReadonlyArray<{ subscriptionId: string; amountGyd: number }>; totalGyd: number };
+    now?: Date;
+  }): Promise<{ created: boolean; checkout: StartedCheckout; branches: ChainCheckoutBranch[] }> {
+    const clientKey = typeof input.clientKey === 'string' && CLIENT_KEY.test(input.clientKey) ? input.clientKey : null;
+    if (!clientKey) {
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Starting a checkout needs an Idempotency-Key header of 8-128 letters, digits, - or _. The same key on a retry returns the same checkout.');
+    }
+    const now = input.now ?? new Date();
+    const owner = await this.prisma.vendorOwner.findUnique({ where: { id: input.ownerId }, select: { id: true, userId: true } });
+    if (!owner || owner.userId !== input.userId) throw new AppError(404, 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription to pay.');
+    const who: KeyOwner = { userId: input.userId, subscriptionId: null, chainOwnerId: owner.id, clientKey };
+    const withBranches = async (answer: { created: boolean; checkout: StartedCheckout }) => ({ ...answer, branches: await this.chainBranches(answer.checkout.ref) });
+
+    // [F3] A key that was ever answered keeps its answer: never a new checkout.
+    const replay = await this.answerForKey(who, now);
+    if (replay) return withBranches(replay);
+
+    for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
+      // [I4] One open chain checkout per owner, read again after any expiry or lost race.
+      const open = await this.prisma.mmgCheckoutIntent.findFirst({ where: { chainOwnerId: owner.id, status: { in: ['OPEN', 'CONFIRMING'] } } });
+      if (open?.status === 'CONFIRMING') {
+        const bound = await this.bindKey(who, open, now);
+        if (bound.intentId !== open.id) return withBranches(await bound.answer());
+        throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
+      }
+      if (open && open.expiresAt > now) {
+        // [REVIEW-M #2224 S4-2] The open pay-all is handed back only for the list it was opened for: a tap from a
+        // stale list (another device) is shown the list again before any MMG page, never sent to pay a different one.
+        const parts = await this.prisma.mmgCheckoutPart.findMany({ where: { checkoutId: open.id }, select: { subscriptionId: true, amount: true } });
+        const opened = parts.map((p) => ({ subscriptionId: p.subscriptionId, amountGyd: Number(p.amount) }));
+        if (!sameChainQuote(opened, Number(open.amount), input.confirmed)) {
+          throw new AppError(409, 'PAYMENT_QUOTE_CHANGED', 'A payment for a different list of branches is open. Reload the list before paying.', { ref: open.id });
+        }
+        return withBranches(await (await this.bindKey(who, open, now)).answer());
+      }
+      if (open) {
+        await this.expireUnanswered(open.id, now);
+        continue;
+      }
+
+      // [I1] Priced here: each branch's own Pay amount, as its fee screen prices it.
+      const quote = await chainFeeQuote(this.prisma, { ownerId: owner.id, platform: input.platform, checkout: this.checkout, production: true, now });
+      const due = quote.branches.filter((b) => b.state === 'DUE' && b.subscriptionId !== null && b.amountGyd !== null);
+      if (due.length === 0) throw new AppError(409, 'NOTHING_DUE', 'No branch has a weekly fee to pay with MMG right now.');
+      if (!sameChainQuote(due, quote.totalGyd, input.confirmed)) throw quoteChanged();
+      const shares = due.map((b) => ({ subscriptionId: b.subscriptionId!, amountGyd: b.amountGyd! }))
+        .sort((a, b) => (a.subscriptionId < b.subscriptionId ? -1 : a.subscriptionId > b.subscriptionId ? 1 : 0));
+      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most, per branch: refused before any page exists.
+      for (const share of shares) await assertPayAheadRoom(this.prisma, share.subscriptionId, share.amountGyd, now, 'partner');
+      const quoted = new Map<string, { basis: string; wallet: number }>();
+      for (const share of shares) {
+        const sub = await this.prisma.subscription.findUniqueOrThrow({ where: { id: share.subscriptionId } });
+        const wallet = await this.prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id }, select: { balance: true } });
+        quoted.set(sub.id, { basis: checkoutQuoteBasis(sub), wallet: Number(wallet?.balance ?? 0) });
+      }
+      const totalGyd = quote.totalGyd;
+      const merchantTransactionId = newMerchantTransactionId(now);
+      let checkoutUrl: string;
+      try {
+        checkoutUrl = this.checkout().createCheckout({ amount: fromMajor(String(totalGyd), 'GYD'), merchantTransactionId, now }).checkoutUrl;
+      } catch (err) {
+        log().error({ err, ownerId: owner.id }, '[MMG checkout] the chain checkout could not be built');
+        throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
+      }
+      // [F6] Sealed before it is written down; with no master key there is no checkout at all.
+      const sealed = await sealCheckoutUrl(checkoutUrl);
+
+      try {
+        const result = await this.prisma.$transaction(async (tx) => {
+          // The payer first, then every branch, sorted: the order every verifier and credit takes too.
+          let tenantId: string | null = null;
+          for (const share of shares) {
+            const authority = await lockBillingAuthority(tx, share.subscriptionId);
+            if (authority.userId !== input.userId || (tenantId !== null && authority.tenantId !== tenantId)) throw new NotFoundError('Subscription', share.subscriptionId);
+            tenantId = authority.tenantId;
+          }
+          for (const share of shares) {
+            const decision = await lockFeePaymentDecision(tx, share.subscriptionId, new Date());
+            if (!decision.allowed) return { kind: 'blocked' as const };
+          }
+          // Re-priced under the locks: the obligation, the price, the wallet and the switch, branch by branch.
+          for (const share of shares) {
+            const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: share.subscriptionId } });
+            const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: fresh.id }, select: { balance: true } });
+            const freshAmount = checkoutAmountGyd({ weeklyFeeGyd: weeklyFeeAmount(fresh), amountDueGyd: await amountDueNow(tx, fresh) });
+            const before = quoted.get(fresh.id)!;
+            if (before.basis !== checkoutQuoteBasis(fresh) || freshAmount !== share.amountGyd || Number(wallet?.balance ?? 0) !== before.wallet
+              || !(await amountDueNow(tx, fresh) > 0) || !await mmgCheckoutLive(tx, fresh, input.platform, this.checkout)) return { kind: 'quoteChanged' as const };
+            await assertPayAheadRoom(tx, fresh.id, share.amountGyd, new Date(), 'partner');
+          }
+          const created = await tx.mmgCheckoutIntent.create({
+            data: {
+              tenantId: tenantId!,
+              subscriptionId: null,
+              chainOwnerId: owner.id,
+              merchantTransactionId,
+              amount: totalGyd,
+              currencyCode: 'GYD',
+              createdByUserId: input.userId,
+              platform: input.platform,
+              ...sealed,
+              expiresAt: new Date(now.getTime() + MMG_CHECKOUT_TTL_MS),
+            },
+          });
+          for (const share of shares) {
+            const part = await tx.mmgCheckoutPart.create({ data: {
+              tenantId: tenantId!, checkoutId: created.id, subscriptionId: share.subscriptionId, amount: share.amountGyd, currencyCode: 'GYD',
+            } });
+            await beginConfirmationInTx(tx, share.subscriptionId, { checkoutPartId: part.id }, 'MMG_CHECKOUT_PENDING', now);
+          }
+          await tx.mmgCheckoutKey.create({ data: { tenantId: tenantId!, createdByUserId: input.userId, clientKey, intentId: created.id } });
+          return { kind: 'reserved' as const, intent: created };
+        });
+        if (result.kind === 'blocked') {
+          // [F3 · I4] A concurrent pay-all tap's checkout is handed back on the next pass; anything else is a
+          // payment being confirmed for one of the branches (its own checkout, a card payment): nothing new.
+          const again = await this.answerForKey(who, now);
+          if (again) return withBranches(again);
+          const openNow = await this.prisma.mmgCheckoutIntent.findFirst({ where: { chainOwnerId: owner.id, status: { in: ['OPEN', 'CONFIRMING'] } }, select: { id: true } });
+          if (openNow) continue;
+          throw new AppError(409, 'PAYMENT_CONFIRMING', 'A payment for one of these branches is being confirmed. Refresh the list before paying.');
+        }
+        if (result.kind === 'quoteChanged') throw quoteChanged();
+        mmgCheckoutEventsCounter.labels('created').inc();
+        return withBranches({ created: true, checkout: await this.started(result.intent, input.userId) });
+      } catch (err) {
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+        const again = await this.answerForKey(who, now);
+        if (again) return withBranches(again);
+      }
+    }
+    throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
+  }
+
+  /** [ENTERPRISE E1] One chain checkout of this owner, or 404 (the same answer for anyone else's). */
+  async getChainCheckout(input: { ref: string; ownerId: string }): Promise<ChainCheckoutView> {
+    const intent = await this.prisma.mmgCheckoutIntent.findFirst({ where: { id: input.ref, chainOwnerId: input.ownerId } });
+    if (!intent) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
+    return { ...this.chainView(intent), branches: await this.chainBranches(intent.id) };
+  }
+
+  /** [ENTERPRISE E1] The owner's recent chain checkouts, newest first (the pay-all screen resumes from these). */
+  async recentChainCheckouts(ownerId: string, take = 10): Promise<ChainCheckoutView[]> {
+    const rows = await this.prisma.mmgCheckoutIntent.findMany({ where: { chainOwnerId: ownerId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take });
+    const out: ChainCheckoutView[] = [];
+    for (const row of rows) {
+      out.push({ ...this.chainView(row), branches: await this.chainBranches(row.id) });
+    }
+    return out;
+  }
+
+  /** A chain checkout's branches and shares, in name order. */
+  private async chainBranches(checkoutId: string): Promise<ChainCheckoutBranch[]> {
+    const parts = await this.prisma.mmgCheckoutPart.findMany({
+      where: { checkoutId },
+      select: { subscriptionId: true, amount: true, subscription: { select: { vendor: { select: { id: true, name: true } } } } },
+    });
+    return parts.map((part) => ({
+      vendorId: part.subscription.vendor?.id ?? '', branchName: part.subscription.vendor?.name ?? '',
+      subscriptionId: part.subscriptionId, amountGyd: Number(part.amount),
+    })).sort((a, b) => a.branchName.localeCompare(b.branchName) || a.subscriptionId.localeCompare(b.subscriptionId));
+  }
+
   /**
    * [MMG reopen · review F1] "Back to MMG's page": hand back the page of ONE
    * named checkout, and only while it is this subscription's latest checkout,
@@ -763,7 +975,8 @@ export class MmgCheckoutService {
   async getCheckout(input: { ref: string; subscriptionId: string }): Promise<CheckoutView> {
     const intent = await this.prisma.mmgCheckoutIntent.findFirst({ where: { id: input.ref, subscriptionId: input.subscriptionId } });
     if (!intent) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
-    const sub = await this.prisma.subscription.findUnique({ where: { id: intent.subscriptionId }, select: { status: true } });
+    // Found by its subscription, so it names it (a chain checkout never matches).
+    const sub = await this.prisma.subscription.findUnique({ where: { id: input.subscriptionId }, select: { status: true } });
     return this.view(intent, sub?.status ?? 'CANCELLED');
   }
 
@@ -836,7 +1049,8 @@ export class MmgCheckoutService {
       // own not-paid answer for THIS checkout releases the confirmation pause
       // in the same transaction, unless a success answer was ever given for it.
       const merged = await this.prisma.$transaction(async (tx) => {
-        await lockBillingAuthority(tx, intent.subscriptionId);
+        // [ENTERPRISE E1] Every subscription the checkout pays (one, or a chain checkout's branches).
+        const { covered } = await lockCheckoutAuthority(tx, intent);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
         if (current.status === 'CONFIRMED') return 'CONFIRMED' as const;
@@ -856,8 +1070,10 @@ export class MmgCheckoutService {
             },
           });
           if (moved.count !== 1) throw new Error(`Locked checkout ${current.id} changed under its reply`);
-          await resolveConfirmationInTx(tx, current.subscriptionId, { checkoutId: current.id }, 'PROVEN_UNPAID',
-            { actor: 'mmg-checkout-reply', reference: `${current.merchantTransactionId}:MMG_RESULT_${parsed.resultCode}` }, now);
+          for (const fee of covered) {
+            await resolveConfirmationInTx(tx, fee.subscriptionId, fee.source, 'PROVEN_UNPAID',
+              { actor: 'mmg-checkout-reply', reference: `${current.merchantTransactionId}:MMG_RESULT_${parsed.resultCode}` }, now);
+          }
           return 'RELEASED' as const;
         }
         await tx.mmgCheckoutIntent.updateMany({
@@ -1112,7 +1328,7 @@ export class MmgCheckoutService {
   /** [F3] The answer a key already has, if it has one: the checkout it was
    *  bound to, as it stands now, and only for the subscription it was bound for. */
   private async answerForKey(
-    who: { userId: string; subscriptionId: string; clientKey: string },
+    who: KeyOwner,
     now: Date,
   ): Promise<{ created: false; checkout: StartedCheckout } | null> {
     const binding = await this.prisma.mmgCheckoutKey.findUnique({
@@ -1120,7 +1336,8 @@ export class MmgCheckoutService {
       include: { intent: true },
     });
     if (!binding) return null;
-    if (binding.intent.subscriptionId !== who.subscriptionId) {
+    // [ENTERPRISE E1] A key answered for one subscription never answers for another, nor for a chain checkout (or back).
+    if (binding.intent.subscriptionId !== (who.subscriptionId ?? null) || binding.intent.chainOwnerId !== (who.chainOwnerId ?? null)) {
       throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That Idempotency-Key was used for a different checkout. A new tap needs a new key.');
     }
     let intent = binding.intent;
@@ -1136,7 +1353,7 @@ export class MmgCheckoutService {
    *  is already bound (a concurrent request), its first binding wins and is the
    *  answer, checked against this subscription like any replay. */
   private async bindKey(
-    who: { userId: string; subscriptionId: string; clientKey: string },
+    who: KeyOwner,
     intent: MmgCheckoutIntent,
     now: Date,
   ): Promise<{ intentId: string; answer: () => Promise<{ created: false; checkout: StartedCheckout }> }> {
@@ -1319,7 +1536,8 @@ export class MmgCheckoutService {
     try {
       outcome = await this.prisma.$transaction(async (tx) => {
         // Serialize every verifier of this checkout: return, notify and poll may race.
-        await lockBillingAuthority(tx, intent.subscriptionId);
+        // [ENTERPRISE E1] A chain checkout locks every branch it pays (the payer first, then the branches sorted).
+        const { covered } = await lockCheckoutAuthority(tx, intent);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
         if (current.status === 'CONFIRMED') return 'already' as const;
@@ -1335,6 +1553,8 @@ export class MmgCheckoutService {
         if (pushed || toppedUp) {
           throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'Another channel already recorded this transaction.');
         }
+        // [ENTERPRISE E1] A chain checkout's one MMG payment paid several branches: its identity names no
+        // single subscription (each branch's share is its own top-up below, keyed by this identity and its part).
         const identity = await claimProviderPaymentInTx(tx, {
           provider: 'MMG',
           providerTxnId: key,
@@ -1352,21 +1572,27 @@ export class MmgCheckoutService {
           });
         }
         if (!identity.already) {
-          await this.billing.recordTopUpInTransaction(tx, {
-            subscriptionId: current.subscriptionId,
-            expectedTenantId: current.tenantId,
-            amount,
-            recordedBy: 'mmg-checkout',
-            channel: 'MMG_CHECKOUT',
-            reference: `MMG checkout ${current.merchantTransactionId}, MMG transaction ${key}`,
-            eventKey: `mmg-checkout:pp:${identity.id}`,
-          });
+          // One credit per subscription the checkout pays, of exactly its share (the whole amount for a single
+          // checkout; the parts add up to the amount MMG confirmed, a database check). All or nothing: one transaction.
+          for (const fee of covered) {
+            await this.billing.recordTopUpInTransaction(tx, {
+              subscriptionId: fee.subscriptionId,
+              expectedTenantId: current.tenantId,
+              amount: fee.amount,
+              recordedBy: 'mmg-checkout',
+              channel: 'MMG_CHECKOUT',
+              reference: fee.partId
+                ? `MMG checkout ${current.merchantTransactionId} (all branches), MMG transaction ${key}`
+                : `MMG checkout ${current.merchantTransactionId}, MMG transaction ${key}`,
+              eventKey: fee.partId ? `mmg-checkout:pp:${identity.id}:${fee.partId}` : `mmg-checkout:pp:${identity.id}`,
+            });
+          }
         }
         await tx.mmgCheckoutIntent.update({
           where: { id: current.id },
           data: { status: 'CONFIRMED', mmgTransactionId: key, providerPaymentId: identity.id, confirmedAt: now, nextCheckAt: null, reason: null },
         });
-        await markSettlementApplying(tx, current.subscriptionId, { checkoutId: current.id }, now);
+        for (const fee of covered) await markSettlementApplying(tx, fee.subscriptionId, fee.source, now);
         return 'credited' as const;
       });
     } catch (err) {
@@ -1375,8 +1601,9 @@ export class MmgCheckoutService {
       throw err;
     }
     if (outcome === 'held') return 'HELD';
+    const covered = await coveredFees(this.prisma, intent);
     if (outcome === 'already') {
-      await this.billing.recoverConfirmationSettlements(intent.subscriptionId, now);
+      for (const fee of covered) await this.billing.recoverConfirmationSettlements(fee.subscriptionId, now);
       return 'CONFIRMED';
     }
 
@@ -1392,9 +1619,11 @@ export class MmgCheckoutService {
     });
     // [I5] Paying while behind re-bills at once and reinstates. It moves no
     // money and is idempotent; the billing cycle is the recovery path.
-    await this.billing.afterTopUpCommitted(intent.subscriptionId, amount, { notify: false }).catch((err) => {
-      log().error({ err, checkoutId: intent.id }, '[MMG checkout] credited; the re-bill will retry through billing');
-    });
+    for (const fee of covered) {
+      await this.billing.afterTopUpCommitted(fee.subscriptionId, fee.amount, { notify: false }).catch((err) => {
+        log().error({ err, checkoutId: intent.id, subscriptionId: fee.subscriptionId }, '[MMG checkout] credited; the re-bill will retry through billing');
+      });
+    }
     await this.tellPartner(intent, 'CONFIRMED');
     return 'CONFIRMED';
   }
@@ -1478,16 +1707,19 @@ export class MmgCheckoutService {
   /** [I6] A person must look: nothing credits, and a reversal is a two-person decision. */
   private async hold(intent: MmgCheckoutIntent, reason: string, now: Date = new Date()): Promise<CheckoutStatus> {
     const moved = await this.prisma.$transaction(async (tx) => {
-      await lockBillingAuthority(tx, intent.subscriptionId);
+      const { covered } = await lockCheckoutAuthority(tx, intent);
       const changed = await tx.mmgCheckoutIntent.updateMany({
         where: { id: intent.id, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED', 'NOT_PAID'] } },
         data: { status: 'HELD', reason, nextCheckAt: null },
       });
       if (changed.count) {
-        const confirmation = await beginConfirmationInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, reason, now);
-        // An MMG negative released this checkout's pause; a later paid-looking
-        // record takes it again, for the same obligation only (owner decision 2).
-        if (confirmation.status === 'PROVEN_UNPAID') await reopenConfirmationForReviewInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, reason, now);
+        // [ENTERPRISE E1] Every branch a chain checkout pays is held for the person, each on its own clock.
+        for (const fee of covered) {
+          const confirmation = await beginConfirmationInTx(tx, fee.subscriptionId, fee.source, reason, now);
+          // An MMG negative released this checkout's pause; a later paid-looking
+          // record takes it again, for the same obligation only (owner decision 2).
+          if (confirmation.status === 'PROVEN_UNPAID') await reopenConfirmationForReviewInTx(tx, fee.subscriptionId, fee.source, reason, now);
+        }
       }
       return changed;
     });
@@ -1510,7 +1742,7 @@ export class MmgCheckoutService {
   private async notPaid(intent: MmgCheckoutIntent, reason: string, now: Date): Promise<CheckoutStatus> {
     const since = (intent.replyAt ?? intent.createdAt).getTime();
     const moved = await this.prisma.$transaction(async (tx) => {
-      await lockBillingAuthority(tx, intent.subscriptionId);
+      const { covered } = await lockCheckoutAuthority(tx, intent);
       const moved = await tx.mmgCheckoutIntent.updateMany({
       where: { id: intent.id, status: 'CONFIRMING' },
       data: {
@@ -1520,7 +1752,9 @@ export class MmgCheckoutService {
         nextCheckAt: intent.candidates.length > 0 && now.getTime() < since + LATE_WINDOW_MS ? new Date(now.getTime() + LATE_CHECK_MS) : null,
       },
     });
-      if (moved.count === 1) await resolveConfirmationInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, 'PROVEN_UNPAID', { actor: 'mmg-provider', reference: reason }, now);
+      if (moved.count === 1) {
+        for (const fee of covered) await resolveConfirmationInTx(tx, fee.subscriptionId, fee.source, 'PROVEN_UNPAID', { actor: 'mmg-provider', reference: reason }, now);
+      }
       return moved;
     });
     if (moved.count === 1) {
@@ -1580,6 +1814,10 @@ export class MmgCheckoutService {
    *  No pay-action promise: the notice says what happened, not what to tap. */
   private async tellPartner(intent: MmgCheckoutIntent, status: 'CONFIRMED' | 'NOT_PAID' | 'HELD'): Promise<void> {
     try {
+      if (!intent.subscriptionId) {
+        await this.tellChainOwner(intent, status);
+        return;
+      }
       const sub = await this.prisma.subscription.findUnique({
         where: { id: intent.subscriptionId },
         select: PAYER_INCLUDE,
@@ -1587,7 +1825,13 @@ export class MmgCheckoutService {
       const userId = payerUserIdOf(sub);
       if (!userId) return;
       const amount = formatMoney(Number(intent.amount), 'GYD', { whole: true });
-      const copy = status === 'CONFIRMED'
+      // [BILL-PRO · REVIEW-M #2230 S4-2] A pro's own-fee payment confirmed after their Services store's fee went live is
+      // kept as credit on the pro's own fee (the store's fee is the one fee now): say that, never "paid".
+      const coveredPro = status === 'CONFIRMED' && !!sub?.serviceProvider
+        && (await this.prisma.subscription.count({ where: liveServicesStoreFeeWhere(sub.serviceProvider.userId) })) > 0;
+      const copy = coveredPro
+        ? { title: 'MMG payment kept as credit', body: `${amount} received with MMG. Your Services store\u2019s weekly fee covers your provider profile now, so this is kept as credit on your own provider weekly fee, never lost.` }
+        : status === 'CONFIRMED'
         ? { title: 'Weekly fee paid', body: `${amount} received with MMG. Thank you.` }
         : status === 'NOT_PAID'
           ? { title: 'MMG payment not completed', body: `MMG did not complete your ${amount} weekly-fee payment.` }
@@ -1603,6 +1847,30 @@ export class MmgCheckoutService {
     } catch (err) {
       log().warn({ err, checkoutId: intent.id, status }, '[MMG checkout] the partner notice failed; the app still polls the truth');
     }
+  }
+
+  /** [ENTERPRISE E1] A chain checkout's owner hears once, for every branch it paid. Like the single notice, it
+   *  says what happened, never what to tap; the app routes kind billing_mmg_checkout to the fee screen. */
+  private async tellChainOwner(intent: MmgCheckoutIntent, status: 'CONFIRMED' | 'NOT_PAID' | 'HELD'): Promise<void> {
+    const owner = intent.chainOwnerId
+      ? await this.prisma.vendorOwner.findUnique({ where: { id: intent.chainOwnerId }, select: { userId: true } })
+      : null;
+    if (!owner) return;
+    const branches = await this.prisma.mmgCheckoutPart.count({ where: { checkoutId: intent.id } });
+    const amount = formatMoney(Number(intent.amount), 'GYD', { whole: true });
+    const fees = branches === 1 ? '1 branch' : `${branches} branches`;
+    const copy = status === 'CONFIRMED'
+      ? { title: 'Weekly fees paid', body: `${amount} received with MMG for ${fees}. Thank you.` }
+      : status === 'NOT_PAID'
+        ? { title: 'MMG payment not completed', body: `MMG did not complete your ${amount} payment for ${fees}.` }
+        : { title: 'We are checking your MMG payment', body: `We are checking your ${amount} MMG payment for ${fees} by hand. Please do not pay again. Support will contact you.` };
+    await this.notifications.send({
+      userId: owner.userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      ...copy,
+      audience: 'business',
+      data: { kind: 'billing_mmg_checkout', ref: intent.id, status, chainCheckout: true },
+    });
   }
 
   /** [DS632] Condition (3): the checkout's own merchant number, the one its
@@ -1640,10 +1908,14 @@ export class MmgCheckoutService {
     // locked decision is after that await, for both first handoff and replay.
     const opened = intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null;
     const result = await this.prisma.$transaction(async (tx) => {
-      const owner = await lockBillingAuthority(tx, intent.subscriptionId);
-      if (owner.userId !== userId) throw new NotFoundError('Subscription', intent.subscriptionId);
+      const { covered, payer } = await lockCheckoutAuthority(tx, intent);
+      if (payer.userId !== userId) throw new NotFoundError('Subscription', intent.subscriptionId ?? intent.id);
       const now = new Date();
-      const decision = await lockFeePaymentDecision(tx, intent.subscriptionId, now, { checkoutId: intent.id });
+      // [ENTERPRISE E1] The page goes out only while EVERY subscription it pays allows it (its own hold, nothing else).
+      let allowed = true;
+      for (const fee of covered) {
+        if (!(await lockFeePaymentDecision(tx, fee.subscriptionId, now, fee.source)).allowed) allowed = false;
+      }
       await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
       let current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
       if (current.status === 'OPEN' && current.expiresAt <= now) {
@@ -1653,7 +1925,7 @@ export class MmgCheckoutService {
             ? new Date(now.getTime() + LATE_CHECK_MS) : null,
         } });
       }
-      return { current, blocked: current.status === 'OPEN' && !decision.allowed };
+      return { current, blocked: current.status === 'OPEN' && !allowed };
     });
     if (result.blocked) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.', { ref: result.current.id });
     const current = result.current;
@@ -1664,6 +1936,21 @@ export class MmgCheckoutService {
       amountGyd: Number(current.amount),
       currencyCode: 'GYD',
       expiresAt: current.expiresAt.toISOString(),
+    };
+  }
+
+  /** [ENTERPRISE E1] A chain checkout's own fields: it pays several subscriptions, so it carries no one status. */
+  private chainView(intent: MmgCheckoutIntent): Omit<CheckoutView, 'subscriptionStatus'> {
+    return {
+      ref: intent.id,
+      status: intent.status as CheckoutStatus,
+      amountGyd: Number(intent.amount),
+      currencyCode: 'GYD',
+      createdAt: intent.createdAt.toISOString(),
+      expiresAt: intent.expiresAt.toISOString(),
+      confirmedAt: intent.confirmedAt ? intent.confirmedAt.toISOString() : null,
+      ...partnerReceiptIds(intent),
+      seller: FEE_SELLER,
     };
   }
 

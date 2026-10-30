@@ -210,7 +210,8 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
   const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
   const [checkouts, cardPayments, payments, holds, credit, reversals] = await Promise.all([
-    tx.mmgCheckoutIntent.count({ where: { subscriptionId, OR: [
+    // [ENTERPRISE E1] A store's own checkouts and every "pay all my branches" checkout that pays one of its stores.
+    tx.mmgCheckoutIntent.count({ where: { AND: [{ OR: [{ subscriptionId }, { parts: { some: { subscriptionId } } }] }, { OR: [
       { status: { in: ['OPEN', 'CONFIRMING', 'HELD'] } },
       // [DS782 S2] A late MMG reply re-arms an EXPIRED or NOT_PAID checkout and
       // a confirmation is still credited, so it is final only once no check is
@@ -220,7 +221,7 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
         { createdAt: { gt: lateHorizon } },
         { replyAt: { gt: lateHorizon } },
       ] },
-    ] } }),
+    ] }] } }),
     // A card payment for the fee still open, unknown or held (saving a card moves no money).
     tx.cardSession.count({ where: { subscriptionId, purpose: 'PAY_NOW', status: { in: ['OPEN', 'UNKNOWN', 'HELD'] } } }),
     // The weekly MMG prompt and any other fee payment not yet settled.

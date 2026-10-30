@@ -190,6 +190,8 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/settlement-batches/:id/adjust-deposit`]: approval('payout'),
   // Weekly-fee checkouts and fee money.
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createCheckout', 'const replay = await this.answerForKey(who, now);']] },
+  // [ENTERPRISE E1] "Pay all my branches": the same key rule (a key that answered keeps its answer), one open per owner.
+  'modules/billing/mmg-checkout.routes.ts|POST|/subscription/chain-fees/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createChainCheckout', 'const replay = await this.answerForKey(who, now);']] },
   'modules/billing/mmg-checkout.routes.ts|POST|/notify': { kind: 'fee-checkout', guard: 'state', pins: MMG_REPLY_CAS },
   'modules/billing/mmg-checkout.routes.ts|POST|/return': { kind: 'fee-checkout', guard: 'state', pins: MMG_REPLY_CAS },
   'modules/billing/card-rail.routes.ts|POST|/subscription/card-sessions': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/card-rail.routes.ts', H, 'subscriptionId_purpose_idempotencyKey: { subscriptionId: sub.id, purpose, idempotencyKey: key }']] },

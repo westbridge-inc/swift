@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { currentDunningClock, resolveConfirmationInTx } from './dunning-clock';
+import { coveredFees } from './chain-checkout';
 import { historyRowFrom, type MmgCheckoutLookupClient, type MmgHistoryQuery } from '../../providers/mmg/mmg-provider';
 import { MMG_HISTORY_CLOCK_TOLERANCE_MS, MMG_HISTORY_MARGIN_MS, MMG_HISTORY_ROWS, mmgHistoryQueryFor, mmgHistoryTruncated, mmgStampOf } from '../../providers/mmg/mmg-history';
 import type { MmgCreationZone } from '../../providers/mmg/mmg-checkout';
@@ -77,7 +78,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 /** The checkout facts every step re-reads. */
 const CHECKOUT_FIELDS = {
-  id: true, tenantId: true, subscriptionId: true, merchantTransactionId: true, status: true, reason: true, candidates: true,
+  id: true, tenantId: true, subscriptionId: true, amount: true, merchantTransactionId: true, status: true, reason: true, candidates: true,
   replyAt: true, mmgTransactionId: true, providerPaymentId: true, confirmedAt: true, createdAt: true, expiresAt: true,
 } satisfies Prisma.MmgCheckoutIntentSelect;
 type CheckoutFacts = Prisma.MmgCheckoutIntentGetPayload<{ select: typeof CHECKOUT_FIELDS }>;
@@ -130,7 +131,7 @@ function leaves(value: unknown, out: string[] = [], depth = 0): string[] {
  * subscription since it opened; a second-admin request for this hold that is
  * still waiting or approved and unspent.
  */
-async function blockerOf(db: Db, holdId: string, c: CheckoutFacts, now: Date): Promise<string | null> {
+async function blockerOf(db: Db, c: CheckoutFacts, now: Date): Promise<string | null> {
   const replies = await db.mmgCheckoutObservation.count({ where: { OR: [
     { intentId: c.id, source: { in: ['RETURN', 'NOTIFY'] } },
     { intentId: null, source: { in: ['RETURN', 'NOTIFY'] }, failure: { in: ['NO_TOKEN', 'INVALID_RESPONSE'] },
@@ -138,13 +139,17 @@ async function blockerOf(db: Db, holdId: string, c: CheckoutFacts, now: Date): P
       createdAt: { gte: c.createdAt, lte: now } },
   ] } });
   if (replies > 0) return 'REPLY_ON_RECORD';
+  // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout pays several branches: any MMG payment on ANY branch it
+  // covers since it opened, and an admin request on ANY of its branches' holds, leaves it to the admins.
+  const covered = await coveredFees(db, { id: c.id, subscriptionId: c.subscriptionId, amount: c.amount });
   const money = await db.providerPayment.count({ where: { OR: [
     { creditedPaymentId: `mco:${c.id}` },
-    { provider: 'MMG', subscriptionId: c.subscriptionId, createdAt: { gte: new Date(c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS) } },
+    { provider: 'MMG', subscriptionId: { in: covered.map((f) => f.subscriptionId) }, createdAt: { gte: new Date(c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS) } },
   ] } });
   if (money > 0) return 'PROVIDER_PAYMENT_ON_RECORD';
+  const holds = await db.paymentConfirmationHold.findMany({ where: { OR: covered.map((f) => f.source) }, select: { id: true } });
   const asked = await db.privilegedApproval.count({ where: {
-    action: CONFIRMATION_RESOLVE_ACTION, entityId: holdId, status: { in: ['PENDING', 'APPROVED'] }, expiresAt: { gt: now },
+    action: CONFIRMATION_RESOLVE_ACTION, entityId: { in: holds.map((h) => h.id) }, status: { in: ['PENDING', 'APPROVED'] }, expiresAt: { gt: now },
   } });
   if (asked > 0) return 'ADMIN_REQUEST_IN_FLIGHT';
   return null;
@@ -220,11 +225,24 @@ export async function checkExpiredNoReplyHolds(
   const out = { checked: 0, closed: 0 };
   if (!deps.zone) return out;
   const zone = deps.zone;
-  const holds = await db.paymentConfirmationHold.findMany({
-    where: { status: 'ACTIVE', checkout: { is: { ...NEVER_ANSWERED, expiresAt: { lte: new Date(now.getTime() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS) } } } },
+  // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout's branches hold through their parts: the same rule finds
+  // it through any of them, and it is checked (and closed) once, for every branch.
+  const expiredBefore = new Date(now.getTime() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS);
+  const rows = await db.paymentConfirmationHold.findMany({
+    where: { status: 'ACTIVE', OR: [
+      { checkout: { is: { ...NEVER_ANSWERED, expiresAt: { lte: expiredBefore } } } },
+      { checkoutPart: { is: { checkout: { is: { ...NEVER_ANSWERED, expiresAt: { lte: expiredBefore } } } } } },
+    ] },
     // Newest first: a page just abandoned is checked promptly; holds whose checks are spent sink.
     orderBy: [{ beganAt: 'desc' }, { id: 'asc' }], take: SCAN,
-    select: { id: true, checkout: { select: CHECKOUT_FIELDS } },
+    select: { id: true, checkout: { select: CHECKOUT_FIELDS }, checkoutPart: { select: { checkout: { select: CHECKOUT_FIELDS } } } },
+  });
+  const seen = new Set<string>();
+  const holds = rows.flatMap((row) => {
+    const checkout = row.checkout ?? row.checkoutPart?.checkout ?? null;
+    if (!checkout || seen.has(checkout.id)) return [];
+    seen.add(checkout.id);
+    return [{ id: row.id, checkout }];
   });
   if (holds.length === 0) return out;
   const tries = await db.mmgCheckoutObservation.groupBy({
@@ -239,7 +257,7 @@ export async function checkExpiredNoReplyHolds(
     const { attempts, lastAt } = triesOf.get(c.id) ?? { attempts: 0, lastAt: null };
     const at = noReplyCheckDueAt(c, attempts, lastAt);
     if (at === null || at > now.getTime() || !neverAnswered(c)) continue;
-    if (await blockerOf(db, hold.id, c, now)) continue;
+    if (await blockerOf(db, c, now)) continue;
     due.push({ holdId: hold.id, checkout: c, attempts });
     if (due.length >= CHECK_BATCH) break;
   }
@@ -327,26 +345,43 @@ async function closeUnpaid(db: PrismaClient, holdId: string, checkoutId: string,
   return db.$transaction(async (tx) => {
     const candidate = await tx.paymentConfirmationHold.findUnique({ where: { id: holdId }, select: { subscriptionId: true } });
     if (!candidate) return false;
-    const clock = await currentDunningClock(tx, candidate.subscriptionId, now);
+    const intent = await tx.mmgCheckoutIntent.findUnique({ where: { id: checkoutId }, select: { id: true, subscriptionId: true, amount: true } });
+    if (!intent) return false;
+    // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] Every subscription the checkout pays (one, or a pay-all's branches,
+    // sorted: the order every verifier takes), each clock read under its payer's lock, then the checkout.
+    const covered = await coveredFees(tx, intent);
+    const clocks = new Map<string, Awaited<ReturnType<typeof currentDunningClock>>>();
+    for (const fee of covered) clocks.set(fee.subscriptionId, await currentDunningClock(tx, fee.subscriptionId, now));
     await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${checkoutId} FOR UPDATE`;
-    const hold = await tx.paymentConfirmationHold.findUniqueOrThrow({ where: { id: holdId } });
     const checkout = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: checkoutId }, select: CHECKOUT_FIELDS });
-    if (hold.status !== 'ACTIVE' || hold.checkoutId !== checkoutId || hold.clockId !== clock.id
-      || hold.sourceEpoch !== clock.epoch || !neverAnswered(checkout)) return false;
-    if (await blockerOf(tx, hold.id, checkout, now)) return false;
+    if (!neverAnswered(checkout)) return false;
+    const holds = [];
+    for (const fee of covered) {
+      const hold = await tx.paymentConfirmationHold.findFirst({ where: fee.source });
+      const clock = clocks.get(fee.subscriptionId)!;
+      if (!hold || hold.status !== 'ACTIVE' || hold.clockId !== clock.id || hold.sourceEpoch !== clock.epoch) return false;
+      holds.push(hold);
+    }
+    if (!holds.some((hold) => hold.id === holdId)) return false;
+    if (await blockerOf(tx, checkout, now)) return false;
     const reference = `mmg-history-none:${facts.observationId}`;
     const moved = await tx.mmgCheckoutIntent.updateMany({ where: { id: checkoutId, status: 'EXPIRED' },
       data: { status: 'NOT_PAID', nextCheckAt: null, reason: NO_REPLY_CLOSED_REASON } });
     if (moved.count !== 1) return false;
-    await resolveConfirmationInTx(tx, hold.subscriptionId, { checkoutId }, 'PROVEN_UNPAID', { actor: NO_REPLY_CHECK_ACTOR, reference }, now);
-    const resolved = await tx.paymentConfirmationHold.findUniqueOrThrow({ where: { id: hold.id } });
-    await tx.auditLog.create({ data: { action: NO_REPLY_CLOSE_AUDIT, entity: 'PaymentConfirmationHold', entityId: hold.id, changes: {
-      tenantId: hold.tenantId, confirmationId: hold.id, subscriptionId: hold.subscriptionId, sourceId: checkoutId, epoch: hold.sourceEpoch,
-      decision: 'UNPAID', evidenceReference: reference, status: resolved.status, actor: NO_REPLY_CHECK_ACTOR,
+    for (const fee of covered) {
+      await resolveConfirmationInTx(tx, fee.subscriptionId, fee.source, 'PROVEN_UNPAID', { actor: NO_REPLY_CHECK_ACTOR, reference }, now);
+    }
+    const resolved = await tx.paymentConfirmationHold.findMany({ where: { id: { in: holds.map((hold) => hold.id) } } });
+    const first = holds.find((hold) => hold.id === holdId)!;
+    await tx.auditLog.create({ data: { action: NO_REPLY_CLOSE_AUDIT, entity: 'PaymentConfirmationHold', entityId: first.id, changes: {
+      tenantId: first.tenantId, confirmationId: first.id, subscriptionId: first.subscriptionId, sourceId: checkoutId, epoch: first.sourceEpoch,
+      decision: 'UNPAID', evidenceReference: reference, status: resolved.find((hold) => hold.id === first.id)?.status ?? null, actor: NO_REPLY_CHECK_ACTOR,
       checkoutReason: NO_REPLY_CLOSED_REASON, observationId: facts.observationId, controlCheckoutId: facts.controlCheckoutId,
       fromdate: facts.query.fromdate, todate: facts.query.todate, rowsReturned: facts.rowsReturned, explainedRows: facts.explained,
+      // A pay-all checkout: every branch it covered was released together.
+      ...(covered.length > 1 || !intent.subscriptionId ? { coveredHolds: resolved.map((hold) => ({ confirmationId: hold.id, subscriptionId: hold.subscriptionId, status: hold.status })) } : {}),
     } } });
-    return resolved.status === 'PROVEN_UNPAID';
+    return resolved.length === holds.length && resolved.every((hold) => hold.status === 'PROVEN_UNPAID');
   });
 }
 
@@ -424,11 +459,22 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
   });
   const endedIds = [...new Set(ended.map((o) => o.intentId).filter((id): id is string => !!id))];
   // No age limit: every automatic close stays watched until it ends (oldest first).
-  const closed = await db.paymentConfirmationHold.findMany({
-    where: { status: 'PROVEN_UNPAID', resolvedBy: NO_REPLY_CHECK_ACTOR, ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}),
-      checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } },
+  // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout closed this way is watched too, once (its branches hold through parts).
+  const watchedFields = { id: true, tenantId: true, merchantTransactionId: true, amount: true, currencyCode: true } as const;
+  const closedRows = await db.paymentConfirmationHold.findMany({
+    where: { status: 'PROVEN_UNPAID', resolvedBy: NO_REPLY_CHECK_ACTOR, OR: [
+      { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } },
+      { checkoutPart: { is: { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } } } },
+    ] },
     orderBy: [{ resolvedAt: 'asc' }, { id: 'asc' }], take: SCAN,
-    select: { id: true, resolvedAt: true, checkout: { select: { id: true, tenantId: true, merchantTransactionId: true, amount: true, currencyCode: true } } },
+    select: { id: true, resolvedAt: true, checkout: { select: watchedFields }, checkoutPart: { select: { checkout: { select: watchedFields } } } },
+  });
+  const watchedIds = new Set<string>();
+  const closed = closedRows.flatMap((row) => {
+    const checkout = row.checkout ?? row.checkoutPart?.checkout ?? null;
+    if (!checkout || watchedIds.has(checkout.id)) return [];
+    watchedIds.add(checkout.id);
+    return [{ id: row.id, resolvedAt: row.resolvedAt, checkout }];
   });
   let reads = 0;
   for (const hold of closed) {
@@ -529,7 +575,9 @@ async function watchOne(
     }
     return false;
   }
-  const hold = await db.paymentConfirmationHold.findUnique({ where: { checkoutId: c.id }, select: { id: true, status: true, reason: true, sourceEpoch: true } });
+  // A pay-all checkout's branches hold through parts: one of them stands for the record (each is held the same way).
+  const hold = await db.paymentConfirmationHold.findFirst({ where: { OR: [{ checkoutId: c.id }, { checkoutPart: { is: { checkoutId: c.id } } }] },
+    orderBy: { id: 'asc' }, select: { id: true, status: true, reason: true, sourceEpoch: true } });
   await db.auditLog.create({ data: { action: AUTO_CLOSE_LATE_RECORD_AUDIT, entity: 'MmgCheckoutIntent', entityId: c.id, changes: {
     tenantId: c.tenantId, checkoutId: c.id, subscriptionId: held.subscriptionId, reason: held.reason, actor: NO_REPLY_CHECK_ACTOR,
     assessment: likely ? 'LATE_PAYMENT_LIKELY' : 'POSSIBLE_MATCH', confirmationId: hold?.id ?? null, confirmationStatus: hold?.status ?? null,

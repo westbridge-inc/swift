@@ -172,14 +172,58 @@ export async function birthDueProFees(
 /** The path a pro's fee tick is recorded under (a store's or a mover's tick at sign-up is not a pro's). */
 export const PRO_FEE_ACK_PATH = 'provider/weekly-fee-ack';
 
-/** Has this pro ticked "I understand the weekly fee" as a pro (the current words)? */
-export async function proFeeAcknowledged(db: Db, userId: string): Promise<boolean> {
+/** A pro's fee tick: the amount and currency the words were ticked to (evidence.weeklyFee). */
+export interface ProFeeTick { amount: number; currencyCode: string }
+
+/** The pro's LATEST "I understand the weekly fee" tick as a pro (the current words), or null when there is none, it was
+ *  withdrawn, or it carries no amount. */
+export async function latestProFeeTick(db: Db, userId: string): Promise<ProFeeTick | null> {
   const tick = await db.consentRecord.findFirst({
     where: { subjectId: userId, documentType: WEEKLY_FEE_ACK_TYPE, documentVersion: WEEKLY_FEE_ACK_VERSION, evidence: { path: ['path'], equals: PRO_FEE_ACK_PATH } },
     orderBy: { capturedAt: 'desc' },
-    select: { action: true },
+    select: { action: true, evidence: true },
   });
-  return !!tick && tick.action !== 'withdrawn';
+  if (!tick || tick.action === 'withdrawn') return null;
+  const fee = (tick.evidence as { weeklyFee?: { amount?: unknown; currencyCode?: unknown } } | null)?.weeklyFee;
+  return typeof fee?.amount === 'number' && typeof fee.currencyCode === 'string' ? { amount: fee.amount, currencyCode: fee.currencyCode } : null;
+}
+
+/** [REVIEW-G #2230 S3-1 · owner B3] Was this tick given to exactly this fee (amount AND currency)? */
+export function tickIsFor(tick: ProFeeTick | null, fee: ProFeeTick): boolean {
+  return !!tick && tick.amount === fee.amount && tick.currencyCode === fee.currencyCode;
+}
+
+export interface ProFeeAckState {
+  /** The pro's tick holds: see proFeeAckState. */
+  acknowledged: boolean;
+  /** What the pro is asked to tick now (the services rate: what the fee would be born at). */
+  amount: number;
+  currencyCode: string;
+  /** The amount their latest tick was given to (null: never ticked, or withdrawn). */
+  ticked: ProFeeTick | null;
+  /** They ticked, but to another amount than the one asked now: ask again, naming the new amount. */
+  changed: boolean;
+}
+
+/**
+ * [REVIEW-G #2230 S3-1 · owner B3: "the amount they saw"] Does this pro's fee tick hold? A tick is consent to ONE
+ * amount. Before the fee is born, it holds only when the pro's LATEST tick was given to the amount the fee would be
+ * born at now (the services rate, proFeeQuote): if the rate changed after they ticked (say while the switch was off,
+ * or while their documents waited), they are asked again at the new amount and nothing is born until they tick it
+ * (birth re-checks the exact rate it writes: pro-fee-due.ts). Once the fee is born the tick that bore it holds: the
+ * born fee's own price changes go through the told-in-advance fee-rise rules, never through this tick.
+ */
+export async function proFeeAckState(db: Db, userId: string): Promise<ProFeeAckState> {
+  const ticked = await latestProFeeTick(db, userId);
+  const quote = await proFeeQuote(db, userId);
+  const own = await db.serviceProvider.findUnique({ where: { userId }, select: { subscription: { select: { id: true } } } });
+  const acknowledged = own?.subscription ? ticked !== null : tickIsFor(ticked, quote);
+  return { acknowledged, amount: quote.amount, currencyCode: quote.currencyCode, ticked, changed: ticked !== null && !acknowledged };
+}
+
+/** Has this pro ticked "I understand the weekly fee" as a pro, and does that tick hold (proFeeAckState)? */
+export async function proFeeAcknowledged(db: Db, userId: string): Promise<boolean> {
+  return (await proFeeAckState(db, userId)).acknowledged;
 }
 
 /** What a pro is quoted now: the services rate, the function the price list and billing use. */
@@ -188,7 +232,7 @@ export function proFeeQuote(db: Db, userId: string) {
 }
 
 /** Record a pro's fee tick: the words' version and the amount they saw must be the current ones, or nothing is written
- *  (WEEKLY_FEE_TERMS_CHANGED / WEEKLY_FEE_CHANGED), exactly as at partner sign-up. Idempotent per pro. */
+ *  (WEEKLY_FEE_TERMS_CHANGED / WEEKLY_FEE_CHANGED), exactly as at partner sign-up. Idempotent per pro and amount. */
 export async function recordProFeeAck(prisma: PrismaClient, input: { userId: string; ack: WeeklyFeeAck; surface: ConsentSurface; ip?: string | null }): Promise<void> {
   assertWeeklyFeeAck(true, input.ack);
   await publishLegalDocumentOnce(prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
@@ -197,7 +241,9 @@ export async function recordProFeeAck(prisma: PrismaClient, input: { userId: str
     if (!pro) throw new AppError(404, 'NOT_FOUND', 'ServiceProvider not found');
     const quote = await proFeeQuote(tx, input.userId);
     assertSawQuote(input.ack, quote);
-    if (await proFeeAcknowledged(tx, input.userId)) return;
+    // [REVIEW-G #2230 S3-1] Idempotent only for the SAME amount: a tick to a new amount (the rate changed since the
+    // last tick) is a new consent and is written.
+    if (tickIsFor(await latestProFeeTick(tx, input.userId), quote)) return;
     await recordConsent(tx, {
       subjectType: 'vendor_user', subjectId: input.userId, documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION,
       action: 'granted', surface: input.surface, ip: input.ip ?? null,
