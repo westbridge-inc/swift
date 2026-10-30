@@ -10,7 +10,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Machine version stamped onto User.tosVersion at signup consent. */
-export const LEGAL_VERSION = "2026-10-29.1" as const;
+export const LEGAL_VERSION = "2026-10-29.2" as const;
 
 /** Human-readable effective date, as published. */
 export const LEGAL_LAST_UPDATED = "29 October 2026" as const;
