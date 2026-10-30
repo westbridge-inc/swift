@@ -174,7 +174,7 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(page).not.toMatch(/automatic/i);
     expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
     expect(page).not.toMatch(/every new store starts on/i);
-    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale or removed in the last 7 days (a services business pays the Services rate). '
+    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). '
       + 'The store sees that exact fee, and its owner ticks it before anything is charged. '
       + 'After that, Swift does not move a store to another rate as its items change.');
     expect(page).toContain('A rate agreed with Swift stays as agreed.');

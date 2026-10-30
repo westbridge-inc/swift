@@ -57,7 +57,7 @@ export function PricingCard(props: PricingCardProps) {
       .map((step) => ` A new store with ${step.minItems.toLocaleString()}+ items when Swift approves it gets ${bandTrialDays(step, p.trialDays)} days free.`);
     const next = quote.ladder[1];
     const sizeLine = next
-      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} items. If yours has more by the time Swift approves the store (counting items taken off sale or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.`
+      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} items. If yours has more by the time Swift approves the store (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.`
       : ' This rate does not change as your catalogue grows.';
     detail =
       quote.tier === 'service'
