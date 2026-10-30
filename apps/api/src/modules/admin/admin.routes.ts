@@ -4487,12 +4487,17 @@ export async function adminRoutes(app: FastifyInstance) {
    *  not happen. Money (C4), like the change itself. */
   app.delete('/vendor-owners/:id/deal-change', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = z.object({ reason: z.string().trim().min(8).max(500) }).strict().parse(request.body ?? {});
+    // A DELETE carries its stated reason in the x-swift-reason header (the console's one transport, as every C4 call);
+    // a body reason is accepted too. Either way it is required.
+    const body = z.object({ reason: z.string().trim().min(8).max(500).optional() }).strict().parse(request.body ?? {});
+    const header = request.headers['x-swift-reason'];
+    const reason = (typeof header === 'string' && header.trim() ? header.trim() : body.reason ?? '').slice(0, 500);
+    if (reason.length < 8) throw new ValidationError('State why the change is withdrawn (at least 8 characters).');
     const dropped = await cancelChainDealChange(
       app.prisma,
-      { ownerId: id, reason: body.reason, adminUserId: request.user.userId, tenantId: requireTenantId() },
+      { ownerId: id, reason, adminUserId: request.user.userId, tenantId: requireTenantId() },
       (tx, rises) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
-        reason: body.reason, extra: { droppedRises: rises.length, told: rises.filter((r) => r.held.noticeAt).length },
+        reason, extra: { droppedRises: rises.length, told: rises.filter((r) => r.held.noticeAt).length },
       }),
     );
     await billing.tellChainDealRisesDropped(dropped);

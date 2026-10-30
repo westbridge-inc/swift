@@ -334,6 +334,10 @@ describe('[E2] withdrawing a change, or a lower deal, raises nothing', () => {
     expect(sent.map((n) => n.title)).toEqual([`${name}: your weekly fee is changing`, `${name}: your weekly fee is not changing`]);
     expect((sent[1]!.data as Record<string, unknown>)['vendorId']).toBe(c.branches[0]!.vendorId);
     expect((await withdraw(c.ownerId)).json().error.code).toBe('NO_DEAL_CHANGE');
+    // A DELETE carries its reason in the stated-reason header alone (no body), as every console C4 call does.
+    await change(c.ownerId, { kind: 'END', notBefore: new Date(Date.now() + 3 * DAY).toISOString() });
+    const headerOnly = await call('DELETE', `/api/v1/admin/vendor-owners/${c.ownerId}/deal-change`);
+    expect(headerOnly.statusCode, headerOnly.body).toBe(200);
   });
 
   it('N5 a change already in force for the owner cannot be withdrawn; a lower deal supersedes it and drops what is left', async () => {
