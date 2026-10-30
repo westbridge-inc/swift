@@ -235,6 +235,8 @@ export interface DashboardOverview {
     weeklyWaived: number;
   }[];
   alerts: { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
+  /** [RIDER-SAFE 6] Free riders (online, empty hands) beside the orders waiting for a rider now. Absent on an older server. */
+  riderSupply?: { freeRiders: number; waitingForRider: number };
 }
 
 export interface RevenueResponse {
@@ -540,6 +542,34 @@ export interface LiveOps {
   }[];
 }
 export const fetchLiveOps = (): Promise<Envelope<LiveOps>> => apiFetch('/api/v1/admin/ops/live');
+
+/** [RIDER-SAFE 5] Swift's delivery pause: platform-wide (this operator) or by zone. Pickup stays open. */
+export interface DeliveryPause {
+  platform: boolean;
+  zoneIds: string[];
+  version: number;
+  updatedBy: string | null;
+  updatedAt: string | null;
+  zones: { id: string; name: string }[];
+}
+export const fetchDeliveryPause = (): Promise<Envelope<DeliveryPause>> => apiFetch('/api/v1/admin/delivery-pause');
+/** C3: the reason rides the header (the law) and the body (the switch's own audit row records it). */
+export const setDeliveryPause = (body: { platform: boolean; zoneIds: string[]; expectedVersion: number }, reason: string) =>
+  apiFetch('/api/v1/admin/delivery-pause', { method: 'PUT', body: JSON.stringify({ ...body, reason }), reason });
+
+/** [RIDER-SAFE 6] Live delivery orders past a stage's time (GET /admin/orders/sla-breaches), worst first. */
+export interface SlaBreach {
+  orderId: string;
+  orderNumber: string;
+  vendorId: string | null;
+  status: string;
+  /** The stage whose clock is still running, if any: ACCEPT | PREP | PICKUP_WAIT | DELIVERY. */
+  openStage: 'ACCEPT' | 'PREP' | 'PICKUP_WAIT' | 'DELIVERY' | null;
+  breached: boolean;
+  worstOverMs: number;
+}
+export const fetchSlaBreaches = (): Promise<Envelope<SlaBreach[]> & { scanned?: number; truncated?: boolean }> =>
+  apiFetch('/api/v1/admin/orders/sla-breaches');
 export const fetchCountries = () => apiFetch('/api/v1/admin/countries');
 
 // ─── Compliance (liability shield) ───────────────────────────────

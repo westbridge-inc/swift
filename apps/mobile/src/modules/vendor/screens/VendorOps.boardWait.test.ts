@@ -26,7 +26,7 @@ vi.mock('../../../stores/vendorPreview', () => ({ useVendorPreview: (pick: (_s: 
 vi.mock('../../../hooks/vendorops', () => ({
   useVendorProfile: () => ({ stores: [], owner: { myRole: 'OWNER' } }),
   useVendorSubscription: () => ({ data: fx.sub }),
-  ...Object.fromEntries(['useVendorOrderHistory', 'useToggleOpen', 'useToggleOrders', 'useSetSelfDelivery', 'useSetRequirePickupCode', 'useVendorMenu', 'useVendorQr', 'useVendorAnalytics', 'useVendorRevenue', 'useVendorOps', 'useVendorHours'].map((name) => [name, () => ({})])),
+  ...Object.fromEntries(['useVendorOrderHistory', 'useToggleOpen', 'useToggleOrders', 'useSetSelfDelivery', 'useSetRequirePickupCode', 'useVendorMenu', 'useVendorQr', 'useVendorAnalytics', 'useVendorRevenue', 'useVendorOps', 'useVendorHours', 'useDeliveryStatus'].map((name) => [name, () => ({})])),
   useVendorOrders: () => ({ data: fx.orders, isLoading: false, isError: false }),
   // The ONE shared mutation is busy (a tap on order A is out): a board wired to its isPending would freeze every card.
   useOrderAction: () => ({ mutate: fx.mutate, isPending: fx.sharedPending, variables: { id: 'order-a', action: 'accept' } }),

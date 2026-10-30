@@ -17,7 +17,7 @@ import { authorityTables } from './helpers/fee-authority-fixture';
 //   service provider                                8,000
 //   restaurant/store/grocery, < 1,000 active items  15,000
 //   1,000–9,999 active items                        20,000
-//   10,000+ active items                            60,000
+//   10,000+ active items                            45,000   (owner, 2026-10-29; was 60,000)
 // Every store pays its own tier: no multi-store discount (owner, 13 Oct 2026).
 //
 // Service-free: every database call below is an in-memory fake, and the
@@ -61,7 +61,7 @@ type MoverKind = 'RIDER' | 'DRIVER';
 type VendorKind = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 8000, service: 8000, small: 15000, large: 20000, department: 60000 };
+const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 8000, service: 8000, small: 15000, large: 20000, department: 45000 };
 /** Every key the complete card carries — a Guyana card missing any one of them is no card at all. */
 const CARD_KEYS = [
   'mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor',
@@ -159,6 +159,8 @@ function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY',
       ),
       findUniqueOrThrow: vi.fn(async () => ({ owner: { userId: 'user-vendor' } })),
     },
+    // [DEPT-PRICE] The trial length counts the store's own catalogue at approval: a new store has none.
+    item: { count: vi.fn(async () => 0) },
     subscription: { ...authority.subscription, create, findFirstOrThrow: vi.fn() },
     enforcementAction: { create: vi.fn(() => Promise.resolve({})) },
     // [SAFE-B] The trial law reads the identity authority (no cluster here);
@@ -486,7 +488,7 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     for (const applied of [
       '2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1', '2026-10-01.2', '2026-10-04.1',
       '2026-10-04.2', '2026-10-06.1', '2026-10-07.1', '2026-10-07.2', '2026-10-13.1', '2026-10-13.2', '2026-10-13.3', '2026-10-14.1', '2026-10-14.2',
-      '2026-10-14.3', '2026-10-14.4',
+      '2026-10-14.3', '2026-10-14.4', '2026-10-14.5', '2026-10-24.1',
     ]) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 
@@ -681,7 +683,8 @@ describe('weekly re-tier — automatic, no approval, custom and waived untouched
       { id: 'r999', vendorType: 'RESTAURANT', activeItems: 999, weeklyRate: 20000 },
       { id: 's1000', vendorType: 'STORE', activeItems: 1000, weeklyRate: OWNER.small },
       { id: 'g9999', vendorType: 'SUPERMARKET', activeItems: 9999, weeklyRate: 30000 },
-      { id: 'g10000', vendorType: 'SUPERMARKET', activeItems: 10000, weeklyRate: 50000 },
+      // [DEPT-PRICE] below the 45,000 department fee (was 50,000 under the 60,000 card), so the move is still a rise
+      { id: 'g10000', vendorType: 'SUPERMARKET', activeItems: 10000, weeklyRate: 40000 },
       { id: 'svc', vendorType: 'SERVICE', activeItems: 40, weeklyRate: 12000 },
       { id: 'steady', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.small },
     ]);
@@ -727,9 +730,9 @@ describe('public price list — quote equals bill, for every partner', () => {
     expect(d.vendors).toEqual({
       service: OWNER.service,
       catalogue: [
-        { minItems: 0, tier: 'small', rate: OWNER.small },
-        { minItems: 1000, tier: 'large', rate: OWNER.large },
-        { minItems: 10000, tier: 'department', rate: OWNER.department },
+        { minItems: 0, tier: 'small', rate: OWNER.small, trialDays: 14 },
+        { minItems: 1000, tier: 'large', rate: OWNER.large, trialDays: 14 },
+        { minItems: 10000, tier: 'department', rate: OWNER.department, trialDays: 7 },
       ],
     });
     expect(d.franchise).toBeNull();
@@ -946,7 +949,7 @@ describe('the complete card — every key present and valid, or the whole market
   it('replays the review: the fallbacks that quietly re-priced an incomplete card are refusals now', () => {
     // Deleting one key at a time, the review got 8,000 for a taxi driver, 15,000
     // for a service and 20,000 for a department store — a different card each
-    // time, where the valid card says 8,000 / 8,000 / 60,000.
+    // time, where the valid card says 8,000 / 8,000 / 45,000 (60,000 before 29 Oct 2026).
     const t = (tiers: Tiers) => tiers as pricing.SubscriptionTiers;
     const calls = [
       () => pricing.partnerRateFor(t(without('taxiDriver')), { kind: 'DRIVER', vehicleType: 'CAR' }),
