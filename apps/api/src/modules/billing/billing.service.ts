@@ -32,7 +32,7 @@ import { catalogueCardTop } from './card-price-cut';
 import { paymentInFlightInTx } from './payment-in-flight';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, guyanaDay, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -54,6 +54,7 @@ import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirm
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { moverUserIdOf, PAYER_INCLUDE, payerAudienceOf, payerOf, payerUserIdOf } from '../subscription/subscription-owner';
+import { sweepChainDealChanges } from '../vendor/chain-deal';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -444,6 +445,8 @@ export class BillingService {
     const now = at ?? new Date();
     const clock = batchClock(at);
     await this.recoverConfirmationSettlements(undefined, now);
+    // [ENTERPRISE E2] Chain deal ends and raises first: the branches due their notice are held, to be told below.
+    await sweepChainDealChanges(this.prisma, now).catch((err) => log().error({ err }, '[E2] the pass over chain deal changes failed; billing goes on at the rates on record'));
     // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
     // rise whose date the next fee has reached moved in, before anything due is priced.
     await this.sweepFeeRises(now).catch((err) => log().error({ err }, '[F2] the pass over held fee rises failed; billing goes on at the rates on record'));
@@ -5380,6 +5383,15 @@ export class BillingService {
   private feeRiseObstacle(sub: Subscription | null, held: HeldFeeRise): string | null {
     if (!sub) return 'GONE';
     if (sub.status === 'CANCELLED') return 'PLAN_ENDED';
+    // [ENTERPRISE E2] A chain-deal rise moves the NEGOTIATED rate it was held for, and only that one, while the branch
+    // is still charged what it was told it pays now (a deal lowered, or the branch's tier moved, drops it: the owner's
+    // deal change holds it again with the new numbers, told again).
+    if (held.source === 'CHAIN_DEAL') {
+      if (sub.customRate === null || Number(sub.customRate) !== held.customFrom) return 'DEAL_MOVED';
+      // What it pays now, and what it would pay then, are still the two fees it was told.
+      if (weeklyFeeAmount(sub) !== held.from || weeklyFeeAmount({ weeklyRate: sub.weeklyRate, customRate: held.customTo ?? null }) !== held.to) return 'RATE_MOVED';
+      return null;
+    }
     if (sub.customRate !== null) return 'NEGOTIATED_RATE';
     if (Number(sub.weeklyRate) !== held.from) return 'RATE_MOVED';
     return null;
@@ -5410,15 +5422,20 @@ export class BillingService {
     }
     // A fresh clock: a long run's start time never dates a notice sent later.
     const at = new Date(Math.max(now.getTime(), Date.now()));
-    const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at);
+    // [ENTERPRISE E2] A chain deal's end date: never a weekly fee due before it.
+    const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at, held.notBefore ? new Date(held.notBefore) : null);
     const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
-    const copy = feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
+    const copy = held.source === 'CHAIN_DEAL'
+      ? chainDealRiseCopy({ branch: await this.branchName(sub?.vendor?.id), from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, dealTo: held.customTo ?? null })
+      : feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
     const userId = this.payerUserId(sub as SubWithRelations);
     const inboxId = await this.notifications.send({
       userId, type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
       data: {
         kind: FEE_RISE_NOTICE_KIND, change: 'RISE', subscriptionId, weeklyFee: held.to, previousWeeklyFee: held.from,
         currencyCode: held.currencyCode, appliesFrom: appliesFrom.toISOString(), toldAt: at.toISOString(),
+        // [REVIEW-F #2227 S3-1] A chain branch's notice opens THAT branch's fee screen (the router selects vendorId).
+        ...(held.source === 'CHAIN_DEAL' && sub?.vendor ? { vendorId: sub.vendor.id } : {}),
       },
       dedupeKey,
     });
@@ -5514,20 +5531,42 @@ export class BillingService {
         return 'deferred';
       }
     }
-    const won = await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: null }, data: { weeklyRate: held.to } });
+    // [ENTERPRISE E2] A chain-deal rise moves the branch's negotiated rate (compare-and-set on the deal it was told
+    // it leaves, and on its tier rate); every other rise moves the card rate, as before.
+    const won = held.source === 'CHAIN_DEAL'
+      ? await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: held.customFrom! }, data: { customRate: held.customTo ?? null } })
+      : await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: null }, data: { weeklyRate: held.to } });
     if (won.count !== 1) return 'waiting';
     await tx.platformConfig.delete({ where: { key } });
     const sequence = await tx.billingEvent.count({ where: { subscriptionId, type: 'TIER_CHANGE' } }) + 1;
     await tx.billingEvent.create({ data: {
       subscriptionId, type: 'TIER_CHANGE', amount: held.to, currencyCode: sub!.currencyCode,
       idempotencyKey: `tier:${subscriptionId}:${sequence}:${held.from}->${held.to}`,
-      note: `Weekly fee rise told ${held.noticeAt.slice(0, 10)} (14-day notice) applies from the fee due ${sub!.nextBillingDate.toISOString().slice(0, 10)}: ${held.from} -> ${held.to}; weeks before it kept their price.`,
+      note: `${held.source === 'CHAIN_DEAL' ? (held.customTo === null ? 'Chain deal ended: w' : `Chain deal raised to ${held.customTo}: w`) : 'W'}eekly fee rise told ${held.noticeAt.slice(0, 10)} (14-day notice) applies from the fee due ${sub!.nextBillingDate.toISOString().slice(0, 10)}: ${held.from} -> ${held.to}; weeks before it kept their price.`,
     } });
     await tx.auditLog.create({ data: {
       action: 'BILLING_FEE_RISE_APPLIED', entity: 'Subscription', entityId: subscriptionId,
-      changes: { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom, firstFeeAtNewRate: sub!.nextBillingDate.toISOString(), at: now.toISOString() },
+      changes: { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom, firstFeeAtNewRate: sub!.nextBillingDate.toISOString(), at: now.toISOString(),
+        ...(held.source === 'CHAIN_DEAL' ? { source: 'CHAIN_DEAL', customFrom: held.customFrom, customTo: held.customTo ?? null, notBefore: held.notBefore } : {}) },
     } });
     return 'applied';
+  }
+
+  /** [ENTERPRISE E2] Chain-deal rises a withdrawn or superseded deal change dropped (chain-deal.ts): each branch that
+   *  was already told is told it will not happen, at the fee it pays now. Best-effort, after the commit. */
+  async tellChainDealRisesDropped(dropped: ReadonlyArray<{ subscriptionId: string; held: HeldFeeRise }>): Promise<void> {
+    for (const { subscriptionId, held } of dropped) {
+      if (!held.noticeAt) continue;
+      const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } }).catch(() => null);
+      await this.tellFeeRiseCancelled(subscriptionId, held, sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null);
+    }
+  }
+
+  /** [ENTERPRISE E2] A branch's name for its own fee notices. */
+  private async branchName(vendorId: string | null | undefined): Promise<string> {
+    if (!vendorId) return 'Your branch';
+    const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true } });
+    return vendor?.name ?? 'Your branch';
   }
 
   /** A told rise that will not happen: the payer is told so, best-effort (it never raises what they pay). */
@@ -5539,10 +5578,15 @@ export class BillingService {
         include: PAYER_INCLUDE,
       });
       if (!sub) return;
-      const copy = feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date: held.appliesFrom ? new Date(held.appliesFrom) : null });
+      const date = held.appliesFrom ? new Date(held.appliesFrom) : null;
+      // [REVIEW-F #2227 S3-1] A chain branch's notice names its branch and opens that branch's fee screen.
+      const chainVendorId = held.source === 'CHAIN_DEAL' ? sub.vendor?.id ?? null : null;
+      const copy = chainVendorId
+        ? chainDealCancelledCopy({ branch: await this.branchName(chainVendorId), from: feeNow, to: held.to, currencyCode: held.currencyCode, date })
+        : feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date });
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
-        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode },
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode, ...(chainVendorId ? { vendorId: chainVendorId } : {}) },
         dedupeKey: `${feeRiseDedupeKey(subscriptionId, held)}:cancelled`,
       });
     } catch (error) {
