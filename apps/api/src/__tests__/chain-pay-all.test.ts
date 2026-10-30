@@ -692,6 +692,49 @@ describe('[REVIEW-M #2224 S3-1] an abandoned pay-all is closed by MMG\'s own rec
   });
 });
 
+describe('[REVIEW-G #2224 S4-1] every outcome reaches every branch', () => {
+  it('MMG\'s lookup declines the payment it answered for: not paid, every branch released', async () => {
+    const o = await makeChain([{}, {}]);
+    const { ref, row } = await openPayAll(o);
+    const txn = tx('E1DECLINED');
+    lookups.set(txn, { ...lookupDetailFrom({ ...uatAnswer(txn, Number(row.amount)), transactionStatus: 'failed' }, txn), echoedReferences: [row.merchantTransactionId] } as MmgLookupDetail);
+    expect((await ret({ token: replyOf(row, '0', txn) })).json().data.state).toBe('NOT_PAID');
+    expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('NOT_PAID');
+    for (const b of o.branches) {
+      expect(await activeHoldsOf(b.subId)).toHaveLength(0);
+      expect((await holdsOf(b.subId))[0]!.status).toBe('PROVEN_UNPAID');
+    }
+  });
+
+  it('a paid-looking MMG record after a not-paid answer is held for a person: EVERY branch paused again', async () => {
+    const o = await makeChain([{}, {}]);
+    const { ref, row } = await openPayAll(o);
+    const txn = tx('E1LATEPAID');
+    expect((await ret({ token: replyOf(row, '2', txn) })).json().data.state).toBe('NOT_PAID');
+    for (const b of o.branches) expect(await activeHoldsOf(b.subId)).toHaveLength(0);
+    mmgPaid(row, txn, Number(row.amount));
+    await service.pollIntents(new Date(Date.now() + 7 * 3_600_000));
+    expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } })).status).toBe('HELD');
+    for (const b of o.branches) {
+      const holds = await activeHoldsOf(b.subId);
+      expect(holds).toHaveLength(1);
+      expect(holds[0]!.reason).toBe('LATE_POSITIVE_REVIEW');
+      expect(await checkoutTopups(b.subId)).toHaveLength(0);
+    }
+  });
+
+  it('another owner\'s pay-all is not found (404), and neither is a single checkout ref', async () => {
+    const a = await makeChain([{}, {}]);
+    const b = await makeChain([{}, {}]);
+    const { ref } = await openPayAll(a);
+    const res = await followChain(b, ref);
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('CHECKOUT_NOT_FOUND');
+    const single = await payOne(b, b.branches[0]!);
+    expect((await followChain(b, single.json().data.ref)).statusCode).toBe(404);
+  });
+});
+
 describe('[REVIEW-M #2224 S4-2] an open pay-all is handed back only for the list it was opened for', () => {
   it('a tap from a stale list is shown the list again (409, naming the open checkout), never sent to pay another list', async () => {
     const o = await makeChain([{}, {}]);
