@@ -125,7 +125,7 @@ export const DARK_FEATURES: DarkFeature[] = [
     enabledWhen: '1',
     title: 'The order hold (free-cancel window)',
     whileOff:
-      'An order shows up on the vendor board the instant it is placed, so the store can accept it within seconds of checkout while the app still promises the customer a five-minute free-cancel window: the hidden grace period never exists.',
+      'An order shows up on the vendor board the instant it is placed, so the store can accept it within seconds of checkout while the app still promises the customer a free-cancel hold: the hidden grace period never exists.',
     impact: 'product',
   },
   {
