@@ -23,8 +23,10 @@ function sentence(reason: string): string {
 export function storeVatApprovedNotice(v: { registeredName: string; number: string; effectiveFrom: Date; ratePercent?: number; mode?: string | null }): { title: string; body: string } {
   const rate = v.ratePercent ?? STORE_VAT_RATE_PERCENT;
   // [VAT-DOCS · owner 30 Oct 2026] A store whose typed prices exclude VAT has the VAT added into each price customers see.
-  const prices = v.mode === 'ADD_VAT_AT_CHECKOUT'
-    ? `From now on, Swift adds VAT at ${rate}% to the prices you type for standard-rated items, so customers see and pay prices that include VAT, `
+  // [REVIEW-F #2255 S4-1] The VAT is the store's ("VAT charged by <store>"): never worded as Swift adding it.
+  const adds = v.mode === 'ADD_VAT_AT_CHECKOUT';
+  const prices = adds
+    ? `From now on, ${addedWords(rate)}, so customers see and pay prices that include VAT, `
     : `From now on, your prices include VAT at ${rate}% `;
   return {
     title: 'Your VAT is approved',
@@ -33,7 +35,36 @@ export function storeVatApprovedNotice(v: { registeredName: string; number: stri
     body: `A person at Swift checked your GRA VAT certificate. Your certificate is in effect from ${calendarDay(v.effectiveFrom)}. `
       + prices
       + `and your receipts say “VAT charged by ${v.registeredName} · VAT reg. no. ${v.number}”. `
-      + 'Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.',
+      + (adds ? UNMARKED_ITEMS : 'Check each item’s VAT class now: zero-rated and exempt goods carry no VAT.'),
+  };
+}
+
+function addedWords(rate: number): string {
+  return `VAT at ${rate}% is added to the prices you type for standard-rated items`;
+}
+
+/** [REVIEW-F #2255 S3-1] Every item starts standard-rated (Item.vatClass default), so when VAT is added to the store's
+ *  prices an item it has not marked zero-rated or exempt costs customers the VAT too: said plainly, with what to do. */
+const UNMARKED_ITEMS = 'Swift treats every item as standard-rated until you mark it: until then customers pay VAT on it, so mark your zero-rated and exempt items now.';
+
+/** [VAT-DOCS · owner ruling 31 Oct 2026] A person approved an approved store's change of price choice: what customers
+ *  pay changes from now on. */
+export function storeVatModeChangeApprovedNotice(mode: string, ratePercent: number = STORE_VAT_RATE_PERCENT): { title: string; body: string } {
+  return {
+    title: 'Your price change is approved',
+    body: 'A person at Swift approved your change. '
+      + (mode === 'ADD_VAT_AT_CHECKOUT'
+        ? `From now on, ${addedWords(ratePercent)}, so customers see and pay prices that include VAT. ${UNMARKED_ITEMS}`
+        : `From now on, your prices include VAT at ${ratePercent}%: customers pay the prices you type.`)
+      + ' Orders already placed keep their prices.',
+  };
+}
+
+/** [VAT-DOCS · owner ruling 31 Oct 2026] A person did not approve the change: nothing moved. */
+export function storeVatModeChangeRejectedNotice(reason: string): { title: string; body: string } {
+  return {
+    title: 'Your price change was not approved',
+    body: `${sentence(reason)} Nothing changed: your prices and what customers pay stay as they were.`,
   };
 }
 
@@ -49,7 +80,7 @@ export function storeVatWithdrawnNotice(reason: string, mode?: string | null): {
     title: 'Your VAT was withdrawn',
     body: `${sentence(reason)} New orders carry no VAT and your prices no longer say “incl. VAT”.`
       // [VAT-DOCS] A store whose VAT was added to its prices gets the prices it typed back.
-      + (mode === 'ADD_VAT_AT_CHECKOUT' ? ' Swift no longer adds VAT to your prices: customers pay the prices you typed.' : '')
+      + (mode === 'ADD_VAT_AT_CHECKOUT' ? ' VAT is no longer added to your prices: customers pay the prices you typed.' : '')
       + ' Orders already placed keep their VAT.',
   };
 }

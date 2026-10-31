@@ -10,7 +10,8 @@ import { z } from '../../lib/zod';
 import { VAT_CLASSES } from '../store-vat/vat-math';
 import { storeVatNumberChanged } from '../store-vat/store-vat-decisions';
 import {
-  VAT_PRICE_BEFORE_VAT_MESSAGE, VatPriceBeforeVatRequired, itemPriceEdit, optionPriceEdit, reconcileVatPricing, typedItemPrice, typedOptionPrice,
+  VAT_PRICE_BEFORE_VAT_MESSAGE, VatPriceBeforeVatRequired, itemPriceEdit, optionPriceEdit, reconcileVatPricing, refuseOlderAppNewPrice,
+  sentOnlyCustomerPrice, typedItemPrice, typedOptionPrice,
 } from '../store-vat/vat-pricing';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from '../verification/upload-consent';
 import { consentSurfaceOf } from '../legal/consent-surface';
@@ -770,6 +771,17 @@ const OPTION_MONEY_FIELDS = ['additionalPrice', 'vatListedAdditionalPrice'] as c
 function vatPriceEditOrRefuse<T>(edit: () => T): T {
   try {
     return edit();
+  } catch (err) {
+    if (err instanceof VatPriceBeforeVatRequired) throw new AppError(409, 'VAT_PRICE_BEFORE_VAT', VAT_PRICE_BEFORE_VAT_MESSAGE);
+    throw err;
+  }
+}
+
+/** [REVIEW-M #2255 S4-2] An older app's NEW price on a store that adds VAT: refused like an edit (vat-pricing.ts
+ *  refuseOlderAppNewPrice), inside the transaction that would create the rows, so nothing is created. */
+async function refuseOlderAppNewPriceIn(tx: Prisma.TransactionClient, vendorId: string, ambiguous: boolean, vatClass?: string | null): Promise<void> {
+  try {
+    await refuseOlderAppNewPrice(tx, vendorId, ambiguous, vatClass);
   } catch (err) {
     if (err instanceof VatPriceBeforeVatRequired) throw new AppError(409, 'VAT_PRICE_BEFORE_VAT', VAT_PRICE_BEFORE_VAT_MESSAGE);
     throw err;
@@ -3915,7 +3927,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       category: { select: { id: true, name: true } },
       optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' as const } } }, orderBy: { sortOrder: 'asc' as const } },
     };
+    const olderAppPrice = sentOnlyCustomerPrice(body.vatListedPrice, body.basePrice)
+      || (body.optionGroups ?? []).some((g) => g.options.some((o) => sentOnlyCustomerPrice(o.vatListedAdditionalPrice, o.additionalPrice)));
     const item = await app.prisma.$transaction(async (tx) => {
+      await refuseOlderAppNewPriceIn(tx, vendorId, olderAppPrice, body.vatClass);
       const created = await tx.item.create({
         data: {
           vendorId,
@@ -4791,32 +4806,37 @@ export async function vendorRoutes(app: FastifyInstance) {
       sortOrder = (last?.sortOrder ?? -1) + 1;
     }
 
-    const group = await app.prisma.optionGroup.create({
-      data: {
-        itemId: request.params.itemId,
-        name: body.name.trim(),
-        isRequired: body.isRequired ?? false,
-        minSelect: body.minSelect ?? 0,
-        maxSelect: body.maxSelect ?? 1,
-        sortOrder,
-        options: body.options?.length
-          ? {
-              create: body.options.map((opt, i) => ({
-                name: opt.name,
-                ...typedOptionPrice(opt.vatListedAdditionalPrice ?? opt.additionalPrice ?? 0),
-                isDefault: opt.isDefault ?? false,
-                sortOrder: opt.sortOrder ?? i,
-              })),
-            }
-          : undefined,
-      },
-      include: { options: { orderBy: { sortOrder: 'asc' } } },
+    // [VAT-DOCS · REVIEW-M #2255 S4-1] The group, its options and their VAT commit together: never options at the price
+    // before VAT on a store whose VAT is added (one transaction, as item and option create).
+    const olderAppPrice = (body.options ?? []).some((o) => sentOnlyCustomerPrice(o.vatListedAdditionalPrice, o.additionalPrice));
+    const group = await app.prisma.$transaction(async (tx) => {
+      await refuseOlderAppNewPriceIn(tx, vendorId, olderAppPrice, item.vatClass);
+      const created = await tx.optionGroup.create({
+        data: {
+          itemId: request.params.itemId,
+          name: body.name.trim(),
+          isRequired: body.isRequired ?? false,
+          minSelect: body.minSelect ?? 0,
+          maxSelect: body.maxSelect ?? 1,
+          sortOrder,
+          options: body.options?.length
+            ? {
+                create: body.options.map((opt, i) => ({
+                  name: opt.name,
+                  ...typedOptionPrice(opt.vatListedAdditionalPrice ?? opt.additionalPrice ?? 0),
+                  isDefault: opt.isDefault ?? false,
+                  sortOrder: opt.sortOrder ?? i,
+                })),
+              }
+            : undefined,
+        },
+        include: { options: { orderBy: { sortOrder: 'asc' } } },
+      });
+      const priced = await reconcileVatPricing(tx, vendorId, { itemIds: [request.params.itemId] });
+      return priced.added > 0
+        ? tx.optionGroup.findUniqueOrThrow({ where: { id: created.id }, include: { options: { orderBy: { sortOrder: 'asc' } } } })
+        : created;
     });
-    // [VAT-DOCS] VAT added to the new options' prices when the store's approval says so.
-    const priced = await app.prisma.$transaction((tx) => reconcileVatPricing(tx, vendorId, { itemIds: [request.params.itemId] }));
-    if (priced.added > 0) {
-      return { success: true, data: await app.prisma.optionGroup.findUniqueOrThrow({ where: { id: group.id }, include: { options: { orderBy: { sortOrder: 'asc' } } } }) };
-    }
 
     return { success: true, data: group };
   });
@@ -4878,7 +4898,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const group = await app.prisma.optionGroup.findFirst({
       where: { id: request.params.groupId, item: { vendorId, archivedAt: null } },
-      select: { id: true, itemId: true },
+      select: { id: true, itemId: true, item: { select: { vatClass: true } } },
     });
     if (!group) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
@@ -4897,6 +4917,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     const option = await app.prisma.$transaction(async (tx) => {
+      await refuseOlderAppNewPriceIn(tx, vendorId, sentOnlyCustomerPrice(body.vatListedAdditionalPrice, body.additionalPrice), group.item.vatClass);
       const created = await tx.option.create({
         data: {
           optionGroupId: request.params.groupId,
