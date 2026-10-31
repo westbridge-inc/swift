@@ -50,8 +50,11 @@ describe('[BOOK-S5b] How many bookings at once', () => {
     await loaded('One booking at a time across all your services. Choose more if several people or chairs serve customers at the same time.');
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     await click('More');
+    // [REVIEW-F S4-1 #2249] The store's number here (1) is also the mount default, so the sentence above cannot prove
+    // the card has taken the store's number: the first More must be seen to land (2) before the next click.
+    await loaded('Up to 2 bookings at the same time, across all your services.');
     await click('More');
-    expect(screen.getByText('Up to 3 bookings at the same time, across all your services.')).toBeTruthy();
+    await loaded('Up to 3 bookings at the same time, across all your services.');
     await click('Save');
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ bookingCapacity: 3 });
