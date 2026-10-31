@@ -1591,6 +1591,9 @@ model Vendor {
   // lapse between daily sweeps stops sales at the next order, not the next
   // sweep.
   activationValidUntil    DateTime?
+  /// [RETIER PR-A] When the store FIRST went live (set by the activation projection and the console's reinstate,
+  /// never cleared). Null = never live: only such a store is priced on its own catalogue when its fee is born.
+  firstLiveAt             DateTime?
   /// [DOC-1 §3.6 · P3-2] See VendorTier. Set to UNREGISTERED only by the vendor's own
   /// signed self-declaration; set to REGISTERED only by a VALID registration record.
   tier                    VendorTier               @default(REGISTERED)
