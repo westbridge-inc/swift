@@ -131,6 +131,15 @@ import { deliveryPausedAt } from '../dispatch/delivery-pause';
 // Input schemas
 // ---------------------------------------------------------------------------
 
+/** [REVIEW-G #2255 N1] The store's VAT record is the OWNER's (the tax registration is theirs to give): the claimed and the
+ *  approved number, the registered name and date, the certificate, a person's review and a change of price choice that
+ *  waits for one. A manager or staff member's profile reads none of it; what every menu role needs stays
+ *  (vatAddsToPrices, vatRatePercent, and the plain vatStatus / vatMode the store's prices already show). */
+const VAT_RECORD_OWNER_ONLY = {
+  vatRegistrationNumber: undefined, vatApprovedNumber: undefined, vatApprovedName: undefined, vatEffectiveFrom: undefined,
+  vatCertificateDocId: undefined, vatModeRequested: undefined, vatReviewNote: undefined, vatReviewedBy: undefined, vatReviewedAt: undefined,
+} as const;
+
 const updateVendorProfileSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
   description: z.string().max(2000).optional(),
@@ -1560,7 +1569,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
-      : safeVendors.map((v) => ({ ...v, subscription: undefined, vatRegistrationNumber: undefined }));
+      : safeVendors.map((v) => ({ ...v, subscription: undefined, ...VAT_RECORD_OWNER_ONLY }));
     return {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
@@ -2220,7 +2229,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
-        ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
+        ...(access.role !== 'OWNER' ? VAT_RECORD_OWNER_ONLY : {}),
         ...link,
         ...storeMoneySurfaceView(link),
         // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.

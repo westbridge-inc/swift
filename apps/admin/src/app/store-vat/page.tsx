@@ -69,6 +69,8 @@ export default function StoreVatPage() {
       registeredName: String(values['registeredName']),
       effectiveFrom: String(values['effectiveFrom']),
       nameMatchesStore: true,
+      // [REVIEW-G #2255 S4-1] The price choice this row showed: never approved unseen if the store changed it since.
+      mode: row.mode,
     }, reason),
     success: () => `${row.name}'s VAT is approved. Its new orders carry VAT inside their prices.`,
   }));

@@ -80,6 +80,8 @@ describe('[O-5] Store VAT queue', () => {
     expect(writes[0]!.url.pathname).toBe('/api/v1/admin/store-vat/vnd-1/approve');
     expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({
       certificateDocId: 'doc-1', vatNumber: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01', nameMatchesStore: true,
+      // [REVIEW-G #2255 S4-1] The price choice this row showed: the server refuses the approval if the store changed it since.
+      mode: 'PRICES_INCLUDE_VAT',
     });
     expect((writes[0]!.init?.headers as Record<string, string>)['x-swift-reason']).toBe(REASON);
     expect(await screen.findByText(/Sample Shop's VAT is approved/)).toBeTruthy();

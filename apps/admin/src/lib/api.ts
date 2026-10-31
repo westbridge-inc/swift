@@ -898,6 +898,8 @@ export interface StoreVatApproval {
   /** YYYY-MM-DD, as printed on the certificate. */
   effectiveFrom: string;
   nameMatchesStore: true;
+  /** [REVIEW-G #2255 S4-1] The price choice the queue row showed: the server refuses (409) if the store changed it since. */
+  mode: string | null;
 }
 export const fetchStoreVatPending = () =>
   apiFetch('/api/v1/admin/store-vat/pending').then((r: { data?: StoreVatPendingRow[] }) => r.data ?? []);
