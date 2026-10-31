@@ -32,7 +32,17 @@ interface Setup {
   refuse?: { code: string; message: string; status?: number };
   statusFails?: boolean;
   food?: boolean;
+  /** [WEB-POLICE] The police clearance's own consent words the status carries (the API sends them for SERVICE/MOVER). */
+  police?: Record<string, unknown>;
+  withdrawAnswer?: Record<string, number>;
 }
+
+/** The API's police-clearance words for a checklist (police-clearance-consent.ts), synthetic days. */
+const POLICE_WORDS = (kind: 'home' | 'taxi' = 'home', version = `${kind}-v1-31d`) => ({
+  tick: 'police_clearance_v1', kind, version,
+  text: kind === 'home' ? "Needed because I will visit customers' homes. I choose to upload my police clearance. (synthetic words)" : 'Optional. I choose to upload my police clearance. (synthetic words)',
+  withdrawConfirm: 'Swift stops using your police clearance now and deletes it. Your home visits pause until a new one is approved. (synthetic)',
+});
 
 function api(s: Setup = {}) {
   const storeId = s.store ?? 'shop';
@@ -44,6 +54,7 @@ function api(s: Setup = {}) {
       const body = init?.body instanceof FormData ? { file: (init.body.get('file') as File | null)?.name ?? null } : init?.body ? JSON.parse(String(init.body)) : null;
       writes.push({ method, path, store: header, body });
       if (path === '/verification/upload') return { body: { success: true, data: { url: 'verification/user-1/synthetic.enc' } } };
+      if (path === '/verification/police-clearance/withdraw') return { body: { success: true, data: s.withdrawAnswer ?? { withdrawn: 1, keptForLegalHold: 0, deletionPending: 0 } } };
       if (s.refuse && path === '/verification/documents') {
         return { status: s.refuse.status ?? 409, body: { success: false, error: { code: s.refuse.code, message: s.refuse.message } } };
       }
@@ -62,6 +73,7 @@ function api(s: Setup = {}) {
         missing: [],
         roleVerified: false,
         documentConsent: { tick: 'document_v1', given: s.consentOnRecord === true, givenAt: s.consentOnRecord ? '2026-10-20T14:00:00.000Z' : null },
+        ...(s.police ? { policeClearanceConsent: s.police } : {}),
         ...(s.food ? { foodHandlerAttestation: { version: 'v1', tick: 'Everyone who handles food here holds a current food handler’s certificate.', stores: [{ vendorId: storeId, name: store.name, attested: false }] } } : {}),
       } } };
     }
@@ -200,16 +212,15 @@ describe('[OPEN-EARLY PR-2] the store’s documents on the website', () => {
     expect(screen.getByText('0 of 3 approved')).toBeTruthy();
   });
 
-  it('a Services business: its own list, no own-name offer; a police clearance is named, sent in the app', async () => {
+  it('a Services business: its own list, no own-name offer', async () => {
     (await import('@/lib/auth')).setSelectedStore('salon');
-    api({ store: 'salon', checklist: ['owner_national_id', 'police_clearance'] });
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], police: POLICE_WORDS() });
     renderWithQuery(<DocumentsPage />);
     await screen.findByText('Owner National ID or Digital ID card');
     expect(reads).toContain('/verification/status?role=SERVICE');
-    expect(screen.getByText('Police Clearance Certificate')).toBeTruthy();
-    expect(screen.getByText(/Added in the Swift app, where it has its own consent/)).toBeTruthy();
-    expect(screen.queryByLabelText('Choose a file for Police Clearance Certificate')).toBeNull();
     expect(screen.queryByText(/Trade under your own name/)).toBeNull();
+    // [#2275 S4-1] the app pointer is gone: the clearance is sent here
+    expect(screen.queryByText(/Added in the Swift app/)).toBeNull();
   });
 
   it('own name: the declaration is signed here for the selected store, and the store can go back to a registered name', async () => {
@@ -233,5 +244,150 @@ describe('[OPEN-EARLY PR-2] the store’s documents on the website', () => {
     expect(await screen.findByText(/your verification steps/i)).toBeTruthy();
     expect(screen.queryByText('Required steps')).toBeNull();
     expect(screen.getByRole('button', { name: /try again/i })).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [WEB-POLICE · owner 31 Oct 2026] A Services business sends its police clearance here, the phone's way: its OWN
+// consent in the API's words (never the list's tick above), the box unticked for everyone and emptied after each upload,
+// the clearance's tick and the words' version in the filing, and a withdrawal at any time. No other store is offered one.
+// ---------------------------------------------------------------------------
+
+const police = () => screen.getByRole('checkbox', { name: /I choose to upload my police clearance/ });
+
+describe('[WEB-POLICE] a Services business’s police clearance', () => {
+  beforeEach(async () => { (await import('@/lib/auth')).setSelectedStore('salon'); });
+
+  it('optional: offered under Optional with the phone’s hint and the API’s own words; the list’s tick never opens it', async () => {
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], police: POLICE_WORDS(), consentOnRecord: true });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('Police Clearance Certificate');
+    const optional = screen.getByRole('heading', { name: 'Optional' }).closest('section') as HTMLElement;
+    expect(within(optional).getByText('Police Clearance Certificate')).toBeTruthy();
+    expect(within(optional).getByText('Optional. If Swift approves a current one, your account is recorded as police-cleared.')).toBeTruthy();
+    // The list's tick stands from the record; the clearance still waits for its own box, unticked for everyone.
+    expect((tick() as HTMLInputElement).checked).toBe(true);
+    expect((police() as HTMLInputElement).checked).toBe(false);
+    expect(card('Police Clearance Certificate').disabled).toBe(true);
+    expect(within(optional).getByText('Tick the box below to upload')).toBeTruthy();
+    // A file chosen without the box sends nothing.
+    pick('Police Clearance Certificate');
+    expect(writes).toEqual([]);
+    fireEvent.click(police());
+    expect(card('Police Clearance Certificate').disabled).toBe(false);
+    // Optional: never counted.
+    expect(screen.getByText('0 of 1 approved')).toBeTruthy();
+  });
+
+  it('files it with its own tick and the words’ version (never document_v1), then the box empties', async () => {
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], police: POLICE_WORDS() });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('Police Clearance Certificate');
+    fireEvent.click(police());
+    pick('Police Clearance Certificate');
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({ method: 'POST', path: '/verification/documents', store: 'salon', body: {
+      role: 'SERVICE', docType: 'police_clearance', fileUrl: 'verification/user-1/synthetic.enc', consent: true, privacyNoticeVersion: 'web-v1',
+      consentTick: 'police_clearance_v1', consentVersion: 'home-v1-31d', consentVia: 'checkbox',
+    } });
+    await waitFor(() => expect((police() as HTMLInputElement).checked).toBe(false));
+    // Ticking the list's box does not open the next one.
+    fireEvent.click(tick());
+    expect(card('Police Clearance Certificate').disabled).toBe(true);
+  });
+
+  it('on the list (a business that offers home visits): the card says only home visits wait for it; it is still its own consent', async () => {
+    api({ store: 'salon', checklist: ['owner_national_id', 'police_clearance'], police: POLICE_WORDS() });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('Police Clearance Certificate');
+    const required = screen.getByRole('heading', { name: 'Required steps' }).closest('section') as HTMLElement;
+    expect(within(required).getByText('Your store can go live without it: only home-visit bookings wait for it.')).toBeTruthy();
+    expect(within(required).getByText(/Needed because I will visit customers' homes/)).toBeTruthy();
+    fireEvent.click(tick());
+    expect(card('Owner National ID or Digital ID card').disabled).toBe(false);
+    expect(card('Police Clearance Certificate').disabled).toBe(true);
+  });
+
+  it('without the API’s words nothing is taken: no box, no file input, never the list’s tick', async () => {
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], consentOnRecord: true });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('Police Clearance Certificate');
+    expect(screen.getByText(/its consent words did not load/)).toBeTruthy();
+    expect(screen.queryByLabelText('Choose a file for Police Clearance Certificate')).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /police clearance/ })).toBeNull();
+  });
+
+  it('new words (the API changed them) empty a ticked box', async () => {
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], police: POLICE_WORDS('home', 'home-v1-31d') });
+    const { queryClient } = renderWithQuery(<DocumentsPage />);
+    await screen.findByText('Police Clearance Certificate');
+    fireEvent.click(police());
+    expect((police() as HTMLInputElement).checked).toBe(true);
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], police: POLICE_WORDS('home', 'home-v1-61d') });
+    await queryClient.invalidateQueries();
+    await waitFor(() => expect((police() as HTMLInputElement).checked).toBe(false));
+  });
+
+  it('a clearance on file can be withdrawn: asked first in the API’s words (focus moves in, Cancel gives it back), then told what happened', async () => {
+    api({ store: 'salon', checklist: ['owner_national_id'], optional: ['police_clearance'], police: POLICE_WORDS(), documents: [
+      { id: 'p1', docType: 'police_clearance', status: 'PENDING', expiresAt: null, reviewNote: null, createdAt: '2026-10-30T12:00:00.000Z' },
+    ] });
+    renderWithQuery(<DocumentsPage />);
+    const link = await screen.findByRole('button', { name: 'Withdraw my police clearance' });
+    fireEvent.click(link);
+    let ask = screen.getByRole('alertdialog', { name: 'Withdraw your police clearance?' });
+    expect(within(ask).getByText(POLICE_WORDS().withdrawConfirm)).toBeTruthy();
+    expect(document.activeElement).toBe(within(ask).getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Withdraw my police clearance' }));
+    expect(writes).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw my police clearance' }));
+    ask = screen.getByRole('alertdialog', { name: 'Withdraw your police clearance?' });
+    fireEvent.click(within(ask).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(writes).toContainEqual({ method: 'POST', path: '/verification/police-clearance/withdraw', store: 'salon', body: { role: 'SERVICE' } }));
+    expect(await screen.findByText('It is deleted. Swift keeps only a note that it was withdrawn.')).toBeTruthy();
+  });
+
+  it.each([
+    ['a shop', 'shop' as const],
+    ['a restaurant', 'kitchen' as const],
+    ['a supermarket', 'grocer' as const],
+  ])('%s is never offered one, even if a list named it', async (_name, store) => {
+    (await import('@/lib/auth')).setSelectedStore(store);
+    api({ store, checklist: ['owner_national_id', 'business_registration'], optional: ['police_clearance'], police: POLICE_WORDS() });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('Business Registration');
+    expect(screen.queryByText('Police Clearance Certificate')).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /police clearance/ })).toBeNull();
+  });
+});
+
+describe('[#2275 S4-2] the replace ask and a refused upload, for keyboard and screen-reader users', () => {
+  it('the replace ask takes the focus; Cancel and Escape give it back to the card', async () => {
+    api({ consentOnRecord: true, documents: [
+      { id: 'd3', docType: 'tin_certificate', status: 'PENDING', expiresAt: null, reviewNote: null, createdAt: '2026-10-29T15:00:00.000Z' },
+    ] });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('TIN Certificate');
+    fireEvent.click(card('TIN Certificate'));
+    let ask = screen.getByRole('alertdialog', { name: 'Replace this document?' });
+    expect(document.activeElement).toBe(within(ask).getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(card('TIN Certificate'));
+    fireEvent.click(card('TIN Certificate'));
+    ask = screen.getByRole('alertdialog', { name: 'Replace this document?' });
+    fireEvent.keyDown(within(ask).getByRole('button', { name: 'Cancel' }), { key: 'Escape' });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(document.activeElement).toBe(card('TIN Certificate'));
+  });
+
+  it('a refused upload is announced in the server’s words', async () => {
+    api({ refuse: { code: 'DOC_TYPE_NOT_ACCEPTED', message: 'That document is not on this store’s list.' } });
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('TIN Certificate');
+    fireEvent.click(tick());
+    pick('TIN Certificate');
+    expect((await screen.findByRole('alert')).textContent).toBe('TIN Certificate: That document is not on this store’s list.');
   });
 });

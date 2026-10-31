@@ -103,6 +103,10 @@ export interface DocStatus {
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;
+  /** [VERIFY-DOCS] What the person MAY add (a taxi driver's police clearance only). */
+  optional?: string[];
+  /** [POLICE-CLEARANCE CONSENT] The clearance's own consent words (read by policeClearanceWordsFrom). */
+  policeClearanceConsent?: unknown;
 }
 export const getVerificationStatus = (vehicleType?: string) =>
   apiFetch(`/api/v1/verification/status?role=MOVER${vehicleType ? `&vehicleType=${vehicleType}` : ''}`).then(
@@ -115,10 +119,14 @@ export const uploadVerificationFile = (file: File) => {
     (r) => r.data as { url: string },
   );
 };
-export const submitVerificationDocument = (docType: string, fileUrl: string) =>
-  apiFetch('/api/v1/verification/documents', {
+export const submitVerificationDocument = async (docType: string, fileUrl: string) => {
+  // [POLICE-CLEARANCE CONSENT] Never a police clearance under the privacy-notice tick: it has its own consent
+  // (store-documents-api submitPoliceClearance). Refused before anything leaves the browser.
+  if (docType === 'police_clearance') throw new Error('A police clearance is sent only with its own consent.');
+  return apiFetch('/api/v1/verification/documents', {
     method: 'POST',
     // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5); [R17] the API records that
     // tick in the consent ledger, anchored to the box's exact words (document_v1)
     body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });
+};
