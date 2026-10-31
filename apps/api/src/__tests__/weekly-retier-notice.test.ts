@@ -233,14 +233,17 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
     // than the day its new fee is due, counting items taken off sale, changed or removed in the 7 days before, so the
     // day to act by is the end of the day 8 days before the new fee's day.
     const lastCutDay = new Date(firstNewFee.getTime() - 8 * DAY);
+    // [REVIEW-F #2259 006bad5f S3-1] Stop weekly billing lives on Account (for the store open there), not on the
+    // weekly-fee screen the notice opens; [S4-2] the day to stop by is named (the fee's own day, not the cut day);
+    // [S4-1] an item off sale that is not the store's doing (sold out) comes back on sale when restocked.
     expect(notice!.body).toBe(
       `${s.name} now has ${largeFloor.toLocaleString('en-US')} items for sale, which is the large catalogue rate. `
       + `From its weekly fee due ${guyanaDay(firstNewFee)}, its Swift weekly fee will be ${money(large)} (it is ${money(small)} now). `
       + 'Until then nothing changes, and any week already paid keeps the price paid. '
       + `Swift counts the items in ${s.name} every week: items for sale, and items taken off sale, changed or removed in the last 7 days. `
-      + `To stop this change, have fewer than ${largeFloor.toLocaleString('en-US')} items for sale by the end of ${guyanaDay(lastCutDay)}, and from then on add no items and leave the ones you took off sale or removed as they are: `
+      + `To stop this change, have fewer than ${largeFloor.toLocaleString('en-US')} items for sale by the end of ${guyanaDay(lastCutDay)}, and from then on add no items and leave every item that is not for sale as it is (restocking a sold-out item puts it back on sale): `
       + 'this change will then not happen, and we will tell you. '
-      + `If you do not want the new fee for ${s.name}, tap Stop weekly billing on ${s.name}'s weekly-fee screen in Swift before then and you will not pay it.`,
+      + `If you do not want the new fee for ${s.name}, tap Stop weekly billing on Account in Swift, with ${s.name} open, before ${guyanaDay(firstNewFee)} and you will not pay it.`,
     );
     // One phrase for the count everywhere (partner/store-fee.ts prices a new store on the same rule).
     expect(notice!.body).toContain(`items ${CATALOGUE_COUNT_WORDS}.`);
@@ -554,6 +557,8 @@ describe('[RETIER PR-B] a mover: told why (the vehicle)', () => {
     expect(notice!.body).toContain(`your Swift weekly fee will be ${money(moverHeavy)} (it is ${money(mover)} now)`);
     // [REVIEW-M #2259 S4-1 · REVIEW-F N1] When it comes down: only once the smaller vehicle holds on two weekly counts.
     expect(notice!.body).toContain('Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down after Swift has seen the smaller vehicle on two weekly counts, a week apart, and we will tell you.');
+    // [REVIEW-F #2259 006bad5f S4-2] The day to stop by is the new fee's own day, named (not "then").
+    expect(notice!.body).toContain(`tap Stop weekly billing in Swift before ${guyanaDay(new Date((notice!.data as { appliesFrom: string }).appliesFrom))} and you will not pay it.`);
     expect(notice!.title).toBe('Your weekly fee is changing');
     expect(notice!.data).not.toHaveProperty('vendorId');
     expect(await rate(r.subId)).toBe(mover);

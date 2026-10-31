@@ -232,11 +232,11 @@ const CATALOGUE_COUNT_PHRASE = 'taken off sale, changed or removed in the last 7
  * reached a higher step), the new fee and from which weekly fee, that nothing changes until then, how to bring it
  * back down, and how to say no. True with the re-tier's own rules [REVIEW-F/M #2259 S3-1]: Swift counts a store's
  * items each week (every listing for sale, and every one taken off sale, changed or removed in the last 7 days); a
- * store with fewer items for sale than the step by the end of the told day (retierCutBy), adding nothing and changing
- * nothing it took off sale after it, is under the step when the rise could move in (retierMovesInFrom) and is never
- * moved; it is told so. A mover's lower vehicle moves the fee only
- * once seen on two weekly counts a week apart (billing.service retierInTx). [REVIEW-G #2259 S4-2] A store's notice
- * names the store (an owner may have several), in the words of a chain branch's notice.
+ * store with fewer items for sale than the step by the end of the told day (retierCutBy), adding nothing and leaving
+ * every item not for sale as it is after it, is under the step when the rise could move in (retierMovesInFrom) and
+ * is never moved; it is told so. A mover's lower vehicle moves the fee only once seen on two weekly counts a week
+ * apart (billing.service retierInTx). [REVIEW-G #2259 S4-2] A store's notice names the store (an owner may have
+ * several), in the words of a chain branch's notice.
  */
 export function retierRiseCopy(p: { from: number; to: number; currencyCode: string; date: Date | null; basis: RetierBasis; store?: string | null }): { title: string; body: string } {
   const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
@@ -250,12 +250,16 @@ export function retierRiseCopy(p: { from: number; to: number; currencyCode: stri
   const cut = p.date ? `by the end of ${feeRiseDay(retierCutBy(p.date))}` : 'by the end of the eighth day before the new fee is due';
   const down = p.basis.kind === 'CATALOGUE'
     ? `Swift counts the items in ${store ?? 'your store'} every week: items for sale, and items ${CATALOGUE_COUNT_PHRASE}. `
-      + `To stop this change, have fewer than ${p.basis.stepFrom.toLocaleString('en-US')} items for sale ${cut}, and from then on add no items and leave the ones you took off sale or removed as they are: `
+      + `To stop this change, have fewer than ${p.basis.stepFrom.toLocaleString('en-US')} items for sale ${cut}, and from then on add no items and leave every item that is not for sale as it is (restocking a sold-out item puts it back on sale): `
       + 'this change will then not happen, and we will tell you.'
     : 'Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down after Swift has seen the smaller vehicle on two weekly counts, a week apart, and we will tell you.';
+  // [REVIEW-F #2259 006bad5f S3-1] Stop weekly billing is on Account, for the store open there (VendorAccountScreen),
+  // not on the weekly-fee screen this notice opens. [S4-2] "Before then" would follow the cut-day sentence: name the
+  // fee's own day instead.
+  const dueDay = p.date ? feeRiseDay(p.date) : 'the new fee is due';
   const no = store
-    ? `If you do not want the new fee for ${store}, tap Stop weekly billing on ${store}'s weekly-fee screen in Swift before then and you will not pay it.`
-    : 'If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.';
+    ? `If you do not want the new fee for ${store}, tap Stop weekly billing on Account in Swift, with ${store} open, before ${dueDay} and you will not pay it.`
+    : `If you do not want the new fee, tap Stop weekly billing in Swift before ${dueDay} and you will not pay it.`;
   return {
     title: store ? `${store}: your weekly fee is changing` : 'Your weekly fee is changing',
     body: `${why} ${when}, ${its} Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
@@ -294,7 +298,8 @@ export function chainDealRiseCopy(p: { branch: string; from: number; to: number;
     title: `${p.branch}: your weekly fee is changing`,
     body: `${p.branch}: ${deal} ${when}, its Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
       + 'Until then nothing changes, and any week already paid keeps the price paid. '
-      + `If you do not want the new fee for ${p.branch}, tap Stop weekly billing on ${p.branch}'s weekly-fee screen in Swift before then and you will not pay it.`,
+      // [REVIEW-F #2259 006bad5f S3-1] The stop control is on Account (for the branch open there), not the weekly-fee screen.
+      + `If you do not want the new fee for ${p.branch}, tap Stop weekly billing on Account in Swift, with ${p.branch} open, before then and you will not pay it.`,
   };
 }
 
