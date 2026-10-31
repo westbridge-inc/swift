@@ -273,7 +273,6 @@ function ModifiersSection({ item, staged, vatPricing }: {
               value={draft(g.id).price}
               onChangeText={(t: string) => setDrafts((s) => ({ ...s, [g.id]: { ...draft(g.id), price: t } }))}
               placeholder={vatAdded ? '+GYD before VAT' : '+GYD'}
-              accessibilityLabel={vatAdded ? `Extra price before VAT for ${g.name}` : `Extra price for ${g.name}`}
               keyboardType="number-pad"
             />
             <Pressable onPress={() => submitOption(g.id)} disabled={readOnly || addOption.isPending}>
