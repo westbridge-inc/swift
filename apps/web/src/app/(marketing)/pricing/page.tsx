@@ -70,6 +70,51 @@ function itemRange(catalogue: CataloguePriceBand[], i: number): string {
 const bandTrialDays = (band: CataloguePriceBand, fallback: number) =>
   typeof band.trialDays === 'number' && Number.isInteger(band.trialDays) && band.trialDays > 0 ? band.trialDays : fallback;
 
+// [ENTERPRISE-PAGE · owner 31 Oct 2026] What a chain gets today, each line true on main: one login runs every branch
+// and a person approves each new one (partner.service addBranch, personApprovalRequired); one MMG checkout pays every
+// branch fee DUE now (a branch in its free trial or not yet due is left out), or each pays its own
+// (billing/chain-checkout.ts); a monthly fee statement (billing/chain-statement.ts);
+// a weekly rate per branch agreed with Swift that never raises a branch's fee and ends or rises only after the
+// 14-day notice (vendor/chain-deal.ts, billing/fee-rise-notice.ts); a branch limit per account (branchLimit). No
+// chain rate is quoted and no discount promised: the rate is negotiated (owner, 29 Oct 2026; decision 49 stays).
+const CHAIN_POINTS = [
+  'One login runs all your branches. A person at Swift checks and approves each new branch before it goes live.',
+  'Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.',
+  'A monthly fee statement lists every branch, the weeks it paid and its receipts.',
+  "Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days' notice.",
+  'Need more branches than one account allows? Contact sales.',
+];
+const SALES_SUBJECT = 'Chain / enterprise enquiry';
+
+function ChainsAndEnterprise() {
+  return (
+    <Section>
+      <div className="grid gap-8 md:grid-cols-[1fr_auto] md:items-start">
+        <div>
+          <h2 className="text-2xl font-extrabold tracking-tight">Chains and enterprise</h2>
+          <p className="mt-3 max-w-2xl text-[var(--swift-muted)]">
+            Run several stores or restaurants? Talk to us about a rate for all your branches.
+          </p>
+          <ul className="mt-5 max-w-3xl list-disc space-y-2 pl-5 text-sm leading-relaxed text-[var(--swift-muted)]">
+            {CHAIN_POINTS.map((point) => (
+              <li key={point}>{point}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="flex flex-col items-start gap-2">
+          <a
+            href={`mailto:${site.salesEmail}?subject=${encodeURIComponent(SALES_SUBJECT)}`}
+            className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+          >
+            Contact sales
+          </a>
+          <p className="text-sm text-[var(--swift-muted)]">{site.salesEmail}</p>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
   return (
     <div className="rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
@@ -192,6 +237,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
           </p>
         )}
       </Section>
+      <ChainsAndEnterprise />
     </>
   );
 }
