@@ -24,16 +24,22 @@ function contrast(a: string, b: string): number {
 }
 
 describe('statusClass: pending is the brand maroon, never the old bright red', () => {
-  it('a pending status is the maroon brand fill with the light text', () => {
+  it('a pending status is the maroon brand fill with fixed white text ("fills, with white text")', () => {
     for (const s of ['PENDING', 'PLACED', 'REVIEW', 'IN_REVIEW', 'UNVERIFIED']) {
-      expect(statusClass(s)).toBe('bg-[var(--accent-deep)] text-[var(--text)]');
+      expect(statusClass(s)).toBe('bg-[var(--accent-deep)] text-white');
     }
   });
 
-  it('those two tokens are the brand maroon and a light text that reads on it', () => {
+  it('the fill is the brand maroon on the dark sheet AND on every light surface, and white reads on it on both', () => {
     expect(BRAND_500).toMatch(/^#[0-9A-F]{6}$/);
     expect(token('accent-deep')).toBe(BRAND_500);
-    expect(contrast(token('accent-deep')!, token('text')!)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(token('accent-deep')!, '#FFFFFF')).toBeGreaterThanOrEqual(4.5);
+    // [REVIEW-F S4-1 #2247] Light Mission Control surfaces re-point --accent-deep to --mc-accent and --text to the
+    // dark ink: --text on the fill would be ink on maroon (about 2:1). The pill's text is a fixed white instead.
+    expect(css).toMatch(/\.mc-page, \.review-center, \.admin-modal \{[^}]*--accent-deep: var\(--mc-accent\);/);
+    expect(contrast(token('mc-accent')!, '#FFFFFF')).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(token('mc-accent')!, token('mc-ink')!)).toBeLessThan(4.5); // why the text may never follow --text
+    expect(statusClass('PENDING')).not.toContain('var(--text)');
   });
 
   it('red stays for bad statuses, green for good ones', () => {
