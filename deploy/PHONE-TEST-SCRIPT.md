@@ -115,7 +115,7 @@ These need no second party. Follow AX309 (`deepseek-audits/AX309-phone-scripts-b
 
 ## CUST-05 — pick up at the counter with your code
 
-**What it proves:** a pickup order gets a 6-digit code that only you hold, and the store can hand the order over only with that code.
+**What it proves:** a pickup order follows every step to **Picked up**, and on build 12 your 6-digit code appears only after the hold. TEST-Kitchen-One's "Ask for the pickup code" is OFF (the default), so the store may also hand over with your first name and order number, without the code.
 
 **Coordinator first:**
 
@@ -152,10 +152,10 @@ These need no second party. Follow AX309 (`deepseek-audits/AX309-phone-scripts-b
 
 6. The order moves to **Picked up** or **Completed**.
 
-Written for build 12. On a phone that already has the takeaway update, a store whose code is OFF shows no code: you see your order number and a line asking you to give your first name and order number. Tell the coordinator; that is expected, not a finding.
+These steps were written for build 12. On a phone that already has the takeaway update, a store whose code is OFF shows no code: you see your order number and a line asking you to give your first name and order number. Tell the coordinator; that is expected, not a finding.
 
-**Pass:** the code appears only after the hold, the store needs it, and your screen follows every step.
-**Fail:** the handover works without your code, the code never appears, or your screen gets stuck on a step the helper already passed.
+**Pass:** on build 12 the code appears only after the hold (with the takeaway update: your order number and the first-name line instead), the helper's handover moves your order, and your screen follows every step.
+**Fail:** on build 12 the code never appears, with the takeaway update a code still shows, or your screen gets stuck on a step the helper already passed. A handover without your code is expected here (the store's code is off), not a finding.
 
 **Cleanup:** none. The order is complete.
 
@@ -355,10 +355,10 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 4. Type the 6 digits the coordinator reads you. Tap **Mark picked up**.
 
-**Pass:** the alert rings, each step moves the order, and the handover needs the customer's code.
-**Fail:** the order never alerts, a step does nothing, or the handover works without the code.
+**Pass:** the alert rings, each step moves the order, and the handover with the customer's code completes the order.
+**Fail:** the order never alerts, a step does nothing, the right code is refused, or the handover works without the code while your store's "Ask for the pickup code" is ON (the website's Orders page). With it OFF (the default), a handover without the code is expected, not a finding.
 
-**Mixed versions, until the store app update reaches your phone (#2251):** a store whose takeaway code is OFF (the default) no longer gives its pickup customers a code on the website or on a phone with the update; they give their first name and order number instead. A store phone still on build 12 doesn't know that: its order screen ("HANDOVER CHECK") still asks for a 6-digit code that such a customer doesn't have. For a real customer of that store, check their first name and order number, then use the board's **Mark picked up** (no code); Swift accepts it while the store's code is off. In this test the helper's `customer codes` still prints the code.
+**Mixed versions, until the store app update reaches your phone (#2251):** a store whose takeaway code is OFF (the default) no longer gives its pickup customers a code on the website or on a phone with the update; they give their first name and order number instead. A store phone still on build 12 doesn't know that: its order screen ("HANDOVER CHECK") still asks for a 6-digit code that such a customer doesn't have. For a real customer of that store, check their first name and order number, then use the board's **Mark picked up** (no code); Swift accepts it while the store's code is off. If that button opens the order screen with the code box instead (a store phone with a newer app update that does not have the takeaway change yet), use **Handed to customer** on that order's page on the website. In this test the helper's `customer codes` still prints the code.
 
 ---
 
