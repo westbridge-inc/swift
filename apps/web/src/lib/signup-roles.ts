@@ -25,3 +25,19 @@ export const TAXI_PLATE_ERROR = 'Taxi plates in Guyana start with H — e.g. HC 
 export function isHirePlate(plate: string): boolean {
   return plate.toUpperCase().replace(/[\s-]+/g, '').startsWith('H');
 }
+
+/** [OPEN-EARLY · owner 31 Oct 2026] The partner doors a link may open straight onto: /signup?as=business|rider|driver.
+ *  Only these three. Ordering is never preselected by a link, so `?as=` can never open the customer door
+ *  (the public site keeps it closed before launch). */
+export type PartnerDoor = 'business' | 'rider' | 'driver';
+export const PARTNER_DOORS: Record<PartnerDoor, 'VENDOR' | MoverRole> = { business: 'VENDOR', rider: 'RIDER', driver: 'DRIVER' };
+
+/** The partner door named by a `?as=` value, exactly as written; anything else (customer included) opens no door. */
+export function partnerDoorRole(value: string | null | undefined): 'VENDOR' | MoverRole | null {
+  return value === 'business' || value === 'rider' || value === 'driver' ? PARTNER_DOORS[value] : null;
+}
+
+/** The sign-up address that opens on one partner door. */
+export function partnerSignupHref(door: PartnerDoor): string {
+  return `/signup?as=${door}`;
+}

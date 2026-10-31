@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { DashboardShell } from './dashboard-shell';
 import { LegalAcceptanceGate } from '@/components/legal-acceptance-gate';
+import { LazyPrelaunchPartnerNote } from '@/components/prelaunch-partner-note-lazy';
 
 /**
  * [DS273 F3] The vendor console (today, orders, inventory, import, settings) is
@@ -15,5 +16,6 @@ export const metadata: Metadata = {
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   // [Legal research G2 · R26] a material change to the Terms is accepted with a fresh tick
-  return <><DashboardShell>{children}</DashboardShell><LegalAcceptanceGate /></>;
+  // [OPEN-EARLY] Before launch, every store console page says approvals come on launch day.
+  return <><DashboardShell><LazyPrelaunchPartnerNote className="mb-5" />{children}</DashboardShell><LegalAcceptanceGate /></>;
 }

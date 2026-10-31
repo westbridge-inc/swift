@@ -39,6 +39,12 @@ import appPartner1206 from './app-partner-1206.webp';
  *  - support days and hours: site.supportDays.
  * The company and policy links live once, in the footer every marketing page carries. The store area follows
  * the server's SWIFT_APP_STORES switch (StoreButtons in components/app-store-links.tsx).
+ *
+ * [OPEN-EARLY · owner 31 Oct 2026] Partners sign up and send documents before ordering opens. This page is only
+ * ever the closed front door (middleware.ts answers ordering addresses with it while the switch is not live), so
+ * it says so plainly: "Opening soon" with a Join Swift button in the hero, the Order and Ride cards marked
+ * "Opening soon" (their words describe the app, which is true), and the Earn card first in the swipe row on a
+ * phone so a partner sees it without swiping.
  */
 export const metadata: Metadata = {
   title: { absolute: `${site.tradeName} · ${launchCity()}, in one app` },
@@ -97,12 +103,16 @@ function Screen({ shot, tone }: { shot: Shot; tone: 'paper' | 'brand' }) {
   );
 }
 
+/** [OPEN-EARLY] Ordering and rides are not open yet: the card says so above its title, and its screen is muted. */
 function Card({ shot, title, children, more }: { shot: Shot; title: string; children: ReactNode; more: ReactNode }) {
   return (
-    <article className="flex w-[82%] shrink-0 snap-center flex-col rounded-3xl bg-[var(--swift-card)] p-4 shadow-[var(--swift-elevation-card)] sm:w-[60%] md:w-auto">
-      <Screen shot={shot} tone="paper" />
+    <article data-opening-soon className="flex w-[82%] shrink-0 snap-center flex-col rounded-3xl bg-[var(--swift-card)] p-4 shadow-[var(--swift-elevation-card)] sm:w-[60%] md:w-auto">
+      <div className="opacity-60 grayscale-[35%]">
+        <Screen shot={shot} tone="paper" />
+      </div>
       <div className="flex flex-1 flex-col px-3 pb-3 pt-6">
-        <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
+        <p className="self-start rounded-full bg-[var(--swift-sunken)] px-3 py-1 text-[13px] font-semibold text-[var(--swift-ink)]">Opening soon</p>
+        <h2 className="mt-3 text-2xl font-bold tracking-tight">{title}</h2>
         <p className="mt-3 flex-1 text-[17px] leading-relaxed text-[var(--swift-muted)]">{children}</p>
         <div className="mt-5">{more}</div>
       </div>
@@ -155,6 +165,15 @@ export default function LaunchingSoonPage() {
               Food, groceries, shops, parcels, rides and local pros. The people doing the work keep 100% of what they
               earn.
             </p>
+            {/* [OPEN-EARLY] What is true today: Swift is not open yet, and partners can sign up now. */}
+            <div data-opening-soon-hero className="mt-6 flex max-w-xl flex-col items-start gap-4">
+              <p className="text-lg font-semibold leading-snug md:text-xl">
+                Opening soon in {launchCity()}. Businesses, riders and taxi drivers can sign up now.
+              </p>
+              <Link href="/signup" className="sw-btn">
+                Join Swift
+              </Link>
+            </div>
             {/* [REVIEW-F S4-2] The area keeps the store buttons' height (one 56 px row) in both states. */}
             <div data-store-area className="mt-8 flex min-h-14 items-center">
               <StoreButtons />
@@ -192,7 +211,8 @@ export default function LaunchingSoonPage() {
             Taxis in the Swift app, with the fare shown before you book. A PIN check before every ride, and the trip
             live on the map.
           </Card>
-          <article className="flex w-[82%] shrink-0 snap-center flex-col rounded-3xl bg-[var(--swift-red)] p-4 text-[var(--swift-white)] sm:w-[60%] md:w-auto">
+          {/* [OPEN-EARLY] First in the swipe row on a phone (a partner sees it without swiping); last on a wide screen. */}
+          <article data-earn-card className="order-first flex w-[82%] shrink-0 snap-center flex-col rounded-3xl bg-[var(--swift-red)] p-4 text-[var(--swift-white)] sm:w-[60%] md:order-none md:w-auto">
             <Screen
               shot={{ image: appPartner, large: appPartner1206, alt: 'The rider’s side of the Swift app: a map of Georgetown and the button to go online for jobs.' }}
               tone="brand"

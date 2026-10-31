@@ -22,6 +22,9 @@ type Answer = 'unknown' | 'live' | 'closed';
 
 let answer: Answer = 'unknown';
 let storesAnswer: Answer = 'unknown';
+// [OPEN-EARLY] Did the server itself say "not open yet"? Only a real answer of "soon" sets it: an unanswered or
+// failed question does not, so a sentence that is true only before launch never shows on a guess.
+let saidSoon = false;
 let asking: Promise<void> | null = null;
 const listeners = new Set<() => void>();
 
@@ -30,6 +33,7 @@ function ask(): void {
     .then((response) => (response.ok ? response.json() : null))
     .then((body: { webOrdering?: string; appStores?: string } | null) => {
       answer = body?.webOrdering === 'live' ? 'live' : 'closed';
+      saidSoon = body?.webOrdering === 'soon';
       storesAnswer = body?.appStores === 'live' ? 'live' : 'closed';
     })
     .catch(() => { answer = 'closed'; storesAnswer = 'closed'; })
@@ -58,9 +62,20 @@ export function useAppStoresLive(): boolean {
   return useSyncExternalStore(subscribe, () => storesAnswer === 'live', () => false);
 }
 
+/**
+ * [OPEN-EARLY] True only on the public site, once the server answered that ordering is not open yet ("soon") on
+ * this page load. While the question is on its way, if it fails, once live, and on every other host (staging,
+ * previews, local runs) it is false. For the pre-launch partner note ("we approve partners on launch day"),
+ * which must never show after launch.
+ */
+export function useWebOrderingSoon(): boolean {
+  return useSyncExternalStore(subscribe, () => isPublicSiteHost(window.location.host) && saidSoon, () => false);
+}
+
 /** Tests only: forget this page load's answer. */
 export function forgetLaunchAnswer(): void {
   answer = 'unknown';
   storesAnswer = 'unknown';
+  saidSoon = false;
   asking = null;
 }

@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { Banknote, ShieldCheck, MapPin, FileCheck2, PhoneCall, Radar } from 'lucide-react';
 import { Section } from '@/components/site';
 import { launch } from '@/site.config';
+import { partnerSignupHref } from '@/lib/signup-roles';
+import { PrelaunchPartnerNote } from '@/components/prelaunch-partner-note';
 
 export const metadata: Metadata = {
   title: 'For riders and drivers',
@@ -141,16 +143,26 @@ export default function DriversPage() {
             Riding a bicycle? You will not be asked for a licence, registration or motor insurance.
           </p>
 
+          {/* [OPEN-EARLY] Two doors, each opening sign-up on its own option: a delivery rider and a taxi driver. */}
           <div className="mt-10">
-            <Link
-              href="/signup"
-              className="inline-block rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
-            >
-              Start a driver account
-            </Link>
+            <div className="flex flex-wrap gap-3">
+              <Link
+                href={partnerSignupHref('rider')}
+                className="inline-block rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+              >
+                Deliver with Swift
+              </Link>
+              <Link
+                href={partnerSignupHref('driver')}
+                className="inline-block rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+              >
+                Drive a taxi with Swift
+              </Link>
+            </div>
             <p className="mt-3 text-sm text-[var(--swift-muted)]">
               Currently onboarding in {launch.markets[0]}.
             </p>
+            <PrelaunchPartnerNote className="mt-6" />
           </div>
         </div>
       </Section>

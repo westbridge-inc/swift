@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import Link from 'next/link';
 import { Section } from '@/components/site';
+import { PrelaunchPartnerNote } from '@/components/prelaunch-partner-note';
+import { partnerSignupHref, type PartnerDoor } from '@/lib/signup-roles';
 import { fetchPricing, type CataloguePriceBand, type CountryPricing, type MoverPriceQuote } from '@/lib/api';
 import { formatAmount, parseAmount } from '@/lib/money';
 import { catalogueRetierOf } from '@/lib/catalogue-retier';
@@ -111,6 +114,44 @@ function ChainsAndEnterprise() {
           <p className="text-sm text-[var(--swift-muted)]">{site.salesEmail}</p>
         </div>
       </div>
+    </Section>
+  );
+}
+
+/** [OPEN-EARLY · owner 31 Oct 2026] The pricing page's own way in: Join Swift, and each partner door opening on
+ *  its own sign-up option (the same names as the sign-up page's tiles). */
+const JOIN_DOORS: ReadonlyArray<{ door: PartnerDoor; label: string }> = [
+  { door: 'business', label: 'Put my business on Swift' },
+  { door: 'rider', label: 'Deliver with Swift' },
+  { door: 'driver', label: 'Drive a taxi with Swift' },
+];
+
+function JoinSwift() {
+  return (
+    <Section>
+      <h2 className="text-2xl font-extrabold tracking-tight">Join Swift</h2>
+      <p className="mt-3 max-w-2xl text-[var(--swift-muted)]">
+        Sign up with your phone and send your documents. A person checks them before you go live, and your free trial
+        starts the day you are approved.
+      </p>
+      <div className="mt-6 flex flex-wrap gap-3">
+        <Link
+          href="/signup"
+          className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+        >
+          Join Swift
+        </Link>
+        {JOIN_DOORS.map(({ door, label }) => (
+          <Link
+            key={door}
+            href={partnerSignupHref(door)}
+            className="rounded-full border border-[var(--swift-border-strong)] px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"
+          >
+            {label}
+          </Link>
+        ))}
+      </div>
+      <PrelaunchPartnerNote className="mt-6 max-w-3xl" />
     </Section>
   );
 }
@@ -237,6 +278,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
           </p>
         )}
       </Section>
+      <JoinSwift />
       <ChainsAndEnterprise />
     </>
   );
