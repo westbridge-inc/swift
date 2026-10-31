@@ -119,6 +119,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // [PAYMENT-SIMPLIFY] the store's MMG NUMBER change notices, exactly like the link's (ALG-34 parity)
     'mmg_number_change_staged', 'mmg_number_change_applied', 'mmg_number_change_cancelled',
+    // [first-number rule hardened] a number that was WAITING to go live was removed: as loud as the change notices
+    'mmg_number_pending_removed',
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_application_abandoned', 'verification_forced_offline', 'verification_vehicle_lapsed',
