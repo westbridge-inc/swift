@@ -41,6 +41,14 @@ async function openCertificate(user: ReturnType<typeof userEvent.setup>) {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('[O-5] Store VAT queue', () => {
+  // [VAT-DOCS · owner 30 Oct 2026] The reviewer sees what approving does to the store's prices.
+  it('each store says how its prices relate to VAT, and an "add VAT" store says approving adds VAT to its prices', async () => {
+    serve([row, { ...row, vendorId: 'vnd-2', name: 'Other Shop', mode: 'ADD_VAT_AT_CHECKOUT', certificate: null }]);
+    renderWithQuery(<StoreVatPage />);
+    expect(await screen.findByText('Prices already include VAT: approving leaves its prices as they are')).toBeTruthy();
+    expect(screen.getByText('Prices do not include VAT: approving adds VAT to each standard-rated price customers see')).toBeTruthy();
+  });
+
   it('nothing waiting: says so', async () => {
     serve([]);
     renderWithQuery(<StoreVatPage />);

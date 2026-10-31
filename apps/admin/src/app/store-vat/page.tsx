@@ -10,6 +10,7 @@ import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { gyDate } from '@/lib/dates';
+import { vatModeWords } from '@/lib/store-vat-mode';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] Stores waiting for a VAT decision, oldest certificate first.
@@ -52,7 +53,7 @@ export default function StoreVatPage() {
       <p>
         Type what the certificate says. The server checks the number against the one the store gave and refuses a
         mismatch. Once approved, the store&apos;s prices say &ldquo;incl. VAT&rdquo; and its receipts name it as the one
-        charging VAT.
+        charging VAT.{row.mode === 'ADD_VAT_AT_CHECKOUT' ? ' This store\u2019s prices do not include VAT, so approving adds VAT to each standard-rated price its customers see.' : ''}
       </p>
     ),
     confirmLabel: 'Approve VAT',
@@ -104,6 +105,7 @@ export default function StoreVatPage() {
               <div className="flex flex-wrap items-baseline gap-3">
                 <Link href={`/vendors/${row.vendorId}`} className="font-semibold underline">{row.name}</Link>
                 <span className="text-sm">Number the store gave: <span className="mc-numbers">{row.vatRegistrationNumber ?? '—'}</span></span>
+                <span className="text-sm">{vatModeWords(row.mode)}</span>
                 <span className="text-sm">
                   {row.certificate ? `Certificate sent ${gyDate(row.certificate.createdAt)} (${CERTIFICATE_WORDS[row.certificate.status] ?? 'in a state this page does not know'})` : 'No certificate sent yet'}
                 </span>
