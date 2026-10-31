@@ -46,6 +46,7 @@ const vendorIds: string[] = [];
 let ownerUserId = '';
 let ownerToken = '';
 let reviewerToken = '';
+let reviewerId = '';
 let customer: { userId: string; token: string; addressId: string };
 let vendorId = '';
 let categoryId = '';
@@ -176,7 +177,7 @@ beforeAll(async () => {
     phone: testPhone(), firstName: 'Vat', lastName: 'Checker', roles: ['SUPER_ADMIN', 'CUSTOMER'] as UserRole[], activeRole: 'SUPER_ADMIN',
     status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } },
   } });
-  userIds.push(reviewer.id);
+  userIds.push(reviewer.id); reviewerId = reviewer.id;
   reviewerToken = await session(reviewer.id, 'SUPER_ADMIN');
 
   const cust = await app.prisma.user.create({ data: {
@@ -472,6 +473,16 @@ describe('4. VAT stops being added: every price back to what the store typed, at
     expect(res.statusCode, res.body).toBe(201);
     expect((await vendorRow()).vatStatus).toBe('PENDING');
     expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
+  });
+
+  it('approved again, then a person withdraws the CERTIFICATE itself (document revoke): typed prices back', async () => {
+    await approve();
+    expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
+    await verification.revokeDocument(certificateDocId, reviewerId, 'The certificate was cancelled by the GRA.');
+    expect((await vendorRow()).vatStatus).toBe('REVOKED');
+    expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
+    const again = await sendCertificate({});
+    expect(again.statusCode, again.body).toBe(201);
   });
 
   it('approved again, then the store says it is not VAT-registered: typed prices back', async () => {
