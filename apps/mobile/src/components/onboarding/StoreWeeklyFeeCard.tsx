@@ -4,8 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { space } from '@swift/ui';
 import { BrandCheckbox, Card, PillButton, T } from '../../kit';
 import { vendorApi } from '../../services/api';
-import { moneyIn } from '../../lib/money';
-import { storeFeeAck, storeFeeCardEnabled, storeFeeCardView, storeFeeKey, tickHolds, type StoreFeeToTick } from './storeWeeklyFee';
+import { storeFeeAck, storeFeeCardEnabled, storeFeeCardView, storeFeeKey, storeFeeMoney, tickHolds, type StoreFeeToTick } from './storeWeeklyFee';
 
 /** The server's message for a refused tick, or a plain retry line. */
 function errorCopy(error: unknown): string {
@@ -64,7 +63,7 @@ export function StoreWeeklyFeeCard({ role, scope }: { role: string; scope?: Stor
   const key = storeFeeKey(fee);
   return (
     <Card style={{ marginTop: space.md, gap: space.sm }}>
-      <T variant="label" weight="bold">Your weekly fee: {moneyIn(fee.amount, fee.currencyCode)} a week</T>
+      <T variant="label" weight="bold">Your weekly fee: {storeFeeMoney(fee)} a week</T>
       {fee.why ? <T variant="caption" tone="muted">{fee.why}</T> : null}
       {fee.items.map((item) => (
         <T key={item.heading} variant="caption"><T variant="caption" weight="bold">{item.heading}: </T>{item.text}</T>

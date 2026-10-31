@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { STORE_ROLES, storeFeeAck, storeFeeCardEnabled, storeFeeCardView, storeFeeKey, storeFeeToTick, tickHolds } from './storeWeeklyFee';
+import { STORE_ROLES, storeFeeAck, storeFeeCardEnabled, storeFeeCardView, storeFeeKey, storeFeeMoney, storeFeeToTick, tickHolds } from './storeWeeklyFee';
 import { GO_LIVE_STEP_WORDS, ownerStepWords } from '../../lib/branches';
 
 // [RETIER PR-A2 · owner 30 Oct 2026] A store whose weekly fee follows its catalogue above the first step goes live
@@ -104,5 +104,20 @@ describe('[RETIER PR-A2] the store weekly-fee card reads only the server', () =>
     expect(card).toMatch(/useQuery\(\{[\s\S]*enabled,\n {2}\}\);/);
     expect(card).toContain('const view = storeFeeCardView(role, scope, { data: read.data, isError: read.isError });');
     expect(card).toContain("<PillButton label=\"Try again\" variant=\"soft\" onPress={() => void read.refetch()} />");
+  });
+});
+
+// [REVIEW-F S4-1 on #2246] The card names the fee as every phone fee screen does (GY$45,000, lib/fee-status feeMoney),
+// and as the website card does; another currency keeps its own code.
+describe('the card names the amount as the fee screens do', () => {
+  it('GYD reads GY$45,000; another currency keeps its code', () => {
+    expect(storeFeeMoney({ amount: 45000, currencyCode: 'GYD' })).toBe('GY$45,000');
+    expect(storeFeeMoney({ amount: 300, currencyCode: 'USD' })).toBe('USD 300');
+  });
+
+  it('the card renders that figure, not the plain "$" shop price', () => {
+    const card = readFileSync(join(__dirname, 'StoreWeeklyFeeCard.tsx'), 'utf8');
+    expect(card).toContain('Your weekly fee: {storeFeeMoney(fee)} a week');
+    expect(card).not.toMatch(/moneyIn\(/);
   });
 });

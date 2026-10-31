@@ -4,7 +4,15 @@
 // words and their version. The app never supplies a figure or the words itself, so an older server — or a malformed
 // answer — shows no card. No React Native imports: the card and its tests share it.
 
+import { feeMoney } from '../../lib/fee-status';
+import { moneyIn } from '../../lib/money';
+
 export interface StoreFeeItem { heading: string; text: string }
+
+/** [REVIEW-F S4-1 on #2246] The fee as every phone fee screen names it (GY$45,000); another currency keeps its code. */
+export function storeFeeMoney(fee: Pick<StoreFeeToTick, 'amount' | 'currencyCode'>): string {
+  return fee.currencyCode === 'GYD' ? feeMoney(fee.amount) : moneyIn(fee.amount, fee.currencyCode);
+}
 
 export interface StoreFeeToTick {
   /** The store the fee is for: the tick is sent for this store only. */
