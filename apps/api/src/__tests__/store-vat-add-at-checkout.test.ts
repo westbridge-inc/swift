@@ -209,12 +209,18 @@ afterAll(async () => {
   await app.prisma.stockMovement.deleteMany({ where: { itemId: { in: itemIds } } });
   await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
+  // Any weekly-fee record a store here picked up (billing runs on its own clock): its notices, clock and subscription.
+  const subscriptionIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((x) => x.id);
+  await app.prisma.billingNoticeHandoff.deleteMany({ where: { notice: { OR: [{ subscriptionId: { in: subscriptionIds } }, { userId: { in: userIds } }] } } });
+  await app.prisma.billingFeeNotice.deleteMany({ where: { OR: [{ subscriptionId: { in: subscriptionIds } }, { userId: { in: userIds } }] } });
+  await app.prisma.billingDunningClock.deleteMany({ where: { subscriptionId: { in: subscriptionIds } } });
   await app.prisma.subscription.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.address.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -265,6 +271,8 @@ describe('1. ONE submission: number + certificate + price mode (the Documents li
     expect(await prices(soapId)).toEqual({ basePrice: 100, vatListedPrice: null });
     expect(await shownPrice(soapId)).toBe(100);
     expect((await storefront()).vat).toBeNull();
+    const profile = await vendorCall('GET', '/profile');
+    expect((profile.json().data.vendors as Array<Record<string, unknown>>).find((v) => v['id'] === vendorId)).toMatchObject({ vatAddsToPrices: false });
   });
 
   it('a person can never approve a store without a pricing mode (409 VAT_MODE_REQUIRED), whatever an older app left', async () => {
@@ -300,6 +308,22 @@ describe('2. approved: VAT added INTO every standard-rated price the customer se
     const notice = await app.prisma.notification.findFirstOrThrow({ where: { userId: ownerUserId, title: 'Your VAT is approved' } });
     expect(notice.body).toContain('From now on, VAT at 14% is added to the prices you type for standard-rated items, so customers see and pay prices that include VAT');
     expect(notice.body).toContain('Swift treats every item as standard-rated until you mark it: until then customers pay VAT on it, so mark your zero-rated and exempt items now.');
+  });
+
+  it('[security review #2256] every role that edits the menu reads whether VAT is added to the store’s prices (the profile)', async () => {
+    const mgr = await app.prisma.user.create({ data: {
+      phone: testPhone(), firstName: 'Vat', lastName: 'Manager', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], activeRole: 'VENDOR_OWNER',
+      isPhoneVerified: true, countryCode: 'GY', selfieCapturedAt: new Date(),
+    } });
+    userIds.push(mgr.id);
+    await app.prisma.vendorStaff.create({ data: { vendorId, userId: mgr.id, role: 'MANAGER', invitedBy: ownerUserId } });
+    const managerToken = await session(mgr.id, 'VENDOR_OWNER');
+    for (const token of [ownerToken, managerToken]) {
+      const res = await call('GET', '/api/v1/vendor/profile', token, undefined, { 'x-vendor-id': vendorId });
+      expect(res.statusCode, res.body).toBe(200);
+      const store = (res.json().data.vendors as Array<Record<string, unknown>>).find((v) => v['id'] === vendorId);
+      expect(store).toMatchObject({ vatAddsToPrices: true, vatRatePercent: 14 });
+    }
   });
 
   it('the store’s own menu shows what it typed (vatListedPrice) next to what customers pay, as numbers', async () => {

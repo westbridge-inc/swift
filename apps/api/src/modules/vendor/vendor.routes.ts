@@ -11,8 +11,9 @@ import { VAT_CLASSES } from '../store-vat/vat-math';
 import { storeVatNumberChanged } from '../store-vat/store-vat-decisions';
 import {
   VAT_PRICE_BEFORE_VAT_MESSAGE, VatPriceBeforeVatRequired, itemPriceEdit, optionPriceEdit, reconcileVatPricing, refuseOlderAppNewPrice,
-  sentOnlyCustomerPrice, typedItemPrice, typedOptionPrice,
+  sentOnlyCustomerPrice, storeAddsVatToPrices, typedItemPrice, typedOptionPrice,
 } from '../store-vat/vat-pricing';
+import { STORE_VAT_RATE_PERCENT } from '../store-vat/vat-rate';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from '../verification/upload-consent';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
@@ -1551,6 +1552,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       // while INSTANT_BOOKING is on; the partner app shows the setting only on this word. Switch
       // off: not sent (the answer is today's).
       ...(vendor.vendorType === 'SERVICE' && instantBookingEnabled() ? { instantBookingAvailable: true } : {}),
+      // [VAT-DOCS · security review #2256] Whether VAT is added to the prices this store types (a person's approval in
+      // "my prices do not include VAT"), for EVERY role that edits the menu: the editors ask for the price before VAT and
+      // send it as such only on this word. Not a secret (customers see the VAT-inclusive prices); the VAT record stays the owner's.
+      vatAddsToPrices: storeAddsVatToPrices(vendor),
+      vatRatePercent: STORE_VAT_RATE_PERCENT,
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
