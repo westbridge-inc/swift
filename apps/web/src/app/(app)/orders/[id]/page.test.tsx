@@ -102,15 +102,27 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
   });
 
   // [O-2 · REVIEW-F S3-3 on #2055] The store's code is off by default: the counter asks for the first name
-  // and order number. The code stays on screen in case an older store app asks; an older server = today's words.
+  // and order number. [PICKUP · owner 30 Oct 2026: "the code is still there rather than mark as picked up"] With
+  // the code off the customer gets NO code: the name + order-number words and the order number itself. The
+  // server sends none to this page (pickupHandover=v1); a code an older server still sends is not shown either.
+  // An older server that does not say (no pickupCodeRequired) = today's code card.
   it('a takeaway tells the customer what the counter asks for', async () => {
     const TAKEAWAY = { ...ORDER, status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', pickupAddress: '7 Counter Lane, Georgetown', pickupCode: '482193' };
-    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired: false } as never);
-    const view = render(<OrderDetailPage />);
-    expect(await screen.findByText('At the counter, give your first name and order number. If they ask for a code:')).toBeTruthy();
-    expect(screen.getByText('482193')).toBeTruthy();
-    expect(screen.queryByText('Show this pickup code')).toBeNull();
-    view.unmount();
+    for (const pickupCode of [null, '482193']) {
+      vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCode, pickupCodeRequired: false } as never);
+      const view = render(<OrderDetailPage />);
+      expect(await screen.findByText('At the counter, give your first name and order number.')).toBeTruthy();
+      expect(screen.getAllByText('SW-2001').length).toBeGreaterThan(0);
+      expect(screen.queryByText('482193')).toBeNull();
+      expect(screen.queryByText(/code/i)).toBeNull();
+      view.unmount();
+    }
+    // Collected: nothing left to say at the counter.
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, status: 'COMPLETED', pickupCode: null, pickupCodeRequired: false } as never);
+    const done = render(<OrderDetailPage />);
+    expect(await screen.findAllByText(/SW-2001/)).toBeTruthy();
+    expect(screen.queryByText('At the counter, give your first name and order number.')).toBeNull();
+    done.unmount();
     for (const pickupCodeRequired of [true, undefined]) {
       vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired } as never);
       const again = render(<OrderDetailPage />);
@@ -514,7 +526,9 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   const fetchSpy = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: {} } as never);
   await orders.getOrder('order-9');
   // [O-4] v2: this page renders the pre-accept removal question too (a v1 client is served a legacy line).
-  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
+  // [PICKUP · owner 30 Oct 2026] pickupHandover=v1: this page tells the customer the name + order number when the
+  // store's code is off, so the server sends it no code then.
+  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2&pickupHandover=v1');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
 });

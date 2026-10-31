@@ -503,7 +503,9 @@ export const customerApi = {
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   // This client renders the server's swap permissions and refusal guidance.
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2' } }), // [O-4] v2 = renders the removal question
+  // [O-4] v2 = renders the removal question. [PICKUP · owner 30 Oct 2026] pickupHandover=v1 = tells the customer the
+  // first name + order number when the store's code is off (the server then sends no code).
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2', pickupHandover: 'v1' } }),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message } } inside the axios body — reading one
   // level short silently discarded the authoritative cancellation outcome.

@@ -43,7 +43,7 @@ import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyR
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 import { isTaxiOrder } from '../../../lib/orderTrackRoute';
-import { pickupWords } from '../pickup-words';
+import { pickupShowsCode, pickupWords } from '../pickup-words';
 import { BookingRescheduleCard } from '../BookingRescheduleCard';
 import { appointmentBookingView } from '../../../lib/appointmentBooking';
 
@@ -1374,7 +1374,9 @@ export function DeliveryScreen() {
               while the kitchen works; at READY it becomes the signature
               moment [pickup spec 2.2]: "It's ready." + the code + the way
               there. The push never carries the code — this screen does. */}
-          {o.fulfillment === 'PICKUP' && o.pickupCode && !cancelled && !failed && !complete ? (
+          {/* [PICKUP · owner 30 Oct 2026] The store's code off: the name + order-number check and the order
+              number, never a code; the store taps "Handed to customer". */}
+          {o.fulfillment === 'PICKUP' && (pickupShowsCode(o) || o.pickupCodeRequired === false) && !cancelled && !failed && !complete ? (
             o.status === 'READY_FOR_PICKUP' ? (
               <View
                 style={{
@@ -1392,8 +1394,8 @@ export function DeliveryScreen() {
                 <T variant="micro" tone="muted" style={{ marginTop: space.md, textAlign: 'center' }}>
                   {pickupWords(o.pickupCodeRequired).ready}
                 </T>
-                <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
-                  {o.pickupCode}
+                <T variant={pickupShowsCode(o) ? 'displayXl' : 'title'} tone="brand" style={{ marginTop: space.xs, letterSpacing: pickupShowsCode(o) ? space.sm : 0, textAlign: 'center' }}>
+                  {pickupShowsCode(o) ? o.pickupCode : o.orderNumber}
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
@@ -1429,8 +1431,8 @@ export function DeliveryScreen() {
                 <T variant="micro" tone="muted" style={{ textAlign: 'center' }}>
                   {pickupWords(o.pickupCodeRequired).waiting}
                 </T>
-                <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
-                  {o.pickupCode}
+                <T variant={pickupShowsCode(o) ? 'displayXl' : 'title'} tone="brand" style={{ marginTop: space.xs, letterSpacing: pickupShowsCode(o) ? space.sm : 0, textAlign: 'center' }}>
+                  {pickupShowsCode(o) ? o.pickupCode : o.orderNumber}
                 </T>
               </View>
             )

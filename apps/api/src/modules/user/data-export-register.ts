@@ -376,6 +376,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       'vatStatus', 'vatMode', 'vatCertificateDocId', 'vatApprovedNumber', 'vatApprovedName', 'vatEffectiveFrom', 'vatReviewedAt', 'vatReviewNote',
       'mmgNumber', 'mmgNumberPending', 'mmgNumberPendingAt', 'mmgNumberApplyAt', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt',
       'isVerified', 'activationValidUntil', 'tier', 'tierChangedAt', 'status', 'totalOrders', 'nameReviewApprovedAt', 'createdAt', 'updatedAt',
+      // [RETIER PR-A] when the store first went live (it decides whether a new fee is priced on its catalogue)
+      'firstLiveAt',
     ],
   },
   {
