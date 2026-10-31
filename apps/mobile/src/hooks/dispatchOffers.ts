@@ -39,6 +39,9 @@ export interface DispatchOffer {
   customerTrust?: { trustLevel: string; completedOrders: number; strikes: number } | null;
   itemCount?: number;
   estLoad?: string | null;
+  // [owner 31 Oct] The order's real size class, and whether it is past what it is offered by today (lib/loadSize).
+  loadSize?: string | null;
+  oversize?: boolean;
   // [REPORT-010 F-07] Authoritative money/route facts carried by the RECOVERY
   // payload so a rebuilt card never prices itself from a missing board row.
   deliveryFee?: number;

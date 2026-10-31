@@ -51,7 +51,9 @@ export const FEE_ASK = {
 } as const;
 
 /** Beside a catalogue store's amount when the price list has more steps (the phone's price card says the same). */
-export const FEE_LADDER = 'This is the starting rate; it steps up as you list more items.';
+/** [RETIER PR-A · owner 30 Oct 2026] A store signs up before it has a catalogue: the fee is born when Swift approves it,
+ *  on its own catalogue's step, ticked by its owner first. [R27] The weekly re-tier is OFF: nothing moves it after. */
+export const FEE_LADDER = 'This is the starting rate. If your store has more items by the time Swift approves it (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.';
 
 /** True when this choice starts on a catalogue step the price list goes beyond. */
 export function feeSteps(pricing: SignupPricing, choice: FeeChoice): boolean {

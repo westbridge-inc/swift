@@ -43,7 +43,7 @@ const context = vm.createContext({
   customerTrustSummaries: async () => new Map(), cashMathForOffer: () => null,
   estimateLoad: () => 'small',
   // [owner #20] The enforced load gate's size read (a food order with no bulky line needs no vehicle size).
-  requiredPackageSizeForOrder: () => null, totalBulkUnits: () => 0, DEFAULT_LOAD_BANDS: { small: 4, medium: 12, large: 30 },
+  requiredPackageSizeForOrder: () => null, offerLoadFields: () => ({ loadSize: null, oversize: false }), totalBulkUnits: () => 0, DEFAULT_LOAD_BANDS: { small: 4, medium: 12, large: 30 },
   dispatchSearchesCounter: { inc: noop }, dispatchTimeToAssign: { observe: noop },
   poolForOrder: (o: { orderType: string }) => o.orderType === 'TAXI' ? 'DRIVER' : 'RIDER',
   verticalForOrder: () => 'DELIVERY',

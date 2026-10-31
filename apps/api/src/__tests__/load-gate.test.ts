@@ -76,6 +76,10 @@ describe('what a vehicle must be able to carry', () => {
     expect(grocery(12)).toBe('MEDIUM');
     expect(grocery(13)).toBe('LARGE');
     expect(grocery(30)).toBe('LARGE');
+    // [owner 31 Oct 2026, TRANSFORMED] Past the motorbike band is the largest class only while a vehicle Swift takes
+    // on may carry it (car deliveries on); while they are off it needs a motorbike — never refused for size alone.
+    expect(grocery(31)).toBe('LARGE');
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     expect(grocery(31)).toBe('EXTRA_LARGE');
     expect(requiredPackageSizeForOrder({ orderType: 'FOOD_DELIVERY', courierPackageSize: null, items: [line(2)] })).toBe('SMALL');
   });
@@ -83,18 +87,25 @@ describe('what a vehicle must be able to carry', () => {
   it('THE CASE THE DEFECT IS ABOUT: a 40-item supermarket run excludes a bicycle', () => {
     // This is the failure in one assertion. Today the filter is not emitted at
     // all, so a bicycle is a valid candidate for this order.
-    const required = requiredPackageSizeForOrder({
+    const run = () => requiredPackageSizeForOrder({
       orderType: 'GROCERY_DELIVERY',
       courierPackageSize: null,
       items: Array.from({ length: 40 }, () => line(1)),
     });
+    // [Owner, 31 Oct 2026 · TRANSFORMED] While car deliveries are off (the default, owner 15 Oct) no vehicle Swift
+    // takes on may carry the largest class, so a store order needs at most a motorbike: it is never refused for
+    // size alone. A bicycle stays excluded either way.
+    const carsOff = run();
+    expect(carsOff).toBe('LARGE');
+    expect(vehicleCanCarry('BICYCLE', carsOff!)).toBe(false);
+    expect(vehicleCanCarry('MOTORCYCLE', carsOff!)).toBe(true);
+    expect(vehicleCanCarry('CAR', carsOff!)).toBe(false);
+    // With the switch on, the car carries this order as before, and the motorbike is excluded again.
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
+    const required = run();
     expect(required).toBe('EXTRA_LARGE');
     expect(vehicleCanCarry('BICYCLE', required!)).toBe(false);
     expect(vehicleCanCarry('MOTORCYCLE', required!)).toBe(false);
-    // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: a car carries goods only while the
-    // CAR_DELIVERIES switch is on (default off); with it on, the car carries this order as before.
-    expect(vehicleCanCarry('CAR', required!)).toBe(false);
-    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     expect(vehicleCanCarry('CAR', required!)).toBe(true);
   });
 

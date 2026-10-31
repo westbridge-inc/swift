@@ -30,8 +30,8 @@ import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
-import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
-import { goodsSizeCarriableToday, vehicleTypesForPackageSize } from '../../config/vehicle-classes';
+import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -1174,19 +1174,16 @@ export class OrderService {
 
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
-        // [owner #20] The vehicle size this delivery needs (a bulky line → the largest class: cars and vans).
-        const requiredSize = requiredPackageSizeForOrder({
+        // [owner #20] The vehicle size this delivery needs: the basket's total bulk, banded. [Owner, 31 Oct 2026]
+        // A store order is never refused for its size alone: while no vehicle Swift takes on today may carry the
+        // largest class (car deliveries off), the size is capped at what a motorbike carries (utils/load), so it
+        // is placed and offered to motorbikes. Only the availability answer below can still say no one is free.
+        // The true band rides along for the stacking read only (an order past a motorbike's band never batches).
+        const { required: requiredSize, trueBand: loadBand } = readOrderSize({
           orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
           courierPackageSize: null,
           items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
         }, DEFAULT_LOAD_BANDS);
-        // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] When no vehicle Swift takes on today may carry
-        // it (a bulky order while car deliveries are off), it is refused HERE, always, whatever the availability
-        // flag below: never placed, accepted and then stranded with nobody who can carry it.
-        if (requiredSize && !goodsSizeCarriableToday(requiredSize)) {
-          throw new AppError(409, 'DELIVERY_TOO_BIG',
-            'This order is too big for delivery by bike or motorbike, and no vehicle on Swift can carry this right now. Choose Pickup for this order.');
-        }
         // [RIDER-SAFE 5] Swift's delivery pause (platform-wide or this store's
         // zone) and [RIDER-SAFE 4] the store's own rider backlog: new DELIVERY
         // orders stop, pickup stays open. Not behind the availability flag —
@@ -1245,6 +1242,7 @@ export class OrderService {
                 floatRequired: cashFloat,
                 cashToCollect: cashFloat,
                 packageSize: requiredSize,
+                loadBand,
               }).catch(() => null)
             : null;
           if (capacity) {
@@ -1269,7 +1267,7 @@ export class OrderService {
               );
             }
             // [owner #20] Too big for a bike: the order is offered only to a
-            // vehicle that can carry it (a bulky line → a car or van), so the
+            // vehicle that can carry it (its total bulk, utils/load), so the
             // customer is told NOW, before anything is placed, when none such is
             // near — never an order that silently finds nobody.
             // (requiredSize: computed above, before the flag.)

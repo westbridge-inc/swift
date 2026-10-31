@@ -403,6 +403,7 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
           role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name}
           // [VAT-DOCS · owner 30 Oct 2026] the owner's optional "VAT certificate (only if VAT-registered)" row
           optionalExtra={myRole === 'OWNER' ? (withHeading) => <VatDocumentRow withHeading={withHeading} /> : undefined}
+          storeFee={store.id ? { vendorId: store.id, isOwner: myRole === 'OWNER' } : null}
         />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}

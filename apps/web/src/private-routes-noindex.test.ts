@@ -73,6 +73,7 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
   'dashboard/insights/page.tsx',
+  'dashboard/qr/page.tsx', // [STORE-LINK] the store's own QR code and share link (owners and managers)
   'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
   'dashboard/settings/vat-report/page.tsx', // [O-5] a store's own VAT report (its order numbers and VAT figures)

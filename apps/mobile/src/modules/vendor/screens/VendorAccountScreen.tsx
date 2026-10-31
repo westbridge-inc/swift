@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import type { StoreFeeScope } from '../../../components/onboarding/StoreWeeklyFeeCard';
 import { guardVendorOperation, useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -342,7 +343,7 @@ export function VendorAccountScreen() {
         {/* A guest's sample store has no pin to move: the save needs a real account. */}
         {isOwner && !guestSample && store ? <StoreLocationCard store={store} /> : null}
 
-        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} storeName={store?.name} /> : null}
+        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} storeName={store?.name} storeFee={store?.id ? { vendorId: store.id, isOwner } : null} /> : null}
 
         {/* [STORE-VAT · owner O-5] The business's VAT registration is the owner's to give; a sample store has none. */}
         {isOwner && !samplePreview && store ? <StoreVatSection style={{ marginBottom: space.lg }} /> : null}
@@ -494,7 +495,7 @@ function StoreLocationCard({ store }: { store: any }) {
  * expiry — an approved document re-opens for upload inside its 30-day renewal
  * window, and an expired one explains exactly why commerce stopped.
  */
-function VendorDocumentsSection({ vendorType, storeName }: { vendorType: string; storeName?: string | null }) {
+function VendorDocumentsSection({ vendorType, storeName, storeFee }: { vendorType: string; storeName?: string | null; storeFee?: StoreFeeScope | null }) {
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(vendorType);
   return (
     <View style={{ marginBottom: space.lg }}>
@@ -502,6 +503,7 @@ function VendorDocumentsSection({ vendorType, storeName }: { vendorType: string;
         role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={storeName}
         // [VAT-DOCS · owner 30 Oct 2026] the owner's optional "VAT certificate (only if VAT-registered)" row (this section is owner-only)
         optionalExtra={(withHeading) => <VatDocumentRow withHeading={withHeading} inline={false} />}
+        storeFee={storeFee}
       />
     </View>
   );

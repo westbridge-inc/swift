@@ -16,6 +16,7 @@ import { BookingCapacityCard } from './booking-capacity-card';
 import { KitchenCapacityCard } from './kitchen-capacity-card';
 import { DeliveryStatusNotice } from '../delivery-status-notice';
 import { FoodHandlersCard } from './food-handlers-card';
+import { StoreFeeCard } from './store-fee-card';
 import { CallUsCard } from './call-us-card';
 import { StorePhotosCard } from './store-photos-card';
 import { VatCard } from './vat-card';
@@ -320,6 +321,8 @@ export default function SettingsPage() {
       <CallUsCard storeId={storeId} />
       {/* [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's owner ticks for its food handlers */}
       <FoodHandlersCard storeId={storeId} isOwner={isOwner} vendorType={p?.vendorType} />
+      {/* [RETIER PR-A2] a store whose fee follows its catalogue above the first step: its owner ticks it to go live */}
+      <StoreFeeCard storeId={storeId} isOwner={isOwner} />
       <VatCard storeId={storeId} />
       <VatReportLink storeId={storeId} />
       <SubscriptionCard isOwner={isOwner} />

@@ -85,6 +85,7 @@ COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
 # role matrix, the accept clock, the MMG-dispute pause, the store-delivery rule
 # and the market-calendar helpers. None imports anything but @swift/types.
 COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
+COPY apps/mobile/src/lib/bulkWords.ts apps/mobile/src/lib/bulkWords.ts
 COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
 COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
 COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts

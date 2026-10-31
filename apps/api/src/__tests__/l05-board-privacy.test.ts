@@ -94,8 +94,10 @@ describe('unassigned boards reveal operational summaries only', () => {
     expect(res.statusCode, res.body).toBe(200);
     const row = res.json().data.find((r: { id: string }) => r.id === order.id);
     expect(row).toBeTruthy();
-    expect(Object.keys(row).sort()).toEqual(['id', 'orderNumber', 'orderType', 'status', 'vendor', 'itemCount', 'estLoad', 'deliveryFee', 'tipAmount', 'totalEarning', 'isExpress', 'paymentMethod', 'customerTrust', 'pickupDistanceKm', 'deliveryDistanceKm', 'estimatedPrepTime', 'estimatedDeliveryTime', 'placedAt'].sort());
+    expect(Object.keys(row).sort()).toEqual(['id', 'orderNumber', 'orderType', 'status', 'vendor', 'itemCount', 'estLoad', 'loadSize', 'oversize', 'deliveryFee', 'tipAmount', 'totalEarning', 'isExpress', 'paymentMethod', 'customerTrust', 'pickupDistanceKm', 'deliveryDistanceKm', 'estimatedPrepTime', 'estimatedDeliveryTime', 'placedAt'].sort());
     expect(row.itemCount).toBe(2); expect(row.deliveryFee).toBe(1500);
+    // [owner 31 Oct] The load's size class is operational, never personal: a parcel with no declared size has none.
+    expect(row.loadSize).toBeNull(); expect(row.oversize).toBe(false);
     expect(row.pickupDistanceKm).toBe(Math.round(haversineDistance(at.lat, at.lng, snap(pickup.lat), snap(pickup.lng)) * 10) / 10);
     expect(row.deliveryDistanceKm).toBe(Math.round(haversineDistance(snap(pickup.lat), snap(pickup.lng), snap(dropoff.lat), snap(dropoff.lng)) * 10) / 10);
     expect(JSON.stringify(row)).not.toContain('private');

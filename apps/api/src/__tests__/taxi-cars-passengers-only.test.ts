@@ -24,10 +24,12 @@ import { recordDispatchQueue } from './helpers/dispatch-queue';
 //
 // While it is OFF no passenger vehicle (car, wagon car, bus: every vehicle a
 // taxi Driver works) takes goods work at any door: dispatch offers, the rider
-// board, the board grab, every claim (offer accept, grab, relay), and checkout
-// never accepts a bulky delivery that no vehicle can carry (owner #20, #1693):
-// it says so before anything is placed. A parcel no vehicle can carry is
-// refused at its quote and at its request.
+// board, the board grab, every claim (offer accept, grab, relay). [Owner, 31 Oct
+// 2026, TRANSFORMED] A store order is never refused for its size alone: a big
+// basket (past the motorbike band) needs a motorbike while cars carry no goods,
+// so checkout places it and dispatch offers it to motorbikes (it used to be
+// refused before placing). A parcel no vehicle can carry is still refused at
+// its quote and at its request.
 //
 // The switch's names are read through a lookup so that on the old code each
 // case fails on its own assertion, not on an import.
@@ -88,7 +90,8 @@ async function makeRider(vehicleType: VehicleType, meters: number) {
   return { ...u, riderId: rider.id };
 }
 
-/** A cash food order ready at the kitchen. `bulky` = one line the store marked bulky (owner #20: car or van only). */
+/** A cash food order ready at the kitchen. `bulky` = a big basket: 8 of an item the store marked bulky (bulk 32,
+ *  past the motorbike band; [owner 31 Oct] one bulky line alone is no longer car-only). */
 async function makeReadyOrder(customerId: string, bulky: boolean) {
   const order = await sys(() => app.prisma.order.create({
     data: {
@@ -100,7 +103,7 @@ async function makeReadyOrder(customerId: string, bulky: boolean) {
       paymentMethod: 'CASH',
       items: {
         create: [{
-          itemId: bulky ? bulkyItemId : plainItemId, name: bulky ? 'Crate of drinks' : 'Rice plate', quantity: 1,
+          itemId: bulky ? bulkyItemId : plainItemId, name: bulky ? 'Crate of drinks' : 'Rice plate', quantity: bulky ? 8 : 1,
           basePrice: 2000, markedUpPrice: 2000, markupAmount: 0, totalBase: 2000, totalMarkup: 0, totalCustomer: 2000,
           bulkUnits: bulky ? 4 : null,
         }],
@@ -151,7 +154,8 @@ beforeAll(async () => {
       },
     });
     const cat = await app.prisma.category.create({ data: { vendorId: vendor.id, name: 'Menu', sortOrder: 0 } });
-    const bulky = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Crate of drinks', basePrice: 2000, isAvailable: true, bulkUnits: 4 } });
+    // [owner 31 Oct] 1000 so a basket of 8 stays under the high-value ID check, which is not this file's subject.
+    const bulky = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Crate of drinks', basePrice: 1000, isAvailable: true, bulkUnits: 4 } });
     const plain = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Rice plate', basePrice: 2000, isAvailable: true } });
     return { vendorId: vendor.id, bulky: bulky.id, plain: plain.id };
   });
@@ -198,7 +202,7 @@ describe('[owner 15 Oct] the switch: car deliveries are OFF unless CAR_DELIVERIE
       expect(vc['carriesGoods']!(t, { CAR_DELIVERIES: '1' }), t).toBe(true);
     }
     for (const t of ['BICYCLE', 'MOTORCYCLE']) expect(vc['carriesGoods']!(t, {}), t).toBe(true);
-    // A bulky load (the largest class) has no vehicle Swift takes on today while cars are off.
+    // The largest class has no vehicle Swift takes on today while cars are off.
     expect(vc['goodsSizeCarriableToday']!('EXTRA_LARGE', {})).toBe(false);
     expect(vc['goodsSizeCarriableToday']!('EXTRA_LARGE', { CAR_DELIVERIES: '1' })).toBe(true);
     expect(vc['goodsSizeCarriableToday']!('LARGE', {})).toBe(true);
@@ -206,7 +210,7 @@ describe('[owner 15 Oct] the switch: car deliveries are OFF unless CAR_DELIVERIE
 });
 
 describe('[owner 15 Oct] switch OFF: a taxi car gets no delivery or courier work at any door', () => {
-  it('dispatch offers an ordinary order to the farther motorbike, never the nearer taxi car; a bulky one to nobody', async () => {
+  it('dispatch offers an ordinary order to the farther motorbike, never the nearer taxi car; a big one to a motorbike too', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const car = await makeRider('CAR', 100);
     const bike = await makeRider('MOTORCYCLE', 600);
@@ -214,8 +218,11 @@ describe('[owner 15 Oct] switch OFF: a taxi car gets no delivery or courier work
     const offered = (await dispatch.dispatchOrder(plain.id)).offered;
     expect(offered).toBe(bike.riderId);
     expect(offered).not.toBe(car.riderId);
+    // [owner 31 Oct, TRANSFORMED] A big basket used to be offered to nobody (car-only while cars are off). It now
+    // needs a motorbike: the first motorbike holds a live offer, so it goes to the next one, never the taxi car.
+    const bike2 = await makeRider('MOTORCYCLE', 700);
     const bulky = await makeReadyOrder(customer.userId, true);
-    expect((await dispatch.dispatchOrder(bulky.id)).offered).toBeUndefined();
+    expect((await dispatch.dispatchOrder(bulky.id)).offered).toBe(bike2.riderId);
   });
 
   it('a taxi car’s board shows no goods work, and its grab is refused in plain words with nothing written', async () => {
@@ -260,23 +267,22 @@ describe('[owner 15 Oct] switch OFF: a taxi car gets no delivery or courier work
   });
 });
 
-describe('[owner 15 Oct + owner #20] checkout never accepts a bulky delivery no vehicle can carry', () => {
-  it('with a taxi car right there, a bulky delivery is refused before placing (whatever the availability flag); an ordinary one is placed', async () => {
+describe('[owner 15 Oct + owner 31 Oct] checkout never refuses a store delivery for its size alone', () => {
+  it('with a taxi car right there, a big delivery is placed for a motorbike (it used to be refused before placing); an ordinary one too', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await sys(() => app.prisma.address.create({
       data: { userId: customer.userId, label: 'Home', addressLine1: '2 Mahdia Road', city: 'Mahdia', region: 'Potaro-Siparuni', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
     }));
     await makeRider('CAR', 100);
     await makeRider('MOTORCYCLE', 300);
-    const add = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: bulkyItemId, quantity: 1 });
+    const add = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: bulkyItemId, quantity: 8 });
     expect([200, 201], add.body).toContain(add.statusCode);
 
-    const refused = await call('POST', '/api/v1/customer/checkout', customer.token, { paymentMethod: 'CASH' });
-    expect(refused.statusCode, refused.body).toBe(409);
-    expect(refused.json().error.code).toBe('DELIVERY_TOO_BIG');
-    expect(refused.json().error.message).toContain('no vehicle on Swift can carry this right now');
-    expect(refused.json().error.message).toContain('Choose Pickup');
-    expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(0);
+    // [owner 31 Oct, TRANSFORMED] This was a 409 DELIVERY_TOO_BIG ("no vehicle on Swift can carry this right now").
+    const big = await call('POST', '/api/v1/customer/checkout', customer.token, { paymentMethod: 'CASH' });
+    expect(big.statusCode, big.body).toBe(200);
+    expect(big.body).not.toContain('no vehicle on Swift can carry this');
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(1);
 
     await sys(() => app.prisma.cart.deleteMany({ where: { customerId: customer.userId } }));
     const plain = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: plainItemId, quantity: 1 });
@@ -304,7 +310,7 @@ describe('[owner 15 Oct] the checkout supply probe counts only vehicles that car
 });
 
 describe('[owner 15 Oct] switch ON (CAR_DELIVERIES=1): cars deliver again, exactly as #1693 built it', () => {
-  it('a bulky order is offered to the car again, and the car’s board shows it', async () => {
+  it('a big order (past the motorbike band) is offered to the car again, and the car’s board shows it', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const car = await makeRider('CAR', 600);

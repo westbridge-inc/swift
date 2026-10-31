@@ -205,9 +205,9 @@ export function goodsVehicleTypesForPackageSize(size: string | null | undefined,
 
 /**
  * Can any vehicle Swift takes on today carry goods of this size? False means no mover on Swift could ever be
- * offered it right now (e.g. a bulky order while car deliveries are off: only cars, vans and the heavy fleet
- * carry the largest class, and the heavy fleet is not taken on yet), so it must be refused before it is placed,
- * never accepted and stranded.
+ * offered it right now (e.g. the largest class while car deliveries are off: only cars, vans and the heavy fleet
+ * carry it, and the heavy fleet is not taken on yet). A parcel of that size is refused before it is placed; a
+ * store order's size is capped to what is carriable (utils/load), so it is never refused for size alone.
  */
 export function goodsSizeCarriableToday(size: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
   return goodsVehicleTypesForPackageSize(size, env).some((type) => isVehicleOffered(type));

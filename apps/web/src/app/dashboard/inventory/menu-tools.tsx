@@ -20,6 +20,8 @@ import { adjustStock } from '@/lib/stock-adjust';
 // The app's own words for the store's pick tick (a plain file, imported as is).
 import { STORE_PICK } from '../../../../../mobile/src/lib/storePick';
 import { SOLD_IN_STORE } from '../../../../../mobile/src/lib/inStoreSale';
+// [Owner ruling 31 Oct] The bulk help: the app's own words (a plain file, imported as is).
+import { BULK_WORDS } from '../../../../../mobile/src/lib/bulkWords';
 // [BOOK-S5b · owner A4/C2] A bookable service's hours per day, gap, notice and "Confirm bookings automatically":
 // the partner app's own rules (#2196), imported as is (a plain file with no imports).
 import {
@@ -36,11 +38,6 @@ export { SaleStock } from './sold-in-store';
 // first load does not carry it and a tap finds it here.
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const BULK_WORDS: Record<BulkWord, string> = {
-  normal: 'Fits in a delivery bag with room to spare.',
-  bulky: 'Like a crate of drinks or a large box.',
-  very_bulky: 'Like a 20 kg bag of rice or a case of water. Only riders with a bigger vehicle will be offered it.',
-};
 /** The app's section-name hints by store type (apps/mobile/src/modules/vendor/shared.tsx CATALOGUE_META). */
 const SECTION_HINT: Record<string, string> = {
   RESTAURANT: 'e.g. Mains, Drinks',
