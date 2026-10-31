@@ -249,8 +249,10 @@ describe('[owner 31 Oct] the size rule: an item’s bulk only adds to the total'
       expect(vehicleCanCarry('MOTORCYCLE', size)).toBe(false);
       expect(vehicleCanCarry('CAR', size)).toBe(true);
     }
-    // A bulky line keeps today's routing with cars on: cars and vans (owner #20). Its real size is unchanged.
-    expect(readOrderSize(food([{ quantity: 1, bulkUnits: 4 }]))).toEqual({ required: 'EXTRA_LARGE', trueBand: 'SMALL' });
+    // [COORD 02:57Z] A bulky line needs a motorbike at least with cars on too — a motorbike or anything bigger, not
+    // cars and vans only. Its real size is unchanged.
+    expect(readOrderSize(food([{ quantity: 1, bulkUnits: 4 }]))).toEqual({ required: 'LARGE', trueBand: 'SMALL' });
+    expect(readOrderSize(grocery([{ quantity: 1, bulkUnits: 8 }]))).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
     expect(requiredPackageSizeForOrder(grocery([{ quantity: 8, bulkUnits: null }]))).toBe('MEDIUM');
   });
 
@@ -355,6 +357,17 @@ describe('[owner 31 Oct] dispatch, the board and the grab read the same size (ca
       expect(grab.statusCode, grab.body).toBe(400);
       expect(grab.json().error).toMatchObject({ code: 'VEHICLE_TOO_SMALL', message: 'This order is too big for your bicycle.' });
     }
+  });
+
+  it('with car deliveries on, one bulky item goes to the nearer motorbike (not cars only), never the nearest bicycle', async () => {
+    await clearStoreOrders();
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await makeRider('BICYCLE', 100);
+    const bike = await makeRider('MOTORCYCLE', 300);
+    await makeRider('CAR', 600);
+    const one = await makeReadyOrder(customer.userId, true, 1);
+    expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bike.riderId);
   });
 
   it('with car deliveries on, the big order goes to the car again, not the nearer motorbike', async () => {

@@ -28,10 +28,10 @@ import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 // Fixtures: Mabaruma, far from every other suite, so only this file's movers
 // are ever candidates.
 //
-// [Owner, 31 Oct 2026] The order's real size is its total bulk (bulk x quantity),
-// banded as before. With car deliveries on (this file) a bulky line still
-// routes the order to cars and vans, and so does a basket past the motorbike
-// band. "Bulky" in this file's dispatch cases is 8 of an item marked bulky
+// [Owner, 31 Oct 2026 · COORD ruling 02:57Z] The order's real size is its total
+// bulk (bulk x quantity), banded as before. A bulky line needs at least a
+// motorbike (never a bicycle), cars on or off; only a basket past the motorbike
+// band goes to cars and vans (this file: car deliveries on). "Bulky" in this file's dispatch cases is 8 of an item marked bulky
 // (bulk 32), past the motorbike band either way.
 //
 // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: this
@@ -191,9 +191,9 @@ afterAll(async () => {
 describe('[owner #20 · owner 31 Oct] the size rule: a basket past the motorbike band means a car or van (cars on)', () => {
   const order = (lines: Array<{ quantity: number; bulkUnits: number | null }>) => ({ orderType: 'FOOD_DELIVERY', courierPackageSize: null, items: lines });
 
-  it('one item marked bulky or very bulky, or bulk × quantity past the motorbike band → the largest class (cars and vans)', () => {
-    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 4 }]))).toBe('EXTRA_LARGE');
-    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('EXTRA_LARGE');
+  it('one item marked bulky or very bulky → at least a motorbike; bulk × quantity past the motorbike band → the largest class (cars and vans)', () => {
+    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 4 }]))).toBe('LARGE');
+    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('LARGE');
     expect(requiredPackageSizeForOrder(order([{ quantity: 8, bulkUnits: 4 }]))).toBe('EXTRA_LARGE');
     expect(requiredPackageSizeForOrder(order([{ quantity: 31, bulkUnits: null }]))).toBe('EXTRA_LARGE');
     // [owner 31 Oct] The real size stays the total bulk: one crate is a small load, a bag of rice and two sachets medium.

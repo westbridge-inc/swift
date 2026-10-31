@@ -114,13 +114,15 @@ const SIZES_SMALL_TO_LARGE: readonly PackageSizeName[] = ['SMALL', 'MEDIUM', 'LA
 const sizeRank = (size: PackageSizeName): number => SIZES_SMALL_TO_LARGE.indexOf(size);
 
 /**
- * [owner #20, 13 Oct 2026 · owner ruling 31 Oct 2026] A line whose ONE unit is
- * bulkier than an ordinary item (the item editor's "bulky" or "very bulky",
- * e.g. a 20 kg bag of rice) routes the order to the largest size class: cars
- * and vans while they deliver goods; while they do not, the cap below brings it
- * to a motorbike's — never a bicycle's. It decides only WHO may carry the
- * order; the order's real size (`trueBand`) is still its total bulk.
+ * [owner #20, 13 Oct 2026 · owner ruling 31 Oct 2026 · COORD 02:57Z] A line
+ * whose ONE unit is bulkier than an ordinary item (the item editor's "bulky" or
+ * "very bulky", e.g. a 20 kg bag of rice) needs AT LEAST a motorbike's size
+ * class — never a bicycle — whether car deliveries are on or off; a motorbike
+ * or anything bigger may take it (never cars and vans only, so a bulky order
+ * never waits on a free car). It decides only WHO may carry the order; the
+ * order's real size (`trueBand`) is still its total bulk.
  */
+const BULKY_LINE_FLOOR: PackageSizeName = 'LARGE';
 export function hasBulkyLine(
   items: { quantity: number; item?: { bulkUnits?: number | null } | null; bulkUnits?: number | null }[],
 ): boolean {
@@ -169,13 +171,12 @@ function capToCarriableToday(size: PackageSizeName, env: Record<string, string |
  *                       customer declared it and paid against it; an estimate
  *                       must never overrule a declaration.
  *  3. FOOD / GROCERY  → sum `quantity × bulkUnits` and band it (`trueBand`).
- *                       `required` is that band — or the largest class when a
- *                       line is bulky (`hasBulkyLine`, owner #20) — capped at
- *                       the largest size a vehicle Swift takes on today may
- *                       carry, so a store order is never refused for size
- *                       alone (owner, 31 Oct 2026), and an order holding a
- *                       bulky item goes to a motorbike at least while cars
- *                       carry no goods, never to a bicycle (owner, 31 Oct).
+ *                       `required` is that band — at least a motorbike's when
+ *                       a line is bulky (`hasBulkyLine`), never a bicycle's,
+ *                       cars on or off — capped at the largest size a vehicle
+ *                       Swift takes on today may carry, so a store order is
+ *                       never refused for size alone (owner, 31 Oct 2026).
+ *                       Only a true extra-large total goes to cars and vans.
  *  4. anything else   → null, so a new OrderType cannot silently acquire a
  *                       gate nobody designed for it.
  *
@@ -204,7 +205,7 @@ export function readOrderSize(
   const total = totalBulkUnits(order.items);
   if (total <= 0) return none;
   const trueBand = bandForBulk(total, bands);
-  const routed: PackageSizeName = hasBulkyLine(order.items) ? 'EXTRA_LARGE' : trueBand;
+  const routed: PackageSizeName = hasBulkyLine(order.items) && sizeRank(trueBand) < sizeRank(BULKY_LINE_FLOOR) ? BULKY_LINE_FLOOR : trueBand;
   return { required: capToCarriableToday(routed, env), trueBand };
 }
 

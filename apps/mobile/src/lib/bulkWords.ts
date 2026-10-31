@@ -2,7 +2,7 @@
  * [Owner ruling 31 Oct 2026] The item editor's help under "How bulky is one of these to carry?", one copy for the
  * phone (VendorItemEditorScreen) and the website (dashboard/inventory/menu-tools). What the server does with the choice
  * (apps/api utils/load): a store order is never refused for its size, and an order holding a bulky or very bulky item
- * goes to a motorbike at least (a car or van while cars deliver goods), never to a bicycle.
+ * goes to a motorbike or anything bigger, never to a bicycle (cars on or off).
  */
 export type BulkChoiceWord = 'normal' | 'bulky' | 'very_bulky';
 

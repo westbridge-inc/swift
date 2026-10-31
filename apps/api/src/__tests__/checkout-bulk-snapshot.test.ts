@@ -188,13 +188,12 @@ describe('checkout snapshots the item’s bulk onto the order line', () => {
       where: { id: orderId },
       select: { orderType: true, courierPackageSize: true, items: { select: { quantity: true, bulkUnits: true } } },
     });
-    // [owner #20 · owner 31 Oct 2026] A line the store marked very bulky (the
-    // rice, 8) routes the order to the largest class a goods vehicle carries
-    // today: a motorbike's with car deliveries off (never a bicycle's), and its
-    // real size is the total, 8 + 2 sachets = 10, MEDIUM. Before this write the
+    // [owner #20 · owner 31 Oct 2026 · COORD 02:57Z] A line the store marked
+    // very bulky (the rice, 8) needs at least a motorbike (never a bicycle),
+    // cars on or off, and its real size is the total, 8 + 2 sachets = 10, MEDIUM. Before this write the
     // snapshot was missing, every line read ordinary and the order banded
     // SMALL — a bicycle's job, with a 20 kg bag in it.
     expect(readOrderSize(order!, undefined, {})).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
-    expect(readOrderSize(order!, undefined, { CAR_DELIVERIES: '1' })).toEqual({ required: 'EXTRA_LARGE', trueBand: 'MEDIUM' });
+    expect(readOrderSize(order!, undefined, { CAR_DELIVERIES: '1' })).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
   });
 });
