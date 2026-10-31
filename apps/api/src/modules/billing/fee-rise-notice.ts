@@ -1,7 +1,7 @@
 import type { Prisma, VehicleType } from '@prisma/client';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { formatMoney } from '../../utils/currency-amount';
-import { formatGuyanaTime } from '../../utils/guyana-day';
+import { endOfGuyanaDay, formatGuyanaTime, guyanaDayKey } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // [F2 · GUARDRAILS §7 standing rule 2 · Mover and Business Agreements F2]
@@ -182,6 +182,20 @@ export function riseAppliesFrom(nextBillingDate: Date, noticeAt: Date, notBefore
   return firstFeeOnOrAfter(nextBillingDate, new Date(Math.max(notice, notBefore ? notBefore.getTime() : notice)));
 }
 
+/** [RETIER PR-B · REVIEW-F/M #2259 S3-1] A store's weekly re-tier rise (CATALOGUE) told for the weekly fee due
+ *  `appliesFrom`: the last day the store may bring its count back under the step is the day (in Guyana) a week before
+ *  it, as its notice says. The count keeps items taken off sale, changed or removed in the last 7 days, so a cut made
+ *  later would still count when the rise moves in. */
+export function retierLastCutDay(appliesFrom: Date): Date {
+  return new Date(appliesFrom.getTime() - 7 * DAY_MS);
+}
+
+/** ... and the rise moves in no sooner than the first moment after that day ends (Guyana): the paid-week and hourly
+ *  passes count the store then, so a store under the step by the end of that day, and still under, is never moved. */
+export function retierMovesInFrom(appliesFrom: Date): Date {
+  return new Date(endOfGuyanaDay(guyanaDayKey(retierLastCutDay(appliesFrom))).getTime() + 1);
+}
+
 /** "Thursday 5 November", the day in Guyana. */
 export function feeRiseDay(at: Date): string {
   return formatGuyanaTime(at, { weekday: 'long', day: 'numeric', month: 'long' });
@@ -206,28 +220,42 @@ const TIER_WORDS: Record<string, string> = {
   courier: 'delivery and courier', courierHeavy: 'heavy delivery', taxi: 'taxi',
 };
 
+/** [RETIER PR-B · REVIEW-F/M #2259 S3-1] How a store's items are counted, in the partner's words: the same phrase as
+ *  partner/store-fee.ts CATALOGUE_COUNT_WORDS (a test pins them equal; this file stays free of the partner module). */
+const CATALOGUE_COUNT_PHRASE = 'taken off sale, changed or removed in the last 7 days';
+
 /**
  * [RETIER PR-B · owner 30 Oct 2026 · F2] The words of a weekly re-tier rise: WHY (the catalogue or vehicle that
  * reached a higher step), the new fee and from which weekly fee, that nothing changes until then, how to bring it
- * back down, and how to say no. True with the re-tier's own rules: Swift counts a store's items each week (every
- * listing available, or made unavailable or edited in the last 7 days); a store that is back under the step before
- * the new fee starts is not moved, and is told so.
+ * back down, and how to say no. True with the re-tier's own rules [REVIEW-F/M #2259 S3-1]: Swift counts a store's
+ * items each week (every listing for sale, and every one taken off sale, changed or removed in the last 7 days); a
+ * store whose count is under the step by the end of the told last day (retierLastCutDay) and stays under is never
+ * moved (the rise moves in no sooner: retierMovesInFrom) and is told so. A mover's lower vehicle moves the fee only
+ * once seen on two weekly counts a week apart (billing.service retierInTx). [REVIEW-G #2259 S4-2] A store's notice
+ * names the store (an owner may have several), in the words of a chain branch's notice.
  */
-export function retierRiseCopy(p: { from: number; to: number; currencyCode: string; date: Date | null; basis: RetierBasis }): { title: string; body: string } {
+export function retierRiseCopy(p: { from: number; to: number; currencyCode: string; date: Date | null; basis: RetierBasis; store?: string | null }): { title: string; body: string } {
   const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
   const tier = TIER_WORDS[p.basis.tier] ?? p.basis.tier;
+  const store = p.store?.trim() || null;
+  const its = store ? 'its' : 'your';
   const why = p.basis.kind === 'CATALOGUE'
-    ? `Your store now has ${p.basis.items.toLocaleString('en-US')} items for sale, which is the ${tier} rate.`
+    ? `${store ?? 'Your store'} now has ${p.basis.items.toLocaleString('en-US')} items for sale, which is the ${tier} rate.`
     : `Your vehicle on Swift is now a ${VEHICLE_CLASSES[p.basis.vehicleType as VehicleType]?.label ?? p.basis.vehicleType}, which is the ${tier} rate.`;
-  const when = p.date ? `From your weekly fee due ${feeRiseDay(p.date)}` : `From your first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`;
+  const when = p.date ? `From ${its} weekly fee due ${feeRiseDay(p.date)}` : `From ${its} first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`;
+  const cut = p.date ? `by the end of ${feeRiseDay(retierLastCutDay(p.date))}` : 'a full week before the new fee starts';
   const down = p.basis.kind === 'CATALOGUE'
-    ? `Your fee follows the number of items for sale in your store, counted by Swift every week. If you bring it back under ${p.basis.stepFrom.toLocaleString('en-US')} items before the new fee starts, this change will not happen, and we will tell you.`
-    : 'Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down, and we will tell you.';
+    ? `Swift counts the items in ${store ?? 'your store'} every week: items for sale, and items ${CATALOGUE_COUNT_PHRASE}. `
+      + `If that count is under ${p.basis.stepFrom.toLocaleString('en-US')} ${cut} and stays under, this change will not happen, and we will tell you.`
+    : 'Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down after Swift has seen the smaller vehicle on two weekly counts, a week apart, and we will tell you.';
+  const no = store
+    ? `If you do not want the new fee for ${store}, tap Stop weekly billing on ${store}'s weekly-fee screen in Swift before then and you will not pay it.`
+    : 'If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.';
   return {
-    title: 'Your weekly fee is changing',
-    body: `${why} ${when}, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
-      + 'Until then nothing changes, and any week you have already paid keeps the price you paid. '
-      + `${down} If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.`,
+    title: store ? `${store}: your weekly fee is changing` : 'Your weekly fee is changing',
+    body: `${why} ${when}, ${its} Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
+      + (store ? 'Until then nothing changes, and any week already paid keeps the price paid. ' : 'Until then nothing changes, and any week you have already paid keeps the price you paid. ')
+      + `${down} ${no}`,
   };
 }
 

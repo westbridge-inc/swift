@@ -32,7 +32,7 @@ import { catalogueCardTop } from './card-price-cut';
 import { paymentInFlightInTx } from './payment-in-flight';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, retierRiseCopy, riseAppliesFrom, type HeldFeeRise, type RetierBasis } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, chainDealCancelledCopy, chainDealRiseCopy, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, retierMovesInFrom, retierRiseCopy, riseAppliesFrom, type HeldFeeRise, type RetierBasis } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, guyanaDay, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -5546,11 +5546,14 @@ export class BillingService {
     // [ENTERPRISE E2] A chain deal's end date: never a weekly fee due before it.
     const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at, held.notBefore ? new Date(held.notBefore) : null);
     const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
+    // [REVIEW-G #2259 S4-2] A store's re-tier notice names the store and opens THAT store's fee screen (an owner may
+    // have several stores), as a chain branch's does.
+    const storeId = held.source === 'WEEKLY_RETIER' ? sub?.vendor?.id ?? null : null;
     const copy = held.source === 'CHAIN_DEAL'
       ? chainDealRiseCopy({ branch: await this.branchName(sub?.vendor?.id), from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, dealTo: held.customTo ?? null })
       // [RETIER PR-B] A re-tier rise says why, and how to bring the fee back down.
       : held.basis
-        ? retierRiseCopy({ from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, basis: held.basis })
+        ? retierRiseCopy({ from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom, basis: held.basis, store: storeId ? await this.storeName(storeId) : null })
         : feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
     const userId = this.payerUserId(sub as SubWithRelations);
     const inboxId = await this.notifications.send({
@@ -5561,6 +5564,7 @@ export class BillingService {
         ...(held.basis ? { reason: held.basis } : {}),
         // [REVIEW-F #2227 S3-1] A chain branch's notice opens THAT branch's fee screen (the router selects vendorId).
         ...(held.source === 'CHAIN_DEAL' && sub?.vendor ? { vendorId: sub.vendor.id } : {}),
+        ...(storeId ? { vendorId: storeId } : {}),
       },
       dedupeKey,
     });
@@ -5644,12 +5648,19 @@ export class BillingService {
     const appliesFrom = new Date(held.appliesFrom);
     if (sub!.nextBillingDate.getTime() < appliesFrom.getTime()) return 'waiting';
     // [RETIER PR-B · owner 30 Oct 2026] A store's re-tier rise moves in only while the store still reaches its step:
-    // counted as the weekly pass counts a lower tier (the week's largest catalogue). Back under it before the new fee
-    // starts, the change does not happen (dropped by the hourly pass, and the partner told).
-    if (held.source === 'WEEKLY_RETIER' && held.basis?.kind === 'CATALOGUE' && sub!.vendorId && await this.storeBelowRise(tx, sub!.vendorId, held, now)) {
-      if (!opts.drop) return 'waiting';
-      await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub, false, 'BELOW_AGAIN');
-      return { dropped: true, held, feeNow: sub!.status !== 'CANCELLED' ? weeklyFeeAmount(sub!) : null };
+    // counted as the weekly pass counts a lower tier (the week's largest catalogue). [REVIEW-F/M #2259 S3-1] Its notice
+    // told the store the last day it may cut (a week before the new fee: the count keeps the last 7 days), so the rise
+    // never moves in before that day is over; under the step then, the change does not happen (dropped by the hourly
+    // pass, and the partner told). A count the market's card cannot price moves nothing in: the rise waits, loudly.
+    if (held.source === 'WEEKLY_RETIER' && held.basis?.kind === 'CATALOGUE') {
+      if (now.getTime() < retierMovesInFrom(appliesFrom).getTime()) return 'waiting';
+      const reach = sub!.vendorId ? await this.storeReachesRise(tx, subscriptionId, sub!.vendorId, held, now) : 'unknown';
+      if (reach === 'unknown') return 'waiting';
+      if (reach === 'below') {
+        if (!opts.drop) return 'waiting';
+        await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub, false, 'BELOW_AGAIN');
+        return { dropped: true, held, feeNow: sub!.status !== 'CANCELLED' ? weeklyFeeAmount(sub!) : null };
+      }
     }
     if (!held.deferredOnce) {
       const credit = await tx.prepaidBalance.findUnique({ where: { subscriptionId }, select: { balance: true, currencyCode: true } });
@@ -5686,14 +5697,16 @@ export class BillingService {
   }
 
   /** [RETIER PR-B] Is this store's week's largest catalogue (available now, or made unavailable or edited in the last 7
-   *  days) priced below the rise's new fee? A market whose card cannot price it answers no (the rise waits, loudly). */
-  private async storeBelowRise(tx: Prisma.TransactionClient, vendorId: string, held: HeldFeeRise, now: Date): Promise<boolean> {
+   *  days) priced below the rise's new fee ('below') or not ('reaches')? A store gone, or a market whose card cannot
+   *  price it (logged by retierTarget), is 'unknown': the rise waits. */
+  private async storeReachesRise(tx: Prisma.TransactionClient, subscriptionId: string, vendorId: string, held: HeldFeeRise, now: Date): Promise<'below' | 'reaches' | 'unknown'> {
     const vendor = await tx.vendor.findUnique({ where: { id: vendorId }, select: { vendorType: true, owner: { select: { user: { select: { countryCode: true } } } } } });
-    if (!vendor) return false;
+    if (!vendor) return 'unknown';
     const tiers = await this.countryConfig.getSubscriptionTiers(vendor.owner.user.countryCode, tx);
     const weekListings = await tx.item.count({ where: weekCatalogueWhere(vendorId, now) });
-    const card = this.retierTarget(vendorId, tiers, { kind: 'VENDOR', isService: vendor.vendorType === 'SERVICE', activeListings: weekListings });
-    return card !== null && card.rate < held.to;
+    const card = this.retierTarget(subscriptionId, tiers, { kind: 'VENDOR', isService: vendor.vendorType === 'SERVICE', activeListings: weekListings });
+    if (card === null) return 'unknown';
+    return card.rate < held.to ? 'below' : 'reaches';
   }
 
   /** [ENTERPRISE E2] Chain-deal rises a withdrawn or superseded deal change dropped (chain-deal.ts): each branch that
@@ -5704,6 +5717,12 @@ export class BillingService {
       const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } }).catch(() => null);
       await this.tellFeeRiseCancelled(subscriptionId, held, sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null);
     }
+  }
+
+  /** [REVIEW-G #2259 S4-2] A store's name for its own re-tier notices; null (the unnamed words) if it cannot be read. */
+  private async storeName(vendorId: string): Promise<string | null> {
+    const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true } });
+    return vendor?.name?.trim() || null;
   }
 
   /** [ENTERPRISE E2] A branch's name for its own fee notices. */
@@ -5724,13 +5743,19 @@ export class BillingService {
       if (!sub) return;
       const date = held.appliesFrom ? new Date(held.appliesFrom) : null;
       // [REVIEW-F #2227 S3-1] A chain branch's notice names its branch and opens that branch's fee screen.
+      // [REVIEW-G #2259 S4-2] So does a store's re-tier notice (the same words, the store named).
       const chainVendorId = held.source === 'CHAIN_DEAL' ? sub.vendor?.id ?? null : null;
+      const storeId = held.source === 'WEEKLY_RETIER' ? sub.vendor?.id ?? null : null;
+      const store = storeId ? await this.storeName(storeId) : null;
       const copy = chainVendorId
         ? chainDealCancelledCopy({ branch: await this.branchName(chainVendorId), from: feeNow, to: held.to, currencyCode: held.currencyCode, date })
-        : feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date });
+        : store
+          ? chainDealCancelledCopy({ branch: store, from: feeNow, to: held.to, currencyCode: held.currencyCode, date })
+          : feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date });
+      const vendorId = chainVendorId ?? storeId;
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
-        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode, ...(chainVendorId ? { vendorId: chainVendorId } : {}) },
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode, ...(vendorId ? { vendorId } : {}) },
         dedupeKey: `${feeRiseDedupeKey(subscriptionId, held)}:cancelled`,
       });
     } catch (error) {
