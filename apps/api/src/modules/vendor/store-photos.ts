@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { clearListingPhotos } from '../inventory/system-item-writes';
 import { queueStorageOrphan } from '../../lib/storage-orphans';
 import { PUBLIC_PHOTO_REMOVED, isStorePhotoKey } from '../../utils/public-photo-deletion';
 
@@ -43,6 +44,7 @@ export async function queueStoresPhotoErasure(
     ], reason);
     await tx.vendor.update({ where: { id: vendorId }, data: { logoUrl: null, coverImageUrl: null } });
     await tx.category.updateMany({ where: { vendorId, imageUrl: { not: null } }, data: { imageUrl: null } });
-    await tx.item.updateMany({ where: { vendorId, imageUrl: { not: null } }, data: { imageUrl: null } });
+    // [RETIER · REVIEW-M #2259 S4-1] An erasure, not the store changing listings: items."updatedAt" stays put.
+    await clearListingPhotos(tx, vendorId);
   }
 }

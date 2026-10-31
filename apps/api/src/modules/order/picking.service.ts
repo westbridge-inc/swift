@@ -5,6 +5,7 @@ import { NotificationService } from '../notification/notification.service';
 import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
+import { hideSoldOut } from '../inventory/system-item-writes';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
 import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, totalFixedCopy, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
@@ -594,11 +595,9 @@ export class PickingService {
           } catch {
             throw new AppError(409, 'SUBSTITUTE_OUT_OF_STOCK', 'The substitute just sold out — ask the store to pick another');
           }
-          // Mirror the inventory engine: hitting zero auto-hides from browse.
-          await tx.item.updateMany({
-            where: { id: fresh.substituteItemId, stockQuantity: { lte: 0 }, isAvailable: true },
-            data: { isAvailable: false, autoHiddenAt: new Date() },
-          });
+          // Mirror the inventory engine: hitting zero auto-hides from browse. [RETIER · REVIEW-M #2259 S4-1] The
+          // picker's substitution hid it, not the store: items."updatedAt" stays put.
+          await hideSoldOut(tx, fresh.substituteItemId);
         }
       }
       await this.restockLine(fresh, 'customer approved substitution', tx);

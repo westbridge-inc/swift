@@ -2,6 +2,7 @@ import { accountErasedUnderLock } from '../user/account-closure';
 import { documentLapsesAt, isDocumentValidAt, lapsedExpiryAnd, validExpiryOr } from './document-validity';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
+import { hideStoreListings } from '../inventory/system-item-writes';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
@@ -3811,10 +3812,8 @@ export class VerificationService {
           where: { id: vendor.id },
           data: { isVerified: false, acceptingOrders: false },
         });
-        await this.prisma.item.updateMany({
-          where: { vendorId: vendor.id },
-          data: { isAvailable: false },
-        });
+        // [RETIER · REVIEW-M #2259 S4-1] Swift took them off sale, not the store: items."updatedAt" stays put.
+        await hideStoreListings(this.prisma, [vendor.id], { onlyForSale: false });
         // A darkened vendor's items must leave search now, not at the next
         // boot [SWIFT-UG-SRCH-01] — same direct sync as afterApproval (this
         // sweep runs from jobs; no queue-decorated app in reach).

@@ -7,6 +7,8 @@ function missingItem() {
   const tx = {
     item: { findUnique: vi.fn().mockResolvedValue(null), update: vi.fn(), updateMany: vi.fn() },
     stockMovement: writes,
+    // [RETIER] the stock writer moves the counter in plain SQL now: a missing item must not reach it either.
+    $executeRaw: vi.fn(),
   };
   return { tx, client: tx as unknown as Prisma.TransactionClient, writes };
 }
@@ -31,6 +33,7 @@ describe('cancellation records missing stock without inventing an item balance',
     });
     expect(tx.item.update).not.toHaveBeenCalled();
     expect(tx.item.updateMany).not.toHaveBeenCalled();
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('keeps missing-item failure for ordinary callers and stock deductions', async () => {
