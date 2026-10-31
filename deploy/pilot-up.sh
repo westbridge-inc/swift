@@ -24,7 +24,8 @@
 # the stack changes (all but the backup-key check also before the checkout
 # moves; that one reads the store after the switch to the requested SHA, before
 # any store restart or Docker change): NODE_ENV must be production; no served name may be a
-# staging name; documents in object storage, never on this disk; the backup
+# staging name; APP_PUBLIC_URL exactly https:// plus the domain the app claims for
+# its links (apps/mobile/app.config.ts); documents in object storage, never on this disk; the backup
 # keys in the store; no unfilled site details; and, for the whole stack, every
 # served name must already resolve to THIS host (Caddy obtains certificates
 # for them, and the public names stay on the old host until DNS moves).
@@ -303,6 +304,24 @@ if [ "$PILOT_ENV" = production ]; then
   [[ "$app_public_url" =~ $https_origin_re ]] && [ -z "${BASH_REMATCH[2]}" ] ||
     die "PILOT_ENV=production needs APP_PUBLIC_URL to be the public website's https:// origin (printed QR codes and trip-share links name it)"
   production_name "${BASH_REMATCH[1]}"
+  # [DEPLOY-GUARD] ...and it is exactly https://<the domain the app claims>.
+  # The app opens a store link or QR code only on its own link domain (its
+  # associated domains and Android App Links, which the website's AASA and
+  # assetlinks files answer for); any other host opens a web page instead (the
+  # staging site's is behind a tester password). The domain is read from the
+  # one place it is declared, apps/mobile/app.config.ts, in the revision this
+  # run checks (after the checkout moves, the restarted run checks again).
+  # Exact: no trailing slash (links append "/trip/..." as text), no www, no
+  # port, lower case. Unreadable is a refusal, never a pass.
+  app_link_config="$ROOT/apps/mobile/app.config.ts"
+  app_link_line=""
+  [ ! -f "$app_link_config" ] || app_link_line="$(grep -E '^const linkDomain = ' "$app_link_config" || true)"
+  app_link_re="^const linkDomain = process[.]env[[]'SWIFT_LINK_DOMAIN'[]] [?][?] '([a-z0-9][a-z0-9.-]*[.][a-z]{2,})';\$"
+  [[ "$app_link_line" =~ $app_link_re ]] ||
+    die "PILOT_ENV=production cannot read the app's link domain from apps/mobile/app.config.ts (one line: const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? '<domain>';): APP_PUBLIC_URL is checked against it"
+  app_link_domain="${BASH_REMATCH[1]}"
+  [ "$app_public_url" = "https://$app_link_domain" ] ||
+    die "PILOT_ENV=production needs APP_PUBLIC_URL=https://$app_link_domain exactly (no trailing slash, no www, no port): every store link and printed QR code names it, and the app opens only links on $app_link_domain, the domain it claims (apps/mobile/app.config.ts)"
   # CORS_ORIGIN: the browser origins allowed to call the API with its cookies.
   cors_setting="$(env_setting CORS_ORIGIN | tr -d " \t\"'")"
   [ -n "$cors_setting" ] || die "PILOT_ENV=production needs CORS_ORIGIN: the https:// origins allowed to call the API"
