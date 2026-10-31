@@ -113,20 +113,20 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(within(cardOf('Services')).getByText(/8,000/)).toBeTruthy();
     const small = cardOf('Businesses');
     expect(within(small).getByText(/15,000/)).toBeTruthy();
-    expect(small.textContent).toContain('fewer than 1,000 active items');
+    expect(small.textContent).toContain('fewer than 1,000 items');
     const large = cardOf('Large catalogues');
     expect(within(large).getByText(/20,000/)).toBeTruthy();
-    expect(large.textContent).toContain('1,000–9,999 active items');
+    expect(large.textContent).toContain('1,000–9,999 items');
     const department = cardOf('Department stores');
     expect(within(department).getByText(/45,000/)).toBeTruthy();
-    expect(department.textContent).toContain('10,000+ active items');
+    expect(department.textContent).toContain('10,000+ items');
   });
 
   it('[DEPT-PRICE] each catalogue card shows its own free trial: 7 days for a new department store, 14 for the others', async () => {
     await renderPage();
     const department = cardOf('Department stores').textContent!;
     expect(department).toContain('7-day free trial');
-    expect(department).toContain('A new store with this many active items when Swift approves it gets 7 days free.');
+    expect(department).toContain('A new store with this many items when Swift approves it gets 7 days free.');
     expect(department).not.toContain('14-day');
     for (const title of ['Businesses', 'Large catalogues', 'Services', 'Taxi drivers', 'Delivery & courier riders']) {
       const card = cardOf(title).textContent!;
@@ -159,8 +159,6 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     await renderPage();
     // [WEBSITE 30 Oct] Shorter words, the same promise.
     expect(document.body.textContent).toContain('Each store pays its own weekly fee, however many stores its owner runs.');
-    // [REVIEW-F S3-1 on #2234] A store is priced at its first step whatever its catalogue (R27 off): never 'the rate for its own catalogue'.
-    expect(document.body.textContent).not.toMatch(/rate for its own catalogue/);
     cleanup();
     // A server from before multi-store pricing existed sends no key at all.
     pricing = { ...GY, franchise: undefined };
@@ -168,22 +166,18 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(document.body.textContent).toContain('however many stores its owner runs');
   });
 
-  // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
-  // born on the first catalogue step and nothing moves it between steps. The page must not say it moves on its own.
-  it('[R27] never says a store moves between catalogue rates on its own: every new store starts on the first rate', async () => {
+  // [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on its own catalogue's step,
+  // and its owner ticks that exact fee first. [R27] The weekly re-tier is OFF on the server
+  // (apps/api/src/modules/billing/weekly-retier.ts): after that nothing moves it. The page must not say it moves on its own.
+  it('[RETIER PR-A · R27] a new store is priced for its catalogue when approved and ticks that fee first; nothing moves it after', async () => {
     await renderPage();
     const page = document.body.textContent!;
     expect(page).not.toMatch(/automatic/i);
     expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
-    // [WEBSITE 30 Oct] Shorter words, the same truth while R27 is off.
-    expect(page).toContain('Today every new store pays the Businesses rate (a services business pays the Services rate), whatever its size, and Swift does not move stores between rates.');
-    expect(page).toContain('A rate agreed with Swift stays as agreed.');
-  });
-
-  it('[R27] names the first step the server lists, not a label frozen into the sentence', async () => {
-    pricing = { ...GY, vendors: { ...GY.vendors, catalogue: [{ minItems: 0, tier: 'large', rate: 20000 }, { minItems: 10000, tier: 'department', rate: 45000 }] } };
-    await renderPage();
-    expect(document.body.textContent).toContain('Today every new store pays the Large catalogues rate (a services business');
+    expect(page).not.toMatch(/every new store starts on/i);
+    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). '
+      + 'The store sees that exact fee, and its owner ticks it before anything is charged; '
+      + 'after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.');
   });
 
   it('[R27] the sentence holds only while the server\'s weekly re-tier is off — turning it on must revisit this page', () => {
@@ -197,8 +191,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
       vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 500, tier: 'large', rate: 20000 }] },
     };
     await renderPage();
-    expect(cardOf('Businesses').textContent).toContain('fewer than 500 active items');
-    expect(cardOf('Large catalogues').textContent).toContain('500+ active items');
+    expect(cardOf('Businesses').textContent).toContain('fewer than 500 items');
+    expect(cardOf('Large catalogues').textContent).toContain('500+ items');
     expect(document.body.textContent).not.toContain('1,000');
     expect(screen.queryByRole('heading', { name: 'Department stores' })).toBeNull();
   });
@@ -231,7 +225,7 @@ describe('[WEBSITE] the pricing page reads plainly', () => {
 
   it('the note under the cards is three short sentences at most', async () => {
     await renderPage();
-    const note = screen.getByText(/Today every new store pays/);
+    const note = screen.getByText(/When Swift approves a new store/);
     const sentences = (note.textContent ?? '').split(/(?<=\.)\s+/).filter(Boolean);
     expect(sentences.length).toBeLessThanOrEqual(3);
     expect(note.textContent).not.toMatch(/taxi rate whatever the vehicle/);

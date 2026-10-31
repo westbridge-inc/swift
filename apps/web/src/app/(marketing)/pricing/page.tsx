@@ -59,9 +59,9 @@ function typedList(pricing: CountryPricing | null) {
 function itemRange(catalogue: CataloguePriceBand[], i: number): string {
   const band = catalogue[i]!;
   const next = catalogue[i + 1];
-  if (!next) return i === 0 ? 'Any number of active items' : `${band.minItems.toLocaleString()}+ active items`;
-  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} active items`;
-  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} active items`;
+  if (!next) return i === 0 ? 'Any number of items' : `${band.minItems.toLocaleString()}+ items`;
+  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} items`;
+  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} items`;
 }
 
 /** A catalogue step's own free trial (a NEW store at that step when Swift approves it), else the list's. A value that
@@ -137,7 +137,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                     </p>
                     {trialDays !== list.pricing.trialDays && (
                       <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                        A new store with this many active items when Swift approves it gets {trialDays} days free.
+                        A new store with this many items when Swift approves it gets {trialDays} days free.
                       </p>
                     )}
                   </PriceCard>
@@ -153,13 +153,15 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               {list.pricing.franchise == null && (
                 <>Each store pays its own weekly fee, however many stores its owner runs. </>
               )}
-              {/* [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts,
-                  WEEKLY_RETIER_ON = false): a store is born on the first catalogue step and nothing moves it to
-                  another. Only its free trial follows its catalogue. The page test pins the flag: turning the
-                  re-tier back on must revisit this sentence. */}
-              Today every new store pays the {CATALOGUE_CLASSES[list.catalogue[0]!.tier]?.label ?? 'Businesses'} rate (a
-              services business pays the Services rate), whatever its size, and Swift does not move stores between rates.
-              A rate agreed with Swift stays as agreed.
+              {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
+                  OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
+                  anything is charged (api partner/store-fee.ts). [R27] The weekly re-tier is OFF on the server
+                  (apps/api/src/modules/billing/weekly-retier.ts, WEEKLY_RETIER_ON = false): after that nothing
+                  moves it. The page test pins the flag: turning the re-tier back on must revisit this sentence. */}
+              {/* [WEBSITE 30 Oct · owner] The note is three short sentences at most: the same words, joined. */}
+              When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). The store
+              sees that exact fee, and its owner ticks it
+              before anything is charged; after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

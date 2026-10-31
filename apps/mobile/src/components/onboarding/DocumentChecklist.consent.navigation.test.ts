@@ -48,6 +48,8 @@ vi.mock('../../kit', async () => {
 vi.mock('./OwnNameCard', () => ({ OwnNameCard: () => null }));
 // [FOOD-PERMIT #2062] the food handlers tick card is a sibling like OwnNameCard (its own tests: foodHandlers.test.ts)
 vi.mock('./FoodHandlersCard', () => ({ FoodHandlersCard: () => null }));
+// [RETIER PR-A2] the store weekly-fee card reads the API itself (its own tests: storeWeeklyFee.test.ts)
+vi.mock('./StoreWeeklyFeeCard', () => ({ StoreWeeklyFeeCard: () => null }));
 vi.mock('./DocumentUploadCard', async () => {
   const R = await import('react');
   return {
