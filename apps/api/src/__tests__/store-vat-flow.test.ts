@@ -323,7 +323,8 @@ describe('3b. one door for a VAT certificate decision', () => {
 
 describe('4. a PERSON decides', () => {
   const approveBody = (over: Record<string, unknown> = {}) => ({
-    certificateDocId, vatNumber: VAT_NUMBER, registeredName: 'Vat Corner Trading', effectiveFrom: '2026-01-01', nameMatchesStore: true, ...over,
+    // [REVIEW-G #2255 S4-1] The price choice the queue row showed this reviewer (the store said "prices include VAT").
+    certificateDocId, vatNumber: VAT_NUMBER, registeredName: 'Vat Corner Trading', effectiveFrom: '2026-01-01', nameMatchesStore: true, mode: 'PRICES_INCLUDE_VAT', ...over,
   });
 
   it('refused: the typed number differs from the store’s (409), a future effective date (400), the name not confirmed (400)', async () => {

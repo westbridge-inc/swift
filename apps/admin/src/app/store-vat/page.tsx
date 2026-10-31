@@ -10,7 +10,7 @@ import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { gyDate } from '@/lib/dates';
-import { vatModeChangeWords, vatModeWords } from '@/lib/store-vat-mode';
+import { vatApprovedWords, vatModeChangeWords, vatModeWords } from '@/lib/store-vat-mode';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] Stores waiting for a VAT decision, oldest certificate first.
@@ -52,11 +52,16 @@ export default function StoreVatPage() {
   const approve = async (row: StoreVatPendingRow) => show(await dialog.run({
     title: `Approve VAT for ${row.name}?`,
     body: (
-      <p>
-        Type what the certificate says. The server checks the number against the one the store gave and refuses a
-        mismatch. Once approved, the store&apos;s prices say &ldquo;incl. VAT&rdquo; and its receipts name it as the one
-        charging VAT.{row.mode === 'ADD_VAT_AT_CHECKOUT' ? ' This store\u2019s prices do not include VAT, so approving adds VAT to each standard-rated price its customers see.' : ''}
-      </p>
+      <>
+        <p>
+          Type what the certificate says. The server checks the number against the one the store gave and refuses a
+          mismatch. Once approved, the store&apos;s prices say &ldquo;incl. VAT&rdquo; and its receipts name it as the one
+          charging VAT.
+        </p>
+        {/* [REVIEW-G #2266 S3-1] The approval binds this price choice (the server refuses it if the store changed it
+            since): the reviewer reads it here, where they decide. */}
+        <p className="font-semibold">{vatModeWords(row.mode)}.</p>
+      </>
     ),
     confirmLabel: 'Approve VAT',
     reason: { hint: 'Kept on the permanent record with your decision.' },
@@ -72,8 +77,10 @@ export default function StoreVatPage() {
       registeredName: String(values['registeredName']),
       effectiveFrom: String(values['effectiveFrom']),
       nameMatchesStore: true,
+      // [REVIEW-G #2255 S4-1] The price choice this row showed: never approved unseen if the store changed it since.
+      mode: row.mode,
     }, reason),
-    success: () => `${row.name}'s VAT is approved. Its new orders carry VAT inside their prices.`,
+    success: () => vatApprovedWords(row.name, row.mode),
   }));
 
   const reject = async (row: StoreVatPendingRow) => show(await dialog.run({

@@ -77,6 +77,8 @@ describe('[O-5] Store VAT queue', () => {
     const dialog = screen.getByRole('dialog', { name: 'Approve VAT for Sample Shop?' });
     // [REVIEW-G #2087 S4-2] The reviewer types what the certificate says; the store's own number is not shown to copy.
     expect(within(dialog).queryByText(/012345678/)).toBeNull();
+    // [REVIEW-G #2266 S3-1] The approval binds the price choice: the reviewer SEES it where they decide.
+    expect(within(dialog).getByText('Prices already include VAT: approving leaves its prices as they are.')).toBeTruthy();
     await user.type(within(dialog).getByLabelText('VAT registration number on the certificate'), '012345678');
     await user.type(within(dialog).getByLabelText('Registered name on the certificate'), 'Sample Shop Ltd');
     await user.type(within(dialog).getByLabelText('Date it takes effect (YYYY-MM-DD)'), '2026-01-01');
@@ -89,9 +91,31 @@ describe('[O-5] Store VAT queue', () => {
     expect(writes[0]!.url.pathname).toBe('/api/v1/admin/store-vat/vnd-1/approve');
     expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({
       certificateDocId: 'doc-1', vatNumber: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01', nameMatchesStore: true,
+      // [REVIEW-G #2255 S4-1] The price choice this row showed: the server refuses the approval if the store changed it since.
+      mode: 'PRICES_INCLUDE_VAT',
     });
     expect((writes[0]!.init?.headers as Record<string, string>)['x-swift-reason']).toBe(REASON);
-    expect(await screen.findByText(/Sample Shop's VAT is approved/)).toBeTruthy();
+    expect(await screen.findByText("Sample Shop's VAT is approved. Its prices already include VAT and stay as they are: customers pay the same.")).toBeTruthy();
+  });
+
+  it('[REVIEW-G #2266 S3-1] an "add VAT" store: the dialog says approving adds VAT to its prices; the approval binds that choice; the result says so', async () => {
+    const user = userEvent.setup();
+    const writes: ApiRequest[] = [];
+    serve([{ ...row, mode: 'ADD_VAT_AT_CHECKOUT' }], (r) => { writes.push(r); return { body: { success: true, data: { status: 'APPROVED' } } }; });
+    renderWithQuery(<StoreVatPage />);
+    await openCertificate(user);
+    await user.click(screen.getByRole('button', { name: 'Approve VAT' }));
+    const dialog = screen.getByRole('dialog', { name: 'Approve VAT for Sample Shop?' });
+    expect(within(dialog).getByText('Prices do not include VAT: approving adds VAT to each standard-rated price customers see (every item the store has not marked zero-rated or exempt).')).toBeTruthy();
+    await user.type(within(dialog).getByLabelText('VAT registration number on the certificate'), '012345678');
+    await user.type(within(dialog).getByLabelText('Registered name on the certificate'), 'Sample Shop Ltd');
+    await user.type(within(dialog).getByLabelText('Date it takes effect (YYYY-MM-DD)'), '2026-01-01');
+    await user.click(within(dialog).getByRole('radio', { name: /Yes, it is this store/ }));
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Approve VAT' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(JSON.parse(String(writes[0]!.init?.body))).toMatchObject({ mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(await screen.findByText("Sample Shop's VAT is approved. VAT is now added to each standard-rated price its customers pay.")).toBeTruthy();
   });
 
   it('the server’s refusal (a number that is not the store’s) stays in the panel, in its words', async () => {

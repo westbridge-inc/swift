@@ -6626,6 +6626,9 @@ export async function adminRoutes(app: FastifyInstance) {
     registeredName: z.string().trim().min(2).max(200),
     effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     nameMatchesStore: z.literal(true),
+    // [REVIEW-G #2255 S4-1] The price choice the queue row showed (null: none). Optional here so an out-of-date page
+    // gets the decision's "reload" refusal (409 VAT_MODE_MOVED), not a bare validation error.
+    mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']).nullable().optional(),
     reason: z.string().max(500).optional(),
   });
   const storeVatReasonSchema = z.object({ reason: z.string().trim().min(3).max(500) });
@@ -6652,6 +6655,7 @@ export async function adminRoutes(app: FastifyInstance) {
       registeredName: body.registeredName,
       effectiveFrom: new Date(`${body.effectiveFrom}T00:00:00.000Z`),
       nameMatchesStore: body.nameMatchesStore,
+      shownMode: body.mode,
     }, async (tx, facts) => {
       await auditIn(tx, request.user.userId, 'APPROVE_STORE_VAT', 'Vendor', vendorId, facts, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);

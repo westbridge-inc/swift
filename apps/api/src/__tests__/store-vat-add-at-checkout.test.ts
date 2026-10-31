@@ -123,9 +123,16 @@ async function sendCertificate(extra: Record<string, unknown>) {
   });
 }
 
+/** [REVIEW-G #2255 S4-1] The price choice the reviewer sees on the Store VAT queue row: the approval carries it. */
+async function seenMode() {
+  const res = await call('GET', '/api/v1/admin/store-vat/pending', reviewerToken);
+  expect(res.statusCode, res.body).toBe(200);
+  return (res.json().data as Array<Record<string, unknown>>).find((r) => r['vendorId'] === vendorId)?.['mode'] as string | null | undefined;
+}
+
 async function approve() {
   certificateDocId = (await vendorRow()).vatCertificateDocId!;
-  const res = await adminCall(`/store-vat/${vendorId}/approve`, approveBody());
+  const res = await adminCall(`/store-vat/${vendorId}/approve`, approveBody({ mode: await seenMode() }));
   expect(res.statusCode, res.body).toBe(200);
   return res;
 }
@@ -287,6 +294,31 @@ describe('1. ONE submission: number + certificate + price mode (the Documents li
       await app.prisma.vendor.update({ where: { id: vendorId }, data: { vatMode: 'ADD_VAT_AT_CHECKOUT' } });
     }
   });
+
+  it('[REVIEW-G #2255 S4-1] the approval binds the price choice the reviewer saw: switched to "add VAT" meanwhile -> 409, nothing moves', async () => {
+    // The reviewer opens the row while the store says its prices already include VAT ...
+    let res = await vendorCall('PUT', '/vat', { registered: true, mode: 'PRICES_INCLUDE_VAT' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await vendorRow()).toMatchObject({ vatStatus: 'PENDING', vatMode: 'PRICES_INCLUDE_VAT' });
+    const seen = await seenMode();
+    expect(seen).toBe('PRICES_INCLUDE_VAT');
+    // ... and the store switches to "add VAT" (+14% on every standard price) before the reviewer presses Approve.
+    res = await vendorCall('PUT', '/vat', { registered: true, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(res.statusCode, res.body).toBe(200);
+    certificateDocId = (await vendorRow()).vatCertificateDocId!;
+    for (const shown of [{ mode: seen }, { mode: null }, {}]) {
+      // The choice it saw, a page that showed none, and an out-of-date page that sends none: all refused.
+      const stale = await adminCall(`/store-vat/${vendorId}/approve`, approveBody(shown));
+      expect(stale.statusCode, `${JSON.stringify(shown)} ${stale.body}`).toBe(409);
+      expect(codeOf(stale)).toBe('VAT_MODE_MOVED');
+    }
+    expect(await vendorRow()).toMatchObject({ vatStatus: 'PENDING', vatMode: 'ADD_VAT_AT_CHECKOUT', vatApprovedNumber: null, vatReviewedBy: null });
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: certificateDocId } })).status).toBe('PENDING');
+    expect(await prices(soapId)).toEqual({ basePrice: 100, vatListedPrice: null });
+    expect(await app.prisma.auditLog.count({ where: { action: 'APPROVE_STORE_VAT', entityId: vendorId } })).toBe(0);
+    // The reviewer reloads and sees "add VAT": that approval is the one a person saw (section 2 makes it).
+    expect(await seenMode()).toBe('ADD_VAT_AT_CHECKOUT');
+  });
 });
 
 describe('2. approved: VAT added INTO every standard-rated price the customer sees', () => {
@@ -323,6 +355,37 @@ describe('2. approved: VAT added INTO every standard-rated price the customer se
       expect(res.statusCode, res.body).toBe(200);
       const store = (res.json().data.vendors as Array<Record<string, unknown>>).find((v) => v['id'] === vendorId);
       expect(store).toMatchObject({ vatAddsToPrices: true, vatRatePercent: 14 });
+    }
+  });
+
+  it('[REVIEW-G #2255 N1] the store’s VAT record (approved number and name, certificate, review note, a waiting change) is the owner’s alone', async () => {
+    const mgr = await app.prisma.user.create({ data: {
+      phone: testPhone(), firstName: 'Vat', lastName: 'Deputy', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], activeRole: 'VENDOR_OWNER',
+      isPhoneVerified: true, countryCode: 'GY', selfieCapturedAt: new Date(),
+    } });
+    userIds.push(mgr.id);
+    await app.prisma.vendorStaff.create({ data: { vendorId, userId: mgr.id, role: 'MANAGER', invitedBy: ownerUserId } });
+    const managerToken = await session(mgr.id, 'VENDOR_OWNER');
+    const RECORD = ['vatRegistrationNumber', 'vatApprovedNumber', 'vatApprovedName', 'vatEffectiveFrom', 'vatCertificateDocId', 'vatModeRequested', 'vatReviewNote', 'vatReviewedBy', 'vatReviewedAt'];
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { vatModeRequested: 'PRICES_INCLUDE_VAT', vatReviewNote: 'Checked against the GRA register' } });
+    try {
+      const storeOf = async (token: string) => {
+        const res = await call('GET', '/api/v1/vendor/profile', token, undefined, { 'x-vendor-id': vendorId });
+        expect(res.statusCode, res.body).toBe(200);
+        return (res.json().data.vendors as Array<Record<string, unknown>>).find((v) => v['id'] === vendorId)!;
+      };
+      const owner = await storeOf(ownerToken);
+      for (const field of RECORD) expect(owner[field], `owner ${field}`).toBeTruthy();
+      const manager = await storeOf(managerToken);
+      for (const field of RECORD) expect(manager[field], `manager ${field}`).toBeUndefined();
+      // What every menu role needs stays: whether VAT is added to the prices it types, and at what rate.
+      expect(manager).toMatchObject({ vatAddsToPrices: true, vatRatePercent: 14 });
+      // The profile save answers the manager with the same record stripped.
+      const saved = await call('PUT', '/api/v1/vendor/profile', managerToken, { description: 'Soap and rice' }, { 'x-vendor-id': vendorId });
+      expect(saved.statusCode, saved.body).toBe(200);
+      for (const field of RECORD) expect((saved.json().data as Record<string, unknown>)[field], `manager save ${field}`).toBeUndefined();
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { vatModeRequested: null, vatReviewNote: null } });
     }
   });
 

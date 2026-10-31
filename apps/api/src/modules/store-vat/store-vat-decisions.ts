@@ -249,6 +249,9 @@ export interface StoreVatApprovalInput {
   effectiveFrom: Date;
   /** The reviewer confirms the certificate's name is this store's business. */
   nameMatchesStore: true;
+  /** [REVIEW-G #2255 S4-1] The price choice the reviewer saw on the queue row (null: the row showed none). The approval
+   *  binds it: a store that changed its choice since (or a page too old to send it) is refused, never approved unseen. */
+  shownMode?: string | null;
 }
 
 /** Minimal surface of VerificationService the decisions use (the admin route passes its instance). */
@@ -299,6 +302,12 @@ export async function approveStoreVat(
     // [VAT-DOCS · owner 30 Oct 2026] Never an approved store without a pricing mode: its VAT could not be applied.
     if (!vendor.vatMode || !STORE_VAT_MODES_OFFERED.has(vendor.vatMode)) {
       throw new AppError(409, 'VAT_MODE_REQUIRED', 'The store has not said whether its prices include VAT. Ask the store to choose, then approve.');
+    }
+    // [REVIEW-G #2255 S4-1] The same stale-request check as the price-choice door (decideStoreVatModeChange): a store
+    // that switched "prices include VAT" -> "add VAT" while the reviewer looked would otherwise get 14% added to every
+    // standard price with no person having seen that choice. Read under the store lock, like everything above.
+    if (input.shownMode !== vendor.vatMode) {
+      throw new AppError(409, 'VAT_MODE_MOVED', 'The store changed how its prices relate to VAT since you opened it. Reload and look again before you approve.');
     }
     await tx.vendor.update({
       where: { id: vendorId },

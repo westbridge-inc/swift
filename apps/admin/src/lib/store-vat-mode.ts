@@ -6,6 +6,12 @@ export function vatModeWords(mode: string | null): string {
   return 'The store has not said how its prices relate to VAT: it cannot be approved yet';
 }
 
+/** [REVIEW-G #2266 S3-1] The approval binds the price choice the reviewer saw: what the approval did, in the same terms. */
+export function vatApprovedWords(name: string, mode: string | null): string {
+  if (mode === 'ADD_VAT_AT_CHECKOUT') return `${name}'s VAT is approved. VAT is now added to each standard-rated price its customers pay.`;
+  return `${name}'s VAT is approved. Its prices already include VAT and stay as they are: customers pay the same.`;
+}
+
 /** [VAT-DOCS · owner ruling 31 Oct 2026] An APPROVED store asks to change its price choice: what approving the change does. */
 export function vatModeChangeWords(requested: string | null | undefined): string {
   if (requested === 'ADD_VAT_AT_CHECKOUT') return 'Asks to change to “prices do not include VAT”: approving adds VAT to each standard-rated price its customers see (every item it has not marked zero-rated or exempt).';
