@@ -9,7 +9,7 @@ import {
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
 } from './cartPayment';
-import { paymentActionForCheckout, placedOrderConfirmationCopy } from './cartPlaced';
+import { paymentActionForCheckout, pickupCodeGivenAtCheckout, placedOrderConfirmationCopy } from './cartPlaced';
 
 function capabilities(scope: string, mmg: boolean): CartPaymentCapabilities {
   return {
@@ -99,6 +99,27 @@ describe('post-checkout MMG action and confirmation copy', () => {
     expect(cashCopy).toContain('pay cash at handover');
     expect(cashCopy).toContain('Swift never holds the order money');
     expect(cashCopy).not.toContain('MMG');
+  });
+
+  // [PICKUP · REVIEW-F S3-1 (a) on #2251] A cash takeaway names the pickup code only when the checkout answer
+  // carries one (the store asks for it); with the store's code off (the default) the counter checks the
+  // customer's first name and order number, so the popup never promises a code they do not have.
+  it('a cash takeaway names the code only when the store asks for it', () => {
+    const base = { appointment: false, pickup: true, held: false, submittedMethod: 'CASH' as const, paymentAction: null };
+    const off = placedOrderConfirmationCopy({ ...base, pickupCodeGiven: false });
+    expect(off).toBe('We’ll tell you when it’s ready — give your first name and order number and pay cash directly at the counter.');
+    expect(off).not.toMatch(/code/i);
+    expect(placedOrderConfirmationCopy({ ...base })).toBe(off);
+    expect(placedOrderConfirmationCopy({ ...base, pickupCodeGiven: true })).toBe('We’ll tell you when it’s ready — show the pickup code and pay cash directly at the counter.');
+  });
+
+  it('pickupCodeGivenAtCheckout: true only when a placed takeaway carries a code', () => {
+    expect(pickupCodeGivenAtCheckout({ orders: [{ pickupCode: null }] })).toBe(false);
+    expect(pickupCodeGivenAtCheckout({ orders: [{}] })).toBe(false);
+    expect(pickupCodeGivenAtCheckout({})).toBe(false);
+    expect(pickupCodeGivenAtCheckout(null)).toBe(false);
+    expect(pickupCodeGivenAtCheckout({ orders: [{ pickupCode: '' }] })).toBe(false);
+    expect(pickupCodeGivenAtCheckout({ orders: [{ pickupCode: null }, { pickupCode: '424242' }] })).toBe(true);
   });
 });
 

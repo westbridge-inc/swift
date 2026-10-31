@@ -34,17 +34,27 @@ beforeEach(async () => {
   });
 });
 
-async function click(name: string) { await act(async () => { fireEvent.click(screen.getByRole('button', { name })); }); }
+async function click(name: string) {
+  const button = await screen.findByRole('button', { name });
+  await act(async () => { fireEvent.click(button); });
+}
+
+/** The card has loaded the store's own number when its sentence names it: until then the counter still holds its
+ *  first-render default (1) and a click lands on that, not on the store's setting. Wait for it before any click. */
+async function loaded(sentence: string) { expect(await screen.findByText(sentence)).toBeTruthy(); }
 
 describe('[BOOK-S5b] How many bookings at once', () => {
   it('one by default, More then Save sends the number, and the words follow it', async () => {
     renderWithQuery(<BookingCapacityCard storeId="store-1" />);
     expect(await screen.findByRole('heading', { name: 'How many bookings at once' })).toBeTruthy();
-    expect(screen.getByText('One booking at a time across all your services. Choose more if several people or chairs serve customers at the same time.')).toBeTruthy();
+    await loaded('One booking at a time across all your services. Choose more if several people or chairs serve customers at the same time.');
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     await click('More');
+    // [REVIEW-F S4-1 #2249] The store's number here (1) is also the mount default, so the sentence above cannot prove
+    // the card has taken the store's number: the first More must be seen to land (2) before the next click.
+    await loaded('Up to 2 bookings at the same time, across all your services.');
     await click('More');
-    expect(screen.getByText('Up to 3 bookings at the same time, across all your services.')).toBeTruthy();
+    await loaded('Up to 3 bookings at the same time, across all your services.');
     await click('Save');
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ bookingCapacity: 3 });
@@ -54,8 +64,8 @@ describe('[BOOK-S5b] How many bookings at once', () => {
     store = { ...store, bookingCapacity: 20 };
     renderWithQuery(<BookingCapacityCard storeId="store-1" />);
     await screen.findByRole('heading', { name: 'How many bookings at once' });
+    await loaded('Up to 20 bookings at the same time, across all your services.');
     expect((screen.getByRole('button', { name: 'More' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Up to 20 bookings at the same time, across all your services.')).toBeTruthy();
   });
 
   it('a lowering the server refuses is shown in its own words', async () => {
@@ -63,7 +73,9 @@ describe('[BOOK-S5b] How many bookings at once', () => {
     refusal = 'You already have 3 bookings at the same time on Fri 30 Oct. Move or cancel one first.';
     renderWithQuery(<BookingCapacityCard storeId="store-1" />);
     await screen.findByRole('heading', { name: 'How many bookings at once' });
+    await loaded('Up to 3 bookings at the same time, across all your services.');
     await click('Fewer');
+    await loaded('Up to 2 bookings at the same time, across all your services.');
     await click('Save');
     expect((await screen.findByRole('alert')).textContent).toBe(refusal);
   });

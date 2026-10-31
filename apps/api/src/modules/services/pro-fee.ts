@@ -5,10 +5,11 @@ import { readFeePause } from '../billing/mmg-pause';
 import { proAgreementAccepted, proAgreementState } from '../legal/reaccept';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import {
-  assertSawQuote, assertWeeklyFeeAck, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
+  assertSawQuote, assertWeeklyFeeAck, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type SignupQuote, type WeeklyFeeAck,
 } from '../partner/weekly-fee-ack';
 import { subscriptionOperability, type OperabilitySubscription, type SubscriptionOperability } from '../subscription/operate-gate';
 import { liveServicesStoreFeeWhere } from '../subscription/subscription-owner';
+import { weeklyFeeAmount } from '../billing/subscription-fee';
 
 // ---------------------------------------------------------------------------
 // [BILL-PRO PR3 · owner 28 Oct 2026 Rounds A+B] THE PRO WEEKLY FEE: when a pro's fee is born, and whether a pro may
@@ -223,7 +224,21 @@ export async function proFeeAckState(db: Db, userId: string): Promise<ProFeeAckS
   const own = await db.serviceProvider.findUnique({ where: { userId }, select: { subscription: { select: { id: true } } } });
   const held = own?.subscription ?? (await liveServicesStoreFee(db, userId));
   const acknowledged = held ? ticked !== null : tickIsFor(ticked, quote);
-  return { acknowledged, amount: quote.amount, currencyCode: quote.currencyCode, ticked, changed: ticked !== null && !acknowledged };
+  // [REVIEW-M #2240 N2] Asked at the amount the pro pays once their own fee exists, never today's rate for new pros.
+  const asked = await proFeeAskedAmount(db, userId);
+  return { acknowledged, amount: asked.amount, currencyCode: asked.currencyCode, ticked, changed: ticked !== null && !acknowledged };
+}
+
+/**
+ * [REVIEW-M #2240 N2 · owner B3: "the amount they saw"] The amount a pro is asked to tick: their OWN fee's weekly amount
+ * once it exists (what they pay; its price changes only through the told-in-advance fee-rise rules), otherwise the
+ * services rate it would be born at (proFeeQuote). The tick shown and the tick recorded are the same amount.
+ */
+export async function proFeeAskedAmount(db: Db, userId: string): Promise<SignupQuote> {
+  const quote = await proFeeQuote(db, userId);
+  const own = await db.serviceProvider.findUnique({ where: { userId }, select: { subscription: { select: { weeklyRate: true, customRate: true, currencyCode: true } } } });
+  if (!own?.subscription) return quote;
+  return { ...quote, amount: weeklyFeeAmount(own.subscription), currencyCode: own.subscription.currencyCode };
 }
 
 /** Has this pro ticked "I understand the weekly fee" as a pro, and does that tick hold (proFeeAckState)? */
@@ -244,7 +259,8 @@ export async function recordProFeeAck(prisma: PrismaClient, input: { userId: str
   await prisma.$transaction(async (tx) => {
     const pro = await tx.serviceProvider.findUnique({ where: { userId: input.userId }, select: { id: true } });
     if (!pro) throw new AppError(404, 'NOT_FOUND', 'ServiceProvider not found');
-    const quote = await proFeeQuote(tx, input.userId);
+    // [REVIEW-M #2240 N2] Their own fee's amount once it exists; the services rate before (proFeeAskedAmount).
+    const quote = await proFeeAskedAmount(tx, input.userId);
     assertSawQuote(input.ack, quote);
     // [REVIEW-G #2230 S3-1] Idempotent only for the SAME amount: a tick to a new amount (the rate changed since the
     // last tick) is a new consent and is written.

@@ -31,6 +31,8 @@ describe('the website upload tick says the recorded words', () => {
 
   it('no review-time promise faster than the support hours', () => {
     expect(PAGE).not.toMatch(/within 24 hours/);
-    expect(PAGE).toContain('Monday to Saturday, 8:00–20:00 Guyana time');
+    // [Owner 30 Oct 2026] Support and document review: Monday to Saturday, 8:00–16:00 Guyana time.
+    expect(PAGE).toContain('Monday to Saturday, 8:00–16:00 Guyana time');
+    expect(PAGE).not.toContain('20:00');
   });
 });

@@ -107,11 +107,14 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
   // [R27] The weekly re-tier is OFF on the server (apps/api/src/modules/billing/weekly-retier.ts): a new store is
   // born on the first catalogue step whatever its size, and nothing moves it. The card must not promise a move, nor
   // show the larger steps' fees as if they were this store's.
-  it('[R27] a restaurant, grocery or shop starts at 15,000, and is told the rate does not change as its catalogue grows', () => {
+  // [REVIEW-F S4 on #2236] "Today": a statement of how it works now, not a promise that it never will (the re-tier
+  // with 14 days' notice may come later).
+  it('[R27] a restaurant, grocery or shop starts at 15,000, and is told the rate does not change today as its catalogue grows', () => {
     for (const vendorType of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
-      expect(text).toContain('Keep 100% of every sale — no commission on orders. This rate does not change as your catalogue grows.');
+      expect(text).toContain('Keep 100% of every sale — no commission on orders. Today this rate does not change as your catalogue grows.');
+      expect(text).not.toContain('. This rate does not change');
       expect(text).not.toMatch(/automatic/i);
       expect(text).not.toContain('$20,000');
       expect(text).not.toContain('$45,000');

@@ -141,6 +141,8 @@ describe('[E3] the chain fee statement', () => {
   // [REVIEW-G note on #2228] The receipts are the chosen month's only: one issued in the last millisecond before the
   // month, or at the first millisecond of the next (the bound is exclusive), is never on this month's statement; one
   // in the month's last millisecond is. Each figure is its own amount, so the total names exactly which ones counted.
+  // [REVIEW-G S4 on #2239] One issued at exactly `from` (Guyana midnight on the 1st: the lower bound is INCLUSIVE) is
+  // this month's, and never the previous month's.
   it('receipts are limited to the chosen month: one from the month before or the month after is left out', async () => {
     const c = await chain();
     const { from, to } = monthOf(new Date());
@@ -155,15 +157,16 @@ describe('[E3] the chain fee statement', () => {
     await receipt(to, 3333); // the next month's first millisecond
     await receipt(new Date(to.getTime() + 20 * DAY), 4444); // well inside the next month
     await receipt(new Date(to.getTime() - 1), 5555); // this month's last millisecond: in
+    await receipt(from, 6666); // this month's first millisecond (Guyana midnight on the 1st): in
 
     const s = (await statementOf(c, c.north.vendorId)).json().data;
     const north = s.branches.find((b: { branchName: string }) => b.branchName === `A North ${RUN}`);
-    expect(north.receipts.map((r: { amount: number }) => r.amount)).toEqual([14000, 5555]);
+    expect(north.receipts.map((r: { amount: number }) => r.amount)).toEqual([6666, 14000, 5555]);
     expect(north.receipts.every((r: { issuedAt: string }) => r.issuedAt >= s.from && r.issuedAt < s.to)).toBe(true);
-    expect(north.receiptsTotal).toBe(19555);
-    expect(s.totals.received).toBe(19555);
+    expect(north.receiptsTotal).toBe(26221);
+    expect(s.totals.received).toBe(26221);
 
-    // The previous month's statement holds the two from before this month, and nothing from this one.
+    // The previous month's statement holds the two from before this month, and nothing from this one (not 6666).
     const prev = new Date(from.getTime() - DAY);
     const prevMonth = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}`;
     if (prevMonth >= '2026-01') {

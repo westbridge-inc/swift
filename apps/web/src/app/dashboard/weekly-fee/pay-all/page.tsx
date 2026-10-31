@@ -47,6 +47,11 @@ function PayAll({ storeId }: { storeId: string | null }) {
   const path = `/api/v1${CHAIN_FEE_PATH}`;
   const q = useQuery<ChainFees>({ queryKey, queryFn: () => apiFetch(path, undefined, { storeId }).then((r) => r.data), staleTime: 0, refetchInterval: 60_000 });
   const { withStepUp, dialog } = useStepUp();
+  // [SPEED 30 Oct] Opened again: the branches' last known fees at once, said to be checking (no paying on them) until Swift
+  // answers: an answer from before this page opened while the re-read is on its way (components/checking-latest, inlined
+  // here for this page's size budget).
+  const [openedAt] = useState(Date.now);
+  const checkingLatest = q.data !== undefined && q.isFetching && q.dataUpdatedAt < openedAt;
   const [view, setView] = useState<ChainView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   const session = useMemo(() => new ChainCheckoutSession({
     // One MMG page for several fees: the server asks for a fresh "Confirm it's you" first (403 STEP_UP_REQUIRED).
@@ -78,6 +83,7 @@ function PayAll({ storeId }: { storeId: string | null }) {
         <p className="text-base font-semibold">{CHAIN_COPY.intro}</p>
         <p>{CHAIN_COPY.optional}</p>
         <p className="text-[var(--swift-muted)]">{CHAIN_COPY.notCharged}</p>
+        {checkingLatest && <p role="status" className="text-sm text-[var(--swift-muted)]">Checking for the latest…</p>}
       </div>
       <ul aria-label="Your branches" className="divide-y divide-black/5 rounded-2xl border border-black/5 bg-white shadow-sm">
         {fees.branches.map((b) => (
@@ -98,7 +104,7 @@ function PayAll({ storeId }: { storeId: string | null }) {
         {due.length > 0 && !fees.payable && <p className="text-sm text-[var(--swift-muted)]">{CHAIN_COPY.notHere}</p>}
         {confirmed && !pending && <>
           <p className="text-sm text-[var(--swift-muted)]">Opens MMG&apos;s page, then brings you back to Swift. {CHAIN_COPY.confirmFirst}</p>
-          <button disabled={view.busy} onClick={() => void session.pay(confirmed)} className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
+          <button disabled={view.busy || checkingLatest} onClick={() => void session.pay(confirmed)} className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
             {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(confirmed.totalGyd)} with MMG`}
           </button>
         </>}

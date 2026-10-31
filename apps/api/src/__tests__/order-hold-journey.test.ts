@@ -46,7 +46,8 @@ import { orderSocketFixture } from './helpers/order-socket-fixture';
 // reserve — deliberately avoided).
 const PHONE_PREFIX = '+5920861';
 const DAY = 24 * 60 * 60 * 1000;
-const HOLD_MS = 5 * 60_000;
+// [owner 30 Oct 2026] The store-order hold is ONE minute (was five): this journey runs on the unset default.
+const HOLD_MS = 1 * 60_000;
 
 let app: FastifyInstance;
 let socketUrl = '';
@@ -462,7 +463,7 @@ afterAll(async () => {
 describe.each([
   { label: 'restaurant', vendorType: 'RESTAURANT' as const, orderType: 'FOOD_DELIVERY', stock: undefined },
   { label: 'store', vendorType: 'SUPERMARKET' as const, orderType: 'GROCERY_DELIVERY', stock: 10 },
-])('Q12 · $label — the customer cancels inside the five-minute window', ({ vendorType, orderType, stock }) => {
+])('Q12 · $label — the customer cancels inside the one-minute window', ({ vendorType, orderType, stock }) => {
   let store: Store;
   let buyer: Actor;
   let order: Placed;
@@ -472,7 +473,7 @@ describe.each([
     buyer = await makeCustomer(vendorType === 'RESTAURANT' ? 'Asha' : 'Dev');
   });
 
-  it('checkout holds the order for exactly the five-minute window and tells the store nothing', async () => {
+  it('checkout holds the order for exactly the one-minute window and tells the store nothing', async () => {
     order = await placeOrder(buyer, store, 2);
     const row = await orderRow(order.id);
     expect(row.orderType).toBe(orderType);

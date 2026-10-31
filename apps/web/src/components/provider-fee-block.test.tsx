@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 import { LEGAL_RECHECK_EVENT } from '@/lib/legal-acceptance';
-import { PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, PRO_FEE_RUNNING_TICK_LINE, type ProFeeStanding, type ProFeeView } from '@/lib/provider-fee';
+import { PRO_FEE_COVERED_TICK_LINE, PRO_FEE_OWN_FEE_LINK, PRO_FEE_RUNNING_TICK_LINE, PRO_FEE_RUNNING_UNLISTED_LINE, type ProFeeStanding, type ProFeeView } from '@/lib/provider-fee';
 
 vi.mock('@/components/weekly-fee', () => ({ WeeklyFee: ({ family }: { family: string }) => <p>The {family} weekly fee</p> }));
 import { ProviderFeeBlock } from './provider-fee';
@@ -105,6 +105,8 @@ describe('[S3-3 · S4-1 · S4-3] a covered pro, and a fee behind the tick', () =
     // [REVIEW-M #2238 S4-1] The fee already runs: never "Ticking this starts your weekly fee today" (no new trial).
     expect(screen.queryByText(STARTS)).toBeNull();
     expect(screen.getByText(PRO_FEE_RUNNING_TICK_LINE)).toBeTruthy();
+    // [REVIEW-F #2240 S4-1] Not listed until they tick: said plainly.
+    expect(screen.getByText(PRO_FEE_RUNNING_UNLISTED_LINE)).toBeTruthy();
   });
 
   it('[REVIEW-M #2238 S4-1] a running fee and the agreement not accepted: the card never says the fee "can start only after"', () => {
