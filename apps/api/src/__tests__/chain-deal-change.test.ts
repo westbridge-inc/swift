@@ -183,7 +183,9 @@ describe('[E2] ending a deal now', () => {
     expect(sent[0]!.body).toContain(`${up.name}: your Swift chain deal is ending.`);
     expect(sent[0]!.body).toMatch(/GY\$20,000/);
     expect(sent[0]!.body).toMatch(/GY\$14,000/);
-    expect(sent[0]!.body).toContain(`tap Stop weekly billing on ${up.name}'s weekly-fee screen`);
+    // [REVIEW-F #2259 006bad5f S3-1] The stop control is on Account (for the branch open there), not the weekly-fee screen.
+    expect(sent[0]!.body).toContain(`tap Stop weekly billing on Account in Swift, with ${up.name} open, before then`);
+    expect(sent[0]!.body).not.toContain('weekly-fee screen');
     const after = (await heldOf(up.subId))!;
     expect(Date.parse(after.appliesFrom!)).toBeGreaterThanOrEqual(Date.parse(after.noticeAt!) + FEE_RISE_NOTICE_DAYS * DAY);
     // The owner's deal moves now (the end date is today): a branch approved from now on pays its own tier fee.
