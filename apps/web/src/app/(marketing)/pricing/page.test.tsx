@@ -328,3 +328,42 @@ describe('[ENTERPRISE-PAGE] chains and enterprise', () => {
     expect(page).toContain('site.salesEmail');
   });
 });
+
+// [ENTERPRISE-CARD · owner 31 Oct 2026] The price list ends with an "Enterprise and chains" card in the same style:
+// a custom rate, no figure, no discount (decision 49), and no free-trial line (a chain's branches share the owner's
+// trial end date or pay from day 1, so "14-day free trial" would not be true for them).
+describe('[ENTERPRISE-CARD] the last price card is enterprise and chains', () => {
+  const card = () => cardOf('Enterprise and chains');
+
+  it('comes last in the price list, after Department stores, with "Custom rate" where the price goes', async () => {
+    await renderPage();
+    const titles = within(screen.getByRole('heading', { level: 2, name: 'Weekly rates' }).parentElement!)
+      .getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    expect(titles.slice(-2)).toEqual(['Department stores', 'Enterprise and chains']);
+    expect(card().querySelector('p')!.textContent).toBe('Custom rate');
+    expect(card().textContent).toContain('For chains and large groups with several branches. Swift agrees a weekly rate per branch with you.');
+  });
+
+  it('quotes no rate, promises no discount and shows no free-trial line', async () => {
+    await renderPage();
+    const text = card().textContent!;
+    expect(text).not.toMatch(/\$|GYD|\d|%|discount|week\b|free trial/i);
+    expect(text).not.toContain('—');
+  });
+
+  it('its Contact sales button mails the same address and subject as the chains section', async () => {
+    await renderPage();
+    const button = within(card()).getByRole('link', { name: 'Contact sales' });
+    expect(button.getAttribute('href')).toBe('mailto:sales@example.test?subject=Chain%20%2F%20enterprise%20enquiry');
+    // The chains section below is still there, with its own button.
+    const section = screen.getByRole('heading', { level: 2, name: 'Chains and enterprise' }).closest('section')!;
+    expect(within(section).getByRole('link', { name: 'Contact sales' })).toBeTruthy();
+  });
+
+  it('shows with the price list, like the catalogue cards; with no rates there is no card (the chains section still shows)', async () => {
+    pricing = null;
+    await renderPage();
+    expect(screen.queryByRole('heading', { name: 'Enterprise and chains' })).toBeNull();
+    expect(screen.getByRole('heading', { level: 2, name: 'Chains and enterprise' })).toBeTruthy();
+  });
+});

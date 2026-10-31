@@ -4,7 +4,7 @@ import { Banknote, ShieldCheck, MapPin, FileCheck2, PhoneCall, Radar } from 'luc
 import { Section } from '@/components/site';
 import { launch } from '@/site.config';
 import { partnerSignupHref } from '@/lib/signup-roles';
-import { PrelaunchPartnerNote } from '@/components/prelaunch-partner-note';
+import { PrelaunchPartnerNote, ReviewTime } from '@/components/prelaunch-partner-note';
 
 export const metadata: Metadata = {
   title: 'For riders and drivers',
@@ -123,7 +123,8 @@ export default function DriversPage() {
           <h2 className="text-2xl font-bold tracking-tight md:text-3xl">What you need to sign up</h2>
           <p className="mt-3 text-[var(--swift-muted)]">
             Four documents. Photograph them with your phone — the camera frames each one for you.
-            Most riders clear review within a day, and you can browse the whole app while you wait.
+            {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
+            {' '}<ReviewTime live="Most riders clear review within a day, and you can browse the whole app while you wait." after="You can browse the whole app while you wait." />
           </p>
           <ul className="mt-7 space-y-4">
             {DOCUMENTS.map((d) => (

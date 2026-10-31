@@ -88,6 +88,8 @@ const CHAIN_POINTS = [
   'Need more branches than one account allows? Contact sales.',
 ];
 const SALES_SUBJECT = 'Chain / enterprise enquiry';
+/** The chains enquiry, the same address and subject wherever Contact sales appears on this page. */
+const salesMailto = () => `mailto:${site.salesEmail}?subject=${encodeURIComponent(SALES_SUBJECT)}`;
 
 function ChainsAndEnterprise() {
   return (
@@ -106,7 +108,7 @@ function ChainsAndEnterprise() {
         </div>
         <div className="flex flex-col items-start gap-2">
           <a
-            href={`mailto:${site.salesEmail}?subject=${encodeURIComponent(SALES_SUBJECT)}`}
+            href={salesMailto()}
             className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
           >
             Contact sales
@@ -156,19 +158,21 @@ function JoinSwift() {
   );
 }
 
-function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
+/** A weekly price card. [ENTERPRISE-CARD] `trialDays` null = no figure per week and no trial line (the custom rate). */
+function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number | null }) {
   return (
     <div className="rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
       <h3 className="font-bold">{title}</h3>
       <p className="mt-3 text-3xl font-extrabold">
         {price}
-        <span className="text-base font-medium text-[var(--swift-muted)]"> / week</span>
+        {trialDays !== null && <span className="text-base font-medium text-[var(--swift-muted)]"> / week</span>}
       </p>
       {children}
-      <p className="mt-4 text-sm font-semibold text-[var(--swift-red)]">{trialDays}-day free trial</p>
+      {trialDays !== null && <p className="mt-4 text-sm font-semibold text-[var(--swift-red)]">{trialDays}-day free trial</p>}
     </div>
   );
 }
+
 
 // Live from the same endpoint the app's signup shows — never a hardcoded table.
 export default async function PricingPage({ searchParams }: { searchParams: Promise<{ country?: string }> }) {
@@ -230,6 +234,20 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                   </PriceCard>
                 );
               })}
+              {/* [ENTERPRISE-CARD · owner 31 Oct 2026] Last in the list: a custom rate, never a figure or a discount
+                  (decision 49), and no trial line: a chain's branches share the owner's trial end date or pay from
+                  day 1, so "14-day free trial" would not be true for them. The section below says the rest. */}
+              <PriceCard title="Enterprise and chains" price="Custom rate" trialDays={null}>
+                <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                  For chains and large groups with several branches. Swift agrees a weekly rate per branch with you.
+                </p>
+                <a
+                  href={salesMailto()}
+                  className="mt-4 inline-block rounded-full bg-[var(--swift-red)] px-5 py-2.5 text-sm font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+                >
+                  Contact sales
+                </a>
+              </PriceCard>
             </div>
             {/* [WEBSITE 30 Oct · owner] The note is short: the taxi and rider rules already sit on their cards. */}
             <p className="mt-6 max-w-3xl text-sm leading-relaxed text-[var(--swift-muted)]">

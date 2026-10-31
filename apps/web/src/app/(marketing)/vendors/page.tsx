@@ -4,7 +4,7 @@ import { CheckCircle2, Store, ClipboardList, Boxes, QrCode, LineChart, Users } f
 import { Section } from '@/components/site';
 import { launch } from '@/site.config';
 import { partnerSignupHref } from '@/lib/signup-roles';
-import { PrelaunchPartnerNote } from '@/components/prelaunch-partner-note';
+import { PrelaunchPartnerNote, ReviewTime } from '@/components/prelaunch-partner-note';
 
 // NOTE [G-FEE]: this page may state subscription pricing. It must never be
 // deep-linked from the iOS binary — Apple treats in-app links to external
@@ -124,7 +124,13 @@ export default function VendorsPage() {
               {
                 n: '3',
                 t: 'We review them',
-                b: 'A person checks every document. Most businesses clear review within a day, and you can browse the whole dashboard while you wait.',
+                // [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day.
+                b: (
+                  <>
+                    A person checks every document.{' '}
+                    <ReviewTime live="Most businesses clear review within a day, and you can browse the whole dashboard while you wait." after="You can browse the whole dashboard while you wait." />
+                  </>
+                ),
               },
               {
                 n: '4',

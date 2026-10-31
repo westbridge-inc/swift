@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -310,5 +311,65 @@ describe('[OPEN-EARLY] the pre-launch partner note', () => {
     for (const page of ['app/(marketing)/vendors/page.tsx', 'app/(marketing)/drivers/page.tsx', 'app/(marketing)/pricing/page.tsx']) {
       expect(readFileSync(join(SRC, page), 'utf8'), page).toMatch(/<PrelaunchPartnerNote className="mt-6[^"]*" \/>/);
     }
+  });
+});
+
+// [OPEN-EARLY · owner 31 Oct 2026] "Most businesses clear review within a day" is not true before launch: Swift checks
+// documents as they arrive and approves partners on launch day. The partner pages follow the same server answer as
+// the note: "soon" says launch day; open (live, or staging) keeps the review-time words; while the answer is on its
+// way, or if it fails, a sentence true in both states.
+describe('[OPEN-EARLY] the partner pages never promise review within a day before launch', () => {
+  const SOON = 'We check documents as they arrive and approve partners on launch day.';
+  const PAGES = [
+    ['For businesses', 'app/(marketing)/vendors/page.tsx', 'Most businesses clear review within a day'],
+    ['For riders and drivers', 'app/(marketing)/drivers/page.tsx', 'Most riders clear review within a day'],
+    ['Questions', 'app/(marketing)/faq/page.tsx', 'Most businesses clear review within a day'],
+  ] as const;
+
+  async function page(file: string) {
+    const { default: Page } = await load<{ default: () => ReactNode }>(file);
+    return render(<>{Page()}</>);
+  }
+
+  it.each(PAGES)('%s on the closed public site says launch day, never "within a day"', async (_name, file) => {
+    await configWith('');
+    openAt('https://swiftgy.com/');
+    const view = await page(file);
+    await answered();
+    await waitFor(() => expect(view.container.textContent).toContain(SOON));
+    expect(view.container.textContent).not.toMatch(/within a day/i);
+  });
+
+  it.each(PAGES)('%s once live (and on staging) keeps its review-time words', async (_name, file, live) => {
+    for (const [switchValue, url] of [['live', 'https://swiftgy.com/'], ['', 'https://staging.swiftgy.com/']] as const) {
+      await configWith(switchValue);
+      openAt(url);
+      const view = await page(file);
+      if (url.startsWith('https://swiftgy.com')) await answered();
+      await waitFor(() => expect(view.container.textContent, url).toContain(live));
+      expect(view.container.textContent, url).not.toContain(SOON);
+      view.unmount();
+    }
+  });
+
+  it.each(PAGES)('%s says neither while the answer is on its way, nor if it fails', async (_name, file) => {
+    await configWith('');
+    let answer!: (_value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { answer = resolve; })));
+    openAt('https://swiftgy.com/');
+    const view = await page(file);
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    expect(view.container.textContent).not.toMatch(/within a day/i);
+    expect(view.container.textContent).not.toContain(SOON);
+    expect(view.container.textContent).toContain('A person checks your documents before you go live.');
+    await act(async () => { answer(new Response('busy', { status: 503 })); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(view.container.textContent).not.toMatch(/within a day/i);
+    expect(view.container.textContent).not.toContain(SOON);
+  });
+
+  it('no web page states a review time outside that switch', () => {
+    const hits = execSync(`grep -rniE "within a day|same-day review|24 hours to (review|approve)|approved (in|within)" ${join(SRC, 'app')} ${join(SRC, 'components')} --include=*.tsx || true`, { encoding: 'utf8' })
+      .split('\n').filter((line) => line && !/\.test\./.test(line));
+    for (const line of hits) expect(line, line).toMatch(/live="/);
   });
 });
