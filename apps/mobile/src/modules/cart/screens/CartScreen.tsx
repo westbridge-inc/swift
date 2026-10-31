@@ -80,7 +80,7 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../cartPayment';
-import { paymentActionForCheckout, placedOrderConfirmationCopy } from '../cartPlaced';
+import { paymentActionForCheckout, pickupCodeGivenAtCheckout, placedOrderConfirmationCopy } from '../cartPlaced';
 import { touchTarget } from '../../../kit/touch-target';
 import { bookingSummaryNote, checkoutButtonLabel, mmgBookingWaitsNote, placedBookingOutcome, placedPopupTitle, type PlacedBookingOutcome } from '../../../lib/appointmentBooking';
 
@@ -217,6 +217,7 @@ export function CartScreen() {
   // Alert must not leave the retry dead).
   const [pickupAttempt, setPickupAttempt] = useState(0);
   const [placedPickup, setPlacedPickup] = useState(false);
+  const [placedPickupCode, setPlacedPickupCode] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
   // LIFECYCLE_V2: while held, the store has NOT been told yet — say so honestly.
@@ -450,6 +451,7 @@ export function CartScreen() {
         onSuccess: (data: any) => {
           haptic.success();
           setPlacedPickup(submittingPickup);
+          setPlacedPickupCode(pickupCodeGivenAtCheckout(data));
           const first = data?.orders?.[0];
           const paymentAction = paymentActionForCheckout(data ?? {}, submittedMethod);
           setPlacedOrderId(first?.id ?? null);
@@ -1264,6 +1266,7 @@ export function CartScreen() {
             appointment: placedAppt,
             appointmentConfirmed: placedBooking === 'confirmed',
             pickup: placedPickup,
+            pickupCodeGiven: placedPickupCode,
             held: placedHeld,
             submittedMethod: placedSubmittedMethod,
             paymentAction: placedPaymentAction,

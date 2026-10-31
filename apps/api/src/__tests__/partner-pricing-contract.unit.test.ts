@@ -1139,7 +1139,8 @@ describe('activation — a market that cannot price a partner refuses to activat
     expect(projectionAt).toBeGreaterThan(-1);
     // [owner #51, 14 Oct] The go-live phone gate added lines to the projection: the
     // slice is a reading window, not the property — the ORDER is what is graded.
-    before(verification.slice(projectionAt, projectionAt + 6000), 'startTrialForVendor(vendor.id, db)', 'data: { isVerified: true');
+    // [RETIER PR-A] the store weekly-fee tick gate added lines to the projection too: a wider window, the same ORDER.
+    before(verification.slice(projectionAt, projectionAt + 8000), 'startTrialForVendor(vendor.id, db)', 'data: { isVerified: true');
     // The review decision prices inside its transaction, before the approval projects anything.
     const decisionAt = verification.indexOf('private async transitionPendingDocument(');
     expect(decisionAt).toBeGreaterThan(-1);

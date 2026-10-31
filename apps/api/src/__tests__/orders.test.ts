@@ -335,8 +335,12 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.fulfillment).toBe('PICKUP');
     expect(order.deliveryFee).toBe(0);
     expect(order.deliveryAddress).toContain('Lifecycle Lane');
-    // Takeaway: the customer gets a 6-digit (CSPRNG) collection code.
-    expect(order.pickupCode).toMatch(/^\d{6}$/);
+    // Takeaway: a 6-digit (CSPRNG) collection code is minted for every pickup order. [PICKUP · owner 30 Oct 2026]
+    // The customer's answer carries it only when the store asks for it (this store's code is off, the default).
+    const minted = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { pickupCode: true, vendor: { select: { requirePickupCode: true } } } });
+    expect(minted.pickupCode).toMatch(/^\d{6}$/);
+    expect(minted.vendor?.requirePickupCode).toBe(false);
+    expect(order.pickupCode).toBeNull();
   });
 
   it('PU-05: derives one cart-level MMG capability without exposing the raw link', async () => {
