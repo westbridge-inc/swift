@@ -22,6 +22,9 @@ export const MMG_NUMBER_WORDS = {
   cancel: 'This wasn’t me — cancel and sign out other devices',
   cancelled: 'Change cancelled. Your current number stays. Other devices were signed out.',
   saveFailed: 'That number could not be saved. Check it and try again.',
+  // [WEB-SETTINGS · security delta] The server cancels only a change that is still waiting ({ cancelled: false } otherwise,
+  // and then it signs out no device). Web-only words: the phone shows "Change cancelled" either way (follow-up).
+  notCancelled: 'Nothing was cancelled: no change was waiting any more, so the new number may already be live. Check the number customers pay below. If you did not set it, change it now and sign out of Swift on your other devices.',
 } as const;
 
 const DRAFT = 'Your MMG number';
@@ -72,7 +75,13 @@ export function MmgNumberCard({ storeId }: { storeId: string | null }) {
   const cancel = useMutation({
     mutationFn: cancelPendingMmgNumber,
     onMutate: () => { setError(null); setNotice(null); },
-    onSuccess: () => { setNotice(MMG_NUMBER_WORDS.cancelled); void refresh(); },
+    // Only the server's own "cancelled: true" is a cancel; anything else warns, and the card re-reads what is live.
+    onSuccess: (res) => {
+      const cancelled = (res as { data?: { cancelled?: unknown } } | null | undefined)?.data?.cancelled === true;
+      if (cancelled) setNotice(MMG_NUMBER_WORDS.cancelled);
+      else setError(MMG_NUMBER_WORDS.notCancelled);
+      void refresh();
+    },
     onError: (e) => setError(`Could not cancel. ${serverWords(e, 'Try again in a moment.')}`),
   });
 

@@ -20,7 +20,7 @@ const LIVE = '+5926001234';
 const PENDING = '+5926005678';
 const APPLY_AT = '2026-11-01T15:00:00.000Z';
 
-type Opts = { role?: string; live?: string | null; pending?: string | null; holdHours?: number | null; stepUp?: boolean; refuse?: string };
+type Opts = { role?: string; live?: string | null; pending?: string | null; holdHours?: number | null; stepUp?: boolean; refuse?: string; appliedBeforeCancel?: boolean };
 const calls: Array<{ method: string; path: string; url: string; body: unknown }> = [];
 
 function api(opts: Opts = {}) {
@@ -44,7 +44,13 @@ function api(opts: Opts = {}) {
       if (body.mmgNumber === null) { live = null; pending = null; } else pending = '+5926009876';
       return { body: { success: true, data: {} } };
     }
-    if (path === '/vendor/profile/mmg-number/pending' && method === 'DELETE') { pending = null; return { body: { success: true, data: {} } }; }
+    if (path === '/vendor/profile/mmg-number/pending' && method === 'DELETE') {
+      // The API's answer (money-surface.ts cancelMmgLinkChange): cancelled only when a change was still waiting.
+      if (opts.appliedBeforeCancel && pending) { live = pending; pending = null; }
+      const cancelled = pending !== null;
+      pending = null;
+      return { body: { success: true, data: { cancelled, revokedSessions: cancelled ? 2 : 0 } } };
+    }
     return { body: { success: true, data: {} } };
   });
 }
@@ -126,6 +132,17 @@ describe('[WEB-SETTINGS] the store\'s MMG number (web)', () => {
     await waitFor(() => expect(writes()).toEqual([expect.objectContaining({ method: 'DELETE', path: '/vendor/profile/mmg-number/pending' })]));
     expect(await screen.findByText(MMG_NUMBER_WORDS.cancelled)).toBeTruthy();
     await waitFor(() => expect(screen.queryByText('+592 ••• •678')).toBeNull());
+  });
+
+  it('a cancel the server did not make (the change already went live) is never shown as cancelled: it warns and re-reads', async () => {
+    api({ pending: PENDING, appliedBeforeCancel: true });
+    const { user } = renderWithQuery(<MmgNumberCard storeId="store-1" />);
+    await user.click(await screen.findByRole('button', { name: MMG_NUMBER_WORDS.cancel }));
+    expect((await screen.findByRole('alert')).textContent).toBe(MMG_NUMBER_WORDS.notCancelled);
+    expect(screen.queryByText(MMG_NUMBER_WORDS.cancelled)).toBeNull();
+    // Re-read: the number that went live is shown (masked), so the owner can check it.
+    expect(await screen.findByText('+592 ••• •678')).toBeTruthy();
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/vendor/profile').length).toBeGreaterThanOrEqual(2);
   });
 
   it('removing the number goes through the same confirmation and sends { mmgNumber: null }', async () => {
