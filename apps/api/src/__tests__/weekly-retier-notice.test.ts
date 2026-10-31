@@ -45,6 +45,9 @@ let dept = 0;
 let largeFloor = 0;
 let mover = 0;
 let moverHeavy = 0;
+/** Every plan this file made: each pass below runs over these only, never over other files' fixtures. */
+const mine: string[] = [];
+const scope = () => ({ subscriptionIds: mine });
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
@@ -73,6 +76,7 @@ async function makeStore(opts: { weeklyRate: number; due: Date; items: number; s
     autoRenew: opts.status !== 'PAUSED', currentPeriodStart: new Date(opts.due.getTime() - WEEK), currentPeriodEnd: opts.due, nextBillingDate: opts.due,
   } });
   if (opts.items > 0) await addItems(vendor.id, opts.items);
+  mine.push(sub.id);
   return { userId, vendorId: vendor.id, subId: sub.id };
 }
 
@@ -103,6 +107,7 @@ async function makeRider(opts: { weeklyRate: number; due: Date; vehicleType: Veh
     riderId: rider.id, type: 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: opts.weeklyRate, billingMethod: 'CASH', autoRenew: true,
     currentPeriodStart: new Date(opts.due.getTime() - WEEK), currentPeriodEnd: opts.due, nextBillingDate: opts.due,
   } });
+  mine.push(sub.id);
   return { userId, subId: sub.id };
 }
 
@@ -201,7 +206,7 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
     ]);
     expect(await rate(s.subId)).toBe(small);
 
-    await billing.sweepFeeRises(t);
+    await billing.sweepFeeRises(t, scope());
     const firstNewFee = new Date(due.getTime() + 2 * WEEK);
     const [notice, ...more] = await notices(s.userId);
     expect(more).toHaveLength(0);
@@ -223,7 +228,7 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
 
     // Re-runs (a crashed job retried, the next hour, the next week): one rise, one notice, no move.
     await billing.runWeeklyRetier(true);
-    await billing.sweepFeeRises(new Date(t.getTime() + DAY));
+    await billing.sweepFeeRises(new Date(t.getTime() + DAY), scope());
     expect(await notices(s.userId)).toHaveLength(1);
     expect((await heldOf(s.subId))?.heldAt).toBe(held.heldAt);
     expect(await audits(s.subId, 'BILLING_FEE_RISE_HELD')).toHaveLength(1);
@@ -232,8 +237,8 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
 
     // The weeks before the told date are billed: the next fee is the told one, and the new fee moves in, once.
     await reachToldFee(s.subId);
-    await billing.sweepFeeRises(new Date(t.getTime() + 2 * DAY));
-    await billing.sweepFeeRises(new Date(t.getTime() + 2 * DAY + 60_000));
+    await billing.sweepFeeRises(new Date(t.getTime() + 2 * DAY), scope());
+    await billing.sweepFeeRises(new Date(t.getTime() + 2 * DAY + 60_000), scope());
     expect(await rate(s.subId)).toBe(large);
     expect(await heldOf(s.subId)).toBeNull();
     expect((await tierChanges(s.subId)).map((e) => Number(e.amount))).toEqual([large]);
@@ -247,8 +252,8 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
     const due = new Date(Date.now() + 3 * DAY);
     const paused = await makeStore({ weeklyRate: small, due, items: largeFloor, status: 'PAUSED' });
     const suspended = await makeStore({ weeklyRate: small, due, items: largeFloor, status: 'SUSPENDED' });
-    await billing.recalculateVendorTiers(new Date());
-    await billing.sweepFeeRises(new Date());
+    await billing.recalculateVendorTiers(new Date(), scope());
+    await billing.sweepFeeRises(new Date(), scope());
     for (const s of [paused, suspended]) {
       expect(await heldOf(s.subId)).toMatchObject({ from: small, to: large, source: 'WEEKLY_RETIER' });
       expect((await notices(s.userId)).map((n) => n.title)).toEqual(['Your weekly fee is changing']);
@@ -258,8 +263,8 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
 
   it('an agreed chain deal never rises: nothing is held, nothing told, the deal and the rate stay', async () => {
     const s = await makeStore({ weeklyRate: small, due: new Date(Date.now() + 3 * DAY), items: largeFloor, deal: small - 2000 });
-    await billing.recalculateVendorTiers(new Date());
-    await billing.sweepFeeRises(new Date());
+    await billing.recalculateVendorTiers(new Date(), scope());
+    await billing.sweepFeeRises(new Date(), scope());
     expect(await heldOf(s.subId)).toBeNull();
     expect(await notices(s.userId)).toHaveLength(0);
     const after = await sub(s.subId);
@@ -271,12 +276,12 @@ describe('[RETIER PR-B] back under the step before the new fee starts: the chang
   it('on the next weekly count: a store under the step for a whole week is never moved; the rise is dropped and the store told', async () => {
     const t = new Date();
     const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
-    await billing.recalculateVendorTiers(t);
-    await billing.sweepFeeRises(t);
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
     expect(await notices(s.userId)).toHaveLength(1);
 
     await hide(s.vendorId, 10, 8 * DAY);
-    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000));
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000), scope());
     expect(await heldOf(s.subId)).toBeNull();
     expect((await audits(s.subId, 'BILLING_FEE_RISE_DROPPED')).map((a) => a.changes)).toEqual([expect.objectContaining({ from: small, to: large, told: true, why: 'BELOW_AGAIN' })]);
     const said = await notices(s.userId);
@@ -285,17 +290,17 @@ describe('[RETIER PR-B] back under the step before the new fee starts: the chang
     expect(await rate(s.subId)).toBe(small);
     expect(await tierChanges(s.subId)).toHaveLength(0);
     // Counted again: nothing more to tell.
-    await billing.recalculateVendorTiers(new Date(t.getTime() + 120_000));
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 120_000), scope());
     expect(await notices(s.userId)).toHaveLength(2);
   });
 
   it('hiding listings just before the count does not cancel it: a listing hidden in the last 7 days still counts', async () => {
     const t = new Date();
     const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
-    await billing.recalculateVendorTiers(t);
-    await billing.sweepFeeRises(t);
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
     await hide(s.vendorId, 10, DAY);
-    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000));
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000), scope());
     expect(await heldOf(s.subId)).toMatchObject({ from: small, to: large });
     expect(await notices(s.userId)).toHaveLength(1);
   });
@@ -303,11 +308,11 @@ describe('[RETIER PR-B] back under the step before the new fee starts: the chang
   it('at the moment the new fee would start: a store back under the step is not moved; the hourly pass drops it and tells', async () => {
     const t = new Date();
     const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
-    await billing.recalculateVendorTiers(t);
-    await billing.sweepFeeRises(t);
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
     await hide(s.vendorId, 10, 8 * DAY);
     await reachToldFee(s.subId);
-    await billing.sweepFeeRises(new Date(t.getTime() + DAY));
+    await billing.sweepFeeRises(new Date(t.getTime() + DAY), scope());
     expect(await rate(s.subId)).toBe(small);
     expect(await heldOf(s.subId)).toBeNull();
     expect((await audits(s.subId, 'BILLING_FEE_RISE_DROPPED')).map((a) => a.changes)).toEqual([expect.objectContaining({ told: true, why: 'BELOW_AGAIN' })]);
@@ -317,13 +322,13 @@ describe('[RETIER PR-B] back under the step before the new fee starts: the chang
   it('a store that grew further during the notice is told the higher fee afresh, its 14 days counted again', async () => {
     const t = new Date();
     const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
-    await billing.recalculateVendorTiers(t);
-    await billing.sweepFeeRises(t);
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
     const first = (await heldOf(s.subId))!;
     const deptFloor = (await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } })).subscriptionTiers as Record<string, number>;
     await addItems(s.vendorId, deptFloor['departmentCatalogueThreshold']! - largeFloor);
-    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000));
-    await billing.sweepFeeRises(new Date(t.getTime() + 120_000));
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000), scope());
+    await billing.sweepFeeRises(new Date(t.getTime() + 120_000), scope());
     const second = (await heldOf(s.subId))!;
     expect(second).toMatchObject({ from: small, to: dept, basis: { tier: 'department' } });
     expect(new Date(second.appliesFrom!).getTime() - new Date(second.noticeAt!).getTime()).toBeGreaterThanOrEqual(FEE_RISE_NOTICE_DAYS * DAY);
@@ -340,9 +345,38 @@ describe('[RETIER PR-B] an owner\'s chain-deal change is the owner\'s, never the
     expect(await app.prisma.$transaction((tx) => holdChainDealRiseInTx(tx, {
       subscriptionId: s.subId, from: small - 3000, to: large - 1000, customFrom: small - 3000, customTo: large - 1000, notBefore: t, currencyCode: 'GYD', now: t,
     }))).toBe('held');
-    await billing.recalculateVendorTiers(t);
+    await billing.recalculateVendorTiers(t, scope());
     expect(await heldOf(s.subId)).toMatchObject({ source: 'CHAIN_DEAL', from: small - 3000, to: large - 1000 });
     expect(await audits(s.subId, 'BILLING_FEE_RISE_DROPPED')).toHaveLength(0);
+  });
+});
+
+describe('[RETIER PR-B · REVIEW-M #2245 S3-1 · COORD ruling] removed listings: 7 days, then never', () => {
+  const remove = (vendorId: string, n: number, daysAgo: number) => app.prisma.$executeRaw`
+    UPDATE "items" SET "archivedAt" = now() - make_interval(days => ${daysAgo}::int), "isAvailable" = false, "updatedAt" = now() - make_interval(days => ${daysAgo}::int)
+    WHERE "id" IN (SELECT "id" FROM "items" WHERE "vendorId" = ${vendorId} AND "archivedAt" IS NULL ORDER BY "id" LIMIT ${n})`;
+
+  it('listings removed long ago are not the catalogue: a store that reaches the step only with them is never told a rise', async () => {
+    const t = new Date();
+    const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
+    await remove(s.vendorId, 10, 8);
+    await billing.recalculateVendorTiers(t, scope());
+    expect(await heldOf(s.subId)).toBeNull();
+  });
+
+  it('during the notice: removing listings today does not cancel the rise (the 7-day window); removed for a whole week, the next count cancels it', async () => {
+    const t = new Date();
+    const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
+    expect(await heldOf(s.subId)).toMatchObject({ from: small, to: large });
+    await remove(s.vendorId, 10, 0);
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000), scope());
+    expect(await heldOf(s.subId)).toMatchObject({ from: small, to: large });
+    await app.prisma.$executeRaw`UPDATE "items" SET "archivedAt" = now() - interval '8 days', "updatedAt" = now() - interval '8 days' WHERE "vendorId" = ${s.vendorId} AND "archivedAt" IS NOT NULL`;
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 120_000), scope());
+    expect(await heldOf(s.subId)).toBeNull();
+    expect((await notices(s.userId)).map((n) => n.title)).toEqual(['Your weekly fee is changing', 'Your weekly fee is not changing']);
   });
 });
 
@@ -350,9 +384,9 @@ describe('[RETIER PR-B] the fee coming down applies from the next weekly fee, wi
   it('a store whose catalogue shrank for good: seen on one weekly count, confirmed on the next, the lower fee from the next weekly fee', async () => {
     const t = Date.now();
     const s = await makeStore({ weeklyRate: large, due: new Date(t + 3 * DAY), items: 10 });
-    await billing.recalculateVendorTiers(new Date(t));
+    await billing.recalculateVendorTiers(new Date(t), scope());
     expect(await rate(s.subId)).toBe(large);
-    await billing.recalculateVendorTiers(new Date(t + WEEK));
+    await billing.recalculateVendorTiers(new Date(t + WEEK), scope());
     expect(await rate(s.subId)).toBe(small);
     expect((await sub(s.subId)).nextBillingDate.getTime()).toBe(t + 3 * DAY);
     expect((await notices(s.userId)).map((n) => n.title)).toEqual(['Your weekly fee is going down']);
@@ -365,9 +399,9 @@ describe('[RETIER PR-B] a mover: told why (the vehicle)', () => {
     const t = new Date();
     const due = new Date(t.getTime() + 3 * DAY);
     const r = await makeRider({ weeklyRate: mover, due, vehicleType: 'CANTER_SHORT' });
-    await billing.recalculateMoverTiers(t);
+    await billing.recalculateMoverTiers(t, scope());
     expect(await heldOf(r.subId)).toMatchObject({ from: mover, to: moverHeavy, basis: { kind: 'VEHICLE', vehicleType: 'CANTER_SHORT', tier: 'courierHeavy' } });
-    await billing.sweepFeeRises(t);
+    await billing.sweepFeeRises(t, scope());
     const [notice] = await notices(r.userId);
     expect(notice!.body).toContain('Your vehicle on Swift is now a Short-Base Canter (Open Back), which is the heavy delivery rate.');
     expect(notice!.body).toContain(`your Swift weekly fee will be ${money(moverHeavy)} (it is ${money(mover)} now)`);

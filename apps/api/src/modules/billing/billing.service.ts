@@ -377,6 +377,19 @@ function readRetierLower(value: unknown): { rate: number; tier: string; seenAt: 
   return { rate: v['rate'], tier: v['tier'], seenAt: v['seenAt'], basis: v['basis'] };
 }
 
+/** [R27 · security review · REVIEW-M #2245 S3-1 · COORD ruling 30 Oct 2026] The week's largest catalogue a LOWER tier is
+ *  judged on: every listing on sale, taken off sale or changed in the last 7 days, plus every listing REMOVED (archived)
+ *  in the last 7 days; a listing removed longer ago is not the store's catalogue and never counts. Hiding or deleting
+ *  listings just before a count changes nothing. (partner/store-fee.ts prices a new store on the same rule.) */
+export function weekCatalogueWhere(vendorId: string, now: Date): Prisma.ItemWhereInput {
+  const since = new Date(now.getTime() - 7 * 86_400_000);
+  return { vendorId, OR: [{ archivedAt: null, OR: [{ isAvailable: true }, { updatedAt: { gte: since } }] }, { archivedAt: { gte: since } }] };
+}
+
+/** [RETIER PR-B] A pass over named subscriptions only (tests: a whole-table pass would move other files' fixtures).
+ *  The job never passes one: it re-tiers and sweeps everything. */
+export interface RetierScope { subscriptionIds: readonly string[] }
+
 /** [R27] What one weekly re-tier pass did to one subscription. */
 type RetierMove = { held?: true; lowered?: { from: number; to: number }; dropped?: HeldFeeRise };
 
@@ -5038,9 +5051,9 @@ export class BillingService {
    * at signup. Same shape as `recalculateVendorTiers` below, and it shares that
    * method's TIER_CHANGE event so one audit trail covers both.
    */
-  async recalculateMoverTiers(now = new Date()): Promise<number> {
+  async recalculateMoverTiers(now = new Date(), scope?: RetierScope): Promise<number> {
     const moverSubs = await this.prisma.subscription.findMany({
-      where: { OR: [{ riderId: { not: null } }, { driverId: { not: null } }], status: { in: RETIER_STATUSES } },
+      where: { OR: [{ riderId: { not: null } }, { driverId: { not: null } }], status: { in: RETIER_STATUSES }, ...(scope ? { id: { in: [...scope.subscriptionIds] } } : {}) },
       select: { id: true },
     });
     let changed = 0;
@@ -5285,9 +5298,9 @@ export class BillingService {
    * Weekly tier check: vendor tier comes from catalogue size (active listing
    * count) and CountryConfig rates — NEVER from sales (zero-commission model).
    */
-  async recalculateVendorTiers(now = new Date()): Promise<number> {
+  async recalculateVendorTiers(now = new Date(), scope?: RetierScope): Promise<number> {
     const vendorSubs = await this.prisma.subscription.findMany({
-      where: { vendorId: { not: null }, status: { in: RETIER_STATUSES } },
+      where: { vendorId: { not: null }, status: { in: RETIER_STATUSES }, ...(scope ? { id: { in: [...scope.subscriptionIds] } } : {}) },
       include: {
         vendor: {
           select: {
@@ -5318,7 +5331,7 @@ export class BillingService {
 
         const tiers = await this.countryConfig.getSubscriptionTiers(sub.vendor.owner.user.countryCode);
         const activeListings = await this.prisma.item.count({
-          where: { vendorId: sub.vendor.id, isAvailable: true },
+          where: { vendorId: sub.vendor.id, isAvailable: true, archivedAt: null },
         });
         // The threshold count itself qualifies: "1000+ items" is >= 1000.
         // THIS store's catalogue alone: no multi-store discount (owner, 13 Oct
@@ -5336,9 +5349,7 @@ export class BillingService {
         // [R27 · security review] A LOWER tier is judged on the week's largest catalogue: every listing
         // available now, or made unavailable (or edited) in the last 7 days. Hiding listings around the
         // pass never counts.
-        const weekListings = await this.prisma.item.count({
-          where: { vendorId: sub.vendor.id, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } }] },
-        });
+        const weekListings = await this.prisma.item.count({ where: weekCatalogueWhere(sub.vendor.id, now) });
         const weekTarget = this.retierTarget(sub.id, tiers, { kind: 'VENDOR', isService: sub.vendor.vendorType === 'SERVICE', activeListings: weekListings }) ?? target;
 
         const note = `${activeListings} active listings -> ${target.tier} tier`;
@@ -5442,9 +5453,12 @@ export class BillingService {
    * whose date the next weekly fee has reached. One subscription's failure
    * never stops the others or the billing run.
    */
-  async sweepFeeRises(now = new Date()): Promise<{ told: number; applied: number; deferred: number; dropped: number }> {
+  async sweepFeeRises(now = new Date(), scope?: RetierScope): Promise<{ told: number; applied: number; deferred: number; dropped: number }> {
     const out = { told: 0, applied: 0, deferred: 0, dropped: 0 };
-    const rows = await this.prisma.platformConfig.findMany({ where: { key: { startsWith: FEE_RISE_PREFIX } }, select: { key: true, value: true }, orderBy: { key: 'asc' } });
+    const rows = await this.prisma.platformConfig.findMany({
+      where: scope ? { key: { in: scope.subscriptionIds.map(feeRiseKey) } } : { key: { startsWith: FEE_RISE_PREFIX } },
+      select: { key: true, value: true }, orderBy: { key: 'asc' },
+    });
     for (const row of rows) {
       const subscriptionId = row.key.slice(FEE_RISE_PREFIX.length);
       try {
@@ -5671,9 +5685,7 @@ export class BillingService {
     const vendor = await tx.vendor.findUnique({ where: { id: vendorId }, select: { vendorType: true, owner: { select: { user: { select: { countryCode: true } } } } } });
     if (!vendor) return false;
     const tiers = await this.countryConfig.getSubscriptionTiers(vendor.owner.user.countryCode, tx);
-    const weekListings = await tx.item.count({
-      where: { vendorId, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } }] },
-    });
+    const weekListings = await tx.item.count({ where: weekCatalogueWhere(vendorId, now) });
     const card = this.retierTarget(vendorId, tiers, { kind: 'VENDOR', isService: vendor.vendorType === 'SERVICE', activeListings: weekListings });
     return card !== null && card.rate < held.to;
   }

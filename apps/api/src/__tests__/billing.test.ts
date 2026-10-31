@@ -578,13 +578,15 @@ describe('Waivers, reminders, tier recalculation', () => {
 
     // Shrink the catalogue back under the threshold: the held rise no longer stands and is dropped.
     await app.prisma.item.updateMany({ where: { vendorId: fixture.vendorId }, data: { isAvailable: false } });
-    // [R27 · security review] The week's largest catalogue counts: listings hidden today still count
-    // for 7 days, and the lower tier must then hold on two weekly passes before the rise is dropped.
+    // [R27 · security review] The week's largest catalogue counts: listings hidden today still count for 7 days, so
+    // hiding them just before a count changes nothing. [RETIER PR-B · owner 30 Oct 2026] Once the store has been under
+    // the step for a whole week, the next weekly count cancels the waiting rise (the fee itself only comes DOWN after
+    // two counts; here it never went up).
     const t = Date.now();
     await billing.recalculateVendorTiers(new Date(t));
     expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
     await billing.recalculateVendorTiers(new Date(t + 8 * DAY));
-    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: heldKey } })).toBeNull();
     await billing.recalculateVendorTiers(new Date(t + 15 * DAY));
     sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
     expect(Number(sub.weeklyRate)).toBe(15000);
