@@ -1,5 +1,6 @@
 import { Prisma, type StockMovementReason } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { asUtcColumn } from './system-item-writes';
 
 // ---------------------------------------------------------------------------
 // THE SINGLE WRITER [MKT-2 Movement 1].
@@ -24,6 +25,25 @@ import { AppError } from '../../utils/errors';
 // mechanism `operate-gate-unification.test.ts` uses to stop the canOperate
 // predicate being forked, and it works — it already caught a real divergence.
 // ---------------------------------------------------------------------------
+
+/** [RETIER · REVIEW-M #2259 S4-1] Who moves the stock for each reason. Only a STORE movement is the store changing
+ *  its listing, so only it stamps items."updatedAt" (the 7-day "changed" count of a new store's fee and the weekly
+ *  re-tier: inventory/system-item-writes.ts). A sale, a cancelled order's restock and a picker's movements are not the
+ *  store's change. Every reason must be named here (a new one fails the type-check until it is). */
+export const STOCK_REASON_ACTOR: Record<StockMovementReason, 'STORE' | 'SYSTEM'> = {
+  SALE: 'SYSTEM',
+  CANCEL_RESTOCK: 'SYSTEM',
+  PICK: 'SYSTEM',
+  PICK_REFUND: 'SYSTEM',
+  RECEIVED: 'STORE',
+  DAMAGED: 'STORE',
+  MANUAL: 'STORE',
+  RECONCILE: 'STORE',
+  RETURN: 'STORE',
+  OPENING_BALANCE: 'STORE',
+  IN_STORE_SALE: 'STORE',
+  POS_IMPORT: 'STORE',
+};
 
 export interface StockMovementInput {
   itemId: string;
@@ -58,6 +78,11 @@ export interface StockApplyResult {
   movementId: string | null;
   /** [L02 · row 36] Set when the item no longer exists and the skip was recorded. */
   skipped?: 'ITEM_MISSING';
+}
+
+/** `, "updatedAt" = <now>` for the store's own movement, nothing for Swift's (STOCK_REASON_ACTOR). */
+function storeStamp(reason: StockMovementReason): Prisma.Sql {
+  return STOCK_REASON_ACTOR[reason] === 'STORE' ? Prisma.sql`, "updatedAt" = ${asUtcColumn(new Date())}` : Prisma.empty;
 }
 
 /**
@@ -128,11 +153,11 @@ export async function applyStockMovement(
     // THE GUARD. Conditional on there being enough, so concurrent takers cannot
     // oversell. Unchanged from what checkout already did — just no longer the
     // only thing that happens.
-    const hit = await tx.item.updateMany({
-      where: { id: itemId, stockQuantity: { gte: -delta } },
-      data: { stockQuantity: { decrement: -delta } },
-    });
-    if (hit.count === 0) {
+    // [RETIER · REVIEW-M #2259 S4-1] Plain SQL so only the store's own movement stamps "updatedAt" (STOCK_REASON_ACTOR).
+    const hit = await tx.$executeRaw`
+      UPDATE "items" SET "stockQuantity" = "stockQuantity" - ${-delta}::int${storeStamp(reason)}
+       WHERE "id" = ${itemId} AND "stockQuantity" >= ${-delta}::int`;
+    if (hit === 0) {
       throw new AppError(
         409,
         'INSUFFICIENT_STOCK',
@@ -141,10 +166,9 @@ export async function applyStockMovement(
       );
     }
   } else {
-    await tx.item.update({
-      where: { id: itemId },
-      data: { stockQuantity: { increment: delta } },
-    });
+    await tx.$executeRaw`
+      UPDATE "items" SET "stockQuantity" = "stockQuantity" + ${delta}::int${storeStamp(reason)}
+       WHERE "id" = ${itemId}`;
   }
 
   // Re-read inside the transaction: this is the authoritative post-move value,
@@ -313,7 +337,7 @@ export async function applyStockMovements(
   const values = Prisma.join(entries.map((e) => Prisma.sql`(${e.itemId}::text, ${e.delta}::int)`));
   const moved = await tx.$queryRaw<Array<{ id: string; balance: number }>>`
     UPDATE "items" AS i
-       SET "stockQuantity" = i."stockQuantity" + v.delta, "updatedAt" = now()
+       SET "stockQuantity" = i."stockQuantity" + v.delta${storeStamp(input.reason)}
       FROM (VALUES ${values}) AS v(id, delta)
      WHERE i.id = v.id
        AND i."vendorId" = ${input.vendorId}

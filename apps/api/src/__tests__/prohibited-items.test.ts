@@ -127,6 +127,8 @@ function inject(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: 
 
 /** [DS1267 S4] Every object literal that switches an item on AND clears its auto-hide, named by the statement it is
  *  written in (and its enclosing function, when it has a name). */
+/** SET "isAvailable" = true together with "autoHiddenAt" = NULL, in either order. */
+const UNHIDE_SQL = /"isAvailable"\s*=\s*true[\s\S]*"autoHiddenAt"\s*=\s*NULL|"autoHiddenAt"\s*=\s*NULL[\s\S]*"isAvailable"\s*=\s*true/i;
 function unhideWrites(fileName: string, code: string): string[] {
   const source = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const keyOf = (p: ts.ObjectLiteralElementLike) => (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : null);
@@ -145,6 +147,15 @@ function unhideWrites(fileName: string, code: string): string[] {
         const name = fn && ts.isFunctionDeclaration(fn) && fn.name ? `${fn.name.text}: ` : '';
         out.push(`${name}${statement.getText(source).replace(/\s+/g, ' ').slice(0, 90)}`);
       }
+    }
+    // [RETIER · REVIEW-M #2259 S4-1] An un-hide written in plain SQL (so it leaves items."updatedAt" alone) is read too.
+    if (ts.isTaggedTemplateExpression(node) && UNHIDE_SQL.test(node.template.getText(source))) {
+      let statement: ts.Node = node;
+      while (statement.parent && !ts.isBlock(statement.parent) && !ts.isSourceFile(statement.parent)) statement = statement.parent;
+      let fn: ts.Node | undefined = node.parent;
+      while (fn && !ts.isFunctionDeclaration(fn)) fn = fn.parent;
+      const name = fn && ts.isFunctionDeclaration(fn) && fn.name ? `${fn.name.text}: ` : '';
+      out.push(`${name}${statement.getText(source).replace(/\s+/g, ' ').slice(0, 90)}`);
     }
     ts.forEachChild(node, visit);
   };
@@ -485,6 +496,12 @@ describe('[§8] a partner saving and editing items', () => {
     const roll = await shelf(`Coconut roll ${RUN}`, 3);
     await unhideRestocked(app.prisma, roll.id);
     expect(await row(roll.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null });
+    // [RETIER] One batch (a till sync, a cancelled order of several lines): the banned one stays off, the other comes back.
+    const rum = await shelf(`${RUN} Spare Rum`, 3);
+    const cake = await shelf(`Coconut cake ${RUN}`, 3);
+    await unhideRestocked(app.prisma, [rum.id, cake.id]);
+    expect(await row(rum.id)).toMatchObject({ isAvailable: false });
+    expect(await row(cake.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null });
   });
 
   // [DS1267 S4] Read as code, not as one way of formatting it: any object that sets `isAvailable: true` AND
@@ -497,7 +514,7 @@ describe('[§8] a partner saving and editing items', () => {
     expect(files.length).toBeGreaterThan(300);
     const sites = files.flatMap((file) => unhideWrites(file, readFileSync(file, 'utf8')).map((at) => `${relative(root, file)}: ${at}`));
     expect(sites).toEqual([
-      expect.stringMatching(/^compliance\/prohibited-gate\.ts: unhideRestocked: await tx\.item\.updateMany/),
+      expect.stringMatching(/^compliance\/prohibited-gate\.ts: unhideRestocked: await tx\.\$executeRaw`/),
       expect.stringMatching(/^vendor\/vendor\.routes\.ts: vendorRoutes: return banned \? updated : tx\.item\.update/),
     ]);
   });
@@ -511,6 +528,10 @@ describe('[§8] a partner saving and editing items', () => {
     expect(found('db.item.update({ data: { isAvailable: false, autoHiddenAt: null } });')).toBe(0);
     expect(found('db.item.update({ data: { isAvailable: true } });')).toBe(0);
     expect(found('db.item.update({ data: { autoHiddenAt: null } });')).toBe(0);
+    // [RETIER] plain SQL, either order; a hide or a lone clear is not an un-hide
+    expect(found('async function f() { await db.$executeRaw`UPDATE "items" SET "isAvailable" = true, "autoHiddenAt" = NULL WHERE "id" = ${id}`; }')).toBe(1);
+    expect(found('async function f() { await db.$executeRaw`UPDATE "items" SET "autoHiddenAt" = NULL,\n "isAvailable" = true`; }')).toBe(1);
+    expect(found('async function f() { await db.$executeRaw`UPDATE "items" SET "isAvailable" = false, "autoHiddenAt" = NULL`; }')).toBe(0);
   });
 
   it('a banned platform category is refused outright: tag, accepted suggestion, store category', async () => {

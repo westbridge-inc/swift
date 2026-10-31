@@ -407,7 +407,13 @@ export async function unhideRestocked(db: Db, itemIds: string | readonly string[
     const checks = await catalogueChecksFor(tx, locked.map((row) => row.id));
     const allowed = locked.map((row) => row.id).filter((id) => checks.get(id)?.state !== 'BANNED');
     if (allowed.length === 0) return;
-    await tx.item.updateMany({ where: { id: { in: allowed }, autoHiddenAt: { not: null }, OR: [{ stockQuantity: { gt: 0 } }, { stockQuantity: null }] }, data: { isAvailable: true, autoHiddenAt: null } });
+    // [RETIER · REVIEW-M #2259 S4-1] Stock coming back re-shows it; that is not the store changing the listing, so it is
+    // plain SQL that leaves items."updatedAt" alone (a store's own stock change stamps it in inventory/stock.ts). The
+    // un-hide stays here, behind the ban check, as the only guarded un-hide (prohibited-items.test.ts census).
+    await tx.$executeRaw`
+      UPDATE "items" SET "isAvailable" = true, "autoHiddenAt" = NULL
+       WHERE "id" IN (${Prisma.join(allowed)}) AND "autoHiddenAt" IS NOT NULL
+         AND ("stockQuantity" > 0 OR "stockQuantity" IS NULL)`;
   };
   // A transaction's own client has no $transaction; the root client opens one.
   if ('$transaction' in db) await db.$transaction(judgeAndWrite);

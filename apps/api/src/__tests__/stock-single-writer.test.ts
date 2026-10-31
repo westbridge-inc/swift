@@ -155,7 +155,9 @@ describe('the stock counter has exactly one writer', () => {
     expect(src).toContain('stockMovement.create');
     // The conditional decrement is the concurrency guarantee — losing it would
     // let two customers win the last item without failing any other test here.
-    expect(src).toMatch(/stockQuantity:\s*\{\s*gte:/);
+    // [RETIER · REVIEW-M #2259 S4-1] It is plain SQL now (only the store's own movement stamps "updatedAt"): the
+    // decrement still lands only on a row holding at least that much.
+    expect(src).toMatch(/SET "stockQuantity" = "stockQuantity" - \$\{-delta\}::int\$\{storeStamp\(reason\)\}\s+WHERE "id" = \$\{itemId\} AND "stockQuantity" >= \$\{-delta\}::int/);
   });
 
   it('the ledger is append-only in the database, not just by convention', () => {

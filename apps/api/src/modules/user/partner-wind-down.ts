@@ -2,6 +2,7 @@ import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { hideStoreListings } from '../inventory/system-item-writes';
 import { formatMoney } from '../../utils/currency-amount';
 import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
 import { formatGuyanaTime } from '../../utils/guyana-day';
@@ -316,7 +317,8 @@ export async function windDownPartner(
 
   const [items, vendors, staff] = await Promise.all([
     vendorIds.length
-      ? prisma.item.updateMany({ where: { vendorId: { in: vendorIds }, isAvailable: true }, data: { isAvailable: false } })
+      // [RETIER · REVIEW-M #2259 S4-1] Swift winds the account down, not the store changing listings: "updatedAt" stays put.
+      ? hideStoreListings(prisma, vendorIds, { onlyForSale: true }).then((count) => ({ count }))
       : Promise.resolve({ count: 0 }),
     vendorIds.length
       ? prisma.vendor.updateMany({

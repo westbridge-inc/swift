@@ -116,6 +116,7 @@ import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
 import { moverUserOf, PAYER_INCLUDE, subscriptionTenantWhere } from '../subscription/subscription-owner';
 import { readDeliveryPause, setDeliveryPause } from '../dispatch/delivery-pause';
+import { approveListingWords, markListingProhibited } from '../inventory/system-item-writes';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1728,7 +1729,8 @@ export async function adminRoutes(app: FastifyInstance) {
       if (!words || judgedWordsHash(words) !== body.wordsHash) {
         throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
       }
-      await tx.item.update({ where: { id }, data: { reviewApprovedHash: body.wordsHash, reviewApprovedAt: new Date() } });
+      // [RETIER · REVIEW-M #2259 S4-1] Swift's reviewer, not the store: items."updatedAt" stays put.
+      await approveListingWords(tx, { itemId: id, tenantId, wordsHash: body.wordsHash });
       // [Opus S3-9] The record is written in the same transaction as the approval: no approval without its record.
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
     });
@@ -1774,11 +1776,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
     if (!item) throw new NotFoundError('Item', id);
     // One way, once: the write only lands on a row not already removed.
-    const removed = await tenantPrisma.item.updateMany({
-      where: { id, prohibitedAt: null },
-      data: { prohibitedAt: new Date(), prohibitedClass: body.prohibitedClass, prohibitedReason: reason, isAvailable: false },
-    });
-    if (removed.count === 0) throw new AppError(409, 'ALREADY_REMOVED', 'This item was already removed.');
+    // [RETIER · REVIEW-M #2259 S4-1] Swift removed it, not the store: items."updatedAt" stays put (plain SQL, this tenant).
+    const removed = await markListingProhibited(app.prisma, { itemId: id, tenantId: requireTenantId(), prohibitedClass: body.prohibitedClass, reason });
+    if (removed === 0) throw new AppError(409, 'ALREADY_REMOVED', 'This item was already removed.');
     return { success: true, data: { itemId: id, state: 'BANNED', prohibitedClass: body.prohibitedClass } };
   });
 

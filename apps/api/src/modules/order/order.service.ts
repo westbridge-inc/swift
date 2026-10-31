@@ -72,6 +72,7 @@ import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
+import { countItemsOrdered, hideSoldOut } from '../inventory/system-item-writes';
 import { shareTillSyncLock } from '../inventory/till-sync-lock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
@@ -558,7 +559,8 @@ export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()):
  *  counts exactly once, and one cancelled inside its hold never counts. */
 async function countOrderForStore(tx: Prisma.TransactionClient, vendorId: string, itemIds: string[]): Promise<void> {
   await tx.vendor.updateMany({ where: { id: vendorId }, data: { totalOrders: { increment: 1 } } });
-  await tx.item.updateMany({ where: { id: { in: itemIds } }, data: { totalOrdered: { increment: 1 } } });
+  // [RETIER · REVIEW-M #2259 S4-1] Swift's write, not the store's change: items."updatedAt" stays put.
+  await countItemsOrdered(tx, itemIds);
 }
 
 /** [Q12 · AX289 F1] THE release of a held order to its store, inside the
@@ -1998,10 +2000,8 @@ export class OrderService {
           });
           const remaining = after.stockQuantity ?? 0;
           if (remaining <= 0 && after.isAvailable) {
-            await tx.item.update({
-              where: { id: oi.itemId },
-              data: { isAvailable: false, autoHiddenAt: new Date() },
-            });
+            // [RETIER · REVIEW-M #2259 S4-1] A sale hid it, not the store: items."updatedAt" stays put.
+            await hideSoldOut(tx, oi.itemId);
           }
           const events = stockEventsByVendor.get(plan.vendor.id) ?? [];
           if (remaining <= 0) {
