@@ -149,6 +149,32 @@ describe('[G11] what the visitor sees', () => {
     }
   });
 
+  // [WEBSITE 30 Oct · owner] The front door's store area: a calm line while the switch is off (never a dead
+  // badge, never a disclaimer), and two real store buttons once it is live. The line goes when the buttons come.
+  it('the front door says "Coming to the App Store and Google Play" while off, and shows the two store buttons once live', async () => {
+    const COMING = 'Coming to the App Store and Google Play';
+    await serverWith('');
+    openAt('https://swiftgy.com/');
+    let { default: Page } = await load<{ default: () => React.ReactNode }>('app/(marketing)/launching-soon/page.tsx');
+    let view = render(<>{Page()}</>);
+    // Before the server answers, and while off, the line shows and nothing links to a store.
+    expect(view.container.textContent).toContain(COMING);
+    await answered();
+    expect(view.container.textContent).toContain(COMING);
+    expect(storeHrefs(view.container)).toEqual([]);
+    view.unmount();
+
+    await serverWith('live');
+    openAt('https://swiftgy.com/');
+    ({ default: Page } = await load<{ default: () => React.ReactNode }>('app/(marketing)/launching-soon/page.tsx'));
+    view = render(<>{Page()}</>);
+    await answered();
+    expect(view.container.textContent).not.toContain(COMING);
+    expect(view.container.querySelector(`a[href="${APP_STORE}"]`)?.textContent).toBe('Download on the App Store');
+    expect(view.container.querySelector(`a[href="${GOOGLE_PLAY}"]`)?.textContent).toBe('Get it on Google Play');
+    view.unmount();
+  });
+
   it('the FAQ says the links will come while off, and gives them once live', async () => {
     await serverWith('');
     openAt('https://swiftgy.com/faq');

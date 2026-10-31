@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -59,17 +59,164 @@ afterEach(() => {
 });
 
 describe('[Item 7] the front door itself', () => {
-  it('says "Launching soon in Georgetown" and links to /welcome and the company and legal pages', async () => {
+  // [WEBSITE 30 Oct · owner] The front door is a real launch page: a headline naming Georgetown, the app's own
+  // screen, Order / Ride / Earn, and a short trust strip. It leads to how Swift works, pricing and partner
+  // sign-up, never into ordering. The company and policy links live once, in the footer every marketing page
+  // carries; the page no longer repeats them as rows of pills.
+  async function frontDoor() {
     await configWith('');
     const { default: FrontDoor } = await load<{ default: () => React.ReactNode }>('app/(marketing)/launching-soon/page.tsx');
-    render(<>{FrontDoor()}</>);
-    expect(screen.getByRole('heading', { level: 1, name: 'Launching soon in Georgetown' })).toBeTruthy();
+    return render(<>{FrontDoor()}</>);
+  }
+
+  it('names Georgetown in its one headline and leads to how it works, pricing, partner sign-up and support', async () => {
+    await frontDoor();
+    expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual(['Georgetown, in one app.']);
     const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href'));
-    for (const href of ['/welcome', '/about', '/contact', '/pricing', '/legal/refunds', '/legal/delivery', '/legal/terms', '/legal/privacy']) {
-      expect(hrefs, href).toContain(href);
-    }
+    for (const href of ['/how-it-works', '/faq', '/pricing', '/signup', '/contact']) expect(hrefs, href).toContain(href);
     expect(hrefs).not.toContain('/cart');
     expect(hrefs).not.toContain('/');
+  });
+
+  it('has an Order, a Ride and an Earn section, and a trust strip whose words the Terms back', async () => {
+    const view = await frontDoor();
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(['Order', 'Ride', 'Earn with Swift', 'Why people trust Swift']);
+    const words = view.container.textContent ?? '';
+    // Terms §4: paid in cash or straight to the business's own MMG; Swift holds no money.
+    // [REVIEW-F N2] Exact: the business (Terms §4), the rider (courier) or the driver (taxi fare) is paid directly;
+    // MMG only where they take it.
+    expect(words).toContain('Pay the business, rider or driver directly, in cash or by MMG where they take it. Swift never holds your money.');
+    // Terms §11 + Privacy: a person checks every partner's documents before they operate (GUARDRAILS §7(4)).
+    expect(words).toContain('Every business, rider and driver has their documents checked by a person on our team before they go live.');
+    // Terms §10: the PIN handshake and live trip sharing.
+    expect(words).toContain('A PIN check before every ride, and the trip live on the map.');
+    expect(words).toContain('Keep 100% of every sale, fare and tip. One flat weekly fee, no commission.');
+  });
+
+  it('repeats no footer link: no policy or company page is linked from the page itself', async () => {
+    await frontDoor();
+    const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href') ?? '');
+    expect(hrefs.filter((href) => href.startsWith('/legal/') || href === '/about' || href === '/welcome')).toEqual([]);
+  });
+
+  it('the footer under it still carries every company and policy link', async () => {
+    await configWith('');
+    const { SiteFooter } = await import('@/components/site');
+    const view = render(<SiteFooter />);
+    const hrefs = [...view.container.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+    for (const href of ['/about', '/contact', '/legal/refunds', '/legal/delivery', '/legal/terms', '/legal/privacy', '/legal/child-safety', '/account/delete']) {
+      expect(hrefs, href).toContain(href);
+    }
+  });
+
+  it('reads as a launch page, not a disclaimer: no hedging line and no em dash', async () => {
+    const view = await frontDoor();
+    const words = view.container.textContent ?? '';
+    expect(words).not.toMatch(/nothing can be ordered|Ordering opens on this site/);
+    expect(words).not.toContain('—');
+  });
+
+  // [WEBSITE round 2 · owner] More of the app: the Home screen in the hero, then the taxi fare before booking, live
+  // order tracking and the rider's side on the Order / Ride / Earn cards. Real app screens only, cut so no rating,
+  // review, earning or shop price shows; the greeting carries no name. Each is sized (no jump) and the three below
+  // the fold load lazily.
+  it('shows four real app screens, each described and sized; only the first loads eagerly', async () => {
+    const view = await frontDoor();
+    const images = [...view.container.querySelectorAll('img')];
+    expect(images.map((img) => img.getAttribute('alt'))).toEqual([
+      'The Swift app’s Home screen: a Good afternoon greeting, search, and tiles for Food, Groceries, Taxi, Send, Services, Orders, Favourites and Scan.',
+      'Live order tracking in the Swift app: the rider on the map and where the order stands.',
+      'Booking a taxi in the Swift app: the destination pinned on the map, and the pickup and destination fields.',
+      'The rider’s side of the Swift app: a map of Georgetown and the button to go online for jobs.',
+    ]);
+    for (const img of images) {
+      expect(Number(img.getAttribute('width')), img.alt).toBeGreaterThan(0);
+      expect(Number(img.getAttribute('height')), img.alt).toBeGreaterThan(0);
+    }
+    expect(images[0]!.getAttribute('loading')).not.toBe('lazy');
+    expect(images.slice(1).map((img) => img.getAttribute('loading'))).toEqual(['lazy', 'lazy', 'lazy']);
+  });
+
+  // [WEBSITE 30 Oct · owner] "blurry when you zoom in": a card draws its screen about 400 px wide, so a Retina
+  // screen needs about 800 real pixels. Each card offers the phone's full 1206-pixel screen too, and that file
+  // really is 1206 pixels wide (read from the WebP header, not trusted from the name).
+  it('each card screen offers a full 1206-pixel file for Retina screens and zoom', async () => {
+    const view = await frontDoor();
+    const cards = [...view.container.querySelectorAll('img')].slice(1);
+    const dir = join(SRC, 'app/(marketing)/launching-soon');
+    const webpWidth = (file: string) => {
+      const b = readFileSync(join(dir, file));
+      expect(b.toString('ascii', 0, 4) + b.toString('ascii', 8, 12), file).toBe('RIFFWEBP');
+      const chunk = b.toString('ascii', 12, 16);
+      if (chunk === 'VP8 ') return b.readUInt16LE(26) & 0x3fff;
+      if (chunk === 'VP8X') return 1 + b.readUIntLE(24, 3);
+      if (chunk === 'VP8L') return 1 + (b.readUInt16LE(21) & 0x3fff);
+      throw new Error(`${file}: unknown WebP chunk ${chunk}`);
+    };
+    expect(cards).toHaveLength(3);
+    for (const img of cards) {
+      expect(img.getAttribute('sizes'), img.alt).toBeTruthy();
+      const large = (img.getAttribute('srcset') ?? '').split(',').map((s) => s.trim().split(/\s+/)).find(([, w]) => w === '1206w');
+      expect(large, img.alt).toBeDefined();
+    }
+    for (const name of ['app-tracking', 'app-taxi', 'app-partner']) {
+      expect(webpWidth(`${name}-1206.webp`), name).toBe(1206);
+    }
+  });
+
+  it('the screens never carry a name, a rating, a review or earnings in their words', async () => {
+    const view = await frontDoor();
+    const alts = [...view.container.querySelectorAll('img')].map((img) => img.alt).join(' ');
+    // [Owner 30 Oct, round 3] "dont show prices": no screen shows a fare or a price.
+    expect(alts).not.toMatch(/Demo|Kezia|rating|review|earn(ed|ings)|fare|price|\$/i);
+  });
+
+  it('on a phone the Order / Ride / Earn cards are one swipe row; on a wide screen, three columns', async () => {
+    const view = await frontDoor();
+    const row = view.container.querySelector('[data-swipe-row]')!;
+    expect(row).toBeTruthy();
+    for (const cls of ['overflow-x-auto', 'snap-x', 'snap-mandatory', 'md:grid', 'md:grid-cols-3', 'md:overflow-visible']) expect(row.className, cls).toContain(cls);
+    expect(row.querySelectorAll(':scope > article').length).toBe(3);
+  });
+
+  // [REVIEW-F S3-1] The page's focus ring is the brand maroon, invisible on the maroon Earn card: its two links
+  // draw a white ring instead (WCAG 2.4.7).
+  it('the Earn card\'s links show a white focus ring on the maroon card', async () => {
+    await frontDoor();
+    for (const name of ['Become a partner', 'See pricing']) {
+      const link = screen.getByRole('link', { name });
+      expect(link.className, name).toContain('focus-visible:outline-[var(--swift-white)]');
+    }
+  });
+
+  // [REVIEW-F S4-1] The support hours come from the company facts, never typed into the page.
+  it('the support line reads the hours from site.config, in Guyana time', async () => {
+    const view = await frontDoor();
+    const { site } = await import('@/site.config');
+    expect(site.supportDays).toContain('Guyana time');
+    expect(site.supportHours.startsWith(site.supportDays)).toBe(true);
+    expect(view.container.textContent).toContain(`People answer Help & Support in the app, ${site.supportDays}.`);
+  });
+
+  // [REVIEW-F S4-2] Turning the store switch on must not move the page: the store area keeps the height of the
+  // two buttons (one 56 px row, never wrapping) in both states.
+  it('the store area keeps one button-row of height whether the stores are live or not', async () => {
+    const view = await frontDoor();
+    const area = view.container.querySelector('[data-store-area]')!;
+    expect(area).toBeTruthy();
+    expect(area.className).toContain('min-h-14');
+    const { readFileSync } = await import('node:fs');
+    const buttons = readFileSync(join(SRC, 'components', 'app-store-links.tsx'), 'utf8');
+    expect(buttons).toMatch(/aria-label="Get the Swift app" className=\{`flex flex-nowrap gap-3/);
+  });
+
+  it('no heading skips a level, and axe finds nothing', async () => {
+    const view = await frontDoor();
+    const levels = [...view.container.querySelectorAll('h1, h2, h3, h4')].map((h) => Number(h.tagName.slice(1)));
+    expect(levels[0]).toBe(1);
+    levels.forEach((level, i) => { if (i > 0) expect(level - levels[i - 1]!).toBeLessThanOrEqual(1); });
+    const { axeViolations } = await import('@/test/axe');
+    expect(await axeViolations(view.container)).toEqual([]);
   });
 });
 

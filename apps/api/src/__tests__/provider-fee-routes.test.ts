@@ -319,6 +319,30 @@ describe('[REVIEW-G #2230 S3-1 · owner B3] a fee tick is consent to ONE amount:
   });
 });
 
+// [REVIEW-M #2240 N2] A pro whose own fee already runs and who is asked to tick again (no tick that holds: new fee
+// words, or never ticked) is asked at THEIR OWN weekly amount, the one they pay, never today's services rate for new
+// providers; the tick is recorded at that amount, and today's rate is refused (it is not their fee).
+describe('[REVIEW-M #2240 N2] the tick for a running fee names the pro\'s own weekly amount', () => {
+  it('a running fee at 7,000 with no tick that holds: asked at 7,000 (not the 8,000 rate); 8,000 refused; 7,000 recorded', async () => {
+    on();
+    const pro = await makePro();
+    await sys(() => recordReacceptance(app.prisma, { userId: pro.userId, roles: ['CUSTOMER'], hadAccepted: false, surface: 'mobile' }));
+    await sys(() => app.prisma.subscription.create({ data: {
+      serviceProviderId: pro.providerId, type: 'INDEPENDENT_PRO', weeklyRate: 7000, status: 'ACTIVE', currencyCode: 'GYD',
+      currentPeriodStart: new Date(Date.now() - DAY), currentPeriodEnd: new Date(Date.now() + 6 * DAY), nextBillingDate: new Date(Date.now() + 6 * DAY),
+    } }));
+    const asked = (await get(pro.token, '/subscription')).json();
+    expect(asked).toMatchObject({ standing: { required: true, operable: false, why: 'FEE_TERMS' }, feeTerms: { amount: 7000, currencyCode: 'GYD', acknowledged: false } });
+    const rate = await post(pro.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 8000, currencyCode: 'GYD' });
+    expect([rate.statusCode, rate.json().error?.code]).toEqual([409, 'WEEKLY_FEE_CHANGED']);
+    const own = await post(pro.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 7000, currencyCode: 'GYD' });
+    expect(own.statusCode, own.body).toBe(200);
+    const rows = await sys(() => app.prisma.consentRecord.findMany({ where: { subjectId: pro.userId, documentType: WEEKLY_FEE_ACK_TYPE }, select: { evidence: true } }));
+    expect(rows.map((r) => (r.evidence as { weeklyFee: { amount: number } }).weeklyFee.amount)).toEqual([7000]);
+    expect((await get(pro.token, '/subscription')).json()).toMatchObject({ standing: { operable: true, source: 'OWN' }, feeTerms: { amount: 7000, acknowledged: true } });
+  });
+});
+
 describe('paying: only the pro\'s own fee, only on MMG\'s checkout page', () => {
   it('no fee: nothing to pay (404); a fee while MMG checkout is off: refused before any checkout is written', async () => {
     const none = await makePro();
@@ -395,5 +419,68 @@ describe('a pro\'s fee notices (plan G14, owner A4)', () => {
   it('the pay sentence names the app and the website for a pro, the app alone for anyone else', () => {
     expect(mmgPayLine(8000, { alsoWebsite: true })).toBe('Pay GY$8,000 with MMG in the Swift app or on the Swift website.');
     expect(mmgPayLine(8000)).toBe('Pay GY$8,000 with MMG in the Swift app.');
+  });
+});
+
+// [REVIEW-G #2230 S4] The profile gate, not the body, refuses a person with no provider profile. The authz matrix's
+// sweep sends an empty body, so a refusal there can come from body validation alone; here every body is well formed
+// (the current words, the amount a pro is asked, or a plan choice), the switch is on, and the person may even own a
+// Services store whose fee is live. Each route answers 404 (no provider profile) and nothing is written: no fee tick
+// in the consent ledger, no change to anyone's fee.
+describe('[REVIEW-G #2230 S4] a person with no provider profile sending a well-formed body', () => {
+  const put = (token: string, method: 'CASH' | 'NONE') => app.inject({ method: 'PUT', url: '/api/v1/provider/subscription/billing-method', headers: { authorization: `Bearer ${token}` }, payload: { method } });
+  const ticksOf = (userId: string) => sys(() => app.prisma.consentRecord.count({ where: { subjectId: userId } }));
+
+  it('POST /weekly-fee-ack: 404 for the current words and amount, and for older words (never "the terms changed"); no consent row', async () => {
+    on();
+    const someone = await makeUser();
+    const tick = await post(someone.token, '/weekly-fee-ack', { version: WEEKLY_FEE_ACK_VERSION, amount: 8000, currencyCode: 'GYD' });
+    expect([tick.statusCode, tick.json().error?.code]).toEqual([404, 'NOT_FOUND']);
+    const older = await post(someone.token, '/weekly-fee-ack', { version: 'v0', amount: 8000, currencyCode: 'GYD' });
+    expect([older.statusCode, older.json().error?.code]).toEqual([404, 'NOT_FOUND']);
+    expect(await ticksOf(someone.userId)).toBe(0);
+  });
+
+  it('recordProFeeAck itself refuses a person with no provider profile (the belt under the route): no consent row', async () => {
+    on();
+    const someone = await makeUser();
+    await expect(sys(() => recordProFeeAck(app.prisma, { userId: someone.userId, ack: { version: WEEKLY_FEE_ACK_VERSION, amount: 8000, currencyCode: 'GYD' }, surface: 'web' })))
+      .rejects.toMatchObject({ statusCode: 404 });
+    expect(await ticksOf(someone.userId)).toBe(0);
+  });
+
+  it('PUT /subscription/billing-method: 404 for CASH and NONE, before any step-up', async () => {
+    on();
+    const someone = await makeUser();
+    for (const method of ['CASH', 'NONE'] as const) {
+      const res = await put(someone.token, method);
+      expect([method, res.statusCode, res.json().error?.code]).toEqual([method, 404, 'NOT_FOUND']);
+    }
+    expect(await ticksOf(someone.userId)).toBe(0);
+  });
+
+  it('PUT /subscription/billing-method from a Services store owner with no provider profile: 404 (never "your store covers your provider profile"); the store\'s fee is untouched', async () => {
+    on();
+    const owner = await makeUser();
+    const storeSubId = await sys(async () => {
+      const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
+      const vendor = await app.prisma.vendor.create({ data: {
+        ownerId: vo.id, name: `Non Pro Store ${wordFreeTag(8)}`, slug: `non-pro-${nanoid(8).toLowerCase()}`, vendorType: 'SERVICE',
+        phone: '+5920000578', addressLine1: '1 St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE',
+      } });
+      vendorIds.push(vendor.id);
+      return (await app.prisma.subscription.create({ data: {
+        vendorId: vendor.id, type: 'SERVICE_PROVIDER', weeklyRate: 8000, status: 'ACTIVE', currencyCode: 'GYD',
+        currentPeriodStart: new Date(Date.now() - DAY), currentPeriodEnd: new Date(Date.now() + 6 * DAY), nextBillingDate: new Date(Date.now() + 6 * DAY),
+      } })).id;
+    });
+    const before = await sys(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: storeSubId }, select: { status: true, billingMethod: true } }));
+    for (const method of ['CASH', 'NONE'] as const) {
+      const res = await put(owner.token, method);
+      expect([method, res.statusCode, res.json().error?.code]).toEqual([method, 404, 'NOT_FOUND']);
+    }
+    expect(await sys(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: storeSubId }, select: { status: true, billingMethod: true } }))).toEqual(before);
+    expect(await sys(() => app.prisma.billingEvent.count({ where: { subscriptionId: storeSubId } }))).toBe(0);
+    expect(await ticksOf(owner.userId)).toBe(0);
   });
 });

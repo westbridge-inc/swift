@@ -610,3 +610,59 @@ describe('[U14 / U15 / U16] the order page speaks the phone\'s words and has a s
     expect(rule('statusPill')).toMatch(/max-width:\s*100%;/);
   });
 });
+
+// [PICKUP · owner 30 Oct 2026, testing a takeaway on staging] "Preparing still shows on the customer side, which it
+// should, but it's not green when the restaurant accepts it, and same with Ready." A step is green, with its tick, the
+// moment the server says it is reached (aria-current keeps saying which step the order is at); the next step waits.
+// Never before the server says so: ACCEPTED alone (an MMG order before "Paid by MMG") is still "Placed".
+describe('[PICKUP] the live status rail: a step is green the moment it is reached', () => {
+  const rail = async () => {
+    render(<OrderDetailPage />);
+    const heading = await screen.findByRole('heading', { name: 'From order to handover' });
+    const items = [...(heading.closest('section')?.querySelectorAll('ol > li') ?? [])];
+    return items.map((li) => ({
+      label: li.querySelectorAll('span')[1]?.textContent,
+      dot: li.querySelectorAll('span')[0]?.textContent,
+      reached: li.className.includes('stageReached'),
+      now: li.getAttribute('aria-current') === 'step',
+    }));
+  };
+  const CASH = { ...ORDER, paymentMethod: 'CASH', paymentStatus: 'PENDING', paymentAction: null };
+
+  it('a takeaway the store accepted (Accept = Preparing): Preparing is ticked and green; Ready waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'PREPARING', pickupAddress: '7 Counter Lane' } as never);
+    expect(await rail()).toEqual([
+      { label: 'Placed', dot: '✓', reached: true, now: false },
+      { label: 'Preparing', dot: '✓', reached: true, now: true },
+      { label: 'Ready', dot: '3', reached: false, now: false },
+      { label: 'Collected', dot: '4', reached: false, now: false },
+    ]);
+  });
+
+  it('a takeaway marked ready: Ready is ticked and green; Collected waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Ready:✓:true:true', 'Collected:4:false:false']);
+  });
+
+  it('a delivery being prepared: Preparing is ticked and green; On the way waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'DELIVERY', status: 'PREPARING', deliveryAddress: '1 Main St' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.now}`))
+      .toEqual(['Placed:✓:false', 'Preparing:✓:true', 'On the way:3:false', 'Delivered:4:false']);
+  });
+
+  it('ACCEPTED but not preparing (an MMG order before "Paid by MMG"): Preparing is not green yet', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, fulfillment: 'PICKUP', status: 'ACCEPTED', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}`))
+      .toEqual(['Placed:✓:true', 'Preparing:2:false', 'Ready:3:false', 'Collected:4:false']);
+  });
+
+  it('the stylesheet paints the step the order is at like any reached step, and leaves the leg after it unlit', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/app/(app)/orders/[id]/tracking.module.css'), 'utf8');
+    expect(css).not.toMatch(/li\[aria-current='step'\] \.stageDot/);
+    expect(css).toMatch(/\.statusRail li\[aria-current='step'\]:not\(:last-child\)::after \{ background: var\(--swift-border\); \}/);
+    expect(css).toMatch(/\.stageReached \.stageDot \{\s*border-color: var\(--swift-success\);\s*background: var\(--swift-success\);/);
+  });
+});

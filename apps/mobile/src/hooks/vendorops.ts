@@ -126,11 +126,13 @@ export function useVendorProfile() {
   };
 }
 
-// ─── Reviews (manager+ replies) ──────────────────────────────────────────────
-
-export function useMyStoreReviews() {
-  const pv = usePreviewDataset();
-  const q = useQuery({
+// ─── [SPEED 30 Oct] The reads a business tab makes on its first draw ─────────
+// One definition per read, used by its hook below AND by the tab prefetch
+// (hooks/vendorTabPrefetch.ts), so both always ask for the same key, with the
+// same call, answered in the same shape: a prefetched answer is exactly what the
+// tab would have fetched. Freshness that belongs to the read lives here too.
+export const vendorRead = {
+  reviews: () => ({
     queryKey: ['vendor', 'reviews'],
     queryFn: async () => {
       const r = await vendorApi.reviews();
@@ -139,8 +141,27 @@ export function useMyStoreReviews() {
         summary: { averageRating: number; totalReviews: number; distribution: Record<string, number> };
       };
     },
-    enabled: !pv,
-  });
+  }),
+  standing: <T = any>() => ({ queryKey: ['vendor', 'standing'], queryFn: () => unwrap<T>(vendorApi.standing()) }),
+  itemFeedback: () => ({
+    queryKey: ['vendor', 'item-feedback'],
+    queryFn: () => unwrap<Array<{ itemId: string; name: string; up: number; down: number }>>(vendorApi.itemFeedback()),
+  }),
+  promos: () => ({ queryKey: ['vendor', 'promos'], queryFn: () => unwrap<any[]>(vendorApi.promos()) }),
+  staff: () => ({ queryKey: ['vendor', 'staff'], queryFn: () => unwrap<any[]>(vendorApi.staff()) }),
+  cashSettlements: () => ({ queryKey: ['vendor', 'cash-settlements'], queryFn: () => unwrap<any>(vendorApi.cashSettlements()) }),
+  busyHours: () => ({ queryKey: ['vendor', 'analytics', 'busy-hours'], queryFn: () => unwrap<any>(vendorApi.analyticsBusyHours()) }),
+  repeatCustomers: () => ({ queryKey: ['vendor', 'analytics', 'repeat-customers'], queryFn: () => unwrap<any>(vendorApi.analyticsRepeatCustomers()) }),
+  popularItems: (limit = 8) => ({ queryKey: ['vendor', 'analytics', 'popular', limit], queryFn: () => unwrap<any>(vendorApi.analyticsPopularItems(limit)) }),
+  bookings: () => ({ queryKey: ['vendor', 'bookings'], queryFn: () => unwrap<VendorBooking[]>(vendorApi.bookings()) }),
+  bookingExceptions: () => ({ queryKey: ['vendor', 'booking-exceptions'], queryFn: () => unwrap<VendorBookingException[]>(vendorApi.bookingExceptions()), staleTime: 30_000 }),
+};
+
+// ─── Reviews (manager+ replies) ──────────────────────────────────────────────
+
+export function useMyStoreReviews() {
+  const pv = usePreviewDataset();
+  const q = useQuery({ ...vendorRead.reviews(), enabled: !pv });
   return pv ? previewQuery({ data: [], summary: { averageRating: 4.8, totalReviews: 0, distribution: {} } }) : q;
 }
 
@@ -196,18 +217,14 @@ export function useResolveCategorySuggestion() {
 
 export function useVendorStanding<T = any>() {
   const pv = usePreviewDataset();
-  const q = useQuery<T>({ queryKey: ['vendor', 'standing'], queryFn: () => unwrap<T>(vendorApi.standing()), enabled: !pv });
+  const q = useQuery<T>({ ...vendorRead.standing<T>(), enabled: !pv });
   return pv ? previewQuery(null as T) : q;
 }
 
 /** Movement R9: which items earn the 👎 — last 30 days, worst first. */
 export function useVendorItemFeedback() {
   const pv = usePreviewDataset();
-  const q = useQuery({
-    queryKey: ['vendor', 'item-feedback'],
-    queryFn: () => unwrap<Array<{ itemId: string; name: string; up: number; down: number }>>(vendorApi.itemFeedback()),
-    enabled: !pv,
-  });
+  const q = useQuery({ ...vendorRead.itemFeedback(), enabled: !pv });
   return pv ? previewQuery([] as Array<{ itemId: string; name: string; up: number; down: number }>) : q;
 }
 
@@ -215,7 +232,7 @@ export function useVendorItemFeedback() {
 
 export function useVendorPromos(enabled = true) {
   const pv = usePreviewDataset();
-  const q = useQuery({ queryKey: ['vendor', 'promos'], queryFn: () => unwrap<any[]>(vendorApi.promos()), enabled: enabled && !pv });
+  const q = useQuery({ ...vendorRead.promos(), enabled: enabled && !pv });
   return pv ? previewQuery([] as any[]) : q;
 }
 
@@ -248,11 +265,7 @@ export function useDeletePromo() {
 
 export function useVendorStaff(enabled = true) {
   const pv = usePreviewDataset();
-  const q = useQuery({
-    queryKey: ['vendor', 'staff'],
-    queryFn: () => unwrap<any[]>(vendorApi.staff()),
-    enabled: enabled && !pv,
-  });
+  const q = useQuery({ ...vendorRead.staff(), enabled: enabled && !pv });
   return pv ? previewQuery([] as any[]) : q;
 }
 
@@ -677,11 +690,7 @@ export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 
  *  customer's MMG payment, fee included, landed in the store's wallet). */
 export function useVendorCashSettlements(enabled = true) {
   const pv = usePreviewDataset();
-  const q = useQuery({
-    queryKey: ['vendor', 'cash-settlements'],
-    queryFn: () => unwrap<any>(vendorApi.cashSettlements()),
-    enabled: enabled && !pv,
-  });
+  const q = useQuery({ ...vendorRead.cashSettlements(), enabled: enabled && !pv });
   return pv ? previewQuery([] as any[]) : q;
 }
 /** "We handed the rider their fee" — the store's half of the dual confirm. */
@@ -1087,11 +1096,7 @@ export function useVendorOps(days = 30) {
 /** Orders by local hour (last 30 days) — the §4.1 busy-hours view. */
 export function useBusyHours() {
   const pv = usePreviewDataset();
-  const q = useQuery({
-    queryKey: ['vendor', 'analytics', 'busy-hours'],
-    queryFn: () => unwrap<any>(vendorApi.analyticsBusyHours()),
-    enabled: !pv,
-  });
+  const q = useQuery({ ...vendorRead.busyHours(), enabled: !pv });
   return pv ? previewQuery(pv.busyHours) : q;
 }
 
@@ -1099,22 +1104,14 @@ export function useBusyHours() {
  *  the MANAGER-only Insights tab (the endpoint requires MANAGER). */
 export function useRepeatCustomers() {
   const pv = usePreviewDataset();
-  const q = useQuery({
-    queryKey: ['vendor', 'analytics', 'repeat-customers'],
-    queryFn: () => unwrap<any>(vendorApi.analyticsRepeatCustomers()),
-    enabled: !pv,
-  });
+  const q = useQuery({ ...vendorRead.repeatCustomers(), enabled: !pv });
   return pv ? previewQuery(pv.loyalty) : q;
 }
 
 /** Top items by lifetime + last-30-days order counts. */
 export function usePopularItems(limit = 8) {
   const pv = usePreviewDataset();
-  const q = useQuery({
-    queryKey: ['vendor', 'analytics', 'popular', limit],
-    queryFn: () => unwrap<any>(vendorApi.analyticsPopularItems(limit)),
-    enabled: !pv,
-  });
+  const q = useQuery({ ...vendorRead.popularItems(limit), enabled: !pv });
   return pv ? previewQuery(pv.popularItems) : q;
 }
 
@@ -1223,8 +1220,7 @@ export interface VendorBooking {
 export function useVendorBookings(enabled = true) {
   const pv = usePreviewDataset();
   const q = useQuery<VendorBooking[]>({
-    queryKey: ['vendor', 'bookings'],
-    queryFn: () => unwrap<VendorBooking[]>(vendorApi.bookings()),
+    ...vendorRead.bookings(),
     enabled: enabled && !pv,
     refetchInterval: 60000,
   });
@@ -1244,10 +1240,8 @@ export type VendorBookingException = {
 export function useVendorBookingExceptions(enabled = true) {
   const pv = usePreviewDataset();
   const q = useQuery<VendorBookingException[]>({
-    queryKey: ['vendor', 'booking-exceptions'],
-    queryFn: () => unwrap<VendorBookingException[]>(vendorApi.bookingExceptions()),
+    ...vendorRead.bookingExceptions(),
     enabled: enabled && !pv,
-    staleTime: 30_000,
   });
   return pv ? previewQuery([] as VendorBookingException[]) : q;
 }

@@ -66,6 +66,7 @@ import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
 import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, persistDispatchCommandInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
+import { orderHoldMinutes } from './hold-minutes';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
@@ -522,14 +523,13 @@ function courierPickupProofBound(order: Pick<Order,
 /** Hold duration in ms, or null when the feature is off / misconfigured. */
 export function holdWindowMs(): number | null {
   if (process.env['LIFECYCLE_V2'] !== '1') return null;
-  // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
-  // env examples say 5 since #792). The code defaulting 2 meant an env that
-  // omitted the variable quietly broke the documented customer promise: the
-  // free-cancel window (then FREE_CANCEL_WINDOW_MIN = 5) outlived the hold,
-  // putting orders on the vendor board while still free to cancel. The boot
-  // floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts) since the window after
-  // acceptance became one minute (owner 22 Oct 2026); the hold is unchanged.
-  const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
+  // [REPORT-036 F036-03b] The default is the SETTLED value, the one both env
+  // examples declare. The code once defaulted 2 while the examples said 5, so
+  // an env that omitted the variable quietly broke the documented customer
+  // promise. The boot floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts).
+  // [owner 30 Oct 2026] The settled hold is ONE minute (was five):
+  // ORDER_HOLD_DEFAULT_MIN in order/hold-minutes.ts, read by checkout too.
+  const minutes = orderHoldMinutes();
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
 
