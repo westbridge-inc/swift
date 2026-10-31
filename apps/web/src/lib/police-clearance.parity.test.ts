@@ -27,7 +27,8 @@ const API_ROUTES = read('api/src/modules/verification/verification.routes.ts');
 const API_CONFIG = read('api/src/modules/ops/platform-config.ts');
 const WEB_CARD = read('web/src/app/dashboard/documents/document-card.tsx');
 const WEB_STORE_LIST = read('web/src/app/dashboard/documents/checklist.tsx');
-const WEB_PORTAL = read('web/src/app/portal/documents/page.tsx');
+const WEB_PORTAL_PAGE = read('web/src/app/portal/documents/page.tsx');
+const WEB_PORTAL = read('web/src/app/portal/documents/police-clearance-section.tsx');
 
 /** The API's words for a checklist, as GET /verification/status sends them (police-clearance-consent.ts), synthetic days. */
 const words = (kind: 'taxi' | 'home') => ({
@@ -110,7 +111,8 @@ describe('[WEB-POLICE] who is offered one: the API’s lists', () => {
     expect(API_CONSENT).toContain("if (role === 'MOVER') return 'taxi';");
     expect(API_CONSENT).toContain("if (role === 'SERVICE' || role === 'SERVICE_PROVIDER') return 'home';");
     // The rider page offers it on a taxi's checklist only, and the store page to a Services business only.
-    expect(WEB_PORTAL).toContain('isTaxiChecklist(d.checklist ?? []) && optionalDocTypes(d).includes(POLICE_CLEARANCE_DOC)');
+    expect(WEB_PORTAL).toContain('isTaxiChecklist(status.checklist ?? []) && optionalDocTypes(status).includes(POLICE_CLEARANCE_DOC)');
+    expect(WEB_PORTAL_PAGE).toContain("isTaxiChecklist(d.checklist ?? []) && (d.optional ?? []).includes(POLICE_CLEARANCE_DOC)");
     expect(WEB_STORE_LIST).toContain('const offersPolice = POLICE_CLEARANCE_STORE_TYPES.has(vendorType);');
   });
 });
@@ -175,5 +177,13 @@ describe('[WEB-POLICE] the same body as the phone, and never under the list’s 
     expect(sent).toEqual([{ method: 'POST', path: '/api/v1/verification/police-clearance/withdraw', body: { role: 'MOVER' } }]);
     expect(PHONE_API).toContain("api.post('/verification/police-clearance/withdraw', { role }, capturedAuthConfig(session)),");
     expect(API_ROUTES).toContain("app.post('/police-clearance/withdraw', auth, async (request) => {");
+  });
+});
+
+describe('[WEB-POLICE · REVIEW-F S2-1] the rider page loads the police card on demand', () => {
+  it('the card, its API calls and the phone word modules are not in the page’s first load: one retried lazy import', () => {
+    expect(WEB_PORTAL_PAGE).toContain("const PoliceClearanceSection = lazyRetry(() => import('./police-clearance-section'));");
+    expect(WEB_PORTAL_PAGE).not.toMatch(/from '@\/lib\/store-documents'|from '@\/lib\/store-documents-api'|document-card'/);
+    expect(WEB_PORTAL_PAGE).toContain('<Suspense fallback=');
   });
 });

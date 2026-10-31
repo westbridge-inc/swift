@@ -347,6 +347,8 @@ describe('[WEB-POLICE] a Services business’s police clearance', () => {
     fireEvent.click(within(ask).getByRole('button', { name: 'Withdraw' }));
     await waitFor(() => expect(writes).toContainEqual({ method: 'POST', path: '/verification/police-clearance/withdraw', store: 'salon', body: { role: 'SERVICE' } }));
     expect(await screen.findByText('It is deleted. Swift keeps only a note that it was withdrawn.')).toBeTruthy();
+    // [REVIEW-F #2278 S4] the focus goes to what happened, never to the top of the page
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByText('It is deleted. Swift keeps only a note that it was withdrawn.').closest('[role="status"]')));
   });
 
   it.each([

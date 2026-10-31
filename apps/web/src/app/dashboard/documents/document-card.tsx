@@ -54,6 +54,7 @@ export function DocumentCard({ role, docType, doc, isNext, optionalHint, hint, c
   const replaceCancelRef = useRef<HTMLButtonElement>(null);
   const withdrawLinkRef = useRef<HTMLButtonElement>(null);
   const withdrawCancelRef = useRef<HTMLButtonElement>(null);
+  const withdrawnRef = useRef<HTMLDivElement>(null);
   const captionId = useId();
   const [askReplace, setAskReplace] = useState(false);
   const [askWithdraw, setAskWithdraw] = useState(false);
@@ -105,6 +106,9 @@ export function DocumentCard({ role, docType, doc, isNext, optionalHint, hint, c
   // back to the card, so a keyboard or screen-reader user is never dropped at the top of the page.
   useEffect(() => { if (askReplace) replaceCancelRef.current?.focus(); }, [askReplace]);
   useEffect(() => { if (askWithdraw) withdrawCancelRef.current?.focus(); }, [askWithdraw]);
+  // [REVIEW-F #2278 S4] After a withdrawal the link may be gone (the clearance left the list): the focus goes to what
+  // happened, never to the top of the page.
+  useEffect(() => { if (withdrawn) withdrawnRef.current?.focus(); }, [withdrawn]);
   const closeReplace = () => { setAskReplace(false); cardRef.current?.focus(); };
   const closeWithdraw = () => { setAskWithdraw(false); withdrawLinkRef.current?.focus(); };
   const escapeCloses = (close: () => void) => (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
@@ -174,7 +178,7 @@ export function DocumentCard({ role, docType, doc, isNext, optionalHint, hint, c
             <button
               type="button"
               disabled={withdraw.isPending}
-              onClick={() => { setAskWithdraw(false); setWithdrawn(null); withdraw.mutate(); }}
+              onClick={() => { closeWithdraw(); setWithdrawn(null); withdraw.mutate(); }}
               className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
             >
               Withdraw
@@ -184,7 +188,7 @@ export function DocumentCard({ role, docType, doc, isNext, optionalHint, hint, c
       )}
       {withdrawError && <p role="alert" className="px-5 pb-3 text-xs text-[var(--swift-red)]">{withdrawError}</p>}
       {withdrawn && (
-        <div role="status" className="border-t border-[var(--swift-border)] px-5 py-3 text-sm">
+        <div ref={withdrawnRef} tabIndex={-1} role="status" className="border-t border-[var(--swift-border)] px-5 py-3 text-sm outline-none">
           <p className="font-semibold">{withdrawn.title}</p>
           <p className="text-[var(--swift-muted)]">{withdrawn.message}</p>
         </div>

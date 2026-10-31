@@ -130,6 +130,19 @@ describe('[WEB-POLICE] the police clearance on the rider/driver Documents page',
     expect(screen.queryByRole('checkbox', { name: /police clearance/ })).toBeNull();
   });
 
+  it('[REVIEW-G S4-1] a taxi driver’s withdrawal names the mover checklist (role MOVER), after asking in the API’s words', async () => {
+    vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType: 'CAR' } as never);
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(TAXI, { documents: [
+      { id: 'p1', docType: 'police_clearance', status: 'PENDING', expiresAt: null, reviewNote: null, createdAt: '2026-10-30T12:00:00.000Z' },
+    ] }) as never);
+    renderWithQuery(<DocumentsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Withdraw my police clearance' }));
+    const ask = screen.getByRole('alertdialog', { name: 'Withdraw your police clearance?' });
+    expect(within(ask).getByText(TAXI_WORDS.withdrawConfirm)).toBeTruthy();
+    fireEvent.click(within(ask).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(writes).toEqual([{ method: 'POST', path: '/verification/police-clearance/withdraw', body: { role: 'MOVER' } }]));
+  });
+
   it('a taxi driver without the API’s words: nothing is taken (no box, no file input)', async () => {
     vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType: 'CAR' } as never);
     vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(TAXI, { policeClearanceConsent: undefined }) as never);
