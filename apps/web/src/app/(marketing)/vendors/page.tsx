@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { CheckCircle2, Store, ClipboardList, Boxes, QrCode, LineChart, Users } from 'lucide-react';
 import { Section } from '@/components/site';
 import { launch } from '@/site.config';
+import { partnerSignupHref } from '@/lib/signup-roles';
+import { PrelaunchPartnerNote, ReviewTime } from '@/components/prelaunch-partner-note';
 
 // NOTE [G-FEE]: this page may state subscription pricing. It must never be
 // deep-linked from the iOS binary — Apple treats in-app links to external
@@ -122,7 +124,13 @@ export default function VendorsPage() {
               {
                 n: '3',
                 t: 'We review them',
-                b: 'A person checks every document. Most businesses clear review within a day, and you can browse the whole dashboard while you wait.',
+                // [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day.
+                b: (
+                  <>
+                    A person checks every document.{' '}
+                    <ReviewTime live="Most businesses clear review within a day, and you can browse the whole dashboard while you wait." after="You can browse the whole dashboard while you wait." />
+                  </>
+                ),
               },
               {
                 n: '4',
@@ -143,8 +151,9 @@ export default function VendorsPage() {
           </ol>
 
           <div className="mt-10 flex flex-wrap gap-3">
+            {/* [OPEN-EARLY] Opens sign-up on the business door. */}
             <Link
-              href="/signup"
+              href={partnerSignupHref('business')}
               className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
             >
               Start a business account
@@ -156,6 +165,7 @@ export default function VendorsPage() {
               See what it costs
             </Link>
           </div>
+          <PrelaunchPartnerNote className="mt-6" />
         </div>
       </Section>
     </>

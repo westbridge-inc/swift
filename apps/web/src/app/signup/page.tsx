@@ -14,7 +14,7 @@ import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
-import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
+import { isHirePlate, MOVER_VEHICLES, partnerDoorRole, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
 // [PERF] The map picker (with its place search and location code) is needed
 // only on a store's "Place your store on the map" step, so it no longer rides
 // in the sign-up page's first load. Its stylesheet stays in the page, so the
@@ -283,6 +283,17 @@ export default function SignupPage() {
     if (r === 'RIDER' || r === 'DRIVER') setVeh((current) => ({ ...current, vehicleType: MOVER_VEHICLES[r][0]!.value }));
     setStep('phone');
   };
+  // [OPEN-EARLY · owner 31 Oct 2026] A partner page's button (/signup?as=business|rider|driver) opens straight
+  // onto that door's phone step, as if its tile had been tapped; Back still reaches the four doors. Only the three
+  // partner doors: no link can open the customer door (closed on the public site before launch). A business
+  // account resuming its store (?resume=business) keeps its own path.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('resume') === 'business') return;
+    const door = partnerDoorRole(params.get('as'));
+    if (door) chooseRole(door);
+  }, []);
+  const chosenDoor = ROLES.find((r) => r.role === role && r.role !== 'CUSTOMER');
 
   return (
     <main id="main" tabIndex={-1} className={styles.page}>
@@ -331,6 +342,7 @@ export default function SignupPage() {
         {step === 'phone' && (
           <div className={styles.stack}>
             <h1 id="signup-title" className={styles.heading}>Confirm your phone</h1>
+            {chosenDoor ? <p className={styles.smallCopy} data-chosen-door>Signing up as: {chosenDoor.title}</p> : null}
             <p className={styles.bodyCopy}>We’ll text you a code to confirm your number.</p>
             <div className={styles.field}>
               <label htmlFor="signup-phone" className={styles.label}>Phone number</label>

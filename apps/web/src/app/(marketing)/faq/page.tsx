@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
 import { BrowserOrderingNote } from '@/components/browser-ordering-note';
+import { ReviewTime } from '@/components/prelaunch-partner-note';
 import { AppStoreSentence } from '@/components/app-store-links';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 import { CANCEL_ORDER_ANSWER } from '@/lib/cancel-policy-copy';
@@ -117,8 +118,9 @@ const FAQ: QA[] = [
         Owner ID, business registration, a photo of your storefront, and any licence your kind of
         business needs (a restaurant adds its GRA licence and confirms that everyone who handles its food holds a
         current food handler&apos;s certificate; a cook selling without a registered business uploads their own food
-        handler&apos;s certificate). A person reviews them —
-        most businesses clear within a day — and your free trial starts the day you are{' '}
+        handler&apos;s certificate). A person reviews them.{' '}
+        {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
+        <ReviewTime live="Most businesses clear review within a day." /> Your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}
         <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/vendors">
           business page
