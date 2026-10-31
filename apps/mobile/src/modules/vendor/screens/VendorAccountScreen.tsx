@@ -278,6 +278,7 @@ export function VendorAccountScreen() {
           <MmgNumberCard
             value={store?.mmgNumber}
             pending={store?.mmgNumberPending ? { number: store.mmgNumberPending, applyAt: store.mmgNumberApplyAt ?? null } : null}
+            holdHours={store?.mmgNumberHoldHours ?? null}
             saving={saveMmgNumber.isPending}
             cancelling={cancelPendingMmgNumber.isPending}
             error={mmgNumberError}
@@ -293,6 +294,7 @@ export function VendorAccountScreen() {
             who="store"
             value={store?.mmgPayUrl}
             pending={store?.mmgPayUrlPending ? { url: store.mmgPayUrlPending, applyAt: store.mmgPayUrlApplyAt ?? null } : null}
+            holdHours={store?.mmgPayUrlHoldHours ?? null}
             saving={saveMmgLink.isPending}
             cancelling={cancelPendingMmgLink.isPending}
             error={mmgError}
