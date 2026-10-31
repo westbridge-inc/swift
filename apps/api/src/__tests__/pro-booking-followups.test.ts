@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 
 // [BILL-PRO PR7] The agreement version with the advance-acceptance clause is the real one now: the Business
 // Agreement's section 12 (PRO_AGREEMENT_VERSION, which PRO_MENU_AGREEMENT.sinceVersion names). No mock.
@@ -498,6 +498,22 @@ describe('[BOOK-P3] browse says which pros take bookings from their list (the ph
 });
 
 describe('[BOOK-P3 · COORD (b)] after the PROVIDER moves it, the customer cancels free for 60 minutes, even inside the cut-off', () => {
+  // [COORD 31 Oct · CI time-of-day flake] These cases place times relative to NOW (a move nine days out, a move just
+  // past the two-hour notice). Read from the wall clock, a run between 23:50 and 23:55 in Guyana put the customer's
+  // nine-day move on a 23:55 start, whose 5-minute slot ends past the pro's 23:59 close: 409 SLOT_UNAVAILABLE, so CI
+  // went red at that hour only (#2257, #2256). The clock is pinned instead: to the latest 10:00 in Guyana (never
+  // after the real now, so nothing is dated ahead of the database), running on from there, so every time below lands
+  // mid-morning or midday on whatever date the suite runs.
+  beforeEach(() => {
+    const now = Date.now();
+    const today = guyanaDayKey(new Date(now));
+    const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+    let pinned = instantOfGuyanaWallClock(new Date(Date.UTC(y, m - 1, d, 10)));
+    if (pinned.getTime() > now) pinned = new Date(pinned.getTime() - DAY);
+    vi.useFakeTimers({ toFake: ['Date'], now: pinned, shouldAdvanceTime: true });
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
   it('the move stamps providerMovedAt; the view counts down to it + 60 min; the cancel goes through; the customer\'s own move stamps nothing', async () => {
     on();
     const allDay = [0, 1, 2, 3, 4, 5, 6].map((d) => ({ dayOfWeek: d, start: '00:00', end: '23:59' }));
@@ -513,8 +529,8 @@ describe('[BOOK-P3 · COORD (b)] after the PROVIDER moves it, the customer cance
     // The pro moves it to the first open time after the 2-hour notice: the customer's 2-hour rule alone would close
     // almost at once; the move opens 60 minutes.
     target = new Date(Math.ceil((Date.now() + 125 * MIN) / (5 * MIN)) * 5 * MIN);
-    const local = hhmm(target);
-    if (local >= '23:50') target = new Date(target.getTime() + 15 * MIN);
+    // The pinned clock puts these at 10:00 nine days out and about 12:05 today, Guyana time: inside the pro's hours.
+    expect([hhmm(new Date(Date.now() + 9 * DAY)) >= '10:00', hhmm(target) <= '12:10']).toEqual([true, true]);
     const moved = await reschedule(pro.token, job.id, target);
     expect(moved.statusCode, moved.body).toBe(200);
     const row = await jobRow(job.id);
