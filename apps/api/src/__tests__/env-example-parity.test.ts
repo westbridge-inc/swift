@@ -46,8 +46,9 @@ function declared(file: string, name: string): string | undefined {
 const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> = [
   // [DS214 D3] Unset reads as OFF in the code (holdWindowMs, checkoutQueueTiming),
   // and production now refuses to boot without an explicit value (E08).
-  { name: 'LIFECYCLE_V2', whenUnset: '0', what: 'orders are born HELD — the five-minute free-cancel window' },
-  { name: 'ORDER_HOLD_MINUTES', whenUnset: '5', what: 'how long that window lasts' },
+  { name: 'LIFECYCLE_V2', whenUnset: '0', what: 'orders are born HELD — the free-cancel hold before the store sees them' },
+  // [owner 30 Oct 2026] One minute (was five): order/hold-minutes.ts ORDER_HOLD_DEFAULT_MIN.
+  { name: 'ORDER_HOLD_MINUTES', whenUnset: '1', what: 'how long that window lasts' },
   { name: 'DELIVERY_BLOCK_ON_NONE', whenUnset: '1', what: 'whether a no-rider delivery checkout is blocked' },
   { name: 'TAXI_ALLOW_REQUEST_ON_NONE', whenUnset: '1', what: 'whether a passenger may request with no drivers near' },
   { name: 'DISPATCH_EXHAUSTION', whenUnset: '0', what: 'the terminal exhausted state and pickup conversion' },

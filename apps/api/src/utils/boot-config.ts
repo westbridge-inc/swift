@@ -179,11 +179,13 @@ export function assertWallLoginConfig(env: Record<string, string | undefined>): 
   }
 }
 
-/** [DS214 D1 · B1/S4 · CANCEL-WINDOW 22 Oct 2026] The shortest LIFECYCLE_V2 order hold production boots with:
- *  the settled five-minute hold (Total Audit build order; ORDER_HOLD_MINUTES default 5). Its own number since the
- *  owner cut the free-cancel window AFTER acceptance to one minute (FREE_CANCEL_WINDOW_MIN): the hold BEFORE
- *  acceptance did not change, so neither does this boot floor. */
-export const ORDER_HOLD_FLOOR_MIN = 5;
+/** [DS214 D1 · B1/S4 · CANCEL-WINDOW 22 Oct 2026] The shortest LIFECYCLE_V2 order hold production boots with.
+ *  Its own number since the owner cut the free-cancel window AFTER acceptance to one minute (FREE_CANCEL_WINDOW_MIN).
+ *  [owner 30 Oct 2026, testing a pickup on staging: "the 5 minute wait time is still there, not 1 minute"] The
+ *  hold BEFORE acceptance is now one minute too (order/hold-minutes.ts ORDER_HOLD_DEFAULT_MIN, was five), so the
+ *  floor is ONE minute: the owner's own value. Not relaxed silently — moved by the owner's ruling, and the guard
+ *  still refuses a missing number, zero, a negative, and any hold shorter than one minute. */
+export const ORDER_HOLD_FLOOR_MIN = 1;
 
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
@@ -232,7 +234,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   }
 
   // [ledger E08] The settled posture is hold ON: every order is born held for
-  // ORDER_HOLD_MINUTES (default 5) — the customer's free-cancel window, hidden
+  // ORDER_HOLD_MINUTES (default 1, owner 30 Oct 2026) — the customer's free-cancel window, hidden
   // from the vendor. But holdWindowMs() and checkoutQueueTiming() read an
   // UNSET LIFECYCLE_V2 as hold OFF, so a deploy that merely omits the variable
   // pushes new orders to the vendor instantly while the app still promises a
@@ -245,14 +247,15 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // When the hold is on, a set-but-unparseable window makes holdWindowMs()
   // return null — the same silent hold-off — so that too refuses, never
   // silently defaults. [DS214 D1] And the hold may never be SHORTER than the
-  // settled five-minute hold (ORDER_HOLD_FLOOR_MIN): a shorter hold puts an
-  // order on the vendor board early, which is exactly the REPORT-036 defect
-  // (order.service.ts holdWindowMs).
+  // settled hold (ORDER_HOLD_FLOOR_MIN, one minute since the owner's 30 Oct
+  // 2026 ruling): a shorter hold puts an order on the vendor board early,
+  // which is exactly the REPORT-036 defect (order.service.ts holdWindowMs).
   // [CANCEL-WINDOW · owner 22 Oct 2026] This floor used to read
   // FREE_CANCEL_WINDOW_MIN, which was also five. The free-cancel window after
   // acceptance is now ONE minute; the hold before acceptance is a different
-  // timer the owner did not change, so the floor keeps its own number and
-  // this guard refuses exactly what it refused before (never relaxed silently).
+  // timer, so the floor keeps its own number. [owner 30 Oct 2026] The owner
+  // then cut the hold itself to one minute: the floor follows the owner's
+  // ruling (not relaxed silently) and still refuses below one minute.
   if (lifecycleV2 === '1' && env['ORDER_HOLD_MINUTES'] !== undefined) {
     const holdMinutes = Number(env['ORDER_HOLD_MINUTES']);
     if (!Number.isFinite(holdMinutes) || holdMinutes < ORDER_HOLD_FLOOR_MIN) {
