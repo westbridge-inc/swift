@@ -38,6 +38,7 @@ FROM deps AS build
 # Which API the browser calls, and which release the build is for. The origin
 # law (src/lib/browser-api-origin.ts) refuses any other pairing:
 #   public site: NEXT_PUBLIC_API_URL=https://api.<site domain>, no SWIFT_WEB_CHANNEL
+#                or https://api-live.<site domain> (the pre-launch production name)
 #   staging:     NEXT_PUBLIC_API_URL=https://api-staging.<site domain>, SWIFT_WEB_CHANNEL=staging
 ARG NEXT_PUBLIC_API_URL
 ARG SWIFT_WEB_CHANNEL

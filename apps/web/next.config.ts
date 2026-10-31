@@ -22,7 +22,8 @@ const FONT_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=6048
 // [SWX-DEV-WEB-076 · integrated] The browser API origin and the CSP that
 // permits exactly it come from ONE authority (src/lib/browser-api-origin.ts).
 // `next dev` runs in development mode; every other phase — build, start,
-// export — is production and REQUIRES the canonical release origin.
+// export — is production and REQUIRES one of the channel's exact origins
+// (production: the release origin or the pre-launch origin; staging: staging).
 export default function createNextConfig(phase: string): NextConfig {
   // `next lint` loads this config with the production-build phase but produces
   // no artifact; the release law binds artifacts, so linting runs as
@@ -37,7 +38,9 @@ export default function createNextConfig(phase: string): NextConfig {
   // API's own card page). OFF unless the build sets SWIFT_WEB_CARD_FRAME=1: off, the CSP and
   // the client bundle are exactly what they were, and the card page opens in the same tab.
   const cardFrame = process.env['SWIFT_WEB_CARD_FRAME'] === '1';
-  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame });
+  // [OPEN-EARLY] The policy names the origin the build resolved (the release origin or the
+  // pre-launch one), so the browser may connect to exactly the API this build calls.
+  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame, apiOrigin: browserApiOrigin });
   // [WEB-TILES] The MapTiler browser key (lib/map-tiles.ts): a malformed value
   // refuses the build; a production build without one says, in its log, that
   // the site it builds draws no map tiles. Next inlines the key into the bundle.

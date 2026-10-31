@@ -5,6 +5,7 @@ import { SITE_DOMAIN } from '../site.domain';
 import {
   buildBrowserContentSecurityPolicy,
   DEVELOPMENT_BROWSER_API_ORIGIN,
+  PRELAUNCH_BROWSER_API_ORIGIN,
   RELEASE_BROWSER_API_ORIGIN,
   resolveBrowserApiOrigin,
   resolveReleaseChannel,
@@ -181,5 +182,91 @@ describe('[Q11] the staging release channel', () => {
     expect(connectOf(production)).not.toContain(STAGING_BROWSER_API_ORIGIN);
     const withoutConnect = (csp: string) => csp.split('; ').filter((d) => !d.startsWith('connect-src '));
     expect(withoutConnect(staging)).toEqual(withoutConnect(production));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OPEN-EARLY] The public site goes live before the release API name moves to
+// production (the release name stays where the app review points until launch
+// day). A production build therefore accepts exactly TWO origins: the release
+// origin and one pre-launch name under the same domain. The CSP, the /s/ proxy,
+// the photo resizer and the browser all follow the ONE origin the build chose.
+// Staging is unchanged, and every other origin is still refused.
+// ---------------------------------------------------------------------------
+
+describe('[OPEN-EARLY] the pre-launch production API origin', () => {
+  it('is derived from the one domain file, like the release origin', () => {
+    expect(PRELAUNCH_BROWSER_API_ORIGIN).toBe(`https://api-live.${SITE_DOMAIN}`);
+    expect(source('src/lib/browser-api-origin.ts')).not.toMatch(/https:\/\/api-live\.[a-z]+\.[a-z]+/);
+  });
+
+  it('a production build accepts the release origin and the pre-launch origin, each as itself', () => {
+    expect(resolveBrowserApiOrigin('production', RELEASE_BROWSER_API_ORIGIN)).toBe(RELEASE_BROWSER_API_ORIGIN);
+    expect(resolveBrowserApiOrigin('production', PRELAUNCH_BROWSER_API_ORIGIN)).toBe(PRELAUNCH_BROWSER_API_ORIGIN);
+    expect(resolveBrowserApiOrigin('production', PRELAUNCH_BROWSER_API_ORIGIN, 'production')).toBe(PRELAUNCH_BROWSER_API_ORIGIN);
+  });
+
+  it('every other production origin is still refused, look-alikes of the pre-launch name included', () => {
+    for (const wrong of [
+      STAGING_BROWSER_API_ORIGIN,
+      DEVELOPMENT_BROWSER_API_ORIGIN,
+      `${PRELAUNCH_BROWSER_API_ORIGIN}/`,
+      `${PRELAUNCH_BROWSER_API_ORIGIN}/v1`,
+      `${PRELAUNCH_BROWSER_API_ORIGIN}?x=1`,
+      `${PRELAUNCH_BROWSER_API_ORIGIN}#f`,
+      `${PRELAUNCH_BROWSER_API_ORIGIN}:443`,
+      PRELAUNCH_BROWSER_API_ORIGIN.replace('https://', 'http://'),
+      PRELAUNCH_BROWSER_API_ORIGIN.replace('https://', 'https://user:pw@'),
+      PRELAUNCH_BROWSER_API_ORIGIN.toUpperCase(),
+      `https://api-live2.${SITE_DOMAIN}`,
+      `https://x.api-live.${SITE_DOMAIN}`,
+      `https://api-live.${SITE_DOMAIN}.example.com`,
+      'https://api-live.example.com',
+      `https://admin.${SITE_DOMAIN}`,
+      `https://${SITE_DOMAIN}`,
+    ]) {
+      expect(() => resolveBrowserApiOrigin('production', wrong), wrong).toThrow();
+    }
+    expect(() => resolveBrowserApiOrigin('production', `https://api-live2.${SITE_DOMAIN}`)).toThrow(
+      `must be exactly ${RELEASE_BROWSER_API_ORIGIN} or ${PRELAUNCH_BROWSER_API_ORIGIN} in production`,
+    );
+  });
+
+  it('a staging build refuses the pre-launch origin; development refuses it too', () => {
+    expect(() => resolveBrowserApiOrigin('production', PRELAUNCH_BROWSER_API_ORIGIN, 'staging')).toThrow(/must be exactly/);
+    expect(() => resolveBrowserApiOrigin('development', PRELAUNCH_BROWSER_API_ORIGIN)).toThrow(/must be exactly/);
+  });
+
+  it('the CSP names exactly the origin the build resolved, https and wss, never both production names', () => {
+    const prelaunch = buildBrowserContentSecurityPolicy('production', 'production', { apiOrigin: PRELAUNCH_BROWSER_API_ORIGIN });
+    expect(connectOf(prelaunch)).toBe(
+      `connect-src 'self' ${PRELAUNCH_BROWSER_API_ORIGIN} ${PRELAUNCH_BROWSER_API_ORIGIN.replace('https://', 'wss://')}`,
+    );
+    expect(connectOf(prelaunch).split(' ')).not.toContain(RELEASE_BROWSER_API_ORIGIN);
+    expect(connectOf(prelaunch).split(' ')).not.toContain(RELEASE_BROWSER_API_ORIGIN.replace('https://', 'wss://'));
+    const release = buildBrowserContentSecurityPolicy('production', 'production', { apiOrigin: RELEASE_BROWSER_API_ORIGIN });
+    expect(release).toBe(buildBrowserContentSecurityPolicy('production'));
+    expect(connectOf(release).split(' ')).not.toContain(PRELAUNCH_BROWSER_API_ORIGIN);
+    // The rest of the policy is the release policy, word for word.
+    const withoutConnect = (csp: string) => csp.split('; ').filter((d) => !d.startsWith('connect-src '));
+    expect(withoutConnect(prelaunch)).toEqual(withoutConnect(release));
+  });
+
+  it('with the card frame on, frame-src names the resolved origin too', () => {
+    const csp = buildBrowserContentSecurityPolicy('production', 'production', { apiOrigin: PRELAUNCH_BROWSER_API_ORIGIN, cardFrame: true });
+    expect(csp.split('; ')).toContain(`frame-src 'self' ${PRELAUNCH_BROWSER_API_ORIGIN}`);
+    expect(csp).not.toContain(`${RELEASE_BROWSER_API_ORIGIN} `);
+  });
+
+  it('the CSP builder refuses an origin its channel does not allow, so the policy can never name a stray host', () => {
+    for (const wrong of [STAGING_BROWSER_API_ORIGIN, 'https://api.example.com', `${PRELAUNCH_BROWSER_API_ORIGIN}/`, '']) {
+      expect(() => buildBrowserContentSecurityPolicy('production', 'production', { apiOrigin: wrong }), wrong).toThrow();
+    }
+    expect(() => buildBrowserContentSecurityPolicy('production', 'staging', { apiOrigin: PRELAUNCH_BROWSER_API_ORIGIN })).toThrow();
+    expect(() => buildBrowserContentSecurityPolicy('development', 'production', { apiOrigin: PRELAUNCH_BROWSER_API_ORIGIN })).toThrow();
+    expect(buildBrowserContentSecurityPolicy('production', 'staging', { apiOrigin: STAGING_BROWSER_API_ORIGIN }))
+      .toBe(buildBrowserContentSecurityPolicy('production', 'staging'));
+    expect(buildBrowserContentSecurityPolicy('development', 'production', { apiOrigin: DEVELOPMENT_BROWSER_API_ORIGIN }))
+      .toBe(buildBrowserContentSecurityPolicy('development'));
   });
 });
