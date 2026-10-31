@@ -301,6 +301,17 @@ describe('[REVIEW-M #2245] what the quote counts, and which tick counts', () => 
     expect(Math.round((sub.trialEndDate!.getTime() - sub.currentPeriodStart.getTime()) / DAY)).toBe(14);
   });
 
+  it('S4-1 (REVIEW-M pair) · a listing removed more than 7 days ago stays out even when a later write touched it (photo clean-up updates archived rows): 10,000 with 2,000 removed 8 days ago but updated now is priced for 8,000 (large)', async () => {
+    const o = await owner();
+    await addItems(o.vendorId, deptFloor);
+    await system(() => app.prisma.$executeRaw`
+      UPDATE "items" SET "archivedAt" = now() - interval '8 days', "isAvailable" = false, "updatedAt" = now()
+      WHERE "id" IN (SELECT "id" FROM "items" WHERE "vendorId" = ${o.vendorId} ORDER BY "id" LIMIT 2000)`);
+    const view = await feeView(o);
+    expect(view).toMatchObject({ items: deptFloor - 2000, required: true, weeklyFee: { amount: large, tier: 'large' } });
+    expect(view.why).toContain(`It has ${(deptFloor - 2000).toLocaleString('en-US')} items on sale`);
+  });
+
   it('S4-1 a tick to OTHER words (an older version) at the right amount is no tick: nothing is born', async () => {
     const o = await owner();
     await addItems(o.vendorId, largeFloor);

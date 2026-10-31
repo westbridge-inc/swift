@@ -47,8 +47,9 @@ export const CATALOGUE_COUNT_WORDS = 'taken off sale, changed or removed in the 
 /** [REVIEW-M #2245 S3-1 · COORD ruling 30 Oct 2026] Which listings a store's fee and trial are priced from: every
  *  listing on sale now; every listing taken off sale or changed in the last 7 days; and every listing REMOVED (deleted,
  *  archivedAt set) in the last 7 days. Hiding or deleting listings just before approval does not count them out; a
- *  listing removed longer ago is not the store's catalogue and never counts. (billing.service uses the same rule for
- *  the re-tier's weekly count.) */
+ *  listing removed longer ago is not the store's catalogue and never counts, even when a later write (e.g. a photo
+ *  clean-up) touched it: the "changed" branch needs archivedAt null. (RETIER PR-B aligns billing.service's weekly
+ *  re-tier count to this rule; the re-tier is off until then.) */
 export function catalogueCountWhere(vendorId: string, now: Date): Prisma.ItemWhereInput {
   const since = new Date(now.getTime() - CATALOGUE_WINDOW_DAYS * DAY_MS);
   return {
