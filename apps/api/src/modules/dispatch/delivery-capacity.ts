@@ -69,8 +69,11 @@ export interface CapacityProbe {
   floatRequired: number;
   /** Cash the rider collects at the door (stacking R4); 0 for MMG. */
   cashToCollect: number;
-  /** The vehicle size this basket needs (utils/load requiredPackageSizeForOrder). */
+  /** The vehicle size this basket needs (utils/load readOrderSize: `required`). */
   packageSize: string | null;
+  /** [owner 31 Oct] The basket's TRUE size band (readOrderSize: `trueBand`): what the stacking rulebook weighs,
+   *  so a basket past a motorbike's band stays XL there (never batches) even when `packageSize` is capped. */
+  loadBand: string | null;
 }
 
 export interface CapacityDeps {
@@ -230,7 +233,7 @@ export async function measureDeliveryCapacity(deps: CapacityDeps, probe: Capacit
   const stackable = probe.dropoff && working.length > 0
     ? (await stackableForProbe(deps.prisma, working, {
         vertical,
-        sizeClass: sizeClassForProbe(probe.packageSize),
+        sizeClass: sizeClassForProbe(probe.loadBand),
         cashToCollect: probe.cashToCollect,
         pickup: { lat: point.lat, lng: point.lng, vendorId: probe.store.id },
         dropoff: probe.dropoff,

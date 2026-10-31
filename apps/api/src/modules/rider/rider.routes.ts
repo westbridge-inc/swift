@@ -52,7 +52,7 @@ import { handoverAuthorityFor } from '../order/handover-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
-import { estimateLoad, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { estimateLoad, offerLoadFields, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
@@ -1164,7 +1164,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // [owner #20 · G1] The board shows only work this rider's vehicle can
     // carry — the same size rule dispatch and the grab enforce (a parcel's
-    // declared size; a goods order's bulk, a bulky line needing a car or van).
+    // declared size; a goods order's total bulk, banded by utils/load).
     // [Owner ruling 15 Oct 2026] …and a taxi car sees no goods work at all while car deliveries are off
     // (vehicleCanCarry reads the switch; an unsized order is asked too).
     const carriable = candidates.filter((order) => {
@@ -1218,6 +1218,8 @@ export async function riderRoutes(app: FastifyInstance) {
           vendor: order.vendor,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
           estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
+          // [owner 31 Oct] The real size class beside estLoad (unchanged), as on the offer card.
+          ...offerLoadFields(order),
           deliveryFee: Number(order.deliveryFee),
           tipAmount: Number(order.tipAmount),
           totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
@@ -1419,8 +1421,8 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     // [owner #20 · G1 ENFORCED] The same gate for food and grocery: an order
-    // the rider's vehicle cannot carry — a bulky line needs a car or van; a
-    // big ordinary load is banded — is refused here exactly as dispatch never
+    // the rider's vehicle cannot carry — its total bulk, banded (utils/load),
+    // capped at a motorbike's while cars carry no goods — is refused as dispatch never
     // offers it. (A parcel was refused just above by its declared size.)
     if (order.orderType !== 'COURIER') {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);

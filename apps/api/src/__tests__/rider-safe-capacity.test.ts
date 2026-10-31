@@ -231,7 +231,7 @@ describe('[RIDER-SAFE 1] honest capacity, measured on real rows', () => {
     const at = cell(0);
     const store = await makeStore(at, 'Capacity Kitchen');
     const other = await makeStore({ lat: at.lat + 0.002, lng: at.lng }, 'Next Door Kitchen');
-    const probe = { tenantId: 'swift-default', store: { id: store.vendorId, ...at }, orderType: 'FOOD_DELIVERY', dropoff: { lat: at.lat + 0.004, lng: at.lng }, floatRequired: 2000, cashToCollect: 2000, packageSize: 'SMALL' };
+    const probe = { tenantId: 'swift-default', store: { id: store.vendorId, ...at }, orderType: 'FOOD_DELIVERY', dropoff: { lat: at.lat + 0.004, lng: at.lng }, floatRequired: 2000, cashToCollect: 2000, packageSize: 'SMALL', loadBand: 'SMALL' };
 
     expect(await sys(() => dispatch.getDeliveryCapacity(probe))).toMatchObject({ level: 'NONE', reason: 'NO_RIDERS' });
 

@@ -28,11 +28,17 @@ import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 // Fixtures: Mabaruma, far from every other suite, so only this file's movers
 // are ever candidates.
 //
+// [Owner, 31 Oct 2026] TRANSFORMED: one line marked bulky no longer makes the
+// whole order car-only — an item's bulk only adds to the order's total, banded
+// as before. "Bulky" in this file is now a basket past the motorbike band (8 of
+// an item marked bulky: bulk 32), which is the largest class while car
+// deliveries are on; one bulky item alone is an ordinary small load.
+//
 // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: this
 // file now pins #1693's behaviour on the switch's re-enable path
 // (CAR_DELIVERIES=1, set for the whole file). With the switch OFF, the default,
-// no car takes goods work and a bulky delivery is refused at checkout whatever
-// is near: taxi-cars-passengers-only.test.ts pins that.
+// no car takes goods work and such a basket needs only a motorbike (never
+// refused for size alone): store-order-size-never-refused.test.ts pins that.
 // ---------------------------------------------------------------------------
 const priorCarDeliveries = process.env['CAR_DELIVERIES'];
 
@@ -85,7 +91,7 @@ async function makeRider(vehicleType: VehicleType, meters: number) {
   return { ...u, riderId: rider.id };
 }
 
-/** A cash food order ready at the kitchen, waiting for a rider. `bulky` = one line the store marked bulky. */
+/** A cash food order ready at the kitchen, waiting for a rider. `bulky` = 8 of an item the store marked bulky (bulk 32). */
 async function makeReadyOrder(customerId: string, bulky: boolean) {
   const order = await sys(() => app.prisma.order.create({
     data: {
@@ -97,7 +103,7 @@ async function makeReadyOrder(customerId: string, bulky: boolean) {
       paymentMethod: 'CASH',
       items: {
         create: [{
-          itemId: bulky ? bulkyItemId : plainItemId, name: bulky ? 'Crate of drinks' : 'Rice plate', quantity: 1,
+          itemId: bulky ? bulkyItemId : plainItemId, name: bulky ? 'Crate of drinks' : 'Rice plate', quantity: bulky ? 8 : 1,
           basePrice: 2000, markedUpPrice: 2000, markupAmount: 0, totalBase: 2000, totalMarkup: 0, totalCustomer: 2000,
           bulkUnits: bulky ? 4 : null,
         }],
@@ -145,7 +151,8 @@ beforeAll(async () => {
       },
     });
     const cat = await app.prisma.category.create({ data: { vendorId: vendor.id, name: 'Menu', sortOrder: 0 } });
-    const bulky = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Crate of drinks', basePrice: 2000, isAvailable: true, bulkUnits: 4 } });
+    // [owner 31 Oct] 1000 so a basket of 8 stays under the high-value ID check, which is not this file's subject.
+    const bulky = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Crate of drinks', basePrice: 1000, isAvailable: true, bulkUnits: 4 } });
     const plain = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Rice plate', basePrice: 2000, isAvailable: true } });
     return { vendorId: vendor.id, bulky: bulky.id, plain: plain.id };
   });
@@ -181,12 +188,15 @@ afterAll(async () => {
   await app.close();
 }, 120_000);
 
-describe('[owner #20] the size rule: a bulky line means a car or van', () => {
+describe('[owner #20 · owner 31 Oct] the size rule: a basket past the motorbike band means a car or van (cars on)', () => {
   const order = (lines: Array<{ quantity: number; bulkUnits: number | null }>) => ({ orderType: 'FOOD_DELIVERY', courierPackageSize: null, items: lines });
 
-  it('one item marked bulky or very bulky → the largest class (cars and vans)', () => {
-    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 4 }]))).toBe('EXTRA_LARGE');
-    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('EXTRA_LARGE');
+  it('bulk × quantity past the motorbike band → the largest class (cars and vans); one bulky item alone does not', () => {
+    // [owner 31 Oct, TRANSFORMED] These two were EXTRA_LARGE ("a bulky line → cars and vans"); the bulk now adds.
+    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 4 }]))).toBe('SMALL');
+    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('MEDIUM');
+    expect(requiredPackageSizeForOrder(order([{ quantity: 8, bulkUnits: 4 }]))).toBe('EXTRA_LARGE');
+    expect(requiredPackageSizeForOrder(order([{ quantity: 3, bulkUnits: 8 }, { quantity: 7, bulkUnits: null }]))).toBe('EXTRA_LARGE');
   });
 
   it('ordinary items keep their bands; a parcel keeps its declared size; a ride needs none', () => {
@@ -234,7 +244,7 @@ describe('[owner #20] dispatch, the board and the grab all follow it', () => {
     // pre-accept board sends no item lines at all, only a count, so the
     // property is asserted on the whole row instead of on one item line.]
     const bulkyRow = carRows.find((o) => o.id === bulky.id)!;
-    expect(bulkyRow.itemCount).toBe(1);
+    expect(bulkyRow.itemCount).toBe(8); // [owner 31 Oct] the basket is 8 of the bulky item (was 1)
     expect(JSON.stringify(bulkyRow)).not.toMatch(/bulkUnits|bulkClass/);
 
     const grab = await call('POST', `/api/v1/rider/orders/${bulky.id}/accept`, bike.token, {});
@@ -274,7 +284,7 @@ describe('[owner #20] checkout tells the customer before placing', () => {
     await sys(() => app.prisma.address.create({
       data: { userId: customer.userId, label: 'Home', addressLine1: '2 Hosororo Road', city: 'Mabaruma', region: 'Barima-Waini', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
     }));
-    const add = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: bulkyItemId, quantity: 1 });
+    const add = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: bulkyItemId, quantity: 8 });
     expect([200, 201], add.body).toContain(add.statusCode);
     await makeRider('MOTORCYCLE', 100);
     process.env['DISPATCH_AVAILABILITY'] = '1';

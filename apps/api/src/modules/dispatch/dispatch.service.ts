@@ -25,7 +25,7 @@ import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { assignmentLogWhere } from '../order/store-handover-log';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
-import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { estimateLoad, offerLoadFields, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
@@ -1459,8 +1459,8 @@ export class DispatchService {
       // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
       const floatRequired = pool === 'RIDER' ? riderFloatForOrder(order) : 0;
       // [owner #20 · G1 ENFORCED] The size of vehicle this order needs — a
-      // parcel's declared size, or a food/grocery order's bulk (a bulky line
-      // means a car or van) — gates the candidate pool, exactly as the parcel
+      // parcel's declared size, or a food/grocery order's total bulk (capped at
+      // a motorbike's while cars carry no goods) — gates the pool, as the parcel
       // gate always has. The visible half of the rule is checkout, which
       // tells the customer before placing when no such vehicle is near.
       const requiredSize = pool === 'RIDER' ? requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS) : null;
@@ -1644,6 +1644,9 @@ export class DispatchService {
             customerTrust: trust ?? null,
             itemCount: order.items.length,
             estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+            // [owner 31 Oct] The order's real size class beside estLoad (unchanged), and whether it is bigger than
+            // what it is offered by today (utils/load offerLoadFields). Additive: older builds ignore both.
+            ...offerLoadFields(order),
             // [WS-6.0] Server-computed, or absent. Null on MMG (the customer
             // already paid the store) and null whenever the numbers do not
             // reconcile — see `cashMathForOffer`.
@@ -1810,6 +1813,9 @@ export class DispatchService {
     expiresInSeconds: number;
     itemCount: number;
     estLoad: string | null;
+    /** [owner 31 Oct] The order's real size class (utils/load trueBand), and whether it is past what it is offered by today. */
+    loadSize: string | null;
+    oversize: boolean;
     customerTrust: unknown;
     /** [REPORT-010 F-07] Authoritative money/route facts ride the recovery
      *  payload so the rebuilt card never depends on a separately-fetched
@@ -1857,9 +1863,9 @@ export class DispatchService {
         pickupAddress: true, deliveryAddress: true, pickupLat: true, pickupLng: true,
         totalAmount: true, subtotalBase: true, serviceFee: true, taxAmount: true, discount: true,
         id: true, status: true, riderId: true, driverId: true, fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderType: true, foodAgeHeldAt: true, holdExpiresAt: true,
-        taxiStopCount: true,
+        taxiStopCount: true, courierPackageSize: true,
         vendor: { select: { name: true } },
-        items: { select: { quantity: true } },
+        items: { select: { quantity: true, bulkUnits: true } },
       },
     });
     if (!order) return null;
@@ -1921,6 +1927,8 @@ export class DispatchService {
       expiresInSeconds,
       itemCount: order.items.length,
       estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+      // [owner 31 Oct] The SAME real-size fields the live card carried.
+      ...offerLoadFields(order),
       customerTrust: trust ?? null,
       deliveryFee: Number(order.deliveryFee),
       tipAmount: Number(order.tipAmount),

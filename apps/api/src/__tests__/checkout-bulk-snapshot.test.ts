@@ -188,10 +188,10 @@ describe('checkout snapshots the item’s bulk onto the order line', () => {
       where: { id: orderId },
       select: { orderType: true, courierPackageSize: true, items: { select: { quantity: true, bulkUnits: true } } },
     });
-    // [owner #20, 13 Oct] A line the store marked very bulky (the rice, 8)
-    // means a car or van: EXTRA_LARGE. Before this write the snapshot was
-    // missing, every line read ordinary and the order banded SMALL — a
-    // bicycle's job, with a 20 kg bag in it.
-    expect(requiredPackageSizeForOrder(order!)).toBe('EXTRA_LARGE');
+    // [owner 31 Oct 2026, TRANSFORMED] The very bulky rice (8) adds its bulk to
+    // the total: 8 + 2 sachets = 10, a MEDIUM load (it used to make the whole
+    // order car-only: EXTRA_LARGE). Before this write the snapshot was
+    // missing, every line read ordinary and the order banded SMALL (3).
+    expect(requiredPackageSizeForOrder(order!)).toBe('MEDIUM');
   });
 });

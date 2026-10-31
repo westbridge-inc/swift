@@ -67,8 +67,8 @@ const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","o
 
 /** The keys of an open-board item and of the two offer cards today (main). */
 const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
-const LIVE_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'isExpress', 'expiresInSeconds', 'etaMinutes', 'rescueIncentiveGyd', 'paymentMethod', 'customerTrust', 'itemCount', 'estLoad', 'cashMath'];
-const RECOVERED_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'vendorName', 'isExpress', 'paymentMethod', 'expiresInSeconds', 'itemCount', 'estLoad', 'customerTrust', 'deliveryFee', 'tipAmount', 'taxiFareTotal', 'pickupAddress', 'deliveryAddress', 'etaMinutes', 'rescueIncentiveGyd', 'cashMath'];
+const LIVE_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'isExpress', 'expiresInSeconds', 'etaMinutes', 'rescueIncentiveGyd', 'paymentMethod', 'customerTrust', 'itemCount', 'estLoad', 'loadSize', 'oversize', 'cashMath']; // [owner 31 Oct] + loadSize, oversize (additive; null/false on a ride)
+const RECOVERED_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'vendorName', 'isExpress', 'paymentMethod', 'expiresInSeconds', 'itemCount', 'estLoad', 'loadSize', 'oversize', 'customerTrust', 'deliveryFee', 'tipAmount', 'taxiFareTotal', 'pickupAddress', 'deliveryAddress', 'etaMinutes', 'rescueIncentiveGyd', 'cashMath'];
 const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence', 'stopWait'];
 
 let app: FastifyInstance;
