@@ -18,11 +18,14 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { assertNotRecused } from '../verification/recusal';
 import {
-  STORE_VAT_MODES_OFFERED, STORE_VAT_SELECT, VAT_CERTIFICATE_DOC_TYPE, inEffectOn, storeVatEffective, storeVatEnabled,
+  STORE_VAT_MODES_OFFERED, STORE_VAT_SELECT, STORE_VAT_WAITING_WHERE, VAT_CERTIFICATE_DOC_TYPE, inEffectOn, storeVatEffective, storeVatEnabled,
 } from './store-vat';
 import { STORE_VAT_RATE_PERCENT, STORE_VAT_SOURCES } from './vat-rate';
 import { insertNoticeFor } from '../../lib/owner-wall-notices';
-import { storeVatApprovedNotice, storeVatRejectedNotice, storeVatWithdrawnNotice } from './store-vat-notices';
+import {
+  storeVatApprovedNotice, storeVatModeChangeApprovedNotice, storeVatModeChangeRejectedNotice, storeVatRejectedNotice, storeVatWithdrawnNotice,
+} from './store-vat-notices';
+import { reconcileVatPricing, storeAddsVatToPrices } from './vat-pricing';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 type Tx = Prisma.TransactionClient;
@@ -50,11 +53,13 @@ function refuseWhileOff(env: Record<string, string | undefined>): void {
   }
 }
 
-/** The approval fields a new claim or a store's "no" clears (the decision trail lives in the audit log). */
+/** The approval fields a new claim or a store's "no" clears (the decision trail lives in the audit log). A price-mode
+ *  change still waiting for a person goes with the approval it would have changed. */
 const CLEARED_APPROVAL = {
   vatApprovedNumber: null, vatApprovedName: null, vatEffectiveFrom: null,
-  vatReviewedBy: null, vatReviewedAt: null, vatReviewNote: null,
+  vatReviewedBy: null, vatReviewedAt: null, vatReviewNote: null, vatModeRequested: null,
 } as const;
+
 
 /** Lock the store row: every VAT write on a store is serialised on it. */
 async function lockVendor(tx: Tx, vendorId: string) {
@@ -78,9 +83,14 @@ export async function storeVatView(db: Db, vendorId: string, env: Record<string,
     available: storeVatEnabled(env),
     status: vendor.vatStatus,
     mode: vendor.vatMode,
+    /** [VAT-DOCS · owner ruling 31 Oct 2026] The price choice this APPROVED store asked to change to, waiting for a person
+     *  (null when none): until a person approves it, `mode` and every price stay as they are. */
+    modeRequested: vendor.vatStatus === 'APPROVED' ? vendor.vatModeRequested : null,
     vatRegistrationNumber: vendor.vatRegistrationNumber,
     /** True while this store's orders carry VAT (storeVatEffective). */
     effective: storeVatEffective(vendor, env),
+    /** [VAT-DOCS] True while Swift adds VAT to the prices this store types (ADD_VAT_AT_CHECKOUT, approved). */
+    addsVatToPrices: storeAddsVatToPrices(vendor),
     approved: vendor.vatStatus === 'APPROVED'
       ? { number: vendor.vatApprovedNumber, registeredName: vendor.vatApprovedName, effectiveFrom: vendor.vatEffectiveFrom, reviewedAt: vendor.vatReviewedAt }
       : null,
@@ -101,8 +111,13 @@ export interface StoreVatSettingsInput {
 /**
  * The store's answer. "No" takes VAT off at once (NONE; the typed number is cleared too, so nothing can claim
  * VAT for it). "Yes" needs the number and a mode the server offers; a store that changes its number, or says
- * yes again after a rejection or revocation, goes back to PENDING (a person must look again). A mode change on
- * an APPROVED store keeps the approval: the person checked the registration, not the pricing choice.
+ * yes again after a rejection or revocation, goes back to PENDING (a person must look again).
+ *
+ * [VAT-DOCS · owner ruling 31 Oct 2026] A mode change on an APPROVED store (either way) goes to the person VAT review
+ * queue (vatModeRequested): the approval, the mode and every customer price stay exactly as they are until a person
+ * approves the change (decideStoreVatModeChange). Nothing switches by itself. Asking for the mode already in force
+ * withdraws a waiting request. [REVIEW-M #2255 S4-3] So an older app that always sends "my prices include VAT" can
+ * never silently switch a store whose VAT is added to its prices: at most it files a request a person refuses.
  */
 export async function updateStoreVatSettings(
   db: PrismaClient, vendorId: string, input: StoreVatSettingsInput, env: Record<string, string | undefined> = process.env,
@@ -114,33 +129,39 @@ export async function updateStoreVatSettings(
         where: { id: vendorId },
         data: { vatStatus: 'NONE', vatMode: null, vatCertificateDocId: null, vatRegistrationNumber: null, ...CLEARED_APPROVAL },
       });
+      // [VAT-DOCS] No VAT: every price back to what the store typed, in the same transaction.
+      await reconcileVatPricing(tx, vendorId);
     });
     return storeVatView(db, vendorId, env);
   }
   refuseWhileOff(env);
   const number = input.vatRegistrationNumber === undefined ? undefined : vatNumberForWrite(input.vatRegistrationNumber);
   if (input.mode !== undefined && !STORE_VAT_MODES_OFFERED.has(input.mode)) {
-    throw new AppError(409, 'VAT_MODE_NOT_AVAILABLE',
-      input.mode === 'ADD_VAT_AT_CHECKOUT'
-        ? 'Adding VAT at checkout is not available yet. Choose "My prices already include VAT" for now, or keep VAT off.'
-        : 'Choose how your prices relate to VAT.');
+    throw new AppError(409, 'VAT_MODE_NOT_AVAILABLE', 'Choose how your prices relate to VAT.');
   }
   await db.$transaction(async (tx) => {
     const vendor = await lockVendor(tx, vendorId);
     const nextNumber = number === undefined ? vendor.vatRegistrationNumber : number;
-    const nextMode = input.mode ?? vendor.vatMode;
+    // The store's latest word: what it sent now, else a change it is still waiting on, else its mode.
+    const nextMode = input.mode ?? vendor.vatModeRequested ?? vendor.vatMode;
     if (!nextNumber) throw new AppError(400, 'VAT_NUMBER_REQUIRED', 'Type your VAT registration number exactly as it is on your GRA certificate.');
     if (!nextMode) throw new AppError(400, 'VAT_MODE_REQUIRED', 'Choose how your prices relate to VAT.');
     const keepsApproval = vendor.vatStatus === 'APPROVED' && nextNumber === vendor.vatApprovedNumber;
     const keepsPending = vendor.vatStatus === 'PENDING' && nextNumber === vendor.vatRegistrationNumber;
     await tx.vendor.update({
       where: { id: vendorId },
-      data: {
-        vatRegistrationNumber: nextNumber,
-        vatMode: nextMode as 'PRICES_INCLUDE_VAT',
-        ...(keepsApproval || keepsPending ? {} : { vatStatus: 'PENDING', ...CLEARED_APPROVAL }),
-      },
+      data: keepsApproval
+        // Approved: the mode in force never changes here. A different one waits for a person; the same one withdraws it.
+        ? { vatRegistrationNumber: nextNumber, vatModeRequested: nextMode === vendor.vatMode ? null : nextMode as StoreVatModeName }
+        : {
+          vatRegistrationNumber: nextNumber,
+          vatMode: nextMode as StoreVatModeName,
+          ...(keepsPending ? {} : { vatStatus: 'PENDING', ...CLEARED_APPROVAL }),
+        },
     });
+    // [VAT-DOCS] A store sent back to PENDING has its typed prices back until a person approves again; an approved
+    // store's prices do not move (its mode did not).
+    await reconcileVatPricing(tx, vendorId);
   });
   return storeVatView(db, vendorId, env);
 }
@@ -152,28 +173,67 @@ export async function updateStoreVatSettings(
  * keeps the status honest. No-op for a store that never claimed VAT.
  */
 export async function storeVatNumberChanged(tx: Tx, vendorId: string, number: string | null): Promise<void> {
+  // [VAT-DOCS] Serialised with every other VAT write on the store (its prices move with it).
+  const vendor = await lockVendor(tx, vendorId);
   if (number === null) {
     await tx.vendor.updateMany({
       where: { id: vendorId, vatStatus: { in: ['PENDING', 'APPROVED'] } },
       data: { vatStatus: 'NONE', vatMode: null, vatCertificateDocId: null, ...CLEARED_APPROVAL },
     });
-    return;
+  } else {
+    await tx.vendor.updateMany({
+      where: { id: vendorId, vatStatus: 'APPROVED', NOT: { vatApprovedNumber: number } },
+      // A change of price choice still waiting becomes the claim's: a person looks at both together.
+      data: { vatStatus: 'PENDING', ...CLEARED_APPROVAL, ...(vendor.vatModeRequested ? { vatMode: vendor.vatModeRequested } : {}) },
+    });
   }
-  await tx.vendor.updateMany({
-    where: { id: vendorId, vatStatus: 'APPROVED', NOT: { vatApprovedNumber: number } },
-    data: { vatStatus: 'PENDING', ...CLEARED_APPROVAL },
-  });
+  // A number no person approved never has VAT added to the store's prices.
+  await reconcileVatPricing(tx, vendorId);
+}
+
+export type StoreVatModeName = 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT';
+
+/** [VAT-DOCS · owner 30 Oct 2026] What the store sends WITH its certificate: its VAT number (as on the certificate)
+ *  and how its prices relate to VAT, so one submission carries everything a person needs to approve. */
+export interface StoreVatClaim {
+  vatRegistrationNumber?: string | null;
+  mode?: string;
+}
+
+/**
+ * The claim a certificate is filed under: the number and mode sent with it, else the ones the store already gave.
+ * Both are required: a person can approve only a store whose number AND pricing mode are known, so no approved store
+ * is ever left without a mode. Checked before the certificate is filed (nothing is stored for a refused claim) and
+ * again under the store's lock when it is linked.
+ */
+export function vatClaimForCertificate(
+  current: { vatRegistrationNumber: string | null; vatMode: string | null },
+  claim: StoreVatClaim,
+): { vatRegistrationNumber: string; vatMode: StoreVatModeName } {
+  const number = claim.vatRegistrationNumber === undefined ? current.vatRegistrationNumber : vatNumberForWrite(claim.vatRegistrationNumber);
+  const mode = claim.mode ?? current.vatMode;
+  if (claim.mode !== undefined && !STORE_VAT_MODES_OFFERED.has(claim.mode)) throw new AppError(409, 'VAT_MODE_NOT_AVAILABLE', 'Choose how your prices relate to VAT.');
+  if (!number) throw new AppError(400, 'VAT_NUMBER_REQUIRED', 'Type your VAT registration number exactly as it is on your GRA certificate.');
+  if (!mode) throw new AppError(400, 'VAT_MODE_REQUIRED', 'Choose how your prices relate to VAT.');
+  return { vatRegistrationNumber: number, vatMode: mode as StoreVatModeName };
 }
 
 /** The certificate the store just sent becomes the one its VAT decision is about; the store is PENDING again
- *  (a new certificate is a new claim, looked at by a person). */
-export async function linkVatCertificate(db: PrismaClient, vendorId: string, doc: Pick<VerificationDocument, 'id' | 'docType' | 'userId'>, env: Record<string, string | undefined> = process.env) {
+ *  (a new certificate is a new claim, looked at by a person). [VAT-DOCS] The number and mode sent with it are stored
+ *  in the same transaction (vatClaimForCertificate); until a person approves, the store's typed prices stand. */
+export async function linkVatCertificate(
+  db: PrismaClient, vendorId: string, doc: Pick<VerificationDocument, 'id' | 'docType' | 'userId'>,
+  env: Record<string, string | undefined> = process.env, claim: StoreVatClaim = {},
+) {
   refuseWhileOff(env);
   if (doc.docType !== VAT_CERTIFICATE_DOC_TYPE) throw new AppError(400, 'INVALID_DOC_TYPE', 'That is not a VAT registration certificate.');
   await db.$transaction(async (tx) => {
     const vendor = await lockVendor(tx, vendorId);
     if (vendor.owner.userId !== doc.userId) throw new AppError(403, 'FORBIDDEN', 'Only the store owner can send its VAT certificate.');
-    await tx.vendor.update({ where: { id: vendorId }, data: { vatCertificateDocId: doc.id, vatStatus: 'PENDING', ...CLEARED_APPROVAL } });
+    // A change of price choice still waiting goes into the new claim: a person looks at everything again.
+    const claimed = vatClaimForCertificate({ vatRegistrationNumber: vendor.vatRegistrationNumber, vatMode: vendor.vatModeRequested ?? vendor.vatMode }, claim);
+    await tx.vendor.update({ where: { id: vendorId }, data: { ...claimed, vatCertificateDocId: doc.id, vatStatus: 'PENDING', ...CLEARED_APPROVAL } });
+    await reconcileVatPricing(tx, vendorId);
   });
   return storeVatView(db, vendorId, env);
 }
@@ -236,6 +296,10 @@ export async function approveStoreVat(
     if (typed !== vendor.vatRegistrationNumber) {
       throw new AppError(409, 'VAT_NUMBER_MISMATCH', 'The number on the certificate is not the number the store gave. Reject it and tell the store, or ask the store to correct its number.');
     }
+    // [VAT-DOCS · owner 30 Oct 2026] Never an approved store without a pricing mode: its VAT could not be applied.
+    if (!vendor.vatMode || !STORE_VAT_MODES_OFFERED.has(vendor.vatMode)) {
+      throw new AppError(409, 'VAT_MODE_REQUIRED', 'The store has not said whether its prices include VAT. Ask the store to choose, then approve.');
+    }
     await tx.vendor.update({
       where: { id: vendorId },
       data: {
@@ -243,9 +307,11 @@ export async function approveStoreVat(
         vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: null,
       },
     });
+    // [VAT-DOCS] "Add VAT at checkout": from this commit every standard-rated price includes the VAT.
+    await reconcileVatPricing(tx, vendorId);
     await audit(tx, { vendorId, certificateDocId: input.certificateDocId, effectiveFrom: effectiveFrom.toISOString().slice(0, 10) });
     noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_approved',
-      storeVatApprovedNotice({ registeredName, number: typed, effectiveFrom })));
+      storeVatApprovedNotice({ registeredName, number: typed, effectiveFrom, mode: vendor.vatMode })));
   };
   const noticeIds: string[] = [];
 
@@ -292,6 +358,7 @@ export async function rejectStoreVat(
     const vendor = await lockVendor(tx, vendorId);
     if (vendor.vatStatus !== 'PENDING') throw new AppError(409, 'VAT_NOT_PENDING', 'This store is not waiting for a VAT decision. Reload and look again.');
     await tx.vendor.update({ where: { id: vendorId }, data: { vatStatus: 'REJECTED', ...CLEARED_APPROVAL, vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: note } });
+    await reconcileVatPricing(tx, vendorId);
     await audit(tx, { vendorId, certificateDocId: vendor.vatCertificateDocId });
     noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_rejected', storeVatRejectedNotice(note)));
   };
@@ -323,9 +390,11 @@ export async function revokeStoreVat(
   const run = async (tx: Tx) => {
     const vendor = await lockVendor(tx, vendorId);
     if (vendor.vatStatus !== 'APPROVED') throw new AppError(409, 'VAT_NOT_APPROVED', 'This store’s VAT is not approved, so there is nothing to withdraw.');
-    await tx.vendor.update({ where: { id: vendorId }, data: { vatStatus: 'REVOKED', vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: note } });
+    await tx.vendor.update({ where: { id: vendorId }, data: { vatStatus: 'REVOKED', vatModeRequested: null, vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: note } });
+    // [VAT-DOCS] Withdrawn: the store's typed prices are back for every new cart and order.
+    await reconcileVatPricing(tx, vendorId);
     await audit(tx, { vendorId });
-    noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_withdrawn', storeVatWithdrawnNotice(note)));
+    noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_withdrawn', storeVatWithdrawnNotice(note, vendor.vatMode)));
   };
   if ('$transaction' in db) await (db as PrismaClient).$transaction(async (tx) => run(tx));
   else await run(db);
@@ -344,18 +413,62 @@ export async function revokeStoreVatForCertificate(tx: Tx, docId: string, adminI
     const vendor = await lockVendor(tx, store.id);
     const withdrawn = await tx.vendor.updateMany({
       where: { id: store.id, vatStatus: 'APPROVED' },
-      data: { vatStatus: 'REVOKED', vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: `Certificate withdrawn: ${reason}` },
+      data: { vatStatus: 'REVOKED', vatModeRequested: null, vatReviewedBy: adminId, vatReviewedAt: now, vatReviewNote: `Certificate withdrawn: ${reason}` },
     });
+    await reconcileVatPricing(tx, store.id);
     // [REVIEW-F #2085 S4] The store is told in VAT words (the caller publishes after its commit).
-    if (withdrawn.count === 1) noticeIds.push(await noticeStore(tx, vendor.owner.userId, store.id, 'store_vat_withdrawn', storeVatWithdrawnNotice(reason)));
+    if (withdrawn.count === 1) noticeIds.push(await noticeStore(tx, vendor.owner.userId, store.id, 'store_vat_withdrawn', storeVatWithdrawnNotice(reason, vendor.vatMode)));
   }
   return noticeIds;
 }
 
-/** The admin queue: stores waiting for a VAT decision, oldest certificate first. */
+/**
+ * [VAT-DOCS · owner ruling 31 Oct 2026] A person decides an APPROVED store's change of price choice. `mode` is the
+ * change the person saw; it must still be the one waiting (else 409, reload). Approve: the mode changes and every price
+ * follows it in the same transaction (VAT added into, or back to as typed). Refuse (a reason the store reads): the
+ * request is cleared and nothing moves. Either way the store is told. Refused while the switch is off.
+ */
+export async function decideStoreVatModeChange(
+  db: PrismaClient, vendorId: string, adminId: string, input: { approve: boolean; mode: string; reason?: string },
+  audit: (tx: Tx, facts: Record<string, unknown>) => Promise<void>, env: Record<string, string | undefined> = process.env,
+  publish: NoticePublisher = noPublish,
+) {
+  refuseWhileOff(env);
+  const note = input.reason?.trim() ?? '';
+  if (!input.approve && note.length < 3) throw new AppError(400, 'REASON_REQUIRED', 'Say why, in words the store will read.');
+  const current = await db.vendor.findUnique({ where: { id: vendorId }, select: { owner: { select: { userId: true } } } });
+  if (!current) throw new NotFoundError('Vendor', vendorId);
+  await assertNotRecused(db, adminId, current.owner.userId);
+  const noticeIds: string[] = [];
+  await db.$transaction(async (tx) => {
+    const vendor = await lockVendor(tx, vendorId);
+    if (vendor.vatStatus !== 'APPROVED' || !vendor.vatModeRequested) {
+      throw new AppError(409, 'VAT_NO_MODE_CHANGE', 'This store is not waiting for a decision on its price choice. Reload and look again.');
+    }
+    if (vendor.vatModeRequested !== input.mode || !STORE_VAT_MODES_OFFERED.has(vendor.vatModeRequested)) {
+      throw new AppError(409, 'VAT_MODE_CHANGE_MOVED', 'The store changed its request since you opened it. Reload and look again.');
+    }
+    const facts = { vendorId, from: vendor.vatMode, to: vendor.vatModeRequested };
+    if (input.approve) {
+      await tx.vendor.update({ where: { id: vendorId }, data: { vatMode: vendor.vatModeRequested, vatModeRequested: null } });
+      await reconcileVatPricing(tx, vendorId);
+      await audit(tx, facts);
+      noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_mode_approved', storeVatModeChangeApprovedNotice(vendor.vatModeRequested)));
+    } else {
+      await tx.vendor.update({ where: { id: vendorId }, data: { vatModeRequested: null } });
+      await audit(tx, { ...facts, reason: note });
+      noticeIds.push(await noticeStore(tx, vendor.owner.userId, vendorId, 'store_vat_mode_rejected', storeVatModeChangeRejectedNotice(note)));
+    }
+  });
+  await publishAll(publish, noticeIds);
+  return storeVatView(db, vendorId, env);
+}
+
+/** The admin queue: stores waiting for a VAT decision (a claim, or an approved store's change of price choice),
+ *  oldest certificate first. */
 export async function pendingStoreVat(db: Db, take = 50) {
   const stores = await db.vendor.findMany({
-    where: { vatStatus: 'PENDING' },
+    where: STORE_VAT_WAITING_WHERE,
     select: { ...STORE_VAT_SELECT, owner: { select: { userId: true } } },
     take,
   });
@@ -365,6 +478,11 @@ export async function pendingStoreVat(db: Db, take = 50) {
     : [];
   const byId = new Map(docs.map((d) => [d.id, d]));
   return stores
-    .map((s) => ({ vendorId: s.id, name: s.name, vatRegistrationNumber: s.vatRegistrationNumber, mode: s.vatMode, certificate: s.vatCertificateDocId ? byId.get(s.vatCertificateDocId) ?? null : null }))
+    .map((s) => ({
+      vendorId: s.id, name: s.name, vatRegistrationNumber: s.vatRegistrationNumber, status: s.vatStatus, mode: s.vatMode,
+      // [owner ruling 31 Oct 2026] Set: an APPROVED store asks to change its price choice (decideStoreVatModeChange).
+      modeRequested: s.vatStatus === 'APPROVED' ? s.vatModeRequested : null,
+      certificate: s.vatCertificateDocId ? byId.get(s.vatCertificateDocId) ?? null : null,
+    }))
     .sort((a, b) => (a.certificate?.createdAt?.getTime() ?? Infinity) - (b.certificate?.createdAt?.getTime() ?? Infinity));
 }

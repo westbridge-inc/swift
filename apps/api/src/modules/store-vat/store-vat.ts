@@ -8,7 +8,8 @@
  *     store-typed number never drives VAT: a PERSON checks the certificate, types the number from it and
  *     confirms the name, and only that approval (store-vat-decisions.ts) makes the store APPROVED;
  *   - a price a registered store advertises must include the VAT and say so (s.90(2)); so VAT is always inside
- *     the price customers see, and Swift never adds VAT on top of a total;
+ *     the price customers see, and Swift never adds VAT on top of a total (a store whose typed prices exclude VAT
+ *     has the VAT added INTO each price, vat-pricing.ts);
  *   - only the registered supplier issues a tax invoice, one per supply (s.28(3)-(4), an offence otherwise,
  *     s.67(4)); so Swift's order receipt is never a tax invoice and never says it is one (order/receipt.ts).
  *
@@ -41,6 +42,8 @@ export const STORE_VAT_SELECT = {
   vatRegistrationNumber: true,
   vatStatus: true,
   vatMode: true,
+  // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice, waiting for a person.
+  vatModeRequested: true,
   vatCertificateDocId: true,
   vatApprovedNumber: true,
   vatApprovedName: true,
@@ -49,6 +52,12 @@ export const STORE_VAT_SELECT = {
   vatReviewedAt: true,
   vatReviewNote: true,
 } as const;
+
+/** [VAT-DOCS · owner ruling 31 Oct 2026] The stores a person has to look at: a VAT claim waiting, or an approved store's
+ *  change of price choice waiting. The admin queue and the dashboard count read this one filter. */
+export const STORE_VAT_WAITING_WHERE = {
+  OR: [{ vatStatus: 'PENDING' as const }, { vatStatus: 'APPROVED' as const, vatModeRequested: { not: null } }],
+};
 
 export interface StoreVatRow {
   vatRegistrationNumber: string | null;
@@ -59,9 +68,10 @@ export interface StoreVatRow {
   vatEffectiveFrom?: Date | null;
 }
 
-/** The modes a store may choose TODAY. ADD_VAT_AT_CHECKOUT (the server adds 14% into the shown price) is refused
- *  until the follow-up server change ships it. */
-export const STORE_VAT_MODES_OFFERED: ReadonlySet<string> = new Set(['PRICES_INCLUDE_VAT']);
+/** The modes a store may choose. PRICES_INCLUDE_VAT: its typed prices already include VAT. ADD_VAT_AT_CHECKOUT
+ *  [VAT-DOCS · owner 30 Oct 2026]: its typed prices exclude VAT and the server adds 14% INTO the price customers see
+ *  and pay while the approval stands (vat-pricing.ts), so the customer sees the full price before ordering. */
+export const STORE_VAT_MODES_OFFERED: ReadonlySet<string> = new Set(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']);
 
 /**
  * THE predicate: does this store's next order carry VAT? Every reader (checkout, cart quote, storefront) asks

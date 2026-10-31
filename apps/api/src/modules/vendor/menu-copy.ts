@@ -5,6 +5,7 @@ import { sniffImageType } from '../../utils/images';
 import { isStorePhotoKey, parsePublicPhotoKey } from '../../utils/public-photo-deletion';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
 import { catalogueChecksFor } from '../compliance/prohibited-gate';
+import { reconcileVatPricing } from '../store-vat/vat-pricing';
 
 // ---------------------------------------------------------------------------
 // [CHAINS PR2 · owner 29 Oct 2026] "Copy the menu from another branch" and "export the menu".
@@ -53,7 +54,7 @@ const sourceMenuSelect = {
     where: { archivedAt: null },
     orderBy: { sortOrder: 'asc' },
     select: {
-      id: true, name: true, description: true, imageUrl: true, basePrice: true, fulfillment: true, bookingConfig: true,
+      id: true, name: true, description: true, imageUrl: true, basePrice: true, vatListedPrice: true, fulfillment: true, bookingConfig: true,
       isAvailable: true, autoHiddenAt: true, tillOffAt: true,
       isPopular: true, sku: true, barcode: true, unit: true, bulkUnits: true, substitutionGroup: true,
       dietaryTags: true, allergens: true, sortOrder: true, vatClass: true,
@@ -61,7 +62,7 @@ const sourceMenuSelect = {
         orderBy: { sortOrder: 'asc' },
         select: {
           name: true, isRequired: true, minSelect: true, maxSelect: true, sortOrder: true,
-          options: { orderBy: { sortOrder: 'asc' }, select: { name: true, additionalPrice: true, isDefault: true, isAvailable: true, sortOrder: true } },
+          options: { orderBy: { sortOrder: 'asc' }, select: { name: true, additionalPrice: true, vatListedAdditionalPrice: true, isDefault: true, isAvailable: true, sortOrder: true } },
         },
       },
     },
@@ -176,7 +177,9 @@ export async function writeMenuCopy(
       await tx.item.create({ data: {
         vendorId: input.targetId, categoryId: category.id,
         name: item.name, description: item.description, imageUrl: photo(item.imageUrl),
-        basePrice: item.basePrice, fulfillment: item.fulfillment,
+        // [VAT-DOCS] The price the other branch's store TYPED (before VAT while its VAT is added): this branch's own VAT
+        // decides whether VAT is added to it (reconciled below).
+        basePrice: item.vatListedPrice ?? item.basePrice, fulfillment: item.fulfillment,
         ...(item.bookingConfig !== null ? { bookingConfig: item.bookingConfig as Prisma.InputJsonValue } : {}),
         // Hidden by the other branch's stock count or its till (not the store's own switch): this branch has its own.
         isAvailable: item.isAvailable || item.autoHiddenAt !== null || item.tillOffAt !== null, isPopular: item.isPopular, sku: item.sku, barcode: item.barcode, unit: item.unit,
@@ -186,7 +189,7 @@ export async function writeMenuCopy(
           create: item.optionGroups.map((g) => ({
             name: g.name, isRequired: g.isRequired, minSelect: g.minSelect, maxSelect: g.maxSelect, sortOrder: g.sortOrder,
             options: { create: g.options.map((o) => ({
-              name: o.name, additionalPrice: o.additionalPrice, isDefault: o.isDefault, isAvailable: o.isAvailable, sortOrder: o.sortOrder,
+              name: o.name, additionalPrice: o.vatListedAdditionalPrice ?? o.additionalPrice, isDefault: o.isDefault, isAvailable: o.isAvailable, sortOrder: o.sortOrder,
             })) },
           })),
         } : undefined,
@@ -195,6 +198,7 @@ export async function writeMenuCopy(
       options += item.optionGroups.reduce((n, g) => n + g.options.length, 0);
     }
   }
+  await reconcileVatPricing(tx, input.targetId);
   return { categories, items, options, photos };
 }
 
@@ -211,9 +215,10 @@ export function assertCopyable(menu: SourceMenu): void {
 
 const EXPORT_HEADER = ['category', 'name', 'description', 'basePrice', 'sku', 'unit', 'stockQuantity', 'isAvailable', 'fulfillment', 'options'];
 
-/** "Size: Small (+0.00), Large (+500.00) | Sauce: ..." — one cell; prices as the database's Decimal text. */
+/** "Size: Small (+0.00), Large (+500.00) | Sauce: ..." — one cell; prices as the database's Decimal text.
+ *  [VAT-DOCS] The prices the store typed (before VAT while its VAT is added), so the file imports back unchanged. */
 function optionsCell(groups: SourceMenu[number]['items'][number]['optionGroups']): string {
-  return groups.map((g) => `${g.name}: ${g.options.map((o) => `${o.name} (+${o.additionalPrice.toFixed(2)})`).join(', ')}`).join(' | ');
+  return groups.map((g) => `${g.name}: ${g.options.map((o) => `${o.name} (+${(o.vatListedAdditionalPrice ?? o.additionalPrice).toFixed(2)})`).join(', ')}`).join(' | ');
 }
 
 /** The store's live menu as CSV (the import template's columns, then the options), formula-safe. */
@@ -228,7 +233,7 @@ export async function menuExportCsv(db: Db, vendorId: string): Promise<string> {
     for (const item of section.items) {
       const count = counts.get(item.id);
       lines.push([
-        csvTextCell(section.name), csvTextCell(item.name), csvTextCell(item.description ?? ''), item.basePrice.toFixed(2),
+        csvTextCell(section.name), csvTextCell(item.name), csvTextCell(item.description ?? ''), (item.vatListedPrice ?? item.basePrice).toFixed(2),
         csvTextCell(item.sku ?? ''), csvTextCell(item.unit ?? ''), count === null || count === undefined ? '' : String(count),
         item.isAvailable ? 'true' : 'false', item.fulfillment, csvTextCell(optionsCell(item.optionGroups)),
       ].join(','));
