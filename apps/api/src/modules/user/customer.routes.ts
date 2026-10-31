@@ -3259,7 +3259,7 @@ export async function customerRoutes(app: FastifyInstance) {
         id: true, status: true, fulfillment: true, riderId: true, vendorId: true,
         deliveryFee: true, tipAmount: true, totalAmount: true, orderNumber: true,
         paymentMethod: true, paymentStatus: true,
-        vendor: { select: { name: true, ownerId: true } },
+        vendor: { select: { name: true, ownerId: true, requirePickupCode: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -3364,7 +3364,10 @@ export async function customerRoutes(app: FastifyInstance) {
       })
       .catch(() => {});
 
-    // Both sides hear it now.
+    // Both sides hear it now. [PICKUP · owner 30 Oct 2026 · REVIEW-F S3-1 on #2251] The words promise a code
+    // only when the store asks for one; off (the default) the counter checks the first name and order number
+    // (worded so it reads true on every store build: no button name).
+    const storeAsksForCode = order.vendor?.requirePickupCode === true;
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: statusAtConvert, fulfillment: 'PICKUP',
     });
@@ -3375,7 +3378,9 @@ export async function customerRoutes(app: FastifyInstance) {
           userId: owner.userId,
           type: 'ORDER_UPDATE',
           title: 'Order switched to pickup',
-          body: `#${order.orderNumber}: no rider is coming — the customer collects it with a pickup code.`,
+          body: storeAsksForCode
+            ? `#${order.orderNumber}: no rider is coming — the customer collects it with a pickup code.`
+            : `#${order.orderNumber}: no rider is coming — the customer collects it. Check their first name and order number before you hand it over.`,
           audience: 'business',
           data: { orderId: order.id, kind: 'converted_to_pickup' },
         });
@@ -3385,7 +3390,9 @@ export async function customerRoutes(app: FastifyInstance) {
       userId,
       type: 'ORDER_UPDATE',
       title: 'Switched to pickup',
-      body: `Show ${order.vendor?.name ?? 'the store'} your pickup code when you arrive.`,
+      body: storeAsksForCode
+        ? `Show ${order.vendor?.name ?? 'the store'} your pickup code when you arrive.`
+        : `Give ${order.vendor?.name ?? 'the store'} your first name and order number when you arrive.`,
       // [NOC-A F48] The pickup code is a handover SECRET — the same class the
       // verifier is never allowed to read (HND-003). A push payload transits
       // Google/Apple and is then persisted in notifications.data for 180 days,
