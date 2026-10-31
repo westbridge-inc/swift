@@ -66,6 +66,14 @@ export function proFeeTickRunningLine(view: ProFeeView | null | undefined): stri
   return PRO_FEE_RUNNING_TICK_LINE;
 }
 
+/** [REVIEW-F #2240 S4-1] A running fee asked to re-tick (FEE_TERMS): the server unlists the pro until they tick
+ *  (pro-fee.ts proFeeStanding), so say it plainly. Under AGREEMENT the agreement card says it. */
+export const PRO_FEE_RUNNING_UNLISTED_LINE = 'Until you tick it, you are not listed: customers can\u2019t book you or ask you for a quote. Jobs already booked still go ahead.';
+export function proFeeRunningUnlistedLine(view: ProFeeView | null | undefined): string | null {
+  if (!proFeeTickRunningLine(view) || !view?.standing?.required || view.standing.operable || view.standing.why !== 'FEE_TERMS') return null;
+  return PRO_FEE_RUNNING_UNLISTED_LINE;
+}
+
 /** [REVIEW-F #2231 S4] The tick is asked but the Business Agreement is not accepted yet (the server's standing says
  *  AGREEMENT): the page says the agreement comes first, with the Review button, next to the tick. */
 export function proFeeAgreementFirst(view: ProFeeView | null | undefined): { title: string; body: string } | null {
