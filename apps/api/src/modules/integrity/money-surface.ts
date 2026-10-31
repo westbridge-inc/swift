@@ -37,6 +37,17 @@ export type LinkActor = 'VENDOR' | 'DRIVER';
 export type LinkSignal = 'NEW_DEVICE' | 'NEW_IP';
 export const ALGO_ID = 'ALG-34';
 export const DEFAULT_LINK_COOLOFF_HOURS = 24;
+/**
+ * [owner 30 Oct 2026 via COORD · "do what's best for MMG"] A store's FIRST-EVER MMG number goes live after this
+ * many hours instead of the configured cool-off. First ever = the very first number stage on record: no live
+ * number, none pending, and NO earlier number command of any kind (a stage in any state — waiting, live,
+ * replaced, cancelled or removed — an application, a removal or a cancel). A change, a number added again after
+ * one was removed, or one staged again after a cancel or a removal keeps the full cool-off: a removal or a cancel
+ * can never turn a full hold into the short one (whoever does either holds the owner's signed-in session). The ruling names the number only: an MMG pay link (store or
+ * driver) keeps the full cool-off even the first time. Everything else (step-up, signals, decision, command,
+ * owner notice, one-tap cancel) is exactly as for a change.
+ */
+export const FIRST_DESTINATION_HOLD_HOURS = 1;
 /** How long an executor's lease on a due command lasts before another executor may take it. */
 export const APPLY_LEASE_MS = 60_000;
 
@@ -235,6 +246,43 @@ async function supersedeOpenStage(tx: Tx, entityId: string, spec: FieldSpec = FI
   await tx.moneySurfaceCommand.updateMany({ where: { entityId, kind: spec.stage, state: 'DECIDED' }, data: { state: 'SUPERSEDED' } });
 }
 
+/** Has this field any command on record for this entity — a stage in any state, an application, a removal or a
+ *  cancel? Any of them means this is not the first number: a removal of a waiting value (even one staged before
+ *  the command history existed) and a cancel both leave their command, so neither can reset the hold. */
+async function hasFieldHistory(db: Tx | PrismaClient, entityId: string, spec: FieldSpec): Promise<boolean> {
+  const seen = await db.moneySurfaceCommand.findFirst({
+    where: { entityId, kind: { in: [spec.stage, spec.apply, spec.clear, spec.cancel] } },
+    select: { id: true },
+  });
+  return seen != null;
+}
+
+/** How long a value staged now would wait: the short first-number hold (MMG number only), or the configured cool-off. */
+async function holdFor(
+  db: Tx | PrismaClient, entityId: string, spec: FieldSpec, current: { live: string | null; pending: string | null }, cooloffHours: number,
+): Promise<{ hours: number; first: boolean }> {
+  const first = spec.key === 'mmg_number' && current.live == null && current.pending == null && !(await hasFieldHistory(db, entityId, spec));
+  return { hours: first ? Math.min(FIRST_DESTINATION_HOLD_HOURS, cooloffHours) : cooloffHours, first };
+}
+
+async function configuredCooloff(prisma: PrismaClient): Promise<{ hours: number; version: number }> {
+  const cfg = await algoConfig(prisma, 'money.linkCooloffHours');
+  return { hours: Math.min(72, Math.max(1, Number(cfg.value) || DEFAULT_LINK_COOLOFF_HOURS)), version: cfg.version };
+}
+
+/** [owner 30 Oct 2026] What the owner's screen says before they save: how many hours a value set NOW would wait
+ *  (the same rule stageMmgLinkChange applies). Read-only; null when the entity is not found. */
+export async function nextMoneySurfaceHoldHours(prisma: PrismaClient, actor: LinkActor, entityId: string, field: MoneySurfaceField = 'LINK'): Promise<number | null> {
+  const spec = FIELDS[field];
+  const row = actor === 'VENDOR'
+    ? await prisma.vendor.findUnique({ where: { id: entityId }, select: { [spec.live]: true, [spec.pending]: true } as Prisma.VendorSelect })
+    : await prisma.driver.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true } });
+  if (!row) return null;
+  const values = row as Record<string, string | null>;
+  const { hours } = await configuredCooloff(prisma);
+  return (await holdFor(prisma, entityId, spec, { live: values[spec.live] ?? null, pending: values[spec.pending] ?? null }, hours)).hours;
+}
+
 interface CommandDraft {
   actor: LinkActor; entityId: string; userId: string; kind: CommandKind; state: CommandState;
   oldDigest: string; newDigest: string; decisionId: string; stepUpSessionId?: string | null; signals?: LinkSignal[];
@@ -335,11 +383,14 @@ export interface StageInput {
 }
 
 /** What the owner is told, per field: the same three moments, in the field's own words. */
-function stagedNotice(spec: FieldSpec, actor: LinkActor, entityId: string, applyAt: Date): OwnerNotice {
+function stagedNotice(spec: FieldSpec, actor: LinkActor, entityId: string, applyAt: Date, hasLive: boolean): OwnerNotice {
   if (spec.key === 'mmg_number') {
     return {
       title: 'Your MMG number is changing',
-      body: `The new number takes effect ${whenSentence(applyAt)}. Until then customers pay your current number. If this wasn’t you, open Account and cancel it now — that also signs out every other device.`,
+      // [owner 30 Oct 2026] With no live number there is no "current number" to keep paying: say what is true.
+      body: hasLive
+        ? `The new number takes effect ${whenSentence(applyAt)}. Until then customers pay your current number. If this wasn’t you, open Account and cancel it now — that also signs out every other device.`
+        : `Your MMG number takes effect ${whenSentence(applyAt)}. Until then customers cannot choose MMG for your store. If this wasn’t you, open Account and cancel it now — that also signs out every other device.`,
       kind: 'mmg_number_change_staged',
       sms: `Swift: the MMG number on your store account changes ${whenSentence(applyAt)}. If this wasn't you, open Swift > Account and cancel it now.`,
       dedupeKey: `mmg-number-staged:${entityId}:${applyAt.toISOString()}`,
@@ -365,12 +416,10 @@ export async function stageMmgLinkChange(deps: MoneySurfaceDeps, input: StageInp
     try { ok = !!input.sessionId && (await hasStepUp(deps.redis, input.sessionId)); } catch { moneySurfaceCounter.labels('refused_control_unavailable').inc(); throw new AppError(503, 'CONTROL_UNAVAILABLE', spec.key === 'mmg_link' ? 'The step-up check is unavailable right now; the pay link was not changed.' : `The step-up check is unavailable right now; the ${spec.noun} was not changed.`); }
     if (!ok) { moneySurfaceCounter.labels('refused_step_up').inc(); throw new AppError(403, 'STEP_UP_REQUIRED', 'Confirm it’s you first — we’ll text a code to the phone on this account.'); }
   }
-  const cfg = await algoConfig(deps.prisma, 'money.linkCooloffHours');
-  const cooloffHours = Math.min(72, Math.max(1, Number(cfg.value) || DEFAULT_LINK_COOLOFF_HOURS));
-  const applyAt = new Date(now.getTime() + cooloffHours * 3_600_000);
+  const cfg = await configuredCooloff(deps.prisma);
+  const cooloffHours = cfg.hours;
   const sig = await sessionSignals(deps.prisma, input.userId, input.sessionId);
   const newDigest = digestOf(newValue);
-  const notice = stagedNotice(spec, input.actor, input.entityId, applyAt);
   const result = await deps.prisma.$transaction(async (tx) => {
     await lockEntity(tx, input.entityId);
     const current = await readLink(tx, input.actor, input.entityId, 'refuse', input.field ?? 'LINK');
@@ -379,8 +428,12 @@ export async function stageMmgLinkChange(deps: MoneySurfaceDeps, input: StageInp
     // replay convergence: the same change staged again is the same command, not a second one
     if (open && open.newDigest === newDigest && open.applyAt) {
       moneySurfaceCounter.labels('stage_replay').inc();
-      return { command: open, replay: true, applyAt: open.applyAt };
+      return { command: open, replay: true, applyAt: open.applyAt, holdHours: Math.max(1, Math.round((open.applyAt.getTime() - open.createdAt.getTime()) / 3_600_000)) };
     }
+    // Read under the entity lock, before this stage supersedes anything: the pending value is still on the row.
+    const hold = await holdFor(tx, input.entityId, spec, current, cooloffHours);
+    const applyAt = new Date(now.getTime() + hold.hours * 3_600_000);
+    const notice = stagedNotice(spec, input.actor, input.entityId, applyAt, current.live != null);
     if (open) await supersedeOpenStage(tx, input.entityId, spec);
     const generation = await nextGeneration(tx, input.entityId);
     await writeLink(tx, input.actor, input.entityId, spec, { live: current.live }, { [spec.pending]: newValue, [spec.pendingAt]: now, [spec.applyAt]: applyAt });
@@ -388,14 +441,18 @@ export async function stageMmgLinkChange(deps: MoneySurfaceDeps, input: StageInp
     const decisionId = await decide(tx, {
       algo: ALGO_ID, subjectType: input.actor, subjectId: input.entityId, outcome: 'STAGED',
       sentence: spec.key === 'mmg_number'
-        ? `MMG number change staged ${fromClause(sig.signals)}; the old number stays live until ${whenSentence(applyAt)} unless the owner cancels.`
-        : `MMG pay link change staged ${fromClause(sig.signals)}; the old link stays live until ${whenSentence(applyAt)} unless the owner cancels.`,
+        ? (current.live != null
+          ? `MMG number change staged ${fromClause(sig.signals)}; the old number stays live until ${whenSentence(applyAt)} unless the owner cancels.`
+          : `MMG number staged ${fromClause(sig.signals)}${hold.first ? ' (the store\u2019s first)' : ''}; no number is live until ${whenSentence(applyAt)}, and it goes live then unless the owner cancels.`)
+        : (current.live != null
+          ? `MMG pay link change staged ${fromClause(sig.signals)}; the old link stays live until ${whenSentence(applyAt)} unless the owner cancels.`
+          : `MMG pay link staged ${fromClause(sig.signals)}; no link is live until ${whenSentence(applyAt)}, and it goes live then unless the owner cancels.`),
       // The number itself never enters the decision record: its digest is on the command.
       inputs: spec.key === 'mmg_number'
-        ? { field: 'NUMBER', signals: sig.signals, sessionAgeMin: sig.sessionAgeMin, deviceId: sig.deviceId, hadNumber: current.live != null, cooloffHours, applyAt: applyAt.toISOString(), generation }
+        ? { field: 'NUMBER', signals: sig.signals, sessionAgeMin: sig.sessionAgeMin, deviceId: sig.deviceId, hadNumber: current.live != null, firstDestination: hold.first, holdHours: hold.hours, cooloffHours, applyAt: applyAt.toISOString(), generation }
         : {
             signals: sig.signals, sessionAgeMin: sig.sessionAgeMin, deviceId: sig.deviceId,
-            hadLink: current.live != null, newHost: hostOf(newValue), cooloffHours, applyAt: applyAt.toISOString(), generation,
+            hadLink: current.live != null, firstDestination: hold.first, holdHours: hold.hours, newHost: hostOf(newValue), cooloffHours, applyAt: applyAt.toISOString(), generation,
           },
       configVersion: cfg.version,
     });
@@ -405,12 +462,13 @@ export async function stageMmgLinkChange(deps: MoneySurfaceDeps, input: StageInp
       oldDigest: digestOf(current.live), newDigest, decisionId, stepUpSessionId: input.sessionId, signals: sig.signals, applyAt, notice,
     });
     await deps.failpoint?.('tx:after-command');
-    return { command, replay: false, applyAt };
+    return { command, replay: false, applyAt, holdHours: hold.hours };
   });
   moneySurfaceCounter.labels(result.replay ? 'stage_replay' : 'staged').inc();
   await deps.failpoint?.('after-commit');
   if (!result.replay) await deliverCommandNotice(deps, result.command);
-  return { applyAt: result.applyAt, cooloffHours, signals: sig.signals, commandId: result.command.id, replay: result.replay };
+  // cooloffHours is the hold THIS stage got: the first-destination hour or the configured cool-off.
+  return { applyAt: result.applyAt, cooloffHours: result.holdHours, signals: sig.signals, commandId: result.command.id, replay: result.replay };
 }
 
 export async function cancelMmgLinkChange(
@@ -465,7 +523,7 @@ export async function cancelMmgLinkChange(
 
 export async function clearMmgLink(deps: MoneySurfaceDeps, input: { actor: LinkActor; entityId: string; userId?: string; field?: MoneySurfaceField }): Promise<void> {
   const spec = FIELDS[input.field ?? 'LINK'];
-  await deps.prisma.$transaction(async (tx) => {
+  const cleared = await deps.prisma.$transaction(async (tx) => {
     await lockEntity(tx, input.entityId);
     const current = await readLink(tx, input.actor, input.entityId, 'refuse', input.field ?? 'LINK');
     await deps.failpoint?.('tx:after-read');
@@ -481,13 +539,26 @@ export async function clearMmgLink(deps: MoneySurfaceDeps, input: { actor: LinkA
       inputs: spec.key === 'mmg_number' ? { field: 'NUMBER', generation } : { generation },
     });
     await deps.failpoint?.('tx:after-decision');
-    await writeCommand(tx, generation, {
+    // [first-number rule hardened · 30 Oct 2026] Removing a number that was WAITING to go live tells the owner (app +
+    // text), from the same outbox as every other money-surface notice: a removal they did not make is seen.
+    const notice: OwnerNotice | null = spec.key === 'mmg_number' && current.pending != null
+      ? {
+          title: 'Your new MMG number was removed',
+          body: 'The MMG number that was waiting to go live was removed, so it will not go live. Customers cannot choose MMG for your store until a new number clears its hold. If this wasn’t you, contact Swift support right away.',
+          kind: 'mmg_number_pending_removed',
+          sms: "Swift: the MMG number waiting to go live on your store account was removed. If this wasn't you, contact Swift support right away.",
+          dedupeKey: `mmg-number-pending-removed:${input.entityId}:${generation}`,
+        }
+      : null;
+    const command = await writeCommand(tx, generation, {
       actor: input.actor, entityId: input.entityId, userId: input.userId ?? current.userId, kind: spec.clear, state: 'APPLIED',
-      oldDigest: digestOf(current.live), newDigest: 'none', decisionId,
+      oldDigest: digestOf(current.live), newDigest: 'none', decisionId, notice,
     });
     await deps.failpoint?.('tx:after-command');
+    return command;
   });
   moneySurfaceCounter.labels('cleared').inc();
+  await deliverCommandNotice(deps, cleared);
 }
 
 /**

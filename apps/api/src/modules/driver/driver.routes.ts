@@ -17,6 +17,7 @@ import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
 import { z } from '../../lib/zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { earningsWindow } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -71,7 +72,7 @@ import {
 import { assertDriverMmgPayLinkWritable, driverMmgPayLinkEnabled, mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { assertVelocity } from '../integrity/velocity';
-import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
+import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink, nextMoneySurfaceHoldHours } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES, TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
@@ -151,6 +152,12 @@ function driverLinkView(link: { mmgPayUrl: string | null; mmgPayUrlPending: stri
   };
 }
 
+/** [owner 30 Oct 2026] How many hours a pay link set NOW would wait: the configured cool-off (the 1-hour first
+ *  hold is for a store's MMG number only; money-surface.ts). Null while the driver pay link is switched off. */
+async function driverLinkHold(prisma: PrismaClient, driverId: string): Promise<{ mmgPayUrlHoldHours: number | null }> {
+  return { mmgPayUrlHoldHours: driverMmgPayLinkEnabled() ? await nextMoneySurfaceHoldHours(prisma, 'DRIVER', driverId, 'LINK') : null };
+}
+
 /** §6.3 `stopWait` on the wire: ISO times, or null. */
 function stopWaitView(wait: TaxiStopWait | null) {
   return wait ? { sequence: wait.sequence, arrivedAt: wait.arrivedAt.toISOString(), noShowAvailableAt: wait.noShowAvailableAt.toISOString() } : null;
@@ -225,7 +232,7 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
-      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver) } : driver,
+      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver), ...(await driverLinkHold(app.prisma, driver.id)) } : driver,
     };
   });
 
@@ -325,7 +332,7 @@ export async function driverRoutes(app: FastifyInstance) {
       : await app.prisma.driver.findUniqueOrThrow({ where: { id: me.id }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true } });
     return {
       success: true,
-      data: { ...driver, ...driverLinkView(link), ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)) },
+      data: { ...driver, ...driverLinkView(link), ...(await driverLinkHold(app.prisma, me.id)), ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)) },
     };
   });
 
