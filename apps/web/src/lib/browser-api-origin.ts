@@ -18,7 +18,11 @@ import { SITE_DOMAIN } from '../site.domain';
  *   than a second hardcoded hostname; [Q11] a build that also declares the
  *   staging channel requires the staging origin, `https://api-staging.<site
  *   domain>`, instead, and nothing else;
- * - the CSP's connect-src names that one origin, never a scheme wildcard.
+ * - [OPEN-EARLY] the public site goes live before the release API name moves to
+ *   production, so the production channel also accepts ONE pre-launch name,
+ *   `https://api-live.<site domain>`. Exactly these two; anything else throws;
+ * - the CSP's connect-src names the one origin the build resolved, never a
+ *   scheme wildcard and never both production names.
  *
  * The Codex candidate this integrates pinned the release origin to a literal
  * hostname under a different domain than the site's own domain file names,
@@ -33,6 +37,15 @@ export const RELEASE_BROWSER_API_ORIGIN = `https://api.${SITE_DOMAIN}` as const;
  * same domain file, and the host the mobile staging builds use (eas.json).
  */
 export const STAGING_BROWSER_API_ORIGIN = `https://api-staging.${SITE_DOMAIN}` as const;
+/**
+ * [OPEN-EARLY] The production API's name until launch day. The release name
+ * keeps pointing where the app review points until then, so the production
+ * website is built against this name instead (the deploy passes
+ * `https://${API_HOST}`). On launch day the release name is added to the same
+ * server as a second name; the website keeps calling this one, so nobody is
+ * signed out. Derived from the same domain file.
+ */
+export const PRELAUNCH_BROWSER_API_ORIGIN = `https://api-live.${SITE_DOMAIN}` as const;
 
 export type BrowserApiMode = 'development' | 'production';
 
@@ -46,10 +59,19 @@ export type BrowserApiMode = 'development' | 'production';
  */
 export type ReleaseChannel = 'production' | 'staging';
 
-const RELEASE_CHANNEL_ORIGIN: Record<ReleaseChannel, string> = {
-  production: RELEASE_BROWSER_API_ORIGIN,
-  staging: STAGING_BROWSER_API_ORIGIN,
+/**
+ * The origins each channel accepts, the canonical one first. [OPEN-EARLY] The
+ * production channel accepts exactly two: the release origin and the pre-launch
+ * origin. Staging accepts exactly one.
+ */
+const RELEASE_CHANNEL_ORIGINS: Record<ReleaseChannel, readonly string[]> = {
+  production: [RELEASE_BROWSER_API_ORIGIN, PRELAUNCH_BROWSER_API_ORIGIN],
+  staging: [STAGING_BROWSER_API_ORIGIN],
 };
+
+function allowedOrigins(mode: BrowserApiMode, channel: ReleaseChannel): readonly string[] {
+  return mode === 'production' ? RELEASE_CHANNEL_ORIGINS[channel] : [DEVELOPMENT_BROWSER_API_ORIGIN];
+}
 
 export function resolveReleaseChannel(value: string | undefined): ReleaseChannel {
   if (value === undefined || value === '' || value === 'production') return 'production';
@@ -106,33 +128,43 @@ export function resolveBrowserApiOrigin(
   if (mode === 'development' && configuredOrigin === undefined) {
     return DEVELOPMENT_BROWSER_API_ORIGIN;
   }
-  const expected = mode === 'production'
-    ? RELEASE_CHANNEL_ORIGIN[channel]
-    : DEVELOPMENT_BROWSER_API_ORIGIN;
+  const allowed = allowedOrigins(mode, channel);
+  const expected = allowed.join(' or ');
   if (configuredOrigin === undefined) {
     throw new Error(`NEXT_PUBLIC_API_URL is required for a production web build (expected ${expected})`);
   }
   assertOriginOnly(configuredOrigin);
-  if (configuredOrigin !== expected) {
+  const match = allowed.find((origin) => origin === configuredOrigin);
+  if (match === undefined) {
     throw new Error(`NEXT_PUBLIC_API_URL must be exactly ${expected} in ${mode === 'production' ? channel : mode}`);
   }
-  return expected;
+  return match;
 }
 
+/**
+ * [OPEN-EARLY] `apiOrigin` is the origin the build RESOLVED (next.config passes
+ * it), so the policy names exactly the API the build calls. It must be one the
+ * mode and channel allow, or this throws: the policy can never name a stray
+ * host. Left out, it is the channel's canonical origin, as before.
+ */
 export function buildBrowserContentSecurityPolicy(
   mode: BrowserApiMode,
   channel: ReleaseChannel = 'production',
-  options: { cardFrame?: boolean } = {},
+  options: { cardFrame?: boolean; apiOrigin?: string } = {},
 ): string {
-  const releaseOrigin = RELEASE_CHANNEL_ORIGIN[channel];
+  const allowed = allowedOrigins(mode, channel);
+  const apiOrigin = options.apiOrigin ?? allowed[0]!;
+  if (!allowed.includes(apiOrigin)) {
+    throw new Error(`The CSP API origin must be exactly ${allowed.join(' or ')} in ${mode === 'production' ? channel : mode}`);
+  }
   // [CARD embed] Only when the build turns the embedded card page on: the weekly-fee page
   // may frame ONE origin besides itself, the API's (the card page is Swift's own API page,
   // which frames the bank's form under its own policy). Off, the policy is unchanged.
   const frameSources = options.cardFrame
-    ? [`frame-src 'self' ${mode === 'production' ? releaseOrigin : DEVELOPMENT_BROWSER_API_ORIGIN}`]
+    ? [`frame-src 'self' ${apiOrigin}`]
     : [];
   const connectSources = mode === 'production'
-    ? ["'self'", releaseOrigin, releaseOrigin.replace('https://', 'wss://')]
+    ? ["'self'", apiOrigin, apiOrigin.replace('https://', 'wss://')]
     : ["'self'", DEVELOPMENT_BROWSER_API_ORIGIN, 'ws://localhost:3000', 'ws://localhost:3002'];
   // [W-42] The legal pages inject document HTML. Nothing a script can reach
   // survives the legal grammar (src/legal/legal-html.ts), and the CSP shrinks
