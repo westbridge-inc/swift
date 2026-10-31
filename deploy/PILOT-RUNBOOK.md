@@ -1246,9 +1246,12 @@ checkout moves to the requested SHA; everything else before that):
 - a test-environment name (a label that is or starts uat, test, sandbox, dev,
   qa or demo) anywhere a staging name is refused;
 - API_PUBLIC_URL other than `https://<API_HOST>` (storage links and card
-  return pages are built from it); an APP_PUBLIC_URL that is not the public
-  website's `https://` origin (every printed QR code and trip-share link
-  names it); and a CORS_ORIGIN that is empty or has an entry that is not an
+  return pages are built from it); an APP_PUBLIC_URL that is not exactly
+  `https://swiftgy.com`, the domain the app claims for its links, read from
+  apps/mobile/app.config.ts (every store share link, printed QR code and
+  trip-share link names it, and a link on any other host, the staging site
+  or www included, never opens the app; no trailing slash; an app config
+  whose link domain cannot be read is refused too); and a CORS_ORIGIN that is empty or has an entry that is not an
   `https://` origin of a public name (no http, localhost, address or
   wildcard), or is a staging or test name;
 - for the whole stack, a served name that does not already resolve to this
