@@ -9,7 +9,7 @@
 //   3. fill    — journeys that need no released order run while the hold runs
 //                down (only those expected to end inside the auto-reject window);
 //   4. release — right after the hold, stores accept and riders claim the
-//                prepared orders (a store must answer within its response window, 10 minutes by default);
+//                prepared orders (a store must answer within the auto-reject window: order_auto_reject_minutes, 5 minutes on a seeded instance, 10 only if that row is missing);
 //   5. run     — the order-driven journeys, the rest, then the OTP-abuse pair
 //                (each waits out the per-IP OTP bucket) last;
 //   6. finish  — checks that need wall-clock time (an expiry);
@@ -124,8 +124,9 @@ export async function runJourneySuite(o: SuiteOpts): Promise<number> {
     o.log('\nPhase 3 — journeys that need no released order, while the hold runs down');
     const independent = selected.filter((j) => !j.prepare && !j.release && !LAST.includes(j.id));
     for (const j of independent) {
-      // A store must accept a prepared order within its response window after the release (auto-reject;
-      // 10 minutes by default): start a journey here only if it should end within 2 minutes of the release.
+      // A store must accept a prepared order within the auto-reject window after the release
+      // (order_auto_reject_minutes: 5 minutes on a seeded instance, 10 only if that row is missing):
+      // start a journey here only if it should end within 2 minutes of the release.
       if (releaseAt && Date.now() + (j.estimateSeconds ?? 60) * 1000 > releaseAt + 120_000) continue;
       await runOne(j);
     }
