@@ -56,6 +56,7 @@ import { vatClassChoices, type VatClass } from '../../../lib/storeVat';
 import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
+import { BULK_WORDS } from '../../../lib/bulkWords';
 import {
   BUFFER_CHOICES, NOTICE_CHOICES, choicesWith, instantBookingAvailable, minutesLabel, nextWindow, openingBookingSettings,
   slotsFromWeekHours, weekHoursFromSlots, weekHoursProblem, type WeekHours,
@@ -781,8 +782,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                 <InlineInput style={{ flex: 1 }} value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
                 <InlineInput style={{ flex: 1 }} value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
               </View>
-              {/* How big is one of these to carry? Riders on bicycles cannot take
-                  a very bulky order, and dispatch uses this to keep it off them.
+              {/* How big is one of these to carry? An order holding a bulky or very bulky
+                  item is never offered to a bicycle (lib/bulkWords; the server's utils/load).
                   A choice, not a number — nobody should be asked to think in units. */}
               <View>
                 <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
@@ -798,11 +799,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
                   onChange={setBulk}
                 />
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                  {bulk === 'very_bulky'
-                    ? 'Like a 20 kg bag of rice or a case of water. Only riders with a bigger vehicle will be offered it.'
-                    : bulk === 'bulky'
-                      ? 'Like a crate of drinks or a large box.'
-                      : 'Fits in a delivery bag with room to spare.'}
+                  {BULK_WORDS[bulk]}
                 </T>
               </View>
               {vatRate != null ? (

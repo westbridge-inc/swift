@@ -25,7 +25,7 @@ import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { assignmentLogWhere } from '../order/store-handover-log';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
-import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { offerEstLoad, offerLoadFields, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
@@ -1459,8 +1459,8 @@ export class DispatchService {
       // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
       const floatRequired = pool === 'RIDER' ? riderFloatForOrder(order) : 0;
       // [owner #20 · G1 ENFORCED] The size of vehicle this order needs — a
-      // parcel's declared size, or a food/grocery order's bulk (a bulky line
-      // means a car or van) — gates the candidate pool, exactly as the parcel
+      // parcel's declared size, or a food/grocery order's total bulk (capped at
+      // a motorbike's while cars carry no goods) — gates the pool, as the parcel
       // gate always has. The visible half of the rule is checkout, which
       // tells the customer before placing when no such vehicle is near.
       const requiredSize = pool === 'RIDER' ? requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS) : null;
@@ -1540,8 +1540,7 @@ export class DispatchService {
         // fronting it for (trust level, completed orders, strikes) before accept.
         const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
 
-        // §7: a mover judges a big grocery order BEFORE accepting.
-        const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
+        // §7: a mover judges a big grocery order BEFORE accepting (estLoad below, utils/load offerEstLoad).
 
         // [TAXI multi-stop] A driver judges a ride with stops by where it goes:
         // how many stops and where, in order. Read before the final proofs
@@ -1643,7 +1642,10 @@ export class DispatchService {
             paymentMethod: order.paymentMethod,
             customerTrust: trust ?? null,
             itemCount: order.items.length,
-            estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+            estLoad: order.items.length > 0 ? offerEstLoad(order) : null,
+            // [owner 31 Oct] estLoad counts bulk too (utils/load offerEstLoad); beside it the order's real size class,
+            // and whether it is bigger than what it is offered by today (offerLoadFields). Additive: older builds ignore both.
+            ...offerLoadFields(order),
             // [WS-6.0] Server-computed, or absent. Null on MMG (the customer
             // already paid the store) and null whenever the numbers do not
             // reconcile — see `cashMathForOffer`.
@@ -1810,6 +1812,9 @@ export class DispatchService {
     expiresInSeconds: number;
     itemCount: number;
     estLoad: string | null;
+    /** [owner 31 Oct] The order's real size class (utils/load trueBand), and whether it is past what it is offered by today. */
+    loadSize: string | null;
+    oversize: boolean;
     customerTrust: unknown;
     /** [REPORT-010 F-07] Authoritative money/route facts ride the recovery
      *  payload so the rebuilt card never depends on a separately-fetched
@@ -1857,9 +1862,9 @@ export class DispatchService {
         pickupAddress: true, deliveryAddress: true, pickupLat: true, pickupLng: true,
         totalAmount: true, subtotalBase: true, serviceFee: true, taxAmount: true, discount: true,
         id: true, status: true, riderId: true, driverId: true, fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderType: true, foodAgeHeldAt: true, holdExpiresAt: true,
-        taxiStopCount: true,
+        taxiStopCount: true, courierPackageSize: true,
         vendor: { select: { name: true } },
-        items: { select: { quantity: true } },
+        items: { select: { quantity: true, bulkUnits: true } },
       },
     });
     if (!order) return null;
@@ -1884,7 +1889,6 @@ export class DispatchService {
     }
     if (!this.searchable(order, poolForOrder(order))) return null;
     const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
-    const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
     // [G5] The same journey the ranking priced — MOVER → PICKUP — from wherever
     // the mover is NOW. A mover whose position is unknown gets null, never a
     // stale number; the card hides the line rather than guess.
@@ -1920,7 +1924,9 @@ export class DispatchService {
       paymentMethod: order.paymentMethod,
       expiresInSeconds,
       itemCount: order.items.length,
-      estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+      estLoad: order.items.length > 0 ? offerEstLoad(order) : null,
+      // [owner 31 Oct] The SAME real-size fields the live card carried.
+      ...offerLoadFields(order),
       customerTrust: trust ?? null,
       deliveryFee: Number(order.deliveryFee),
       tipAmount: Number(order.tipAmount),
@@ -2187,6 +2193,8 @@ export class DispatchService {
     // screen is never charged, render proof or not.
     if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId, withdrawnBefore)) {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout behind a withdrawn card that could still be on screen — acceptance rate spared');
+    } else if (await this.offerWasOversize(orderId)) {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: an oversize offer lapsed — acceptance rate spared');
     } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
     } else {
@@ -2238,6 +2246,8 @@ export class DispatchService {
     // for one sent while a withdrawn card could still be on it.
     if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId, withdrawnBefore)) {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer sat behind a withdrawn card that could still be on screen — acceptance rate spared');
+    } else if (await this.offerWasOversize(orderId)) {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: a released offer was oversize — acceptance rate spared');
     } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
     } else {
@@ -2291,7 +2301,9 @@ export class DispatchService {
       : undefined;
     await this.redis.sadd(declinedKey(orderId, offerVersion), mover.id);
     await this.redis.expire(declinedKey(orderId, offerVersion), 3600);
-    if (countsForMover) {
+    if (countsForMover && await this.offerWasOversize(orderId)) {
+      log().info({ orderId, moverId: mover.id, pool, attemptId: resolvedAttemptId }, 'dispatch: an oversize offer was declined — acceptance rate spared');
+    } else if (countsForMover) {
       await this.recordOfferOutcome(mover.id, false, pool);
     } else {
       log().info({ orderId, moverId: mover.id, pool, attemptId: resolvedAttemptId }, 'dispatch: a decline naming no attempt released a generated card — acceptance rate spared');
@@ -3288,6 +3300,24 @@ export class DispatchService {
       : await this.prisma.rider.findUnique({ where: { userId }, select: { id: true } });
     if (!mover) throw new NotFoundError(pool === 'DRIVER' ? 'Driver' : 'Rider');
     return mover;
+  }
+
+  /** [Owner, 31 Oct 2026 · COORD Round 2] An oversize offer — a load past what
+   *  it is offered by today (utils/load offerLoadFields: a store order bigger
+   *  than a motorbike's band, offered to motorbikes only because cars carry no
+   *  goods) — is the rider's to turn down freely: its decline, lapse or release
+   *  never lowers their acceptance rate. Read when the outcome lands; fails fair
+   *  like the render proof (a failed read spares the mover). */
+  private async offerWasOversize(orderId: string): Promise<boolean> {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        select: { orderType: true, courierPackageSize: true, items: { select: { quantity: true, bulkUnits: true } } },
+      });
+      return !!order && offerLoadFields(order).oversize;
+    } catch {
+      return true;
+    }
   }
 
   /** Acceptance history feeds future scoring — abandoners drift down the list. */

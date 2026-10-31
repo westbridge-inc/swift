@@ -183,15 +183,17 @@ describe('checkout snapshots the item’s bulk onto the order line', () => {
 
   it('the load gate would now see this order for what it is', async () => {
     // What the shadow reads, computed exactly as it computes it.
-    const { requiredPackageSizeForOrder } = await import('../utils/load');
+    const { readOrderSize } = await import('../utils/load');
     const order = await app.prisma.order.findUnique({
       where: { id: orderId },
       select: { orderType: true, courierPackageSize: true, items: { select: { quantity: true, bulkUnits: true } } },
     });
-    // [owner #20, 13 Oct] A line the store marked very bulky (the rice, 8)
-    // means a car or van: EXTRA_LARGE. Before this write the snapshot was
-    // missing, every line read ordinary and the order banded SMALL — a
-    // bicycle's job, with a 20 kg bag in it.
-    expect(requiredPackageSizeForOrder(order!)).toBe('EXTRA_LARGE');
+    // [owner #20 · owner 31 Oct 2026 · COORD 02:57Z] A line the store marked
+    // very bulky (the rice, 8) needs at least a motorbike (never a bicycle),
+    // cars on or off, and its real size is the total, 8 + 2 sachets = 10, MEDIUM. Before this write the
+    // snapshot was missing, every line read ordinary and the order banded
+    // SMALL — a bicycle's job, with a 20 kg bag in it.
+    expect(readOrderSize(order!, undefined, {})).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
+    expect(readOrderSize(order!, undefined, { CAR_DELIVERIES: '1' })).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
   });
 });

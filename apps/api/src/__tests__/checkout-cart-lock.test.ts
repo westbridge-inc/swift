@@ -430,7 +430,7 @@ describe('[price lock] the order is placed at the prices the customer saw, or re
   it('a cart with more than 200 lines can still be placed with every line price the customer saw', async () => {
     // [Owner ruling 15 Oct 2026] TRANSFORMED: over 200 lines is the largest load class, which only a car (or the heavy
     // fleet) carries, so this price-lock case runs with CAR_DELIVERIES=1 (the re-enable path); with the switch off a
-    // delivery this size is refused at checkout before anything is placed (DELIVERY_TOO_BIG).
+    // delivery this size needs a motorbike instead (owner 31 Oct: never refused for size alone).
     vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     // A cart has no line cap, and the apps send every line's price, so the
     // checkout body must take as many lines as a cart can hold.

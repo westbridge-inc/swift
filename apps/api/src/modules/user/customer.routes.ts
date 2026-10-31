@@ -21,7 +21,7 @@ import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCou
 import { promoDiscount } from '../../utils/order-total';
 import { z } from '../../lib/zod';
 import { tenantCacheKey } from '../../utils/tenant-cache';
-import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { capacitySentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
@@ -3193,9 +3193,10 @@ export async function customerRoutes(app: FastifyInstance) {
     });
     const lines = cart?.items ?? [];
     const orderType = vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY';
-    const packageSize = lines.length > 0
-      ? requiredPackageSizeForOrder({ orderType, courierPackageSize: null, items: lines.map((l) => ({ quantity: l.quantity, bulkUnits: l.item.bulkUnits ?? null })) }, DEFAULT_LOAD_BANDS)
-      : null;
+    // The size a vehicle must carry (capped) and the true band the stacking read weighs (utils/load readOrderSize).
+    const { required: packageSize, trueBand: loadBand } = lines.length > 0
+      ? readOrderSize({ orderType, courierPackageSize: null, items: lines.map((l) => ({ quantity: l.quantity, bulkUnits: l.item.bulkUnits ?? null })) }, DEFAULT_LOAD_BANDS)
+      : { required: null, trueBand: null };
     const cash = q.paymentMethod === 'MOBILE_MONEY' ? 0 : lines.reduce((sum, l) => sum + Number(l.item.basePrice) * l.quantity, 0);
     let dropoff: { lat: number; lng: number } | null = q.lat != null && q.lng != null ? { lat: q.lat, lng: q.lng } : null;
     if (!dropoff) {
@@ -3205,7 +3206,7 @@ export async function customerRoutes(app: FastifyInstance) {
       if (addr) dropoff = { lat: addr.latitude, lng: addr.longitude };
     }
 
-    const cacheKey = tenantCacheKey(`avail:DELIVERY:${vendor.id}:${packageSize ?? '-'}:${Math.ceil(cash / 1000)}:${dropoff ? `${dropoff.lat.toFixed(2)}:${dropoff.lng.toFixed(2)}` : '-'}`);
+    const cacheKey = tenantCacheKey(`avail:DELIVERY:${vendor.id}:${packageSize ?? '-'}/${loadBand ?? '-'}:${Math.ceil(cash / 1000)}:${dropoff ? `${dropoff.lat.toFixed(2)}:${dropoff.lng.toFixed(2)}` : '-'}`);
     type Reading = { level: 'GOOD' | 'BUSY' | 'NONE'; reason: 'NO_RIDERS' | 'RIDERS_BUSY' | null; riderWaitMinutes: number };
     let reading: Reading | null = null;
     const cached = await app.redis.get(cacheKey).catch(() => null);
@@ -3221,6 +3222,7 @@ export async function customerRoutes(app: FastifyInstance) {
         floatRequired: cash,
         cashToCollect: cash,
         packageSize,
+        loadBand,
       });
       reading = { level: capacity.level, reason: capacity.reason, riderWaitMinutes: capacity.riderWaitMinutes };
       await app.redis.set(cacheKey, JSON.stringify(reading), 'EX', 10).catch(() => {});

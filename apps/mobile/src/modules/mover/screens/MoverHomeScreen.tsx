@@ -12,6 +12,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
 import { boardPaused, recentBoard } from '../../../lib/moverBoard';
+import { oversizeLoadLabel } from '../../../lib/loadSize';
 import { demandTapFor } from '../demandTap';
 import {
   useMoverKind,
@@ -235,6 +236,7 @@ export function DispatchOfferCard({
                       {offer.itemCount} item{offer.itemCount === 1 ? '' : 's'}
                     </T>
                     {offer.estLoad ? <TonePill label={String(offer.estLoad).toUpperCase()} tone="brand" /> : null}
+                    {oversizeLoadLabel(offer) ? <TonePill label={oversizeLoadLabel(offer)!.toUpperCase()} tone="warning" /> : null}
                   </View>
                 ) : null}
               </>
@@ -1012,6 +1014,7 @@ export function MoverHomeScreen({ navigation }: any) {
                       <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                         {j.itemCount} item{j.itemCount === 1 ? '' : 's'}
                         {j.estLoad ? ` · ${j.estLoad} load` : ''}
+                        {oversizeLoadLabel(j) ? ` · ${oversizeLoadLabel(j)!.toLowerCase()}` : ''}
                       </T>
                     ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
