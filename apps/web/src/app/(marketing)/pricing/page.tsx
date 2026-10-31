@@ -71,13 +71,14 @@ const bandTrialDays = (band: CataloguePriceBand, fallback: number) =>
 
 // [ENTERPRISE-PAGE · owner 31 Oct 2026] What a chain gets today, each line true on main: one login runs every branch
 // and a person approves each new one (partner.service addBranch, personApprovalRequired); one MMG checkout pays every
-// due branch, or each pays its own (billing/chain-checkout.ts); a monthly fee statement (billing/chain-statement.ts);
+// branch fee DUE now (a branch in its free trial or not yet due is left out), or each pays its own
+// (billing/chain-checkout.ts); a monthly fee statement (billing/chain-statement.ts);
 // a weekly rate per branch agreed with Swift that never raises a branch's fee and ends or rises only after the
 // 14-day notice (vendor/chain-deal.ts, billing/fee-rise-notice.ts); a branch limit per account (branchLimit). No
 // chain rate is quoted and no discount promised: the rate is negotiated (owner, 29 Oct 2026; decision 49 stays).
 const CHAIN_POINTS = [
   'One login runs all your branches. A person at Swift checks and approves each new branch before it goes live.',
-  'Pay all your branches in one MMG checkout, or pay each branch on its own.',
+  'Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.',
   'A monthly fee statement lists every branch, the weeks it paid and its receipts.',
   "Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days' notice.",
   'Need more branches than one account allows? Contact sales.',

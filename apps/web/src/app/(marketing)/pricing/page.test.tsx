@@ -261,7 +261,10 @@ describe('[ENTERPRISE-PAGE] chains and enterprise', () => {
     const text = block().textContent!;
     expect(text).toContain('One login runs all your branches.');
     expect(text).toContain('A person at Swift checks and approves each new branch before it goes live.');
-    expect(text).toContain('Pay all your branches in one MMG checkout, or pay each branch on its own.');
+    // [REVIEW-F #2267 S4-1] chain-checkout takes only the branch fees DUE now (a branch in its free trial or not yet
+    // due is left out), so the page never says "all your branches".
+    expect(text).toContain('Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.');
+    expect(text).not.toMatch(/all (of )?your branches (in|at) once|pay all your branches/i);
     expect(text).toContain('A monthly fee statement lists every branch, the weeks it paid and its receipts.');
     expect(text).toContain('Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days\' notice.');
     expect(text).toContain('Need more branches than one account allows? Contact sales.');
