@@ -62,9 +62,14 @@ export function cardTestSubscriptions(env: Record<string, string | undefined> = 
   return new Set((env['CARD_RAIL_TEST_SUBSCRIPTIONS'] ?? '').split(',').map((s) => s.trim()).filter((s) => /^[A-Za-z0-9_-]{1,64}$/.test(s)));
 }
 
-/** [PT-2 · review S2] The host the public talks to (and, until the DNS
- * cutover, Apple's reviewers): no test switch or test page may ever run there. */
-export const PUBLIC_API_HOST = 'api.swiftgy.com';
+/** [PT-2 · review S2 · GUARD-FIX] Every public name of the production API
+ * (and, until the DNS cutover, of what Apple's reviewers reach): no test
+ * switch or test page may ever run on any of them. Production is served as
+ * api-live.swiftgy.com and keeps that name after launch, when api.swiftgy.com
+ * is added beside it as a second name. A guard keyed on one name alone never
+ * fires on the other. Production also refuses a test card system whatever its
+ * name (boot-config.ts). */
+export const PUBLIC_API_HOSTS: readonly string[] = ['api.swiftgy.com', 'api-live.swiftgy.com'];
 
 /** No implicit OFF state: disabling the provider also requires the billing
  * kill switch, so boot and provider construction enforce the same contract. */

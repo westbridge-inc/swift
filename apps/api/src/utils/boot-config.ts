@@ -2,7 +2,7 @@ import { assertPlacesConfig } from '../providers/places/places-config';
 import { runtimeMode } from './runtime-mode';
 import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
-import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
+import { PUBLIC_API_HOSTS, assertDisabledCardRailConfig } from './card-rail';
 import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
@@ -68,8 +68,9 @@ export function assertCardSimulatorNotPublic(env: Record<string, string | undefi
     let host = '';
     // [#1511 review S4] A trailing dot names the same host.
     try { host = new URL(env['API_PUBLIC_URL'] ?? '').hostname.toLowerCase().replace(/\.+$/, ''); } catch { host = ''; }
-    if (host === PUBLIC_API_HOST) {
-      throw new Error(`FATAL: a TEST card system (the simulator, CARD_RAIL_SIMULATOR_LIVE, or the provider's sandbox) on the public API host ${PUBLIC_API_HOST} — it books weeks without real money. Refusing to start.`);
+    // [GUARD-FIX] Either public name of the production API, never just one.
+    if (PUBLIC_API_HOSTS.includes(host)) {
+      throw new Error(`FATAL: a TEST card system (the simulator, CARD_RAIL_SIMULATOR_LIVE, or the provider's sandbox) on the public API host ${host} — it books weeks without real money. Refusing to start.`);
     }
     if ((env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0' && !host) {
       throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL set to this TEST server\'s own address (never the public host). Refusing to start.');
@@ -333,6 +334,14 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     } catch (err) {
       throw new Error(`FATAL: ${which} in production, but the card provider is not fully set up for live cards: ${(err as Error).message}. Refusing to start.`);
     }
+  }
+  // [GUARD-FIX] The provider's TEST system (its sandbox) never runs in
+  // production, whatever the API's public name and even with v2 off: the
+  // public-name check above (assertCardSimulatorNotPublic) is keyed on names,
+  // this one on the production identity. The simulator and its test switch
+  // are already refused above.
+  if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] !== 'live') {
+    throw new Error('FATAL: a TEST card system (the provider\'s sandbox: CARD_RAIL_PROVIDER=powertranz without CARD_RAIL_ENVIRONMENT=live) in production — it books weeks without real money. Refusing to start.');
   }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
