@@ -192,11 +192,8 @@
 }
 
 .statusRail li[aria-current='step'] { font-weight: 600; }
-.statusRail li[aria-current='step'] .stageDot {
-  border-color: var(--swift-red);
-  background: var(--swift-card);
-  color: transparent;
-}
+/* [PICKUP · owner 30 Oct 2026] The step the order is at is drawn like any reached step (green, ticked): it was
+   reached the moment the server said so. Only the leg after it stays unlit (above). */
 
 .riderDetails {
   display: grid;

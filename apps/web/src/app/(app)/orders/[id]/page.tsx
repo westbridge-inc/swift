@@ -712,11 +712,14 @@ export default function OrderDetailPage() {
           </div>
           <ol className={styles.statusRail} style={{ '--swift-stage-count': stages.length } as CSSProperties}>
             {stages.map((stage, index) => {
+              // [PICKUP · owner 30 Oct 2026] A step is green, with its tick, the moment the server says it is
+              // reached (Preparing on accept, Ready on ready); aria-current still says which step the order is at,
+              // and the leg to the next step stays unlit until that step is reached.
               const reached = index <= currentStage;
               const current = index === currentStage && !completed;
               return (
                 <li key={stage.label} className={reached ? styles.stageReached : ''} aria-current={current ? 'step' : undefined}>
-                  <span className={styles.stageDot}>{index < currentStage || completed ? '✓' : index + 1}</span>
+                  <span className={styles.stageDot}>{reached ? '✓' : index + 1}</span>
                   <span>{stage.label}</span>
                 </li>
               );

@@ -35,6 +35,7 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { orderStepState } from '../timeline-states';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
 import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
@@ -284,23 +285,20 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
           override rather than something the primitive infers: rider dispatch
           runs alongside kitchen preparation, so a rider status must not tick
           off Preparing unless a server prep fact did. The primitive is told;
-          it never guesses. */}
+          it never guesses.
+          [PICKUP · owner 30 Oct 2026] A store order's step turns green the
+          moment the server says it is reached (Preparing on accept, Ready on
+          ready); the rules live in ../timeline-states.ts. */}
       <View style={{ marginTop: space.lg }}>
         <Timeline
           currentIndex={currentIndex}
+          doneTone="success"
           steps={steps.map((step, index) => {
-            let done = currentIndex == null ? index === 0 : index < currentIndex;
-            let current = currentIndex === index;
-            if (step.key === 'preparing' && !courier && !appointment && currentIndex != null && currentIndex >= 2) {
-              if (currentIndex === 2) {
-                done = false;
-                current = true;
-              } else {
-                done = preparationFinished;
-                current = !done && (preparationStarted || acceptedRecorded);
-              }
-            }
-            return { ...step, state: done ? ('done' as const) : current ? ('current' as const) : ('upcoming' as const) };
+            const { state, live } = orderStepState(step.key, index, {
+              currentIndex, storeOrder: !courier && !appointment, holdActive, releasePending, status,
+              preparationStarted, preparationFinished, acceptedRecorded,
+            });
+            return { ...step, state, live };
           })}
         />
       </View>
