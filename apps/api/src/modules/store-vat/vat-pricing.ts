@@ -109,6 +109,26 @@ export function optionPriceEdit(
   throw new VatPriceBeforeVatRequired();
 }
 
+/**
+ * [REVIEW-M #2255 S4-2] A NEW price from an app that does not know about "add VAT at checkout" (basePrice /
+ * additionalPrice without the price before VAT) on a store that adds VAT is as ambiguous as an older app's edit: it
+ * cannot be told whether VAT is in it, so it is refused the same way (409 VAT_PRICE_BEFORE_VAT) and nothing is
+ * created. Unambiguous, so accepted: the updated apps' price before VAT, a zero-rated or exempt item (no VAT is ever
+ * added to it), a free option (0), and any store that adds no VAT. Checked under the same store lock reconcile takes,
+ * in the transaction that writes the rows, so an approval can never slip in between.
+ */
+export async function refuseOlderAppNewPrice(tx: Tx, vendorId: string, ambiguous: boolean, vatClass: string | null | undefined = 'STANDARD'): Promise<void> {
+  if (!ambiguous || (vatClass ?? 'STANDARD') !== 'STANDARD') return;
+  await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendorId} FOR KEY SHARE /* store-vat-pricing */`;
+  const vendor = await tx.vendor.findUnique({ where: { id: vendorId }, select: STORE_VAT_SELECT });
+  if (vendor && storeAddsVatToPrices(vendor)) throw new VatPriceBeforeVatRequired();
+}
+
+/** A price an older app sent for a new row, without the price before VAT beside it (a 0 is the same either way). */
+export function sentOnlyCustomerPrice(typed: number | undefined, customer: number | undefined): boolean {
+  return typed === undefined && customer !== undefined && customer !== 0;
+}
+
 export const VAT_PRICE_BEFORE_VAT_MESSAGE =
   'This store adds VAT to its prices, so type the price before VAT. Update the Swift app, or change it on the web dashboard.';
 
@@ -120,6 +140,11 @@ export const VAT_PRICE_BEFORE_VAT_MESSAGE =
  * Serialised with every VAT decision on the store row: the decisions hold it FOR UPDATE, an item write takes it
  * FOR KEY SHARE here, so an item written while a person approves is either seen by the approval's own reconcile or
  * reconciles itself after the approval committed. Never both missed.
+ *
+ * [REVIEW-G #2255 S3-1] It never touches items."updatedAt": that stamp means "the store changed this listing" (the
+ * weekly re-tier and the fee quote count a hidden listing changed in the last 7 days), and a VAT decision is Swift's
+ * write, not the store's. Search is refreshed by the callers (scheduleVendorSearchSync), not by the stamp.
+ * [REVIEW-G #2255 S3-2] Every statement is scoped to this store (i."vendorId"): another store's prices never move.
  */
 export async function reconcileVatPricing(
   tx: Tx, vendorId: string, opts: { itemIds?: readonly string[]; rateBps?: number } = {},
@@ -138,8 +163,7 @@ export async function reconcileVatPricing(
     added += await tx.$executeRaw`
       UPDATE "items" AS i
          SET "vatListedPrice" = COALESCE(i."vatListedPrice", i."basePrice"),
-             "basePrice" = ROUND(COALESCE(i."vatListedPrice", i."basePrice") * ${factor}::int / 10000, 0),
-             "updatedAt" = now()
+             "basePrice" = ROUND(COALESCE(i."vatListedPrice", i."basePrice") * ${factor}::int / 10000, 0)
        WHERE i."vendorId" = ${vendorId} AND i."vatClass" = 'STANDARD' ${items}
          AND (i."vatListedPrice" IS NULL OR i."basePrice" <> ROUND(i."vatListedPrice" * ${factor}::int / 10000, 0))`;
     added += await tx.$executeRaw`
@@ -155,7 +179,7 @@ export async function reconcileVatPricing(
   const notAdded = adds ? Prisma.sql`AND i."vatClass" <> 'STANDARD'` : Prisma.empty;
   let restored = await tx.$executeRaw`
     UPDATE "items" AS i
-       SET "basePrice" = i."vatListedPrice", "vatListedPrice" = NULL, "updatedAt" = now()
+       SET "basePrice" = i."vatListedPrice", "vatListedPrice" = NULL
      WHERE i."vendorId" = ${vendorId} AND i."vatListedPrice" IS NOT NULL ${notAdded} ${items}`;
   restored += await tx.$executeRaw`
     UPDATE "options" AS o

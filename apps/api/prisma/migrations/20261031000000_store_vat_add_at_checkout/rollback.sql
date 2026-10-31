@@ -3,8 +3,9 @@
 -- the store typed (before VAT), and the columns are dropped. Orders already placed keep what they froze.
 BEGIN;
 SET LOCAL lock_timeout = '10s';
-UPDATE "items" SET "basePrice" = "vatListedPrice", "updatedAt" = now() WHERE "vatListedPrice" IS NOT NULL;
+UPDATE "items" SET "basePrice" = "vatListedPrice" WHERE "vatListedPrice" IS NOT NULL;
 UPDATE "options" SET "additionalPrice" = "vatListedAdditionalPrice" WHERE "vatListedAdditionalPrice" IS NOT NULL;
 ALTER TABLE "options" DROP COLUMN IF EXISTS "vatListedAdditionalPrice";
 ALTER TABLE "items" DROP COLUMN IF EXISTS "vatListedPrice";
+ALTER TABLE "vendors" DROP COLUMN IF EXISTS "vatModeRequested";
 COMMIT;

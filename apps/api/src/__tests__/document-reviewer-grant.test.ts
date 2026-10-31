@@ -177,6 +177,8 @@ describe('[V3] the grant is explicit-only: `*`, a wildcard or a role default nev
     const doors = [
       'GET /verification/:id/document-url', 'PUT /verification/:id/approve', 'PUT /verification/:id/reject', 'PUT /verification/:id/revoke',
       'POST /store-vat/:vendorId/approve', 'POST /store-vat/:vendorId/reject', 'POST /store-vat/:vendorId/revoke',
+      // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice: the same VAT reviewers.
+      'POST /store-vat/:vendorId/mode',
     ];
     for (const door of doors) expect((authority.ADMIN_ROUTE_AUTHORITY[door] as { requires?: string } | undefined)?.requires, door).toBe(GRANT);
     const others = Object.entries(authority.ADMIN_ROUTE_AUTHORITY).filter(([k, a]) => !doors.includes(k) && (a as { requires?: string }).requires);

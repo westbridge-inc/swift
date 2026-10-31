@@ -20,6 +20,7 @@ import { readLiveMenu, writeMenuCopy } from '../modules/vendor/menu-copy';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { walkOrderStatus } from './helpers/order-status-walk';
+import { withSuiteCapability } from '../lib/test-target-lock';
 
 // ---------------------------------------------------------------------------
 // [VAT-DOCS · owner 30 Oct 2026] "Add VAT at checkout", end to end on a real database:
@@ -297,7 +298,8 @@ describe('2. approved: VAT added INTO every standard-rated price the customer se
     const view = await vendorCall('GET', '/vat');
     expect(view.json().data).toMatchObject({ status: 'APPROVED', mode: 'ADD_VAT_AT_CHECKOUT', effective: true, addsVatToPrices: true });
     const notice = await app.prisma.notification.findFirstOrThrow({ where: { userId: ownerUserId, title: 'Your VAT is approved' } });
-    expect(notice.body).toContain('From now on, Swift adds VAT at 14% to the prices you type for standard-rated items, so customers see and pay prices that include VAT');
+    expect(notice.body).toContain('From now on, VAT at 14% is added to the prices you type for standard-rated items, so customers see and pay prices that include VAT');
+    expect(notice.body).toContain('Swift treats every item as standard-rated until you mark it: until then customers pay VAT on it, so mark your zero-rated and exempt items now.');
   });
 
   it('the store’s own menu shows what it typed (vatListedPrice) next to what customers pay, as numbers', async () => {
@@ -364,15 +366,15 @@ describe('3. every price the store types afterwards gets VAT added; an older app
     expect(await optionPrices(sizeOptionId)).toEqual({ additionalPrice: 11, vatListedAdditionalPrice: 10 });
   });
 
-  it('a new item, a new option, an option edit: the typed price + 14%', async () => {
-    const created = await vendorCall('POST', '/items', { categoryId, name: word('Brush'), basePrice: 50, optionGroups: [{ name: 'Pack', options: [{ name: 'Two', additionalPrice: 25 }] }] });
+  it('a new item, a new option, an option edit (updated apps send the price before VAT): the typed price + 14%', async () => {
+    const created = await vendorCall('POST', '/items', { categoryId, name: word('Brush'), basePrice: 50, vatListedPrice: 50, optionGroups: [{ name: 'Pack', options: [{ name: 'Two', vatListedAdditionalPrice: 25 }] }] });
     expect(created.statusCode, created.body).toBeLessThan(300);
     const brushId = created.json().data.id as string;
     expect(await prices(brushId)).toEqual({ basePrice: 57, vatListedPrice: 50 });
     const brush = await itemRow(brushId);
     expect(await optionPrices(brush.optionGroups[0]!.options[0]!.id)).toEqual({ additionalPrice: 29, vatListedAdditionalPrice: 25 });
 
-    const added = await vendorCall('POST', `/option-groups/${brush.optionGroups[0]!.id}/options`, { name: 'Three', additionalPrice: 20 });
+    const added = await vendorCall('POST', `/option-groups/${brush.optionGroups[0]!.id}/options`, { name: 'Three', vatListedAdditionalPrice: 20 });
     expect(added.statusCode, added.body).toBeLessThan(300);
     const threeId = added.json().data.id as string;
     expect(await optionPrices(threeId)).toEqual({ additionalPrice: 23, vatListedAdditionalPrice: 20 });
@@ -386,6 +388,50 @@ describe('3. every price the store types afterwards gets VAT added; an older app
     const moved = await vendorCall('PUT', `/options/${threeId}`, { additionalPrice: 40 });
     expect(moved.statusCode, moved.body).toBe(409);
     expect(codeOf(moved)).toBe('VAT_PRICE_BEFORE_VAT');
+  });
+
+  it('[REVIEW-M #2255 S4-2] an older app’s NEW price on a store that adds VAT is refused like an edit (409): nothing is created', async () => {
+    const items = await app.prisma.item.count({ where: { vendorId } });
+    const groups = await app.prisma.optionGroup.count({ where: { item: { vendorId } } });
+    const options = await app.prisma.option.count({ where: { optionGroup: { item: { vendorId } } } });
+    const refused = [
+      await vendorCall('POST', '/items', { categoryId, name: word('Comb'), basePrice: 50 }),
+      await vendorCall('POST', '/items', { categoryId, name: word('Comb'), basePrice: 50, vatListedPrice: 50, optionGroups: [{ name: 'Pack', options: [{ name: 'Two', additionalPrice: 25 }] }] }),
+      await vendorCall('POST', `/items/${soapId}/option-groups`, { name: 'Scent', options: [{ name: 'Lime', additionalPrice: 5 }] }),
+      await vendorCall('POST', `/option-groups/${sizeGroupId}/options`, { name: 'Huge', additionalPrice: 30 }),
+    ];
+    for (const res of refused) {
+      expect(res.statusCode, res.body).toBe(409);
+      expect(codeOf(res)).toBe('VAT_PRICE_BEFORE_VAT');
+    }
+    expect(await app.prisma.item.count({ where: { vendorId } })).toBe(items);
+    expect(await app.prisma.optionGroup.count({ where: { item: { vendorId } } })).toBe(groups);
+    expect(await app.prisma.option.count({ where: { optionGroup: { item: { vendorId } } } })).toBe(options);
+    // Nothing to tell apart: a zero-rated item's price, a free option.
+    const zero = await vendorCall('POST', '/items', { categoryId, name: word('Flour'), basePrice: 300, vatClass: 'ZERO_RATED' });
+    expect(zero.statusCode, zero.body).toBeLessThan(300);
+    expect(await prices(zero.json().data.id as string)).toEqual({ basePrice: 300, vatListedPrice: null });
+    const free = await vendorCall('POST', `/option-groups/${sizeGroupId}/options`, { name: 'Travel', additionalPrice: 0 });
+    expect(free.statusCode, free.body).toBeLessThan(300);
+  });
+
+  it('[REVIEW-M #2255 S4-1] a new option group commits WITH its VAT: a failure adding the VAT leaves no group behind', async () => {
+    // A test-only trigger makes the VAT step fail for this one option (the DDL is granted to this block only).
+    const fn = `vat_boom_${RUN}`;
+    await withSuiteCapability('ddl', async () => {
+      await app.prisma.$executeRawUnsafe(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."name" = 'Boom ${RUN}' THEN RAISE EXCEPTION 'vat boom'; END IF; RETURN NEW; END $$`);
+      await app.prisma.$executeRawUnsafe(`CREATE TRIGGER ${fn} BEFORE UPDATE ON "options" FOR EACH ROW EXECUTE FUNCTION ${fn}()`);
+    });
+    try {
+      const res = await vendorCall('POST', `/items/${soapId}/option-groups`, { name: `Boomgroup ${RUN}`, options: [{ name: `Boom ${RUN}`, vatListedAdditionalPrice: 5 }] });
+      expect(res.statusCode, res.body).toBeGreaterThanOrEqual(500);
+      expect(await app.prisma.optionGroup.count({ where: { itemId: soapId, name: `Boomgroup ${RUN}` } })).toBe(0);
+    } finally {
+      await withSuiteCapability('ddl', async () => {
+        await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS ${fn} ON "options"`);
+        await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${fn}()`);
+      });
+    }
   });
 
   it('a file import: the file’s price is the typed price', async () => {
@@ -429,19 +475,77 @@ describe('3. every price the store types afterwards gets VAT added; an older app
 });
 
 describe('4. VAT stops being added: every price back to what the store typed, at once', () => {
-  it('"my prices already include VAT" on the approved store: typed prices back, approval kept; "add VAT" again: added again', async () => {
+  const queueRow = async () => {
+    const res = await call('GET', '/api/v1/admin/store-vat/pending', reviewerToken);
+    expect(res.statusCode, res.body).toBe(200);
+    return (res.json().data as Array<Record<string, unknown>>).find((r) => r['vendorId'] === vendorId);
+  };
+  const modeDecision = (body: Record<string, unknown>) => adminCall(`/store-vat/${vendorId}/mode`, body);
+
+  it('[owner ruling 31 Oct] an approved store’s change of price choice waits for a PERSON: no price moves until then', async () => {
     let res = await vendorCall('PUT', '/vat', { registered: true, mode: 'PRICES_INCLUDE_VAT' });
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data).toMatchObject({ status: 'APPROVED', effective: true, addsVatToPrices: false });
-    expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
+    expect(res.json().data).toMatchObject({ status: 'APPROVED', mode: 'ADD_VAT_AT_CHECKOUT', modeRequested: 'PRICES_INCLUDE_VAT', effective: true, addsVatToPrices: true });
+    expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
+    expect(await shownPrice(soapId)).toBe(228);
+    expect(await queueRow()).toMatchObject({ mode: 'ADD_VAT_AT_CHECKOUT', modeRequested: 'PRICES_INCLUDE_VAT' });
+    // The store takes it back: nothing left for a person to decide.
     res = await vendorCall('PUT', '/vat', { registered: true, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ status: 'APPROVED', mode: 'ADD_VAT_AT_CHECKOUT', modeRequested: null });
+    expect(await queueRow()).toBeUndefined();
+    const nothing = await modeDecision({ approve: true, mode: 'PRICES_INCLUDE_VAT' });
+    expect(nothing.statusCode, nothing.body).toBe(409);
+    expect(codeOf(nothing)).toBe('VAT_NO_MODE_CHANGE');
+  });
+
+  it('[REVIEW-M #2255 S4-3] an older app re-saving the approved number in another format with its built-in "include" never switches the store', async () => {
+    const res = await vendorCall('PUT', '/vat', { registered: true, vatRegistrationNumber: '023-456-789', mode: 'PRICES_INCLUDE_VAT' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ status: 'APPROVED', mode: 'ADD_VAT_AT_CHECKOUT', modeRequested: 'PRICES_INCLUDE_VAT', addsVatToPrices: true });
+    expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
+  });
+
+  it('a person approves the change: the typed prices are back at once and the store is told; a stale decision is refused', async () => {
+    const stale = await modeDecision({ approve: true, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(codeOf(stale)).toBe('VAT_MODE_CHANGE_MOVED');
+    expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
+    const res = await modeDecision({ approve: true, mode: 'PRICES_INCLUDE_VAT' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ status: 'APPROVED', mode: 'PRICES_INCLUDE_VAT', modeRequested: null, effective: true, addsVatToPrices: false });
+    expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
+    expect(await optionPrices(sizeOptionId)).toEqual({ additionalPrice: 10, vatListedAdditionalPrice: null });
+    expect(await app.prisma.notification.count({ where: { userId: ownerUserId, title: 'Your price change is approved' } })).toBe(1);
+    expect(await app.prisma.auditLog.count({ where: { action: 'APPROVE_STORE_VAT_MODE', entityId: vendorId } })).toBe(1);
+    expect(await queueRow()).toBeUndefined();
+  });
+
+  it('it asks for "add VAT" again; a person refuses with a reason: nothing moves and the store is told; asked again and approved: added', async () => {
+    let res = await vendorCall('PUT', '/vat', { registered: true, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(res.json().data).toMatchObject({ mode: 'PRICES_INCLUDE_VAT', modeRequested: 'ADD_VAT_AT_CHECKOUT', addsVatToPrices: false });
+    expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
+    const noReason = await modeDecision({ approve: false, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(noReason.statusCode, noReason.body).toBe(400);
+    res = await modeDecision({ approve: false, mode: 'ADD_VAT_AT_CHECKOUT', reason: 'Most of the shelf is zero-rated' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ status: 'APPROVED', mode: 'PRICES_INCLUDE_VAT', modeRequested: null });
+    expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
+    const refused = await app.prisma.notification.findFirstOrThrow({ where: { userId: ownerUserId, title: 'Your price change was not approved' } });
+    expect(refused.body).toBe('Most of the shelf is zero-rated. Nothing changed: your prices and what customers pay stay as they were.');
+    expect(await app.prisma.auditLog.count({ where: { action: 'REJECT_STORE_VAT_MODE', entityId: vendorId } })).toBe(1);
+    await vendorCall('PUT', '/vat', { registered: true, mode: 'ADD_VAT_AT_CHECKOUT' });
+    res = await modeDecision({ approve: true, mode: 'ADD_VAT_AT_CHECKOUT' });
     expect(res.statusCode, res.body).toBe(200);
     expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
   });
 
-  it('a person withdraws it: typed prices back; the placed order keeps its total and its VAT', async () => {
+  it('a person withdraws it: typed prices back; a change still waiting goes with it; the placed order keeps its total and its VAT', async () => {
+    await vendorCall('PUT', '/vat', { registered: true, mode: 'PRICES_INCLUDE_VAT' });
+    expect((await vendorRow()).vatModeRequested).toBe('PRICES_INCLUDE_VAT');
     const res = await adminCall(`/store-vat/${vendorId}/revoke`, { reason: 'The GRA cancelled the registration this month.' });
     expect(res.statusCode, res.body).toBe(200);
+    expect((await vendorRow()).vatModeRequested).toBeNull();
     expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
     expect(await optionPrices(sizeOptionId)).toEqual({ additionalPrice: 10, vatListedAdditionalPrice: null });
     expect(await app.prisma.item.count({ where: { vendorId, vatListedPrice: { not: null } } })).toBe(0);
@@ -450,7 +554,7 @@ describe('4. VAT stops being added: every price back to what the store typed, at
     expect(Number(placed.vatAmount)).toBe(31);
     expect(Number(placed.subtotalCustomer)).toBe(850);
     const notice = await app.prisma.notification.findFirstOrThrow({ where: { userId: ownerUserId, title: 'Your VAT was withdrawn' } });
-    expect(notice.body).toContain('Swift no longer adds VAT to your prices: customers pay the prices you typed.');
+    expect(notice.body).toContain('VAT is no longer added to your prices: customers pay the prices you typed.');
   });
 
   it('approved again, then the store changes its VAT number: PENDING, typed prices back before anyone re-checks', async () => {
@@ -458,15 +562,17 @@ describe('4. VAT stops being added: every price back to what the store typed, at
     expect(sent.statusCode, sent.body).toBe(201);
     await approve();
     expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
+    await vendorCall('PUT', '/vat', { registered: true, mode: 'PRICES_INCLUDE_VAT' });
     const res = await vendorCall('PUT', '/profile', { vatRegistrationNumber: '98765432' });
     expect(res.statusCode, res.body).toBe(200);
-    expect((await vendorRow()).vatStatus).toBe('PENDING');
+    // The waiting change of price choice becomes the new claim's (a person looks at both); nothing is left waiting.
+    expect(await vendorRow()).toMatchObject({ vatStatus: 'PENDING', vatMode: 'PRICES_INCLUDE_VAT', vatModeRequested: null });
     expect(await prices(soapId)).toEqual({ basePrice: 200, vatListedPrice: null });
   });
 
   it('approved again, then a NEW certificate is sent: PENDING, typed prices back until a person looks', async () => {
     await vendorCall('PUT', '/profile', { vatRegistrationNumber: VAT_NUMBER });
-    await sendCertificate({ vatRegistrationNumber: VAT_NUMBER });
+    await sendCertificate({ vatRegistrationNumber: VAT_NUMBER, mode: 'ADD_VAT_AT_CHECKOUT' });
     await approve();
     expect(await prices(soapId)).toEqual({ basePrice: 228, vatListedPrice: 200 });
     const res = await sendCertificate({});
@@ -497,5 +603,69 @@ describe('4. VAT stops being added: every price back to what the store typed, at
   it('reconcile is idempotent and writes nothing for a store that adds no VAT', async () => {
     const moved = await app.prisma.$transaction((tx) => reconcileVatPricing(tx, vendorId));
     expect(moved).toEqual({ added: 0, restored: 0 });
+  });
+});
+
+describe('5. Swift’s own VAT write touches only this store’s prices, and never counts as the store changing a listing', () => {
+  const snapshot = async (vid: string) => JSON.stringify(await app.prisma.item.findMany({
+    where: { vendorId: vid }, orderBy: { id: 'asc' }, include: { optionGroups: { orderBy: { id: 'asc' }, include: { options: { orderBy: { id: 'asc' } } } } },
+  }));
+
+  it('[REVIEW-G #2255 S3-1 + S3-2] approve, an item write and a withdrawal: another store’s rows byte-identical; a hidden listing’s updatedAt unmoved', async () => {
+    const ownerId = (await vendorRow()).ownerId;
+    const store = async (name: string) => {
+      const v = await app.prisma.vendor.create({ data: {
+        ownerId, name: `${name} ${RUN}`, slug: `${name.toLowerCase().replace(/ /g, '-')}-${RUN}`, vendorType: 'SUPERMARKET',
+        phone: testPhone(), addressLine1: '6 Vat St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.81, longitude: -58.16,
+      } });
+      vendorIds.push(v.id);
+      const cat = await app.prisma.category.create({ data: { vendorId: v.id, name: 'Shelf', sortOrder: 0 } });
+      const item = await app.prisma.item.create({ data: {
+        vendorId: v.id, categoryId: cat.id, name: word('Towel'), basePrice: 100, isAvailable: true,
+        optionGroups: { create: [{ name: 'Size', isRequired: false, minSelect: 0, maxSelect: 1, options: { create: [{ name: 'Big', additionalPrice: 20 }] } }] },
+      } });
+      return { id: v.id, itemId: item.id };
+    };
+    // B: another store whose OWN approval adds VAT (its towel already VAT-added); C: a store with no VAT at all.
+    const b = await store('Vat Add Other');
+    const c = await store('Vat Plain Other');
+    await app.prisma.vendor.update({ where: { id: b.id }, data: {
+      vatStatus: 'APPROVED', vatMode: 'ADD_VAT_AT_CHECKOUT', vatRegistrationNumber: '034567891', vatApprovedNumber: '034567891', vatApprovedName: 'Other Ltd',
+      vatEffectiveFrom: new Date('2026-01-01T00:00:00Z'),
+    } });
+    await app.prisma.$transaction((tx) => reconcileVatPricing(tx, b.id));
+    expect(Number((await app.prisma.item.findUniqueOrThrow({ where: { id: b.itemId } })).basePrice)).toBe(114);
+    // B's own reconcile touched only B: C's towel and its option are still exactly as typed.
+    const cTowel = await app.prisma.item.findUniqueOrThrow({ where: { id: c.itemId }, include: { optionGroups: { include: { options: true } } } });
+    expect([Number(cTowel.basePrice), cTowel.vatListedPrice]).toEqual([100, null]);
+    expect([Number(cTowel.optionGroups[0]!.options[0]!.additionalPrice), cTowel.optionGroups[0]!.options[0]!.vatListedAdditionalPrice]).toEqual([20, null]);
+
+    // A listing this store took off sale a month ago.
+    const hiddenId = (await app.prisma.item.create({ data: { vendorId, categoryId, name: word('Mop'), basePrice: 80, isAvailable: false } })).id;
+    const monthAgo = new Date(Date.now() - 30 * DAY);
+    await app.prisma.$executeRaw`UPDATE "items" SET "updatedAt" = ${monthAgo} WHERE "id" = ${hiddenId}`;
+    const stamp = async () => (await app.prisma.item.findUniqueOrThrow({ where: { id: hiddenId } })).updatedAt.getTime();
+    const bBefore = await snapshot(b.id);
+    const cBefore = await snapshot(c.id);
+
+    const sent = await sendCertificate({ vatRegistrationNumber: VAT_NUMBER, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(sent.statusCode, sent.body).toBe(201);
+    await approve();
+    expect(await prices(hiddenId)).toEqual({ basePrice: 91, vatListedPrice: 80 });
+    expect(await stamp()).toBe(monthAgo.getTime());
+    expect(await snapshot(b.id)).toBe(bBefore);
+    expect(await snapshot(c.id)).toBe(cBefore);
+
+    const edit = await vendorCall('PUT', `/items/${soapId}`, { vatListedPrice: 210 });
+    expect(edit.statusCode, edit.body).toBe(200);
+    expect(await snapshot(b.id)).toBe(bBefore);
+    expect(await snapshot(c.id)).toBe(cBefore);
+
+    const res = await adminCall(`/store-vat/${vendorId}/revoke`, { reason: 'The GRA cancelled the registration again.' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await prices(hiddenId)).toEqual({ basePrice: 80, vatListedPrice: null });
+    expect(await stamp()).toBe(monthAgo.getTime());
+    expect(await snapshot(b.id)).toBe(bBefore);
+    expect(await snapshot(c.id)).toBe(cBefore);
   });
 });

@@ -1685,6 +1685,10 @@ model Vendor {
   vatStatus             StoreVatStatus           @default(NONE)
   /// How the store's typed prices relate to VAT. Null until the store chooses.
   vatMode               StoreVatMode?
+  /// [VAT-DOCS · owner ruling 31 Oct 2026] A price-mode change an APPROVED store asked for, waiting for a PERSON (the
+  /// store VAT review queue). Until a person approves it, vatMode (and every customer price) stays exactly as it is;
+  /// nothing ever switches by itself. Null when no change is waiting; cleared whenever the approval stops standing.
+  vatModeRequested      StoreVatMode?
   /// The certificate the decision is about (VerificationDocument.id; loose reference, like OrderItem.itemId).
   vatCertificateDocId   String?
   /// Frozen by the person who approved: the number they typed from the certificate, the registered name on it,

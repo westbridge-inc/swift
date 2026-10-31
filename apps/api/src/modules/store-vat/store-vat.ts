@@ -42,6 +42,8 @@ export const STORE_VAT_SELECT = {
   vatRegistrationNumber: true,
   vatStatus: true,
   vatMode: true,
+  // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice, waiting for a person.
+  vatModeRequested: true,
   vatCertificateDocId: true,
   vatApprovedNumber: true,
   vatApprovedName: true,
@@ -50,6 +52,12 @@ export const STORE_VAT_SELECT = {
   vatReviewedAt: true,
   vatReviewNote: true,
 } as const;
+
+/** [VAT-DOCS · owner ruling 31 Oct 2026] The stores a person has to look at: a VAT claim waiting, or an approved store's
+ *  change of price choice waiting. The admin queue and the dashboard count read this one filter. */
+export const STORE_VAT_WAITING_WHERE = {
+  OR: [{ vatStatus: 'PENDING' as const }, { vatStatus: 'APPROVED' as const, vatModeRequested: { not: null } }],
+};
 
 export interface StoreVatRow {
   vatRegistrationNumber: string | null;
