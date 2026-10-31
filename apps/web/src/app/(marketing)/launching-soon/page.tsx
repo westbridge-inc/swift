@@ -19,6 +19,9 @@ import appHome880 from './app-home-880.webp';
 import appTracking from './app-tracking.webp';
 import appTaxi from './app-taxi.webp';
 import appPartner from './app-partner.webp';
+import appTracking1206 from './app-tracking-1206.webp';
+import appTaxi1206 from './app-taxi-1206.webp';
+import appPartner1206 from './app-partner-1206.webp';
 
 /**
  * [Item 7] The front door the public site shows before ordering opens on the web: src/middleware.ts answers
@@ -57,8 +60,10 @@ const HERO_SHOT = {
   alt: 'The Swift app’s Home screen: a Good afternoon greeting, search, and tiles for Food, Groceries, Taxi, Send, Services, Orders, Favourites and Scan.',
 };
 
-type Shot = { image: StaticImageData | string; alt: string };
-const SCREEN = { width: 640, height: 764 };
+/** Each card screen ships at 640 px and at the phone's full 1206 px, so Retina screens and zoom stay sharp; the
+ *  browser picks by the card's drawn width (about 400 px on desktop, 82% of the phone's width below 768 px). */
+type Shot = { image: StaticImageData | string; large: StaticImageData | string; alt: string };
+const SCREEN = { width: 640, height: 764, sizes: '(min-width: 768px) 400px, 75vw' };
 
 type Icon = ComponentType<SVGProps<SVGSVGElement> & { size?: number; strokeWidth?: number }>;
 
@@ -79,6 +84,8 @@ function Screen({ shot, tone }: { shot: Shot; tone: 'paper' | 'brand' }) {
       {/* eslint-disable-next-line @next/next/no-img-element -- a sized file and no client script */}
       <img
         src={fileUrl(shot.image)}
+        srcSet={`${fileUrl(shot.image)} 640w, ${fileUrl(shot.large)} 1206w`}
+        sizes={SCREEN.sizes}
         alt={shot.alt}
         width={SCREEN.width}
         height={SCREEN.height}
@@ -170,7 +177,7 @@ export default function LaunchingSoonPage() {
           className="mx-auto flex max-w-6xl snap-x snap-mandatory gap-4 overflow-x-auto px-5 py-16 [scrollbar-width:none] md:grid md:grid-cols-3 md:gap-5 md:overflow-visible md:py-24"
         >
           <Card
-            shot={{ image: appTracking, alt: 'Live order tracking in the Swift app: the rider on the map and where the order stands.' }}
+            shot={{ image: appTracking, large: appTracking1206, alt: 'Live order tracking in the Swift app: the rider on the map and where the order stands.' }}
             title="Order"
             more={<MoreLink href="/how-it-works">How it works</MoreLink>}
           >
@@ -178,7 +185,7 @@ export default function LaunchingSoonPage() {
             job. Follow every order live on the map.
           </Card>
           <Card
-            shot={{ image: appTaxi, alt: 'Booking a taxi in the Swift app: the destination pinned on the map, and the pickup and destination fields.' }}
+            shot={{ image: appTaxi, large: appTaxi1206, alt: 'Booking a taxi in the Swift app: the destination pinned on the map, and the pickup and destination fields.' }}
             title="Ride"
             more={<MoreLink href="/faq">Common questions</MoreLink>}
           >
@@ -187,7 +194,7 @@ export default function LaunchingSoonPage() {
           </Card>
           <article className="flex w-[82%] shrink-0 snap-center flex-col rounded-3xl bg-[var(--swift-red)] p-4 text-[var(--swift-white)] sm:w-[60%] md:w-auto">
             <Screen
-              shot={{ image: appPartner, alt: 'The rider’s side of the Swift app: a map of Georgetown and the button to go online for jobs.' }}
+              shot={{ image: appPartner, large: appPartner1206, alt: 'The rider’s side of the Swift app: a map of Georgetown and the button to go online for jobs.' }}
               tone="brand"
             />
             <div className="flex flex-1 flex-col px-3 pb-3 pt-6">

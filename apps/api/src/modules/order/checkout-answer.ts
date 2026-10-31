@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { promiseView } from '../eta/promise';
+import { customerPickupCode } from './pickup-code-view';
 
 /**
  * [G3-F2] The checkout command's ONE customer-facing answer.
@@ -34,7 +35,8 @@ export interface CheckoutWireOrder {
   appointmentSlot?: string | null;
   pickupCode?: string | null;
   riskFlagged?: boolean;
-  vendor?: { name: string } | null;
+  /** [PICKUP] requirePickupCode: whether the store asks for the takeaway code (a legacy receipt has none). */
+  vendor?: { name: string; requirePickupCode?: boolean } | null;
   items?: Array<{ name: string; quantity: number; totalCustomer: string | number }>;
   subtotalCustomer: string | number;
   deliveryFee: string | number;
@@ -108,7 +110,9 @@ export function shapeCheckoutAnswer(input: {
     holdExpiresAt: order.holdExpiresAt ?? null,
     fulfillment: order.fulfillment,
     appointmentSlot: order.appointmentSlot ?? null,
-    pickupCode: order.pickupCode ?? null,
+    // [PICKUP · owner 30 Oct 2026] Only when the store asks for the code: with it off the counter checks the
+    // customer's first name and order number. (No client reads the code from this answer.)
+    pickupCode: customerPickupCode(order.pickupCode, order.vendor?.requirePickupCode),
     riskFlagged: order.riskFlagged ?? false,
     vendorName: order.vendor?.name ?? null,
     items: (order.items ?? []).map((i) => ({ name: i.name, quantity: i.quantity, price: Number(i.totalCustomer) })),

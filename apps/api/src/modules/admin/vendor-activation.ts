@@ -45,6 +45,10 @@ export type VendorActivationNext =
    *  there holds a current food handler's certificate (vendor/food-handlers.ts). It goes live by itself once the owner
    *  ticks; the console never makes it live (or reinstates it) without the tick. */
   | 'NEEDS_FOOD_HANDLER_TICK'
+  /** [RETIER PR-A · owner 30 Oct 2026] A store with no weekly fee yet, whose fee would be born above the first step
+   *  (its own catalogue's step, partner/store-fee.ts), and whose owner has not ticked that exact amount. It goes live by
+   *  itself once the owner ticks; the console never makes it live without the tick. */
+  | 'NEEDS_WEEKLY_FEE_TICK'
   /** [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. A suspended
    *  store cannot add the number in the app, so the console may lift the suspension back to waiting; it then goes
    *  live by itself once the owner adds the number. */
@@ -83,7 +87,7 @@ export function feeOperable(subscription: OperabilitySubscription | null, feePau
   return subscriptionOperability(subscription, { missingRow: 'GRANDFATHER' }, feePause, now).operable;
 }
 
-export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick<VendorGoLive, 'checklist' | 'disclosure' | 'publishedPhone' | 'foodHandlers'>): VendorActivationNext {
+export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick<VendorGoLive, 'checklist' | 'disclosure' | 'publishedPhone' | 'foodHandlers'> & Partial<Pick<VendorGoLive, 'weeklyFee'>>): VendorActivationNext {
   if (vendor.status === 'ACTIVE') return 'LIVE';
   if (vendor.status === 'CLOSED') return 'CLOSED';
   if (vendor.suspensionSource === 'WIND_DOWN' || vendor.ownerAccountStatus === 'DEACTIVATED') return 'ACCOUNT_CLOSED';
@@ -100,6 +104,9 @@ export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick
   // [FOOD-PERMIT · owner 24 Oct 2026] Making a registered restaurant live — activating it or reinstating it — needs its
   // owner's food handlers tick. Lifting a suspension back to waiting (above) makes nothing live, so it is not held.
   if (goLive.foodHandlers.required && !goLive.foodHandlers.attested) return 'NEEDS_FOOD_HANDLER_TICK';
+  // [RETIER PR-A] A store whose fee is born when it is made live (it has none yet) is made live only on its owner's
+  // tick of that fee, when the fee is above the first step. A store that already has a fee is never held for it.
+  if (vendor.subscription == null && goLive.weeklyFee?.required && !goLive.weeklyFee.ticked) return 'NEEDS_WEEKLY_FEE_TICK';
   return vendor.status === 'SUSPENDED' ? 'CAN_REINSTATE' : 'CAN_ACTIVATE';
 }
 
@@ -163,6 +170,12 @@ export function vendorActivationRefusal(
         409,
         'FOOD_HANDLER_TICK_MISSING',
         `${name}'s owner has not yet ticked that everyone who handles food there holds a current food handler’s certificate. It goes live by itself once the owner ticks it (Documents in the app, or Settings on the web dashboard).`,
+      );
+    case 'NEEDS_WEEKLY_FEE_TICK':
+      return new AppError(
+        409,
+        'WEEKLY_FEE_TICK_MISSING',
+        `${name}'s weekly fee follows its catalogue, and its owner has not yet read it and ticked “I understand the weekly fee” for this store. It goes live by itself once the owner ticks it.`,
       );
     case 'LIVE':
       return new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');

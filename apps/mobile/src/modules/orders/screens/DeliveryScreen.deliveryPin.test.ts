@@ -32,7 +32,9 @@ describe('the delivery door PIN on the tracking screen [MKT-F057]', () => {
   it('a PICKUP order shows only the pickup-code block, never the delivery PIN', () => {
     // Two separate, mutually exclusive gates — a PICKUP customer gets the
     // counter code; the door PIN is DELIVERY-only.
-    expect(SCREEN.match(/o\.fulfillment === 'PICKUP' && o\.pickupCode/g)).toHaveLength(1);
+    // [PICKUP · owner 30 Oct 2026] The counter block: the code when the store asks for it, else the first name
+    // + order-number check (pickup-words.ts pickupShowsCode).
+    expect(SCREEN.match(/o\.fulfillment === 'PICKUP' && \(pickupShowsCode\(o\) \|\| o\.pickupCodeRequired === false\)/g)).toHaveLength(1);
     expect(SCREEN.match(/o\.fulfillment === 'DELIVERY' && o\.ridePin/g)).toHaveLength(1);
   });
 });
