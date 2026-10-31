@@ -17,8 +17,9 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, UPLOAD_CONSENT_VIAS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { documentConsentOnRecord } from './document-consent-record';
 import {
-  POLICE_CLEARANCE_TICK, POLICE_CLEARANCE_WITHDRAWN_NOTE, policeClearanceChecklistOf, policeClearanceConsentFor, policeClearanceKind,
-  recordPoliceClearanceConsent, recordPoliceClearanceWithdrawal,
+  POLICE_CLEARANCE_CONSENT_REQUIRED, POLICE_CLEARANCE_CONSENT_REQUIRED_MESSAGE, POLICE_CLEARANCE_TICK, POLICE_CLEARANCE_WITHDRAWN_NOTE,
+  policeClearanceChecklistOf, policeClearanceConsentFor, policeClearanceKind, policeClearanceTickMissing, recordPoliceClearanceConsent,
+  recordPoliceClearanceWithdrawal,
 } from './police-clearance-consent';
 import { POLICE_CLEARANCE_DOC_TYPE } from './doc-registry';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -215,6 +216,11 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);
+    // [WEB-POLICE · option (a)] A police clearance with no consent tick at all is refused before anything is stored
+    // (build 12's document_v1 stays accepted; option (b), police_clearance_v1 only, follows the launch OTA).
+    if (policeClearanceTickMissing(body)) {
+      throw new AppError(400, POLICE_CLEARANCE_CONSENT_REQUIRED, POLICE_CLEARANCE_CONSENT_REQUIRED_MESSAGE);
+    }
     // [POLICE-CLEARANCE CONSENT] A police clearance's own tick belongs to a police clearance only, and to the words
     // shown now: the version names the days the words promise, so stale words are refused before anything is stored.
     const policeWords = body.consentTick === POLICE_CLEARANCE_TICK ? await policeClearanceConsentFor(app.prisma, body.role) : null;
