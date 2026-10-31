@@ -30,8 +30,8 @@ import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
-import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
-import { goodsSizeCarriableToday, vehicleTypesForPackageSize } from '../../config/vehicle-classes';
+import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -66,6 +66,7 @@ import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
 import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, persistDispatchCommandInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
+import { orderHoldMinutes } from './hold-minutes';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
@@ -522,14 +523,13 @@ function courierPickupProofBound(order: Pick<Order,
 /** Hold duration in ms, or null when the feature is off / misconfigured. */
 export function holdWindowMs(): number | null {
   if (process.env['LIFECYCLE_V2'] !== '1') return null;
-  // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
-  // env examples say 5 since #792). The code defaulting 2 meant an env that
-  // omitted the variable quietly broke the documented customer promise: the
-  // free-cancel window (then FREE_CANCEL_WINDOW_MIN = 5) outlived the hold,
-  // putting orders on the vendor board while still free to cancel. The boot
-  // floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts) since the window after
-  // acceptance became one minute (owner 22 Oct 2026); the hold is unchanged.
-  const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
+  // [REPORT-036 F036-03b] The default is the SETTLED value, the one both env
+  // examples declare. The code once defaulted 2 while the examples said 5, so
+  // an env that omitted the variable quietly broke the documented customer
+  // promise. The boot floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts).
+  // [owner 30 Oct 2026] The settled hold is ONE minute (was five):
+  // ORDER_HOLD_DEFAULT_MIN in order/hold-minutes.ts, read by checkout too.
+  const minutes = orderHoldMinutes();
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
 
@@ -1174,19 +1174,16 @@ export class OrderService {
 
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
-        // [owner #20] The vehicle size this delivery needs (a bulky line → the largest class: cars and vans).
-        const requiredSize = requiredPackageSizeForOrder({
+        // [owner #20] The vehicle size this delivery needs: the basket's total bulk, banded. [Owner, 31 Oct 2026]
+        // A store order is never refused for its size alone: while no vehicle Swift takes on today may carry the
+        // largest class (car deliveries off), the size is capped at what a motorbike carries (utils/load), so it
+        // is placed and offered to motorbikes. Only the availability answer below can still say no one is free.
+        // The true band rides along for the stacking read only (an order past a motorbike's band never batches).
+        const { required: requiredSize, trueBand: loadBand } = readOrderSize({
           orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
           courierPackageSize: null,
           items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
         }, DEFAULT_LOAD_BANDS);
-        // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] When no vehicle Swift takes on today may carry
-        // it (a bulky order while car deliveries are off), it is refused HERE, always, whatever the availability
-        // flag below: never placed, accepted and then stranded with nobody who can carry it.
-        if (requiredSize && !goodsSizeCarriableToday(requiredSize)) {
-          throw new AppError(409, 'DELIVERY_TOO_BIG',
-            'This order is too big for delivery by bike or motorbike, and no vehicle on Swift can carry this right now. Choose Pickup for this order.');
-        }
         // [RIDER-SAFE 5] Swift's delivery pause (platform-wide or this store's
         // zone) and [RIDER-SAFE 4] the store's own rider backlog: new DELIVERY
         // orders stop, pickup stays open. Not behind the availability flag —
@@ -1245,6 +1242,7 @@ export class OrderService {
                 floatRequired: cashFloat,
                 cashToCollect: cashFloat,
                 packageSize: requiredSize,
+                loadBand,
               }).catch(() => null)
             : null;
           if (capacity) {
@@ -1269,7 +1267,7 @@ export class OrderService {
               );
             }
             // [owner #20] Too big for a bike: the order is offered only to a
-            // vehicle that can carry it (a bulky line → a car or van), so the
+            // vehicle that can carry it (its total bulk, utils/load), so the
             // customer is told NOW, before anything is placed, when none such is
             // near — never an order that silently finds nobody.
             // (requiredSize: computed above, before the flag.)
@@ -1922,7 +1920,8 @@ export class OrderService {
               create: { status: 'PENDING', changedBy: input.userId, note: 'Order placed' },
             },
           },
-          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
+          // [PICKUP] requirePickupCode: the checkout answer gives the takeaway code only when the store asks for it.
+          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true, requirePickupCode: true } } },
         });
 
         // [BOOK-S2 · owner B4] With INSTANT_BOOKING on, the customer's slot is

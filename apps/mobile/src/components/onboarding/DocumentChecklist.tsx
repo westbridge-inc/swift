@@ -7,7 +7,7 @@ import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { OwnNameCard } from './OwnNameCard';
 import { FoodHandlersCard } from './FoodHandlersCard';
-import { StoreWeeklyFeeCard } from './StoreWeeklyFeeCard';
+import { StoreWeeklyFeeCard, type StoreFeeScope } from './StoreWeeklyFeeCard';
 import { FOOD_HANDLERS_DOC } from './foodHandlers';
 import { ownNameApplies } from '../../lib/ownNameCopy';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
@@ -36,11 +36,14 @@ export function DocumentChecklist({
   isError,
   onRetry,
   storeName,
+  storeFee,
 }: {
   role: string;
   status: any;
   /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
   storeName?: string | null;
+  /** [RETIER PR-A2] the store whose weekly fee may need its owner's tick, and whether the person looking owns it */
+  storeFee?: StoreFeeScope | null;
   isLoading?: boolean;
   isError?: boolean;
   onRetry?: () => void;
@@ -125,7 +128,7 @@ export function DocumentChecklist({
       </T>
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
         {/* [Owner 15 Oct 2026] no promise faster than the support hours allow */}
-        Upload these to activate your account. We review them Monday to Saturday, 8:00–20:00 Guyana time.
+        Upload these to activate your account. We review them Monday to Saturday, 8:00–16:00 Guyana time.
       </T>
       {/* [R17 · legal research D2/B1] a tick before any upload; the API records it in the consent ledger.
           [DOC-CONSENT] ticked only by the person: on this visit, or their own grant on record. */}
@@ -226,7 +229,7 @@ export function DocumentChecklist({
         );
       })}
       {/* [RETIER PR-A2] a store whose fee follows its catalogue above the first step ticks it here before it goes live */}
-      <StoreWeeklyFeeCard role={role} />
+      <StoreWeeklyFeeCard role={role} scope={storeFee} />
       {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
       {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
         ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}

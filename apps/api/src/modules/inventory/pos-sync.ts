@@ -6,6 +6,7 @@ import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items'
 import { OrderService } from '../order/order.service';
 import { applyStockMovements, recordOpeningBalances } from './stock';
 import { holdTillSyncLock } from './till-sync-lock';
+import { reconcileVatPricing, storeTypedPrice } from '../store-vat/vat-pricing';
 
 // ---------------------------------------------------------------------------
 // [POS-SYNC] Re-uploading a till export updates the store.
@@ -111,6 +112,8 @@ export interface StoreItem {
   name: string;
   sku: string | null;
   basePrice: Prisma.Decimal | number;
+  /** [VAT-DOCS] The price the store typed before VAT, while its VAT is added (vat-pricing.ts); null otherwise. */
+  vatListedPrice?: Prisma.Decimal | number | null;
   stockQuantity: number | null;
   isAvailable: boolean;
   autoHiddenAt: Date | null;
@@ -368,7 +371,9 @@ function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
       if (target !== from) stock = { from, to: target, till: m.count, held: heldUnits };
     }
   }
-  const currentPrice = Number(item.basePrice);
+  // [VAT-DOCS] The till holds the price the store typed: compared with that (before VAT while VAT is added), never
+  // with the VAT-inclusive price customers pay, or every file would "change" every price.
+  const currentPrice = storeTypedPrice(item);
   const price = m.price !== null && m.price !== currentPrice ? { from: currentPrice, to: m.price } : null;
 
   // Sold out, by the engine's own edges. [REVIEW-F S3-1] An item the SYSTEM
@@ -397,7 +402,7 @@ function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
 }
 
 const ITEM_SELECT = {
-  id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true, tillOffAt: true, fulfillment: true,
+  id: true, name: true, sku: true, basePrice: true, vatListedPrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true, tillOffAt: true, fulfillment: true,
 } as const;
 
 /** The store's live listings: a deleted (archived) one is not on the store any more, so a file never matches it. */
@@ -562,10 +567,12 @@ export async function confirmSync(
     if (prices.length > 0) {
       const values = Prisma.join(prices.map((c) => Prisma.sql`(${c.itemId}::text, ${c.price!.to.toFixed(2)}::numeric)`));
       const priced = await tx.$executeRaw`
-        UPDATE "items" AS i SET "basePrice" = v.price, "updatedAt" = now()
+        UPDATE "items" AS i SET "basePrice" = v.price, "vatListedPrice" = NULL, "updatedAt" = now()
           FROM (VALUES ${values}) AS v(id, price)
          WHERE i.id = v.id AND i."vendorId" = ${input.vendorId}`;
       if (priced !== prices.length) throw new AppError(409, 'PREVIEW_STALE', 'Your store changed while the file was being applied. Preview it again.');
+      // [VAT-DOCS] The till's price is the price the store typed: VAT added to it when the store's approval says so.
+      await reconcileVatPricing(tx, input.vendorId, { itemIds: prices.map((c) => c.itemId) });
     }
 
     // Counts: the single writer's batch, then the inventory engine's two edges.
@@ -656,6 +663,8 @@ export async function confirmSync(
         select: { id: true, sku: true },
       });
       if (created.length !== plan.view.newItems.length) throw new AppError(500, 'NEW_ITEMS_MISMATCH', 'New items were not all created');
+      // [VAT-DOCS] Born at the price the till typed; VAT added to it when the store's approval says so.
+      await reconcileVatPricing(tx, input.vendorId, { itemIds: created.map((c) => c.id) });
       // [F2] The ledger explains the count each item is born with.
       const idBySku = new Map(created.map((c) => [skuKey(c.sku), c.id]));
       // [GUARDRAILS §8] A banned word in a new item's own text holds it hidden until a person checks it.

@@ -94,7 +94,7 @@ const storeStep = async (orderId: string, step: string, expected: string) => {
   expect(res.json().data.status).toBe(expected);
 };
 
-async function placeOrder(fulfillment: 'PICKUP' | 'DELIVERY'): Promise<{ id: string; code: string | null }> {
+async function placeOrder(fulfillment: 'PICKUP' | 'DELIVERY'): Promise<{ id: string; code: string | null; answerCode: string | null }> {
   expect((await call('DELETE', '/api/v1/customer/cart', customer.token)).statusCode).toBe(200);
   const added = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId, quantity: 1 });
   expect(added.statusCode, added.body).toBe(201);
@@ -104,8 +104,10 @@ async function placeOrder(fulfillment: 'PICKUP' | 'DELIVERY'): Promise<{ id: str
   const placed = await call('POST', '/api/v1/customer/checkout', customer.token, body, { 'idempotency-key': `o2-${nanoid(10)}` });
   expect(placed.statusCode, placed.body).toBe(200);
   const order = placed.json().data.order as { id: string; pickupCode?: string | null };
-  await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { holdExpiresAt: null } }));
-  return { id: order.id, code: order.pickupCode ?? null };
+  // [PICKUP · owner 30 Oct 2026] The code is minted for every takeaway (the DB row); the checkout ANSWER carries it
+  // only when the store asks for it. `code` is the minted one, `answerCode` what the customer's answer carried.
+  const row = await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { holdExpiresAt: null } }));
+  return { id: order.id, code: row.pickupCode ?? null, answerCode: order.pickupCode ?? null };
 }
 const readyTakeaway = async () => {
   const order = await placeOrder('PICKUP');
@@ -120,9 +122,11 @@ const setCodeRequired = async (on: boolean) => {
   expect(res.statusCode, res.body).toBe(200);
 };
 const handedToRider = (orderId: string) => call('PUT', `/api/v1/vendor/orders/${orderId}/handed-to-rider`, owner.token, undefined, asStore());
-/** The customer's own order view (GET /customer/orders/:id). */
-const customerDetail = async (orderId: string) => {
-  const res = await call('GET', `/api/v1/customer/orders/${orderId}`, customer.token);
+/** The customer's own order view (GET /customer/orders/:id). `pickupHandover: 'v1'` = a client that tells the
+ *  customer the name + order number when the store's code is off (web, phone after the OTA); none = store build 12. */
+const customerDetail = async (orderId: string, capability: { pickupHandover?: string } = {}) => {
+  const query = capability.pickupHandover ? `?pickupHandover=${capability.pickupHandover}` : '';
+  const res = await call('GET', `/api/v1/customer/orders/${orderId}${query}`, customer.token);
   expect(res.statusCode, res.body).toBe(200);
   return res.json().data as Record<string, unknown> & { timeline: Array<{ status: string; note: string | null }>; vendor: Record<string, unknown> };
 };
@@ -255,9 +259,61 @@ describe('[O-2] takeaway: the pickup code is off by default, for every store', (
       const order = await readyTakeaway();
       expect(await storeDetail(order.id)).toMatchObject({ pickupCodeRequired: true });
       expect(await customerDetail(order.id)).toMatchObject({ pickupCodeRequired: true });
+      // [PICKUP · owner 30 Oct 2026] Code on: every customer surface carries the code, as today.
+      expect(order.answerCode).toBe(order.code);
+      expect(await customerDetail(order.id, { pickupHandover: 'v1' })).toMatchObject({ pickupCodeRequired: true, pickupCode: order.code });
+      expect((await customerList()).find((o) => o['id'] === order.id)).toMatchObject({ pickupCode: order.code });
       const missing = await completePickup(order.id);
       expect(missing.statusCode).toBe(400);
       expect(missing.json().error.code).toBe('MISSING_PICKUP_CODE');
+      expect((await completePickup(order.id, order.code!)).statusCode).toBe(200);
+    } finally {
+      await setCodeRequired(false);
+    }
+  });
+});
+
+/** The customer's order list (GET /customer/orders). */
+const customerList = async () => {
+  const res = await call('GET', '/api/v1/customer/orders?limit=50', customer.token);
+  expect(res.statusCode, res.body).toBe(200);
+  return res.json().data as Array<Record<string, unknown> & { vendor?: Record<string, unknown> | null }>;
+};
+
+// [PICKUP · owner 30 Oct 2026, staging test: "the code is still there rather than mark as picked up"] With the
+// store's code OFF the customer is told to give their first name and order number, and the store taps "Handed to
+// customer": the customer is not given a code. The server stops sending it — on the checkout answer, the order
+// list, the delivery-to-pickup switch, and the order screen of every client that says it tells the customer the
+// name + number instead (pickupHandover=v1: the web, and the phone after its OTA). Store build 12 (under store
+// review; it has no such words and its order screen asks for the code) keeps today's answer until it updates.
+// The code is still minted (a store may turn it on for a live order; an older store build may still send it).
+describe('[PICKUP] code off: the customer is not given a code', () => {
+  it('the checkout answer, the order list and a v1 order screen carry no code; the name + number check completes it', async () => {
+    const order = await readyTakeaway();
+    expect(order.code).toMatch(/^\d{6}$/);
+    expect(order.answerCode).toBeNull();
+    expect(await customerDetail(order.id, { pickupHandover: 'v1' })).toMatchObject({ pickupCodeRequired: false, pickupCode: null, orderNumber: expect.any(String) });
+    const listed = (await customerList()).find((o) => o['id'] === order.id);
+    expect(listed).toMatchObject({ pickupCode: null });
+    expect(listed?.vendor ?? {}).not.toHaveProperty('requirePickupCode');
+    expect(JSON.stringify(await customerDetail(order.id, { pickupHandover: 'v1' }))).not.toContain(order.code!);
+    const handed = await completePickup(order.id);
+    expect(handed.statusCode, handed.body).toBe(200);
+  });
+
+  it('store build 12 (no capability) keeps today\'s answer: its screen shows the code its own store screen asks for', async () => {
+    const order = await readyTakeaway();
+    expect(await customerDetail(order.id)).toMatchObject({ pickupCodeRequired: false, pickupCode: order.code });
+    // An unknown capability level is not v1: today's answer.
+    expect(await customerDetail(order.id, { pickupHandover: 'v9' })).toMatchObject({ pickupCode: order.code });
+  });
+
+  it('a store that turns the code ON for a live order: the customer\'s v1 screen shows the code at once', async () => {
+    const order = await readyTakeaway();
+    expect(await customerDetail(order.id, { pickupHandover: 'v1' })).toMatchObject({ pickupCode: null });
+    await setCodeRequired(true);
+    try {
+      expect(await customerDetail(order.id, { pickupHandover: 'v1' })).toMatchObject({ pickupCodeRequired: true, pickupCode: order.code });
       expect((await completePickup(order.id, order.code!)).statusCode).toBe(200);
     } finally {
       await setCodeRequired(false);

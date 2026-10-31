@@ -45,11 +45,13 @@ DOCKER = FAKE_PILOT_DOCKER.replace(
     'if argv[:1] == ["network"]:')
 assert DOCKER.count("NOT_RUNNING") == 1 and DOCKER.count("pg_roles") == 1
 PROD_API = "api.swift.example.com"
+APP_CONFIG = "apps/mobile/app.config.ts"
+LINK_DOMAIN_LINE = "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';\n"
 # Every production refusal satisfied, for the first boot before DNS moves (no
 # real value: synthetic names, a made-up fingerprint).
 PRODUCTION_ENV = (
     f"PILOT_ENV=production\nNODE_ENV=production\nAPI_HOST={PROD_API}\nAPI_PUBLIC_URL=https://{PROD_API}\n"
-    "APP_PUBLIC_URL=https://app.swift.example.com\nCORS_ORIGIN=https://app.swift.example.com\n"
+    "APP_PUBLIC_URL=https://swiftgy.com\nCORS_ORIGIN=https://app.swift.example.com\n"
     "MAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\nBACKUP_BUCKET=test-backups\nSTORAGE_PROVIDER=s3\n"
     f"BACKUP_GPG_FINGERPRINT={'A' * 40}\nBACKUP_GPG_RECIPIENT_FILE=/nonexistent/owner-backup.pub\n"
     "BACKUP_MAX_AGE_HOURS=1\nBILLING_TOPUP_HOLD=1\nPAYMENT_PROVIDER=disabled\nCARD_RAIL_KILL=1\n"
@@ -103,6 +105,9 @@ class PilotUpRunsTheRequestedRevisionsSteps(unittest.TestCase):
             utils = self.work / "apps" / "api" / "src" / "utils"
             utils.mkdir(parents=True)
             shutil.copy(DEPLOY.parent / "apps" / "api" / "src" / "utils" / "secret-files.ts", utils / "secret-files.ts")
+            # [DEPLOY-GUARD] production checks APP_PUBLIC_URL against the app's link domain.
+            (self.work / "apps" / "mobile").mkdir(parents=True)
+            shutil.copy(DEPLOY.parent / "apps" / "mobile" / "app.config.ts", self.work / APP_CONFIG)
             (self.work / ".gitignore").write_text("deploy/.env\ndeploy/routing-data/\n")
             # backup.sh's own key proof is tested in test_backup_encryption.py;
             # here production's `backup.sh --check-key` is a stub that passes.
@@ -202,6 +207,25 @@ class PilotUpRunsTheRequestedRevisionsSteps(unittest.TestCase):
                 self.assertEqual(self.count(calls, fragment), 0, calls)
         self.assertEqual(self.count(calls, " up -d --no-deps --force-recreate api worker"), 1, calls)
         self.assertEqual(self.count(calls, " stop api worker"), 1, calls)
+
+    def test_production_checks_app_public_url_against_the_requested_revisions_app_config(self):
+        """[DEPLOY-GUARD] The link domain is read from the checkout: after the
+        switch, the restarted run reads the requested revision's app config, so
+        a revision whose app claims another domain refuses before Docker is
+        touched, though the running revision's app config agreed."""
+        config = (DEPLOY.parent / APP_CONFIG).read_text()
+        self.assertEqual(config.count(LINK_DOMAIN_LINE), 1)
+        old = self.commit(with_step("OLD-REVISION-STEP"))
+        moved = config.replace(LINK_DOMAIN_LINE, LINK_DOMAIN_LINE.replace("'swiftgy.com'", "'swift-fixture.com'"))
+        new = self.commit(with_step("NEW-REVISION-STEP"), {APP_CONFIG: moved})
+        self.host_at(old, PRODUCTION_ENV)
+        result, calls = self.run_pilot("--no-public", new, NOT_RUNNING="caddy")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count(RESTART_NOTICE), 1, result.stdout)
+        self.assertIn("needs APP_PUBLIC_URL=https://swift-fixture.com exactly", result.stderr)
+        self.assertNotIn("NEW-REVISION-STEP", result.stdout)
+        self.assertEqual([c for c in calls if re.search(r"docker compose .* (up|stop|pull|build|run)\b", c)], [], calls)
+        self.assertEqual(self.count(calls, "systemctl restart"), 0, calls)
 
     def test_a_marker_naming_another_stage_or_sha_refuses_before_anything(self):
         old = self.commit(with_step("OLD-REVISION-STEP"))

@@ -13,8 +13,13 @@ export interface StoreFeeView {
   ticked: boolean;
   terms: { version: string; items: Array<{ heading: string; text: string }>; tick: string } | null;
 }
-export const getStoreFee = (): Promise<StoreFeeView | null> =>
-  apiFetch('/api/v1/vendor/onboarding/weekly-fee').then((r) => (r.data ?? null) as StoreFeeView | null);
-/** The owner ticks exactly the fee shown, for the selected store (the request carries its x-vendor-id). */
-export const tickStoreFee = (weeklyFeeAck: { version: string; amount: number; currencyCode: string }) =>
-  apiFetch('/api/v1/vendor/onboarding/weekly-fee', { method: 'POST', body: JSON.stringify({ weeklyFeeAck }) }).then((r) => r.data);
+export const getStoreFee = (vendorId: string): Promise<StoreFeeView | null> =>
+  apiFetch('/api/v1/vendor/onboarding/weekly-fee', { headers: { 'x-vendor-id': vendorId } }).then((r) => (r.data ?? null) as StoreFeeView | null);
+/** The owner ticks exactly the fee shown, for ONE store, named in the header and the body (the server refuses a
+ *  mismatch, and any amount, currency or version that is not its quote now). */
+export const tickStoreFee = (tick: { vendorId: string; weeklyFeeAck: { version: string; amount: number; currencyCode: string } }) =>
+  apiFetch('/api/v1/vendor/onboarding/weekly-fee', { method: 'POST', headers: { 'x-vendor-id': tick.vendorId }, body: JSON.stringify(tick) }).then((r) => r.data);
+
+/** What a tick is given to: the store, the words' version, the amount and the currency on screen. */
+export const storeFeeKey = (vendorId: string, fee: { version: string; amount: number; currencyCode: string }) =>
+  `${vendorId}:${fee.version}:${fee.amount}:${fee.currencyCode}`;

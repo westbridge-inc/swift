@@ -15,7 +15,7 @@ import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import { getOrders, money, type VendorOrder } from '@/lib/vendor-api';
 import { preloadedPart } from '@/lib/preloaded-part';
-import { statusChip, timeAgo } from './order-chip';
+import { BoardNames, statusChip, timeAgo } from './order-chip';
 import { DeliveryStatusNotice } from '../delivery-status-notice';
 
 // [PERF · UI-FIX-WEB note 05:18Z] The order window is its own chunk, fetched as soon as this page
@@ -105,8 +105,9 @@ export default function OrdersPage() {
     <button data-order-id={o.id} onClick={() => setSelected(o.id)} className="block w-full text-left">
       <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase(), mmgDisputePaused(o))}</div>
       <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
+      <BoardNames order={o} />
       <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>
       {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot && <p className="sw-caption mt-2">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p>}
       {o.vendor?.name && <p className="sw-caption mt-1">{o.vendor.name}</p>}
       <span className="mt-2 block text-[13px] font-semibold text-[var(--swift-red)]">View order</span>

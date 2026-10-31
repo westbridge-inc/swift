@@ -41,7 +41,8 @@ const good: Record<string, string | undefined> = {
   // [ledger E08] The settled production posture ships the hold ON in both env
   // examples, so the valid production base carries it explicitly.
   LIFECYCLE_V2: '1',
-  ORDER_HOLD_MINUTES: '5',
+  // [owner 30 Oct 2026] the store-order hold is one minute (was five).
+  ORDER_HOLD_MINUTES: '1',
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
@@ -537,20 +538,23 @@ describe('[ledger E08] production must be explicit about the order hold', () => 
     expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1' })).not.toThrow();
   });
 
-  // [CANCEL-WINDOW · owner 22 Oct 2026] '1' joins the list: the free-cancel window after acceptance is now one
-  // minute, but the hold floor stays the settled five minutes (ORDER_HOLD_FLOOR_MIN) — the guard is never relaxed.
-  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '1', '2', '4.99'])(
-    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the settled five-minute hold',
+  // [CANCEL-WINDOW · owner 22 Oct 2026] The free-cancel window after acceptance became one minute; the hold
+  // floor stayed five. [owner 30 Oct 2026, staging test: "the 5 minute wait time is still there, not 1 minute"]
+  // The store-order hold itself is now ONE minute, so the floor is one minute (ORDER_HOLD_FLOOR_MIN): '1', '2' and
+  // '4.99' are accepted now (below). Everything else stays refused — no hold, a broken value, or anything shorter
+  // than one minute ('0.5', '0.99' are new pins of that floor).
+  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '0.5', '0.99', 'NaN', '-Infinity'])(
+    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the one-minute hold',
     (minutes) => {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }))
         .toThrow(/ORDER_HOLD_MINUTES/);
     },
   );
 
-  it('accepts the unset default and any hold at least the settled five minutes (DS214 D1) — not the one-minute window', () => {
+  it('accepts the unset default and any hold of at least the owner\'s one minute (DS214 D1 · owner 30 Oct 2026)', () => {
     expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
-    expect(ORDER_HOLD_FLOOR_MIN).toBe(5);
-    for (const minutes of [undefined, '5', '7', '10']) {
+    expect(ORDER_HOLD_FLOOR_MIN).toBe(1);
+    for (const minutes of [undefined, '1', '1.5', '2', '4.99', '5', '7', '10']) {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }), String(minutes))
         .not.toThrow();
     }

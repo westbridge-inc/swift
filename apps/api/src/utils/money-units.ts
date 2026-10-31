@@ -89,6 +89,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'FeeReceiptAllocation', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FxRate', field: 'rate', unit: 'FX_RATE' },
   { model: 'Item', field: 'basePrice', unit: 'MAJOR_WHOLE' },
+  // [VAT-DOCS] The price a store typed before VAT, while its VAT is added to the item (vat-pricing.ts).
+  { model: 'Item', field: 'vatListedPrice', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'debit', unit: 'MAJOR_WHOLE' },
   { model: 'MmgAgentPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
@@ -98,6 +100,7 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   // [MMG REVERSAL] A returned payment: always the whole checkout amount.
   { model: 'MmgFeeReversal', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Option', field: 'additionalPrice', unit: 'MAJOR_WHOLE' },
+  { model: 'Option', field: 'vatListedAdditionalPrice', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'deliveryFee', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'discount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'serviceFee', unit: 'MAJOR_WHOLE' },

@@ -15,7 +15,7 @@ import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction, runWithoutTenant } from '../../plugins/prisma';
 import { countWaiting, type WaitingKey } from './dashboard-waiting';
-import { VAT_CERTIFICATE_DOC_TYPE } from '../store-vat/store-vat';
+import { STORE_VAT_WAITING_WHERE, VAT_CERTIFICATE_DOC_TYPE } from '../store-vat/store-vat';
 import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -1228,7 +1228,8 @@ export async function adminRoutes(app: FastifyInstance) {
         const { waiting, heldStores } = await catalogueWaiting(tenantId);
         return waiting.length + heldStores.length;
       },
-      storeVat: () => tenantPrisma.vendor.count({ where: { vatStatus: 'PENDING' } }),
+      // [VAT-DOCS · owner ruling 31 Oct 2026] A claim waiting, or an approved store's change of price choice waiting.
+      storeVat: () => tenantPrisma.vendor.count({ where: STORE_VAT_WAITING_WHERE }),
       custody: () => app.prisma.custodyRecoveryCase.count({ where: { state: { in: CUSTODY_CASE_OPEN_STATES } } }),
       claimsToDecide: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'PENDING_REVIEW' } }),
       claimsToPay: () => tenantPrisma.reimbursementClaim.count({ where: { status: 'APPROVED' } }),
@@ -1817,6 +1818,8 @@ export async function adminRoutes(app: FastifyInstance) {
         ready: goLive.ready,
         // [FOOD-PERMIT] a registered restaurant's owner tick (required to go live), never its words or ledger row
         foodHandlers: goLive.foodHandlers,
+        // [RETIER PR-A] a store's weekly-fee tick (required to go live when its fee is above the first step)
+        weeklyFee: goLive.weeklyFee,
         next,
       },
     };
@@ -1945,6 +1948,8 @@ export async function adminRoutes(app: FastifyInstance) {
           where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
           data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
         });
+        // [RETIER PR-A] A reinstated store is live: the first time, for good (partner/store-fee.ts).
+        await tx.vendor.updateMany({ where: { id, firstLiveAt: null }, data: { firstLiveAt: new Date() } });
         if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
           extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
@@ -6624,6 +6629,13 @@ export async function adminRoutes(app: FastifyInstance) {
     reason: z.string().max(500).optional(),
   });
   const storeVatReasonSchema = z.object({ reason: z.string().trim().min(3).max(500) });
+  // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice: the person approves the change they
+  // saw (`mode`), or refuses it with a reason the store reads.
+  const storeVatModeSchema = z.object({
+    approve: z.boolean(),
+    mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']),
+    reason: z.string().trim().min(3).max(500).optional(),
+  }).refine((b) => b.approve || b.reason !== undefined, { message: 'Say why, in words the store will read.', path: ['reason'] });
 
   app.get('/store-vat/pending', { preHandler: [adminGuard] }, async () => {
     const { pendingStoreVat } = await import('../store-vat/store-vat-decisions');
@@ -6644,6 +6656,8 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditIn(tx, request.user.userId, 'APPROVE_STORE_VAT', 'Vendor', vendorId, facts, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }, process.env, new Date(), (id) => notifications.publishPersisted(id));
+    // [VAT-DOCS] An approval can move the store's prices (VAT added at checkout): search shows the new ones.
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data };
   });
 
@@ -6655,6 +6669,20 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditIn(tx, request.user.userId, 'REJECT_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }, process.env, new Date(), (id) => notifications.publishPersisted(id));
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data };
+  });
+
+  app.post('/store-vat/:vendorId/mode', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatModeSchema.parse(request.body);
+    const { decideStoreVatModeChange } = await import('../store-vat/store-vat-decisions');
+    const data = await decideStoreVatModeChange(tenantPrisma, vendorId, request.user.userId, body, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, body.approve ? 'APPROVE_STORE_VAT_MODE' : 'REJECT_STORE_VAT_MODE', 'Vendor', vendorId, facts, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    }, process.env, (id) => notifications.publishPersisted(id));
+    // An approved change moves the store's prices: search shows the new ones.
+    if (body.approve) scheduleVendorSearchSync(app, vendorId);
     return { success: true, data };
   });
 
@@ -6666,6 +6694,8 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditIn(tx, request.user.userId, 'REVOKE_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }, new Date(), (id) => notifications.publishPersisted(id));
+    // [VAT-DOCS] Withdrawn: the store's typed prices are back, in search too.
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: await storeVatView(tenantPrisma, vendorId) };
   });
 

@@ -136,6 +136,8 @@ describe('the Orders home copies the app', () => {
     expect(within(guide).getByText('Use the switch below to start taking orders')).toBeTruthy();
     expect(within(guide).getByText('Share your store link')).toBeTruthy();
     expect(await within(guide).findByText('https://swift.test/s/SAMPLE')).toBeTruthy();
+    // [STORE-LINK] As on the phone (VendorOps opens VendorMyQr): the row opens the store's QR page, where the link is copied and shared.
+    expect(within(guide).getByRole('link', { name: /Share your store link/ }).getAttribute('href')).toBe('/dashboard/qr');
     expect(within(guide).getByText('LISTENING FOR ORDERS')).toBeTruthy();
   });
 
@@ -163,6 +165,9 @@ describe('the Orders home copies the app', () => {
     // [BUG-GUARDS C5] The QR and subscription states read as words, never the code.
     expect(tile('My QR & number').textContent).toContain('Active');
     expect(tile('My QR & number').textContent).not.toContain('ACTIVE');
+    // [STORE-LINK] The tile opens the store's QR page (copy, share, the code), as the phone's opens VendorMyQr.
+    expect(tile('My QR & number').getAttribute('href')).toBe('/dashboard/qr');
+    expect(tile('My QR & number').getAttribute('target')).toBeNull();
     await waitFor(() => expect(tile('Order history').textContent).toContain('31 recent orders'));
     await waitFor(() => expect(tile('Billing').textContent).toContain('Payment due since 18 Oct 2026'));
     expect(tile('Billing').getAttribute('href')).toBe('/dashboard/weekly-fee');

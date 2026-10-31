@@ -7,6 +7,7 @@ import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money, moneyExact } from '../../../lib/money';
+import { useCheckingLatest } from '../../../lib/checkingLatest';
 import { cashSettlementAmount } from '../../../lib/riderFeesOwed';
 import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
@@ -376,6 +377,8 @@ export function EarningsScreen({ navigation }: any) {
   const { kind } = mover;
   const summaryQ = useEarningsSummary<unknown>(kind);
   const historyQ = useEarnings<unknown>(kind);
+  // [SPEED 30 Oct] Figures from memory (opened again, or read ahead from Home) say so until Swift answers.
+  const checkingLatest = useCheckingLatest(summaryQ);
   // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
   const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
   const stats = useMoverStats(kind);
@@ -461,6 +464,7 @@ export function EarningsScreen({ navigation }: any) {
             total={earningsWindowTotal(summaryQ.data, 'thisWeek', 'week')}
             facts={weekFacts}
           />
+          {checkingLatest ? <T variant="caption" tone="muted" testID="earnings-checking" style={{ marginTop: space.sm }}>Checking for the latest…</T> : null}
 
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
             <StatTile

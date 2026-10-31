@@ -45,21 +45,21 @@ export function PricingCard(props: PricingCardProps) {
     rate = quote.rate;
     // [RETIER PR-A · owner 30 Oct 2026] A store signs up before it has a catalogue, so the card quotes the first step.
     // Its fee is born when Swift approves it, on the step its OWN catalogue reaches then, and above the first step its
-    // owner sees that exact fee and ticks it before anything is charged (api partner/store-fee.ts). [RETIER PR-C] What
-    // happens after that is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves it; on, a
-    // rise is told 14 days ahead and a fall applies with a notice; no word, no claim. The larger steps' fees are not
-    // quoted as this store's.
+    // owner sees that exact fee and ticks it before anything is charged (api partner/store-fee.ts). [RETIER PR-C ·
+    // REVIEW-M N3] What happens after that is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing
+    // moves it; on, a rise is told in the app ahead with how to stop it and a fall applies after two weekly counts;
+    // no word, no claim. The larger steps' fees are not quoted as this store's.
     // [DEPT-PRICE · owner 29 Oct 2026] A step with its own free trial (7 days for a NEW department store) says so,
     // from the server's number: the headline keeps the trial every new store starts on.
     const trials = quote.ladder
       .slice(1)
       .filter((step) => bandTrialDays(step, p.trialDays) !== p.trialDays)
-      .map((step) => ` A new store with ${step.minItems.toLocaleString()}+ active items when Swift approves it gets ${bandTrialDays(step, p.trialDays)} days free.`);
+      .map((step) => ` A new store with ${step.minItems.toLocaleString()}+ items when Swift approves it gets ${bandTrialDays(step, p.trialDays)} days free.`);
     const next = quote.ladder[1];
     const sizeLine = next
-      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} active items. If yours has more by the time Swift approves the store, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged.${afterBirthWords(p)}`
-      // One step only: there is no other rate to move to (said only when the server says the re-tier is off).
-      : catalogueRetierOf(p)?.on === false ? ' This rate does not change as your catalogue grows.' : '';
+      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} items. If yours has more by the time Swift approves the store (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged.${afterBirthWords(p)}`
+      // One step only: no other rate to move to. Said only while the server says its re-tier is off.
+      : catalogueRetierOf(p)?.on === false ? ' Today this rate does not change as your catalogue grows.' : '';
     detail =
       quote.tier === 'service'
         ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'

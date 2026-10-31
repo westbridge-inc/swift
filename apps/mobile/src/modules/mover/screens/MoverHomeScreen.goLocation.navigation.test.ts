@@ -161,6 +161,7 @@ vi.mock('../../../hooks', () => {
     useGoOnline: () => ({ mutate: vi.fn(), mutateAsync: fx.goOnline, isPending: false, error: null }),
     useGoOffline: mutation, useAcceptJob: mutation, useAcceptOffer: mutation, useDeclineOffer: mutation, useSelectMoverKind: mutation,
     useVerificationStatus: () => ({ data: null }),
+    useEarnerPrefetch: () => undefined, // [SPEED 30 Oct] Home reads Earnings ahead (hooks/earnerPrefetch)
   };
 });
 // The persisted store's disk; the store itself is real.

@@ -48,10 +48,10 @@ const GY = {
       { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
     ],
   },
-  // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
-  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | undefined,
   // No multi-store pricing (owner, 13 Oct 2026): the server serves null.
   franchise: null,
+  // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
+  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | undefined,
   // What an older page reads; this page must not.
   weekly: { mover: 8000, moverHeavy: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 45000, departmentVendor: 45000 },
 };
@@ -115,20 +115,20 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(within(cardOf('Services')).getByText(/8,000/)).toBeTruthy();
     const small = cardOf('Businesses');
     expect(within(small).getByText(/15,000/)).toBeTruthy();
-    expect(small.textContent).toContain('fewer than 1,000 active items');
+    expect(small.textContent).toContain('fewer than 1,000 items');
     const large = cardOf('Large catalogues');
     expect(within(large).getByText(/20,000/)).toBeTruthy();
-    expect(large.textContent).toContain('1,000–9,999 active items');
+    expect(large.textContent).toContain('1,000–9,999 items');
     const department = cardOf('Department stores');
     expect(within(department).getByText(/45,000/)).toBeTruthy();
-    expect(department.textContent).toContain('10,000+ active items');
+    expect(department.textContent).toContain('10,000+ items');
   });
 
   it('[DEPT-PRICE] each catalogue card shows its own free trial: 7 days for a new department store, 14 for the others', async () => {
     await renderPage();
     const department = cardOf('Department stores').textContent!;
     expect(department).toContain('7-day free trial');
-    expect(department).toContain('A new store with this many active items when Swift approves it gets 7 days free.');
+    expect(department).toContain('A new store with this many items when Swift approves it gets 7 days free.');
     expect(department).not.toContain('14-day');
     for (const title of ['Businesses', 'Large catalogues', 'Services', 'Taxi drivers', 'Delivery & courier riders']) {
       const card = cardOf(title).textContent!;
@@ -159,7 +159,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
 
   it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
     await renderPage();
-    expect(document.body.textContent).toContain('Every store is its own account with its own weekly fee, however many stores its owner runs.');
+    // [WEBSITE 30 Oct] Shorter words, the same promise.
+    expect(document.body.textContent).toContain('Each store pays its own weekly fee, however many stores its owner runs.');
     cleanup();
     // A server from before multi-store pricing existed sends no key at all.
     pricing = { ...GY, franchise: undefined };
@@ -176,27 +177,18 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(page).not.toMatch(/automatic/i);
     expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
     expect(page).not.toMatch(/every new store starts on/i);
-    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the active items it has then (a services business pays the Services rate). '
-      + 'The store sees that exact fee, and its owner ticks it before anything is charged. '
-      + 'After that, Swift does not move a store to another rate as its active items change.');
-    expect(page).toContain('A rate agreed with Swift stays as agreed.');
+    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). '
+      + 'The store sees that exact fee, and its owner ticks it before anything is charged; '
+      + 'after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.');
   });
 
-  it('[RETIER PR-A/C] the Large catalogues and Department stores cards say a new store at that size starts on that rate, ticked first; the first step does not', async () => {
-    await renderPage();
-    const line = 'A new store with this many active items when Swift approves it starts on this rate. Its owner sees it and ticks it before anything is charged.';
-    expect(cardOf('Large catalogues').textContent).toContain(line);
-    expect(cardOf('Department stores').textContent).toContain(line);
-    expect(cardOf('Businesses').textContent).not.toContain(line);
-  });
-
-  it('[RETIER PR-C] the server switched the re-tier on: a rise told at least 14 days ahead, from the first weekly fee after; a fall lowers the fee with a notice', async () => {
+  it('[RETIER PR-C] the server switched the re-tier on: a higher rate told at least 14 days ahead with how to stop it; a lower one after two weekly counts', async () => {
     pricing = { ...GY, catalogueRetier: { on: true, noticeDays: 14 } };
     await renderPage();
     const page = document.body.textContent!;
-    expect(page).toContain('The store sees that exact fee, and its owner ticks it before anything is charged. '
-      + 'After that, Swift counts each store\'s active items every week: if they reach another rate, Swift tells the store in the app at least 14 days before, '
-      + 'and the new fee applies from its first weekly fee after that; if they fall below its rate, its fee goes down and the store is told. A rate agreed with Swift stays as agreed.');
+    expect(page).toContain('The store sees that exact fee, and its owner ticks it before anything is charged; '
+      + 'after that, Swift counts each store\'s items every week and tells the store in the app at least 14 days before a higher rate applies, with how to stop it '
+      + '(a lower rate applies after two weekly counts a week apart, with a notice), and a rate agreed with Swift stays as agreed.');
     expect(page).not.toContain('does not move a store');
     expect(page).not.toMatch(/automatic/i);
   });
@@ -206,20 +198,19 @@ describe('public pricing page — every partner reads their own weekly fee', () 
       pricing = { ...GY, catalogueRetier };
       await renderPage();
       const page = document.body.textContent!;
-      expect(page, JSON.stringify(catalogueRetier)).toContain('its owner ticks it before anything is charged. A rate agreed with Swift stays as agreed.');
-      expect(page, JSON.stringify(catalogueRetier)).not.toContain('After that');
+      expect(page, JSON.stringify(catalogueRetier)).toContain('its owner ticks it before anything is charged, and a rate agreed with Swift stays as agreed.');
+      expect(page, JSON.stringify(catalogueRetier)).not.toContain('after that');
       cleanup();
     }
   });
 
-  // [R27 · RETIER PR-C] The later-moves sentence is the server's word, never the page's: the API serves `catalogueRetier.on`
+  // [R27 · RETIER PR-C] The later-moves words are the server's, never the page's: the API serves `catalogueRetier.on`
   // from its own switch (WEEKLY_RETIER_ON), so switching the re-tier on (the owner's go) changes this page with it.
   it('[R27 · RETIER PR-C] the sentence follows the server\'s switch: the API serves it from WEEKLY_RETIER_ON, the page reads only that', () => {
     const api = (...p: string[]) => readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', ...p), 'utf8');
     expect(api('billing', 'weekly-retier.ts')).toMatch(/^export const WEEKLY_RETIER_ON = (false|true);$/m);
     expect(api('auth', 'auth.routes.ts')).toContain('catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS }');
-    const page = readFileSync(join(__dirname, 'page.tsx'), 'utf8');
-    expect(page).toContain('const retier = catalogueRetierOf(list.pricing);');
+    expect(readFileSync(join(__dirname, 'page.tsx'), 'utf8')).toContain('const retier = catalogueRetierOf(list.pricing);');
   });
 
   it('prints the server boundaries, not copy frozen into the page', async () => {
@@ -228,8 +219,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
       vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 500, tier: 'large', rate: 20000 }] },
     };
     await renderPage();
-    expect(cardOf('Businesses').textContent).toContain('fewer than 500 active items');
-    expect(cardOf('Large catalogues').textContent).toContain('500+ active items');
+    expect(cardOf('Businesses').textContent).toContain('fewer than 500 items');
+    expect(cardOf('Large catalogues').textContent).toContain('500+ items');
     expect(document.body.textContent).not.toContain('1,000');
     expect(screen.queryByRole('heading', { name: 'Department stores' })).toBeNull();
   });
@@ -248,6 +239,31 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(screen.getByText(/could not load this week/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('$0');
     expect(screen.queryByRole('heading', { name: 'Services' })).toBeNull();
+  });
+});
+
+// [WEBSITE 30 Oct · owner] Plain words: short sentences, no em dash, and the note under the cards stays short.
+describe('[WEBSITE] the pricing page reads plainly', () => {
+  it('says the model in one short line and uses no em dash anywhere', async () => {
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).toContain('One flat weekly fee and no commission. Partners keep 100% of every sale, fare and tip, and customers pay Swift nothing.');
+    expect(page).not.toContain('—');
+  });
+
+  it('the note under the cards is three short sentences at most', async () => {
+    await renderPage();
+    const note = screen.getByText(/When Swift approves a new store/);
+    const sentences = (note.textContent ?? '').split(/(?<=\.)\s+/).filter(Boolean);
+    expect(sentences.length).toBeLessThanOrEqual(3);
+    expect(note.textContent).not.toMatch(/taxi rate whatever the vehicle/);
+  });
+
+  it('the fallback, with no rates, has no em dash either', async () => {
+    pricing = null;
+    await renderPage();
+    expect(document.body.textContent).toMatch(/could not load this week/);
+    expect(document.body.textContent).not.toContain('—');
   });
 });
 

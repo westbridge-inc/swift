@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_RUNNING_TICK_LINE, proFeeAgreementFirst, proFeeBanner, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickRunningLine,
+  PRO_FEE_COVERED_COPY, PRO_FEE_COVERED_TICK_LINE, PRO_FEE_RUNNING_TICK_LINE, PRO_FEE_RUNNING_UNLISTED_LINE, proFeeAgreementFirst, proFeeRunningUnlistedLine, proFeeBanner, proFeeChangedLine, proFeeNoFeeWords, proFeeTick, proFeeTickRunningLine,
   proFeeTickStartsLine, type ProFeeStanding,
 } from './providerFee';
 import { providerVerificationPresentation } from '../modules/services/serviceCatalogPresentation';
@@ -181,5 +181,24 @@ describe('[REVIEW-M #2238 S4-1] a pro whose fee is already running is asked to t
     const s = src('src/modules/services/screens/ProviderWeeklyFeeScreen.tsx');
     expect(s).toContain('const runningLine = proFeeTickRunningLine(view);');
     expect(s).toMatch(/\{runningLine \? <T [^>]*>\{runningLine\}<\/T> : null\}/);
+  });
+});
+
+describe('[REVIEW-F #2240 S4-1] a running fee asked to re-tick (FEE_TERMS) says the pro is not listed until they tick', () => {
+  const born = { data: { id: 's1', status: 'ACTIVE' } as never, standing: ON, feeTerms: TERMS };
+  it('says so plainly, true to the server (not listed, no new bookings or quotes; booked jobs go ahead)', () => {
+    expect(proFeeRunningUnlistedLine(born)).toBe(PRO_FEE_RUNNING_UNLISTED_LINE);
+    expect(PRO_FEE_RUNNING_UNLISTED_LINE).toBe('Until you tick it, you are not listed: customers can\u2019t book you or ask you for a quote. Jobs already booked still go ahead.');
+  });
+  it('not before the fee is born, not when covered, not when listed, not under AGREEMENT (the agreement card says it)', () => {
+    expect(proFeeRunningUnlistedLine({ data: null, standing: ON, feeTerms: TERMS })).toBeNull();
+    expect(proFeeRunningUnlistedLine({ ...born, coveredBy: 'STORE' })).toBeNull();
+    expect(proFeeRunningUnlistedLine({ ...born, standing: { ...ON, operable: true, why: null } })).toBeNull();
+    expect(proFeeRunningUnlistedLine({ ...born, standing: { ...ON, why: 'AGREEMENT' } })).toBeNull();
+  });
+  it('the screen shows it under the tick', () => {
+    const s = src('src/modules/services/screens/ProviderWeeklyFeeScreen.tsx');
+    expect(s).toContain('const unlistedLine = proFeeRunningUnlistedLine(view);');
+    expect(s).toMatch(/\{unlistedLine \? <T [^>]*>\{unlistedLine\}<\/T> : null\}/);
   });
 });

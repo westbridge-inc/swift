@@ -358,7 +358,7 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
   const needsPhone = Array.isArray(store.goLiveMissing) && store.goLiveMissing.includes('PUBLISHED_PHONE');
   const qc = useQueryClient();
   // [CHAINS PR2] A new branch waits here for Swift's approval: the owner can switch back to a live branch.
-  const { stores } = useVendorProfile();
+  const { stores, myRole } = useVendorProfile();
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const savePhone = useVendorMutation({
@@ -398,7 +398,8 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
             <PublicCallNumberCard value={store.publicPhone} saving={savePhone.isPending} error={phoneError} onSave={(p) => savePhone.mutate(p)} />
           </>
         ) : null}
-        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name} />
+        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name}
+          storeFee={store.id ? { vendorId: store.id, isOwner: myRole === 'OWNER' } : null} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
         <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={onPreview} />

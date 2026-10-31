@@ -121,6 +121,11 @@ describe('the switch and the ONE predicate', () => {
     expect(storeVatEffective(approved, on, now)).toBe(true);
   });
 
+  it('[VAT-DOCS] holds in either mode the server offers (add-at-checkout: VAT added into the prices)', () => {
+    expect(storeVatEffective({ ...approved, vatMode: 'ADD_VAT_AT_CHECKOUT' }, on, now)).toBe(true);
+    expect(storeVatEffective({ ...approved, vatMode: 'SOME_OTHER_MODE' }, on, now)).toBe(false);
+  });
+
   it.each([
     ['switch off', approved, {}],
     ['PENDING', { ...approved, vatStatus: 'PENDING' }, on],
@@ -128,7 +133,6 @@ describe('the switch and the ONE predicate', () => {
     ['REVOKED', { ...approved, vatStatus: 'REVOKED' }, on],
     ['NONE', { ...approved, vatStatus: 'NONE' }, on],
     ['no mode', { ...approved, vatMode: null }, on],
-    ['add-at-checkout (not offered in this release)', { ...approved, vatMode: 'ADD_VAT_AT_CHECKOUT' }, on],
     ['store number changed since approval', { ...approved, vatRegistrationNumber: '999999999' }, on],
     ['store number taken down', { ...approved, vatRegistrationNumber: null }, on],
     ['no approved number', { ...approved, vatApprovedNumber: null }, on],
@@ -154,8 +158,8 @@ describe('the switch and the ONE predicate', () => {
       .rejects.toMatchObject({ code: 'VAT_EFFECTIVE_IN_FUTURE' });
   });
 
-  it('this release offers only "prices already include VAT"', () => {
-    expect([...STORE_VAT_MODES_OFFERED]).toEqual(['PRICES_INCLUDE_VAT']);
+  it('[VAT-DOCS] the two modes offered: "prices already include VAT" and "add VAT at checkout", nothing else', () => {
+    expect([...STORE_VAT_MODES_OFFERED]).toEqual(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']);
   });
 });
 

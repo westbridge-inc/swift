@@ -177,7 +177,7 @@ sys.exit(0)
 PRODUCTION = {
     'PILOT_ENV': 'production', 'NODE_ENV': 'production', 'API_HOST': 'api.swift-fixture.com', 'MAPS_PROVIDER': 'osrm',
     'OSRM_URL': 'http://osrm:5000', 'BACKUP_BUCKET': 'fixture-backups', 'API_PUBLIC_URL': 'https://api.swift-fixture.com',
-    'APP_PUBLIC_URL': 'https://swift-fixture.com', 'CORS_ORIGIN': 'https://swift-fixture.com', 'STORAGE_PROVIDER': 's3',
+    'APP_PUBLIC_URL': 'https://swiftgy.com', 'CORS_ORIGIN': 'https://swift-fixture.com', 'STORAGE_PROVIDER': 's3',
     'BACKUP_GPG_FINGERPRINT': 'A' * 40, 'BACKUP_GPG_RECIPIENT_FILE': '/etc/swift/backup-recipient.asc',
     'BACKUP_MAX_AGE_HOURS': '3', 'BILLING_TOPUP_HOLD': '1', 'PAYMENT_PROVIDER': 'disabled', 'CARD_RAIL_KILL': '1',
     'TENANT_WALL_EXPAND_ATTESTED': '1',
@@ -200,6 +200,9 @@ class PilotUpHost:
         utils = self.tmp / 'repo' / 'apps' / 'api' / 'src' / 'utils'
         utils.mkdir(parents=True)
         shutil.copy(DEPLOY.parent / 'apps' / 'api' / 'src' / 'utils' / 'secret-files.ts', utils / 'secret-files.ts')
+        # [DEPLOY-GUARD] production checks APP_PUBLIC_URL against the app's link domain.
+        (self.tmp / 'repo' / 'apps' / 'mobile').mkdir(parents=True)
+        shutil.copy(DEPLOY.parent / 'apps' / 'mobile' / 'app.config.ts', self.tmp / 'repo' / 'apps' / 'mobile' / 'app.config.ts')
         shim(self.here, 'backup.sh', 'exit 0')
         shim(self.here, 'rls-logins.sh', 'echo "rls-logins $*" >> "$CALL_LOG"\n'
              'if [ -n "$FAKE_ROLES_HOLD" ]; then echo \'{"status": "hold", "reason": "ROLE_MEMBERSHIP_UNEXPECTED"}\'; exit 1; fi\n'

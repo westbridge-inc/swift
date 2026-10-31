@@ -203,7 +203,7 @@ export function LoadedBoard({ loading, unavailable, total, newCount, progressCou
   );
 }
 
-function GuideRow({ index, label, detail, done, href, external }: { index: number; label: string; detail: string; done?: boolean; href?: string; external?: boolean }) {
+function GuideRow({ index, label, detail, done, href }: { index: number; label: string; detail: string; done?: boolean; href?: string }) {
   const body = (
     <>
       <span className="grid h-6 w-6 flex-none place-items-center rounded-full bg-white/15 text-[12px] font-semibold">{done ? <Check size={14} aria-hidden="true" /> : index}</span>
@@ -213,7 +213,6 @@ function GuideRow({ index, label, detail, done, href, external }: { index: numbe
   );
   const cls = 'flex min-h-11 items-center gap-3 rounded-xl bg-white/10 px-3 py-2';
   if (!href) return <div className={cls}>{body}</div>;
-  if (external) return <a href={href} target="_blank" rel="noreferrer" className={`${cls} hover:bg-white/15`}>{body}</a>;
   return <Link href={href} className={`${cls} hover:bg-white/15`}>{body}</Link>;
 }
 
@@ -242,7 +241,8 @@ export function FirstOrderGuide({ store, manager, listening }: { store: HubStore
         ) : null}
         <GuideRow index={manager ? 2 : 1} label={open ? 'You are open' : 'Your store is closed'} done={open}
           detail={open ? 'Customers can order right now' : manager ? 'Use the switch below to start taking orders' : 'Ask a manager or owner to open the store'} />
-        {manager && <GuideRow index={3} label="Share your store link" detail={shortUrl ?? (qrQ.isError ? 'Link unavailable — try again shortly' : 'Loading your live store link')} href={shortUrl} external />}
+        {/* [STORE-LINK] As the phone (VendorOps opens VendorMyQr): the store's QR page, where the link is copied and shared. */}
+        {manager && <GuideRow index={3} label="Share your store link" detail={shortUrl ?? (qrQ.isError ? 'Link unavailable — try again shortly' : 'Loading your live store link')} href="/dashboard/qr" />}
       </div>
       <p className="mt-4 flex items-center gap-2 text-[11px] font-bold tracking-[0.1em]">
         <span className={`h-2 w-2 rounded-full ${listening ? 'bg-[var(--swift-success)]' : 'bg-white/40'}`} aria-hidden="true" />
@@ -263,8 +263,8 @@ export function BoardQuiet({ lastOrderAt }: { lastOrderAt?: string }) {
   );
 }
 
-function Tile({ icon: Icon, label, detail, badge, badgeLabel, href, onClick, external }: {
-  icon: typeof BookOpen; label: string; detail: string; badge?: ReactNode; badgeLabel?: string; href: string; onClick?: () => void; external?: boolean;
+function Tile({ icon: Icon, label, detail, badge, badgeLabel, href, onClick }: {
+  icon: typeof BookOpen; label: string; detail: string; badge?: ReactNode; badgeLabel?: string; href: string; onClick?: () => void;
 }) {
   const body = (
     <>
@@ -278,7 +278,6 @@ function Tile({ icon: Icon, label, detail, badge, badgeLabel, href, onClick, ext
     </>
   );
   const props = { 'aria-label': [label, detail, badgeLabel].filter(Boolean).join('. '), className: 'sw-card block min-w-0 p-5 hover:outline hover:outline-1 hover:outline-[var(--swift-border-strong)]' };
-  if (external) return <a href={href} target="_blank" rel="noreferrer" {...props}>{body}</a>;
   return <Link href={href} onClick={onClick} {...props}>{body}</Link>;
 }
 
@@ -326,7 +325,7 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
           badgeLabel={revenueKnown ? financialDeltaLabel(revenueWindow.cur.revenue, revenueWindow.prev?.revenue ?? null) : undefined} />
         {/* As the app: a Services store's hours tile opens its Schedule, every other store's opens Account. */}
         <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href={store?.vendorType === 'SERVICE' ? '/dashboard/schedule' : '/dashboard/settings'} />
-        <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href={qrQ.data?.shortUrl ?? '/dashboard/settings'} external={!!qrQ.data?.shortUrl}
+        <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href="/dashboard/qr"
           badge={qrStatus ? <Pill tone={qrStatus === 'ACTIVE' ? 'success' : 'neutral'}>{qrStatusWords(qrStatus)}</Pill> : undefined}
           badgeLabel={qrStatus ? `QR: ${qrStatusWords(qrStatus)}` : undefined} />
         <Tile icon={History} label="Order history" detail={rollingOrders == null ? 'Past orders' : `${rollingOrders} recent orders`} href="#other-orders" onClick={onOrderHistory} />

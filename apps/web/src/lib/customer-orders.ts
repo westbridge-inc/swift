@@ -34,7 +34,9 @@ export async function reorder(id: string): Promise<{ unavailableItems?: number |
 }
 // [SUBSTITUTION · owner 17 Oct 2026] The web renders the server's swap view (its
 // permitted answers and deadline), so it opts in to swap decisions.
-export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}?swapDecisions=v2`)).data; }
+// [PICKUP · owner 30 Oct 2026] pickupHandover=v1: the order page tells the customer the first name + order number when
+// the store's code is off, so the server sends no code then.
+export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}?swapDecisions=v2&pickupHandover=v1`)).data; }
 /** The customer's answer to the store's swap question (approve = take the substitute). */
 export async function decideSubstitution(orderId: string, lineId: string, approve: boolean): Promise<any> {
   return (await apiFetch(`/api/v1/customer/orders/${orderId}/items/${lineId}/substitution`, { method: 'POST', body: JSON.stringify({ approve }) })).data;

@@ -12,6 +12,7 @@
  * builds 9-12 send no such field and keep signing up; nothing is fabricated for them.
  */
 import { createHash } from 'node:crypto';
+import { WEEKLY_RETIER_ON } from '../modules/billing/weekly-retier';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -106,6 +107,13 @@ describe('the weekly fee words are the server’s, pinned and served with the pr
   it('GET /auth/pricing serves the v1 words beside the amounts: what it covers, when it starts, how it is paid, the 14-day rule, and the tick', async () => {
     const p = await priceList();
     expect(p.feeTerms).toEqual({ version: 'v1', items: V1_ITEMS, tick: V1_TICK });
+  });
+
+  it('[RETIER PR-B] says whether Swift moves existing stores between catalogue steps (off until the owner\'s go) and the notice a rise gets', async () => {
+    const p = await priceList() as unknown as { catalogueRetier?: unknown };
+    // the switch's own value (pinned off in weekly-retier-off.test.ts): turning it on changes this answer with it
+    expect(p.catalogueRetier).toEqual({ on: WEEKLY_RETIER_ON, noticeDays: 14 });
+    expect(WEEKLY_RETIER_ON).toBe(false);
   });
 });
 

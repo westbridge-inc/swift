@@ -58,7 +58,7 @@ const GY = {
   },
   franchise: { minLocations: 5, discountPct: 50 },
   // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
-  catalogueRetier: { on: false, noticeDays: 14 },
+  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | null | undefined,
   // What an older app reads: the safe, conflated legacy numbers.
   weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 45000 },
 };
@@ -114,8 +114,8 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
     for (const vendorType of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
-      expect(text).toContain('Keep 100% of every sale — no commission on orders. This is the rate for a store with under 1,000 active items. '
-        + 'If yours has more by the time Swift approves the store, its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. '
+      expect(text).toContain('Keep 100% of every sale — no commission on orders. This is the rate for a store with under 1,000 items. '
+        + 'If yours has more by the time Swift approves the store (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. '
         + 'After that, the rate does not change as your catalogue grows.');
       expect(text).not.toMatch(/automatic/i);
       expect(text).not.toContain('$20,000');
@@ -123,22 +123,37 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
     }
   });
 
-  it('[RETIER PR-C] the server switched the re-tier on: the card says a rise is told 14 days ahead and applies from the first fee after, a fall lowers it with a notice', () => {
+  // [RETIER PR-C · REVIEW-M N3] The server's weekly re-tier (api billing.service recalculateVendorTiers + fee-rise-notice.ts):
+  // a rise is decided on the items for sale and told in the app at least 14 days ahead with how to stop it; a fall is
+  // judged on the week's count (the same 7-day rule) on two passes a week apart, and the store is told.
+  const ON_WORDS = 'After that, Swift counts your items every week. If your items for sale reach a higher rate, Swift tells you in the app at least 14 days before the new fee applies, and how to stop it. '
+    + 'If your items, counting items taken off sale, changed or removed in the last 7 days, fit a lower rate on two weekly counts a week apart, your fee goes down and you are told.';
+
+  it('[RETIER PR-C] the server switched the re-tier on: the card says a rise is told 14 days ahead with how to stop it, a fall comes after two weekly counts', () => {
     state.pricing = { ...GY, catalogueRetier: { on: true, noticeDays: 14 } };
     const text = textOf(card({ kind: 'vendor', vendorType: 'SUPERMARKET' }));
-    expect(text).toContain('you see that exact fee and tick it before anything is charged. After that, Swift counts your active items every week: '
-      + 'if they reach another rate, Swift tells you in the app at least 14 days before the new fee applies, and it applies from your first weekly fee after that; '
-      + 'if they fall below your rate, your fee goes down and you are told.');
+    expect(text).toContain(`you see that exact fee and tick it before anything is charged. ${ON_WORDS}`);
     expect(text).not.toContain('does not change');
     expect(text).not.toMatch(/automatic/i);
   });
 
   it('[RETIER PR-C] a server that says nothing (older, or malformed) gets no claim either way about later moves', () => {
-    for (const catalogueRetier of [undefined, null, {}, { on: 'yes' }, { on: true }, { on: true, noticeDays: 7 }]) {
-      state.pricing = { ...GY, catalogueRetier } as typeof GY;
+    for (const catalogueRetier of [undefined, null, {}, { on: 'yes' }, { on: true }, { on: true, noticeDays: 7 }, { on: true, noticeDays: 14.5 }]) {
+      state.pricing = { ...GY, catalogueRetier };
       const text = textOf(card({ kind: 'vendor', vendorType: 'STORE' }));
       expect(text, JSON.stringify(catalogueRetier)).toContain('you see that exact fee and tick it before anything is charged.');
       expect(text, JSON.stringify(catalogueRetier)).not.toContain('After that');
+      expect(text, JSON.stringify(catalogueRetier)).not.toContain('does not change');
+    }
+  });
+
+  it('[RETIER PR-C] one catalogue step: "does not change" only while the server says its re-tier is off', () => {
+    const one = { ...GY.vendors, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }] };
+    state.pricing = { ...GY, vendors: one };
+    expect(textOf(card({ kind: 'vendor', vendorType: 'STORE' }))).toContain('Today this rate does not change as your catalogue grows.');
+    for (const catalogueRetier of [{ on: true, noticeDays: 14 }, undefined]) {
+      state.pricing = { ...GY, vendors: one, catalogueRetier };
+      expect(textOf(card({ kind: 'vendor', vendorType: 'STORE' })), JSON.stringify(catalogueRetier)).not.toContain('does not change');
     }
   });
 
@@ -154,8 +169,8 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
   it('[DEPT-PRICE] a shop is told, from the server, that a new store at department size gets 7 days free; the headline keeps 14', () => {
     const text = textOf(card({ kind: 'vendor', vendorType: 'SUPERMARKET' }));
     expect(text).toContain('14 days free, then $15,000/week');
-    expect(text).toContain('A new store with 10,000+ active items when Swift approves it gets 7 days free.');
-    expect(text).not.toContain('1,000+ active items when Swift approves it');
+    expect(text).toContain('A new store with 10,000+ items when Swift approves it gets 7 days free.');
+    expect(text).not.toContain('1,000+ items when Swift approves it');
     // A service provider and a mover are never told it.
     for (const props of [{ kind: 'vendor', vendorType: 'SERVICE' }, { kind: 'mover', vehicleType: 'CAR' }]) {
       expect(textOf(card(props))).not.toContain('when Swift approves it');
@@ -176,7 +191,7 @@ describe('PricingCard — vendors see the rate a new store starts on, and that i
     };
     const text = textOf(card({ kind: 'vendor', vendorType: 'STORE' }));
     expect(text).toContain('14 days free, then $12,000/week');
-    expect(text).toContain('A new store with 500+ active items when Swift approves it gets 7 days free.');
+    expect(text).toContain('A new store with 500+ items when Swift approves it gets 7 days free.');
     expect(text).not.toContain('1,000');
   });
 });

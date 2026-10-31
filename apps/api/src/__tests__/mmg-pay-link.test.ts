@@ -204,13 +204,20 @@ describe('MMG pay link — taxi driver', () => {
     expect(set.statusCode).toBe(200);
     expect(set.json().data.mmgPayUrl).toBeNull();
     expect(set.json().data.mmgPayUrlPending).toBe(LINK);
+    // [owner 30 Oct 2026] the 1-hour first hold is for a store's MMG number only: a driver's first link waits the cool-off
+    expect(new Date(set.json().data.mmgPayUrlApplyAt).getTime() - Date.now()).toBeGreaterThan(23 * 3_600_000);
+    expect(set.json().data.mmgPayUrlHoldHours).toBe(24);
     await app.prisma.driver.update({ where: { userId: driver.userId }, data: { mmgPayUrlApplyAt: new Date(Date.now() - 1000) } });
     await applyDueMmgLinkChanges({ prisma: app.prisma, io: app.io });
-    expect((await inject('GET', '/api/v1/driver/profile', driver.token)).json().data.mmgPayUrl).toBe(LINK);
+    const live = (await inject('GET', '/api/v1/driver/profile', driver.token)).json().data;
+    expect(live.mmgPayUrl).toBe(LINK);
+    expect(live.mmgPayUrlHoldHours).toBe(24);
 
     const clear = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: '' });
     expect(clear.statusCode).toBe(200);
     expect(clear.json().data.mmgPayUrl).toBeNull();
+    // removed after it was live: a new link still waits the full cool-off (remove-then-re-add never shortens it)
+    expect(clear.json().data.mmgPayUrlHoldHours).toBe(24);
   });
 
   it('rejects disallowed writes and redacts an unsafe legacy profile value', async () => {

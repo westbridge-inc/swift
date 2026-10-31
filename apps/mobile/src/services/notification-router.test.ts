@@ -531,6 +531,7 @@ const CENSUS: Case[] = [
   { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
   { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_needs_food_handler_tick', d: { vendorId: 'v1' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [FOOD-PERMIT · owner 24 Oct] a registered restaurant ticks that everyone who handles its food holds a current certificate; the store\'s Documents (on Account) show the tick' },
+  { k: 'vendor_needs_weekly_fee_tick', d: { vendorId: 'v1', weeklyFee: 45000, currencyCode: 'GYD' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [RETIER PR-A · owner 30 Oct] a store whose fee follows its catalogue above the first step goes live once its owner ticks that exact fee; the store\'s go-live steps (on Account) show it' },
   { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
@@ -567,6 +568,7 @@ const CENSUS: Case[] = [
   { k: 'mmg_number_change_staged', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the OLD contact point — the owner, on every device — sees the pending number and can cancel it' },
   { k: 'mmg_number_change_applied', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the cool-off passed; the new number is live where it is managed' },
   { k: 'mmg_number_change_cancelled', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the owner cancelled; other devices were signed out' },
+  { k: 'mmg_number_pending_removed', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'a number WAITING to go live was removed; the owner lands where the MMG number card shows it' },
   { k: 'store_pin_moved', d: { vendorId: 'v1', audience: 'business' }, to: { screen: 'Account' }, why: 'the store OWNER — [Q8 · DS269 F1] a manager moved the map pin riders and customers are sent to; Account holds the Store location card that shows it and moves it back' },
   { k: 'incident_new', d: { caseId: 'c1', caseNumber: 'INC-1' }, to: null, why: 'admins' },
   { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
@@ -632,7 +634,7 @@ const DOCUMENT_KINDS = ['verification_approved', 'verification_rejected', 'verif
 /** Census rows whose recipient is a store (owner or team). */
 const STORE_KINDS = [
   'low_stock', 'staff_added', 'staff_joined', 'category_request_resolved', 'category_backfill_review',
-  'vendor_tier_promoted', 'vendor_tier_nudge', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'store_pin_moved', 'booking_rescheduled',
+  'vendor_tier_promoted', 'vendor_tier_nudge', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'vendor_needs_weekly_fee_tick', 'store_pin_moved', 'booking_rescheduled',
 ];
 
 /** Customer copies of kinds the census lists for someone else, or untagged. */

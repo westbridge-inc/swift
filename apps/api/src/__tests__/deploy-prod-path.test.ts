@@ -150,6 +150,9 @@ afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 // ── pilot-up.sh ─────────────────────────────────────────────────────────────
 const COMPOSE_TEXT = readFileSync(join(DEPLOY, 'docker-compose.yml'), 'utf8');
+// [DEPLOY-GUARD] The app's own config: the one place its link domain is declared.
+const APP_CONFIG_PATH = join(DEPLOY, '../apps/mobile/app.config.ts');
+const APP_CONFIG_TEXT = readFileSync(APP_CONFIG_PATH, 'utf8');
 const STORE = [...new Set([...COMPOSE_TEXT.matchAll(/_FILE: \/run\/secrets\/([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]!)), 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'].sort();
 
 function preparePilot() {
@@ -166,6 +169,9 @@ function preparePilot() {
   chmodSync(join(here, 'backup.sh'), 0o755);
   mkdirSync(join(tmp, 'repo', 'apps', 'api', 'src', 'utils'), { recursive: true });
   copyFileSync(join(DEPLOY, '../apps/api/src/utils/secret-files.ts'), join(tmp, 'repo', 'apps', 'api', 'src', 'utils', 'secret-files.ts'));
+  // [DEPLOY-GUARD] production reads the app's link domain from the app config.
+  mkdirSync(join(tmp, 'repo', 'apps', 'mobile'), { recursive: true });
+  copyFileSync(APP_CONFIG_PATH, join(tmp, 'repo', 'apps', 'mobile', 'app.config.ts'));
   return here;
 }
 
@@ -173,7 +179,8 @@ const PRODUCTION = {
   PILOT_ENV: 'production', NODE_ENV: 'production', API_HOST: PROD_HOST, MAPS_PROVIDER: 'osrm', OSRM_URL: 'http://osrm:5000',
   BACKUP_BUCKET: 'prod-backups', STORAGE_PROVIDER: 's3', CORS_ORIGIN: 'https://example.org',
   // Production also requires the public origins the API hands out (#1448 review).
-  API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
+  // APP_PUBLIC_URL is exactly the domain the app claims for its links (DEPLOY-GUARD).
+  API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://swiftgy.com',
   // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
   // No card payment in production until an attorney signs off (owner ruling, 13 Oct).
@@ -188,8 +195,12 @@ const PRODUCTION = {
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
-function runPilot(settings: Record<string, string | undefined>, opts: { args?: string[]; env?: Record<string, string> } = {}) {
+function runPilot(settings: Record<string, string | undefined>, opts: { args?: string[]; env?: Record<string, string>; appConfig?: string | null } = {}) {
   const here = preparePilot();
+  // [DEPLOY-GUARD] a fixture's own app config: other text, or none at all (null).
+  const appConfig = join(here, '..', 'apps', 'mobile', 'app.config.ts');
+  if (opts.appConfig === null) rmSync(appConfig);
+  else if (opts.appConfig !== undefined) writeFileSync(appConfig, opts.appConfig);
   writeFileSync(join(here, '.env'), Object.entries(settings).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
   const res = spawnSync('bash', [join(here, 'pilot-up.sh'), ...(opts.args ?? [SHA])], {
     encoding: 'utf8',
@@ -898,6 +909,115 @@ describe('[PROD-PATH] deploy/.env is read once, the way Compose reads it: one pl
   });
 });
 
+// ── [DEPLOY-GUARD] store links and QR codes open the app ──────────────────────
+// Every store share link and printed QR code is {APP_PUBLIC_URL}/s/{code}. The
+// app opens a link only on the domain it claims (apps/mobile/app.config.ts:
+// linkDomain, its associated domains and Android App Links, which the website's
+// AASA and assetlinks files answer for). A production APP_PUBLIC_URL naming any
+// other host (the staging site behind its tester password, www, a typo) prints
+// links that never open the app. Production therefore needs APP_PUBLIC_URL to be
+// exactly https://<that domain>, read from the app config itself so there is
+// one source of truth. Decided and pinned here: no trailing slash (trip-share
+// and check-in links append "/trip/..." to it as text), no www, no port, no
+// path, no http, lower case. Staging is unchanged.
+const LINK_DOMAIN_LINE = /^const linkDomain = process\.env\['SWIFT_LINK_DOMAIN'\] \?\? '([^']*)';$/m;
+const STAGE_ENV: Record<string, Record<string, string>> = {
+  full: {},
+  '--no-public': { DNS_MAP: '', CADDY_STOPPED: '1' },
+  '--data-only': { DNS_MAP: '', API_STOPPED: '1' },
+};
+const stage = (args: string[]) => STAGE_ENV[args.length > 1 ? args[0]! : 'full']!;
+
+describe('[DEPLOY-GUARD] pilot-up.sh: production store links name the domain the app opens', () => {
+  it('the app config declares its link domain on one line, swiftgy.com, and claims it (and www) for /s and /store', () => {
+    expect(APP_CONFIG_TEXT.match(new RegExp(LINK_DOMAIN_LINE.source, 'gm'))).toHaveLength(1);
+    expect(LINK_DOMAIN_LINE.exec(APP_CONFIG_TEXT)?.[1]).toBe('swiftgy.com');
+    expect(APP_CONFIG_TEXT).toContain('associatedDomains: [`applinks:${linkDomain}`, `applinks:www.${linkDomain}`]');
+    expect(APP_CONFIG_TEXT).toContain("{ scheme: 'https', host: linkDomain, pathPrefix: '/s' }");
+    expect(APP_CONFIG_TEXT).toContain("{ scheme: 'https', host: linkDomain, pathPrefix: '/store' }");
+  });
+
+  it('production accepts APP_PUBLIC_URL=https://swiftgy.com exactly, in every stage', () => {
+    for (const args of [[SHA], ['--no-public', SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args, env: stage(args) });
+      expect(r.status, `${args.join(' ')}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  const exact = 'PILOT_ENV=production needs APP_PUBLIC_URL=https://swiftgy.com exactly';
+  const notOrigin = "APP_PUBLIC_URL to be the public website's https:// origin";
+  it.each([
+    // the finding: the staging site (tester password; the app never opens it)
+    ['https://staging.swiftgy.com', 'staging name staging.swiftgy.com'],
+    ['https://swiftgy.com/', exact],
+    ['https://www.swiftgy.com', exact],
+    ['https://www.swiftgy.com/', exact],
+    ['https://SwiftGY.com', exact],
+    ['https://api.swiftgy.com', exact],
+    ['https://swift-fixture.com', exact],
+    ['https://example.org', exact],
+    ['http://swiftgy.com', notOrigin],
+    ['https://swiftgy.com:443', notOrigin],
+    ['https://swiftgy.com/s', notOrigin],
+    ['"https://swiftgy.com"', notOrigin],
+  ])('production refuses APP_PUBLIC_URL=%s in every stage, before anything runs', (value, named) => {
+    for (const args of [[SHA], ['--no-public', SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, APP_PUBLIC_URL: value }, { args, env: stage(args) });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain(named);
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  it('the refusal says what is wrong and names the app config it was checked against', () => {
+    const r = runPilot({ ...PRODUCTION, APP_PUBLIC_URL: 'https://www.swiftgy.com' });
+    expect(r.stderr).toContain('apps/mobile/app.config.ts');
+    expect(r.stderr).toContain('no trailing slash, no www');
+    expect(r.stderr).toContain('every store link and printed QR code names it');
+  });
+
+  it("the expected domain comes from the app config: move the app's domain and production follows it", () => {
+    const moved = APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swift-fixture.com';");
+    expect(moved).not.toBe(APP_CONFIG_TEXT);
+    const old = runPilot(PRODUCTION, { appConfig: moved });
+    expect(old.status).not.toBe(0);
+    expect(old.stderr).toContain('needs APP_PUBLIC_URL=https://swift-fixture.com exactly');
+    expect(old.calls).toEqual([]);
+    writeFileSync(log, '');
+    const followed = runPilot({ ...PRODUCTION, APP_PUBLIC_URL: 'https://swift-fixture.com' }, { appConfig: moved });
+    expect(followed.status, followed.stderr).toBe(0);
+  });
+
+  it.each([
+    ['the app config is missing', null],
+    ['it has no link-domain line', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, '')],
+    ['it has two link-domain lines', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, (line) => `${line}\n${line}`)],
+    ['the line has another shape', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, 'const linkDomain = process.env["SWIFT_LINK_DOMAIN"] ?? "swiftgy.com";')],
+    ['the domain is empty', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? '';")],
+    ['the domain is not a DNS name', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com/s';")],
+  ])('production refuses (fail closed) when %s, before anything runs', (_what, appConfig) => {
+    if (appConfig !== null) expect(appConfig).not.toBe(APP_CONFIG_TEXT);
+    const r = runPilot(PRODUCTION, { appConfig });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("cannot read the app's link domain from apps/mobile/app.config.ts");
+    expect(r.calls).toEqual([]);
+  });
+
+  it('staging is unchanged: its own site, a trailing slash, www or none at all, and no app config needed', () => {
+    const cases: Array<[string | undefined, null | undefined]> = [
+      ['https://staging.swiftgy.com', undefined], ['https://www.swiftgy.com/', undefined], [undefined, undefined], ['https://staging.swiftgy.com', null],
+    ];
+    for (const [value, appConfig] of cases) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...STAGING, APP_PUBLIC_URL: value }, { appConfig });
+      expect(r.status, `${value} ${appConfig}: ${r.stderr}`).toBe(0);
+      expect(r.stdout).toContain(`STAGING READY at exact SHA ${SHA}`);
+    }
+  });
+});
+
 describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the production public origins, IPv6 too', () => {
   it.each(['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG'])('refuses %s exported in the shell (Docker would act on another daemon), before anything runs, on staging too', (name) => {
     for (const settings of [PRODUCTION, STAGING]) {
@@ -942,8 +1062,9 @@ describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the produc
     expect(r.calls).toEqual([]);
   });
 
-  it('production accepts its public origins with a trailing slash, and several https CORS origins', () => {
-    const r = runPilot({ ...PRODUCTION, API_PUBLIC_URL: `https://${PROD_HOST}/`, APP_PUBLIC_URL: 'https://example.org/', CORS_ORIGIN: 'https://example.org, https://www.example.org' });
+  it('production accepts its API origin with a trailing slash, and several https CORS origins', () => {
+    // APP_PUBLIC_URL takes no trailing slash: DEPLOY-GUARD below.
+    const r = runPilot({ ...PRODUCTION, API_PUBLIC_URL: `https://${PROD_HOST}/`, CORS_ORIGIN: 'https://example.org, https://www.example.org' });
     expect(r.status, r.stderr).toBe(0);
   });
 

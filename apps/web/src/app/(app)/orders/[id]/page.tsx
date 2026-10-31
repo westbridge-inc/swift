@@ -712,11 +712,14 @@ export default function OrderDetailPage() {
           </div>
           <ol className={styles.statusRail} style={{ '--swift-stage-count': stages.length } as CSSProperties}>
             {stages.map((stage, index) => {
+              // [PICKUP · owner 30 Oct 2026] A step is green, with its tick, the moment the server says it is
+              // reached (Preparing on accept, Ready on ready); aria-current still says which step the order is at,
+              // and the leg to the next step stays unlit until that step is reached.
               const reached = index <= currentStage;
               const current = index === currentStage && !completed;
               return (
                 <li key={stage.label} className={reached ? styles.stageReached : ''} aria-current={current ? 'step' : undefined}>
-                  <span className={styles.stageDot}>{index < currentStage || completed ? '✓' : index + 1}</span>
+                  <span className={styles.stageDot}>{reached ? '✓' : index + 1}</span>
                   <span>{stage.label}</span>
                 </li>
               );
@@ -774,7 +777,16 @@ export default function OrderDetailPage() {
                   <h2 id="destination-title" className={styles.cardTitle}>{destination}</h2>
                 </div>
               </div>
-              {order.pickupCode ? (
+              {/* [PICKUP · owner 30 Oct 2026] The store's code off: the name + order-number check, never a code
+                  (not even one an older server still sends); the store taps "Handed to customer". */}
+              {order.fulfillment === 'PICKUP' && order.pickupCodeRequired === false ? (
+                !stopped && !completed ? (
+                  <div className={`${styles.pickupCode} ${styles.pickupCheck}`}>
+                    <span>{pickupCodeWords(false)}</span>
+                    <strong>{order.orderNumber}</strong>
+                  </div>
+                ) : null
+              ) : order.pickupCode ? (
                 <div className={styles.pickupCode}>
                   <span>{pickupCodeWords(order.pickupCodeRequired)}</span>
                   <strong>{order.pickupCode}</strong>

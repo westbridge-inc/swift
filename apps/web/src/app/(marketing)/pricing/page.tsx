@@ -19,8 +19,8 @@ export const metadata: Metadata = { title: 'Pricing' };
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
 // 13 Oct 2026), so its card appears only once the server offers them again.
 const MOVER_CLASSES: ReadonlyArray<{ tier: MoverPriceQuote['tier']; label: string; blurb: string }> = [
-  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels — every delivery fee and tip is yours.' },
-  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One taxi rate, whatever you drive — every fare and tip is yours.' },
+  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels. Every delivery fee and tip is yours.' },
+  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One rate, whatever you drive. Every fare and tip is yours.' },
   { tier: 'courierHeavy', label: 'Heavy delivery', blurb: 'Canters and box trucks for large and bulky loads.' },
 ];
 
@@ -60,9 +60,9 @@ function typedList(pricing: CountryPricing | null) {
 function itemRange(catalogue: CataloguePriceBand[], i: number): string {
   const band = catalogue[i]!;
   const next = catalogue[i + 1];
-  if (!next) return i === 0 ? 'Any number of active items' : `${band.minItems.toLocaleString()}+ active items`;
-  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} active items`;
-  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} active items`;
+  if (!next) return i === 0 ? 'Any number of items' : `${band.minItems.toLocaleString()}+ items`;
+  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} items`;
+  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} items`;
 }
 
 /** A catalogue step's own free trial (a NEW store at that step when Swift approves it), else the list's. A value that
@@ -95,8 +95,8 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
       <Section>
         <h1 className="text-4xl font-extrabold tracking-tight">Simple, flat pricing</h1>
         <p className="mt-3 max-w-2xl text-lg text-[var(--swift-muted)]">
-          One weekly subscription. Zero commission. Customers pay nothing to Swift — partners keep
-          100% of every sale, fare and tip.
+          One flat weekly fee and no commission. Partners keep 100% of every sale, fare and tip, and customers pay
+          Swift nothing.
         </p>
       </Section>
       <Section tint>
@@ -126,7 +126,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               })}
               <PriceCard title="Services" price={amount(list.service)} trialDays={list.pricing.trialDays}>
                 <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                  Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.
+                  Plumbers, electricians, mechanics, barbers and other trades that book work.
                 </p>
               </PriceCard>
               {list.catalogue.map((band, i) => {
@@ -136,48 +136,42 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                     <p className="mt-2 text-sm text-[var(--swift-muted)]">
                       {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
                     </p>
-                    {/* [RETIER PR-A/C] a step above the first is a new store's own fee when Swift approves it at that size */}
-                    {i > 0 && (
-                      <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                        A new store with this many active items when Swift approves it starts on this rate. Its owner sees it and ticks it before anything is charged.
-                      </p>
-                    )}
                     {trialDays !== list.pricing.trialDays && (
                       <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                        A new store with this many active items when Swift approves it gets {trialDays} days free.
+                        A new store with this many items when Swift approves it gets {trialDays} days free.
                       </p>
                     )}
                   </PriceCard>
                 );
               })}
             </div>
-            <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the
-              vehicle they register.{' '}
+            {/* [WEBSITE 30 Oct · owner] The note is short: the taxi and rider rules already sit on their cards. */}
+            <p className="mt-6 max-w-3xl text-sm leading-relaxed text-[var(--swift-muted)]">
               {/* Said only when the server confirms it bills no multi-store
                   discount (franchise: null, owner ruling of 13 Oct 2026). A
                   server that still sends the old rule bills it, so the page
                   must not claim otherwise; it shows no discount either way. */}
               {list.pricing.franchise == null && (
-                <>Every store is its own account with its own weekly fee, however many stores its owner runs. </>
+                <>Each store pays its own weekly fee, however many stores its owner runs. </>
               )}
               {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
                   OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
-                  anything is charged (api partner/store-fee.ts). [RETIER PR-C] What happens after that is the
-                  server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves a store; on, a rise is told
-                  in the app at least 14 days ahead and applies from the first weekly fee after it, a fall lowers the
-                  fee with a notice; no word, no claim. */}
-              When Swift approves a new store, its weekly fee is the rate for the active items it has then (a
-              services business pays the Services rate). The store sees that exact fee, and its owner ticks it
-              before anything is charged.{' '}
+                  anything is charged (api partner/store-fee.ts). [RETIER PR-C · REVIEW-M N3] What happens after that
+                  is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves a store; on, a rise is
+                  told in the app ahead with how to stop it and a fall applies after two weekly counts (api
+                  billing.service recalculateVendorTiers + fee-rise-notice.ts); no word, no claim. */}
+              {/* [WEBSITE 30 Oct · owner] The note is three short sentences at most: the same words, joined. */}
+              When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). The store
+              sees that exact fee, and its owner ticks it
+              before anything is charged
               {(() => {
                 const retier = catalogueRetierOf(list.pricing);
                 if (!retier) return null;
                 return retier.on
-                  ? <>After that, Swift counts each store&apos;s active items every week: if they reach another rate, Swift tells the store in the app at least {retier.noticeDays} days before, and the new fee applies from its first weekly fee after that; if they fall below its rate, its fee goes down and the store is told.{' '}</>
-                  : <>After that, Swift does not move a store to another rate as its active items change.{' '}</>;
+                  ? <>; after that, Swift counts each store&apos;s items every week and tells the store in the app at least {retier.noticeDays} days before a higher rate applies, with how to stop it (a lower rate applies after two weekly counts a week apart, with a notice)</>
+                  : <>; after that, Swift does not move a store to another rate as its items change</>;
               })()}
-              A rate agreed with Swift stays as agreed.
+              , and a rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (
@@ -186,16 +180,15 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
              something true and actionable — and must not point at an app that
              does not exist yet [AC-10]. */
           <p className="text-[var(--swift-muted)]">
-            We could not load this week&apos;s exact rates just now. The model does not change:{' '}
-            <b>one flat weekly fee</b>, a free trial that starts the day you are approved, and{' '}
-            <b>zero commission</b> on anything you sell or earn. Email{' '}
+            We could not load this week&apos;s rates just now. The model stays the same: <b>one flat weekly fee</b>, a
+            free trial from the day you are approved, and <b>zero commission</b> on anything you sell or earn. Email{' '}
             <a
               className="font-medium text-[var(--swift-red)] underline underline-offset-2"
               href={`mailto:${site.supportEmail}`}
             >
               {site.supportEmail}
             </a>{' '}
-            and we will send the current rate card for your market.
+            for the current rates.
           </p>
         )}
       </Section>
