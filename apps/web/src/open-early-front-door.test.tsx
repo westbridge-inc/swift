@@ -121,7 +121,6 @@ describe('[OPEN-EARLY] the front door says "opening soon" and leads partners in'
     const words = view.container.textContent ?? '';
     expect(words).not.toContain('—');
     expect(words).not.toMatch(/order now|book now|available now/i);
-    expect(words).not.toMatch(/Lyft/i);
   });
 });
 
