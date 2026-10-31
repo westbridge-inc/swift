@@ -29,7 +29,7 @@ import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } fr
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
-import { deliveryTransitLabel, mmgStorePaymentDeadline, mmgStorePaymentNote, orderPrepFacts, orderStepState, orderTimelineIndex, parseMmgStorePayment } from '@/lib/app-rules';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, orderPrepFacts, orderStepState, orderTimelineIndex, parseMmgStorePayment } from '@/lib/app-rules';
 import { appointmentBookingView } from '@/lib/booking-rules';
 import styles from './tracking.module.css';
 import { pickupCodeWords } from './pickup-words';
@@ -203,8 +203,9 @@ const PHONE_STEP = [{ key: 'placed', index: 0 }, { key: 'preparing', index: 2 },
 
 /** Which of the rail's steps are ticked, and its words. A store order (delivery or takeaway) follows the phone's rule
  *  (apps/mobile/src/modules/orders/timeline-states.ts): Preparing is ticked only on a kitchen fact, never because a
- *  rider status sits after it, and a delivery's travel step says what has happened ("Rider assigned" ... "On the
- *  way" only once the food is). Rides, bookings and parcels keep the rail by position. */
+ *  rider status sits after it. A delivery's travel step, while the order is at it, is named by its status in the one
+ *  status vocabulary (orderStatusLabel: "Rider on the way to the store" ... "On its way to you"), never a bare "On
+ *  the way" before the food is. Rides, bookings and parcels keep the rail by position. */
 function railSteps(order: OrderDetail, stages: Stage[], currentStage: number, holdActive: boolean): Array<{ label: string; reached: boolean }> {
   const storeOrder = order.orderType !== 'TAXI' && order.orderType !== 'COURIER'
     && (stages === deliveryStages || stages === pickupStages);
@@ -218,7 +219,9 @@ function railSteps(order: OrderDetail, stages: Stage[], currentStage: number, ho
     ...orderPrepFacts(order),
   };
   return stages.map((stage, index) => ({
-    label: stages === deliveryStages && PHONE_STEP[index]!.key === 'transit' ? deliveryTransitLabel(order.status) : stage.label,
+    label: stages === deliveryStages && PHONE_STEP[index]!.key === 'transit' && currentStage === index
+      ? orderStatusLabel(order.status, presentedVertical(order))
+      : stage.label,
     reached: orderStepState(PHONE_STEP[index]!.key, PHONE_STEP[index]!.index, facts).state === 'done',
   }));
 }

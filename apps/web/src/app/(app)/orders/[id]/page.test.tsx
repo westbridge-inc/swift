@@ -674,36 +674,36 @@ describe('[PICKUP] the live status rail: a step is green the moment it is reache
 
   // [#2252 REVIEW-F S4-1 · FOLLOWUPS-3] The phone's rule (apps/mobile/src/modules/orders/timeline-states.ts), read by
   // the website too: Preparing is ticked only on a kitchen fact (PREPARING, its stamp or log row, or the food having
-  // left the store), never because a rider status sits after it; the travel step says what has happened ("Rider
-  // assigned", "Rider heading to pickup" ...) and is "On the way" only once the food is.
+  // left the store), never because a rider status sits after it; the travel step, while the order is at it, is named
+  // by its status in the one status vocabulary (lib/orderStatus.ts), never a bare "On the way" before the food is.
   const at = async (order: Record<string, unknown>) => {
     vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'DELIVERY', deliveryAddress: '1 Main St', ...order } as never);
     return (await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`);
   };
 
-  it('a rider assigned before the kitchen started: the travel step says "Rider assigned"; Preparing is not ticked', async () => {
+  it('a rider assigned before the kitchen started: the travel step says "Rider on the way to the store"; Preparing is not ticked', async () => {
     expect(await at({ status: 'RIDER_ASSIGNED', acceptedAt: '2026-10-31T10:00:00.000Z' }))
-      .toEqual(['Placed:✓:true:false', 'Preparing:2:false:false', 'Rider assigned:✓:true:true', 'Delivered:4:false:false']);
+      .toEqual(['Placed:✓:true:false', 'Preparing:2:false:false', 'Rider on the way to the store:✓:true:true', 'Delivered:4:false:false']);
   });
 
-  it('a rider heading to the store while the kitchen cooks: Preparing ticked (its stamp), "Rider heading to pickup"', async () => {
+  it('a rider heading to the store while the kitchen cooks: Preparing ticked (its stamp), the rider on the way to the store', async () => {
     expect(await at({ status: 'RIDER_EN_ROUTE_PICKUP', preparingAt: '2026-10-31T10:01:00.000Z' }))
-      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider heading to pickup:✓:true:true', 'Delivered:4:false:false']);
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider on the way to the store:✓:true:true', 'Delivered:4:false:false']);
   });
 
-  it('a log row counts like a stamp: "Rider at pickup" with the kitchen\'s PREPARING row on record', async () => {
+  it('a log row counts like a stamp: "Rider is at the store" with the kitchen\'s PREPARING row on record', async () => {
     expect(await at({ status: 'RIDER_ARRIVED_PICKUP', timeline: [{ status: 'PREPARING', timestamp: '2026-10-31T10:01:00.000Z' }] }))
-      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider at pickup:✓:true:true', 'Delivered:4:false:false']);
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider is at the store:✓:true:true', 'Delivered:4:false:false']);
   });
 
-  it('the rider has the food: Preparing ticked (the food left the store), "Picked up"; then "On the way"', async () => {
+  it('the rider has the food: Preparing ticked (the food left the store), "On its way to you"', async () => {
     expect(await at({ status: 'PICKED_UP' }))
-      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Picked up:✓:true:true', 'Delivered:4:false:false']);
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On its way to you:✓:true:true', 'Delivered:4:false:false']);
   });
 
-  it('on the way with the food: "On the way" is ticked', async () => {
+  it('on the way with the food: "On its way to you" is ticked', async () => {
     expect(await at({ status: 'EN_ROUTE_DELIVERY' }))
-      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On the way:✓:true:true', 'Delivered:4:false:false']);
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On its way to you:✓:true:true', 'Delivered:4:false:false']);
   });
 
   it('delivered: every step ticked, none current', async () => {

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { deliveryTransitLabel, orderPrepFacts, orderStepState, orderTimelineIndex, type OrderStepFacts } from './timeline-states';
+import { orderPrepFacts, orderStepState, orderTimelineIndex, type OrderStepFacts } from './timeline-states';
 
 // [PICKUP · owner 30 Oct 2026, staging test of a takeaway] "Preparing still shows on the customer side, which it
 // should, but it's not green when the restaurant accepts it, and same with Ready." A store order's step turns
@@ -166,26 +166,12 @@ describe('the kitchen\'s facts (shared with the website)', () => {
   });
 });
 
-describe('the travel step of a delivery is named by what has happened (shared with the website)', () => {
-  it('names the rider\'s step, never "On the way" before the food has left the store', () => {
-    expect(deliveryTransitLabel('RIDER_ASSIGNED')).toBe('Rider assigned');
-    expect(deliveryTransitLabel('DRIVER_ASSIGNED')).toBe('Rider assigned');
-    expect(deliveryTransitLabel('RIDER_EN_ROUTE_PICKUP')).toBe('Rider heading to pickup');
-    expect(deliveryTransitLabel('DRIVER_EN_ROUTE')).toBe('Rider heading to pickup');
-    expect(deliveryTransitLabel('RIDER_ARRIVED_PICKUP')).toBe('Rider at pickup');
-    expect(deliveryTransitLabel('DRIVER_ARRIVED')).toBe('Rider at pickup');
-    expect(deliveryTransitLabel('PICKED_UP')).toBe('Picked up');
-    expect(deliveryTransitLabel('ARRIVED')).toBe('Rider arrived');
-    expect(deliveryTransitLabel('EN_ROUTE_DELIVERY')).toBe('On the way');
-    expect(deliveryTransitLabel('PREPARING')).toBe('On the way');
-  });
-
-  it('the order screen reads all three from here (no second copy on the screen)', () => {
+describe('the order screen reads the shared rule (no second copy on the screen)', () => {
+  it('the step the order is at and the kitchen\'s facts come from here; the step words stay the screen\'s own', () => {
     const SCREEN = readFileSync(new URL('./screens/DeliveryScreen.tsx', import.meta.url), 'utf8');
     expect(SCREEN).not.toMatch(/function timelineIndex\(/);
     expect(SCREEN).toContain('const currentIndex = orderTimelineIndex(order, holdActive, releasePending);');
     expect(SCREEN).toContain('const { acceptedRecorded, preparationStarted, preparationFinished } = orderPrepFacts(order);');
-    expect(SCREEN).toContain('let transitLabel = deliveryTransitLabel(status);');
-    expect(SCREEN).not.toMatch(/transitLabel = '(Rider assigned|Rider heading to pickup|Rider at pickup|Picked up|Rider arrived|On the way)'/);
+    expect(SCREEN).not.toMatch(/const preparationStarted = /);
   });
 });

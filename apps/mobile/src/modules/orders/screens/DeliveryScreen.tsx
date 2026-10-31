@@ -35,7 +35,7 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
-import { deliveryTransitLabel, orderPrepFacts, orderStepState, orderTimelineIndex } from '../timeline-states';
+import { orderPrepFacts, orderStepState, orderTimelineIndex } from '../timeline-states';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
 import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
@@ -97,8 +97,8 @@ function humanStatus(status: string): string {
   return status.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase());
 }
 
-// [#2252 REVIEW-F S4-1] The step the order is at, the kitchen's facts and the travel step's words live in
-// ../timeline-states.ts (pure), shared with the website's status rail so the two cannot drift.
+// [#2252 REVIEW-F S4-1] The step the order is at and the kitchen's facts live in ../timeline-states.ts (pure),
+// shared with the website's status rail so the two cannot drift.
 
 function TrackingTimeline({ order, holdActive, releasePending }: { order: any; holdActive: boolean; releasePending: boolean }) {
   const currentIndex = orderTimelineIndex(order, holdActive, releasePending);
@@ -115,7 +115,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
       ? courier ? 'Sending to nearby riders' : appointment ? 'Sending to the provider' : 'Sending to the store'
       : courier ? 'Sent to nearby riders' : appointment ? 'Sent to the provider' : 'Sent to the store';
   const { acceptedRecorded, preparationStarted, preparationFinished } = orderPrepFacts(order);
-  let transitLabel = deliveryTransitLabel(status);
+  let transitLabel = 'On the way';
   let transitDescription = order.rider
     ? `${order.rider.firstName ?? 'Your rider'} is handling this delivery.`
     : 'Live rider tracking appears after assignment and a GPS fix.';
@@ -129,14 +129,19 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitLabel = 'Heading to pickup';
     transitDescription = 'This step begins when the assigned rider sets off.';
   } else if (['RIDER_ASSIGNED', 'DRIVER_ASSIGNED'].includes(status)) {
+    transitLabel = 'Rider assigned';
     transitDescription = 'A rider is assigned. We’ll show when they set off.';
   } else if (['RIDER_EN_ROUTE_PICKUP', 'DRIVER_EN_ROUTE'].includes(status)) {
+    transitLabel = 'Rider heading to pickup';
     transitDescription = 'The rider is heading to the pickup.';
   } else if (['RIDER_ARRIVED_PICKUP', 'DRIVER_ARRIVED'].includes(status)) {
+    transitLabel = 'Rider at pickup';
     transitDescription = 'The rider reached the pickup.';
   } else if (status === 'PICKED_UP') {
+    transitLabel = 'Picked up';
     transitDescription = 'The rider has your order. We’ll show when they head to you.';
   } else if (status === 'ARRIVED') {
+    transitLabel = 'Rider arrived';
     transitDescription = 'The rider reached the delivery address.';
   } else if (courier && status === 'RETURNING') {
     transitLabel = 'Coming back to you';

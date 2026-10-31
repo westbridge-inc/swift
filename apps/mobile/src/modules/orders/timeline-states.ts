@@ -106,20 +106,3 @@ export function orderPrepFacts(order: TimelineOrder): Pick<OrderStepFacts, 'acce
       || ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status),
   };
 }
-
-/** The travel step of a delivery, named by what has happened: a rider assigned or heading to the store is not yet
- *  "On the way" with the food. (A takeaway's step is "Ready"; parcels and bookings name theirs on the screen.) */
-const DELIVERY_TRANSIT_LABELS: Record<string, string> = {
-  RIDER_ASSIGNED: 'Rider assigned',
-  DRIVER_ASSIGNED: 'Rider assigned',
-  RIDER_EN_ROUTE_PICKUP: 'Rider heading to pickup',
-  DRIVER_EN_ROUTE: 'Rider heading to pickup',
-  RIDER_ARRIVED_PICKUP: 'Rider at pickup',
-  DRIVER_ARRIVED: 'Rider at pickup',
-  PICKED_UP: 'Picked up',
-  ARRIVED: 'Rider arrived',
-};
-
-export function deliveryTransitLabel(status: string): string {
-  return DELIVERY_TRANSIT_LABELS[String(status).toUpperCase()] ?? 'On the way';
-}
