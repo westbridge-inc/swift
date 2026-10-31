@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { orderStepState, type OrderStepFacts } from './timeline-states';
+import { deliveryTransitLabel, orderPrepFacts, orderStepState, orderTimelineIndex, type OrderStepFacts } from './timeline-states';
 
 // [PICKUP · owner 30 Oct 2026, staging test of a takeaway] "Preparing still shows on the customer side, which it
 // should, but it's not green when the restaurant accepts it, and same with Ready." A store order's step turns
@@ -99,5 +99,93 @@ describe('the order screen draws it', () => {
     expect(KIT.split('backgroundColor: legColor(step, state, onDark, doneTone),').length - 1).toBe(2);
     // The tick stays: state is never told by colour alone.
     expect(KIT).toContain("name={state === 'done' ? 'check' : step.icon}");
+  });
+});
+
+// [#2252 REVIEW-F S4-1 · FOLLOWUPS-3] The website's status rail reads the SAME rule as this screen: the step the
+// order is at, the kitchen's facts and the travel step's words now live here (pure), so the two cannot drift.
+describe('the step the order is at (shared with the website)', () => {
+  const at = (order: Record<string, unknown>, hold = false, release = false) => orderTimelineIndex(order, hold, release);
+
+  it('a held order, or one whose release is being checked, is at Sent', () => {
+    expect(at({ status: 'PENDING' }, true)).toBe(1);
+    expect(at({ status: 'PENDING' }, false, true)).toBe(1);
+    expect(at({ status: 'ACCEPTED' }, true)).toBe(1);
+  });
+
+  it('a store order: accepted or cooking is at Preparing; a rider status is the travel step; the end is the last', () => {
+    expect(at({ status: 'PENDING' })).toBe(1);
+    expect(at({ status: 'ACCEPTED' })).toBe(2);
+    expect(at({ status: 'PREPARING' })).toBe(2);
+    expect(at({ status: 'READY_FOR_PICKUP' })).toBe(2);
+    for (const status of ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED']) {
+      expect(at({ status }), status).toBe(3);
+    }
+    expect(at({ status: 'DELIVERED' })).toBe(4);
+    expect(at({ status: 'COMPLETED' })).toBe(4);
+  });
+
+  it('a takeaway: ready is the Ready step, collected is the last', () => {
+    expect(at({ status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP' })).toBe(3);
+    expect(at({ status: 'PICKED_UP', fulfillment: 'PICKUP' })).toBe(4);
+  });
+
+  it('a parcel: assigned is step 2, a rider moving or back on its way is the travel step, RETURNED has no step', () => {
+    expect(at({ status: 'READY_FOR_PICKUP', orderType: 'COURIER' })).toBe(1);
+    expect(at({ status: 'RIDER_ASSIGNED', orderType: 'COURIER' })).toBe(2);
+    expect(at({ status: 'RIDER_EN_ROUTE_PICKUP', orderType: 'COURIER' })).toBe(3);
+    expect(at({ status: 'RETURNING', orderType: 'COURIER' })).toBe(3);
+    expect(at({ status: 'RETURNED', orderType: 'COURIER' })).toBeNull();
+  });
+
+  it('rides keep their steps; an unknown status has none', () => {
+    expect(at({ status: 'DRIVER_ASSIGNED' })).toBe(2);
+    expect(at({ status: 'DRIVER_EN_ROUTE' })).toBe(3);
+    expect(at({ status: 'CANCELLED' })).toBeNull();
+    expect(at({})).toBeNull();
+  });
+});
+
+describe('the kitchen\'s facts (shared with the website)', () => {
+  it('reads accept / prep / ready from the order\'s own stamps or its status log', () => {
+    expect(orderPrepFacts({ status: 'ACCEPTED' })).toEqual({ acceptedRecorded: false, preparationStarted: false, preparationFinished: false });
+    expect(orderPrepFacts({ status: 'ACCEPTED', acceptedAt: '2026-10-31T10:00:00Z' }).acceptedRecorded).toBe(true);
+    expect(orderPrepFacts({ status: 'X', timeline: [{ status: 'ACCEPTED', timestamp: '2026-10-31T10:00:00Z' }] }).acceptedRecorded).toBe(true);
+    expect(orderPrepFacts({ status: 'X', preparingAt: '2026-10-31T10:01:00Z' }).preparationStarted).toBe(true);
+    expect(orderPrepFacts({ status: 'X', timeline: [{ status: 'PREPARING', timestamp: '2026-10-31T10:01:00Z' }] }).preparationStarted).toBe(true);
+    expect(orderPrepFacts({ status: 'X', readyAt: '2026-10-31T10:09:00Z' }).preparationFinished).toBe(true);
+    expect(orderPrepFacts({ status: 'X', timeline: [{ status: 'READY_FOR_PICKUP', timestamp: '2026-10-31T10:09:00Z' }] }).preparationFinished).toBe(true);
+  });
+
+  it('a log row without a time is not a fact; the food leaving the store is', () => {
+    expect(orderPrepFacts({ status: 'X', timeline: [{ status: 'PREPARING', timestamp: null }] }).preparationStarted).toBe(false);
+    for (const status of ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED']) {
+      expect(orderPrepFacts({ status }).preparationFinished, status).toBe(true);
+    }
+    expect(orderPrepFacts({ status: 'RIDER_ASSIGNED' }).preparationFinished).toBe(false);
+  });
+});
+
+describe('the travel step of a delivery is named by what has happened (shared with the website)', () => {
+  it('names the rider\'s step, never "On the way" before the food has left the store', () => {
+    expect(deliveryTransitLabel('RIDER_ASSIGNED')).toBe('Rider assigned');
+    expect(deliveryTransitLabel('DRIVER_ASSIGNED')).toBe('Rider assigned');
+    expect(deliveryTransitLabel('RIDER_EN_ROUTE_PICKUP')).toBe('Rider heading to pickup');
+    expect(deliveryTransitLabel('DRIVER_EN_ROUTE')).toBe('Rider heading to pickup');
+    expect(deliveryTransitLabel('RIDER_ARRIVED_PICKUP')).toBe('Rider at pickup');
+    expect(deliveryTransitLabel('DRIVER_ARRIVED')).toBe('Rider at pickup');
+    expect(deliveryTransitLabel('PICKED_UP')).toBe('Picked up');
+    expect(deliveryTransitLabel('ARRIVED')).toBe('Rider arrived');
+    expect(deliveryTransitLabel('EN_ROUTE_DELIVERY')).toBe('On the way');
+    expect(deliveryTransitLabel('PREPARING')).toBe('On the way');
+  });
+
+  it('the order screen reads all three from here (no second copy on the screen)', () => {
+    const SCREEN = readFileSync(new URL('./screens/DeliveryScreen.tsx', import.meta.url), 'utf8');
+    expect(SCREEN).not.toMatch(/function timelineIndex\(/);
+    expect(SCREEN).toContain('const currentIndex = orderTimelineIndex(order, holdActive, releasePending);');
+    expect(SCREEN).toContain('const { acceptedRecorded, preparationStarted, preparationFinished } = orderPrepFacts(order);');
+    expect(SCREEN).toContain('let transitLabel = deliveryTransitLabel(status);');
+    expect(SCREEN).not.toMatch(/transitLabel = '(Rider assigned|Rider heading to pickup|Rider at pickup|Picked up|Rider arrived|On the way)'/);
   });
 });

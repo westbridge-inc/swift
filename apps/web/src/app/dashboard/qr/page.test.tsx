@@ -15,6 +15,8 @@ import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
 
 type Role = 'OWNER' | 'MANAGER' | 'STAFF';
 const SHORT = 'https://swiftgy.test/s/abcdfghjkm';
+/** [REVIEW-F #2262 S4-1] The copy button's accessible name carries the link it shows. */
+const COPY_NAME = `Copy web store link ${SHORT}`;
 const CANONICAL = 'https://swiftgy.test/store/sample-kitchen-x1';
 const reads: string[] = [];
 
@@ -69,7 +71,10 @@ describe('[STORE-LINK] the web dashboard shares the store link like the phone ap
     expect(document.querySelector('svg[viewBox="0 0 10 10"]')).toBeNull();
     expect(screen.getByText('Sample Kitchen')).toBeTruthy();
     expect(screen.getByText('v2')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Copy web store link' }).textContent).toContain(SHORT);
+    // [REVIEW-F #2262 S4-1 · WCAG 2.5.3 label in name] The button's name says what it does AND the link it shows.
+    const copy = screen.getByRole('button', { name: COPY_NAME });
+    expect(copy.textContent).toContain(SHORT);
+    expect(copy.getAttribute('aria-label')).toBe(`Copy web store link ${SHORT}`);
     const open = screen.getByRole('link', { name: 'Open web menu' });
     expect(open.getAttribute('href')).toBe(CANONICAL);
     expect(open.getAttribute('target')).toBe('_blank');
@@ -84,7 +89,7 @@ describe('[STORE-LINK] the web dashboard shares the store link like the phone ap
     const view = renderWithQuery(<StoreQrPage />);
     ownClipboard();
     await screen.findByText('Customers scan this to open your live web menu — no app install');
-    await view.user.click(screen.getByRole('button', { name: 'Copy web store link' }));
+    await view.user.click(screen.getByRole('button', { name: COPY_NAME }));
     expect(clipboard.writeText).toHaveBeenCalledWith(SHORT);
     expect(await screen.findByText('Store link copied.')).toBeTruthy();
   });
@@ -95,9 +100,22 @@ describe('[STORE-LINK] the web dashboard shares the store link like the phone ap
     const view = renderWithQuery(<StoreQrPage />);
     ownClipboard();
     await screen.findByText('Customers scan this to open your live web menu — no app install');
-    await view.user.click(screen.getByRole('button', { name: 'Copy web store link' }));
+    await view.user.click(screen.getByRole('button', { name: COPY_NAME }));
     expect(await screen.findByText("Couldn't copy the link. Use Share link instead.")).toBeTruthy();
     expect(screen.queryByText('Store link copied.')).toBeNull();
+  });
+
+  it('[REVIEW-F #2262 S4-2] a refused copy on a browser with no share sheet names the button it shows: Share on WhatsApp', async () => {
+    Reflect.deleteProperty(navigator, 'share');
+    qrApi();
+    clipboard.writeText.mockRejectedValue(new Error('denied'));
+    const view = renderWithQuery(<StoreQrPage />);
+    ownClipboard();
+    await screen.findByText('Customers scan this to open your live web menu — no app install');
+    await view.user.click(screen.getByRole('button', { name: COPY_NAME }));
+    expect(await screen.findByText("Couldn't copy the link. Use Share on WhatsApp instead.")).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Share on WhatsApp' })).toBeTruthy();
+    expect(screen.queryByText(/Use Share link instead/)).toBeNull();
   });
 
   it('Share link opens the device\'s share sheet with the phone\'s message', async () => {
@@ -126,7 +144,7 @@ describe('[STORE-LINK] the web dashboard shares the store link like the phone ap
     expect(await screen.findByText('This code is not taking customers to a live store yet.')).toBeTruthy();
     expect(screen.getByText('Store link not ready')).toBeTruthy();
     expect(screen.getByText('Swift only enables sharing after the public resolver confirms this exact store. Check your store approval and availability, then retry.')).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Copy web store link' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: COPY_NAME }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Share link' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('link', { name: 'Open web menu' })).toBeNull();
     expect((screen.getByRole('button', { name: 'Open web menu' }) as HTMLButtonElement).disabled).toBe(true);
@@ -147,7 +165,7 @@ describe('[STORE-LINK] the web dashboard shares the store link like the phone ap
     qrApi({ publicFails: true });
     renderWithQuery(<StoreQrPage />);
     expect(await screen.findByText("Swift couldn't confirm that this store link is live.")).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Copy web store link' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: COPY_NAME }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('the code could not be loaded: the phone\'s error words and a retry, never an empty page', async () => {
@@ -155,7 +173,7 @@ describe('[STORE-LINK] the web dashboard shares the store link like the phone ap
     renderWithQuery(<StoreQrPage />);
     expect(await screen.findByText("We couldn't load this store's QR code. Check your connection and try again.")).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Copy web store link' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Copy web store link/ })).toBeNull();
   });
 
   it('a staff login is told who shares the link, and the code is never read', async () => {

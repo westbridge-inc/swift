@@ -54,3 +54,72 @@ export function orderStepState(key: string, index: number, facts: OrderStepFacts
   if (key === 'sent' && (facts.holdActive || facts.releasePending)) return { state: 'current', live: false };
   return { state: 'done', live: index < LAST_STEP };
 }
+
+/** The fields of an order the timeline reads (the customer order detail the server sends). */
+export type TimelineOrder = {
+  status?: unknown;
+  fulfillment?: unknown;
+  orderType?: unknown;
+  acceptedAt?: unknown;
+  preparingAt?: unknown;
+  readyAt?: unknown;
+  timeline?: unknown;
+};
+
+/**
+ * [#2252 REVIEW-F S4-1] The step the order is at (0 Placed · 1 Sent · 2 Preparing · 3 the travel step · 4 the end),
+ * or null when its status has no step. Moved here unchanged from DeliveryScreen so the website's status rail reads
+ * the same position as the phone.
+ */
+export function orderTimelineIndex(order: TimelineOrder, holdActive: boolean, releasePending: boolean): number | null {
+  if (holdActive) return 1;
+  if (releasePending) return 1;
+  const status = String(order.status ?? '').toUpperCase();
+  const pickup = order.fulfillment === 'PICKUP';
+  const courier = order.orderType === 'COURIER';
+  // [E17 · DS231 F3] On its way back: the travel step, relabelled below. A
+  // RETURNED parcel has no step — the forward timeline would promise a
+  // delivery — so it falls to the plain status line.
+  if (courier && status === 'RETURNING') return 3;
+  if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
+  if (pickup && status === 'READY_FOR_PICKUP') return 3;
+  if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
+  if (courier && status === 'RIDER_ASSIGNED') return 2;
+  if (courier && ['RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
+  if (status === 'DRIVER_ASSIGNED') return 2;
+  if (['DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
+  if (['ACCEPTED', 'PREPARING'].includes(status) || (!courier && status === 'READY_FOR_PICKUP')) return 2;
+  if (['PENDING', 'READY_FOR_PICKUP'].includes(status)) return 1;
+  return null;
+}
+
+/** The kitchen's facts the Preparing step is judged on: the order's own stamps, its status log (a row with a time),
+ *  or the food having left the store. Shared with the website for the same reason as orderTimelineIndex. */
+export function orderPrepFacts(order: TimelineOrder): Pick<OrderStepFacts, 'acceptedRecorded' | 'preparationStarted' | 'preparationFinished'> {
+  const status = String(order.status ?? '').toUpperCase();
+  const entries = (Array.isArray(order.timeline) ? order.timeline : []) as Array<{ status?: string; timestamp?: string | null }>;
+  const eventTime = (statuses: string[]) => entries.find((entry) => entry.status && statuses.includes(entry.status))?.timestamp;
+  return {
+    acceptedRecorded: !!(order.acceptedAt || eventTime(['ACCEPTED'])),
+    preparationStarted: !!(order.preparingAt || eventTime(['PREPARING'])),
+    preparationFinished: !!(order.readyAt || eventTime(['READY_FOR_PICKUP']))
+      || ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status),
+  };
+}
+
+/** The travel step of a delivery, named by what has happened: a rider assigned or heading to the store is not yet
+ *  "On the way" with the food. (A takeaway's step is "Ready"; parcels and bookings name theirs on the screen.) */
+const DELIVERY_TRANSIT_LABELS: Record<string, string> = {
+  RIDER_ASSIGNED: 'Rider assigned',
+  DRIVER_ASSIGNED: 'Rider assigned',
+  RIDER_EN_ROUTE_PICKUP: 'Rider heading to pickup',
+  DRIVER_EN_ROUTE: 'Rider heading to pickup',
+  RIDER_ARRIVED_PICKUP: 'Rider at pickup',
+  DRIVER_ARRIVED: 'Rider at pickup',
+  PICKED_UP: 'Picked up',
+  ARRIVED: 'Rider arrived',
+};
+
+export function deliveryTransitLabel(status: string): string {
+  return DELIVERY_TRANSIT_LABELS[String(status).toUpperCase()] ?? 'On the way';
+}

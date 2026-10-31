@@ -72,6 +72,9 @@ COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/ca
 COPY apps/mobile/src/modules/cart/cartPlaced.ts apps/mobile/src/modules/cart/cartPlaced.ts
 # [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
 COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
+# [#2252 REVIEW-F S4-1] ...and its status rail reads the phone's timeline rule (which step is done, the step it is at, the
+# travel step's words): pure, imports nothing.
+COPY apps/mobile/src/modules/orders/timeline-states.ts apps/mobile/src/modules/orders/timeline-states.ts
 # [UI-SWEEP U14 / U17] The order pages speak the phone's status words and its
 # reorder notice (src/lib/order-words.ts imports them by path). Both are pure:
 # orderStatus.ts imports only types from @swift/types, reorderNotice.ts nothing.

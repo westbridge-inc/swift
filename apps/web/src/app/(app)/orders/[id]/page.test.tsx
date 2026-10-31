@@ -654,7 +654,8 @@ describe('[PICKUP] the live status rail: a step is green the moment it is reache
   });
 
   it('a takeaway marked ready: Ready is ticked and green; Collected waits', async () => {
-    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' } as never);
+    // Marking ready stamps readyAt (and preparingAt when the store skipped Start preparing): vendor.routes.ts.
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane', preparingAt: '2026-10-31T10:01:00.000Z', readyAt: '2026-10-31T10:09:00.000Z' } as never);
     expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`))
       .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Ready:✓:true:true', 'Collected:4:false:false']);
   });
@@ -669,6 +670,51 @@ describe('[PICKUP] the live status rail: a step is green the moment it is reache
     vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, fulfillment: 'PICKUP', status: 'ACCEPTED', pickupAddress: '7 Counter Lane' } as never);
     expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}`))
       .toEqual(['Placed:✓:true', 'Preparing:2:false', 'Ready:3:false', 'Collected:4:false']);
+  });
+
+  // [#2252 REVIEW-F S4-1 · FOLLOWUPS-3] The phone's rule (apps/mobile/src/modules/orders/timeline-states.ts), read by
+  // the website too: Preparing is ticked only on a kitchen fact (PREPARING, its stamp or log row, or the food having
+  // left the store), never because a rider status sits after it; the travel step says what has happened ("Rider
+  // assigned", "Rider heading to pickup" ...) and is "On the way" only once the food is.
+  const at = async (order: Record<string, unknown>) => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'DELIVERY', deliveryAddress: '1 Main St', ...order } as never);
+    return (await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`);
+  };
+
+  it('a rider assigned before the kitchen started: the travel step says "Rider assigned"; Preparing is not ticked', async () => {
+    expect(await at({ status: 'RIDER_ASSIGNED', acceptedAt: '2026-10-31T10:00:00.000Z' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:2:false:false', 'Rider assigned:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('a rider heading to the store while the kitchen cooks: Preparing ticked (its stamp), "Rider heading to pickup"', async () => {
+    expect(await at({ status: 'RIDER_EN_ROUTE_PICKUP', preparingAt: '2026-10-31T10:01:00.000Z' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider heading to pickup:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('a log row counts like a stamp: "Rider at pickup" with the kitchen\'s PREPARING row on record', async () => {
+    expect(await at({ status: 'RIDER_ARRIVED_PICKUP', timeline: [{ status: 'PREPARING', timestamp: '2026-10-31T10:01:00.000Z' }] }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider at pickup:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('the rider has the food: Preparing ticked (the food left the store), "Picked up"; then "On the way"', async () => {
+    expect(await at({ status: 'PICKED_UP' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Picked up:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('on the way with the food: "On the way" is ticked', async () => {
+    expect(await at({ status: 'EN_ROUTE_DELIVERY' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On the way:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('delivered: every step ticked, none current', async () => {
+    expect(await at({ status: 'DELIVERED' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On the way:✓:true:false', 'Delivered:✓:true:false']);
+  });
+
+  it('a takeaway "ready" with no kitchen fact on record: Ready ticked, Preparing not (the phone does the same)', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`))
+      .toEqual(['Placed:✓:true:false', 'Preparing:2:false:false', 'Ready:✓:true:true', 'Collected:4:false:false']);
   });
 
   it('the stylesheet paints the step the order is at like any reached step, and leaves the leg after it unlit', async () => {

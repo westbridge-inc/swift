@@ -95,7 +95,8 @@ export default function StoreQrPage() {
       await navigator.clipboard.writeText(shortUrl);
       setNotice('Store link copied.');
     } catch {
-      setNotice("Couldn't copy the link. Use Share link instead.");
+      // [REVIEW-F #2262 S4-2] Name the share button this browser shows.
+      setNotice(`Couldn't copy the link. Use ${canShare ? 'Share link' : 'Share on WhatsApp'} instead.`);
     }
   };
   const shareLink = async () => {
@@ -152,7 +153,7 @@ export default function StoreQrPage() {
                 type="button"
                 onClick={() => void copyLink()}
                 disabled={!live}
-                aria-label="Copy web store link"
+                aria-label={`Copy web store link ${shortUrl}`}
                 title="Copies the short link customers can use to order"
                 className={`mt-4 inline-flex min-h-11 max-w-full items-center gap-2 rounded-full bg-[var(--swift-sunken)] px-4 text-[14px] font-semibold text-[var(--swift-red)] hover:outline hover:outline-1 hover:outline-[var(--swift-border-strong)] ${disabledLook}`}
               >

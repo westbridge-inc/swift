@@ -29,7 +29,7 @@ import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } fr
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
-import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
+import { deliveryTransitLabel, mmgStorePaymentDeadline, mmgStorePaymentNote, orderPrepFacts, orderStepState, orderTimelineIndex, parseMmgStorePayment } from '@/lib/app-rules';
 import { appointmentBookingView } from '@/lib/booking-rules';
 import styles from './tracking.module.css';
 import { pickupCodeWords } from './pickup-words';
@@ -195,6 +195,32 @@ function timelineLabel(status: string, order: OrderDetail): string {
 function stageIndex(status: string, stages: Stage[]): number {
   const exact = stages.findIndex((stage) => stage.statuses.includes(status));
   return exact >= 0 ? exact : 0;
+}
+
+/** [#2252 REVIEW-F S4-1] The phone's step for each of the web rail's four store-order steps (the phone also draws
+ *  "Sent", step 1, which the web folds into "Placed"). */
+const PHONE_STEP = [{ key: 'placed', index: 0 }, { key: 'preparing', index: 2 }, { key: 'transit', index: 3 }, { key: 'complete', index: 4 }] as const;
+
+/** Which of the rail's steps are ticked, and its words. A store order (delivery or takeaway) follows the phone's rule
+ *  (apps/mobile/src/modules/orders/timeline-states.ts): Preparing is ticked only on a kitchen fact, never because a
+ *  rider status sits after it, and a delivery's travel step says what has happened ("Rider assigned" ... "On the
+ *  way" only once the food is). Rides, bookings and parcels keep the rail by position. */
+function railSteps(order: OrderDetail, stages: Stage[], currentStage: number, holdActive: boolean): Array<{ label: string; reached: boolean }> {
+  const storeOrder = order.orderType !== 'TAXI' && order.orderType !== 'COURIER'
+    && (stages === deliveryStages || stages === pickupStages);
+  if (!storeOrder) return stages.map((stage, index) => ({ label: stage.label, reached: index <= currentStage }));
+  const facts = {
+    currentIndex: orderTimelineIndex(order, holdActive, false),
+    storeOrder: true,
+    holdActive,
+    releasePending: false,
+    status: String(order.status ?? '').toUpperCase(),
+    ...orderPrepFacts(order),
+  };
+  return stages.map((stage, index) => ({
+    label: stages === deliveryStages && PHONE_STEP[index]!.key === 'transit' ? deliveryTransitLabel(order.status) : stage.label,
+    reached: orderStepState(PHONE_STEP[index]!.key, PHONE_STEP[index]!.index, facts).state === 'done',
+  }));
 }
 
 function statusHeading(order: OrderDetail): string {
@@ -711,14 +737,15 @@ export default function OrderDetailPage() {
             {order.estimatedPrepTime ? <span className={styles.estimate}>About {order.estimatedPrepTime} min prep</span> : null}
           </div>
           <ol className={styles.statusRail} style={{ '--swift-stage-count': stages.length } as CSSProperties}>
-            {stages.map((stage, index) => {
+            {railSteps(order, stages, currentStage, holdActive).map((stage, index) => {
               // [PICKUP · owner 30 Oct 2026] A step is green, with its tick, the moment the server says it is
               // reached (Preparing on accept, Ready on ready); aria-current still says which step the order is at,
-              // and the leg to the next step stays unlit until that step is reached.
-              const reached = index <= currentStage;
+              // and the leg to the next step stays unlit until that step is reached. [#2252 S4-1] "Reached" is the
+              // phone's rule for a store order (railSteps): never Preparing or the travel step by position alone.
+              const reached = stage.reached;
               const current = index === currentStage && !completed;
               return (
-                <li key={stage.label} className={reached ? styles.stageReached : ''} aria-current={current ? 'step' : undefined}>
+                <li key={index} className={reached ? styles.stageReached : ''} aria-current={current ? 'step' : undefined}>
                   <span className={styles.stageDot}>{reached ? '✓' : index + 1}</span>
                   <span>{stage.label}</span>
                 </li>
