@@ -38,4 +38,6 @@ export const SIGNUP_PRICING: SignupPricing = {
   ],
   vendors: { service: 7000, catalogue: [{ minItems: 0, rate: 9000 }, { minItems: 1000, rate: 20000 }] },
   feeTerms: FEE_TERMS_V1,
+  // [RETIER PR-C] what the server sends while its weekly re-tier is off
+  catalogueRetier: { on: false, noticeDays: 14 },
 };

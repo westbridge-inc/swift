@@ -137,8 +137,9 @@ export class SubscriptionService {
 
     // [RETIER PR-A · owner 30 Oct 2026] The fee is born on the step the store's OWN catalogue reaches now, when Swift
     // approves it (partner/store-fee.ts storeFeeQuote), and so is the trial ([DEPT-PRICE · owner 29 Oct 2026]: a NEW
-    // department-store signup gets 7 days, everyone else 14, trial-length.ts). One count for both, as the weekly
-    // re-tier counts a lower tier — available now, or made unavailable or edited in the last 7 days — so hiding
+    // department-store signup gets 7 days, everyone else 14, trial-length.ts). One count for both, the same rule as the
+    // weekly re-tier's (store-fee.ts catalogueCountWhere == billing.service weekCatalogueWhere): items on sale, items
+    // taken off sale or changed in the last 7 days, and items removed in the last 7 days, so hiding or removing
     // listings just before approval does not count them out. A service business has no catalogue: the services rate.
     // Each store is its own account with its own tier: how many other stores its owner has never changes its price
     // (owner, 13 Oct 2026). A fee above the first step is born only on its owner's tick at exactly that amount

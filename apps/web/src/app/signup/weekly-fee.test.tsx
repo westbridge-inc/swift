@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { WeeklyFee } from './weekly-fee';
 import { FEE_TERMS_V1, SIGNUP_PRICING } from '@/test/weekly-fee-fixture';
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,26 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: $9,000/week${LADDER}`);
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
     expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).not.toContain(LADDER);
+  });
+
+  it('[RETIER PR-C] the server switched the re-tier on: the line says a rise is told 14 days ahead with how to stop it, a fall comes after two weekly counts', async () => {
+    fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, catalogueRetier: { on: true, noticeDays: 14 } }));
+    await throughName(/Put my business on Swift/);
+    const on = (await screen.findByRole('region', { name: 'Your weekly fee' })).textContent!;
+    expect(on).toContain('tick it before anything is charged. After that, Swift counts your items every week. If your items for sale reach a higher rate, Swift tells you in the app at least 14 days before the new fee applies, and how to stop it. '
+      + 'If your items, counting items taken off sale, changed or removed in the last 7 days, fit a lower rate on two weekly counts a week apart, your fee goes down and you are told.');
+    expect(on).not.toContain('does not change');
+  });
+
+  it('[RETIER PR-C] a server that says nothing about the re-tier (older, malformed): the line makes no claim about later moves', async () => {
+    for (const catalogueRetier of [undefined, { on: 'yes' }, { on: true, noticeDays: 3 }]) {
+      fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, catalogueRetier }));
+      const view = render(<WeeklyFee role="VENDOR" type="STORE" onChange={() => {}} />);
+      const none = (await view.findByRole('region', { name: 'Your weekly fee' })).textContent!;
+      expect(none, JSON.stringify(catalogueRetier)).toContain('tick it before anything is charged.');
+      expect(none, JSON.stringify(catalogueRetier)).not.toContain('After that');
+      view.unmount();
+    }
   });
 
   it('[REVIEW-F S3-2] a price list with one catalogue step has nothing to step up to, and a rider has no catalogue', async () => {

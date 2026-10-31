@@ -3,16 +3,17 @@ import type { ReactNode } from 'react';
 import { Section } from '@/components/site';
 import { fetchPricing, type CataloguePriceBand, type CountryPricing, type MoverPriceQuote } from '@/lib/api';
 import { formatAmount, parseAmount } from '@/lib/money';
+import { catalogueRetierOf } from '@/lib/catalogue-retier';
 import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
 // Every number on this page is the server's quote — resolved by the same
 // function signup prices through — so what a partner reads here is what they
-// are billed. [R27] The weekly re-tier is OFF (no store moves between catalogue
-// steps), so the store steps above the first decide a NEW store's trial length
-// (and the fee of a store already on one before it went off); the paragraph
-// under the cards says so. A mover reads the rate of the role their
+// are billed. [RETIER PR-A/C] A NEW store's fee and trial follow the step its own
+// catalogue reaches when Swift approves it (its owner ticks the fee first);
+// whether Swift moves a store between steps after that is the server's word
+// (`catalogueRetier`): the paragraph under the cards says so. A mover reads the rate of the role their
 // vehicle provisions: a taxi driver and a delivery rider never share a figure.
 // Only vehicles a mover can register today are shown (the server's `offered`
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
@@ -155,13 +156,22 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               )}
               {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
                   OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
-                  anything is charged (api partner/store-fee.ts). [R27] The weekly re-tier is OFF on the server
-                  (apps/api/src/modules/billing/weekly-retier.ts, WEEKLY_RETIER_ON = false): after that nothing
-                  moves it. The page test pins the flag: turning the re-tier back on must revisit this sentence. */}
+                  anything is charged (api partner/store-fee.ts). [RETIER PR-C · REVIEW-M N3] What happens after that
+                  is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves a store; on, a rise is
+                  told in the app ahead with how to stop it and a fall applies after two weekly counts (api
+                  billing.service recalculateVendorTiers + fee-rise-notice.ts); no word, no claim. */}
               {/* [WEBSITE 30 Oct · owner] The note is three short sentences at most: the same words, joined. */}
               When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). The store
               sees that exact fee, and its owner ticks it
-              before anything is charged; after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.
+              before anything is charged
+              {(() => {
+                const retier = catalogueRetierOf(list.pricing);
+                if (!retier) return null;
+                return retier.on
+                  ? <>; after that, Swift counts each store&apos;s items every week and tells the store in the app at least {retier.noticeDays} days before a higher rate applies, with how to stop it (a lower rate applies after two weekly counts a week apart, with a notice)</>
+                  : <>; after that, Swift does not move a store to another rate as its items change</>;
+              })()}
+              , and a rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

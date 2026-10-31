@@ -52,6 +52,8 @@ export interface CountryPricing {
   /** @deprecated Conflated numbers kept for older clients — never render them:
    *  one figure here can stand for several kinds of partner at once. */
   weekly?: Record<string, number | null>;
+  /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
+  catalogueRetier?: { on?: unknown; noticeDays?: unknown };
 }
 
 /** Public weekly price list — the same numbers the app's signup shows. */
