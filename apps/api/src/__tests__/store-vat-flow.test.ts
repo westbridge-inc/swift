@@ -225,10 +225,13 @@ describe('1. the switch: OFF unless exactly "1"', () => {
 });
 
 describe('2. the store says it is VAT-registered: PENDING, nothing a customer sees changes', () => {
-  it('"add VAT at checkout" is not offered in this release (409); a yes needs the number', async () => {
-    const add = await vendorCall('PUT', '/vat', { registered: true, vatRegistrationNumber: VAT_NUMBER, mode: 'ADD_VAT_AT_CHECKOUT' });
-    expect(add.statusCode, add.body).toBe(409);
-    expect(codeOf(add)).toBe('VAT_MODE_NOT_AVAILABLE');
+  it('a mode the server does not know is refused (400); a yes needs the number, in either mode', async () => {
+    // [VAT-DOCS] "Add VAT at checkout" is offered now (store-vat-add-at-checkout.test.ts proves it end to end).
+    const unknown = await vendorCall('PUT', '/vat', { registered: true, vatRegistrationNumber: VAT_NUMBER, mode: 'VAT_ON_TOP' });
+    expect(unknown.statusCode, unknown.body).toBe(400);
+    const addNoNumber = await vendorCall('PUT', '/vat', { registered: true, mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(addNoNumber.statusCode, addNoNumber.body).toBe(400);
+    expect(codeOf(addNoNumber)).toBe('VAT_NUMBER_REQUIRED');
     const noNumber = await vendorCall('PUT', '/vat', { registered: true, mode: 'PRICES_INCLUDE_VAT' });
     expect(noNumber.statusCode, noNumber.body).toBe(400);
     expect(codeOf(noNumber)).toBe('VAT_NUMBER_REQUIRED');

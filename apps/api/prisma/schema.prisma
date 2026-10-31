@@ -1688,6 +1688,10 @@ model Vendor {
   vatStatus             StoreVatStatus           @default(NONE)
   /// How the store's typed prices relate to VAT. Null until the store chooses.
   vatMode               StoreVatMode?
+  /// [VAT-DOCS · owner ruling 31 Oct 2026] A price-mode change an APPROVED store asked for, waiting for a PERSON (the
+  /// store VAT review queue). Until a person approves it, vatMode (and every customer price) stays exactly as it is;
+  /// nothing ever switches by itself. Null when no change is waiting; cleared whenever the approval stops standing.
+  vatModeRequested      StoreVatMode?
   /// The certificate the decision is about (VerificationDocument.id; loose reference, like OrderItem.itemId).
   vatCertificateDocId   String?
   /// Frozen by the person who approved: the number they typed from the certificate, the registered name on it,
@@ -1881,6 +1885,11 @@ model Item {
   /// to the GRA, VAT Act Schedules I-II). Only STANDARD goods carry VAT, and only for a store whose VAT a person
   /// approved. Default STANDARD: every existing item, and every item an older app creates.
   vatClass          VatClass          @default(STANDARD)
+  /// [VAT-DOCS · owner 30 Oct 2026] ADD_VAT_AT_CHECKOUT: the price the STORE typed, before VAT, while its VAT is added
+  /// to this item. Non-null exactly while the store's approved VAT mode adds VAT and the item is STANDARD-rated; then
+  /// basePrice (what every customer surface shows and every order charges) = this price plus 14%, half-up to whole GYD
+  /// (modules/store-vat/vat-pricing.ts, the ONE writer). Null otherwise: basePrice is the price as typed.
+  vatListedPrice    Decimal?          @db.Decimal(10, 2)
   dietaryTags       String[]
   allergens         String[]
   totalOrdered      Int               @default(0)
@@ -2006,6 +2015,9 @@ model Option {
   optionGroup     OptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: Cascade)
   name            String
   additionalPrice Decimal     @default(0) @db.Decimal(10, 2)
+  /// [VAT-DOCS] The option's extra price as the store typed it, before VAT, while its item's VAT is added (see
+  /// Item.vatListedPrice; same writer, same rule). Null otherwise.
+  vatListedAdditionalPrice Decimal? @db.Decimal(10, 2)
   isDefault       Boolean     @default(false)
   isAvailable     Boolean     @default(true)
   sortOrder       Int         @default(0)
@@ -2937,8 +2949,8 @@ enum StoreVatStatus {
 
 /// [STORE-VAT · owner O-5] PRICES_INCLUDE_VAT: the store's typed prices already include VAT (the customer pays
 /// them unchanged; VAT shown = price x 14/114). ADD_VAT_AT_CHECKOUT: the store types prices before VAT and the
-/// server adds 14% INTO the price customers see (never a surprise at checkout; VAT Act s.90(2)) — accepted
-/// once the follow-up server change ships; refused until then.
+/// server adds 14% INTO the price customers see (never a surprise at checkout; VAT Act s.90(2)): Item.vatListedPrice
+/// keeps the typed price while a person's approval stands (modules/store-vat/vat-pricing.ts).
 enum StoreVatMode {
   PRICES_INCLUDE_VAT
   ADD_VAT_AT_CHECKOUT

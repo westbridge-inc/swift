@@ -373,7 +373,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       // [STORE-VAT · owner O-5] The store's own VAT record, as its owner sees it on the VAT screen (GET /vendor/vat): its
       // answer and pricing choice, the certificate it sent, what a person approved (number, registered name, effective
       // date), when, and the reason the store was given for a refusal or withdrawal (written for the store to read).
-      'vatStatus', 'vatMode', 'vatCertificateDocId', 'vatApprovedNumber', 'vatApprovedName', 'vatEffectiveFrom', 'vatReviewedAt', 'vatReviewNote',
+      'vatStatus', 'vatMode', 'vatModeRequested', 'vatCertificateDocId', 'vatApprovedNumber', 'vatApprovedName', 'vatEffectiveFrom', 'vatReviewedAt', 'vatReviewNote',
       'mmgNumber', 'mmgNumberPending', 'mmgNumberPendingAt', 'mmgNumberApplyAt', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt',
       'isVerified', 'activationValidUntil', 'tier', 'tierChangedAt', 'status', 'totalOrders', 'nameReviewApprovedAt', 'createdAt', 'updatedAt',
       // [RETIER PR-A] when the store first went live (it decides whether a new fee is priced on its catalogue)

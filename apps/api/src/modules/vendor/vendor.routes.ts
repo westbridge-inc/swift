@@ -9,6 +9,11 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from '../../lib/zod';
 import { VAT_CLASSES } from '../store-vat/vat-math';
 import { storeVatNumberChanged } from '../store-vat/store-vat-decisions';
+import {
+  VAT_PRICE_BEFORE_VAT_MESSAGE, VatPriceBeforeVatRequired, itemPriceEdit, optionPriceEdit, reconcileVatPricing, refuseOlderAppNewPrice,
+  sentOnlyCustomerPrice, storeAddsVatToPrices, typedItemPrice, typedOptionPrice,
+} from '../store-vat/vat-pricing';
+import { STORE_VAT_RATE_PERCENT } from '../store-vat/vat-rate';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from '../verification/upload-consent';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
@@ -223,6 +228,8 @@ const reorderCategoriesSchema = z.object({
 const optionInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
   additionalPrice: z.number().min(0).optional(),
+  // [VAT-DOCS] The extra price BEFORE VAT, from the apps that know a store may add VAT at checkout (vat-pricing.ts).
+  vatListedAdditionalPrice: z.number().min(0).max(10_000_000).optional(),
   isDefault: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional(),
 });
@@ -280,6 +287,10 @@ const createItemSchema = z.object({
   description: z.string().max(2000).optional(),
   imageUrl: z.string().max(2048).optional(),
   basePrice: z.number().min(0).max(10_000_000),
+  // [VAT-DOCS · owner 30 Oct 2026] The price BEFORE VAT, sent by the apps that know a store may add VAT at checkout.
+  // When present it is the price the store typed (it wins over basePrice); while the store's approved VAT is added to
+  // its prices, the server stores basePrice = this + 14% (modules/store-vat/vat-pricing.ts).
+  vatListedPrice: z.number().min(0).max(10_000_000).optional(),
   sku: z.string().max(64).optional(),
   unit: z.string().max(30).optional(),
   // [G2] How much room one unit takes, as the WORD the shopkeeper chose. The
@@ -753,9 +764,31 @@ const ORDER_ITEM_MONEY_FIELDS = [
   'totalBase', 'totalMarkup', 'totalCustomer', 'substitutePrice',
 ] as const;
 
-/** `model Item` / `model Option` — the menu's own prices. */
-const ITEM_MONEY_FIELDS = ['basePrice'] as const;
-const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
+/** `model Item` / `model Option` — the menu's own prices. [VAT-DOCS] And the price the store typed before VAT, while
+ *  its VAT is added (null otherwise): the store's editor shows it; basePrice stays what customers pay. */
+const ITEM_MONEY_FIELDS = ['basePrice', 'vatListedPrice'] as const;
+const OPTION_MONEY_FIELDS = ['additionalPrice', 'vatListedAdditionalPrice'] as const;
+
+/** [VAT-DOCS] An older app's edit of a price VAT is added to (vat-pricing.ts itemPriceEdit). */
+function vatPriceEditOrRefuse<T>(edit: () => T): T {
+  try {
+    return edit();
+  } catch (err) {
+    if (err instanceof VatPriceBeforeVatRequired) throw new AppError(409, 'VAT_PRICE_BEFORE_VAT', VAT_PRICE_BEFORE_VAT_MESSAGE);
+    throw err;
+  }
+}
+
+/** [REVIEW-M #2255 S4-2] An older app's NEW price on a store that adds VAT: refused like an edit (vat-pricing.ts
+ *  refuseOlderAppNewPrice), inside the transaction that would create the rows, so nothing is created. */
+async function refuseOlderAppNewPriceIn(tx: Prisma.TransactionClient, vendorId: string, ambiguous: boolean, vatClass?: string | null): Promise<void> {
+  try {
+    await refuseOlderAppNewPrice(tx, vendorId, ambiguous, vatClass);
+  } catch (err) {
+    if (err instanceof VatPriceBeforeVatRequired) throw new AppError(409, 'VAT_PRICE_BEFORE_VAT', VAT_PRICE_BEFORE_VAT_MESSAGE);
+    throw err;
+  }
+}
 
 /** [L09 · M026] The store makes what the customer chose: every line carries its
  *  snapshotted options (group, choice, price) on the board and the detail —
@@ -1531,6 +1564,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       // while INSTANT_BOOKING is on; the partner app shows the setting only on this word. Switch
       // off: not sent (the answer is today's).
       ...(vendor.vendorType === 'SERVICE' && instantBookingEnabled() ? { instantBookingAvailable: true } : {}),
+      // [VAT-DOCS · security review #2256] Whether VAT is added to the prices this store types (a person's approval in
+      // "my prices do not include VAT"), for EVERY role that edits the menu: the editors ask for the price before VAT and
+      // send it as such only on this word. Not a secret (customers see the VAT-inclusive prices); the VAT record stays the owner's.
+      vatAddsToPrices: storeAddsVatToPrices(vendor),
+      vatRatePercent: STORE_VAT_RATE_PERCENT,
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
@@ -1733,11 +1771,18 @@ export async function vendorRoutes(app: FastifyInstance) {
       mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']).optional(),
     }).strict().parse(request.body);
     const { updateStoreVatSettings } = await import('../store-vat/store-vat-decisions');
-    return { success: true, data: await updateStoreVatSettings(app.prisma, vendorId, body) };
+    const data = await updateStoreVatSettings(app.prisma, vendorId, body);
+    // [VAT-DOCS] A "no" or a mode change can move the store's prices: search shows the new ones.
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data };
   });
 
   /** POST /vat/certificate — the store's GRA VAT registration certificate (uploaded first through
-   *  /verification/upload, like every document). Filed for a PERSON's review, never sent to a document processor. */
+   *  /verification/upload, like every document). Filed for a PERSON's review, never sent to a document processor.
+   *  [VAT-DOCS · owner 30 Oct 2026] One submission: the VAT number (as on the certificate) and how the store's prices
+   *  relate to VAT may come WITH the certificate (the Documents list's optional "VAT certificate" row sends all three),
+   *  so a store that never said yes before can claim and send in one step. The number and the mode are both required
+   *  (sent now or given before): no store waits for, or gets, an approval without a pricing mode. */
   app.post('/vat/certificate', auth, async (request, reply) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     const body = z.object({
@@ -1745,24 +1790,31 @@ export async function vendorRoutes(app: FastifyInstance) {
       consent: z.literal(true),
       privacyNoticeVersion: z.string().min(1).max(20),
       consentTick: z.enum(UPLOAD_CONSENT_TICKS).optional(),
+      vatRegistrationNumber: z.string().trim().max(40).optional(),
+      mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']).optional(),
     }).strict().parse(request.body);
     const { storeVatEnabled, VAT_CERTIFICATE_DOC_TYPE } = await import('../store-vat/store-vat');
-    const { linkVatCertificate, STORE_VAT_OFF_CODE } = await import('../store-vat/store-vat-decisions');
+    const { linkVatCertificate, vatClaimForCertificate, STORE_VAT_OFF_CODE } = await import('../store-vat/store-vat-decisions');
     if (!storeVatEnabled()) {
       throw new AppError(409, STORE_VAT_OFF_CODE, 'VAT settings are not available on Swift right now. Your prices stay exactly as you typed them.');
     }
     const userId = request.user.userId;
-    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { vendorType: true, vatStatus: true } });
-    if (vendor.vatStatus === 'NONE') {
-      throw new AppError(409, 'VAT_NOT_CLAIMED', 'First say your business is VAT-registered and type its VAT number, then send the certificate.');
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { vendorType: true, vatStatus: true, vatRegistrationNumber: true, vatMode: true } });
+    const claim = { vatRegistrationNumber: body.vatRegistrationNumber, mode: body.mode };
+    if (vendor.vatStatus === 'NONE' && (claim.vatRegistrationNumber === undefined || claim.mode === undefined)) {
+      throw new AppError(409, 'VAT_NOT_CLAIMED', 'Type your VAT number as it is on your GRA certificate and choose how your prices relate to VAT, then send the certificate.');
     }
+    // Checked before anything is filed: a refused claim stores no certificate (and again under the store's lock).
+    vatClaimForCertificate(vendor.vatStatus === 'NONE' ? { vatRegistrationNumber: null, vatMode: null } : vendor, claim);
     const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
     const doc = await verification.submitDocument(userId, role, VAT_CERTIFICATE_DOC_TYPE, body.fileUrl, body.privacyNoticeVersion, request.user.role, { storeVatCertificate: true });
     if (body.consentTick) {
       await recordUploadConsent(app.prisma, { userId, tick: body.consentTick, subjectType: consentSubjectForRole(role), surface: consentSurfaceOf(request), ip: request.ip, docType: VAT_CERTIFICATE_DOC_TYPE });
     }
     reply.code(201);
-    return { success: true, data: await linkVatCertificate(app.prisma, vendorId, doc) };
+    const data = await linkVatCertificate(app.prisma, vendorId, doc, process.env, claim);
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data };
   });
 
   /**
@@ -2137,6 +2189,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The notice committed with the move; fanning it out afterwards cannot undo either.
     if (pinNoticeId) await notifications.publishPersisted(pinNoticeId);
     await deleteQueuedPhotos(photoOrphans);
+    // [VAT-DOCS] A changed VAT number can take VAT off the store's prices (vat-pricing.ts): search shows them.
+    if (vatRegistrationNumber !== undefined) scheduleVendorSearchSync(app, vendorId);
 
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId });
@@ -3943,51 +3997,60 @@ export async function vendorRoutes(app: FastifyInstance) {
       sortOrder = (last?.sortOrder ?? -1) + 1;
     }
 
-    const item = await app.prisma.item.create({
-      data: {
-        vendorId,
-        categoryId: body.categoryId,
-        name: body.name.trim(),
-        description: body.description?.trim(),
-        basePrice: body.basePrice,
-        sku: body.sku,
-        unit: body.unit,
-        ...(body.bulk !== undefined ? { bulkUnits: bulkUnitsForChoice(body.bulk) } : {}),
-        stockQuantity: body.stockQuantity,
-        lowStockThreshold: body.lowStockThreshold,
-        isAvailable: body.isAvailable ?? true,
-        isPopular: body.isPopular ?? false,
-        dietaryTags: body.dietaryTags || [],
-        allergens: body.allergens || [],
-        sortOrder,
-        ...(body.fulfillment ? { fulfillment: body.fulfillment } : {}),
-        // [BOOK-S3] A new listing stores nothing yet: with the switch on it starts as automatic.
-        ...(body.bookingConfig ? { bookingConfig: bookingSettingsForSave(body.bookingConfig, null) as object } : {}),
-        ...(body.vatClass !== undefined ? { vatClass: body.vatClass } : {}),
-        optionGroups: body.optionGroups?.length
-          ? {
-              create: body.optionGroups.map((group, gi) => ({
-                name: group.name,
-                isRequired: group.isRequired ?? false,
-                minSelect: group.minSelect ?? 0,
-                maxSelect: group.maxSelect ?? 1,
-                sortOrder: group.sortOrder ?? gi,
-                options: {
-                  create: group.options.map((opt, oi) => ({
-                    name: opt.name,
-                    additionalPrice: opt.additionalPrice ?? 0,
-                    isDefault: opt.isDefault ?? false,
-                    sortOrder: opt.sortOrder ?? oi,
-                  })),
-                },
-              })),
-            }
-          : undefined,
-      },
-      include: {
-        category: { select: { id: true, name: true } },
-        optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' } } }, orderBy: { sortOrder: 'asc' } },
-      },
+    // [VAT-DOCS] The price the store typed; reconcileVatPricing (same transaction) adds VAT when its approval says so.
+    const itemInclude = {
+      category: { select: { id: true, name: true } },
+      optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' as const } } }, orderBy: { sortOrder: 'asc' as const } },
+    };
+    const olderAppPrice = sentOnlyCustomerPrice(body.vatListedPrice, body.basePrice)
+      || (body.optionGroups ?? []).some((g) => g.options.some((o) => sentOnlyCustomerPrice(o.vatListedAdditionalPrice, o.additionalPrice)));
+    const item = await app.prisma.$transaction(async (tx) => {
+      await refuseOlderAppNewPriceIn(tx, vendorId, olderAppPrice, body.vatClass);
+      const created = await tx.item.create({
+        data: {
+          vendorId,
+          categoryId: body.categoryId,
+          name: body.name.trim(),
+          description: body.description?.trim(),
+          ...typedItemPrice(body.vatListedPrice ?? body.basePrice),
+          sku: body.sku,
+          unit: body.unit,
+          ...(body.bulk !== undefined ? { bulkUnits: bulkUnitsForChoice(body.bulk) } : {}),
+          stockQuantity: body.stockQuantity,
+          lowStockThreshold: body.lowStockThreshold,
+          isAvailable: body.isAvailable ?? true,
+          isPopular: body.isPopular ?? false,
+          dietaryTags: body.dietaryTags || [],
+          allergens: body.allergens || [],
+          sortOrder,
+          ...(body.fulfillment ? { fulfillment: body.fulfillment } : {}),
+          // [BOOK-S3] A new listing stores nothing yet: with the switch on it starts as automatic.
+          ...(body.bookingConfig ? { bookingConfig: bookingSettingsForSave(body.bookingConfig, null) as object } : {}),
+          ...(body.vatClass !== undefined ? { vatClass: body.vatClass } : {}),
+          optionGroups: body.optionGroups?.length
+            ? {
+                create: body.optionGroups.map((group, gi) => ({
+                  name: group.name,
+                  isRequired: group.isRequired ?? false,
+                  minSelect: group.minSelect ?? 0,
+                  maxSelect: group.maxSelect ?? 1,
+                  sortOrder: group.sortOrder ?? gi,
+                  options: {
+                    create: group.options.map((opt, oi) => ({
+                      name: opt.name,
+                      ...typedOptionPrice(opt.vatListedAdditionalPrice ?? opt.additionalPrice ?? 0),
+                      isDefault: opt.isDefault ?? false,
+                      sortOrder: opt.sortOrder ?? oi,
+                    })),
+                  },
+                })),
+              }
+            : undefined,
+        },
+        select: { id: true },
+      });
+      await reconcileVatPricing(tx, vendorId, { itemIds: [created.id] });
+      return tx.item.findUniqueOrThrow({ where: { id: created.id }, include: itemInclude });
     });
 
     // [MKT-2] The ledger has to explain the stock this item was born with, or
@@ -4350,7 +4413,8 @@ export async function vendorRoutes(app: FastifyInstance) {
               categoryId,
               name: data.name,
               description: data.description || undefined,
-              basePrice: data.basePrice,
+              // [VAT-DOCS] A file's price is the price the store typed (before VAT for a store that adds it).
+              ...typedItemPrice(data.basePrice),
               sku: data.sku || undefined,
               unit: data.unit || undefined,
               isAvailable: data.isAvailable === '' ? true : data.isAvailable === 'true',
@@ -4361,6 +4425,7 @@ export async function vendorRoutes(app: FastifyInstance) {
             select: { id: true },
           });
           await recordOpeningBalance(tx, created.id, data.stockQuantity === '' ? null : data.stockQuantity, request.user.userId);
+          await reconcileVatPricing(tx, vendorId, { itemIds: [created.id] });
           return created.id;
         });
         importedIds.push({ id: createdId, row: rowNumber, name: data.name });
@@ -4572,6 +4637,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     await assertNotBanned(app.prisma, existing.id, { wordBanEditable: true });
 
     const body = updateItemSchema.parse(request.body);
+    // [VAT-DOCS] The price the store typed, or none when an older app sent back the price customers pay unchanged.
+    const priceEdit = vatPriceEditOrRefuse(() => itemPriceEdit(existing, body));
     // [BOOK-S1 · REVIEW-M S4-3] A new overlap is refused; overlapping windows the listing already
     // stores (saved before the rule) are joined, so an unchanged save from any app build still works.
     let bookingConfigToStore: Record<string, unknown> | undefined;
@@ -4637,7 +4704,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.name !== undefined && { name: body.name.trim() }),
           ...(body.description !== undefined && { description: body.description?.trim() }),
           ...(photo === null && { imageUrl: null }),
-          ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
+          ...(priceEdit ?? {}),
           ...(body.vatClass !== undefined && { vatClass: body.vatClass }),
           ...(body.sku !== undefined && { sku: body.sku }),
           ...(body.unit !== undefined && { unit: body.unit }),
@@ -4657,6 +4724,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       });
       // [GUARDRAILS §8] Judged on any "on" in the request, the unchanged one too (stricter than the moved switch).
       if (body.isAvailable === true) await assertNotBanned(tx, updated.id);
+      // [VAT-DOCS] A new typed price or a new VAT class: VAT added or taken off in this transaction.
+      if (priceEdit || body.vatClass !== undefined) {
+        const moved = await reconcileVatPricing(tx, vendorId, { itemIds: [updated.id] });
+        if (moved.added + moved.restored > 0 && !unhide) return tx.item.findUniqueOrThrow({ where: { id: updated.id }, include: itemInclude });
+      }
       if (!unhide) return updated;
       const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
       return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
@@ -4809,26 +4881,36 @@ export async function vendorRoutes(app: FastifyInstance) {
       sortOrder = (last?.sortOrder ?? -1) + 1;
     }
 
-    const group = await app.prisma.optionGroup.create({
-      data: {
-        itemId: request.params.itemId,
-        name: body.name.trim(),
-        isRequired: body.isRequired ?? false,
-        minSelect: body.minSelect ?? 0,
-        maxSelect: body.maxSelect ?? 1,
-        sortOrder,
-        options: body.options?.length
-          ? {
-              create: body.options.map((opt, i) => ({
-                name: opt.name,
-                additionalPrice: opt.additionalPrice ?? 0,
-                isDefault: opt.isDefault ?? false,
-                sortOrder: opt.sortOrder ?? i,
-              })),
-            }
-          : undefined,
-      },
-      include: { options: { orderBy: { sortOrder: 'asc' } } },
+    // [VAT-DOCS · REVIEW-M #2255 S4-1] The group, its options and their VAT commit together: never options at the price
+    // before VAT on a store whose VAT is added (one transaction, as item and option create).
+    const olderAppPrice = (body.options ?? []).some((o) => sentOnlyCustomerPrice(o.vatListedAdditionalPrice, o.additionalPrice));
+    const group = await app.prisma.$transaction(async (tx) => {
+      await refuseOlderAppNewPriceIn(tx, vendorId, olderAppPrice, item.vatClass);
+      const created = await tx.optionGroup.create({
+        data: {
+          itemId: request.params.itemId,
+          name: body.name.trim(),
+          isRequired: body.isRequired ?? false,
+          minSelect: body.minSelect ?? 0,
+          maxSelect: body.maxSelect ?? 1,
+          sortOrder,
+          options: body.options?.length
+            ? {
+                create: body.options.map((opt, i) => ({
+                  name: opt.name,
+                  ...typedOptionPrice(opt.vatListedAdditionalPrice ?? opt.additionalPrice ?? 0),
+                  isDefault: opt.isDefault ?? false,
+                  sortOrder: opt.sortOrder ?? i,
+                })),
+              }
+            : undefined,
+        },
+        include: { options: { orderBy: { sortOrder: 'asc' } } },
+      });
+      const priced = await reconcileVatPricing(tx, vendorId, { itemIds: [request.params.itemId] });
+      return priced.added > 0
+        ? tx.optionGroup.findUniqueOrThrow({ where: { id: created.id }, include: { options: { orderBy: { sortOrder: 'asc' } } } })
+        : created;
     });
 
     return { success: true, data: group };
@@ -4891,7 +4973,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const group = await app.prisma.optionGroup.findFirst({
       where: { id: request.params.groupId, item: { vendorId, archivedAt: null } },
-      select: { id: true, itemId: true },
+      select: { id: true, itemId: true, item: { select: { vatClass: true } } },
     });
     if (!group) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
@@ -4909,15 +4991,21 @@ export async function vendorRoutes(app: FastifyInstance) {
       sortOrder = (last?.sortOrder ?? -1) + 1;
     }
 
-    const option = await app.prisma.option.create({
-      data: {
-        optionGroupId: request.params.groupId,
-        name: body.name.trim(),
-        additionalPrice: body.additionalPrice ?? 0,
-        isDefault: body.isDefault ?? false,
-        isAvailable: body.isAvailable ?? true,
-        sortOrder,
-      },
+    const option = await app.prisma.$transaction(async (tx) => {
+      await refuseOlderAppNewPriceIn(tx, vendorId, sentOnlyCustomerPrice(body.vatListedAdditionalPrice, body.additionalPrice), group.item.vatClass);
+      const created = await tx.option.create({
+        data: {
+          optionGroupId: request.params.groupId,
+          name: body.name.trim(),
+          ...typedOptionPrice(body.vatListedAdditionalPrice ?? body.additionalPrice ?? 0),
+          isDefault: body.isDefault ?? false,
+          isAvailable: body.isAvailable ?? true,
+          sortOrder,
+        },
+      });
+      // [VAT-DOCS] VAT added to its price when the store's approval says so.
+      const priced = await reconcileVatPricing(tx, vendorId, { itemIds: [group.itemId] });
+      return priced.added > 0 ? tx.option.findUniqueOrThrow({ where: { id: created.id } }) : created;
     });
 
     return { success: true, data: option };
@@ -4928,23 +5016,30 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findFirst({
       where: { id: request.params.id, optionGroup: { item: { vendorId, archivedAt: null } } },
-      select: { id: true, optionGroup: { select: { itemId: true } } },
+      select: { id: true, additionalPrice: true, vatListedAdditionalPrice: true, optionGroup: { select: { itemId: true } } },
     });
     if (!existing) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
     if (body.name !== undefined) assertNotBannedGoods([body.name]);
+    // [VAT-DOCS] The extra price the store typed, or none when an older app sent back the customer's price unchanged.
+    const priceEdit = vatPriceEditOrRefuse(() => optionPriceEdit(existing, body));
 
-    const option = await app.prisma.option.update({
-      where: { id: request.params.id },
-      data: {
-        ...(body.name !== undefined && { name: body.name.trim() }),
-        ...(body.additionalPrice !== undefined && { additionalPrice: body.additionalPrice }),
-        ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
-        ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable }),
-        ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
-      },
+    const option = await app.prisma.$transaction(async (tx) => {
+      const updated = await tx.option.update({
+        where: { id: request.params.id },
+        data: {
+          ...(body.name !== undefined && { name: body.name.trim() }),
+          ...(priceEdit ?? {}),
+          ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
+          ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable }),
+          ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
+        },
+      });
+      if (!priceEdit) return updated;
+      const priced = await reconcileVatPricing(tx, vendorId, { itemIds: [existing.optionGroup.itemId] });
+      return priced.added > 0 ? tx.option.findUniqueOrThrow({ where: { id: updated.id } }) : updated;
     });
 
     return { success: true, data: option };
