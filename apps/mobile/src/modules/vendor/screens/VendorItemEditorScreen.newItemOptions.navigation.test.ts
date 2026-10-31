@@ -23,6 +23,8 @@ const fx = vi.hoisted(() => ({
   addOption: vi.fn(),
   saveError: null as unknown,
   previewType: null as string | null,
+  // [security review #2256] The profile's store: its VAT word is read by every role (the VAT read is the owner's).
+  store: { vendorType: 'RESTAURANT' } as Record<string, unknown>,
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 
@@ -117,7 +119,7 @@ vi.mock('../../../hooks/useVendorMutation', () => ({ useVendorMutation: () => ({
 vi.mock('../../../hooks/vendorops', () => {
   const idle = () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false });
   return {
-    useVendorProfile: () => ({ store: { vendorType: 'RESTAURANT' } }),
+    useVendorProfile: () => ({ store: fx.store }),
     useSaveItem: () => ({ mutateAsync: fx.save, isPending: false, isError: fx.saveError != null, error: fx.saveError }),
     useUploadItemImage: idle, useDeleteOptionGroup: idle, useDeleteOption: idle,
     useAddOptionGroup: () => ({ mutate: vi.fn(), mutateAsync: fx.addGroup, isPending: false }),
@@ -148,6 +150,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   fx.previewType = null;
   fx.saveError = null;
+  fx.store = { vendorType: 'RESTAURANT' };
   fx.save.mockResolvedValue({ id: 'item-1' });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
@@ -225,6 +228,26 @@ describe('[TAP-AUDIT] options on a new item, in the one create request', () => {
     expect(stack()).toEqual(['VendorMenu']);
   });
 
+  it('[security review #2256] a store whose VAT is added (any role, from the profile): asks for and sends the prices before VAT', async () => {
+    fx.store = { vendorType: 'RESTAURANT', vatAddsToPrices: true, vatRatePercent: 14 };
+    await openNewItem();
+    expect(shown('Type the price before VAT: 14% VAT is added to standard-rated items.')).toBe(true);
+    await type('Item name', 'Roti');
+    await type('Price before VAT (GYD)', '500');
+    await type('New group (e.g. Size, Toppings)', 'Size');
+    await tap('Add option group');
+    await type('Choice (e.g. Large)', 'Large');
+    await type('+GYD before VAT', '200');
+    const plus = host.querySelector('input[aria-label="Choice (e.g. Large)"]')!.parentElement!.querySelector('button')!;
+    await act(async () => { plus.click(); });
+    await settle();
+    await tap('Add item');
+    expect(fx.save).toHaveBeenCalledTimes(1);
+    const sent = fx.save.mock.calls[0]![0].data;
+    expect(sent).toMatchObject({ basePrice: 500, vatListedPrice: 500 });
+    expect(sent.optionGroups[0].options).toEqual([{ name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 }]);
+  });
+
   it('a new item with no groups sends no optionGroups (the request is as before)', async () => {
     await openNewItem();
     await type('Item name', 'Pepperpot');
@@ -232,6 +255,8 @@ describe('[TAP-AUDIT] options on a new item, in the one create request', () => {
     await tap('Add item');
     expect(fx.save).toHaveBeenCalledTimes(1);
     expect(fx.save.mock.calls[0]![0].data).not.toHaveProperty('optionGroups');
+    // A store whose VAT is not added: the bare price (the server refuses it if that is wrong).
+    expect(fx.save.mock.calls[0]![0].data).not.toHaveProperty('vatListedPrice');
   });
 
   it('a group removed before the save is not sent; "Multiple picks" is sent as up to 10', async () => {

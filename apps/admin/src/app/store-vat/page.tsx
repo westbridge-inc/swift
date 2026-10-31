@@ -3,13 +3,14 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { approveStoreVat, fetchStoreVatPending, rejectStoreVat, type StoreVatPendingRow } from '@/lib/api';
+import { approveStoreVat, decideStoreVatMode, fetchStoreVatPending, rejectStoreVat, type StoreVatPendingRow } from '@/lib/api';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { gyDate } from '@/lib/dates';
+import { vatModeChangeWords, vatModeWords } from '@/lib/store-vat-mode';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] Stores waiting for a VAT decision, oldest certificate first.
@@ -19,6 +20,8 @@ import { gyDate } from '@/lib/dates';
 // registered name, the date it takes effect) before the store's prices may say "incl. VAT". The server refuses a
 // number that differs from the store's, a future date, a reviewer who is the owner, and a certificate only a machine
 // approved. Approve is locked until the certificate has been opened, as in the Review Center.
+// [VAT-DOCS · owner ruling 31 Oct 2026] An APPROVED store's change of price choice waits here too: its prices stay as they
+// are until a person approves the change; a refusal tells the store why.
 // ---------------------------------------------------------------------------
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -52,7 +55,7 @@ export default function StoreVatPage() {
       <p>
         Type what the certificate says. The server checks the number against the one the store gave and refuses a
         mismatch. Once approved, the store&apos;s prices say &ldquo;incl. VAT&rdquo; and its receipts name it as the one
-        charging VAT.
+        charging VAT.{row.mode === 'ADD_VAT_AT_CHECKOUT' ? ' This store\u2019s prices do not include VAT, so approving adds VAT to each standard-rated price its customers see.' : ''}
       </p>
     ),
     confirmLabel: 'Approve VAT',
@@ -82,6 +85,24 @@ export default function StoreVatPage() {
     success: () => `${row.name}'s VAT was not approved. The store sees your reason on its VAT settings.`,
   }));
 
+  const approveChange = async (row: StoreVatPendingRow) => show(await dialog.run({
+    title: `Approve ${row.name}’s price change?`,
+    body: <p>{vatModeChangeWords(row.modeRequested)} The store&apos;s VAT stays approved; only how its prices relate to VAT changes.</p>,
+    confirmLabel: 'Approve the change',
+    reason: { hint: 'Kept on the permanent record with your decision.' },
+    submit: ({ reason }) => decideStoreVatMode(row.vendorId, { approve: true, mode: String(row.modeRequested) }, reason),
+    success: () => `${row.name}'s price change is approved. Its prices follow it now.`,
+  }));
+
+  const refuseChange = async (row: StoreVatPendingRow) => show(await dialog.run({
+    title: `Refuse ${row.name}’s price change?`,
+    body: <p>Nothing changes: the store&apos;s prices and what its customers pay stay as they are. The store reads your reason.</p>,
+    confirmLabel: 'Refuse the change',
+    reason: { label: 'Why (what the store reads)', hint: 'The store is told in these words.' },
+    submit: ({ reason }) => decideStoreVatMode(row.vendorId, { approve: false, mode: String(row.modeRequested) }, reason),
+    success: () => `${row.name}'s price change was refused. The store is told why.`,
+  }));
+
   const rows = pending.data ?? [];
   return (
     <div className="mc-page">
@@ -99,11 +120,24 @@ export default function StoreVatPage() {
         <div className="mc-card">No store is waiting for a VAT decision.</div>
       ) : (
         <ul className="space-y-3" aria-label="Stores waiting for a VAT decision">
-          {rows.map((row) => (
+          {rows.map((row) => row.modeRequested ? (
+            <li key={row.vendorId} className="mc-card space-y-2">
+              <div className="flex flex-wrap items-baseline gap-3">
+                <Link href={`/vendors/${row.vendorId}`} className="font-semibold underline">{row.name}</Link>
+                <span className="text-sm">VAT approved.</span>
+                <span className="text-sm">{vatModeChangeWords(row.modeRequested)}</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="mc-btn mc-btn-primary" onClick={() => void approveChange(row)}>Approve the change</button>
+                <button type="button" className="mc-btn" onClick={() => void refuseChange(row)}>Refuse the change</button>
+              </div>
+            </li>
+          ) : (
             <li key={row.vendorId} className="mc-card space-y-2">
               <div className="flex flex-wrap items-baseline gap-3">
                 <Link href={`/vendors/${row.vendorId}`} className="font-semibold underline">{row.name}</Link>
                 <span className="text-sm">Number the store gave: <span className="mc-numbers">{row.vatRegistrationNumber ?? '—'}</span></span>
+                <span className="text-sm">{vatModeWords(row.mode)}</span>
                 <span className="text-sm">
                   {row.certificate ? `Certificate sent ${gyDate(row.certificate.createdAt)} (${CERTIFICATE_WORDS[row.certificate.status] ?? 'in a state this page does not know'})` : 'No certificate sent yet'}
                 </span>

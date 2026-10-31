@@ -10,7 +10,8 @@ import type { CatalogItem } from '@/lib/vendor-api';
 const V = '/api/v1/vendor';
 
 export type BulkWord = 'normal' | 'bulky' | 'very_bulky';
-export type OptionRow = { id: string; name: string; additionalPrice: string | number; isAvailable?: boolean };
+// [VAT-DOCS] vatListedAdditionalPrice: the extra price the store typed before VAT, while VAT is added to it (else null).
+export type OptionRow = { id: string; name: string; additionalPrice: string | number; vatListedAdditionalPrice?: string | number | null; isAvailable?: boolean };
 export type OptionGroupRow = { id: string; name: string; isRequired: boolean; minSelect: number; maxSelect: number; options: OptionRow[] };
 /** An item as the server answers it to the editor (GET /items row, POST/PUT /items answer). */
 export type MenuItem = CatalogItem & {
@@ -45,7 +46,7 @@ export const deleteSection = (id: string) => apiFetch(`${V}/categories/${id}`, {
 export const addOptionGroup = (itemId: string, body: { name: string; isRequired: boolean; minSelect: number; maxSelect: number }) =>
   apiFetch(`${V}/items/${itemId}/option-groups`, { method: 'POST', body: JSON.stringify(body) }).then(data<OptionGroupRow>);
 export const deleteOptionGroup = (id: string) => apiFetch(`${V}/option-groups/${id}`, { method: 'DELETE' }).then(data<{ deleted: boolean }>);
-export const addOption = (groupId: string, body: { name: string; additionalPrice: number }) =>
+export const addOption = (groupId: string, body: { name: string; additionalPrice: number; vatListedAdditionalPrice?: number }) =>
   apiFetch(`${V}/option-groups/${groupId}/options`, { method: 'POST', body: JSON.stringify(body) }).then(data<OptionRow>);
 export const deleteOption = (id: string) => apiFetch(`${V}/options/${id}`, { method: 'DELETE' }).then(data<{ deleted: boolean }>);
 

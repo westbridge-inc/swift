@@ -36,6 +36,7 @@ import { storedKitchenCapacity } from '../../../lib/kitchenCapacity';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { StoreVatSection } from '../StoreVatSection';
+import { VatDocumentRow } from '../VatDocumentRow';
 import { StorePhotosCard } from '../../../components/StorePhotosCard';
 import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
@@ -500,7 +501,12 @@ function VendorDocumentsSection({ vendorType, storeName, storeFee }: { vendorTyp
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(vendorType);
   return (
     <View style={{ marginBottom: space.lg }}>
-      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={storeName} storeFee={storeFee} />
+      <DocumentChecklist
+        role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={storeName}
+        // [VAT-DOCS · owner 30 Oct 2026] the owner's optional "VAT certificate (only if VAT-registered)" row (this section is owner-only)
+        optionalExtra={(withHeading) => <VatDocumentRow withHeading={withHeading} inline={false} />}
+        storeFee={storeFee}
+      />
     </View>
   );
 }

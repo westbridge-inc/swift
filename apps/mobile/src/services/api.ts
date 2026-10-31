@@ -1396,10 +1396,10 @@ export const vendorApi = {
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [STORE-VAT · owner O-5] The store's VAT (OWNER only): its answer, its certificate, and what a person decided. */
   vat: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/vat', capturedVendorAuthConfig(session, storeId)),
-  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.put('/vendor/vat', data, capturedVendorAuthConfig(session, storeId)),
   /** The certificate file was uploaded first (/verification/upload); this files it for a PERSON's check. */
-  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1'; vatRegistrationNumber?: string; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.post('/vendor/vat/certificate', data, capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
@@ -1452,7 +1452,8 @@ export const vendorApi = {
     api.delete(`/vendor/option-groups/${id}`, capturedAuthConfig(session)),
   addOption: (
     groupId: string,
-    data: { name: string; additionalPrice?: number; isDefault?: boolean },
+    // [VAT-DOCS] vatListedAdditionalPrice: the extra price as the store typed it (before VAT where VAT is added).
+    data: { name: string; additionalPrice?: number; vatListedAdditionalPrice?: number; isDefault?: boolean },
     session?: AuthSessionSnapshot,
   ) => api.post(`/vendor/option-groups/${groupId}/options`, data, capturedAuthConfig(session)),
   updateOption: (id: string, data: { name?: string; additionalPrice?: number; isDefault?: boolean }) =>

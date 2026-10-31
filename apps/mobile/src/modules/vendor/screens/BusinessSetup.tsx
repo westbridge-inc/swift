@@ -9,6 +9,7 @@ import { GUTTER } from '../shared';
 import { API_URL, vendorApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
+import { VatDocumentRow } from '../VatDocumentRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useQueryClient } from '@tanstack/react-query';
@@ -398,8 +399,12 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
             <PublicCallNumberCard value={store.publicPhone} saving={savePhone.isPending} error={phoneError} onSave={(p) => savePhone.mutate(p)} />
           </>
         ) : null}
-        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name}
-          storeFee={store.id ? { vendorId: store.id, isOwner: myRole === 'OWNER' } : null} />
+        <DocumentChecklist
+          role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name}
+          // [VAT-DOCS · owner 30 Oct 2026] the owner's optional "VAT certificate (only if VAT-registered)" row
+          optionalExtra={myRole === 'OWNER' ? (withHeading) => <VatDocumentRow withHeading={withHeading} /> : undefined}
+          storeFee={store.id ? { vendorId: store.id, isOwner: myRole === 'OWNER' } : null}
+        />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
         <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={onPreview} />

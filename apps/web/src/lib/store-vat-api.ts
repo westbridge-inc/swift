@@ -10,16 +10,18 @@ const V = '/api/v1/vendor';
 // the certificate; a PERSON at Swift checks it. Nothing a customer sees changes until then (the API decides).
 export type { StoreVatStatus, StoreVatView } from './store-vat-read';
 
-export const updateStoreVat = (body: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' }) =>
+export const updateStoreVat = (body: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }) =>
   apiFetch(`${V}/vat`, { method: 'PUT', body: JSON.stringify(body) }).then((r) => r.data as StoreVatView);
 /** The certificate file goes through the ordinary document upload (scanned, cleaned, encrypted), then to the store's
  *  VAT route, which files it for a person's check. The owner ticked the document consent box first. */
-export const sendVatCertificate = async (file: File) => {
+/** [VAT-DOCS · owner 30 Oct 2026] `claim`: the VAT number and how the prices relate to VAT, sent WITH the certificate in
+ *  one submission (a store that never said yes before must send both). */
+export const sendVatCertificate = async (file: File, claim?: { vatRegistrationNumber: string; mode: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }) => {
   const form = new FormData();
   form.append('file', file);
   const { url } = await apiFetch('/api/v1/verification/upload', { method: 'POST', body: form }).then((r) => r.data as { url: string });
   return apiFetch(`${V}/vat/certificate`, {
     method: 'POST',
-    body: JSON.stringify({ fileUrl: url, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
+    body: JSON.stringify({ fileUrl: url, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1', ...(claim ?? {}) }),
   }).then((r) => r.data as StoreVatView);
 };

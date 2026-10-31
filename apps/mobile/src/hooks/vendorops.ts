@@ -980,7 +980,7 @@ export function useAddOption() {
     mutationKey: MENU_WRITE_KEY,
     mutationFn: ({ groupId, data, authSession }: {
       groupId: string;
-      data: { name: string; additionalPrice?: number };
+      data: { name: string; additionalPrice?: number; vatListedAdditionalPrice?: number };
       authSession?: AuthSessionSnapshot;
     }) => unwrap<any>(vendorApi.addOption(groupId, data, authSession)),
     onMutate: menuScope,
