@@ -1075,6 +1075,41 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
   });
 
+  // [GUARD-FIX] Production serves the API as api-live.swiftgy.com (and keeps that name after launch,
+  // adding api.swiftgy.com beside it). A guard keyed on one public name alone never fired there.
+  it('[GUARD-FIX] in EVERY mode, a TEST card system refuses to start on EITHER production public name, api.swiftgy.com or api-live.swiftgy.com', () => {
+    const sandbox = { CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox' };
+    for (const env of [
+      { NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://API-LIVE.swiftgy.com/' },
+      { NODE_ENV: 'development', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_ENVIRONMENT: undefined, API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-live.swiftgy.com./' },
+      { NODE_ENV: 'test', ...sandbox, API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host api-live\.swiftgy\.com/);
+    }
+    // The original name still refuses, and names itself.
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com' })).toThrow(/public API host api\.swiftgy\.com /);
+    // Staging and test servers keep their own names and boot exactly as before.
+    for (const url of ['https://api-staging.swiftgy.com', 'https://api-test.example.test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: url }), url).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: url }), url).not.toThrow();
+    }
+  });
+
+  it('[GUARD-FIX] production refuses the provider\'s TEST system (its sandbox) whatever its public name, even with card rail v2 off', () => {
+    for (const url of ['https://api-live.swiftgy.com', 'https://api.swiftgy.com', 'https://api.example.com', undefined]) {
+      for (const environment of ['sandbox', undefined, '']) {
+        const env = { ...good, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: environment, API_PUBLIC_URL: url };
+        expect(() => assertSafeBootConfig(env), JSON.stringify({ url, environment })).toThrow(/^FATAL: a TEST card system/);
+      }
+    }
+    // Live (real) cards with v2 off on production's own name are no test system: nothing here refuses them.
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-live.swiftgy.com' })).not.toThrow();
+  });
+
   it('[review S3] in EVERY mode but production, live (real) cards refuse to start: a test server never charges real cards', () => {
     for (const mode of ['development', 'test']) {
       expect(() => assertSafeBootConfig({ NODE_ENV: mode, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-test.example.test' }), mode)
