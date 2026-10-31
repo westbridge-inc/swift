@@ -1,5 +1,4 @@
-import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -345,7 +344,7 @@ describe('[OPEN-EARLY] the partner pages never promise review within a day befor
       await configWith(switchValue);
       openAt(url);
       const view = await page(file);
-      if (url.startsWith('https://swiftgy.com')) await answered();
+      if (new URL(url).host === 'swiftgy.com') await answered();
       await waitFor(() => expect(view.container.textContent, url).toContain(live));
       expect(view.container.textContent, url).not.toContain(SOON);
       view.unmount();
@@ -368,8 +367,17 @@ describe('[OPEN-EARLY] the partner pages never promise review within a day befor
   });
 
   it('no web page states a review time outside that switch', () => {
-    const hits = execSync(`grep -rniE "within a day|same-day review|24 hours to (review|approve)|approved (in|within)" ${join(SRC, 'app')} ${join(SRC, 'components')} --include=*.tsx || true`, { encoding: 'utf8' })
-      .split('\n').filter((line) => line && !/\.test\./.test(line));
+    const claim = /within a day|same-day review|24 hours to (review|approve)|approved (in|within)/i;
+    const hits: string[] = [];
+    for (const dir of ['app', 'components']) {
+      for (const file of readdirSync(join(SRC, dir), { recursive: true, encoding: 'utf8' })) {
+        if (!file.endsWith('.tsx') || /\.test\./.test(file)) continue;
+        readFileSync(join(SRC, dir, file), 'utf8').split('\n').forEach((line, i) => {
+          if (claim.test(line)) hits.push(`${dir}/${file}:${i + 1}: ${line.trim()}`);
+        });
+      }
+    }
+    expect(hits.length).toBeGreaterThan(0);
     for (const line of hits) expect(line, line).toMatch(/live="/);
   });
 });
