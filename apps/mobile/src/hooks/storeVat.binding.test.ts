@@ -111,7 +111,13 @@ describe('[O-5 · G S4-1] the VAT read belongs to one store and one account', ()
 describe('[O-5 · G S4-1] the owner\'s VAT answer is written for the store and account that gave it', () => {
   it('sends the answer with the captured session and store', async () => {
     await (useUpdateStoreVat() as unknown as Write<{ registered: boolean; vatRegistrationNumber?: string }>).mutationFn({ registered: true, vatRegistrationNumber: '012345678' });
-    expect(fx.calls).toEqual([{ fn: 'updateVat', args: [{ registered: true, vatRegistrationNumber: '012345678', mode: 'PRICES_INCLUDE_VAT' }, owner, 'store-a'] }]);
+    // [REVIEW-M #2256 N1] No choice made = no mode sent (never a built-in default that could ask to switch it).
+    expect(fx.calls).toEqual([{ fn: 'updateVat', args: [{ registered: true, vatRegistrationNumber: '012345678' }, owner, 'store-a'] }]);
+  });
+
+  it('[REVIEW-M #2256 N1] sends the price choice the store made, with the captured session and store', async () => {
+    await (useUpdateStoreVat() as unknown as Write<{ registered: boolean; vatRegistrationNumber?: string; mode?: string }>).mutationFn({ registered: true, vatRegistrationNumber: '012345678', mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(fx.calls).toEqual([{ fn: 'updateVat', args: [{ registered: true, vatRegistrationNumber: '012345678', mode: 'ADD_VAT_AT_CHECKOUT' }, owner, 'store-a'] }]);
   });
 
   it('a store switched after the screen drew is refused before anything is sent', async () => {

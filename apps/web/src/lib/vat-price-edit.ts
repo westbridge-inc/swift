@@ -40,7 +40,7 @@ export function optionPriceLabel(o: { additionalPrice?: unknown; vatListedAdditi
 }
 
 /** What customers pay, under the price of an item Swift adds VAT to (null for every other item). */
-export function beforeVatNote(item: Priced, money: (n: number) => string): string | null {
+export function beforeVatNote(item: Priced, money: (_n: number) => string): string | null {
   if (item?.vatListedPrice == null || item.basePrice == null) return null;
   return `Before VAT. Customers pay ${money(Number(item.basePrice))} incl. VAT.`;
 }
