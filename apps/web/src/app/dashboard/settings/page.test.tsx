@@ -75,6 +75,27 @@ describe('dashboard settings: the store card', () => {
     expect(screen.queryByRole('link', { name: 'Documents' })).toBeNull();
   });
 
+  // [WEB-SETTINGS · owner 31 Oct 2026] Partners have no app yet: the details, the pin and the MMG number are set here.
+  it('the owner finds the store\'s details, its pin and its MMG number here, never "in the Swift app"', async () => {
+    stubReads();
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('button', { name: 'Edit name and description' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Store location' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your MMG number' })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/in the Swift app/);
+  });
+
+  it('a manager sees the MMG number card but not the store\'s pin or the details editor (owner only)', async () => {
+    stubReads();
+    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: 'MANAGER' } as never);
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('heading', { name: 'Your MMG number' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Store location' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit name and description' })).toBeNull();
+  });
+
   it('never says "checked" once a checked document has lapsed', () => {
     const now = new Date('2026-10-16T12:00:00.000Z');
     expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it under Documents');
