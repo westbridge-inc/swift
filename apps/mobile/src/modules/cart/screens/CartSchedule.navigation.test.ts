@@ -154,3 +154,31 @@ describe('instant booking words in the cart', () => {
     expect(host.textContent).toContain('Booking requested');
   });
 });
+
+// [PICKUP · REVIEW-F S3-1 (a) on #2251] A cash takeaway's success popup follows the checkout answer: the server
+// sends the code only when the store asks for it, so with none the counter checks the first name and order number.
+describe('cash takeaway popup words follow the store code setting', () => {
+  async function placePickup(pickupCode: string | null) {
+    fx.answer = { orders: [{ id: 'o-1', fulfillment: 'PICKUP', status: 'PENDING', holdExpiresAt: null, pickupCode }], paymentAction: null, message: 'x' };
+    fx.place.mockImplementation((_body: unknown, opts: { onSuccess: (d: unknown) => void }) => { fx.success = true; opts.onSuccess(fx.answer); });
+    await renderCart();
+    const pickupTab = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Pickup')!;
+    expect(pickupTab).toBeDefined();
+    await act(async () => pickupTab.click());
+    const place = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Place pickup order')!;
+    expect(place).toBeDefined();
+    await act(async () => place.click());
+    expect(fx.place).toHaveBeenCalledOnce();
+  }
+
+  it('no code in the answer (store code off): first name and order number, never a code', async () => {
+    await placePickup(null);
+    expect(host.textContent).toContain('We’ll tell you when it’s ready — give your first name and order number and pay cash directly at the counter.');
+    expect(host.textContent).not.toContain('show the pickup code');
+  });
+
+  it('a code in the answer (store code on): show the pickup code', async () => {
+    await placePickup('424242');
+    expect(host.textContent).toContain('We’ll tell you when it’s ready — show the pickup code and pay cash directly at the counter.');
+  });
+});

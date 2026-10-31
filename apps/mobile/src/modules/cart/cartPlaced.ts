@@ -35,11 +35,18 @@ export function paymentActionForCheckout(
   return action as MmgDirectPaymentAction;
 }
 
+/** [PICKUP · owner 30 Oct 2026] The server sends a takeaway's code only when the store asks for it. */
+export function pickupCodeGivenAtCheckout(data: { orders?: Array<{ pickupCode?: string | null }> } | null | undefined): boolean {
+  return (data?.orders ?? []).some((o) => typeof o?.pickupCode === 'string' && o.pickupCode.length > 0);
+}
+
 export function placedOrderConfirmationCopy(input: {
   appointment: boolean;
   /** [BOOK-S6a] The checkout answer came back ACCEPTED: the business's listing confirmed it at once. */
   appointmentConfirmed?: boolean;
   pickup: boolean;
+  /** [PICKUP · owner 30 Oct 2026] The checkout answer carried a pickup code (the store asks for it). */
+  pickupCodeGiven?: boolean;
   held: boolean;
   submittedMethod: 'CASH' | 'MOBILE_MONEY';
   paymentAction: MmgDirectPaymentAction | null;
@@ -68,7 +75,10 @@ export function placedOrderConfirmationCopy(input: {
     return 'Your time is confirmed when the business accepts — pay cash directly to them when the service is done.';
   }
   if (input.pickup) {
-    return 'We’ll tell you when it’s ready — show the pickup code and pay cash directly at the counter.';
+    // [PICKUP · REVIEW-F S3-1 (a) on #2251] With the store's code off (the default) there is no code to show.
+    return input.pickupCodeGiven
+      ? 'We’ll tell you when it’s ready — show the pickup code and pay cash directly at the counter.'
+      : 'We’ll tell you when it’s ready — give your first name and order number and pay cash directly at the counter.';
   }
   if (input.held) {
     // [REPORT-013 F-013-03 S2] This popup can outlive the hold (one-time
