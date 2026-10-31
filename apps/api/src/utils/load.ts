@@ -11,9 +11,10 @@ export function estimateLoad(totalUnits: number): 'small' | 'medium' | 'large' {
 // ---------------------------------------------------------------------------
 // [G1] The size of vehicle a NON-COURIER order actually needs.
 //
-// `estimateLoad` above is a DISPLAY badge and stays exactly as it is — it is a
-// shipped contract on the offer card (`estLoad`), read by three call sites and
-// consumed by nothing in dispatch. It gates nothing and is not being made to.
+// `estimateLoad` above is a DISPLAY badge and stays exactly as it is — the
+// item-count half of the offer card's `estLoad` (see `offerEstLoad`, which also
+// counts bulk), consumed by nothing in dispatch. It gates nothing and is not
+// being made to.
 //
 // The defect it sits next to: vehicle capability is filtered on
 // `courierPackageSize`, which is written in exactly ONE place
@@ -110,14 +111,33 @@ export interface OrderForLoad {
 }
 
 const SIZES_SMALL_TO_LARGE: readonly PackageSizeName[] = ['SMALL', 'MEDIUM', 'LARGE', 'EXTRA_LARGE'];
+const sizeRank = (size: PackageSizeName): number => SIZES_SMALL_TO_LARGE.indexOf(size);
+
+/**
+ * [owner #20, 13 Oct 2026 · owner ruling 31 Oct 2026] A line whose ONE unit is
+ * bulkier than an ordinary item (the item editor's "bulky" or "very bulky",
+ * e.g. a 20 kg bag of rice) routes the order to the largest size class: cars
+ * and vans while they deliver goods; while they do not, the cap below brings it
+ * to a motorbike's — never a bicycle's. It decides only WHO may carry the
+ * order; the order's real size (`trueBand`) is still its total bulk.
+ */
+export function hasBulkyLine(
+  items: { quantity: number; item?: { bulkUnits?: number | null } | null; bulkUnits?: number | null }[],
+): boolean {
+  return items.some((line) => {
+    const per = line.item?.bulkUnits ?? line.bulkUnits ?? DEFAULT_BULK_UNITS;
+    return Number.isFinite(line.quantity) && line.quantity > 0 && Number.isFinite(per) && (per as number) > DEFAULT_BULK_UNITS;
+  });
+}
 
 /**
  * [Owner, 31 Oct 2026] A store order is never refused for its size alone. When
  * no vehicle Swift takes on today may carry the size its basket bands to (the
  * largest class while car deliveries are off), it needs the largest size one
  * DOES carry (a motorbike's): it is placed and offered to those movers, whose
- * offer card shows the load (`estLoad`), and who may decline it. When cars
- * deliver again, the largest class goes to cars and vans as before.
+ * offer card shows the load (`estLoad`, `loadSize`), and who may decline it
+ * without it counting against them. When cars deliver again, the largest class
+ * goes to cars and vans as before.
  */
 function capToCarriableToday(size: PackageSizeName, env: Record<string, string | undefined>): PackageSizeName {
   for (let i = SIZES_SMALL_TO_LARGE.indexOf(size); i >= 0; i -= 1) {
@@ -149,11 +169,13 @@ function capToCarriableToday(size: PackageSizeName, env: Record<string, string |
  *                       customer declared it and paid against it; an estimate
  *                       must never overrule a declaration.
  *  3. FOOD / GROCERY  → sum `quantity × bulkUnits` and band it (`trueBand`).
- *                       An item marked bulky only adds its bulk to the total
- *                       (owner, 31 Oct 2026: one bulky line no longer means a
- *                       car or van). `required` is that band capped at the
- *                       largest size a vehicle Swift takes on today may carry,
- *                       so a store order is never refused for size alone.
+ *                       `required` is that band — or the largest class when a
+ *                       line is bulky (`hasBulkyLine`, owner #20) — capped at
+ *                       the largest size a vehicle Swift takes on today may
+ *                       carry, so a store order is never refused for size
+ *                       alone (owner, 31 Oct 2026), and an order holding a
+ *                       bulky item goes to a motorbike at least while cars
+ *                       carry no goods, never to a bicycle (owner, 31 Oct).
  *  4. anything else   → null, so a new OrderType cannot silently acquire a
  *                       gate nobody designed for it.
  *
@@ -182,7 +204,8 @@ export function readOrderSize(
   const total = totalBulkUnits(order.items);
   if (total <= 0) return none;
   const trueBand = bandForBulk(total, bands);
-  return { required: capToCarriableToday(trueBand, env), trueBand };
+  const routed: PackageSizeName = hasBulkyLine(order.items) ? 'EXTRA_LARGE' : trueBand;
+  return { required: capToCarriableToday(routed, env), trueBand };
 }
 
 /** The `PackageSize` a vehicle must be able to carry for this order: `readOrderSize(...).required`. */
@@ -197,16 +220,40 @@ export function requiredPackageSizeForOrder(
 /**
  * [Owner, 31 Oct 2026] What the offer card and the board row add beside
  * `estLoad` (whose contract stays exactly as shipped): the order's real size
- * class, and whether it is bigger than what Swift offers it by today (a load
- * past a motorbike's band while car deliveries are off). Additive fields, so
- * an older rider build simply ignores them.
+ * class, and whether it is BIGGER than what Swift offers it by today (a load
+ * past a motorbike's band while car deliveries are off). Never for a car or van
+ * carrying the largest class with car deliveries on, and never for one bulky
+ * item routed to a motorbike (its load is smaller than what carries it).
+ * Additive fields, so an older rider build simply ignores them.
  */
 export function offerLoadFields(order: OrderForLoad): { loadSize: PackageSizeName | null; oversize: boolean } {
   const size = readOrderSize(order, DEFAULT_LOAD_BANDS);
   return {
     loadSize: size.trueBand,
-    oversize: size.trueBand != null && size.required != null && size.trueBand !== size.required,
+    oversize: size.trueBand != null && size.required != null && sizeRank(size.trueBand) > sizeRank(size.required),
   };
+}
+
+const LOAD_WORD_FOR_SIZE: Record<PackageSizeName, 'small' | 'medium' | 'large'> = {
+  SMALL: 'small', MEDIUM: 'medium', LARGE: 'large', EXTRA_LARGE: 'large',
+};
+
+/**
+ * [Owner, 31 Oct 2026 · REVIEW-G S3-1] The `estLoad` word every rider build
+ * shows on the offer card and the board row: the larger of the item-count
+ * reading (`estimateLoad`) and a store order's real size band, in the same
+ * small / medium / large words — so one 20 kg bag of rice says "medium", not
+ * "1 item · small", even on builds that do not know `loadSize`. A parcel or a
+ * ride keeps the item-count reading.
+ */
+export function offerEstLoad(order: OrderForLoad): 'small' | 'medium' | 'large' {
+  const byCount = estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0));
+  if (order.orderType !== 'FOOD_DELIVERY' && order.orderType !== 'GROCERY_DELIVERY') return byCount;
+  const band = readOrderSize(order, DEFAULT_LOAD_BANDS).trueBand;
+  if (band == null) return byCount;
+  const byBulk = LOAD_WORD_FOR_SIZE[band];
+  const words = ['small', 'medium', 'large'] as const;
+  return words.indexOf(byBulk) > words.indexOf(byCount) ? byBulk : byCount;
 }
 
 // ---------------------------------------------------------------------------

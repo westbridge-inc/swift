@@ -11,7 +11,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { makeDispatchService, type DispatchService } from '../modules/dispatch/dispatch.service';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
-import { requiredPackageSizeForOrder } from '../utils/load';
+import { requiredPackageSizeForOrder, readOrderSize } from '../utils/load';
 import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 
 // ---------------------------------------------------------------------------
@@ -28,11 +28,11 @@ import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 // Fixtures: Mabaruma, far from every other suite, so only this file's movers
 // are ever candidates.
 //
-// [Owner, 31 Oct 2026] TRANSFORMED: one line marked bulky no longer makes the
-// whole order car-only — an item's bulk only adds to the order's total, banded
-// as before. "Bulky" in this file is now a basket past the motorbike band (8 of
-// an item marked bulky: bulk 32), which is the largest class while car
-// deliveries are on; one bulky item alone is an ordinary small load.
+// [Owner, 31 Oct 2026] The order's real size is its total bulk (bulk x quantity),
+// banded as before. With car deliveries on (this file) a bulky line still
+// routes the order to cars and vans, and so does a basket past the motorbike
+// band. "Bulky" in this file's dispatch cases is 8 of an item marked bulky
+// (bulk 32), past the motorbike band either way.
 //
 // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: this
 // file now pins #1693's behaviour on the switch's re-enable path
@@ -191,12 +191,14 @@ afterAll(async () => {
 describe('[owner #20 · owner 31 Oct] the size rule: a basket past the motorbike band means a car or van (cars on)', () => {
   const order = (lines: Array<{ quantity: number; bulkUnits: number | null }>) => ({ orderType: 'FOOD_DELIVERY', courierPackageSize: null, items: lines });
 
-  it('bulk × quantity past the motorbike band → the largest class (cars and vans); one bulky item alone does not', () => {
-    // [owner 31 Oct, TRANSFORMED] These two were EXTRA_LARGE ("a bulky line → cars and vans"); the bulk now adds.
-    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 4 }]))).toBe('SMALL');
-    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('MEDIUM');
+  it('one item marked bulky or very bulky, or bulk × quantity past the motorbike band → the largest class (cars and vans)', () => {
+    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 4 }]))).toBe('EXTRA_LARGE');
+    expect(requiredPackageSizeForOrder(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('EXTRA_LARGE');
     expect(requiredPackageSizeForOrder(order([{ quantity: 8, bulkUnits: 4 }]))).toBe('EXTRA_LARGE');
-    expect(requiredPackageSizeForOrder(order([{ quantity: 3, bulkUnits: 8 }, { quantity: 7, bulkUnits: null }]))).toBe('EXTRA_LARGE');
+    expect(requiredPackageSizeForOrder(order([{ quantity: 31, bulkUnits: null }]))).toBe('EXTRA_LARGE');
+    // [owner 31 Oct] The real size stays the total bulk: one crate is a small load, a bag of rice and two sachets medium.
+    expect(readOrderSize(order([{ quantity: 1, bulkUnits: 4 }])).trueBand).toBe('SMALL');
+    expect(readOrderSize(order([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }])).trueBand).toBe('MEDIUM');
   });
 
   it('ordinary items keep their bands; a parcel keeps its declared size; a ride needs none', () => {

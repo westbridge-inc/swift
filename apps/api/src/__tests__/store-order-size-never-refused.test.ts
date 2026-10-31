@@ -12,7 +12,8 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { makeDispatchService, vehicleCanCarry, DispatchService } from '../modules/dispatch/dispatch.service';
 import { goodsSizeCarriableToday } from '../config/vehicle-classes';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
-import { requiredPackageSizeForOrder, readOrderSize, estimateLoad } from '../utils/load';
+import { requiredPackageSizeForOrder, readOrderSize, offerLoadFields } from '../utils/load';
+import { dispatchOfferKey } from '../modules/dispatch/dispatch-generation-keys';
 import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 
 // ---------------------------------------------------------------------------
@@ -85,8 +86,8 @@ async function makeRider(vehicleType: VehicleType, meters: number) {
   return { ...u, riderId: rider.id };
 }
 
-/** A cash food order ready at the kitchen: `quantity` of the bulky item (bulk 4 each) or of the ordinary one. */
-async function makeReadyOrder(customerId: string, bulky: boolean, quantity: number) {
+/** A cash food order ready at the kitchen: `quantity` of the bulky item (bulk 4 each, or `bulk`) or of the ordinary one. */
+async function makeReadyOrder(customerId: string, bulky: boolean, quantity: number, bulk = 4) {
   const order = await sys(() => app.prisma.order.create({
     data: {
       orderNumber: `SIZE-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
@@ -99,7 +100,7 @@ async function makeReadyOrder(customerId: string, bulky: boolean, quantity: numb
         create: [{
           itemId: bulky ? bulkyItemId : plainItemId, name: bulky ? 'Family tray' : 'Roti', quantity,
           basePrice: 500, markedUpPrice: 500, markupAmount: 0, totalBase: 500 * quantity, totalMarkup: 0, totalCustomer: 500 * quantity,
-          bulkUnits: bulky ? 4 : null,
+          bulkUnits: bulky ? bulk : null,
         }],
       },
     },
@@ -209,13 +210,20 @@ describe('[owner 31 Oct] the size rule: an item’s bulk only adds to the total'
   const food = (lines: Array<{ quantity: number; bulkUnits: number | null }>) => ({ orderType: 'FOOD_DELIVERY', courierPackageSize: null, items: lines });
   const grocery = (lines: Array<{ quantity: number; bulkUnits: number | null }>) => ({ orderType: 'GROCERY_DELIVERY', courierPackageSize: null, items: lines });
 
-  it('THE OWNER’S CASE: one item its store marked bulky is an ordinary small load a bicycle carries', () => {
-    const one = requiredPackageSizeForOrder(food([{ quantity: 1, bulkUnits: 4 }]));
-    expect(one).toBe('SMALL');
-    expect(vehicleCanCarry('BICYCLE', one)).toBe(true);
-    // A very bulky item (8) is still just its bulk: a medium load.
-    expect(requiredPackageSizeForOrder(grocery([{ quantity: 1, bulkUnits: 8 }]))).toBe('MEDIUM');
-    expect(requiredPackageSizeForOrder(grocery([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toBe('MEDIUM');
+  // [Owner ruling 31 Oct ~02:40Z] …but an order holding a really bulky item (a line whose one unit is bulkier than an
+  // ordinary item, e.g. a 20 kg bag of rice) goes to a MOTORBIKE at least, never a bicycle, while cars carry no goods.
+  it('THE OWNER’S CASE: one item its store marked bulky needs a motorbike at least, never a bicycle; its real size stays small', () => {
+    const one = readOrderSize(food([{ quantity: 1, bulkUnits: 4 }]));
+    expect(one).toEqual({ required: 'LARGE', trueBand: 'SMALL' });
+    expect(vehicleCanCarry('BICYCLE', one.required)).toBe(false);
+    expect(vehicleCanCarry('MOTORCYCLE', one.required)).toBe(true);
+    expect(goodsSizeCarriableToday(one.required)).toBe(true);
+    // A very bulky item (8): a motorbike, and its real size is a medium load.
+    expect(readOrderSize(grocery([{ quantity: 1, bulkUnits: 8 }]))).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
+    expect(readOrderSize(grocery([{ quantity: 1, bulkUnits: 8 }, { quantity: 2, bulkUnits: null }]))).toEqual({ required: 'LARGE', trueBand: 'MEDIUM' });
+    // Ordinary items go by their total alone, as before: a bicycle carries a small or medium basket.
+    expect(requiredPackageSizeForOrder(grocery([{ quantity: 8, bulkUnits: null }]))).toBe('MEDIUM');
+    expect(requiredPackageSizeForOrder(grocery([{ quantity: 4, bulkUnits: 1 }]))).toBe('SMALL');
   });
 
   it('a load past the motorbike band needs only a motorbike while car deliveries are off — never a size no vehicle carries', () => {
@@ -241,8 +249,9 @@ describe('[owner 31 Oct] the size rule: an item’s bulk only adds to the total'
       expect(vehicleCanCarry('MOTORCYCLE', size)).toBe(false);
       expect(vehicleCanCarry('CAR', size)).toBe(true);
     }
-    // Still no "one bulky line = car only".
-    expect(requiredPackageSizeForOrder(food([{ quantity: 1, bulkUnits: 4 }]))).toBe('SMALL');
+    // A bulky line keeps today's routing with cars on: cars and vans (owner #20). Its real size is unchanged.
+    expect(readOrderSize(food([{ quantity: 1, bulkUnits: 4 }]))).toEqual({ required: 'EXTRA_LARGE', trueBand: 'SMALL' });
+    expect(requiredPackageSizeForOrder(grocery([{ quantity: 8, bulkUnits: null }]))).toBe('MEDIUM');
   });
 
   it('a parcel keeps the size its sender chose, whatever is carriable today; a ride needs none', () => {
@@ -307,15 +316,20 @@ describe('[owner 31 Oct] checkout never refuses a store order for its size alone
 });
 
 describe('[owner 31 Oct] dispatch, the board and the grab read the same size (car deliveries off)', () => {
-  it('a big order goes to the motorbike, never the nearer bicycle; one bulky item goes to the nearer bicycle', async () => {
+  it('a big order and one bulky item go to the motorbike, never the nearer bicycle; ordinary items go to the nearer bicycle', async () => {
     await clearStoreOrders();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const bicycle = await makeRider('BICYCLE', 100);
+    await makeRider('BICYCLE', 100);
     const bike = await makeRider('MOTORCYCLE', 600);
     const big = await makeReadyOrder(customer.userId, true, 8);
     expect((await dispatch.dispatchOrder(big.id)).offered).toBe(bike.riderId);
+    await park(); // the motorbike now holds a live offer: fresh riders for the next two
+    const bicycle2 = await makeRider('BICYCLE', 100);
+    const bike2 = await makeRider('MOTORCYCLE', 600);
     const one = await makeReadyOrder(customer.userId, true, 1);
-    expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bicycle.riderId);
+    expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bike2.riderId);
+    const plain = await makeReadyOrder(customer.userId, false, 3);
+    expect((await dispatch.dispatchOrder(plain.id)).offered).toBe(bicycle2.riderId);
   });
 
   it('the motorbike’s board shows the big order; the bicycle’s leaves it out and its grab is refused', async () => {
@@ -325,18 +339,22 @@ describe('[owner 31 Oct] dispatch, the board and the grab read the same size (ca
     const bike = await makeRider('MOTORCYCLE', 200);
     const big = await makeReadyOrder(customer.userId, true, 8);
     const one = await makeReadyOrder(customer.userId, true, 1);
+    const plain = await makeReadyOrder(customer.userId, false, 3);
 
     const bikeBoard = await call('GET', '/api/v1/rider/orders/available', bike.token);
     expect(bikeBoard.statusCode, bikeBoard.body).toBe(200);
-    expect((bikeBoard.json().data as Array<{ id: string }>).map((o) => o.id)).toEqual(expect.arrayContaining([big.id, one.id]));
+    expect((bikeBoard.json().data as Array<{ id: string }>).map((o) => o.id)).toEqual(expect.arrayContaining([big.id, one.id, plain.id]));
     const bicycleBoard = await call('GET', '/api/v1/rider/orders/available', bicycle.token);
     const bicycleIds = (bicycleBoard.json().data as Array<{ id: string }>).map((o) => o.id);
-    expect(bicycleIds).toContain(one.id);
+    expect(bicycleIds).toContain(plain.id);
     expect(bicycleIds).not.toContain(big.id);
+    expect(bicycleIds).not.toContain(one.id);
 
-    const grab = await call('POST', `/api/v1/rider/orders/${big.id}/accept`, bicycle.token, {});
-    expect(grab.statusCode, grab.body).toBe(400);
-    expect(grab.json().error).toMatchObject({ code: 'VEHICLE_TOO_SMALL', message: 'This order is too big for your bicycle.' });
+    for (const order of [big, one]) {
+      const grab = await call('POST', `/api/v1/rider/orders/${order.id}/accept`, bicycle.token, {});
+      expect(grab.statusCode, grab.body).toBe(400);
+      expect(grab.json().error).toMatchObject({ code: 'VEHICLE_TOO_SMALL', message: 'This order is too big for your bicycle.' });
+    }
   });
 
   it('with car deliveries on, the big order goes to the car again, not the nearer motorbike', async () => {
@@ -358,13 +376,14 @@ describe('[owner 31 Oct] the real size stays visible: the rider sees it, stackin
   it('one reading, both halves: the size a vehicle must carry (capped) and the true band', () => {
     const big = { orderType: 'GROCERY_DELIVERY', courierPackageSize: null, items: [{ quantity: 31, bulkUnits: null }] };
     expect(readOrderSize(big)).toEqual({ required: 'LARGE', trueBand: 'EXTRA_LARGE' });
-    expect(readOrderSize({ ...big, items: [{ quantity: 1, bulkUnits: 4 }] })).toEqual({ required: 'SMALL', trueBand: 'SMALL' });
+    expect(readOrderSize({ ...big, items: [{ quantity: 1, bulkUnits: 4 }] })).toEqual({ required: 'LARGE', trueBand: 'SMALL' });
+    expect(readOrderSize({ ...big, items: [{ quantity: 3, bulkUnits: null }] })).toEqual({ required: 'SMALL', trueBand: 'SMALL' });
     expect(readOrderSize({ orderType: 'COURIER', courierPackageSize: 'EXTRA_LARGE', items: [] })).toEqual({ required: 'EXTRA_LARGE', trueBand: 'EXTRA_LARGE' });
     vi.stubEnv('CAR_DELIVERIES', '1');
     expect(readOrderSize(big)).toEqual({ required: 'EXTRA_LARGE', trueBand: 'EXTRA_LARGE' });
   });
 
-  it('the live offer and the recovered card carry the real size (loadSize, oversize) beside an unchanged estLoad', async () => {
+  it('the live offer and the recovered card carry the real size (loadSize, oversize), and estLoad says the bulk too', async () => {
     await clearStoreOrders();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const bike = await makeRider('MOTORCYCLE', 100);
@@ -377,17 +396,17 @@ describe('[owner 31 Oct] the real size stays visible: the rider sees it, stackin
     expect((await dispatch.dispatchOrder(big.id)).offered).toBe(bike.riderId);
     const live = emitted.find((e) => e.event === 'dispatch:offer' && e.room === `user:${bike.userId}`)?.payload;
     expect(live, 'the live card was emitted').toBeTruthy();
-    expect(live).toMatchObject({ estLoad: estimateLoad(8), loadSize: 'EXTRA_LARGE', oversize: true });
+    expect(live).toMatchObject({ estLoad: 'large', loadSize: 'EXTRA_LARGE', oversize: true });
     const rebuilt = await call('GET', '/api/v1/rider/offers/current', bike.token);
     expect(rebuilt.statusCode, rebuilt.body).toBe(200);
-    expect(rebuilt.json().data.offer).toMatchObject({ orderId: big.id, estLoad: estimateLoad(8), loadSize: 'EXTRA_LARGE', oversize: true });
+    expect(rebuilt.json().data.offer).toMatchObject({ orderId: big.id, estLoad: 'large', loadSize: 'EXTRA_LARGE', oversize: true });
 
     await park();
     const bike2 = await makeRider('MOTORCYCLE', 100);
     const one = await makeReadyOrder(customer.userId, true, 1);
     expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bike2.riderId);
     const small = emitted.find((e) => e.event === 'dispatch:offer' && e.room === `user:${bike2.userId}`)?.payload;
-    expect(small).toMatchObject({ estLoad: estimateLoad(1), loadSize: 'SMALL', oversize: false });
+    expect(small).toMatchObject({ estLoad: 'small', loadSize: 'SMALL', oversize: false });
   });
 
   it('the board row carries the real size too', async () => {
@@ -399,8 +418,8 @@ describe('[owner 31 Oct] the real size stays visible: the rider sees it, stackin
     const board = await call('GET', '/api/v1/rider/orders/available', bike.token);
     expect(board.statusCode, board.body).toBe(200);
     const rows = board.json().data as Array<{ id: string; estLoad: string; loadSize: string; oversize: boolean }>;
-    expect(rows.find((r) => r.id === big.id)).toMatchObject({ estLoad: estimateLoad(8), loadSize: 'EXTRA_LARGE', oversize: true });
-    expect(rows.find((r) => r.id === one.id)).toMatchObject({ estLoad: estimateLoad(1), loadSize: 'SMALL', oversize: false });
+    expect(rows.find((r) => r.id === big.id)).toMatchObject({ estLoad: 'large', loadSize: 'EXTRA_LARGE', oversize: true });
+    expect(rows.find((r) => r.id === one.id)).toMatchObject({ estLoad: 'small', loadSize: 'SMALL', oversize: false });
   });
 
   it('stacking (dispatch): an order past the motorbike band is never stacked onto a motorbike already carrying a leg (XL never batches)', async () => {
@@ -461,5 +480,149 @@ describe('[owner 31 Oct] the real size stays visible: the rider sees it, stackin
     await addToCart(big, bulkyItemId, 8);
     // Not a stack: the only motorbike must finish its leg first, so the answer carries a rider wait.
     expect(await availability(big)).toBe('BUSY');
+  });
+});
+
+// [REVIEW-G 02:37Z S3-1] A bulky load now reaches bicycles and motorbikes, so the
+// load the rider is shown BEFORE accepting must count the bulk, not just the
+// number of items. `estLoad` (the pill every rider build already shows, builds
+// 9/11 included) is the larger of the item-count reading and the order's real
+// size band, in the same small / medium / large words.
+describe('[owner 31 Oct] the rider sees a bulky load before accepting (estLoad counts bulk)', () => {
+  it('ONE 20 kg bag of rice (very bulky, 8) goes to the motorbike, never the nearer bicycle, and says MEDIUM, not "1 item · small"', async () => {
+    await clearStoreOrders();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await makeRider('BICYCLE', 50);
+    const bike = await makeRider('MOTORCYCLE', 100);
+    const emitted: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
+    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
+      emit: (event: string, payload: Record<string, unknown>) => { emitted.push({ room, event, payload }); return true; },
+    })) as never);
+    onTestFinished(() => { spy.mockRestore(); });
+    const rice = await makeReadyOrder(customer.userId, true, 1, 8);
+    expect((await dispatch.dispatchOrder(rice.id)).offered).toBe(bike.riderId);
+    const live = emitted.find((e) => e.event === 'dispatch:offer' && e.room === `user:${bike.userId}`)?.payload;
+    expect(live).toMatchObject({ itemCount: 1, estLoad: 'medium', loadSize: 'MEDIUM', oversize: false });
+    const rebuilt = await call('GET', '/api/v1/rider/offers/current', bike.token);
+    expect(rebuilt.json().data.offer).toMatchObject({ orderId: rice.id, estLoad: 'medium', loadSize: 'MEDIUM', oversize: false });
+    const board = await call('GET', '/api/v1/rider/orders/available', bike.token);
+    const row = (board.json().data as Array<{ id: string }>).find((r) => r.id === rice.id);
+    expect(row).toMatchObject({ estLoad: 'medium', loadSize: 'MEDIUM', oversize: false });
+  });
+
+  it('TWO bags (16) offered to a motorbike say LARGE; ordinary items keep the item-count reading', async () => {
+    await clearStoreOrders();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const bike = await makeRider('MOTORCYCLE', 100);
+    const rice = await makeReadyOrder(customer.userId, true, 2, 8);
+    const roti = await makeReadyOrder(customer.userId, false, 4); // 4 ordinary items: bulk SMALL, count medium
+    const board = await call('GET', '/api/v1/rider/orders/available', bike.token);
+    const rows = board.json().data as Array<{ id: string }>;
+    expect(rows.find((r) => r.id === rice.id)).toMatchObject({ itemCount: 2, estLoad: 'large', loadSize: 'LARGE', oversize: false });
+    expect(rows.find((r) => r.id === roti.id)).toMatchObject({ itemCount: 4, estLoad: 'medium', loadSize: 'SMALL', oversize: false });
+  });
+
+  it('"Very big load" (oversize) is only a load past what it is offered by: never for a car with car deliveries on, never for one bulky item', () => {
+    const big = { orderType: 'GROCERY_DELIVERY', courierPackageSize: null, items: [{ quantity: 31, bulkUnits: null }] };
+    const rice = { orderType: 'GROCERY_DELIVERY', courierPackageSize: null, items: [{ quantity: 1, bulkUnits: 8 }] };
+    expect(offerLoadFields(big)).toEqual({ loadSize: 'EXTRA_LARGE', oversize: true });
+    // One bag needs a motorbike (LARGE) but is a medium load: not "very big".
+    expect(offerLoadFields(rice)).toEqual({ loadSize: 'MEDIUM', oversize: false });
+    vi.stubEnv('CAR_DELIVERIES', '1');
+    expect(offerLoadFields(big)).toEqual({ loadSize: 'EXTRA_LARGE', oversize: false });
+    expect(offerLoadFields(rice)).toEqual({ loadSize: 'MEDIUM', oversize: false });
+  });
+
+  it('with car deliveries on, the car driver offered the XL order sees its size but no "Very big load"', async () => {
+    await clearStoreOrders();
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const car = await makeRider('CAR', 100);
+    const emitted: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
+    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
+      emit: (event: string, payload: Record<string, unknown>) => { emitted.push({ room, event, payload }); return true; },
+    })) as never);
+    onTestFinished(() => { spy.mockRestore(); });
+    const big = await makeReadyOrder(customer.userId, true, 8);
+    expect((await dispatch.dispatchOrder(big.id)).offered).toBe(car.riderId);
+    const live = emitted.find((e) => e.event === 'dispatch:offer' && e.room === `user:${car.userId}`)?.payload;
+    expect(live).toMatchObject({ estLoad: 'large', loadSize: 'EXTRA_LARGE', oversize: false });
+    const board = await call('GET', '/api/v1/rider/orders/available', car.token);
+    const row = (board.json().data as Array<{ id: string }>).find((r) => r.id === big.id);
+    expect(row).toMatchObject({ estLoad: 'large', loadSize: 'EXTRA_LARGE', oversize: false });
+  });
+});
+
+// [COORD 02:35Z, Round 2] An oversize offer (past a motorbike's band, offered
+// to a motorbike only because cars carry no goods today) is the rider's to
+// turn down freely: a decline, a lapse or a go-offline release of one never
+// lowers their acceptance rate. An ordinary offer still does.
+describe('[owner 31 Oct] turning down a very big load never counts against the rider', () => {
+  const rate = async (riderId: string) => Number((await sys(() => app.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { acceptanceRate: true } }))).acceptanceRate);
+  const liveAttempt = async (orderId: string) => {
+    const live = await app.redis.get(dispatchOfferKey(orderId));
+    expect(live, 'a live offer').not.toBeNull();
+    return live!.slice(live!.indexOf(':') + 1);
+  };
+
+  it('declining an oversize offer leaves the acceptance rate alone; declining an ordinary one lowers it', async () => {
+    await clearStoreOrders();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const bike = await makeRider('MOTORCYCLE', 100);
+    const big = await makeReadyOrder(customer.userId, true, 8);
+    expect((await dispatch.dispatchOrder(big.id)).offered).toBe(bike.riderId);
+    const bigAttempt = await liveAttempt(big.id);
+    await dispatch.markOfferSeen(big.id, bike.userId, bigAttempt);
+    await dispatch.declineOffer(big.id, bike.userId, bigAttempt);
+    expect(await rate(bike.riderId)).toBe(50);
+
+    await clearStoreOrders();
+    await sys(() => app.prisma.rider.update({ where: { id: bike.riderId }, data: { isOnline: true, isAvailable: true, currentOrderId: null } }));
+    const one = await makeReadyOrder(customer.userId, true, 1);
+    expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bike.riderId);
+    const oneAttempt = await liveAttempt(one.id);
+    await dispatch.markOfferSeen(one.id, bike.userId, oneAttempt);
+    await dispatch.declineOffer(one.id, bike.userId, oneAttempt);
+    expect(await rate(bike.riderId)).toBeCloseTo(40, 5);
+  });
+
+  it('letting a SEEN oversize offer lapse leaves the rate alone; a seen ordinary one lapsing lowers it', async () => {
+    await clearStoreOrders();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const bike = await makeRider('MOTORCYCLE', 100);
+    const big = await makeReadyOrder(customer.userId, true, 8);
+    expect((await dispatch.dispatchOrder(big.id)).offered).toBe(bike.riderId);
+    const bigAttempt = await liveAttempt(big.id);
+    await dispatch.markOfferSeen(big.id, bike.userId, bigAttempt);
+    await dispatch.handleOfferTimeout(big.id, bike.riderId, bigAttempt);
+    expect(await rate(bike.riderId)).toBe(50);
+
+    await clearStoreOrders();
+    await sys(() => app.prisma.rider.update({ where: { id: bike.riderId }, data: { isOnline: true, isAvailable: true, currentOrderId: null } }));
+    const one = await makeReadyOrder(customer.userId, true, 1);
+    expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bike.riderId);
+    const oneAttempt = await liveAttempt(one.id);
+    await dispatch.markOfferSeen(one.id, bike.userId, oneAttempt);
+    await dispatch.handleOfferTimeout(one.id, bike.riderId, oneAttempt);
+    expect(await rate(bike.riderId)).toBeCloseTo(40, 5);
+  });
+
+  it('going offline while holding a SEEN oversize offer leaves the rate alone; an ordinary one lowers it', async () => {
+    await clearStoreOrders();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const bike = await makeRider('MOTORCYCLE', 100);
+    const big = await makeReadyOrder(customer.userId, true, 8);
+    expect((await dispatch.dispatchOrder(big.id)).offered).toBe(bike.riderId);
+    await dispatch.markOfferSeen(big.id, bike.userId, await liveAttempt(big.id));
+    await dispatch.releaseHeldOffer(bike.riderId);
+    expect(await rate(bike.riderId)).toBe(50);
+
+    await clearStoreOrders();
+    await sys(() => app.prisma.rider.update({ where: { id: bike.riderId }, data: { isOnline: true, isAvailable: true, currentOrderId: null } }));
+    const one = await makeReadyOrder(customer.userId, true, 1);
+    expect((await dispatch.dispatchOrder(one.id)).offered).toBe(bike.riderId);
+    await dispatch.markOfferSeen(one.id, bike.userId, await liveAttempt(one.id));
+    await dispatch.releaseHeldOffer(bike.riderId);
+    expect(await rate(bike.riderId)).toBeCloseTo(40, 5);
   });
 });

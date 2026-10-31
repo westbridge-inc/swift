@@ -52,7 +52,7 @@ import { handoverAuthorityFor } from '../order/handover-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
-import { estimateLoad, offerLoadFields, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { offerEstLoad, offerLoadFields, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
@@ -1217,8 +1217,8 @@ export async function riderRoutes(app: FastifyInstance) {
           status: order.status,
           vendor: order.vendor,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
-          estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
-          // [owner 31 Oct] The real size class beside estLoad (unchanged), as on the offer card.
+          estLoad: offerEstLoad(order),
+          // [owner 31 Oct] estLoad counts bulk too; the real size class beside it, as on the offer card.
           ...offerLoadFields(order),
           deliveryFee: Number(order.deliveryFee),
           tipAmount: Number(order.tipAmount),
