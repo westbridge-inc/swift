@@ -1443,7 +1443,8 @@ export const vendorApi = {
     api.delete(`/vendor/option-groups/${id}`, capturedAuthConfig(session)),
   addOption: (
     groupId: string,
-    data: { name: string; additionalPrice?: number; isDefault?: boolean },
+    // [VAT-DOCS] vatListedAdditionalPrice: the extra price as the store typed it (before VAT where VAT is added).
+    data: { name: string; additionalPrice?: number; vatListedAdditionalPrice?: number; isDefault?: boolean },
     session?: AuthSessionSnapshot,
   ) => api.post(`/vendor/option-groups/${groupId}/options`, data, capturedAuthConfig(session)),
   updateOption: (id: string, data: { name?: string; additionalPrice?: number; isDefault?: boolean }) =>

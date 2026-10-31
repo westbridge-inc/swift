@@ -46,7 +46,8 @@ describe('[O-5] Store VAT queue', () => {
     serve([row, { ...row, vendorId: 'vnd-2', name: 'Other Shop', mode: 'ADD_VAT_AT_CHECKOUT', certificate: null }]);
     renderWithQuery(<StoreVatPage />);
     expect(await screen.findByText('Prices already include VAT: approving leaves its prices as they are')).toBeTruthy();
-    expect(screen.getByText('Prices do not include VAT: approving adds VAT to each standard-rated price customers see')).toBeTruthy();
+    // [REVIEW-F #2256 N1] The reviewer sees the scope: every item the store has not marked zero-rated or exempt.
+    expect(screen.getByText('Prices do not include VAT: approving adds VAT to each standard-rated price customers see (every item the store has not marked zero-rated or exempt)')).toBeTruthy();
   });
 
   it('nothing waiting: says so', async () => {
@@ -129,5 +130,45 @@ describe('[O-5] Store VAT queue', () => {
     expect(await screen.findByText('No certificate sent yet')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Approve VAT' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('button', { name: 'Open the certificate' })).toBeNull();
+  });
+});
+
+// [VAT-DOCS · owner ruling 31 Oct 2026] An APPROVED store's change of price choice waits here for a person. Nothing about its
+// prices moves until the person approves; a refusal tells the store why and leaves everything as it is.
+describe('[VAT-DOCS] an approved store’s change of price choice', () => {
+  const change = { vendorId: 'vnd-3', name: 'Approved Shop', vatRegistrationNumber: '012345678', status: 'APPROVED', mode: 'ADD_VAT_AT_CHECKOUT',
+    modeRequested: 'PRICES_INCLUDE_VAT', certificate: { id: 'doc-3', status: 'APPROVED', state: 'COMMITTED', createdAt: '2026-10-20T10:00:00.000Z' } };
+
+  it('says what the change does; no certificate step; approve sends the change the reviewer saw', async () => {
+    const user = userEvent.setup();
+    const writes: ApiRequest[] = [];
+    serve([change], (r) => { writes.push(r); return { body: { success: true, data: { status: 'APPROVED' } } }; });
+    renderWithQuery(<StoreVatPage />);
+    expect(await screen.findByText('Asks to change to “prices already include VAT”: approving takes the added VAT off, so customers pay the prices the store typed.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Open the certificate' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve VAT' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Approve the change' }));
+    const dialog = screen.getByRole('dialog', { name: 'Approve Approved Shop’s price change?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Approve the change' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]!.url.pathname).toBe('/api/v1/admin/store-vat/vnd-3/mode');
+    expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ approve: true, mode: 'PRICES_INCLUDE_VAT', reason: REASON });
+    expect(await screen.findByText(/Approved Shop's price change is approved/)).toBeTruthy();
+  });
+
+  it('refusing sends the reason the store reads; the words for a change to "add VAT" name the scope', async () => {
+    const user = userEvent.setup();
+    const writes: ApiRequest[] = [];
+    serve([{ ...change, mode: 'PRICES_INCLUDE_VAT', modeRequested: 'ADD_VAT_AT_CHECKOUT' }], (r) => { writes.push(r); return { body: { success: true, data: { status: 'APPROVED' } } }; });
+    renderWithQuery(<StoreVatPage />);
+    expect(await screen.findByText('Asks to change to “prices do not include VAT”: approving adds VAT to each standard-rated price its customers see (every item it has not marked zero-rated or exempt).')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Refuse the change' }));
+    const dialog = screen.getByRole('dialog', { name: 'Refuse Approved Shop’s price change?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /what the store reads/i }), 'Most of the shelf is zero-rated, keep prices as they are');
+    await user.click(within(dialog).getByRole('button', { name: 'Refuse the change' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]!.url.pathname).toBe('/api/v1/admin/store-vat/vnd-3/mode');
+    expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ approve: false, mode: 'ADD_VAT_AT_CHECKOUT', reason: 'Most of the shelf is zero-rated, keep prices as they are' });
   });
 });

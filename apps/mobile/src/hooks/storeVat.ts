@@ -19,6 +19,8 @@ export interface StoreVatView {
   available: boolean;
   status: StoreVatStatus;
   mode: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
+  /** [owner ruling 31 Oct 2026] An approved store's change of choice, waiting for a person (an older server sends none). */
+  modeRequested?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
   vatRegistrationNumber: string | null;
   effective: boolean;
   /** [VAT-DOCS] True while Swift adds VAT to the prices this store types (an older server sends none). */
@@ -76,7 +78,8 @@ export function useUpdateStoreVat() {
   return useMutation({
     mutationFn: guardVendorOperation(previewReadOnly((answer: { registered: boolean; vatRegistrationNumber?: string; mode?: StoreVatMode }) =>
       bound(storeId, (session) => unwrap<StoreVatView>(vendorApi.updateVat(
-        answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, mode: answer.mode ?? 'PRICES_INCLUDE_VAT' } : { registered: false },
+        // [REVIEW-M #2256 N1] The choice only when the store made one: never a built-in default that could ask to switch it.
+        answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, ...(answer.mode ? { mode: answer.mode } : {}) } : { registered: false },
         session, storeId,
       ))))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'vat'] }),

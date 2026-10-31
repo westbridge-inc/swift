@@ -98,6 +98,25 @@ describe('[O-5] the phone’s VAT words', () => {
     expect(editor).not.toMatch(/\bbasePrice: priceNum\b/);
   });
 
+  // [VAT-DOCS · owner ruling 31 Oct 2026 · REVIEW-M #2256 N1] An approved store's change of choice waits for a person and the
+  // store is told; the save never sends a built-in choice the store did not make.
+  it('a change of price choice: the store is told a person checks it; the save sends only a choice the store made', () => {
+    const section = read('modules/vendor/StoreVatSection.tsx');
+    expect(section).toContain("{changeNeedsPerson ? <T variant=\"label\" tone=\"muted\" testID=\"store-vat-mode-review\">{MODE_CHANGE_REVIEW_NOTE}</T> : null}");
+    expect(section).toContain('const waitingLine = modeRequestedLine(v.modeRequested);');
+    expect(section).toContain('setMode(v.modeRequested ?? v.mode ?? null);');
+    const hook = read('hooks/storeVat.ts');
+    expect(hook).toContain('...(answer.mode ? { mode: answer.mode } : {})');
+    expect(hook).not.toContain("?? 'PRICES_INCLUDE_VAT'");
+  });
+
+  it('[REVIEW-M #2255 S4-2 · REVIEW-F #2256 S4-3] new options carry the typed price; an option’s price says when VAT is in it', () => {
+    const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
+    expect(editor).toContain('data: { name, ...newOptionPrice(Number(d.price) || 0) },');
+    expect(editor).toContain('{optionPriceLabel(o)}');
+    expect(editor).toContain('{newItemBeforeVatHint(storeVat.data.ratePercent)}');
+  });
+
   it('every store owner’s Documents list carries the optional VAT certificate row', () => {
     expect(read('modules/vendor/screens/BusinessSetup.tsx')).toContain("optionalExtra={myRole === 'OWNER' ? (withHeading) => <VatDocumentRow withHeading={withHeading} /> : undefined}");
     expect(read('modules/vendor/screens/VendorAccountScreen.tsx')).toContain('optionalExtra={(withHeading) => <VatDocumentRow withHeading={withHeading} inline={false} />}');

@@ -13,9 +13,28 @@ export function editablePrice(item: Priced): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** The price part of an item save. */
-export function itemPricePayload(item: Priced, price: number): { basePrice: number } | { vatListedPrice: number } {
-  return item?.vatListedPrice != null ? { vatListedPrice: price } : { basePrice: price };
+/** The price part of an item save. [REVIEW-M #2255 S4-2] A NEW item sends its typed price as both fields (the server reads
+ *  `vatListedPrice` first and refuses a bare basePrice on a store that adds VAT, where it could not tell whether VAT is in it). */
+export function itemPricePayload(item: Priced, price: number): { basePrice?: number; vatListedPrice?: number } {
+  if (!item) return { basePrice: price, vatListedPrice: price };
+  return item.vatListedPrice != null ? { vatListedPrice: price } : { basePrice: price };
+}
+
+/** [REVIEW-M #2255 S4-2] A NEW option's extra price as the store typed it (the same rule as a new item). */
+export function newOptionPrice(price: number): { additionalPrice: number; vatListedAdditionalPrice: number } {
+  return { additionalPrice: price, vatListedAdditionalPrice: price };
+}
+
+/** [REVIEW-F #2256 S4-2] A NEW item in a store whose VAT is added to its prices (the same words as the phone). */
+export function newItemBeforeVatHint(ratePercent: number): string {
+  return `Type the price before VAT: ${ratePercent}% VAT is added to standard-rated items.`;
+}
+
+/** [REVIEW-F #2256 S4-3] An option's extra price in the editor: what customers pay, saying so when VAT is in it. */
+export function optionPriceLabel(o: { additionalPrice?: unknown; vatListedAdditionalPrice?: unknown }): string {
+  const n = Number(o.additionalPrice);
+  if (!(n > 0)) return 'Free';
+  return `+GYD ${n.toLocaleString('en-US')}${o.vatListedAdditionalPrice != null ? ' incl. VAT' : ''}`;
 }
 
 /** What customers pay, under the price of an item Swift adds VAT to (null for every other item). */

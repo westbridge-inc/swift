@@ -7,7 +7,7 @@ import { storeKey } from '@/lib/store-scope';
 import Image from 'next/image';
 import { photo as storePhoto } from '@/lib/media';
 import { GRA_VAT_URL } from '@/lib/gra-vat-url';
-import { beforeVatNote, editablePrice, itemPricePayload } from '@/lib/vat-price-edit';
+import { beforeVatNote, editablePrice, itemPricePayload, newItemBeforeVatHint, newOptionPrice, optionPriceLabel } from '@/lib/vat-price-edit';
 import { formatMoney } from '@/lib/money';
 import type { CatalogItem, VatClass } from '@/lib/vendor-api';
 import {
@@ -198,12 +198,12 @@ export function PriceEdit({ item, onSave, onDone }: { item: CatalogItem; onSave:
 
 // ── Item editor ──────────────────────────────────────────────────────────────
 
-type DraftGroup = { key: string; name: string; isRequired: boolean; maxSelect: number; options: Array<{ key: string; name: string; additionalPrice: number }> };
+type DraftGroup = { key: string; name: string; isRequired: boolean; maxSelect: number; options: Array<{ key: string; name: string; additionalPrice: number; vatListedAdditionalPrice?: number | null }> };
 let draftKeys = 0;
 const nextKey = () => `draft-${++draftKeys}`;
 
 export function ItemEditor({
-  storeId, item, sections, vendorType, instantAvailable = false, vatRate, vatEffective, onClose,
+  storeId, item, sections, vendorType, instantAvailable = false, vatRate, vatEffective, vatAdded = false, onClose,
 }: {
   storeId: string | null;
   /** The item to edit (a GET /items row), or null for a new item. */
@@ -215,6 +215,8 @@ export function ItemEditor({
   /** Set only for the owner of a store that told Swift it is VAT-registered. */
   vatRate: number | null;
   vatEffective: boolean;
+  /** [REVIEW-F #2256 S4-2] The store's VAT is added to the prices it types (GET /vendor/vat addsVatToPrices). */
+  vatAdded?: boolean;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -223,6 +225,8 @@ export function ItemEditor({
   const booking = item?.bookingConfig ?? {};
   const [name, setName] = useState(item?.name ?? '');
   const [price, setPrice] = useState(String(editablePrice(item) ?? ''));
+  // [VAT-DOCS] The field asks for the price before VAT: an item VAT is added to, or a new item in a store that adds it.
+  const beforeVatField = item ? item.vatListedPrice != null : vatAdded;
   const [description, setDescription] = useState(item?.description ?? '');
   const [categoryId, setCategoryId] = useState(item?.categoryId ?? item?.category?.id ?? sections[0]?.id ?? '');
   const [available, setAvailable] = useState(item ? item.isAvailable !== false : true);
@@ -310,7 +314,8 @@ export function ItemEditor({
               ...(!item && draftGroups.length > 0 ? {
                 optionGroups: draftGroups.map((g) => ({
                   name: g.name, isRequired: g.isRequired, minSelect: g.isRequired ? 1 : 0, maxSelect: g.maxSelect,
-                  options: g.options.map((o) => ({ name: o.name, additionalPrice: o.additionalPrice })),
+                  // [REVIEW-M #2255 S4-2] A new option's price as the store typed it (before VAT where VAT is added).
+                  options: g.options.map((o) => ({ name: o.name, ...newOptionPrice(o.additionalPrice) })),
                 })),
               } : {}),
             }),
@@ -375,7 +380,9 @@ export function ItemEditor({
 
       <div className="mt-4 space-y-3">
         <input className="sw-input" aria-label="Item name" placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} data-modal-initial-focus />
-        <input className="sw-input" aria-label={item?.vatListedPrice != null ? 'Price before VAT (GYD)' : 'Price (GYD)'} placeholder={item?.vatListedPrice != null ? 'Price before VAT (GYD)' : 'Price (GYD)'} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        <input className="sw-input" aria-label={beforeVatField ? 'Price before VAT (GYD)' : 'Price (GYD)'} placeholder={beforeVatField ? 'Price before VAT (GYD)' : 'Price (GYD)'} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        {/* [REVIEW-F #2256 S4-2] A new item in a store whose VAT is added: the same words as the phone. */}
+        {!item && vatAdded && vatRate != null && <p className="text-xs text-[var(--swift-muted)]">{newItemBeforeVatHint(vatRate)}</p>}
         {/* [VAT-DOCS] What customers pay for an item Swift adds VAT to (the saved price, from the server). */}
         {beforeVatNote(item, formatMoney) && <p className="text-xs text-[var(--swift-muted)]">{beforeVatNote(item, formatMoney)}</p>}
         <textarea className="sw-input min-h-20" aria-label="Description (optional)" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -552,7 +559,7 @@ function OptionsSection({ storeId, item, drafts, setDrafts }: {
   const [removeGroupId, setRemoveGroupId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const groups = useMemo(() => (item
-    ? saved.map((g) => ({ id: g.id, name: g.name, isRequired: g.isRequired, maxSelect: g.maxSelect, options: g.options.map((o) => ({ id: o.id, name: o.name, additionalPrice: Number(o.additionalPrice) || 0 })) }))
+    ? saved.map((g) => ({ id: g.id, name: g.name, isRequired: g.isRequired, maxSelect: g.maxSelect, options: g.options.map((o) => ({ id: o.id, name: o.name, additionalPrice: Number(o.additionalPrice) || 0, vatListedAdditionalPrice: o.vatListedAdditionalPrice ?? null })) }))
     : drafts.map((g) => ({ id: g.key, name: g.name, isRequired: g.isRequired, maxSelect: g.maxSelect, options: g.options.map((o) => ({ id: o.key, name: o.name, additionalPrice: o.additionalPrice })) }))), [item, saved, drafts]);
   const keepGroups = (next: OptionGroupRow[]) => {
     setSaved(next);
@@ -573,7 +580,7 @@ function OptionsSection({ storeId, item, drafts, setDrafts }: {
     onError: failed,
   });
   const add = useMutation({
-    mutationFn: ({ groupId, name, additionalPrice }: { groupId: string; name: string; additionalPrice: number }) => addOption(groupId, { name, additionalPrice }),
+    mutationFn: ({ groupId, name, additionalPrice }: { groupId: string; name: string; additionalPrice: number }) => addOption(groupId, { name, ...newOptionPrice(additionalPrice) }),
     onMutate: () => setError(null),
     onSuccess: (o, { groupId }) => { keepGroups(saved.map((g) => (g.id === groupId ? { ...g, options: [...g.options, o] } : g))); setChoice((c) => ({ ...c, [groupId]: { name: '', price: '' } })); },
     onError: failed,
@@ -637,7 +644,7 @@ function OptionsSection({ storeId, item, drafts, setDrafts }: {
           {g.options.map((o) => (
             <div key={o.id} className="mt-2 flex items-center gap-2 text-sm">
               <span className="flex-1">{o.name}</span>
-              <span className="text-[var(--swift-muted)]">{o.additionalPrice > 0 ? `+GYD ${o.additionalPrice.toLocaleString('en-US')}` : 'Free'}</span>
+              <span className="text-[var(--swift-muted)]">{optionPriceLabel(o)}</span>
               <button type="button" className="min-h-9 px-2 text-[var(--swift-muted)]" aria-label={`Remove ${o.name}`} disabled={busy} onClick={() => removeChoice(g.id, o.id)}>✕</button>
             </div>
           ))}
@@ -770,7 +777,7 @@ export type MenuDialogState =
   | { kind: 'section'; mode: 'add' | 'rename' | 'delete'; section: { id: string; name: string } | null }
   | { kind: 'delete'; item: CatalogItem };
 
-export function MenuDialog({ dialog, storeId, sections, counts, vendorType, instantAvailable, vatRate, vatEffective, onClose }: {
+export function MenuDialog({ dialog, storeId, sections, counts, vendorType, instantAvailable, vatRate, vatEffective, vatAdded, onClose }: {
   dialog: MenuDialogState;
   storeId: string | null;
   sections: Array<{ id: string; name: string }>;
@@ -779,10 +786,11 @@ export function MenuDialog({ dialog, storeId, sections, counts, vendorType, inst
   instantAvailable?: boolean;
   vatRate: number | null;
   vatEffective: boolean;
+  vatAdded?: boolean;
   onClose: () => void;
 }) {
   if (dialog.kind === 'item') {
-    return <ItemEditor storeId={storeId} item={dialog.item} sections={sections} vendorType={vendorType} instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} onClose={onClose} />;
+    return <ItemEditor storeId={storeId} item={dialog.item} sections={sections} vendorType={vendorType} instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} vatAdded={vatAdded} onClose={onClose} />;
   }
   if (dialog.kind === 'section') {
     return <SectionDialog storeId={storeId} vendorType={vendorType} section={dialog.section} mode={dialog.mode}

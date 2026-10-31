@@ -135,8 +135,11 @@ describe('[TAP-AUDIT] the web adds and edits items like the app', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(writes.map((w) => `${w.method} ${w.url.pathname}`)).toEqual(['POST /api/v1/vendor/items', 'POST /api/v1/vendor/items/new-1/image']);
     expect(body(writes[0]!)).toMatchObject({
-      categoryId: 'mains', name: 'Chow mein', basePrice: 700, isAvailable: true, bulk: 'normal',
-      optionGroups: [{ name: 'Size', isRequired: true, minSelect: 1, maxSelect: 1, options: [{ name: 'Small', additionalPrice: 0 }, { name: 'Large', additionalPrice: 200 }] }],
+      // [REVIEW-M #2255 S4-2] A new item and its new choices carry the prices as typed (before VAT where VAT is added).
+      categoryId: 'mains', name: 'Chow mein', basePrice: 700, vatListedPrice: 700, isAvailable: true, bulk: 'normal',
+      optionGroups: [{ name: 'Size', isRequired: true, minSelect: 1, maxSelect: 1, options: [
+        { name: 'Small', additionalPrice: 0, vatListedAdditionalPrice: 0 }, { name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 },
+      ] }],
     });
     expect((writes[1]!.init?.body as FormData).get('file')).toBeTruthy();
     expect(await screen.findByRole('article', { name: 'Chow mein' })).toBeTruthy();
@@ -170,7 +173,7 @@ describe('[TAP-AUDIT] the web adds and edits items like the app', () => {
     await click(within(size).getByRole('button', { name: 'Remove Small' }));
     await waitFor(() => expect(within(size).queryByText('Small')).toBeNull());
     expect(writes.slice(1).map((w) => `${w.method} ${w.url.pathname}`)).toEqual(['POST /api/v1/vendor/option-groups/g-size/options', 'DELETE /api/v1/vendor/options/o-small']);
-    expect(body(writes[1]!)).toEqual({ name: 'Large', additionalPrice: 200 });
+    expect(body(writes[1]!)).toEqual({ name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 });
   });
 
   it('Delete asks once ("Delete item?"), then the row leaves', async () => {

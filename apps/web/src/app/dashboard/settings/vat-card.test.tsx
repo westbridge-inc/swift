@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renderWithQuery } from '@/test/test-utils';
+import { mockApi, renderWithQuery } from '@/test/test-utils';
 import * as vendorApi from '@/lib/vendor-api';
 import * as storeVatApi from '@/lib/store-vat-api';
 import * as storeVatRead from '@/lib/store-vat-read';
@@ -82,7 +82,10 @@ describe('[O-5] the owner’s answer', () => {
     await userEvent.type(screen.getByLabelText('VAT registration number (exactly as on your GRA certificate)'), ' 012345678 ');
     expect((choose as HTMLButtonElement).disabled).toBe(true); // still no price choice
     await userEvent.click(screen.getByRole('radio', { name: 'My prices do not include VAT' }));
-    expect(screen.getByText(/Swift adds 14% VAT to the price you type for each standard-rated item, so customers see and pay the full price, VAT included, before they order/)).toBeTruthy();
+    // [REVIEW-F #2256 S3-1 + S4-1] Every item counts as standard-rated until marked; the VAT is the store's (never "Swift adds").
+    expect(screen.getByText('Once a person at Swift approves your certificate, 14% VAT is added to the price you type for each standard-rated item, so customers '
+      + 'see and pay the full price, VAT included, before they order. Every item counts as standard-rated until you mark it zero-rated or exempt: mark those '
+      + 'before a person approves, or customers pay VAT on them.')).toBeTruthy();
     expect((choose as HTMLButtonElement).disabled).toBe(false);
     const file = new File(['%PDF-1.4'], 'certificate.pdf', { type: 'application/pdf' });
     await userEvent.upload(screen.getByLabelText('VAT certificate file'), file);
@@ -133,6 +136,58 @@ describe('[O-5] the owner’s answer', () => {
   });
 });
 
+// [VAT-DOCS · owner ruling 31 Oct 2026] An APPROVED store's change of price choice waits for a person; the store is told.
+describe('[VAT-DOCS] an approved store changes how its prices relate to VAT', () => {
+  const approvedView = (over: Partial<StoreVatView> = {}) => view({
+    status: 'APPROVED', effective: true, mode: 'ADD_VAT_AT_CHECKOUT', addsVatToPrices: true, vatRegistrationNumber: '012345678',
+    approved: { number: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01T00:00:00.000Z', reviewedAt: null }, ...over,
+  });
+
+  it('picking the other choice says a person checks it first; the save sends it; the card then says it is waiting', async () => {
+    setup(owner, approvedView());
+    vi.spyOn(storeVatApi, 'updateStoreVat').mockResolvedValue(approvedView({ modeRequested: 'PRICES_INCLUDE_VAT' }));
+    await userEvent.click(await screen.findByRole('radio', { name: 'My prices already include VAT' }));
+    expect(screen.getByText('A person at Swift checks a change of this choice before it applies. Until then your prices and what customers pay stay as they are.')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Save and send for checking' }));
+    await waitFor(() => expect(storeVatApi.updateStoreVat).toHaveBeenCalledWith({ registered: true, vatRegistrationNumber: '012345678', mode: 'PRICES_INCLUDE_VAT' }));
+    expect(await screen.findByText('You asked to change to “My prices already include VAT”. A person at Swift will check the change. Until then your prices and what customers pay stay as they are.')).toBeTruthy();
+  });
+
+  it('a change already waiting shows as the store’s choice, with the waiting words; the choice in force needs no person', async () => {
+    setup(owner, approvedView({ modeRequested: 'PRICES_INCLUDE_VAT' }));
+    expect(await screen.findByText(/You asked to change to “My prices already include VAT”/)).toBeTruthy();
+    expect((screen.getByRole('radio', { name: 'My prices already include VAT' }) as HTMLInputElement).checked).toBe(true);
+    await userEvent.click(screen.getByRole('radio', { name: 'My prices do not include VAT' }));
+    expect(screen.queryByText(/checks a change of this choice before it applies/)).toBeNull();
+  });
+
+  it('turning VAT off says the typed prices come back, never that Swift adds VAT', async () => {
+    setup(owner, approvedView());
+    await userEvent.click(await screen.findByRole('radio', { name: 'No' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Turn VAT off' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('VAT stops being added to your prices: customers pay the prices you typed.');
+  });
+});
+
+// [REVIEW-G #2256 S4-1] The one submission at the wire: the certificate POST itself carries the number and the choice.
+describe('[VAT-DOCS] the certificate request', () => {
+  it('a first claim sends the number and the price choice in the same request as the certificate; a later one sends the file alone', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    mockApi((r) => {
+      if (r.url.pathname === '/api/v1/verification/upload') return { body: { success: true, data: { url: 'verification/x.enc' } } };
+      bodies.push(JSON.parse(String(r.init?.body ?? '{}')) as Record<string, unknown>);
+      return { body: { success: true, data: view({ status: 'PENDING' }) } };
+    });
+    const file = new File(['%PDF-1.4'], 'certificate.pdf', { type: 'application/pdf' });
+    await storeVatApi.sendVatCertificate(file, { vatRegistrationNumber: '012345678', mode: 'ADD_VAT_AT_CHECKOUT' });
+    await storeVatApi.sendVatCertificate(file);
+    expect(bodies[0]).toMatchObject({ fileUrl: 'verification/x.enc', consent: true, consentTick: 'document_v1', vatRegistrationNumber: '012345678', mode: 'ADD_VAT_AT_CHECKOUT' });
+    expect(bodies[1]).not.toHaveProperty('vatRegistrationNumber');
+    expect(bodies[1]).not.toHaveProperty('mode');
+    vi.unstubAllGlobals();
+  });
+});
+
 describe('[O-5] the certificate', () => {
   it('the file can be chosen only after the consent tick, and goes to the store’s VAT route', async () => {
     setup(owner, view({ status: 'PENDING', mode: 'PRICES_INCLUDE_VAT', vatRegistrationNumber: '012345678' }));
@@ -169,7 +224,7 @@ describe('[O-5] the status line never promises VAT a person has not approved', (
     }))).toBe('Approved from 1 Jan 2026. Your prices include VAT at 14%, and receipts say “VAT charged by Sample Shop Ltd · VAT reg. no. 012345678”.');
     expect(vatStatusLine(view({
       status: 'APPROVED', effective: true, mode: 'ADD_VAT_AT_CHECKOUT', approved: { number: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01T00:00:00.000Z', reviewedAt: null },
-    }))).toBe('Approved from 1 Jan 2026. Swift adds VAT at 14% to the prices you type for standard-rated items, and receipts say “VAT charged by Sample Shop Ltd · VAT reg. no. 012345678”.');
+    }))).toBe('Approved from 1 Jan 2026. VAT at 14% is added to the prices you type for standard-rated items, and receipts say “VAT charged by Sample Shop Ltd · VAT reg. no. 012345678”.');
     expect(vatStatusLine(view({ status: 'REJECTED', reviewNote: 'The photo is unreadable' }))).toBe('Not approved: The photo is unreadable. Correct it and send your certificate again.');
     expect(vatStatusLine(view({ status: 'REVOKED', reviewNote: 'GRA cancelled the registration' }))).toBe('VAT withdrawn: GRA cancelled the registration. New orders carry no VAT.');
   });

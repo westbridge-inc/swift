@@ -372,7 +372,7 @@ export default function InventoryPage() {
         </p>
       )}
       {tools && dialog && <tools.MenuDialog dialog={dialog} storeId={storeId} sections={sections} counts={perSection} vendorType={vendorType}
-        instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} onClose={() => setDialog(null)} />}
+        instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} vatAdded={vat.data?.addsVatToPrices === true} onClose={() => setDialog(null)} />}
     </div>
   );
 }

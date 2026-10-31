@@ -218,7 +218,10 @@ describe('[TAP-AUDIT] options on a new item, in the one create request', () => {
     await tap('Add item');
     expect(fx.save).toHaveBeenCalledTimes(1);
     expect(fx.save.mock.calls[0]![0].data.optionGroups).toEqual([
-      { name: 'Size', isRequired: true, minSelect: 1, maxSelect: 1, options: [{ name: 'Small', additionalPrice: 0 }, { name: 'Large', additionalPrice: 200 }] },
+      // [REVIEW-M #2255 S4-2] New choices carry their prices as typed (before VAT where VAT is added).
+      { name: 'Size', isRequired: true, minSelect: 1, maxSelect: 1, options: [
+        { name: 'Small', additionalPrice: 0, vatListedAdditionalPrice: 0 }, { name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 },
+      ] },
     ]);
     expect(fx.addGroup).not.toHaveBeenCalled();
     expect(fx.addOption).not.toHaveBeenCalled();

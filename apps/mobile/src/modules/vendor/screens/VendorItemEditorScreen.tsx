@@ -51,8 +51,9 @@ import {
 } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
-import { money } from '../../../lib/money';
-import { beforeVatNote, editablePrice, itemPricePayload, vatClassChoices, type VatClass } from '../../../lib/storeVat';
+import {
+  beforeVatNote, editablePrice, itemPricePayload, newItemBeforeVatHint, newOptionPrice, optionPriceLabel, vatClassChoices, type VatClass,
+} from '../../../lib/storeVat';
 import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
@@ -80,7 +81,8 @@ export function draftOptionGroupsPayload(groups: DraftOptionGroup[]) {
     isRequired: g.isRequired,
     minSelect: g.isRequired ? 1 : 0,
     maxSelect: g.maxSelect,
-    options: g.options.map((o) => ({ name: o.name, additionalPrice: o.additionalPrice })),
+    // [REVIEW-M #2255 S4-2] A new option's price as the store typed it (before VAT where VAT is added).
+    options: g.options.map((o) => ({ name: o.name, ...newOptionPrice(o.additionalPrice) })),
   }));
 }
 
@@ -165,7 +167,7 @@ function ModifiersSection({ item, staged }: { item: any; staged?: { groups: Draf
     const owner = requireAuthSessionSnapshot();
     const opt = await addOption.mutateAsync({
       groupId,
-      data: { name, additionalPrice: Number(d.price) || 0 },
+      data: { name, ...newOptionPrice(Number(d.price) || 0) },
       authSession: owner,
     });
     requireAuthSessionForPrincipal(owner);
@@ -243,7 +245,7 @@ function ModifiersSection({ item, staged }: { item: any; staged?: { groups: Draf
                 {o.name}
               </T>
               <T variant="label" tone="muted" style={{ marginRight: space.md }}>
-                {Number(o.additionalPrice) > 0 ? `+${money(o.additionalPrice)}` : 'Free'}
+                {optionPriceLabel(o)}
               </T>
               <Pressable disabled={readOnly} onPress={() => removeOption(g.id, o.id)} hitSlop={8}>
                 <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
@@ -642,11 +644,11 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
         <View style={{ gap: space.md }}>
           <LabeledInput value={name} onChangeText={setName} placeholder="Item name" />
-          <LabeledInput value={price} onChangeText={setPrice} placeholder={beforeVatNote(existing) ? 'Price before VAT (GYD)' : 'Price (GYD)'} keyboardType="decimal-pad" />
+          <LabeledInput value={price} onChangeText={setPrice} placeholder={beforeVatNote(existing) || (!existing && storeVat.data?.addsVatToPrices) ? 'Price before VAT (GYD)' : 'Price (GYD)'} keyboardType="decimal-pad" />
           {/* [VAT-DOCS] What customers pay for an item Swift adds VAT to (the saved price, from the server). */}
           {beforeVatNote(existing) ? <T variant="caption" tone="muted" testID="item-before-vat-note">{beforeVatNote(existing)}</T> : null}
           {!existing && storeVat.data?.addsVatToPrices ? (
-            <T variant="caption" tone="muted">Type the price before VAT. Swift adds {storeVat.data.ratePercent}% VAT to standard-rated items.</T>
+            <T variant="caption" tone="muted" testID="item-new-before-vat-hint">{newItemBeforeVatHint(storeVat.data.ratePercent)}</T>
           ) : null}
           <InlineInput value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
         </View>

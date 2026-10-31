@@ -4,7 +4,9 @@ import * as ImagePicker from 'expo-image-picker';
 import { BrandCheckbox, Card, ChoiceChip, ErrorState, LabeledInput, PillButton, T } from '../../kit';
 import { space } from '@swift/ui';
 import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
-import { VAT_MODE_CHOICES, storeVatStatusLine, vatModeHelp, type StoreVatMode } from '../../lib/storeVat';
+import {
+  MODE_CHANGE_REVIEW_NOTE, VAT_MODE_CHOICES, modeRequestedLine, storeVatStatusLine, turnOffAddedPricesLine, vatModeHelp, type StoreVatMode,
+} from '../../lib/storeVat';
 import { errorMessage } from '../../lib/apiError';
 import { useStoreVat, useUpdateStoreVat } from '../../hooks/storeVat';
 import { useSendVatCertificate } from '../../hooks/storeVatCertificate';
@@ -18,7 +20,9 @@ const GRA_VAT_URL = 'https://www.gra.gov.gy/vat-invoices/';
  * prices relate to VAT, and a photo of the certificate; a PERSON at Swift checks it, and only then do the store's prices
  * say "incl. VAT". [VAT-DOCS · owner 30 Oct 2026] A store that has not said yes yet sends all three in ONE submission
  * (the certificate route takes the number and the mode with it), so no store waits for a person without a mode.
- * "My prices do not include VAT": once approved, Swift adds the VAT into each standard-rated price customers see.
+ * "My prices do not include VAT": once approved, the VAT goes into each standard-rated price customers see.
+ * [owner ruling 31 Oct 2026] An APPROVED store that changes its choice is told a person checks the change first; until
+ * then its prices stay as they are (the server keeps the change waiting, `modeRequested`).
  * Hidden while Swift's VAT switch is off, unless the store already has a VAT record to show. The same words as the web
  * dashboard. Also opened from the Documents list's optional "VAT certificate" row (DocumentChecklist).
  */
@@ -37,8 +41,9 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
     if (!v) return;
     setRegistered(v.status !== 'NONE');
     setNumber(v.vatRegistrationNumber ?? '');
-    setMode(v.mode ?? null);
-  }, [v?.status, v?.vatRegistrationNumber, v?.mode]); // eslint-disable-line react-hooks/exhaustive-deps
+    // A change waiting for a person shows as the store's choice (saving the choice in force withdraws it).
+    setMode(v.modeRequested ?? v.mode ?? null);
+  }, [v?.status, v?.vatRegistrationNumber, v?.mode, v?.modeRequested]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (vat.isError) {
     return (
@@ -52,7 +57,10 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
 
   const claimed = v.status !== 'NONE';
   const numberChanged = number.trim() !== (v.vatRegistrationNumber ?? '');
-  const modeChanged = mode !== (v.mode ?? null);
+  const modeChanged = mode !== (v.modeRequested ?? v.mode ?? null);
+  // [owner ruling 31 Oct 2026] An approved store picking the other choice: a person checks it before anything changes.
+  const changeNeedsPerson = v.status === 'APPROVED' && mode !== null && mode !== v.mode;
+  const waitingLine = modeRequestedLine(v.modeRequested);
   // A store that already said yes saves a new number or mode here; a new claim goes with its certificate (below).
   const canSave = registered ? claimed && number.trim().length > 0 && mode !== null && (numberChanged || modeChanged) : claimed;
   // [VAT-DOCS] One submission: number + mode + certificate, for a store that has not said yes yet.
@@ -90,8 +98,8 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
   const turnOff = () => {
     if (update.isPending) return;
     if (v.status !== 'APPROVED') { update.mutate({ registered: false }); return; }
-    // [VAT-DOCS] A store whose VAT Swift adds to its prices gets the prices it typed back.
-    const prices = v.addsVatToPrices ? ' Swift stops adding VAT to your prices: customers pay the prices you typed.' : '';
+    // [VAT-DOCS] A store whose VAT is added to its prices gets the prices it typed back.
+    const prices = v.addsVatToPrices ? turnOffAddedPricesLine : '';
     Alert.alert('Turn VAT off?', `Your prices stop saying “incl. VAT” at once, and a person at Swift must check your certificate again before VAT can come back.${prices}`, [
       { text: 'Keep VAT', style: 'cancel' },
       { text: 'Turn VAT off', style: 'destructive', onPress: () => update.mutate({ registered: false }) },
@@ -117,6 +125,7 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
         <T variant="label" tone="brand" weight="semibold">VAT at the GRA</T>
       </Pressable>
       <T variant="label" weight="semibold" accessibilityRole="text" testID="store-vat-status">{storeVatStatusLine(v)}</T>
+      {waitingLine ? <T variant="label" tone="muted" accessibilityRole="text" testID="store-vat-mode-waiting">{waitingLine}</T> : null}
 
       {v.available ? (
         <View style={{ gap: space.sm, marginTop: space.sm }}>
@@ -141,6 +150,7 @@ export function StoreVatSection({ style }: { style?: StyleProp<ViewStyle> } = {}
                 ))}
               </View>
               {mode ? <T variant="label" tone="muted" testID="store-vat-mode-help">{vatModeHelp(mode, v.ratePercent)}</T> : null}
+              {changeNeedsPerson ? <T variant="label" tone="muted" testID="store-vat-mode-review">{MODE_CHANGE_REVIEW_NOTE}</T> : null}
             </>
           ) : null}
           {registered && !claimed ? null : (
