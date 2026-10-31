@@ -270,6 +270,8 @@ export type DeliveryStatus = {
 export const getDeliveryStatus = () => apiFetch(`${V}/vendor/delivery-status`).then((r) => r.data as DeliveryStatus);
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
+/** [WEB-SETTINGS] "This wasn't me": drop the store's staged MMG number change and sign out every other device (owner). */
+export const cancelPendingMmgNumber = () => apiFetch(`${V}/profile/mmg-number/pending`, { method: 'DELETE' });
 // NB: these two routes are registered as `/vendor/toggle-*` UNDER the
 // `/api/v1/vendor` prefix, so their real path is double-prefixed
 // (`/api/v1/vendor/vendor/toggle-open`). The mobile client already calls the

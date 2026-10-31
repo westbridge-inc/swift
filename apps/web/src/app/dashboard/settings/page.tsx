@@ -1,9 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { selectedProfileStore, storeCheckLabel, type ProfileData } from './store-check';
+import { selectedProfileStore, type ProfileData } from './store-check';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { DataUnavailable } from '@/components/data-unavailable';
@@ -21,6 +21,13 @@ import { CallUsCard } from './call-us-card';
 import { StorePhotosCard } from './store-photos-card';
 import { VatCard } from './vat-card';
 import { VatReportLink } from './vat-report-link';
+import { StoreDetailsCard } from './store-details-card';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [WEB-SETTINGS · owner 31 Oct 2026] The store's pin and address, and its MMG number: loaded with the page, but in their
+// own pieces (the "Confirm it's you" code and the map picker load only when used), so the console's shared code does not grow.
+const StoreLocationCard = lazyRetry(() => import('./store-location-card').then((m) => ({ default: m.StoreLocationCard })));
+const MmgNumberCard = lazyRetry(() => import('./mmg-number-card').then((m) => ({ default: m.MmgNumberCard })));
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -285,20 +292,8 @@ export default function SettingsPage() {
       <h1 className="sw-title">Settings</h1>
       <DeliveryStatusNotice storeId={storeId} />
 
-      {profile.isError && <DataUnavailable what="your store details" error={profile.error} onRetry={() => void profile.refetch()} />}
-      {p && (
-        <div className="sw-card p-6">
-          <h2 className="font-bold">{p.name}</h2>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            {p.vendorType === 'SUPERMARKET' ? 'Grocery' : p.vendorType === 'STORE' ? 'Shop' : p.vendorType === 'SERVICE' ? 'Services' : 'Restaurant'}
-            {p.city ? ` · ${p.city}` : ''} · {storeCheckLabel(p)}
-          </p>
-          {p.description && <p className="mt-2 text-sm">{p.description}</p>}
-          <p className="mt-3 text-xs text-[var(--swift-muted)]">
-            Name, description, address and MMG details are edited in the Swift app (they go through review).
-          </p>
-        </div>
-      )}
+      {/* [WEB-SETTINGS] The store's name and description: the owner edits them here (partners have no app yet). */}
+      <StoreDetailsCard storeId={storeId} />
 
       {/* [OPEN-EARLY PR-2] The store's documents (owner only, as the phone's Account → Documents). */}
       {isOwner && (
@@ -322,6 +317,11 @@ export default function SettingsPage() {
           <Link href="/dashboard/branches" className="sw-chip">Branches</Link>
         </div>
       )}
+      {/* [WEB-SETTINGS] Where the store is (owner) and its MMG number (owner edits, manager sees it masked), as the phone's Account. */}
+      <Suspense fallback={null}>
+        <StoreLocationCard storeId={storeId} />
+        <MmgNumberCard storeId={storeId} />
+      </Suspense>
       <StorePhotosCard storeId={storeId} />
       {/* [BOOK-S5b · owner C1] Services only, and only when the server sends the setting. */}
       <BookingCapacityCard storeId={storeId} />
