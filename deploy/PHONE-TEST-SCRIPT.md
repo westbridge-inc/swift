@@ -14,7 +14,7 @@ Button names below are copied from build 8's code. Where a name is in quotes, it
 2. **Codes and PINs.** When the script says "read the code to the coordinator", type it into the chat. The helper needs it to play the other person. Don't share your own login code with anyone.
 3. **One role at a time.** When you test as a customer, stay offline as a rider or driver: tap **Stop** on the mover screen. Otherwise the app could offer your own order to you.
 4. **Be where the test is.** The helper puts its store, rider or driver right next to you, so you don't need to travel. It needs your approximate position once per session. Georgetown works best: the test accounts live there.
-5. **Waiting is normal.** A new order is held for about **5 minutes** before the store sees it. The screen shows "Your order goes to {store} in m:ss". That is the free-cancel window, and it is part of the test.
+5. **Waiting is normal.** A new order is held for about **1 minute** before the store sees it. The screen shows "Your order goes to {store} in m:ss". That is the free-cancel window, and it is part of the test.
 6. **Stop anytime.** If a step looks wrong, stop and say what you see. The coordinator records it. A wrong step is a finding, not something to work around.
 
 ---
@@ -151,6 +151,8 @@ These need no second party. Follow AX309 (`deepseek-audits/AX309-phone-scripts-b
 **You:**
 
 6. The order moves to **Picked up** or **Completed**.
+
+Written for build 12. On a phone that already has the takeaway update, a store whose code is OFF shows no code: you see your order number and a line asking you to give your first name and order number. Tell the coordinator; that is expected, not a finding.
 
 **Pass:** the code appears only after the hold, the store needs it, and your screen follows every step.
 **Fail:** the handover works without your code, the code never appears, or your screen gets stuck on a step the helper already passed.
@@ -356,13 +358,15 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 **Pass:** the alert rings, each step moves the order, and the handover needs the customer's code.
 **Fail:** the order never alerts, a step does nothing, or the handover works without the code.
 
+**Mixed versions, until the store app update reaches your phone (#2251):** a store whose takeaway code is OFF (the default) no longer gives its pickup customers a code on the website or on a phone with the update; they give their first name and order number instead. A store phone still on build 12 doesn't know that: its order screen ("HANDOVER CHECK") still asks for a 6-digit code that such a customer doesn't have. For a real customer of that store, check their first name and order number, then use the board's **Mark picked up** (no code); Swift accepts it while the store's code is off. In this test the helper's `customer codes` still prints the code.
+
 ---
 
 ## NOTIF-02 — the store alert escalates to SMS (after your store is approved)
 
 1. Close the Swift app completely (swipe it away). Keep the phone on.
 2. **Coordinator:** `./deploy/phone-helper.sh customer order --store <your store id> --pickup`
-3. Don't touch the phone. When the hold ends (about 5 minutes), the store is alerted. If nobody answers, a **real SMS** reaches your own phone number about 2 minutes later: "Swift: order {number} is still waiting for your response. Open your dashboard now."
+3. Don't touch the phone. When the hold ends (about 1 minute), the store is alerted. If nobody answers, a **real SMS** reaches your own phone number about 2 minutes later: "Swift: order {number} is still waiting for your response. Open your dashboard now."
 4. Open the app, accept the order (VEND-02 steps 1–2), then finish it with the code, or ask the coordinator to cancel: `customer cancel --order <order id>`.
 
 **Pass:** the SMS arrives while the alert is unanswered.

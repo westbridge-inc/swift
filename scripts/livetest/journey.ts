@@ -127,13 +127,14 @@ export interface Journey<C> {
   estimateSeconds?: number;
   /**
    * Optional early phase: place the orders this journey needs while the
-   * LIFECYCLE_V2 hold (5 minutes) runs down for every journey at once. Its
+   * LIFECYCLE_V2 hold (1 minute, ORDER_HOLD_MINUTES) runs down for every journey at once. Its
    * steps belong to the journey; a Halt here stops only this journey.
    */
   prepare?: (rec: Recorder, ctx: C) => Promise<void>;
   /**
    * Optional: right after the prepared orders leave their hold. A store must
-   * accept within the auto-reject window (hold + 5 minutes), so journeys
+   * accept within the auto-reject window (hold + the store response window,
+   * 10 minutes by default), so journeys
    * accept (or otherwise claim) their prepared orders here, before the run.
    */
   release?: (rec: Recorder, ctx: C) => Promise<void>;

@@ -153,6 +153,10 @@ export function offerWorkerConcurrency(env: Record<string, string | undefined> =
   return Number.isSafeInteger(value) && value >= 1 && value <= 50 ? value : 10;
 }
 
+/** [#2250 S4-3] How often the held-order release sweep ticks: the worst-case release tail. 5 s is
+ *  ~8% of the one-minute hold (order/hold-minutes.ts); scheduleRecurringJobs explains the choice. */
+export const HOLD_RELEASE_SWEEP_MS = 5_000;
+
 /** [row 331] The recurring jobs the safety lane runs, and nothing else. */
 export const SAFETY_TIMER_JOBS = ['promote-sos-grace', 'guardian-sweep'] as const;
 
@@ -3300,14 +3304,25 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // LIFECYCLE_V2 hold release: flip held orders whose cancel window closed to
   // visible + dispatchable. The server clock owns the window — the customer
   // closing the app changes nothing. No-op while the flag is off.
-  // [B18] 10s, not 30s: the sweep interval IS the release tail. At 30s an
-  // order could sit released-but-invisible for up to 29s after its ring hit
-  // 0:00 — a 24% overrun on the old 2-minute hold, and still 10% on the
-  // designed 5. At 10s the worst case is a 3% tail on the 5-minute window.
+  // [B18 · #2250 S4-3] The sweep interval IS the release tail: an order whose
+  // ring hit 0:00 waits for the next tick before the store is alerted and a
+  // rider is sought (the store board already shows it at holdExpiresAt, a
+  // column compare). The hold is ONE minute now (owner 30 Oct 2026, was five):
+  // the old 10s tick was a 3% tail on five minutes but up to ~17% on one, so
+  // the sweep ticks every 5s (worst case ~8%). Its query is the indexed
+  // (status, holdExpiresAt) lookup and almost always returns nothing.
   // (The precise fix — a per-order delayed job at holdExpiresAt — is noted in
   // the Total Audit; the sweep stays either way as the crash-proof backstop.)
+  // A repeatable registration lives in Redis, not in the code: an older
+  // boot's 10s tick would keep running beside this one, so remove any
+  // release-held-orders registration at another cadence first (idempotent).
+  for (const legacy of await queues.dispatchQueue.getRepeatableJobs()) {
+    if (legacy.name === 'release-held-orders' && Number(legacy.every) !== HOLD_RELEASE_SWEEP_MS) {
+      await queues.dispatchQueue.removeRepeatableByKey(legacy.key);
+    }
+  }
   await queues.dispatchQueue.add('release-held-orders', {}, {
-    repeat: { every: 10_000 },
+    repeat: { every: HOLD_RELEASE_SWEEP_MS },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
