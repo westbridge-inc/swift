@@ -33,7 +33,8 @@ import { instantBookingEnabled } from '../booking/instant-booking';
  *  which the customer cancels it free (`freeWindowEnd`). ONE minute since the
  *  owner's 22 Oct 2026 ruling (was five). Before anyone accepts, the cancel is
  *  free at any age; under LIFECYCLE_V2 a held order nobody holds is free for
- *  its whole hold (ORDER_HOLD_MINUTES — a different, unchanged timer). */
+ *  its whole hold (ORDER_HOLD_MINUTES — a different timer, one minute too
+ *  since 30 Oct 2026). */
 export const FREE_CANCEL_WINDOW_MIN = 1;
 
 /** [BOOK-S3 · owner B1 28 Oct 2026] With INSTANT_BOOKING on, an APPOINTMENT

@@ -35,7 +35,7 @@ import { orderSocketFixture } from './helpers/order-socket-fixture';
 // by id, the pending-alert banner, its dashboard counters and analytics, a
 // real socket client asking to follow the order, and its low-stock pushes.
 //
-// Time: the hold is the real five minutes. "Five minutes later" is modelled by
+// Time: the hold is the real one minute (HOLD_MS). "A minute later" is modelled by
 // moving the order's clock back (placement, hold and any cancel together, so
 // their order is kept) — the server clock owns the window, as in production.
 // ---------------------------------------------------------------------------
