@@ -364,7 +364,16 @@ export const getOverview = () => apiFetch(`${V}/analytics/overview`).then((r) =>
 // (apps/mobile/src/services/api.ts vendorApi.analyticsRevenue / analyticsOps / qr).
 export const getRevenue = (days = 14) => apiFetch(`${V}/analytics/revenue?days=${days}`).then((r) => r.data);
 export const getOps = (days = 30) => apiFetch(`${V}/analytics/ops?days=${days}`).then((r) => r.data as { avgAcceptMinutes?: number | null } & Record<string, unknown>);
-export const getQr = () => apiFetch(`${V}/qr`).then((r) => r.data as { shortUrl?: string | null; status?: string | null } & Record<string, unknown>);
+/** GET /vendor/qr (vendor.routes qrPayload): the store's live code. The image encodes `shortUrl`. */
+export interface VendorQr {
+  shortUrl?: string | null; status?: string | null; shortCode?: string | null; canonicalUrl?: string | null;
+  svg?: string | null; vendorName?: string | null; version?: number | null;
+}
+export const getQr = () => apiFetch(`${V}/qr`).then((r) => r.data as VendorQr & Record<string, unknown>);
+/** [STORE-LINK] The public resolver's answer for a short code (GET /public/qr/:code, as the phone asks
+ *  before it lets a store share its link): WEB_RENDER and THIS store's id = the link opens this store. */
+export const getQrPublicState = (shortCode: string) =>
+  apiFetch(`/api/v1/public/qr/${encodeURIComponent(shortCode)}`).then((r) => r.data as { verdict?: string | null; vendorId?: string | null });
 export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((r) => r.data);
 // [W-26] A settlement confirmation carries the amount the confirmer says
 // changed hands. The server refuses any figure that is not the ledger's own, so
