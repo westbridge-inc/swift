@@ -57,6 +57,9 @@ describe('the phone upload ticks', () => {
   it('no review-time promise faster than the support hours', () => {
     for (const f of [SRC('components', 'onboarding', 'DocumentChecklist.tsx'), SRC('modules', 'mover', 'screens', 'MoverOnboardingScreen.tsx')]) {
       expect(f).not.toMatch(/within 24 hours/);
+      // [Owner 30 Oct 2026] The review hours are the support hours: Monday to Saturday, 8:00–16:00 Guyana time.
+      expect(f).toContain('Monday to Saturday, 8:00–16:00 Guyana time');
+      expect(f).not.toContain('20:00');
     }
   });
 });

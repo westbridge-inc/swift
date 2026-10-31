@@ -102,15 +102,27 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
   });
 
   // [O-2 · REVIEW-F S3-3 on #2055] The store's code is off by default: the counter asks for the first name
-  // and order number. The code stays on screen in case an older store app asks; an older server = today's words.
+  // and order number. [PICKUP · owner 30 Oct 2026: "the code is still there rather than mark as picked up"] With
+  // the code off the customer gets NO code: the name + order-number words and the order number itself. The
+  // server sends none to this page (pickupHandover=v1); a code an older server still sends is not shown either.
+  // An older server that does not say (no pickupCodeRequired) = today's code card.
   it('a takeaway tells the customer what the counter asks for', async () => {
     const TAKEAWAY = { ...ORDER, status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', pickupAddress: '7 Counter Lane, Georgetown', pickupCode: '482193' };
-    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired: false } as never);
-    const view = render(<OrderDetailPage />);
-    expect(await screen.findByText('At the counter, give your first name and order number. If they ask for a code:')).toBeTruthy();
-    expect(screen.getByText('482193')).toBeTruthy();
-    expect(screen.queryByText('Show this pickup code')).toBeNull();
-    view.unmount();
+    for (const pickupCode of [null, '482193']) {
+      vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCode, pickupCodeRequired: false } as never);
+      const view = render(<OrderDetailPage />);
+      expect(await screen.findByText('At the counter, give your first name and order number.')).toBeTruthy();
+      expect(screen.getAllByText('SW-2001').length).toBeGreaterThan(0);
+      expect(screen.queryByText('482193')).toBeNull();
+      expect(screen.queryByText(/code/i)).toBeNull();
+      view.unmount();
+    }
+    // Collected: nothing left to say at the counter.
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, status: 'COMPLETED', pickupCode: null, pickupCodeRequired: false } as never);
+    const done = render(<OrderDetailPage />);
+    expect(await screen.findAllByText(/SW-2001/)).toBeTruthy();
+    expect(screen.queryByText('At the counter, give your first name and order number.')).toBeNull();
+    done.unmount();
     for (const pickupCodeRequired of [true, undefined]) {
       vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired } as never);
       const again = render(<OrderDetailPage />);
@@ -514,7 +526,9 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   const fetchSpy = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: {} } as never);
   await orders.getOrder('order-9');
   // [O-4] v2: this page renders the pre-accept removal question too (a v1 client is served a legacy line).
-  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
+  // [PICKUP · owner 30 Oct 2026] pickupHandover=v1: this page tells the customer the name + order number when the
+  // store's code is off, so the server sends it no code then.
+  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2&pickupHandover=v1');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
 });
@@ -608,5 +622,61 @@ describe('[U14 / U15 / U16] the order page speaks the phone\'s words and has a s
     expect(rule('heroCopy')).toMatch(/flex:\s*1 1 200px;/);
     expect(rule('statusPill')).not.toMatch(/white-space:\s*nowrap|text-transform:\s*capitalize/);
     expect(rule('statusPill')).toMatch(/max-width:\s*100%;/);
+  });
+});
+
+// [PICKUP · owner 30 Oct 2026, testing a takeaway on staging] "Preparing still shows on the customer side, which it
+// should, but it's not green when the restaurant accepts it, and same with Ready." A step is green, with its tick, the
+// moment the server says it is reached (aria-current keeps saying which step the order is at); the next step waits.
+// Never before the server says so: ACCEPTED alone (an MMG order before "Paid by MMG") is still "Placed".
+describe('[PICKUP] the live status rail: a step is green the moment it is reached', () => {
+  const rail = async () => {
+    render(<OrderDetailPage />);
+    const heading = await screen.findByRole('heading', { name: 'From order to handover' });
+    const items = [...(heading.closest('section')?.querySelectorAll('ol > li') ?? [])];
+    return items.map((li) => ({
+      label: li.querySelectorAll('span')[1]?.textContent,
+      dot: li.querySelectorAll('span')[0]?.textContent,
+      reached: li.className.includes('stageReached'),
+      now: li.getAttribute('aria-current') === 'step',
+    }));
+  };
+  const CASH = { ...ORDER, paymentMethod: 'CASH', paymentStatus: 'PENDING', paymentAction: null };
+
+  it('a takeaway the store accepted (Accept = Preparing): Preparing is ticked and green; Ready waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'PREPARING', pickupAddress: '7 Counter Lane' } as never);
+    expect(await rail()).toEqual([
+      { label: 'Placed', dot: '✓', reached: true, now: false },
+      { label: 'Preparing', dot: '✓', reached: true, now: true },
+      { label: 'Ready', dot: '3', reached: false, now: false },
+      { label: 'Collected', dot: '4', reached: false, now: false },
+    ]);
+  });
+
+  it('a takeaway marked ready: Ready is ticked and green; Collected waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Ready:✓:true:true', 'Collected:4:false:false']);
+  });
+
+  it('a delivery being prepared: Preparing is ticked and green; On the way waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'DELIVERY', status: 'PREPARING', deliveryAddress: '1 Main St' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.now}`))
+      .toEqual(['Placed:✓:false', 'Preparing:✓:true', 'On the way:3:false', 'Delivered:4:false']);
+  });
+
+  it('ACCEPTED but not preparing (an MMG order before "Paid by MMG"): Preparing is not green yet', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, fulfillment: 'PICKUP', status: 'ACCEPTED', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}`))
+      .toEqual(['Placed:✓:true', 'Preparing:2:false', 'Ready:3:false', 'Collected:4:false']);
+  });
+
+  it('the stylesheet paints the step the order is at like any reached step, and leaves the leg after it unlit', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/app/(app)/orders/[id]/tracking.module.css'), 'utf8');
+    expect(css).not.toMatch(/li\[aria-current='step'\] \.stageDot/);
+    expect(css).toMatch(/\.statusRail li\[aria-current='step'\]:not\(:last-child\)::after \{ background: var\(--swift-border\); \}/);
+    expect(css).toMatch(/\.stageReached \.stageDot \{\s*border-color: var\(--swift-success\);\s*background: var\(--swift-success\);/);
   });
 });

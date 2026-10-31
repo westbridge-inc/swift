@@ -12,6 +12,7 @@ import { CountryConfigService, partnerRateFor, type PartnerRate } from '../count
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { previewTrial } from '../integrity/enforcement';
 import { TRIAL_DAYS, trialDaysFor } from './trial-length';
+import { assertStoreFeeTicked, chargedFor, storeFeeQuote } from '../partner/store-fee';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,12 @@ export type ActivationEntity = { riderId: string } | { driverId: string } | { ve
  *  trial is born on. */
 type ActivationPricing =
   | { existing: Subscription }
-  | { existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string; trialDays: number };
+  | {
+    existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string; trialDays: number;
+    /** [RETIER PR-A] A store: the first-step amount every sign-up was quoted; a fee born above it needs the owner's
+     *  tick at exactly that amount (partner/store-fee.ts). */
+    storeSignupAmount?: number;
+  };
 
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
@@ -129,26 +135,19 @@ export class SubscriptionService {
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
     if (vendor.subscription) return { existing: vendor.subscription };
 
-    const countryCode = vendor.owner.user.countryCode;
-    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
-    // A brand-new store has no catalogue yet, so it is born on the small tier
-    // and the weekly re-tier moves it up once its listings are counted. Each
-    // store is its own account with its own tier: how many other stores its
-    // owner has never changes its price (owner, 13 Oct 2026).
-    const isService = vendor.vendorType === 'SERVICE';
-    const priced = partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: 0 });
-    // [DEPT-PRICE · owner 29 Oct 2026] The trial, though, follows the tier the store's OWN catalogue reaches now, when
-    // Swift approves it: a NEW department-store signup gets 7 days, everyone else 14 (trial-length.ts). Counted as the
-    // weekly re-tier counts a lower tier — available now, or made unavailable or edited in the last 7 days — so hiding
-    // listings just before approval does not count them out. A service business has no catalogue to count.
-    const trialTier = isService ? priced.tier : partnerRateFor(tiers, {
-      kind: 'VENDOR', isService, activeListings: await db.item.count({
-        where: { vendorId, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(Date.now() - 7 * DAY_MS) } }] },
-      }),
-    }).tier;
+    // [RETIER PR-A · owner 30 Oct 2026] The fee is born on the step the store's OWN catalogue reaches now, when Swift
+    // approves it (partner/store-fee.ts storeFeeQuote), and so is the trial ([DEPT-PRICE · owner 29 Oct 2026]: a NEW
+    // department-store signup gets 7 days, everyone else 14, trial-length.ts). One count for both, as the weekly
+    // re-tier counts a lower tier — available now, or made unavailable or edited in the last 7 days — so hiding
+    // listings just before approval does not count them out. A service business has no catalogue: the services rate.
+    // Each store is its own account with its own tier: how many other stores its owner has never changes its price
+    // (owner, 13 Oct 2026). A fee above the first step is born only on its owner's tick at exactly that amount
+    // (createRow re-checks it under the activation locks).
+    const quote = await storeFeeQuote(db, vendorId);
+    const priced: PartnerRate = { rate: quote.cardRate, tier: quote.tier };
     return {
-      existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db),
-      trialDays: trialDaysFor({ tier: trialTier, storeCreatedAt: vendor.createdAt }),
+      existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: quote.currencyCode,
+      trialDays: trialDaysFor({ tier: quote.catalogueTier, storeCreatedAt: vendor.createdAt }), storeSignupAmount: quote.signupAmount,
     };
   }
 
@@ -224,7 +223,8 @@ export class SubscriptionService {
         ? await this.moverRow(entity, payer, activation, tx)
         : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx,
           // [BILL-PRO] A pro's trial is decided in their own user's tenant (stores keep STORE_TRIAL_TENANT, as before).
-          'serviceProviderId' in entity ? (await this.humanTenant(entity, tx)) : STORE_TRIAL_TENANT, activation.trialDays);
+          'serviceProviderId' in entity ? (await this.humanTenant(entity, tx)) : STORE_TRIAL_TENANT, activation.trialDays,
+          activation.existing ? undefined : activation.storeSignupAmount);
       return apply(tx, sub);
     };
     return '$transaction' in db ? db.$transaction(run) : run(db);
@@ -351,7 +351,7 @@ export class SubscriptionService {
 
   private async createRow(
     entity: ActivationEntity, type: SubscriptionType, weeklyRate: number, currencyCode: string,
-    tx: Prisma.TransactionClient, tenantId: string, trialDays: number,
+    tx: Prisma.TransactionClient, tenantId: string, trialDays: number, storeSignupAmount?: number,
   ) {
     const human = await this.humanFor(entity, tx);
     // [REVIEW-PARTNER · DL-5] No weekly fee is ever born for the store-review fiction: it has no
@@ -404,6 +404,11 @@ export class SubscriptionService {
     // is born on it or waits for it (REVIEW-M #2211 S4-4).
     if ('vendorId' in entity) await lockVendorActivationBilling(tx, human.userId);
     const deal = 'vendorId' in entity ? await chainDealFor(tx, entity.vendorId, weeklyRate, currencyCode) : null;
+    // [RETIER PR-A] The birth re-checks the owner's tick for the amount it is about to charge (the lower of the deal
+    // and the step, read under the locks above): above the first step, exactly that amount and currency, or nothing.
+    if ('vendorId' in entity && storeSignupAmount !== undefined) {
+      await assertStoreFeeTicked(tx, { vendorId: entity.vendorId, ownerUserId: human.userId, amount: chargedFor(weeklyRate, deal), currencyCode, signupAmount: storeSignupAmount });
+    }
     const sub = await tx.subscription.create({ data: {
       ...entity, type, weeklyRate, currencyCode, billingMethod: 'CASH', currentPeriodStart: now,
       status: trial ? 'TRIAL' : 'ACTIVE', isTrialActive: trial,

@@ -1,11 +1,11 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-const mock = vi.hoisted(() => ({ probe: vi.fn(), restore: vi.fn(), pro: vi.fn(), fee: vi.fn(), router: { replace: vi.fn() } }));
+const mock = vi.hoisted(() => ({ probe: vi.fn(), restore: vi.fn(), pro: vi.fn(), fee: vi.fn(), api: vi.fn(), router: { replace: vi.fn() } }));
 vi.mock('next/navigation', () => ({ useRouter: () => mock.router }));
-vi.mock('@/lib/auth', () => ({ sessionProbe: mock.probe, restoreSession: mock.restore, hasProviderProfile: mock.pro }));
+vi.mock('@/lib/auth', () => ({ sessionProbe: mock.probe, restoreSession: mock.restore, hasProviderProfile: mock.pro, apiFetch: mock.api }));
 vi.mock('@/lib/provider-fee-api', () => ({ getProviderFee: mock.fee }));
 import { WeeklyFeeDestination } from './weekly-fee-destination';
-beforeEach(() => { vi.resetAllMocks(); mock.restore.mockResolvedValue({ ok: false }); mock.pro.mockResolvedValue(false); mock.fee.mockResolvedValue(null); });
+beforeEach(() => { vi.resetAllMocks(); mock.restore.mockResolvedValue({ ok: false }); mock.pro.mockResolvedValue(false); mock.fee.mockResolvedValue(null); mock.api.mockResolvedValue({ data: null }); });
 describe('neutral weekly-fee destination', () => {
   it.each([['VENDOR', '/dashboard/weekly-fee'], ['RIDER', '/portal/weekly-fee'], ['DRIVER', '/portal/weekly-fee'], ['MOVER', '/portal/weekly-fee']])('routes %s from the session only', async (role, route) => {
     mock.probe.mockResolvedValue({ ok: true, user: { roles: [role] } });
@@ -66,5 +66,34 @@ describe('neutral weekly-fee destination', () => {
     mock.pro.mockResolvedValue(true);
     render(<WeeklyFeeDestination />);
     expect((await screen.findByRole('link', { name: 'Earner and service provider weekly fees' })).getAttribute('href')).toBe('/portal/weekly-fee');
+  });
+  // [REVIEW-M #2240 S4] Both fees' latest checkouts are read: the return goes to the NEWER one (a store owner who paid
+  // their pro fee and then their store fee within two hours lands on the store fee).
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  it('the store checkout is the newer: the store fee', async () => {
+    mock.probe.mockResolvedValue({ ok: true, user: { roles: ['VENDOR'] } });
+    mock.pro.mockResolvedValue(true);
+    mock.fee.mockResolvedValue({ data: { latestMmgCheckout: { createdAt: ago(30) } } });
+    mock.api.mockResolvedValue({ data: { latestMmgCheckout: { createdAt: ago(5) } } });
+    render(<WeeklyFeeDestination />);
+    await waitFor(() => expect(mock.router.replace).toHaveBeenCalledWith('/dashboard/weekly-fee'));
+    expect(mock.api).toHaveBeenCalledWith('/api/v1/vendor/subscription', undefined, { redirectOnExpired: false });
+  });
+  it('the pro checkout is the newer: the pro fee', async () => {
+    mock.probe.mockResolvedValue({ ok: true, user: { roles: ['VENDOR'] } });
+    mock.pro.mockResolvedValue(true);
+    mock.fee.mockResolvedValue({ data: { latestMmgCheckout: { createdAt: ago(5) } } });
+    mock.api.mockResolvedValue({ data: { latestMmgCheckout: { createdAt: ago(30) } } });
+    render(<WeeklyFeeDestination />);
+    await waitFor(() => expect(mock.router.replace).toHaveBeenCalledWith('/portal/weekly-fee'));
+  });
+  it('a store owner, earner and pro whose store checkout is the newer still chooses (an earner checkout is not read)', async () => {
+    mock.probe.mockResolvedValue({ ok: true, user: { roles: ['VENDOR', 'RIDER'] } });
+    mock.pro.mockResolvedValue(true);
+    mock.fee.mockResolvedValue({ data: { latestMmgCheckout: { createdAt: ago(30) } } });
+    mock.api.mockResolvedValue({ data: { latestMmgCheckout: { createdAt: ago(5) } } });
+    render(<WeeklyFeeDestination />);
+    expect(await screen.findByRole('link', { name: 'Business weekly fee' })).toBeTruthy();
+    expect(mock.router.replace).not.toHaveBeenCalled();
   });
 });

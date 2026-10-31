@@ -12,6 +12,8 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { amountDueNow } from '../modules/billing/amount-due';
+import { recordStoreFeeAck, storeFeeStanding } from '../modules/partner/store-fee';
+import { WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
@@ -90,7 +92,16 @@ async function addItems(vendorId: string, n: number, opts: { available?: boolean
     FROM generate_series(1, ${n}) AS g`;
 }
 
+/** [RETIER PR-A] Swift approves the store: a fee above the first step is born only on its owner's tick of that amount,
+ *  so the owner ticks what the store is shown first (as the app does), then the fee is born. */
 async function approve(vendorId: string) {
+  const fee = await storeFeeStanding(app.prisma, vendorId);
+  if (fee.required && !fee.ticked && fee.quote) {
+    await recordStoreFeeAck(app.prisma, {
+      userId: fee.quote.ownerUserId, vendorId, surface: 'web',
+      ack: { version: WEEKLY_FEE_ACK_VERSION, amount: fee.quote.amount, currencyCode: fee.quote.currencyCode },
+    });
+  }
   const sub = await subscriptions.startTrialForVendor(vendorId);
   subIds.push(sub.id);
   return app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
@@ -170,8 +181,8 @@ describe('trial length at approval — department stores 7 days (new signups), e
     expect(sub.status).toBe('TRIAL');
     expect(daysOf(sub)).toBe(7);
     expect(sub.nextBillingDate.getTime()).toBe(sub.trialEndDate!.getTime());
-    // The price it is born on is unchanged: the signup quote (the first step), never the department fee.
-    expect(Number(sub.weeklyRate)).toBe(15000);
+    // [RETIER PR-A] The price it is born on is its own catalogue's step, ticked by its owner first: the department fee.
+    expect(Number(sub.weeklyRate)).toBe(cardTop);
     const grant = await app.prisma.trialGrant.findFirstOrThrow({ where: { accountId: userId } });
     // The grant is stamped by the trial law a moment later in the same transaction: the same end, to the second.
     expect(Math.abs(grant.endsAt.getTime() - sub.trialEndDate!.getTime())).toBeLessThan(1000);

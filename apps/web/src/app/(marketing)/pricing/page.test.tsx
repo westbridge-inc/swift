@@ -157,7 +157,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
 
   it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
     await renderPage();
-    expect(document.body.textContent).toContain('Every store is its own account with its own weekly fee, however many stores its owner runs.');
+    // [WEBSITE 30 Oct] Shorter words, the same promise.
+    expect(document.body.textContent).toContain('Each store pays its own weekly fee, however many stores its owner runs.');
     // [REVIEW-F S3-1 on #2234] A store is priced at its first step whatever its catalogue (R27 off): never 'the rate for its own catalogue'.
     expect(document.body.textContent).not.toMatch(/rate for its own catalogue/);
     cleanup();
@@ -174,14 +175,15 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     const page = document.body.textContent!;
     expect(page).not.toMatch(/automatic/i);
     expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
-    expect(page).toContain('Today every new store starts on the Businesses rate (a services business on the Services rate), whatever the size of its catalogue, and Swift does not move a store to another rate as its active items change.');
+    // [WEBSITE 30 Oct] Shorter words, the same truth while R27 is off.
+    expect(page).toContain('Today every new store pays the Businesses rate (a services business pays the Services rate), whatever its size, and Swift does not move stores between rates.');
     expect(page).toContain('A rate agreed with Swift stays as agreed.');
   });
 
   it('[R27] names the first step the server lists, not a label frozen into the sentence', async () => {
     pricing = { ...GY, vendors: { ...GY.vendors, catalogue: [{ minItems: 0, tier: 'large', rate: 20000 }, { minItems: 10000, tier: 'department', rate: 45000 }] } };
     await renderPage();
-    expect(document.body.textContent).toContain('Today every new store starts on the Large catalogues rate (a services business');
+    expect(document.body.textContent).toContain('Today every new store pays the Large catalogues rate (a services business');
   });
 
   it('[R27] the sentence holds only while the server\'s weekly re-tier is off — turning it on must revisit this page', () => {
@@ -215,6 +217,31 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(screen.getByText(/could not load this week/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('$0');
     expect(screen.queryByRole('heading', { name: 'Services' })).toBeNull();
+  });
+});
+
+// [WEBSITE 30 Oct · owner] Plain words: short sentences, no em dash, and the note under the cards stays short.
+describe('[WEBSITE] the pricing page reads plainly', () => {
+  it('says the model in one short line and uses no em dash anywhere', async () => {
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).toContain('One flat weekly fee and no commission. Partners keep 100% of every sale, fare and tip, and customers pay Swift nothing.');
+    expect(page).not.toContain('—');
+  });
+
+  it('the note under the cards is three short sentences at most', async () => {
+    await renderPage();
+    const note = screen.getByText(/Today every new store pays/);
+    const sentences = (note.textContent ?? '').split(/(?<=\.)\s+/).filter(Boolean);
+    expect(sentences.length).toBeLessThanOrEqual(3);
+    expect(note.textContent).not.toMatch(/taxi rate whatever the vehicle/);
+  });
+
+  it('the fallback, with no rates, has no em dash either', async () => {
+    pricing = null;
+    await renderPage();
+    expect(document.body.textContent).toMatch(/could not load this week/);
+    expect(document.body.textContent).not.toContain('—');
   });
 });
 

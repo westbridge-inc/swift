@@ -103,6 +103,7 @@ import { requireStepUp } from '../auth/step-up';
 import { BRANCH_TIER, PartnerService, branchLimit } from '../partner/partner.service';
 import { assertStoreNameAllowed, businessSchema, weeklyFeeAckSchema } from '../partner/business-input';
 import { assertWeeklyFeeAck, signupQuote, weeklyFeeTerms, WEEKLY_FEE_ACK_VERSION } from '../partner/weekly-fee-ack';
+import { recordStoreFeeAck, storeFeeStanding, storeFeeWhy } from '../partner/store-fee';
 import { chainTrialPreview } from '../subscription/subscription.service';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink, nextMoneySurfaceHoldHours } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
@@ -1908,6 +1909,61 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     reply.code(recorded ? 201 : 200);
     return { success: true, data: { foodHandlers: { vendorId: vendor.id, attested: true, version: FOOD_HANDLERS_VERSION }, status: await verification.getStatus(userId, 'RESTAURANT') } };
+  });
+
+  /**
+   * [RETIER PR-A · owner 30 Oct 2026] GET /onboarding/weekly-fee — the selected store's weekly fee as it would be born
+   * now (partner/store-fee.ts): the amount and currency, the step its own catalogue reaches and the items counted, a
+   * chain deal under it, whether the owner must tick it before the store goes live (above the first step), whether
+   * they have, and the words they tick (the sign-up's versioned weekly-fee words). A store that already has its fee
+   * answers `set: true` and nothing to tick. Owner only. Reads only.
+   */
+  app.get('/onboarding/weekly-fee', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const fee = await storeFeeStanding(app.prisma, vendorId);
+    const quote = fee.quote;
+    return {
+      success: true,
+      data: {
+        vendorId,
+        set: quote === null,
+        weeklyFee: quote ? { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier, version: WEEKLY_FEE_ACK_VERSION } : null,
+        cardRate: quote?.cardRate ?? null,
+        items: quote?.items ?? null,
+        dealRate: quote?.dealRate ?? null,
+        why: quote ? storeFeeWhy(quote) : null,
+        required: fee.required,
+        ticked: fee.required && fee.ticked,
+        terms: weeklyFeeTerms(),
+      },
+    };
+  });
+
+  /**
+   * [RETIER PR-A · owner 30 Oct 2026] POST /onboarding/weekly-fee — the owner ticks "I understand the weekly fee" for
+   * the selected store at exactly the amount and currency it would be born on now (WEEKLY_FEE_CHANGED otherwise, and
+   * nothing is written). A row in the consent ledger (append-only): who, which store, the words' version and hash, the
+   * amount, the step and the items counted. A store waiting only for it goes live now (the activation projection), not
+   * at the next daily belt. Refused once the store has its fee (its changes follow the 14-day notice). The same amount
+   * again changes nothing. Owner only; the body names the store (`vendorId`), which must be the store this request is for.
+   */
+  app.post('/onboarding/weekly-fee', { ...auth, config: { rateLimit: { max: 20, timeWindow: '1 hour' } } }, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const userId = request.user.userId;
+    const body = z.object({ vendorId: z.string().min(1).max(64), weeklyFeeAck: weeklyFeeAckSchema }).strict().parse(request.body ?? {});
+    // [REVIEW · store binding] The tick names the store it was shown for; the store this request resolves to must be that
+    // one, or nothing is written (an account naming a store that is not its own resolves to its own).
+    if (body.vendorId !== vendorId) {
+      throw new AppError(409, 'STORE_FEE_STORE_MISMATCH', 'This weekly fee is for another store. Open that store and read its weekly fee again.');
+    }
+    const { recorded, quote } = await recordStoreFeeAck(app.prisma, { userId, vendorId, ack: body.weeklyFeeAck, surface: consentSurfaceOf(request), ip: request.ip });
+    if (recorded) {
+      // A failure here never undoes the tick: the daily belt makes the store live.
+      await verification.reprojectVendorActivation(userId)
+        .catch((err) => request.log.warn({ err, vendorId }, 'go-live projection after the weekly fee tick is held for the belt'));
+    }
+    reply.code(recorded ? 201 : 200);
+    return { success: true, data: { vendorId, weeklyFee: { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier }, ticked: true } };
   });
 
   /**

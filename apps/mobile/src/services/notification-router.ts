@@ -348,6 +348,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant ticks that everyone who handles its food holds a current
   // food handler's certificate: the tick is in the store's Documents, on Account.
   if (kind === 'vendor_needs_food_handler_tick') return { screen: 'VendorRoot', params: { screen: 'Account' } };
+  // [RETIER PR-A · owner 30 Oct 2026] A store whose weekly fee follows its catalogue (above the first step) goes live
+  // once its owner reads and ticks that fee: the store's go-live steps, with its Documents, on Account.
+  if (kind === 'vendor_needs_weekly_fee_tick') return { screen: 'VendorRoot', params: { screen: 'Account' } };
   // [PUSH-ROUTING] STORE SURFACES, on VendorRoot after the router selects the
   // store (go() validates the account and the store first). Stock ran low, or a
   // category the store asked for was added, mapped or declined: the catalogue

@@ -26,7 +26,8 @@
     "/portal/documents/page": 149,
     "/portal/weekly-fee/page": 154,
     "/portal/account/page": 146,
-    "/advertiser/page": 144
+    "/advertiser/page": 144,
+    "/(marketing)/launching-soon/page": 113
   },
   "raisedBecause": {
     "/(app)/store/[slug]/page": "[BOOK-S6b 29 Oct] +1 kB: web customer booking (owner C3). The sheet, time picker and held time load on tap; what stays is the Book button, its sign-in path and the lazy loader (measured 166.6 kB; main 165.7).",
