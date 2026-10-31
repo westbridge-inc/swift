@@ -1,7 +1,7 @@
 import type { Prisma, VehicleType } from '@prisma/client';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { formatMoney } from '../../utils/currency-amount';
-import { endOfGuyanaDay, formatGuyanaTime, guyanaDayKey } from '../../utils/guyana-day';
+import { formatGuyanaTime, guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // [F2 · GUARDRAILS §7 standing rule 2 · Mover and Business Agreements F2]
@@ -182,18 +182,21 @@ export function riseAppliesFrom(nextBillingDate: Date, noticeAt: Date, notBefore
   return firstFeeOnOrAfter(nextBillingDate, new Date(Math.max(notice, notBefore ? notBefore.getTime() : notice)));
 }
 
-/** [RETIER PR-B · REVIEW-F/M #2259 S3-1] A store's weekly re-tier rise (CATALOGUE) told for the weekly fee due
- *  `appliesFrom`: the last day the store may bring its count back under the step is the day (in Guyana) a week before
- *  it, as its notice says. The count keeps items taken off sale, changed or removed in the last 7 days, so a cut made
- *  later would still count when the rise moves in. */
-export function retierLastCutDay(appliesFrom: Date): Date {
-  return new Date(appliesFrom.getTime() - 7 * DAY_MS);
+/** [RETIER PR-B · REVIEW-F/M #2259 S3-1 · COORD 03:50Z: ONE rule for the gate and the notice] A store's weekly
+ *  re-tier rise (CATALOGUE) told for the weekly fee due `appliesFrom` moves in no sooner than the first moment of the
+ *  day (Guyana) that fee is due: every pass that could move it in (the paid week, the hourly sweep, the billing run
+ *  before it charges that fee) counts the store at that moment or later, on the week's rule (items for sale, and items
+ *  taken off sale, changed or removed in the last 7 days). */
+export function retierMovesInFrom(appliesFrom: Date): Date {
+  return startOfGuyanaDay(guyanaDayKey(appliesFrom));
 }
 
-/** ... and the rise moves in no sooner than the first moment after that day ends (Guyana): the paid-week and hourly
- *  passes count the store then, so a store under the step by the end of that day, and still under, is never moved. */
-export function retierMovesInFrom(appliesFrom: Date): Date {
-  return new Date(endOfGuyanaDay(guyanaDayKey(retierLastCutDay(appliesFrom))).getTime() + 1);
+/** ... so the TRUE last moment a store can act is 7 days before that: the end of the day (Guyana) 8 days before the
+ *  fee's day, as its notice says. Items for sale under the step by then, nothing added and nothing taken off sale
+ *  changed after it, and the count at the move-in is under the step. A 14-day notice (appliesFrom is at least 14 days
+ *  and an hour after the notice) leaves at least 6 days after the notice to act (pinned). */
+export function retierCutBy(appliesFrom: Date): Date {
+  return new Date(retierMovesInFrom(appliesFrom).getTime() - 7 * DAY_MS - 1);
 }
 
 /** "Thursday 5 November", the day in Guyana. */
@@ -229,8 +232,9 @@ const CATALOGUE_COUNT_PHRASE = 'taken off sale, changed or removed in the last 7
  * reached a higher step), the new fee and from which weekly fee, that nothing changes until then, how to bring it
  * back down, and how to say no. True with the re-tier's own rules [REVIEW-F/M #2259 S3-1]: Swift counts a store's
  * items each week (every listing for sale, and every one taken off sale, changed or removed in the last 7 days); a
- * store whose count is under the step by the end of the told last day (retierLastCutDay) and stays under is never
- * moved (the rise moves in no sooner: retierMovesInFrom) and is told so. A mover's lower vehicle moves the fee only
+ * store with fewer items for sale than the step by the end of the told day (retierCutBy), adding nothing and changing
+ * nothing it took off sale after it, is under the step when the rise could move in (retierMovesInFrom) and is never
+ * moved; it is told so. A mover's lower vehicle moves the fee only
  * once seen on two weekly counts a week apart (billing.service retierInTx). [REVIEW-G #2259 S4-2] A store's notice
  * names the store (an owner may have several), in the words of a chain branch's notice.
  */
@@ -243,10 +247,11 @@ export function retierRiseCopy(p: { from: number; to: number; currencyCode: stri
     ? `${store ?? 'Your store'} now has ${p.basis.items.toLocaleString('en-US')} items for sale, which is the ${tier} rate.`
     : `Your vehicle on Swift is now a ${VEHICLE_CLASSES[p.basis.vehicleType as VehicleType]?.label ?? p.basis.vehicleType}, which is the ${tier} rate.`;
   const when = p.date ? `From ${its} weekly fee due ${feeRiseDay(p.date)}` : `From ${its} first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`;
-  const cut = p.date ? `by the end of ${feeRiseDay(retierLastCutDay(p.date))}` : 'a full week before the new fee starts';
+  const cut = p.date ? `by the end of ${feeRiseDay(retierCutBy(p.date))}` : 'by the end of the eighth day before the new fee is due';
   const down = p.basis.kind === 'CATALOGUE'
     ? `Swift counts the items in ${store ?? 'your store'} every week: items for sale, and items ${CATALOGUE_COUNT_PHRASE}. `
-      + `If that count is under ${p.basis.stepFrom.toLocaleString('en-US')} ${cut} and stays under, this change will not happen, and we will tell you.`
+      + `To stop this change, have fewer than ${p.basis.stepFrom.toLocaleString('en-US')} items for sale ${cut}, and from then on add no items and leave the ones you took off sale or removed as they are: `
+      + 'this change will then not happen, and we will tell you.'
     : 'Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down after Swift has seen the smaller vehicle on two weekly counts, a week apart, and we will tell you.';
   const no = store
     ? `If you do not want the new fee for ${store}, tap Stop weekly billing on ${store}'s weekly-fee screen in Swift before then and you will not pay it.`

@@ -9,7 +9,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { WEEKLY_RETIER_ON } from '../modules/billing/weekly-retier';
-import { FEE_RISE_NOTICE_DAYS, feeRiseKey, holdChainDealRiseInTx, readHeldFeeRise, retierMovesInFrom } from '../modules/billing/fee-rise-notice';
+import { FEE_RISE_NOTICE_DAYS, feeRiseKey, holdChainDealRiseInTx, readHeldFeeRise, retierCutBy, retierMovesInFrom, riseAppliesFrom } from '../modules/billing/fee-rise-notice';
 import { CATALOGUE_COUNT_WORDS } from '../modules/partner/store-fee';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -229,16 +229,17 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
     expect(notice!.type).toBe('SYSTEM_ANNOUNCEMENT');
     // [REVIEW-G #2259 S4-2] The notice names the store (an owner may have several) and opens THAT store's fee screen.
     expect(notice!.title).toBe(`${s.name}: your weekly fee is changing`);
-    // [REVIEW-F/M #2259 S3-1] How to come down is the rule the code runs: the count includes items taken off sale,
-    // changed or removed in the last 7 days, and it must be under the step by the end of the day a week before the
-    // new fee (the rise moves in no sooner), so a store that cuts in the last 7 days is never promised a cancel.
-    const lastCutDay = new Date(firstNewFee.getTime() - WEEK);
+    // [REVIEW-F/M #2259 S3-1 · COORD 03:50Z] How to come down is the rule the code runs: the rise moves in no sooner
+    // than the day its new fee is due, counting items taken off sale, changed or removed in the 7 days before, so the
+    // day to act by is the end of the day 8 days before the new fee's day.
+    const lastCutDay = new Date(firstNewFee.getTime() - 8 * DAY);
     expect(notice!.body).toBe(
       `${s.name} now has ${largeFloor.toLocaleString('en-US')} items for sale, which is the large catalogue rate. `
       + `From its weekly fee due ${guyanaDay(firstNewFee)}, its Swift weekly fee will be ${money(large)} (it is ${money(small)} now). `
       + 'Until then nothing changes, and any week already paid keeps the price paid. '
       + `Swift counts the items in ${s.name} every week: items for sale, and items taken off sale, changed or removed in the last 7 days. `
-      + `If that count is under ${largeFloor.toLocaleString('en-US')} by the end of ${guyanaDay(lastCutDay)} and stays under, this change will not happen, and we will tell you. `
+      + `To stop this change, have fewer than ${largeFloor.toLocaleString('en-US')} items for sale by the end of ${guyanaDay(lastCutDay)}, and from then on add no items and leave the ones you took off sale or removed as they are: `
+      + 'this change will then not happen, and we will tell you. '
       + `If you do not want the new fee for ${s.name}, tap Stop weekly billing on ${s.name}'s weekly-fee screen in Swift before then and you will not pay it.`,
     );
     // One phrase for the count everywhere (partner/store-fee.ts prices a new store on the same rule).
@@ -259,12 +260,16 @@ describe('[RETIER PR-B] a store that grew: one notice 14 days ahead, the new fee
     expect(await rate(s.subId)).toBe(small);
     expect(await tierChanges(s.subId)).toHaveLength(0);
 
-    // The weeks before the told date are billed: the next fee is the told one. Until the told last day to cut is over
-    // the new fee does not move in (the store may still bring its count under the step) ...
+    // The weeks before the told date are billed: the next fee is the told one. Until the day the new fee is due the
+    // new fee does not move in (the store is counted then, on the last 7 days) ...
     await reachToldFee(s.subId);
     const movesIn = retierMovesInFrom(firstNewFee);
-    expect(movesIn.getTime()).toBeGreaterThan(lastCutDay.getTime());
-    expect(movesIn.getTime()).toBeLessThanOrEqual(lastCutDay.getTime() + DAY);
+    expect(movesIn.getTime()).toBeLessThanOrEqual(firstNewFee.getTime());
+    expect(movesIn.getTime()).toBeGreaterThan(firstNewFee.getTime() - DAY);
+    expect(guyanaDay(movesIn)).toBe(guyanaDay(firstNewFee));
+    // ... and the told day to act by ends exactly 7 days before that moment.
+    expect(retierCutBy(firstNewFee).getTime()).toBe(movesIn.getTime() - WEEK - 1);
+    expect(guyanaDay(retierCutBy(firstNewFee))).toBe(guyanaDay(lastCutDay));
     await billing.sweepFeeRises(new Date(t.getTime() + 2 * DAY), scope());
     await billing.sweepFeeRises(new Date(movesIn.getTime() - 1), scope());
     expect(await rate(s.subId)).toBe(small);
@@ -352,6 +357,47 @@ describe('[RETIER PR-B] back under the step before the new fee starts: the chang
     expect(await heldOf(s.subId)).toBeNull();
     expect((await audits(s.subId, 'BILLING_FEE_RISE_DROPPED')).map((a) => a.changes)).toEqual([expect.objectContaining({ told: true, why: 'BELOW_AGAIN' })]);
     expect((await notices(s.userId)).map((n) => n.title)).toEqual(toldThenCancelled(s.name));
+  });
+
+  it('(COORD 03:50Z) one rule: a store under the step for sale by the end of the told day is NOT charged the new fee; one that cuts a moment later IS', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    const onTime = await makeStore({ weeklyRate: small, due, items: largeFloor, prepaid: 0 });
+    const late = await makeStore({ weeklyRate: small, due, items: largeFloor, prepaid: 0 });
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
+    for (const s of [onTime, late]) {
+      const firstNewFee = await reachToldFee(s.subId);
+      const told = (await notices(s.userId))[0]!;
+      const cutBy = retierCutBy(firstNewFee);
+      expect(told.body).toContain(`have fewer than ${largeFloor.toLocaleString('en-US')} items for sale by the end of ${guyanaDay(cutBy)},`);
+      // On time: the 10 items come off sale in the last moment of the told day. Late: one millisecond after it.
+      await hideAt(s.vendorId, 10, s === onTime ? cutBy : new Date(cutBy.getTime() + 1));
+      // The billing run on the day the new fee is due: it applies held rises, then charges that week (paid from the
+      // credit topped up after the move-in: credit held before it would keep the old price for a week, by design).
+      await billing.sweepFeeRises(retierMovesInFrom(firstNewFee), scope());
+      await app.prisma.prepaidBalance.update({ where: { subscriptionId: s.subId }, data: { balance: large } });
+      expect(await bill(s.subId, new Date(firstNewFee.getTime() + 60_000))).toBe('succeeded');
+      const charged = await app.prisma.subscriptionPayment.findFirst({ where: { subscriptionId: s.subId, periodStart: firstNewFee, status: 'CAPTURED' } });
+      expect(Number(charged!.amount)).toBe(s === onTime ? small : large);
+      expect(await rate(s.subId)).toBe(s === onTime ? small : large);
+    }
+    expect((await notices(onTime.userId)).map((n) => n.title)).toEqual(toldThenCancelled(onTime.name));
+    expect((await notices(late.userId)).map((n) => n.title)).toEqual([`${late.name}: your weekly fee is changing`]);
+  });
+
+  it('(COORD 03:50Z) the told day to act by is always after the notice: a 14-day notice leaves at least 6 days, and it ends at least 7 days before the new fee is due', () => {
+    const base = Date.UTC(2026, 10, 2, 0, 0, 0);
+    for (let noticeH = 0; noticeH < 7 * 24; noticeH += 1) {
+      const noticeAt = new Date(base + noticeH * 3_600_000 + 17 * 60_000);
+      for (let nextH = -24; nextH < 21 * 24; nextH += 5) {
+        const appliesFrom = riseAppliesFrom(new Date(base + nextH * 3_600_000), noticeAt);
+        const cutBy = retierCutBy(appliesFrom).getTime();
+        expect(cutBy - noticeAt.getTime()).toBeGreaterThanOrEqual(6 * DAY);
+        expect(appliesFrom.getTime() - cutBy).toBeGreaterThanOrEqual(WEEK);
+        expect(retierMovesInFrom(appliesFrom).getTime()).toBeLessThanOrEqual(appliesFrom.getTime());
+      }
+    }
   });
 
   it('(REVIEW-M #2259 S3-1 · REVIEW-G S4-1 G3) cut in the last 7 days before the new fee moves in: the cut still counts, the new fee moves in', async () => {

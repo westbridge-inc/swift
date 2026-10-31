@@ -5648,10 +5648,11 @@ export class BillingService {
     const appliesFrom = new Date(held.appliesFrom);
     if (sub!.nextBillingDate.getTime() < appliesFrom.getTime()) return 'waiting';
     // [RETIER PR-B · owner 30 Oct 2026] A store's re-tier rise moves in only while the store still reaches its step:
-    // counted as the weekly pass counts a lower tier (the week's largest catalogue). [REVIEW-F/M #2259 S3-1] Its notice
-    // told the store the last day it may cut (a week before the new fee: the count keeps the last 7 days), so the rise
-    // never moves in before that day is over; under the step then, the change does not happen (dropped by the hourly
-    // pass, and the partner told). A count the market's card cannot price moves nothing in: the rise waits, loudly.
+    // counted as the weekly pass counts a lower tier (the week's largest catalogue). [REVIEW-F/M #2259 S3-1 · COORD
+    // 03:50Z: one rule] It never moves in before the day its new fee is due (retierMovesInFrom), and its notice told
+    // the store the last day to act, 7 days before that (retierCutBy: the count keeps the last 7 days); under the step
+    // then, the change does not happen (dropped by the hourly pass, and the partner told). A count the market's card
+    // cannot price moves nothing in: the rise waits, loudly.
     if (held.source === 'WEEKLY_RETIER' && held.basis?.kind === 'CATALOGUE') {
       if (now.getTime() < retierMovesInFrom(appliesFrom).getTime()) return 'waiting';
       const reach = sub!.vendorId ? await this.storeReachesRise(tx, subscriptionId, sub!.vendorId, held, now) : 'unknown';
