@@ -42,8 +42,9 @@ export function vatStatusLine(v: StoreVatView): string {
  * certificate itself; a person at Swift checks it, and only then do prices say "incl. VAT" and receipts name the store
  * as the one charging VAT. [VAT-DOCS · owner 30 Oct 2026] The store also says how its prices relate to VAT ("my prices
  * do not include VAT": once approved, the VAT goes into each standard-rated price customers see), and a store that
- * has not said yes yet sends the number, the choice and the certificate in ONE submission. The store's documents are
- * uploaded in the Swift app; on the web this card is the optional "VAT certificate (only if VAT-registered)" document.
+ * has not said yes yet sends the number, the choice and the certificate in ONE submission. The store's other documents
+ * are uploaded under Documents ([OPEN-EARLY PR-2] /dashboard/documents, or the Swift app); this card is the optional
+ * "VAT certificate (only if VAT-registered)" document, which the Documents page points to.
  * Hidden while Swift's VAT switch is off, unless the store already has a VAT record to show. [owner ruling 31 Oct 2026]
  * An APPROVED store that changes its choice is told a person checks the change first; until then its prices stay as they
  * are (the server keeps the change waiting, `modeRequested`).

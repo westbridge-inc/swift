@@ -19,17 +19,18 @@ describe('branches', () => {
 
   it('the owner\'s steps, each with where it is done; none on Swift\'s turn; unknown steps left out', () => {
     expect(ownerSteps({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS', 'PUBLISHED_PHONE', 'FOOD_HANDLERS', 'NEW_THING'] } })).toEqual([
-      { words: 'Add the documents it still needs, in the Swift app under Documents', where: 'app' },
+      { words: 'Add the documents it still needs, under Documents', where: 'documents' },
       { words: 'Add the number customers can call', where: 'settings' },
       { words: 'Confirm your food handlers', where: 'settings' },
     ]);
     expect(ownerSteps({ status: 'PENDING_APPROVAL', goLive: { waitingFor: 'SWIFT', steps: ['DOCUMENTS'] } })).toEqual([]);
     expect(ownerSteps({ status: 'ACTIVE', goLive: { waitingFor: 'OWNER', steps: ['DOCUMENTS'] } })).toEqual([]);
     expect(BRANCH_IS_CHECKED).not.toMatch(/You’ll see it as waiting for Swift’s approval/);
-    // [REVIEW-F #2220 f710ebda S4-1] A documents-only branch has no button on the website (documents are added in the
-    // Swift app), so the promise is what is left and where, never a button.
+    // [REVIEW-F #2220 f710ebda S4-1] The promise is what is left and where, never a button. [OPEN-EARLY PR-2] Documents are
+    // sent on this website too (a store's Documents page), so nothing points to the Swift app any more.
     expect(BRANCH_IS_CHECKED).not.toMatch(/button/);
-    expect(BRANCH_IS_CHECKED).toBe('A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what is left and where: on this website, or in the Swift app for documents.');
+    expect(BRANCH_IS_CHECKED).not.toMatch(/Swift app/);
+    expect(BRANCH_IS_CHECKED).toBe('A person at Swift checks every new branch before it goes live. If a branch still needs something from you first, the Branches page says what is left and where to do it on this website.');
   });
 
   it('the shared trial holds only if Swift approves the branch before it ends; with no running trial, billed from approval', () => {

@@ -110,14 +110,25 @@ describe('[CHAINS] the Branches page', () => {
     expect(await screen.findByText('Royal West · not live yet: finish setting it up')).toBeTruthy();
     expect(screen.queryByText('Royal West · waiting for Swift’s approval')).toBeNull();
     expect(screen.getByText('Add the number customers can call')).toBeTruthy();
-    expect(screen.getAllByText('Add the documents it still needs, in the Swift app under Documents')).toHaveLength(2);
+    expect(screen.getAllByText('Add the documents it still needs, under Documents')).toHaveLength(2);
     expect(screen.queryByRole('button', { name: "Finish in Royal East's Settings" })).toBeNull();
-    // documents are added in the Swift app: named, with no Settings button that could not finish them
+    // [OPEN-EARLY PR-2] documents are sent on this website: a documents-only branch gets its Documents button, no Settings one
     expect(screen.getByText('Royal South · not live yet: finish setting it up')).toBeTruthy();
     expect(screen.queryByRole('button', { name: "Finish in Royal South's Settings" })).toBeNull();
+    expect(screen.getByRole('button', { name: "Open Royal South's Documents" })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: "Open Royal East's Documents" })).toBeNull();
     await user.click(screen.getByRole('button', { name: "Finish in Royal West's Settings" }));
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/dashboard/settings'));
     expect((await import('@/lib/auth')).getSelectedStore()).toBe('west');
+  });
+
+  // [OPEN-EARLY PR-2] A branch waiting for its documents: the button opens THAT branch's Documents on the website.
+  it('a branch waiting for its documents opens its own Documents page', async () => {
+    api();
+    const { user } = renderWithQuery(<BranchesPage />);
+    await user.click(await screen.findByRole('button', { name: "Open Royal South's Documents" }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/dashboard/documents'));
+    expect((await import('@/lib/auth')).getSelectedStore()).toBe('south');
   });
 
   it('several branches at once offers live branches only (REVIEW-F N1)', async () => {

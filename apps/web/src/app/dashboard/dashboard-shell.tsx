@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BarChart3, Calendar, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, Calendar, Check, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import type { ShellPerson } from '@/components/customer-shell';
@@ -24,7 +24,9 @@ import { branchLabel } from '@/lib/branch-label';
  * it as "Availability" and have no Insights, exactly as in the app. A Services
  * store's owners and managers also get Schedule after Orders (the app's R1 tab:
  * a Services store runs its day from a booking agenda). Weekly fee, bulk import
- * and hours are reached from the Orders home and Account.
+ * and hours are reached from the Orders home and Account. [OPEN-EARLY PR-2] The store's owner also has Documents
+ * (the phone's Account → Documents, owner only), in the rail and the menu but not the phone dock. Its icon is one
+ * every console page already loads (Check), so no page grows past its first-load ceiling (scripts/perf-budget.json).
  */
 export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined, vendorType?: string) => {
   const manager = role === 'OWNER' || role === 'MANAGER';
@@ -33,6 +35,7 @@ export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | 
     ...(manager && vendorType === 'SERVICE' ? [{ href: '/dashboard/schedule', label: 'Schedule', icon: Calendar, exact: false }] : []),
     { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
     ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
+    ...(role === 'OWNER' ? [{ href: '/dashboard/documents', label: 'Documents', icon: Check, exact: false, dock: false }] : []),
     // Account is the store's settings page until the app's Account screen lands (PR D).
     { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
   ];

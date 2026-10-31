@@ -300,6 +300,17 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* [OPEN-EARLY PR-2] The store's documents (owner only, as the phone's Account → Documents). */}
+      {isOwner && (
+        <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-bold">Documents</h2>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Upload your store&apos;s documents and renewals, and see where each one stands.</p>
+          </div>
+          <Link href="/dashboard/documents" className="sw-chip">Documents</Link>
+        </div>
+      )}
+
       {/* [CHAINS PR2] The team (owner) and the branches (owner and managers); the phone has them under Account. */}
       {seesBranches && (
         <div className="sw-card flex flex-wrap items-center gap-3 p-6">

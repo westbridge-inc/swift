@@ -10,7 +10,7 @@ import { storeKey } from '@/lib/store-scope';
 /**
  * [RETIER PR-A2 · owner 30 Oct 2026] A new store's weekly fee follows its own catalogue when Swift approves it. Above
  * the first step, the store goes live only after its owner reads that exact fee and ticks "I understand the weekly
- * fee" for it — here, or in the Swift app under Documents. OWNER only, for the store named (read and ticked with that
+ * fee" for it — here, or under Documents (this website or the Swift app). OWNER only, for the store named (read and ticked with that
  * store's id; an answer about another store shows nothing). The tick is given to the exact fee on screen: if another
  * amount, currency or version arrives, or the save fails, the box empties. The server records the tick only for its
  * own current quote. A read that failed (or an answer that says a tick is needed but cannot be read) shows that it

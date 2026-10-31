@@ -158,7 +158,7 @@ export default function OrdersPage() {
     </>}
     {manager ? <ManageGrid store={store.data} owner={role === 'OWNER'} onOrderHistory={() => setBucket('done')} /> : <StaffAvailability />}
     {store.data && <div className="grid gap-4 wide:grid-cols-2">
-      <StoreStatusCard store={store.data} manager={manager} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
+      <StoreStatusCard store={store.data} manager={manager} owner={role === 'OWNER'} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
       {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
       {/* [STORE-DASH · O-2] Shown once the server serves the setting. */}
       {manager && storeLive && typeof store.data.requirePickupCode === 'boolean' && <PickupCodeCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}

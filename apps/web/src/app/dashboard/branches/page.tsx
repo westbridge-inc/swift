@@ -89,8 +89,9 @@ export default function BranchesPage() {
     }
     router.push('/dashboard/orders');
   };
-  /** [REVIEW-F #2220 S3-1] Open the branch's own Settings, where its number customers can call and its food handlers tick are given. */
-  const finishAt = async (id: string) => {
+  /** [REVIEW-F #2220 S3-1] Open the branch's own Settings, where its number customers can call and its food handlers tick are
+   *  given, or [OPEN-EARLY PR-2] its own Documents, where its documents are sent. */
+  const finishAt = async (id: string, page: '/dashboard/settings' | '/dashboard/documents' = '/dashboard/settings') => {
     if (id !== storeId) {
       const switched = await switchStore(queryClient, {
         from: storeId, to: id, commit: setSelectedStore,
@@ -98,7 +99,7 @@ export default function BranchesPage() {
       });
       if (!switched) return;
     }
-    router.push('/dashboard/settings');
+    router.push(page);
   };
 
   const current = list.find((s) => s.id === storeId);
@@ -129,6 +130,9 @@ export default function BranchesPage() {
                   )}
                   {waitingFor(s) === 'OWNER' && steps.some((step) => step.where === 'settings') && (
                     <button type="button" className="sw-chip" onClick={() => void finishAt(s.id)}>Finish in {s.name}&apos;s Settings</button>
+                  )}
+                  {waitingFor(s) === 'OWNER' && steps.some((step) => step.where === 'documents') && (
+                    <button type="button" className="sw-chip" onClick={() => void finishAt(s.id, '/dashboard/documents')}>Open {s.name}&apos;s Documents</button>
                   )}
                 </li>
               );

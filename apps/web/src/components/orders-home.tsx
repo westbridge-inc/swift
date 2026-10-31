@@ -375,7 +375,7 @@ function ReadFailed({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-export function StoreStatusCard({ store, manager, readFailed = false, onRetryRead = () => {} }: { store: HubStore; manager: boolean; readFailed?: boolean; onRetryRead?: () => void }) {
+export function StoreStatusCard({ store, manager, owner = false, readFailed = false, onRetryRead = () => {} }: { store: HubStore; manager: boolean; owner?: boolean; readFailed?: boolean; onRetryRead?: () => void }) {
   const storeId = useStoreId();
   const client = useQueryClient();
   // The server FLIPS the stored value (it ignores the body), so a second tap
@@ -438,6 +438,8 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
         <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || locked} onClick={() => openMut.mutate(!open)}
           className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
+      {/* [OPEN-EARLY PR-2] A store not live yet: its owner sends its documents on this website (Documents). */}
+      {owner && inPreview && <Link href="/dashboard/documents" className="sw-btn sw-btn-md mt-4 w-full">Upload your documents</Link>}
       {manager && !inPreview && (
         <button type="button" disabled={locked} onClick={() => ordersMut.mutate(!accepting)} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getFoodHandlers, tickFoodHandlers } from '@/lib/food-handlers-api';
 import { storeKey } from '@/lib/store-scope';
@@ -33,7 +34,8 @@ export function FoodHandlersCard({ storeId, isOwner, vendorType }: { storeId: st
         <>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             Instead of uploading a certificate, confirm it for the people who handle food at {store.name}. You can still
-            add your own food handler&apos;s certificate in the app under Documents — customers see it on your store page.
+            add your own food handler&apos;s certificate under{' '}
+            <Link href="/dashboard/documents" className="font-semibold text-[var(--swift-red)]">Documents</Link> — customers see it on your store page.
           </p>
           <label className="mt-3 flex items-start gap-2 text-sm">
             <input type="checkbox" checked={ticked} onChange={(e) => setTicked(e.target.checked)} className="mt-0.5" />

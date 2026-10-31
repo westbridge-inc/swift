@@ -333,6 +333,27 @@ describe('the store controls read the real server state', () => {
     expect(screen.queryByRole('button', { name: /Pause new orders|Resume orders/ })).toBeNull();
     expect(screen.queryByRole('switch', { name: 'Deliver my own orders' })).toBeNull();
   });
+
+  // [OPEN-EARLY PR-2 · owner 31 Oct 2026] Partners sign up on the website before the apps are out: a store not live yet
+  // shows its OWNER the way to send its documents here; a manager or staff login is never offered it (owner only).
+  it('a store not live yet shows its owner "Upload your documents" (Documents on this website); nobody else', async () => {
+    hubApi({ status: 'PENDING_REVIEW', open: false });
+    const { unmount } = renderWithQuery(<OrdersPage />);
+    expect(await screen.findByText('Not open yet')).toBeTruthy();
+    expect((await screen.findByRole('link', { name: 'Upload your documents' })).getAttribute('href')).toBe('/dashboard/documents');
+    unmount();
+    for (const role of ['MANAGER', 'STAFF'] as const) {
+      hubApi({ status: 'PENDING_REVIEW', open: false, role });
+      const view = renderWithQuery(<OrdersPage />);
+      expect(await screen.findByText('Not open yet')).toBeTruthy();
+      expect(screen.queryByRole('link', { name: 'Upload your documents' })).toBeNull();
+      view.unmount();
+    }
+    hubApi({ status: 'ACTIVE' });
+    renderWithQuery(<OrdersPage />);
+    expect(await screen.findByRole('switch', { name: 'Store open to customers' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Upload your documents' })).toBeNull();
+  });
 });
 
 describe('MMG orders on the board follow the app', () => {
