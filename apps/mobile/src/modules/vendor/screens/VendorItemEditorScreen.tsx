@@ -52,7 +52,7 @@ import {
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
-import { vatClassChoices, type VatClass } from '../../../lib/storeVat';
+import { beforeVatNote, editablePrice, itemPricePayload, vatClassChoices, type VatClass } from '../../../lib/storeVat';
 import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
@@ -414,7 +414,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const save = useSaveItem();
   const uploadImage = useUploadItemImage();
   const [name, setName] = useState<string>(existing?.name ?? '');
-  const [price, setPrice] = useState<string>(existing ? String(existing.basePrice ?? '') : '');
+  // [VAT-DOCS] An item Swift adds VAT to is edited by the price the store typed before VAT.
+  const [price, setPrice] = useState<string>(editablePrice(existing));
   const [description, setDescription] = useState<string>(existing?.description ?? '');
   const [categoryId, setCategoryId] = useState<string>(existing?.categoryId ?? categories[0]?.id ?? '');
   const [available, setAvailable] = useState<boolean>(existing ? existing.isAvailable !== false : true);
@@ -549,7 +550,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
         categoryId,
         name: name.trim(),
         description: description.trim() || undefined,
-        basePrice: priceNum,
+        ...itemPricePayload(existing, priceNum),
         isAvailable: available,
         isPopular: popular,
         ...(isService
@@ -641,7 +642,12 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
         <View style={{ gap: space.md }}>
           <LabeledInput value={name} onChangeText={setName} placeholder="Item name" />
-          <LabeledInput value={price} onChangeText={setPrice} placeholder="Price (GYD)" keyboardType="decimal-pad" />
+          <LabeledInput value={price} onChangeText={setPrice} placeholder={beforeVatNote(existing) ? 'Price before VAT (GYD)' : 'Price (GYD)'} keyboardType="decimal-pad" />
+          {/* [VAT-DOCS] What customers pay for an item Swift adds VAT to (the saved price, from the server). */}
+          {beforeVatNote(existing) ? <T variant="caption" tone="muted" testID="item-before-vat-note">{beforeVatNote(existing)}</T> : null}
+          {!existing && storeVat.data?.addsVatToPrices ? (
+            <T variant="caption" tone="muted">Type the price before VAT. Swift adds {storeVat.data.ratePercent}% VAT to standard-rated items.</T>
+          ) : null}
           <InlineInput value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
         </View>
 

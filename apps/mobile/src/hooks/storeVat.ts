@@ -5,6 +5,7 @@ import { getAuthSessionSnapshot, requireAuthSessionSnapshot, useAuthStore } from
 import { useVendorPreview } from '../stores/vendorPreview';
 import { previewMutation } from '../lib/vendorPreviewData';
 import { guardVendorOperation } from './useVendorMutation';
+import type { StoreVatMode } from '../lib/storeVat';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] The store's VAT on the phone (OWNER only; the API refuses anyone else). The owner says
@@ -20,6 +21,8 @@ export interface StoreVatView {
   mode: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
   vatRegistrationNumber: string | null;
   effective: boolean;
+  /** [VAT-DOCS] True while Swift adds VAT to the prices this store types (an older server sends none). */
+  addsVatToPrices?: boolean;
   approved: { number: string | null; registeredName: string | null; effectiveFrom: string | null; reviewedAt: string | null } | null;
   reviewNote: string | null;
   certificate: { id: string; status: string; state: string; reviewNote: string | null; createdAt: string; reviewedAt: string | null } | null;
@@ -71,9 +74,9 @@ export function useUpdateStoreVat() {
   const qc = useQueryClient();
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   return useMutation({
-    mutationFn: guardVendorOperation(previewReadOnly((answer: { registered: boolean; vatRegistrationNumber?: string }) =>
+    mutationFn: guardVendorOperation(previewReadOnly((answer: { registered: boolean; vatRegistrationNumber?: string; mode?: StoreVatMode }) =>
       bound(storeId, (session) => unwrap<StoreVatView>(vendorApi.updateVat(
-        answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, mode: 'PRICES_INCLUDE_VAT' } : { registered: false },
+        answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, mode: answer.mode ?? 'PRICES_INCLUDE_VAT' } : { registered: false },
         session, storeId,
       ))))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'vat'] }),

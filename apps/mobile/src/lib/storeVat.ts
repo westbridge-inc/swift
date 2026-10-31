@@ -75,9 +75,54 @@ export function orderVatLine(order: { vatRateBps?: unknown; vatAmount?: unknown;
   return `Includes VAT of ${money(amount)} (${rate}%)${by}`;
 }
 
+/** [VAT-DOCS · owner 30 Oct 2026] How a VAT-registered store's typed prices relate to VAT. */
+export type StoreVatMode = 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT';
+
+/** The two choices, in the owner's words (the same on the web dashboard). */
+export const VAT_MODE_CHOICES: ReadonlyArray<{ value: StoreVatMode; label: string }> = [
+  { value: 'PRICES_INCLUDE_VAT', label: 'My prices already include VAT' },
+  { value: 'ADD_VAT_AT_CHECKOUT', label: 'My prices do not include VAT' },
+];
+
+/** What each choice means for the customer (the rate always from the API). VAT Act s.90(2): the customer always sees
+ *  the full price, VAT included, before ordering: Swift adds it INTO the price, never as a surprise at checkout. */
+export function vatModeHelp(mode: StoreVatMode, ratePercent: number): string {
+  return mode === 'ADD_VAT_AT_CHECKOUT'
+    ? `Once a person at Swift approves your certificate, Swift adds ${ratePercent}% VAT to the price you type for each standard-rated item, so customers see and pay the full price, VAT included, before they order. Zero-rated and exempt items stay as you type them.`
+    : 'Customers pay the prices you type; receipts show the VAT inside them.';
+}
+
+/** [VAT-DOCS] The optional row in a store's Documents list. Never required to go live. */
+export const VAT_DOCUMENT_ROW = {
+  title: 'VAT certificate (only if VAT-registered)',
+  body: 'Only if your business is registered for VAT with the GRA. You do not need it to go live.',
+} as const;
+
+/** [VAT-DOCS] An item's price as the store edits it: the price it typed before VAT while Swift adds VAT to it (the
+ *  server sends `vatListedPrice`), else the price itself. */
+export function editablePrice(item: { basePrice?: unknown; vatListedPrice?: unknown } | null | undefined): string {
+  if (!item) return '';
+  const typed = item.vatListedPrice ?? item.basePrice;
+  return typed == null ? '' : String(Number(typed));
+}
+
+/** [VAT-DOCS] The price field of an item save: an item Swift adds VAT to is edited by its price BEFORE VAT
+ *  (`vatListedPrice`); any other item, and every new one, by its price as typed (`basePrice`). */
+export function itemPricePayload(item: { vatListedPrice?: unknown } | null | undefined, price: number): { basePrice: number } | { vatListedPrice: number } {
+  return item?.vatListedPrice != null ? { vatListedPrice: price } : { basePrice: price };
+}
+
+/** [VAT-DOCS] The line under the price of an item Swift adds VAT to: what customers pay. */
+export function beforeVatNote(item: { basePrice?: unknown; vatListedPrice?: unknown } | null | undefined): string | null {
+  if (item?.vatListedPrice == null || item.basePrice == null) return null;
+  return `Before VAT. Customers pay ${money(Number(item.basePrice))} incl. VAT.`;
+}
+
 /** What the store's own VAT screen reads (GET /vendor/vat), as far as the status line needs it. */
 export interface StoreVatStatusView {
   status: 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'REVOKED';
+  /** [VAT-DOCS] An older server sends no mode words beyond these two. */
+  mode?: StoreVatMode | null;
   effective: boolean;
   ratePercent: number;
   reviewNote: string | null;
@@ -105,7 +150,9 @@ export function storeVatStatusLine(v: StoreVatStatusView): string {
         : 'Send your GRA VAT registration certificate below. A person at Swift checks it before anything changes.';
     case 'APPROVED':
       if (!v.effective) return 'Approved, but VAT is not on your orders right now. Your prices and receipts show no VAT.';
-      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
+      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. ${v.mode === 'ADD_VAT_AT_CHECKOUT'
+        ? `Swift adds VAT at ${v.ratePercent}% to the prices you type for standard-rated items`
+        : `Your prices include VAT at ${v.ratePercent}%`}, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
     case 'REJECTED':
       return `Not approved${v.reviewNote ? `: ${v.reviewNote}` : ''}. Correct it and send your certificate again.`;
     case 'REVOKED':

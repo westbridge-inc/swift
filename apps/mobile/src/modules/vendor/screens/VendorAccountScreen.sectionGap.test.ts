@@ -56,6 +56,7 @@ vi.mock('../../../components/JobAlertSettingsRow', () => ({ JobAlertSettingsRow:
 vi.mock('../../../components/WithdrawStaffInvites', () => ({ WithdrawStaffInvites: 'WithdrawStaffInvites' }));
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
 vi.mock('../StoreVatSection', () => ({ StoreVatSection: 'StoreVatSection' })); // [STORE-VAT] a child section, stubbed like its siblings
+vi.mock('../VatDocumentRow', () => ({ VatDocumentRow: 'VatDocumentRow' })); // [VAT-DOCS] the Documents list's optional VAT row, stubbed the same way
 // [IMAGES-E2E #1909] The real store-photo card is measured (it owns its spacing); its native pickers are not loaded.
 vi.mock('expo-image-picker', () => ({}));
 vi.mock('../../../lib/uploadImage', () => ({ prepareUploadImage: vi.fn() }));

@@ -75,3 +75,30 @@ describe('[O-5] item VAT class on the inventory', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/vendor/vat'))).toBe(false);
   });
 });
+
+// [VAT-DOCS · owner 30 Oct 2026] A store whose VAT Swift adds to its prices: the row edits the price BEFORE VAT.
+describe('[VAT-DOCS] the price of an item Swift adds VAT to', () => {
+  it('the inline price edit starts at the price before VAT and sends vatListedPrice; another item sends basePrice', async () => {
+    const user = userEvent.setup();
+    const writes: ApiRequest[] = [];
+    items.splice(0, items.length,
+      { id: 'item-1', name: 'Soap', basePrice: '228.00', vatListedPrice: '200.00', stockQuantity: null, isAvailable: true, vatClass: 'STANDARD' } as never,
+      { id: 'item-2', name: 'Rice', basePrice: '600.00', vatListedPrice: null, stockQuantity: null, isAvailable: true, vatClass: 'ZERO_RATED' } as never);
+    serve('MANAGER', 'APPROVED', writes);
+    renderWithQuery(<InventoryPage />);
+    await user.click(await screen.findByRole('button', { name: /228/ }));
+    const field = screen.getByRole('spinbutton', { name: 'Price before VAT: Soap' }) as HTMLInputElement;
+    expect(field.value).toBe('200');
+    await user.clear(field);
+    await user.type(field, '250{Enter}');
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(JSON.parse(String(writes[0]!.init?.body))).toEqual({ vatListedPrice: 250 });
+    await user.click(await screen.findByRole('button', { name: /600/ }));
+    const rice = screen.getByRole('spinbutton', { name: 'Price: Rice' }) as HTMLInputElement;
+    await user.clear(rice);
+    await user.type(rice, '650{Enter}');
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(JSON.parse(String(writes[1]!.init?.body))).toEqual({ basePrice: 650 });
+  });
+});
+

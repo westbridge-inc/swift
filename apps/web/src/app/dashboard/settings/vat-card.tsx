@@ -8,10 +8,7 @@ import { getStoreVat, type StoreVatView } from '@/lib/store-vat-read';
 import { LEGAL_URL } from '@/lib/legal-url';
 import { storeKey } from '@/lib/store-scope';
 import { GRA_VAT_URL } from '@/lib/gra-vat-url';
-import { calendarDay } from '@/lib/store-vat-words';
-
-
-
+import { calendarDay, VAT_DOCUMENT_ROW, VAT_MODE_CHOICES, vatModeHelp, type StoreVatMode } from '@/lib/store-vat-words';
 
 /**
  * [STORE-VAT · owner O-5] The one line that says where the store's VAT stands, in the owner's words. Only an APPROVED
@@ -27,7 +24,9 @@ export function vatStatusLine(v: StoreVatView): string {
         : 'Send your GRA VAT registration certificate below. A person at Swift checks it before anything changes.';
     case 'APPROVED':
       if (!v.effective) return 'Approved, but VAT is not on your orders right now. Your prices and receipts show no VAT.';
-      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
+      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. ${v.mode === 'ADD_VAT_AT_CHECKOUT'
+        ? `Swift adds VAT at ${v.ratePercent}% to the prices you type for standard-rated items`
+        : `Your prices include VAT at ${v.ratePercent}%`}, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
     case 'REJECTED':
       return `Not approved${v.reviewNote ? `: ${v.reviewNote}` : ''}. Correct it and send your certificate again.`;
     case 'REVOKED':
@@ -39,8 +38,11 @@ export function vatStatusLine(v: StoreVatView): string {
  * [STORE-VAT · owner O-5] "Is your business VAT-registered with the GRA?" The owner's to answer (the API refuses anyone
  * else). No keeps (or takes) VAT off at once. Yes needs the VAT number exactly as the certificate shows it, and the
  * certificate itself; a person at Swift checks it, and only then do prices say "incl. VAT" and receipts name the store
- * as the one charging VAT. Prices are never changed here: they already include VAT ("add VAT at checkout" is not
- * offered yet). Hidden while Swift's VAT switch is off, unless the store already has a VAT record to show.
+ * as the one charging VAT. [VAT-DOCS · owner 30 Oct 2026] The store also says how its prices relate to VAT ("my prices
+ * do not include VAT": once approved, Swift adds the VAT into each standard-rated price customers see), and a store that
+ * has not said yes yet sends the number, the choice and the certificate in ONE submission. The store's documents are
+ * uploaded in the Swift app; on the web this card is the optional "VAT certificate (only if VAT-registered)" document.
+ * Hidden while Swift's VAT switch is off, unless the store already has a VAT record to show.
  */
 export function VatCard({ storeId }: { storeId: string | null }) {
   const queryClient = useQueryClient();
@@ -50,6 +52,7 @@ export function VatCard({ storeId }: { storeId: string | null }) {
   const v = vat.data;
   const [registered, setRegistered] = useState<boolean>(false);
   const [number, setNumber] = useState('');
+  const [mode, setMode] = useState<StoreVatMode | null>(null);
   const [consent, setConsent] = useState(false);
   // [REVIEW-F #2087 S4] Turning off an APPROVED store's VAT ends the approval (a person must check again): ask once.
   const [confirmOff, setConfirmOff] = useState(false);
@@ -58,41 +61,51 @@ export function VatCard({ storeId }: { storeId: string | null }) {
     if (!v) return;
     setRegistered(v.status !== 'NONE');
     setNumber(v.vatRegistrationNumber ?? '');
-  }, [v?.status, v?.vatRegistrationNumber]); // eslint-disable-line react-hooks/exhaustive-deps
+    setMode(v.mode ?? null);
+  }, [v?.status, v?.vatRegistrationNumber, v?.mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const settle = (data: StoreVatView) => {
     queryClient.setQueryData(storeKey(storeId, 'vat'), data);
     void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'profile') });
   };
   const save = useMutation({
-    mutationFn: (answer: boolean) => updateStoreVat(answer
-      ? { registered: true, vatRegistrationNumber: number.trim(), mode: 'PRICES_INCLUDE_VAT' }
+    mutationFn: (answer: boolean) => updateStoreVat(answer && mode
+      ? { registered: true, vatRegistrationNumber: number.trim(), mode }
       : { registered: false }),
     onSuccess: (data) => { setConfirmOff(false); settle(data); },
   });
   const send = useMutation({
-    mutationFn: (file: File) => sendVatCertificate(file),
+    // [VAT-DOCS] A first claim sends the number and the choice with the certificate.
+    mutationFn: (v: { file: File; claim?: { vatRegistrationNumber: string; mode: StoreVatMode } }) => sendVatCertificate(v.file, v.claim),
     onSuccess: (data) => { setConsent(false); settle(data); },
   });
 
   if (!isOwner || !v || (!v.available && v.status === 'NONE')) return null;
   const claimed = v.status !== 'NONE';
+  // [VAT-DOCS] One submission: number + choice + certificate, for a store that has not said yes yet.
+  const firstClaim = v.available && !claimed && registered;
   const numberChanged = number.trim() !== (v.vatRegistrationNumber ?? '');
-  const canSave = registered ? number.trim().length > 0 && (!claimed || numberChanged) : claimed;
+  const modeChanged = mode !== (v.mode ?? null);
+  // A store that already said yes saves a new number or choice here; a first claim goes with its certificate (below).
+  const canSave = registered ? claimed && number.trim().length > 0 && mode !== null && (numberChanged || modeChanged) : claimed;
+  const claimReady = !firstClaim || (number.trim().length > 0 && mode !== null);
   const approved = v.status === 'APPROVED';
   const turnOff = () => (approved && !confirmOff ? setConfirmOff(true) : save.mutate(false));
   const confirmLine = confirmOff ? (
     <p role="alert" className="mt-2 text-sm">
       Turning VAT off ends your approval: your prices stop saying &ldquo;incl. VAT&rdquo; at once, and a person at Swift must
-      check your certificate again before VAT can come back. Press the button again to turn it off.
+      check your certificate again before VAT can come back.{v.addsVatToPrices ? ' Swift stops adding VAT to your prices: customers pay the prices you typed.' : ''} Press the button again to turn it off.
     </p>
   ) : null;
-  const needsCertificate = v.available && (v.status === 'PENDING' || v.status === 'REJECTED' || v.status === 'REVOKED')
-    && (!v.certificate || v.certificate.status !== 'PENDING');
+  const needsCertificate = firstClaim || (v.available && (v.status === 'PENDING' || v.status === 'REJECTED' || v.status === 'REVOKED')
+    && (!v.certificate || v.certificate.status !== 'PENDING'));
 
   return (
     <div className="sw-card p-6">
       <h2 className="font-bold">VAT</h2>
+      <p className="mt-1 text-sm">
+        <span className="font-semibold">Optional document: {VAT_DOCUMENT_ROW.title}.</span> {VAT_DOCUMENT_ROW.body}
+      </p>
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
         Only a business registered for VAT with the GRA may charge VAT. If yours is not, keep this at No: your prices stay
         exactly as you type them.{' '}
@@ -124,20 +137,30 @@ export function VatCard({ storeId }: { storeId: string | null }) {
                 maxLength={40}
                 className="w-full max-w-xs rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm focus:border-[var(--swift-red)] focus:outline-none"
               />
-              <p className="text-sm">
-                Your prices: <span className="font-semibold">my prices already include VAT ({v.ratePercent}%)</span>. Customers pay
-                the prices you type; receipts show the VAT inside them. Adding VAT at checkout is not available yet.
-              </p>
+              <fieldset className="mt-2">
+                <legend className="text-sm font-semibold">Your prices</legend>
+                <div className="mt-1 space-y-1 text-sm">
+                  {VAT_MODE_CHOICES.map((c) => (
+                    <label key={c.value} className="flex items-center gap-2">
+                      <input type="radio" name="vat-mode" checked={mode === c.value} onChange={() => setMode(c.value)} className="accent-[var(--swift-red)]" />
+                      {c.label}
+                    </label>
+                  ))}
+                </div>
+                {mode && <p className="mt-1 text-sm text-[var(--swift-muted)]">{vatModeHelp(mode, v.ratePercent)}</p>}
+              </fieldset>
             </div>
           )}
-          <button
-            type="button"
-            onClick={() => (registered ? save.mutate(true) : turnOff())}
-            disabled={!canSave || save.isPending}
-            className="mt-3 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-          >
-            {save.isPending ? 'Saving…' : registered ? 'Save and send for checking' : 'Turn VAT off'}
-          </button>
+          {!(registered && !claimed) && (
+            <button
+              type="button"
+              onClick={() => (registered ? save.mutate(true) : turnOff())}
+              disabled={!canSave || save.isPending}
+              className="mt-3 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {save.isPending ? 'Saving…' : registered ? 'Save and send for checking' : 'Turn VAT off'}
+            </button>
+          )}
           {!registered && confirmLine}
           {save.isError && <p role="alert" className="mt-2 text-sm text-[var(--swift-red)]">{(save.error as Error).message}</p>}
         </fieldset>
@@ -162,6 +185,7 @@ export function VatCard({ storeId }: { storeId: string | null }) {
         <div className="mt-4 space-y-3 border-t border-[var(--swift-border)] pt-4">
           <p className="text-sm font-semibold">Your GRA VAT registration certificate</p>
           <p className="text-sm text-[var(--swift-muted)]">A photo or PDF of the certificate the GRA gave your business. A person at Swift checks the name, the VAT number and the date it starts.</p>
+          {!claimReady && <p className="text-sm text-[var(--swift-muted)]">Type your VAT number and choose how your prices relate to VAT first.</p>}
           <label className="flex items-start gap-2 text-xs text-[var(--swift-muted)]">
             <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--swift-red)]" />
             <span>
@@ -173,10 +197,10 @@ export function VatCard({ storeId }: { storeId: string | null }) {
           <button
             type="button"
             onClick={() => fileRef.current?.click()}
-            disabled={!consent || send.isPending}
+            disabled={!consent || !claimReady || send.isPending}
             className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
           >
-            {send.isPending ? 'Sending…' : 'Choose the certificate'}
+            {send.isPending ? 'Sending…' : firstClaim ? 'Choose the certificate and send' : 'Choose the certificate'}
           </button>
           <input
             ref={fileRef}
@@ -188,7 +212,7 @@ export function VatCard({ storeId }: { storeId: string | null }) {
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = '';
-              if (file) send.mutate(file);
+              if (file) send.mutate({ file, claim: firstClaim && mode ? { vatRegistrationNumber: number.trim(), mode } : undefined });
             }}
           />
           {send.isError && <p role="alert" className="text-sm text-[var(--swift-red)]">{(send.error as Error).message}</p>}

@@ -209,14 +209,15 @@ export default function InventoryPage() {
   const priceKey = ['item-price', storeId];
   const priceMut = useMutation({
     mutationKey: priceKey,
-    mutationFn: (v: { id: string; price: number; was: number | null }) => updateItem(v.id, { basePrice: v.price }),
-    ...instantSwitch<{ id: string; price: number; was: number | null }, CatalogItem[], { data?: { basePrice?: unknown } }>(
+    // [VAT-DOCS] An item Swift adds VAT to is priced by what the store types before VAT (the server adds the VAT).
+    mutationFn: (v: { id: string; price: number; was: number | null; beforeVat: boolean }) => updateItem(v.id, v.beforeVat ? { vatListedPrice: v.price } : { basePrice: v.price }),
+    ...instantSwitch<{ id: string; price: number; was: number | null; beforeVat: boolean }, CatalogItem[], { data?: { basePrice?: unknown; vatListedPrice?: unknown } }>(
       queryClient, storeKey(storeId, 'items', 'all'),
-      (rows, v, undo) => rows.map((row) => (row.id === v.id ? { ...row, basePrice: undo ? v.was : v.price } : row)),
+      (rows, v, undo) => rows.map((row) => (row.id !== v.id || v.beforeVat ? row : { ...row, basePrice: undo ? v.was : v.price })),
       () => (queryClient.isMutating({ mutationKey: priceKey }) > 1 ? undefined : refresh()),
       (rows, answer) => {
-        const saved = answer?.data as { id?: string; basePrice?: unknown } | undefined;
-        return saved?.id ? rows.map((row) => (row.id === saved.id ? { ...row, basePrice: toAmount(saved.basePrice) } : row)) : rows;
+        const saved = answer?.data as { id?: string; basePrice?: unknown; vatListedPrice?: unknown } | undefined;
+        return saved?.id ? rows.map((row) => (row.id === saved.id ? { ...row, basePrice: toAmount(saved.basePrice), vatListedPrice: toAmount(saved.vatListedPrice) } : row)) : rows;
       },
     ),
   });
@@ -225,7 +226,7 @@ export default function InventoryPage() {
     select: (mutation) => (mutation.state.variables as { id: string } | undefined)?.id,
   }));
   const sendPrice = priceMut.mutate;
-  const onPrice = useCallback((item: CatalogItem, price: number) => sendPrice({ id: item.id, price, was: item.basePrice }), [sendPrice]);
+  const onPrice = useCallback((item: CatalogItem, price: number) => sendPrice({ id: item.id, price, was: item.basePrice, beforeVat: item.vatListedPrice != null }), [sendPrice]);
   const onEdit = useCallback((item: CatalogItem) => setDialog({ kind: 'item', item }), []);
   const onDelete = useCallback((item: CatalogItem) => setDialog({ kind: 'delete', item }), []);
 

@@ -7,6 +7,8 @@ import { storeKey } from '@/lib/store-scope';
 import Image from 'next/image';
 import { photo as storePhoto } from '@/lib/media';
 import { GRA_VAT_URL } from '@/lib/gra-vat-url';
+import { beforeVatNote, editablePrice, itemPricePayload } from '@/lib/vat-price-edit';
+import { formatMoney } from '@/lib/money';
 import type { CatalogItem, VatClass } from '@/lib/vendor-api';
 import {
   addOption, addOptionGroup, createItem, createSection, deleteItem, deleteOption, deleteOptionGroup, deleteSection,
@@ -59,7 +61,7 @@ const price = (value: unknown): number | null => {
 };
 /** The server's answer for one item, written into the list on screen (price made a number as the list read makes it). */
 function writeItem(qc: QueryClient, keys: Keys, answer: MenuItem) {
-  const row = { ...answer, basePrice: price(answer.basePrice) } as CatalogItem;
+  const row = { ...answer, basePrice: price(answer.basePrice), vatListedPrice: price((answer as { vatListedPrice?: unknown }).vatListedPrice) } as CatalogItem;
   qc.setQueryData<CatalogItem[]>(keys.itemsAll, (rows) => {
     if (!rows) return rows;
     return rows.some((r) => r.id === row.id) ? rows.map((r) => (r.id === row.id ? { ...r, ...row } : r)) : [...rows, row];
@@ -170,7 +172,8 @@ export function PriceEdit({ item, onSave, onDone }: { item: CatalogItem; onSave:
   // `basePrice` is null when the server did not send a usable price: start the
   // editor EMPTY rather than seeding it with the string "null" (or a 0 the
   // vendor might save over their real price).
-  const [price, setPrice] = useState(item.basePrice == null ? '' : String(item.basePrice));
+  // [VAT-DOCS] An item Swift adds VAT to is edited by the price the store typed before VAT.
+  const [price, setPrice] = useState(String(editablePrice(item) ?? ''));
   // [TAP-AUDIT] The new price shows on the row at the tap; the page sends it (and puts the old one back if the
   // server refuses, saying why).
   const save = () => { if (Number(price) > 0) { onSave(Number(price)); onDone(); } };
@@ -182,7 +185,7 @@ export function PriceEdit({ item, onSave, onDone }: { item: CatalogItem; onSave:
         onChange={(e) => setPrice(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && save()}
         autoFocus
-        aria-label={`Price: ${item.name}`}
+        aria-label={item.vatListedPrice != null ? `Price before VAT: ${item.name}` : `Price: ${item.name}`}
         className="w-24 rounded-lg border border-[var(--swift-red)] px-2 py-1 text-sm"
       />
       <button onClick={save} disabled={!(Number(price) > 0)} className="text-xs font-bold text-[var(--swift-red)]">
@@ -219,7 +222,7 @@ export function ItemEditor({
   const isService = vendorType === 'SERVICE';
   const booking = item?.bookingConfig ?? {};
   const [name, setName] = useState(item?.name ?? '');
-  const [price, setPrice] = useState(item?.basePrice == null ? '' : String(item.basePrice));
+  const [price, setPrice] = useState(String(editablePrice(item) ?? ''));
   const [description, setDescription] = useState(item?.description ?? '');
   const [categoryId, setCategoryId] = useState(item?.categoryId ?? item?.category?.id ?? sections[0]?.id ?? '');
   const [available, setAvailable] = useState(item ? item.isAvailable !== false : true);
@@ -279,7 +282,7 @@ export function ItemEditor({
         categoryId,
         name: name.trim(),
         description: description.trim() || undefined,
-        basePrice: priceNum,
+        ...itemPricePayload(item, priceNum),
         isAvailable: available,
         isPopular: popular,
         ...(isService
@@ -372,7 +375,9 @@ export function ItemEditor({
 
       <div className="mt-4 space-y-3">
         <input className="sw-input" aria-label="Item name" placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} data-modal-initial-focus />
-        <input className="sw-input" aria-label="Price (GYD)" placeholder="Price (GYD)" inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        <input className="sw-input" aria-label={item?.vatListedPrice != null ? 'Price before VAT (GYD)' : 'Price (GYD)'} placeholder={item?.vatListedPrice != null ? 'Price before VAT (GYD)' : 'Price (GYD)'} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        {/* [VAT-DOCS] What customers pay for an item Swift adds VAT to (the saved price, from the server). */}
+        {beforeVatNote(item, formatMoney) && <p className="text-xs text-[var(--swift-muted)]">{beforeVatNote(item, formatMoney)}</p>}
         <textarea className="sw-input min-h-20" aria-label="Description (optional)" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
       </div>
 

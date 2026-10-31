@@ -67,7 +67,9 @@ describe('[O-5] the phone’s VAT words', () => {
   it('the certificate upload carries the recorded document consent words and tick', () => {
     const section = read('modules/vendor/StoreVatSection.tsx');
     expect(section).toContain('accessibilityLabel={DOCUMENT_CONSENT_TEXT}');
-    expect(section).toContain('disabled={!consented}');
+    // [VAT-DOCS] the consent tick still gates every send (a first claim also waits for its number and price choice)
+    expect(section).toContain('disabled={!consented || !claimReady}');
+    expect(section).toContain('if (!consented || !claimReady || send.isPending) return;');
     const hooks = read('hooks/storeVatCertificate.ts');
     expect(hooks).toContain("consentTick: 'document_v1'");
     expect(hooks).toMatch(/const PRIVACY_NOTICE_VERSION = 'v1'/);
@@ -78,5 +80,27 @@ describe('[O-5] the phone’s VAT words', () => {
     const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
     expect(editor).toContain('...(vatRate != null ? { vatClass } : {})');
     expect(editor).toContain("useStoreVat(myRole === 'OWNER' && !samplePreview)");
+  });
+
+  // [VAT-DOCS · owner 30 Oct 2026] "Add VAT at checkout": one submission, the price before VAT, the optional Documents row.
+  it('a first VAT claim sends the number and the price choice WITH the certificate (one submission)', () => {
+    const section = read('modules/vendor/StoreVatSection.tsx');
+    expect(section).toContain('...(firstClaim && mode ? { claim: { vatRegistrationNumber: number.trim(), mode } } : {})');
+    expect(section).toContain('VAT_MODE_CHOICES.map');
+    expect(section).not.toContain('not available yet');
+    expect(read('hooks/storeVatCertificate.ts')).toContain('...(claim ?? {})');
+  });
+
+  it('the item editor edits the price before VAT of an item Swift adds VAT to (never the VAT-inclusive price)', () => {
+    const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
+    expect(editor).toContain('useState<string>(editablePrice(existing))');
+    expect(editor).toContain('...itemPricePayload(existing, priceNum)');
+    expect(editor).not.toMatch(/\bbasePrice: priceNum\b/);
+  });
+
+  it('every store owner’s Documents list carries the optional VAT certificate row', () => {
+    expect(read('modules/vendor/screens/BusinessSetup.tsx')).toContain("optionalExtra={myRole === 'OWNER' ? (withHeading) => <VatDocumentRow withHeading={withHeading} /> : undefined}");
+    expect(read('modules/vendor/screens/VendorAccountScreen.tsx')).toContain('optionalExtra={(withHeading) => <VatDocumentRow withHeading={withHeading} inline={false} />}');
+    expect(read('components/onboarding/DocumentChecklist.tsx')).toContain('optionalExtra?.(true)');
   });
 });

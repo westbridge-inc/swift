@@ -192,6 +192,9 @@ export interface CatalogItem {
   catalogueCheck?: CatalogueCheck | null;
   /** [STORE-VAT · owner O-5] The store's VAT class for the item (STANDARD unless the store chose otherwise). */
   vatClass?: VatClass;
+  /** [VAT-DOCS] The price the store typed before VAT, while Swift adds VAT to this item (basePrice = what customers
+   *  pay); null otherwise. Such an item is edited by this price (lib/vat-price-edit.ts). */
+  vatListedPrice?: number | null;
 }
 
 /** [STORE-VAT · owner O-5] Only STANDARD goods carry VAT, and only for a store whose VAT a person approved. */
@@ -236,6 +239,7 @@ function normalizeCatalogItem(raw: unknown): CatalogItem {
   return {
     ...(item as unknown as CatalogItem),
     basePrice: toAmount(item['basePrice']),
+    vatListedPrice: toAmount(item['vatListedPrice']),
   };
 }
 

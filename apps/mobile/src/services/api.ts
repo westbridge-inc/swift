@@ -1387,10 +1387,10 @@ export const vendorApi = {
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [STORE-VAT · owner O-5] The store's VAT (OWNER only): its answer, its certificate, and what a person decided. */
   vat: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/vat', capturedVendorAuthConfig(session, storeId)),
-  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.put('/vendor/vat', data, capturedVendorAuthConfig(session, storeId)),
   /** The certificate file was uploaded first (/verification/upload); this files it for a PERSON's check. */
-  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1'; vatRegistrationNumber?: string; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.post('/vendor/vat/certificate', data, capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
