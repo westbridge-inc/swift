@@ -3,18 +3,30 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
+import { apiFetch, hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
 import { getProviderFee } from '@/lib/provider-fee-api';
 
-/** [REVIEW-M #2238 S4-2] The pro's own MMG checkout was started in the last two hours: the return is theirs. */
+/** [REVIEW-M #2238 S4-2] A checkout started in the last two hours is the one MMG is returning from. */
 const RECENT_CHECKOUT_MS = 2 * 60 * 60 * 1000;
-async function proCheckoutJustStarted(): Promise<boolean> {
-  try {
-    const at = Date.parse(((await getProviderFee())?.data as { latestMmgCheckout?: { createdAt?: string } | null } | null)?.latestMmgCheckout?.createdAt ?? '');
-    return Number.isFinite(at) && Date.now() - at < RECENT_CHECKOUT_MS;
-  } catch {
-    return false;
-  }
+type WithCheckout = { latestMmgCheckout?: { createdAt?: string } | null } | null | undefined;
+const startedAt = (sub: WithCheckout) => Date.parse(sub?.latestMmgCheckout?.createdAt ?? '');
+async function readStartedAt(read: () => Promise<WithCheckout>): Promise<number> {
+  try { return startedAt(await read()); } catch { return Number.NaN; }
+}
+
+/** [REVIEW-M #2240 S4] Which fee's checkout MMG is returning from, for a store owner who is also a pro: the NEWER of
+ *  the pro fee's and the store fee's latest checkouts, when it was started in the last two hours; null when neither
+ *  (or both at once). */
+async function newerCheckout(): Promise<'pro' | 'store' | null> {
+  const [pro, store] = await Promise.all([
+    readStartedAt(async () => (await getProviderFee())?.data as WithCheckout),
+    readStartedAt(async () => ((await apiFetch('/api/v1/vendor/subscription', undefined, { redirectOnExpired: false })) as { data?: WithCheckout })?.data),
+  ]);
+  const p = Number.isFinite(pro) ? pro : -Infinity;
+  const v = Number.isFinite(store) ? store : -Infinity;
+  const newest = Math.max(p, v);
+  if (!Number.isFinite(newest) || Date.now() - newest >= RECENT_CHECKOUT_MS || p === v) return null;
+  return p > v ? 'pro' : 'store';
 }
 
 /** The return document carries no identity. Resolve only from this session. */
@@ -37,8 +49,12 @@ export function WeeklyFeeDestination() {
       // pro fee when they started its checkout in the last two hours, otherwise they choose (the pro fee is a choice).
       const pro = await hasProviderProfile();
       if (cancelled) return;
-      if (vendor && pro && await proCheckoutJustStarted()) { if (!cancelled) router.replace('/portal/weekly-fee'); return; }
+      // [REVIEW-M #2240 S4] The NEWER checkout decides; with an earner profile too (whose checkout is not read here)
+      // only the pro's newer checkout routes, otherwise they choose.
+      const back = vendor && pro ? await newerCheckout() : null;
       if (cancelled) return;
+      if (back === 'pro') { router.replace('/portal/weekly-fee'); return; }
+      if (back === 'store' && !mover) { router.replace('/dashboard/weekly-fee'); return; }
       if (vendor && (mover || pro)) {
         setPortalLabel(mover && pro ? 'Earner and service provider weekly fees' : pro ? 'Service provider weekly fee' : 'Earner weekly fee');
         setChoice('both');

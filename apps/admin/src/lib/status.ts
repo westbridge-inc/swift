@@ -4,8 +4,10 @@
  * same way: green = good/terminal-success, red = bad/blocked, brand maroon =
  * pending/needs-attention, grey = neutral. The maroon pill is the admin's
  * brand fill (globals.css --accent-deep, the @swift/ui brand maroon; "fills,
- * with white text") with its light text (--text): about 7:1, readable on the
- * dark admin. The old bright red is not Swift's colour.
+ * with white text") with a FIXED white text, never --text: light Mission
+ * Control surfaces re-point --text to the dark ink, which on maroon is about
+ * 2:1. White on the maroon is about 8:1 on every surface. The old bright red
+ * is not Swift's colour.
  */
 export function statusClass(s: string) {
   const x = (s || '').toUpperCase();
@@ -16,7 +18,7 @@ export function statusClass(s: string) {
     return 'bg-red-500/15 text-red-400';
   }
   if (['PENDING', 'PLACED', 'REVIEW', 'IN_REVIEW', 'UNVERIFIED'].includes(x)) {
-    return 'bg-[var(--accent-deep)] text-[var(--text)]';
+    return 'bg-[var(--accent-deep)] text-white';
   }
   return 'bg-white/10 text-[#8E8E93]';
 }

@@ -180,7 +180,8 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/statements/', wrongRoles: [] },
   // [BILL-PRO PR4] A pro's own weekly fee. Being a pro is a profile, not a role (a customer, a store owner or a mover
   // may also be a service provider), so no role token is wrong here by role; the gate is the person's OWN provider
-  // profile (no profile: refused, see PRO_FEE_NON_PRO below). The unauthenticated sweep applies to every route.
+  // profile (no profile: refused, see the '[BILL-PRO] /api/v1/provider' describe below, and with well-formed bodies
+  // provider-fee-routes.test.ts '[REVIEW-G #2230 S4]'). The unauthenticated sweep applies to every route.
   { prefix: '/api/v1/provider/', wrongRoles: [] },
 ];
 

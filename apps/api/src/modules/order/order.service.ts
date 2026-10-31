@@ -1920,7 +1920,8 @@ export class OrderService {
               create: { status: 'PENDING', changedBy: input.userId, note: 'Order placed' },
             },
           },
-          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
+          // [PICKUP] requirePickupCode: the checkout answer gives the takeaway code only when the store asks for it.
+          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true, requirePickupCode: true } } },
         });
 
         // [BOOK-S2 · owner B4] With INSTANT_BOOKING on, the customer's slot is

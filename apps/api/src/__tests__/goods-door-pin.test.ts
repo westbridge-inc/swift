@@ -350,7 +350,8 @@ describe('MKT-F057 — the PIN is minted at checkout for every delivery rail', (
     expect(res.statusCode).toBe(200);
     const order = res.json().data.order;
     createdOrderIds.push(order.id);
-    expect(order.pickupCode).toMatch(/^\d{6}$/);
+    // [PICKUP · owner 30 Oct 2026] The code is minted (below); the answer carries it only when the store asks for it.
+    expect(order.pickupCode).toBeNull();
 
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(db.fulfillment).toBe('PICKUP');
