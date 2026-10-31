@@ -19,7 +19,7 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
-import type { FulfillmentMode, Prisma } from '@prisma/client';
+import type { FulfillmentMode, Prisma, PrismaClient } from '@prisma/client';
 import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, preparationMayStart, releaseLapsedHoldInTransaction } from '../order/order.service';
 import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
@@ -110,7 +110,7 @@ import { assertStoreNameAllowed, businessSchema, weeklyFeeAckSchema } from '../p
 import { assertWeeklyFeeAck, signupQuote, weeklyFeeTerms, WEEKLY_FEE_ACK_VERSION } from '../partner/weekly-fee-ack';
 import { recordStoreFeeAck, storeFeeStanding, storeFeeWhy } from '../partner/store-fee';
 import { chainTrialPreview } from '../subscription/subscription.service';
-import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
+import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink, nextMoneySurfaceHoldHours } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { refundRuleForWrite } from './refund-rule';
@@ -947,6 +947,16 @@ function storeMoneySurfaceView(row: {
 }
 
 
+/** [owner 30 Oct 2026] How many hours a number (or link) the owner sets NOW would wait before it goes live: 1 for
+ *  the store's first-ever number, else the configured cool-off (a link always waits the cool-off). The server's own rule (money-surface.ts), so the screen's
+ *  words are true; the link only while STORE_MMG_PAY_LINK is on. */
+async function storeMoneySurfaceHolds(prisma: PrismaClient, vendorId: string): Promise<{ mmgNumberHoldHours: number | null; mmgPayUrlHoldHours: number | null }> {
+  return {
+    mmgNumberHoldHours: await nextMoneySurfaceHoldHours(prisma, 'VENDOR', vendorId, 'NUMBER'),
+    mmgPayUrlHoldHours: storeMmgPayLinkEnabled() ? await nextMoneySurfaceHoldHours(prisma, 'VENDOR', vendorId, 'LINK') : null,
+  };
+}
+
 /** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An accepted MMG order waiting for "Paid by MMG"
  *  cancels 30 minutes after acceptance: the store sees when (server clock, the sweep's rule). */
 function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayBy: string | null; mmgPayByLine: string | null } {
@@ -1546,10 +1556,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // invalid stored value back into an app where it could be opened.
     // [CHAINS PR2 · REVIEW-F #2220 S3-1] Each store not live yet says whose turn it is (the switcher's words).
     const views = await verification.storeGoLiveViews(vendors.filter((v) => v.status === 'PENDING_APPROVAL').map((v) => v.id));
+    const holds = new Map(await Promise.all(vendors.map(async (v) => [v.id, await storeMoneySurfaceHolds(app.prisma, v.id)] as const)));
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
       goLive: storeGoLiveShown(views, vendor.id, vendor.status === 'PENDING_APPROVAL' || vendor.personApprovalRequired),
       ...storeMoneySurfaceView(vendor),
+      ...holds.get(vendor.id),
       publicPhone: safePublicPhone(vendor.publicPhone),
       // [owner #51] What still stands between a never-live store and going
       // live, besides its documents (additive; older apps ignore it).
@@ -2232,6 +2244,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(access.role !== 'OWNER' ? VAT_RECORD_OWNER_ONLY : {}),
         ...link,
         ...storeMoneySurfaceView(link),
+        ...(await storeMoneySurfaceHolds(app.prisma, vendorId)),
         // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
         storeCheck: partnerStoreView(storeCheckOf(vendor)),
         nameReviewApprovedHash: undefined,

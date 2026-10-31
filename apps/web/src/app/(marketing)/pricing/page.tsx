@@ -3,16 +3,17 @@ import type { ReactNode } from 'react';
 import { Section } from '@/components/site';
 import { fetchPricing, type CataloguePriceBand, type CountryPricing, type MoverPriceQuote } from '@/lib/api';
 import { formatAmount, parseAmount } from '@/lib/money';
+import { catalogueRetierOf } from '@/lib/catalogue-retier';
 import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
 // Every number on this page is the server's quote — resolved by the same
 // function signup prices through — so what a partner reads here is what they
-// are billed. [R27] The weekly re-tier is OFF (no store moves between catalogue
-// steps), so the store steps above the first decide a NEW store's trial length
-// (and the fee of a store already on one before it went off); the paragraph
-// under the cards says so. A mover reads the rate of the role their
+// are billed. [RETIER PR-A/C] A NEW store's fee and trial follow the step its own
+// catalogue reaches when Swift approves it (its owner ticks the fee first);
+// whether Swift moves a store between steps after that is the server's word
+// (`catalogueRetier`): the paragraph under the cards says so. A mover reads the rate of the role their
 // vehicle provisions: a taxi driver and a delivery rider never share a figure.
 // Only vehicles a mover can register today are shown (the server's `offered`
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
@@ -68,6 +69,51 @@ function itemRange(catalogue: CataloguePriceBand[], i: number): string {
  *  is not a whole number of days above zero is not shown: the list's own trial stands. */
 const bandTrialDays = (band: CataloguePriceBand, fallback: number) =>
   typeof band.trialDays === 'number' && Number.isInteger(band.trialDays) && band.trialDays > 0 ? band.trialDays : fallback;
+
+// [ENTERPRISE-PAGE · owner 31 Oct 2026] What a chain gets today, each line true on main: one login runs every branch
+// and a person approves each new one (partner.service addBranch, personApprovalRequired); one MMG checkout pays every
+// branch fee DUE now (a branch in its free trial or not yet due is left out), or each pays its own
+// (billing/chain-checkout.ts); a monthly fee statement (billing/chain-statement.ts);
+// a weekly rate per branch agreed with Swift that never raises a branch's fee and ends or rises only after the
+// 14-day notice (vendor/chain-deal.ts, billing/fee-rise-notice.ts); a branch limit per account (branchLimit). No
+// chain rate is quoted and no discount promised: the rate is negotiated (owner, 29 Oct 2026; decision 49 stays).
+const CHAIN_POINTS = [
+  'One login runs all your branches. A person at Swift checks and approves each new branch before it goes live.',
+  'Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.',
+  'A monthly fee statement lists every branch, the weeks it paid and its receipts.',
+  "Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days' notice.",
+  'Need more branches than one account allows? Contact sales.',
+];
+const SALES_SUBJECT = 'Chain / enterprise enquiry';
+
+function ChainsAndEnterprise() {
+  return (
+    <Section>
+      <div className="grid gap-8 md:grid-cols-[1fr_auto] md:items-start">
+        <div>
+          <h2 className="text-2xl font-extrabold tracking-tight">Chains and enterprise</h2>
+          <p className="mt-3 max-w-2xl text-[var(--swift-muted)]">
+            Run several stores or restaurants? Talk to us about a rate for all your branches.
+          </p>
+          <ul className="mt-5 max-w-3xl list-disc space-y-2 pl-5 text-sm leading-relaxed text-[var(--swift-muted)]">
+            {CHAIN_POINTS.map((point) => (
+              <li key={point}>{point}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="flex flex-col items-start gap-2">
+          <a
+            href={`mailto:${site.salesEmail}?subject=${encodeURIComponent(SALES_SUBJECT)}`}
+            className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+          >
+            Contact sales
+          </a>
+          <p className="text-sm text-[var(--swift-muted)]">{site.salesEmail}</p>
+        </div>
+      </div>
+    </Section>
+  );
+}
 
 function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
   return (
@@ -155,13 +201,22 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               )}
               {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
                   OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
-                  anything is charged (api partner/store-fee.ts). [R27] The weekly re-tier is OFF on the server
-                  (apps/api/src/modules/billing/weekly-retier.ts, WEEKLY_RETIER_ON = false): after that nothing
-                  moves it. The page test pins the flag: turning the re-tier back on must revisit this sentence. */}
+                  anything is charged (api partner/store-fee.ts). [RETIER PR-C · REVIEW-M N3] What happens after that
+                  is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves a store; on, a rise is
+                  told in the app ahead with how to stop it and a fall applies after two weekly counts (api
+                  billing.service recalculateVendorTiers + fee-rise-notice.ts); no word, no claim. */}
               {/* [WEBSITE 30 Oct · owner] The note is three short sentences at most: the same words, joined. */}
               When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). The store
               sees that exact fee, and its owner ticks it
-              before anything is charged; after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.
+              before anything is charged
+              {(() => {
+                const retier = catalogueRetierOf(list.pricing);
+                if (!retier) return null;
+                return retier.on
+                  ? <>; after that, Swift counts each store&apos;s items every week and tells the store in the app at least {retier.noticeDays} days before a higher rate applies, with how to stop it (a lower rate applies after two weekly counts a week apart, with a notice)</>
+                  : <>; after that, Swift does not move a store to another rate as its items change</>;
+              })()}
+              , and a rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (
@@ -182,6 +237,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
           </p>
         )}
       </Section>
+      <ChainsAndEnterprise />
     </>
   );
 }

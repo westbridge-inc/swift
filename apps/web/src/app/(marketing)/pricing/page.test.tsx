@@ -6,8 +6,8 @@ import * as api from '@/lib/api';
 import PricingPage from './page';
 
 // The real config refuses to load while company details are placeholders; the
-// page only needs a support address from it.
-vi.mock('@/site.config', () => ({ site: { supportEmail: 'support@example.test' } }));
+// page only needs the support and sales addresses from it.
+vi.mock('@/site.config', () => ({ site: { supportEmail: 'support@example.test', salesEmail: 'sales@example.test' } }));
 
 // ---------------------------------------------------------------------------
 // The public price list must quote each partner the rate they will be billed.
@@ -50,6 +50,8 @@ const GY = {
   },
   // No multi-store pricing (owner, 13 Oct 2026): the server serves null.
   franchise: null,
+  // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
+  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | undefined,
   // What an older page reads; this page must not.
   weekly: { mover: 8000, moverHeavy: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 45000, departmentVendor: 45000 },
 };
@@ -180,9 +182,35 @@ describe('public pricing page — every partner reads their own weekly fee', () 
       + 'after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.');
   });
 
-  it('[R27] the sentence holds only while the server\'s weekly re-tier is off — turning it on must revisit this page', () => {
-    const flag = readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', 'billing', 'weekly-retier.ts'), 'utf8');
-    expect(flag).toMatch(/^export const WEEKLY_RETIER_ON = false;$/m);
+  it('[RETIER PR-C] the server switched the re-tier on: a higher rate told at least 14 days ahead with how to stop it; a lower one after two weekly counts', async () => {
+    pricing = { ...GY, catalogueRetier: { on: true, noticeDays: 14 } };
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).toContain('The store sees that exact fee, and its owner ticks it before anything is charged; '
+      + 'after that, Swift counts each store\'s items every week and tells the store in the app at least 14 days before a higher rate applies, with how to stop it '
+      + '(a lower rate applies after two weekly counts a week apart, with a notice), and a rate agreed with Swift stays as agreed.');
+    expect(page).not.toContain('does not move a store');
+    expect(page).not.toMatch(/automatic/i);
+  });
+
+  it('[RETIER PR-C] a server that says nothing about the re-tier (older, malformed): no claim either way', async () => {
+    for (const catalogueRetier of [undefined, { on: 'yes' }, { on: true, noticeDays: 3 }]) {
+      pricing = { ...GY, catalogueRetier };
+      await renderPage();
+      const page = document.body.textContent!;
+      expect(page, JSON.stringify(catalogueRetier)).toContain('its owner ticks it before anything is charged, and a rate agreed with Swift stays as agreed.');
+      expect(page, JSON.stringify(catalogueRetier)).not.toContain('after that');
+      cleanup();
+    }
+  });
+
+  // [R27 · RETIER PR-C] The later-moves words are the server's, never the page's: the API serves `catalogueRetier.on`
+  // from its own switch (WEEKLY_RETIER_ON), so switching the re-tier on (the owner's go) changes this page with it.
+  it('[R27 · RETIER PR-C] the sentence follows the server\'s switch: the API serves it from WEEKLY_RETIER_ON, the page reads only that', () => {
+    const api = (...p: string[]) => readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', ...p), 'utf8');
+    expect(api('billing', 'weekly-retier.ts')).toMatch(/^export const WEEKLY_RETIER_ON = (false|true);$/m);
+    expect(api('auth', 'auth.routes.ts')).toContain('catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS }');
+    expect(readFileSync(join(__dirname, 'page.tsx'), 'utf8')).toContain('const retier = catalogueRetierOf(list.pricing);');
   });
 
   it('prints the server boundaries, not copy frozen into the page', async () => {
@@ -247,5 +275,56 @@ describe('[WEB-LAUNCH-CHECK F5] the pricing page outline', () => {
     const levels = screen.getAllByRole('heading').map((h) => Number(h.tagName.slice(1)));
     expect(levels[0]).toBe(1);
     levels.forEach((level, i) => { if (i > 0) expect(level - levels[i - 1]!, `heading ${i}: h${levels[i - 1]} -> h${level}`).toBeLessThanOrEqual(1); });
+  });
+});
+
+// [ENTERPRISE-PAGE · owner 31 Oct 2026] A short "Chains and enterprise" block with a Contact sales button. It says only
+// what main does (partner.service addBranch + branchLimit, billing/chain-checkout.ts, billing/chain-statement.ts,
+// vendor/chain-deal.ts + billing/fee-rise-notice.ts) and quotes no chain rate: the rate is negotiated.
+describe('[ENTERPRISE-PAGE] chains and enterprise', () => {
+  const block = () => screen.getByRole('heading', { level: 2, name: 'Chains and enterprise' }).closest('section')!;
+
+  it('says what a chain gets today, in plain words', async () => {
+    await renderPage();
+    const text = block().textContent!;
+    expect(text).toContain('One login runs all your branches.');
+    expect(text).toContain('A person at Swift checks and approves each new branch before it goes live.');
+    // [REVIEW-F #2267 S4-1] chain-checkout takes only the branch fees DUE now (a branch in its free trial or not yet
+    // due is left out), so the page never says "all your branches".
+    expect(text).toContain('Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.');
+    expect(text).not.toMatch(/all (of )?your branches (in|at) once|pay all your branches/i);
+    expect(text).toContain('A monthly fee statement lists every branch, the weeks it paid and its receipts.');
+    expect(text).toContain('Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days\' notice.');
+    expect(text).toContain('Need more branches than one account allows? Contact sales.');
+  });
+
+  it('quotes no chain rate and promises no discount: the rate is negotiated', async () => {
+    await renderPage();
+    const text = block().textContent!;
+    expect(text).not.toMatch(/\$|GYD|%|discount|automatic|franchise/i);
+    expect(text).not.toContain('—');
+    // The only number is the notice period the fee-change flow enforces.
+    expect(text.match(/\d+/g)).toEqual(['14']);
+  });
+
+  it('the Contact sales button mails the sales address from the site config with a subject', async () => {
+    await renderPage();
+    const button = within(block()).getByRole('link', { name: 'Contact sales' });
+    expect(button.getAttribute('href')).toBe('mailto:sales@example.test?subject=Chain%20%2F%20enterprise%20enquiry');
+    expect(block().textContent).toContain('sales@example.test');
+  });
+
+  it('shows even when this week\'s rates could not be loaded', async () => {
+    pricing = null;
+    await renderPage();
+    expect(within(block()).getByRole('link', { name: 'Contact sales' })).toBeTruthy();
+  });
+
+  it('the sales address lives once, in the site config next to support', () => {
+    const config = readFileSync(join(__dirname, '..', '..', '..', 'site.config.ts'), 'utf8');
+    expect(config).toMatch(/^ {2}salesEmail: 'sales@swiftgy\.com',$/m);
+    const page = readFileSync(join(__dirname, 'page.tsx'), 'utf8');
+    expect(page).not.toContain('sales@swiftgy.com');
+    expect(page).toContain('site.salesEmail');
   });
 });

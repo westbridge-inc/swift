@@ -55,6 +55,9 @@ export const site = {
   /** Support inbox. Already live on the domain's mail — do not change. */
   supportEmail: OPERATOR.supportEmail,
 
+  /** [Owner 31 Oct 2026] Sales inbox for chains and enterprise (the pricing page's Contact sales button). */
+  salesEmail: 'sales@swiftgy.com',
+
   /** [Owner 15 Oct 2026] When support answers. The one source for the days and hours: the home page's trust strip
    *  shows it as is, and supportHours below builds on it. */
   supportDays: SUPPORT_DAYS,

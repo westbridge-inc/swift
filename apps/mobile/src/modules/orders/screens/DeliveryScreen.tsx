@@ -35,7 +35,7 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
-import { orderStepState } from '../timeline-states';
+import { orderPrepFacts, orderStepState, orderTimelineIndex } from '../timeline-states';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
 import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
@@ -97,30 +97,11 @@ function humanStatus(status: string): string {
   return status.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase());
 }
 
-function timelineIndex(order: any, holdActive: boolean, releasePending: boolean): number | null {
-  if (holdActive) return 1;
-  if (releasePending) return 1;
-  const status = String(order.status ?? '').toUpperCase();
-  const pickup = order.fulfillment === 'PICKUP';
-  const courier = order.orderType === 'COURIER';
-  // [E17 · DS231 F3] On its way back: the travel step, relabelled below. A
-  // RETURNED parcel has no step — the forward timeline would promise a
-  // delivery — so it falls to the plain status line.
-  if (courier && status === 'RETURNING') return 3;
-  if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
-  if (pickup && status === 'READY_FOR_PICKUP') return 3;
-  if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
-  if (courier && status === 'RIDER_ASSIGNED') return 2;
-  if (courier && ['RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
-  if (status === 'DRIVER_ASSIGNED') return 2;
-  if (['DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
-  if (['ACCEPTED', 'PREPARING'].includes(status) || (!courier && status === 'READY_FOR_PICKUP')) return 2;
-  if (['PENDING', 'READY_FOR_PICKUP'].includes(status)) return 1;
-  return null;
-}
+// [#2252 REVIEW-F S4-1] The step the order is at and the kitchen's facts live in ../timeline-states.ts (pure),
+// shared with the website's status rail so the two cannot drift.
 
 function TrackingTimeline({ order, holdActive, releasePending }: { order: any; holdActive: boolean; releasePending: boolean }) {
-  const currentIndex = timelineIndex(order, holdActive, releasePending);
+  const currentIndex = orderTimelineIndex(order, holdActive, releasePending);
   const pickup = order.fulfillment === 'PICKUP';
   const appointment = order.fulfillment === 'APPOINTMENT';
   const courier = order.orderType === 'COURIER';
@@ -133,10 +114,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     : releasePending
       ? courier ? 'Sending to nearby riders' : appointment ? 'Sending to the provider' : 'Sending to the store'
       : courier ? 'Sent to nearby riders' : appointment ? 'Sent to the provider' : 'Sent to the store';
-  const acceptedRecorded = !!(order.acceptedAt || eventTime(['ACCEPTED']));
-  const preparationStarted = !!(order.preparingAt || eventTime(['PREPARING']));
-  const preparationFinished = !!(order.readyAt || eventTime(['READY_FOR_PICKUP']))
-    || ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status);
+  const { acceptedRecorded, preparationStarted, preparationFinished } = orderPrepFacts(order);
   let transitLabel = 'On the way';
   let transitDescription = order.rider
     ? `${order.rider.firstName ?? 'Your rider'} is handling this delivery.`

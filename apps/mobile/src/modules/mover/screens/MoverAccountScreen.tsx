@@ -217,6 +217,7 @@ export function MoverAccountScreen({ navigation }: any) {
             style={{ marginTop: space.md, marginBottom: 0 }}
             value={profile?.mmgPayUrl}
             pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
+            holdHours={profile?.mmgPayUrlHoldHours ?? null}
             saving={saveMmgLink.isPending}
             cancelling={cancelPendingMmgLink.isPending}
             error={mmgError}

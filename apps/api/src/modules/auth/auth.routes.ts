@@ -5,6 +5,8 @@ import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { partnerPriceList } from '../country/partner-pricing';
 import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
+import { WEEKLY_RETIER_ON } from '../billing/weekly-retier';
+import { FEE_RISE_NOTICE_DAYS } from '../billing/fee-rise-notice';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
@@ -529,6 +531,10 @@ export async function authRoutes(app: FastifyInstance) {
         // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
         // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
         feeTerms: weeklyFeeTerms(),
+        // [RETIER PR-B · owner 30 Oct 2026] Whether Swift moves an existing store between catalogue steps, and the
+        // notice a rise gets (billing/weekly-retier.ts, billing/fee-rise-notice.ts). The apps word the pricing card from
+        // it, so switching the re-tier on (the owner's go, after launch) changes their words with it.
+        catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS },
       },
     });
   });

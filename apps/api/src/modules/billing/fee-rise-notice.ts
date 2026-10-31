@@ -1,6 +1,7 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, VehicleType } from '@prisma/client';
+import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { formatMoney } from '../../utils/currency-amount';
-import { formatGuyanaTime } from '../../utils/guyana-day';
+import { formatGuyanaTime, guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // [F2 · GUARDRAILS §7 standing rule 2 · Mover and Business Agreements F2]
@@ -67,6 +68,13 @@ export const FEE_RISE_NOTICE_KIND = 'billing_rate_change';
  *  rate moves (customRate customFrom -> customTo, null = back to its own tier fee), never sooner than notBefore. */
 export type FeeRiseSource = 'MOVER_FEE_RESOLVED' | 'TAXI_ACTIVATION' | 'WEEKLY_RETIER' | 'CHAIN_DEAL';
 
+/** [RETIER PR-B · owner 30 Oct 2026] WHY a weekly re-tier rise: the catalogue a store reached (the listings counted,
+ *  the step and the item count that step starts at), or the vehicle a mover drives on Swift. Told in the notice, with
+ *  how to bring the fee back down. */
+export type RetierBasis =
+  | { kind: 'CATALOGUE'; items: number; tier: string; stepFrom: number }
+  | { kind: 'VEHICLE'; vehicleType: string; tier: string };
+
 export interface HeldFeeRise {
   /** The weekly rate the partner pays now, when the rise was held (major units). */
   from: number;
@@ -90,6 +98,20 @@ export interface HeldFeeRise {
   customTo?: number | null;
   /** ... and the deal's end date: no weekly fee due before it is charged the new fee (ISO). */
   notBefore?: string;
+  /** [RETIER PR-B] WEEKLY_RETIER only: why the card gives the higher fee (told in the notice). */
+  basis?: RetierBasis;
+}
+
+/** A stored basis, or undefined for anything that is not one. */
+function readRetierBasis(value: unknown): RetierBasis | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v['tier'] !== 'string') return undefined;
+  if (v['kind'] === 'CATALOGUE' && Number.isInteger(v['items']) && (v['items'] as number) >= 0 && Number.isInteger(v['stepFrom']) && (v['stepFrom'] as number) > 0) {
+    return { kind: 'CATALOGUE', items: v['items'] as number, tier: v['tier'], stepFrom: v['stepFrom'] as number };
+  }
+  if (v['kind'] === 'VEHICLE' && typeof v['vehicleType'] === 'string') return { kind: 'VEHICLE', vehicleType: v['vehicleType'], tier: v['tier'] };
+  return undefined;
 }
 
 const isIso = (v: unknown): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v));
@@ -125,11 +147,20 @@ export function readHeldFeeRise(value: unknown): HeldFeeRise | null {
   } else if ('customFrom' in v || 'customTo' in v || 'notBefore' in v) {
     return null;
   }
+  // [RETIER PR-B] A re-tier rise may carry its basis (the words of its notice); any other rise carries none, and a
+  // basis that cannot be read is not one.
+  let basis: Pick<HeldFeeRise, 'basis'> = {};
+  if (v['basis'] !== undefined && v['basis'] !== null) {
+    const read = v['source'] === 'WEEKLY_RETIER' ? readRetierBasis(v['basis']) : undefined;
+    if (!read) return null;
+    basis = { basis: read };
+  }
   return {
     from, to, currencyCode: v['currencyCode'], source: v['source'] as FeeRiseSource, heldAt: v['heldAt'], noticeAt, appliesFrom,
     inboxId: typeof v['inboxId'] === 'string' ? v['inboxId'] : null,
     ...(v['deferredOnce'] === true ? { deferredOnce: true } : {}),
     ...chain,
+    ...basis,
   };
 }
 
@@ -151,6 +182,23 @@ export function riseAppliesFrom(nextBillingDate: Date, noticeAt: Date, notBefore
   return firstFeeOnOrAfter(nextBillingDate, new Date(Math.max(notice, notBefore ? notBefore.getTime() : notice)));
 }
 
+/** [RETIER PR-B · REVIEW-F/M #2259 S3-1 · COORD 03:50Z: ONE rule for the gate and the notice] A store's weekly
+ *  re-tier rise (CATALOGUE) told for the weekly fee due `appliesFrom` moves in no sooner than the first moment of the
+ *  day (Guyana) that fee is due: every pass that could move it in (the paid week, the hourly sweep, the billing run
+ *  before it charges that fee) counts the store at that moment or later, on the week's rule (items for sale, and items
+ *  taken off sale, changed or removed in the last 7 days). */
+export function retierMovesInFrom(appliesFrom: Date): Date {
+  return startOfGuyanaDay(guyanaDayKey(appliesFrom));
+}
+
+/** ... so the TRUE last moment a store can act is 7 days before that: the end of the day (Guyana) 8 days before the
+ *  fee's day, as its notice says. Items for sale under the step by then, nothing added and nothing taken off sale
+ *  changed after it, and the count at the move-in is under the step. A 14-day notice (appliesFrom is at least 14 days
+ *  and an hour after the notice) leaves at least 6 days after the notice to act (pinned). */
+export function retierCutBy(appliesFrom: Date): Date {
+  return new Date(retierMovesInFrom(appliesFrom).getTime() - 7 * DAY_MS - 1);
+}
+
 /** "Thursday 5 November", the day in Guyana. */
 export function feeRiseDay(at: Date): string {
   return formatGuyanaTime(at, { weekday: 'long', day: 'numeric', month: 'long' });
@@ -166,6 +214,57 @@ export function feeDecreaseCopy(p: { from: number; to: number; currencyCode: str
   return {
     title: 'Your weekly fee is going down',
     body: `From your next weekly fee, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). A weekly fee already charged keeps its amount.`,
+  };
+}
+
+/** A tier in the partner's words. */
+const TIER_WORDS: Record<string, string> = {
+  small: 'business', large: 'large catalogue', department: 'department store', service: 'service business',
+  courier: 'delivery and courier', courierHeavy: 'heavy delivery', taxi: 'taxi',
+};
+
+/** [RETIER PR-B · REVIEW-F/M #2259 S3-1] How a store's items are counted, in the partner's words: the same phrase as
+ *  partner/store-fee.ts CATALOGUE_COUNT_WORDS (a test pins them equal; this file stays free of the partner module). */
+const CATALOGUE_COUNT_PHRASE = 'taken off sale, changed or removed in the last 7 days';
+
+/**
+ * [RETIER PR-B · owner 30 Oct 2026 · F2] The words of a weekly re-tier rise: WHY (the catalogue or vehicle that
+ * reached a higher step), the new fee and from which weekly fee, that nothing changes until then, how to bring it
+ * back down, and how to say no. True with the re-tier's own rules [REVIEW-F/M #2259 S3-1]: Swift counts a store's
+ * items each week (every listing for sale, and every one taken off sale, changed or removed in the last 7 days); a
+ * store with fewer items for sale than the step by the end of the told day (retierCutBy), adding nothing and leaving
+ * every item not for sale as it is after it, is under the step when the rise could move in (retierMovesInFrom) and
+ * is never moved; it is told so. A mover's lower vehicle moves the fee only once seen on two weekly counts a week
+ * apart (billing.service retierInTx). [REVIEW-G #2259 S4-2] A store's notice names the store (an owner may have
+ * several), in the words of a chain branch's notice.
+ */
+export function retierRiseCopy(p: { from: number; to: number; currencyCode: string; date: Date | null; basis: RetierBasis; store?: string | null }): { title: string; body: string } {
+  const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
+  const tier = TIER_WORDS[p.basis.tier] ?? p.basis.tier;
+  const store = p.store?.trim() || null;
+  const its = store ? 'its' : 'your';
+  const why = p.basis.kind === 'CATALOGUE'
+    ? `${store ?? 'Your store'} now has ${p.basis.items.toLocaleString('en-US')} items for sale, which is the ${tier} rate.`
+    : `Your vehicle on Swift is now a ${VEHICLE_CLASSES[p.basis.vehicleType as VehicleType]?.label ?? p.basis.vehicleType}, which is the ${tier} rate.`;
+  const when = p.date ? `From ${its} weekly fee due ${feeRiseDay(p.date)}` : `From ${its} first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`;
+  const cut = p.date ? `by the end of ${feeRiseDay(retierCutBy(p.date))}` : 'by the end of the eighth day before the new fee is due';
+  const down = p.basis.kind === 'CATALOGUE'
+    ? `Swift counts the items in ${store ?? 'your store'} every week: items for sale, and items ${CATALOGUE_COUNT_PHRASE}. `
+      + `To stop this change, have fewer than ${p.basis.stepFrom.toLocaleString('en-US')} items for sale ${cut}, and from then on add no items and leave every item that is not for sale as it is (restocking a sold-out item puts it back on sale): `
+      + 'this change will then not happen, and we will tell you.'
+    : 'Your fee follows the vehicle you drive on Swift: if you change back to a smaller vehicle, your fee goes back down after Swift has seen the smaller vehicle on two weekly counts, a week apart, and we will tell you.';
+  // [REVIEW-F #2259 006bad5f S3-1] Stop weekly billing is on Account, for the store open there (VendorAccountScreen),
+  // not on the weekly-fee screen this notice opens. [S4-2] "Before then" would follow the cut-day sentence: name the
+  // fee's own day instead.
+  const dueDay = p.date ? feeRiseDay(p.date) : 'the new fee is due';
+  const no = store
+    ? `If you do not want the new fee for ${store}, tap Stop weekly billing on Account in Swift, with ${store} open, before ${dueDay} and you will not pay it.`
+    : `If you do not want the new fee, tap Stop weekly billing in Swift before ${dueDay} and you will not pay it.`;
+  return {
+    title: store ? `${store}: your weekly fee is changing` : 'Your weekly fee is changing',
+    body: `${why} ${when}, ${its} Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
+      + (store ? 'Until then nothing changes, and any week already paid keeps the price paid. ' : 'Until then nothing changes, and any week you have already paid keeps the price you paid. ')
+      + `${down} ${no}`,
   };
 }
 
@@ -199,7 +298,8 @@ export function chainDealRiseCopy(p: { branch: string; from: number; to: number;
     title: `${p.branch}: your weekly fee is changing`,
     body: `${p.branch}: ${deal} ${when}, its Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
       + 'Until then nothing changes, and any week already paid keeps the price paid. '
-      + `If you do not want the new fee for ${p.branch}, tap Stop weekly billing on ${p.branch}'s weekly-fee screen in Swift before then and you will not pay it.`,
+      // [REVIEW-F #2259 006bad5f S3-1] The stop control is on Account (for the branch open there), not the weekly-fee screen.
+      + `If you do not want the new fee for ${p.branch}, tap Stop weekly billing on Account in Swift, with ${p.branch} open, before then and you will not pay it.`,
   };
 }
 
@@ -262,7 +362,7 @@ export async function holdChainDealRiseInTx(
  */
 export async function holdFeeRiseInTx(
   tx: Prisma.TransactionClient,
-  p: { subscriptionId: string; from: number; to: number; currencyCode: string; source: FeeRiseSource; sourceRef?: string | null; now: Date },
+  p: { subscriptionId: string; from: number; to: number; currencyCode: string; source: FeeRiseSource; sourceRef?: string | null; now: Date; basis?: RetierBasis },
 ): Promise<'held' | 'unchanged' | 'not-a-rise'> {
   if (!(p.from > 0) || !(p.to > p.from)) return 'not-a-rise';
   const sub = await tx.subscription.findUnique({ where: { id: p.subscriptionId }, select: { customRate: true, feeWaived: true, weeklyRate: true } });
@@ -274,6 +374,8 @@ export async function holdFeeRiseInTx(
   const value: HeldFeeRise = {
     from: p.from, to: p.to, currencyCode: p.currencyCode, source: p.source, heldAt: p.now.toISOString(),
     noticeAt: null, appliesFrom: null, inboxId: null,
+    // [RETIER PR-B] Only a re-tier rise carries its basis (the reader refuses one on any other source).
+    ...(p.source === 'WEEKLY_RETIER' && p.basis ? { basis: p.basis } : {}),
   };
   const json = value as unknown as Prisma.InputJsonValue;
   await tx.platformConfig.upsert({ where: { key }, update: { value: json }, create: { key, value: json } });
@@ -281,7 +383,7 @@ export async function holdFeeRiseInTx(
     action: 'BILLING_FEE_RISE_HELD', entity: 'Subscription', entityId: p.subscriptionId,
     changes: {
       from: p.from, to: p.to, currencyCode: p.currencyCode, source: p.source, sourceRef: p.sourceRef ?? null,
-      noticeDays: FEE_RISE_NOTICE_DAYS,
+      noticeDays: FEE_RISE_NOTICE_DAYS, ...(value.basis ? { basis: value.basis } : {}),
       replaces: held ? { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom } : null,
     },
   } });

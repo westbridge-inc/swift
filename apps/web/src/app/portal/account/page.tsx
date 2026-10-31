@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { cancelPendingMmgPayUrl, getDriverProfile, getRiderProfile, updateDriverProfile } from '@/lib/mover-api';
+import { payLinkHoldLine } from '@/lib/mmg-hold';
 
 export default function AccountPage() {
   const queryClient = useQueryClient();
@@ -128,7 +129,8 @@ export default function AccountPage() {
                 // [W-31] Changing where your earnings land is not a field edit.
                 const next = mmg.trim();
                 const question = next
-                  ? `Send your future MMG payments to:\n\n${next}\n\nThis replaces ${liveUrl ?? 'no current link'} after a short safety delay.`
+                  // [owner 30 Oct 2026] The server's hours (a pay link waits the cool-off), never a guess.
+                  ? `Send your future MMG payments to:\n\n${next}\n\n${payLinkHoldLine(driver.data?.['mmgPayUrlHoldHours'], liveUrl)}`
                   : 'Remove your MMG pay link? Riders will no longer be able to pay you by MMG.';
                 if (window.confirm(question)) save.mutate();
               }}
