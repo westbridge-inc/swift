@@ -5180,13 +5180,19 @@ export class BillingService {
     // HIGHER of the two observations: then the fee goes down. Every observation, confirmation and
     // clearing is an audit row with its basis.
     const lower = opts.lowerTarget && opts.lowerTarget.rate > target.rate ? opts.lowerTarget : target;
-    // [RETIER PR-B · owner 30 Oct 2026] A rise still waiting (told or not) whose new fee the partner no longer reaches
-    // — judged, for a store, on the week's largest catalogue (above: hiding listings around the pass never counts) —
-    // is cancelled on THIS pass, and a partner who was told is told it will not happen. Only the fee itself coming
-    // down waits for the second pass below. A chain deal's own change is the owner's deal, never the catalogue's.
-    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, lower.rate, { exceptChainDeal: true, why: 'BELOW_AGAIN' });
+    // [RETIER PR-B · owner 30 Oct 2026] A STORE's rise still waiting (told or not) whose new fee the store no longer
+    // reaches on the week's largest catalogue (`lowerTarget`, above: hiding or removing listings around the pass never
+    // counts) is cancelled on THIS pass, and a store that was told is told it will not happen. Only the fee itself
+    // coming down waits for the second pass below. A chain deal's own change is the owner's deal, never the catalogue's.
+    // A MOVER's vehicle has no 7-day window (selling the canter for one pass and buying it back): its rise is dropped
+    // only when the lower vehicle is confirmed on the second pass, as before [R27 · security review].
+    const dropped = opts.lowerTarget
+      ? await this.dropStaleFeeRiseInTx(tx, sub.id, lower.rate, { exceptChainDeal: true, why: 'BELOW_AGAIN' })
+      : null;
     const keep = (move: RetierMove | false): RetierMove | false => (dropped ? { ...(move || {}), dropped } : move);
-    if (!(lower.rate < from)) {
+    const heldRow = opts.lowerTarget ? null : await tx.platformConfig.findUnique({ where: { key: feeRiseKey(sub.id) } });
+    const held = heldRow ? readHeldFeeRise(heldRow.value) : null;
+    if (!(lower.rate < from) && !(held && held.to > lower.rate)) {
       await this.clearRetierLowerInTx(tx, sub.id, opts, 'NOT_LOWER');
       return keep(false);
     }

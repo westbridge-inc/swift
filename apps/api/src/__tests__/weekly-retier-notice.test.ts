@@ -378,6 +378,18 @@ describe('[RETIER PR-B · REVIEW-M #2245 S3-1 · COORD ruling] removed listings:
     expect(await heldOf(s.subId)).toBeNull();
     expect((await notices(s.userId)).map((n) => n.title)).toEqual(['Your weekly fee is changing', 'Your weekly fee is not changing']);
   });
+
+  it('(REVIEW-M pair S4-1) listings removed more than 7 days ago stay out even when a later write touched them (the photo clean-up updates removed rows): the next count still cancels the rise', async () => {
+    const t = new Date();
+    const s = await makeStore({ weeklyRate: small, due: new Date(t.getTime() + 3 * DAY), items: largeFloor });
+    await billing.recalculateVendorTiers(t, scope());
+    await billing.sweepFeeRises(t, scope());
+    expect(await heldOf(s.subId)).toMatchObject({ from: small, to: large });
+    await remove(s.vendorId, 10, 8);
+    await app.prisma.$executeRaw`UPDATE "items" SET "updatedAt" = now() WHERE "vendorId" = ${s.vendorId} AND "archivedAt" IS NOT NULL`;
+    await billing.recalculateVendorTiers(new Date(t.getTime() + 60_000), scope());
+    expect(await heldOf(s.subId)).toBeNull();
+  });
 });
 
 describe('[RETIER PR-B] the fee coming down applies from the next weekly fee, with a notice', () => {
