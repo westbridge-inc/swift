@@ -4,9 +4,10 @@
 import { isAwaitingApproval, waitingFor, type StoreGoLive } from './branch-label';
 
 /** An owner's step before a store goes live: what it is, and where it is done on the website (`settings`: the store's
- *  own Settings page) or, for documents, in the Swift app. */
-export const GO_LIVE_STEPS: Readonly<Record<string, { words: string; where: 'settings' | 'app' }>> = {
-  DOCUMENTS: { words: 'Add the documents it still needs, in the Swift app under Documents', where: 'app' },
+ *  own Settings page; `documents`: its Documents page, [OPEN-EARLY PR-2] where a store uploads before the apps are out). */
+export type GoLiveWhere = 'settings' | 'documents';
+export const GO_LIVE_STEPS: Readonly<Record<string, { words: string; where: GoLiveWhere }>> = {
+  DOCUMENTS: { words: 'Add the documents it still needs, under Documents', where: 'documents' },
   PUBLISHED_PHONE: { words: 'Add the number customers can call', where: 'settings' },
   FOOD_HANDLERS: { words: 'Confirm your food handlers', where: 'settings' },
   // [RETIER PR-A2] the store's fee follows its catalogue above the first step: its owner reads and ticks it
@@ -14,7 +15,7 @@ export const GO_LIVE_STEPS: Readonly<Record<string, { words: string; where: 'set
 };
 
 /** The owner's steps for a store not live yet (none on Swift's turn; unknown steps are left out). */
-export function ownerSteps(store: { goLive?: StoreGoLive | null; awaitingApproval?: boolean; status?: string }): Array<{ words: string; where: 'settings' | 'app' }> {
+export function ownerSteps(store: { goLive?: StoreGoLive | null; awaitingApproval?: boolean; status?: string }): Array<{ words: string; where: GoLiveWhere }> {
   if (waitingFor(store) !== 'OWNER' || !isAwaitingApproval(store)) return [];
   return (store.goLive?.steps ?? []).flatMap((step) => (GO_LIVE_STEPS[step] ? [GO_LIVE_STEPS[step]!] : []));
 }

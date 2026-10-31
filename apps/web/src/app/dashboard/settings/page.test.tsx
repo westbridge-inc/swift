@@ -4,6 +4,7 @@ import { renderWithQuery } from '@/test/test-utils';
 import { setSelectedStore } from '@/lib/auth';
 import * as vendorApi from '@/lib/vendor-api';
 import * as storeVatRead from '@/lib/store-vat-read';
+import * as storeFeeApi from '@/lib/store-fee-api';
 import SettingsPage from './page';
 import { storeCheckLabel } from './store-check';
 import { feeDate } from '@/lib/weekly-fee';
@@ -31,6 +32,8 @@ function stubReads() {
   vi.spyOn(vendorApi, 'getCashSettlements').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(vendorApi, 'getHours').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card and (SPEED 30 Oct, the same read) the VAT report link
+  // The owner's weekly-fee card read: left to the network it failed at a random moment and drew a second "Try again" (a flake on main)
+  vi.spyOn(storeFeeApi, 'getStoreFee').mockReturnValue(new Promise(() => {}) as never);
 }
 
 afterEach(() => {
@@ -55,15 +58,28 @@ describe('dashboard settings: the store card', () => {
     setSelectedStore('store-1');
     renderWithQuery(<SettingsPage />);
     expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
-    expect(screen.getByText(/Shop · Town A · Not checked by Swift yet: see your documents in the Swift app/)).toBeTruthy();
+    // [OPEN-EARLY PR-2] the documents are on this website too: the card points to Documents, and the owner has a way there
+    expect(screen.getByText(/Shop · Town A · Not checked by Swift yet: see Documents/)).toBeTruthy();
+    expect(screen.queryByText(/documents in the Swift app/)).toBeNull();
+    expect(screen.getByRole('link', { name: 'Documents' }).getAttribute('href')).toBe('/dashboard/documents');
     expect(screen.queryByText(/Waiting for Swift/)).toBeNull();
+  });
+
+  // [OPEN-EARLY PR-2] The Documents card is the owner's, as on the phone (Account → Documents, owner only).
+  it('a manager gets no Documents card', async () => {
+    stubReads();
+    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: 'MANAGER' } as never);
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Documents' })).toBeNull();
   });
 
   it('never says "checked" once a checked document has lapsed', () => {
     const now = new Date('2026-10-16T12:00:00.000Z');
-    expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it in the Swift app');
+    expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it under Documents');
     expect(storeCheckLabel({ isVerified: true, activationValidUntil: null }, now)).toBe('Documents checked by Swift');
-    expect(storeCheckLabel({ isVerified: false, activationValidUntil: '2999-01-01T00:00:00.000Z' }, now)).toBe('Not checked by Swift yet: see your documents in the Swift app');
+    expect(storeCheckLabel({ isVerified: false, activationValidUntil: '2999-01-01T00:00:00.000Z' }, now)).toBe('Not checked by Swift yet: see Documents');
   });
 });
 
@@ -92,6 +108,7 @@ function stubSettings({ role = 'OWNER', subscription, settlements }: { role?: st
   const cash = vi.spyOn(vendorApi, 'getCashSettlements').mockImplementation((settlements ?? (() => Promise.resolve({ unsettled: [], summary: { owed: 0, count: 0 } }))) as never);
   vi.spyOn(vendorApi, 'getHours').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card and (SPEED 30 Oct, the same read) the VAT report link
+  vi.spyOn(storeFeeApi, 'getStoreFee').mockReturnValue(new Promise(() => {}) as never); // the weekly-fee card (see stubReads)
   return { sub, cash };
 }
 

@@ -103,6 +103,14 @@ COPY apps/mobile/src/lib/inStoreSale.ts apps/mobile/src/lib/inStoreSale.ts
 COPY apps/mobile/src/lib/appointmentBooking.ts apps/mobile/src/lib/appointmentBooking.ts
 # [BOOK-S5b] The Products editor's booking hours, gap, notice and confirm-automatically rules (imports nothing).
 COPY apps/mobile/src/lib/bookingHours.ts apps/mobile/src/lib/bookingHours.ts
+# [OPEN-EARLY PR-2] A store's Documents page speaks the phone's checklist: its document names, list rules, consent and
+# own-name words, and the food handlers step's code (src/lib/store-documents.ts). Each imports nothing.
+COPY apps/mobile/src/components/onboarding/docLabels.ts apps/mobile/src/components/onboarding/docLabels.ts
+COPY apps/mobile/src/components/onboarding/documentChecklistPresentation.ts apps/mobile/src/components/onboarding/documentChecklistPresentation.ts
+COPY apps/mobile/src/components/onboarding/documentConsentRecord.ts apps/mobile/src/components/onboarding/documentConsentRecord.ts
+COPY apps/mobile/src/components/onboarding/foodHandlers.ts apps/mobile/src/components/onboarding/foodHandlers.ts
+COPY apps/mobile/src/lib/uploadConsentCopy.ts apps/mobile/src/lib/uploadConsentCopy.ts
+COPY apps/mobile/src/lib/ownNameCopy.ts apps/mobile/src/lib/ownNameCopy.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 
