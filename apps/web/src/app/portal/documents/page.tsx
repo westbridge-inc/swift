@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { Suspense, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, ShieldCheck, AlertTriangle } from 'lucide-react';
 import {
@@ -10,6 +10,13 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/legal-url';
 import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 import { documentExpiryDay } from '@/lib/documentExpiry';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [PERF · REVIEW-F S2-1] The taxi driver's police-clearance card (its own consent, the phone's words) loads on demand,
+// only for a taxi checklist that offers it: it stays out of this page's first load.
+const PoliceClearanceSection = lazyRetry(() => import('./police-clearance-section'));
+/** The police clearance's code (the API's POLICE_CLEARANCE_DOC_TYPE): never in the privacy-notice uploads below. */
+const POLICE_CLEARANCE_DOC = 'police_clearance';
 
 // [Owner ruling 11 Oct 2026] plain names and, on a taxi checklist, what each document is.
 const pretty = documentLabel;
@@ -57,6 +64,11 @@ export default function DocumentsPage() {
   });
 
   const d = status.data;
+  // [POLICE-CLEARANCE CONSENT · owner 31 Oct 2026] A TAXI driver may add a police clearance (optional; an approved,
+  // current one records the account as police-cleared; it never gates), on the phone's card with its OWN consent in the
+  // API's words — never under the privacy-notice tick below. A delivery rider is never offered one, whatever a list says
+  // (the section checks again with the phone's own list rule).
+  const offersPolice = !!d && isTaxiChecklist(d.checklist ?? []) && (d.optional ?? []).includes(POLICE_CLEARANCE_DOC);
   // Newest document per checklist type wins the display.
   const latestByType = new Map<string, NonNullable<typeof d>['documents'][number]>();
   for (const doc of d?.documents ?? []) {
@@ -100,7 +112,7 @@ export default function DocumentsPage() {
             onRetry={() => void status.refetch()}
           />
         )}
-        {(d?.checklist ?? []).map((docType) => {
+        {(d?.checklist ?? []).filter((docType) => docType !== POLICE_CLEARANCE_DOC).map((docType) => {
           const doc = latestByType.get(docType);
           const tone = doc ? statusTone(doc.status, doc.expiresAt, doc.replaced === true) : null;
           // An approved document stays locked until its renewal window; a copy waiting for review can be replaced.
@@ -168,6 +180,12 @@ export default function DocumentsPage() {
           );
         })}
       </div>
+
+      {d && offersPolice && (
+        <Suspense fallback={<p role="status" className="text-sm text-[var(--swift-muted)]">Loading…</p>}>
+          <PoliceClearanceSection status={d} onSent={() => void queryClient.invalidateQueries({ queryKey: ['p-docs'] })} />
+        </Suspense>
+      )}
     </div>
   );
 }

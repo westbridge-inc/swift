@@ -12,8 +12,9 @@ export {
   DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes, pendingDocumentLabel,
 } from '../../../mobile/src/components/onboarding/documentChecklistPresentation';
 export {
-  DOCUMENT_CONSENT_TICK, documentConsentGivenLine, documentConsentOnRecord,
+  DOCUMENT_CONSENT_TICK, POLICE_CLEARANCE_TICK, documentConsentGivenLine, documentConsentOnRecord, policeClearanceWordsFrom, policeWithdrawOutcome,
 } from '../../../mobile/src/components/onboarding/documentConsentRecord';
+export type { PoliceClearanceWords } from '../../../mobile/src/components/onboarding/documentConsentRecord';
 export { FOOD_HANDLERS_DOC } from '../../../mobile/src/components/onboarding/foodHandlers';
 export { DOCUMENT_CONSENT_TEXT } from '../../../mobile/src/lib/uploadConsentCopy';
 export {
@@ -27,12 +28,29 @@ export const STORE_DOCUMENT_ROLES: ReadonlySet<string> = new Set(['RESTAURANT', 
 export const OWN_NAME_DOC = 'own_name_declaration';
 
 /**
- * [POLICE-CLEARANCE CONSENT] A police clearance has its OWN consent words and version (DPA s.9(1)(a)); the website
- * does not take one yet (as the rider page). A Services business that offers home visits sees it on its list: only
- * those visits wait for it, never the store's going live (verification.service getStatus `gate`).
+ * [POLICE-CLEARANCE CONSENT · DPA s.9(1)(a) · owner 31 Oct 2026] A police clearance is a criminal record: it is sent
+ * with its OWN consent, never the list's document tick — the phone's DocumentUploadCard `policeConsent`. The words are
+ * the API's (GET /verification/status `policeClearanceConsent`, read by the phone's policeClearanceWordsFrom), shown
+ * beside the card's own box: unticked for everyone, emptied after each upload and whenever the words change; the
+ * filing names that tick and the words' version (the API refuses changed words). Who is offered one: a Services
+ * business (optional; a business that offers home visits sees it on its list, and only those visits wait for it, never
+ * the store's going live: verification.service getStatus `gate`) and a taxi driver (optional; an approved, current one
+ * records the account as police-cleared, and it never gates). Delivery riders and every other store are never offered
+ * one here, whatever a list says. Without the API's words the website takes none: it never falls back to the list's
+ * tick (the phone's ask-again fallback is for an older API only).
  */
 export const POLICE_CLEARANCE_DOC = 'police_clearance';
-export const POLICE_CLEARANCE_ON_THE_APP = 'Added in the Swift app, where it has its own consent. Your store can go live without it: only home-visit bookings wait for it.';
+/** The store types offered a police clearance on the website (the API's SERVICE_OPTIONAL list). */
+export const POLICE_CLEARANCE_STORE_TYPES: ReadonlySet<string> = new Set(['SERVICE']);
+/** Under a Services business's clearance when its list names it (it offers home visits): what waits for it. */
+export const POLICE_CLEARANCE_HOME_VISITS = 'Your store can go live without it: only home-visit bookings wait for it.';
+/** When the API sent no words for the clearance's own consent (or words the phone's reader refuses): nothing is taken. */
+export const POLICE_CLEARANCE_NO_WORDS = 'It can’t be added right now: its consent words did not load. Reload the page to try again.';
+/** The phone card's words for the clearance's own box and its withdrawal (DocumentUploadCard). */
+export const POLICE_TICK_BELOW = 'Tick the box below to upload';
+export const POLICE_WITHDRAW_LINK = 'Withdraw my police clearance';
+export const POLICE_WITHDRAW_TITLE = 'Withdraw your police clearance?';
+export const POLICE_WITHDRAW_FAILED = 'Couldn’t withdraw it. Try again.';
 
 /** The files the API takes (POST /verification/upload), as the rider page. */
 export const DOCUMENT_FILE_TYPES = 'image/jpeg,image/png,image/webp,application/pdf';
@@ -76,6 +94,8 @@ export interface StoreDocumentStatus {
   roleVerified?: boolean;
   nameBasis?: string;
   documentConsent?: unknown;
+  /** [POLICE-CLEARANCE CONSENT] The clearance's own consent words for this checklist (read by policeClearanceWordsFrom). */
+  policeClearanceConsent?: unknown;
   categoryUnavailable?: boolean;
 }
 
@@ -107,8 +127,10 @@ export interface DocumentCardInput {
   replaced?: boolean;
   isNext?: boolean;
   optional?: boolean;
-  /** The consent tick is given (the person's own, on this visit or on record). */
+  /** The consent tick is given (the person's own, on this visit or on record) — for a police clearance, its own box. */
   consented: boolean;
+  /** [POLICE-CLEARANCE CONSENT] The card has its own box (below it), not the list's tick above. */
+  ownTick?: boolean;
   /** The server's words for a refused upload (shown as they are), or null. */
   uploadError?: string | null;
 }
@@ -130,7 +152,7 @@ export interface DocumentCardView {
  * approved document inside its renewal window also says "Expiring soon" here, as the rider page does.
  */
 export function documentCardView(input: DocumentCardInput, now = new Date()): DocumentCardView {
-  const { status, expiresAt, submittedAt, reviewNote, replaced = false, isNext = false, optional = false, consented, uploadError = null } = input;
+  const { status, expiresAt, submittedAt, reviewNote, replaced = false, isNext = false, optional = false, consented, ownTick = false, uploadError = null } = input;
   const expired = status === 'EXPIRED';
   const pending = status === 'PENDING';
   const rejected = status === 'REJECTED';
@@ -140,7 +162,7 @@ export function documentCardView(input: DocumentCardInput, now = new Date()): Do
   const approved = status === 'APPROVED' && !expiringSoon;
 
   const caption = !consented && !approved && !pending && !uploadError
-    ? 'Tick the box above to upload'
+    ? (ownTick ? POLICE_TICK_BELOW : 'Tick the box above to upload')
     : uploadError
       ? uploadError
       : approved

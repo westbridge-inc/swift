@@ -1,7 +1,7 @@
-import { screen } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import DocumentsPage from './page';
-import { renderWithQuery } from '@/test/test-utils';
+import { mockApi, renderWithQuery } from '@/test/test-utils';
 import * as moverApi from '@/lib/mover-api';
 
 // ---------------------------------------------------------------------------
@@ -65,3 +65,97 @@ describe('[FOLLOWUPS] the expiry is the day on the document', () => {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// [WEB-POLICE · owner 31 Oct 2026] A TAXI driver may add a police clearance on the website (optional; an approved,
+// current one records the account as police-cleared; it never gates), the phone's way: its OWN consent in the API's
+// words, never the privacy-notice tick. A delivery rider is never offered one, whatever a list says. Synthetic values.
+// ---------------------------------------------------------------------------
+
+const TAXI = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
+const TAXI_WORDS = {
+  tick: 'police_clearance_v1', kind: 'taxi', version: 'taxi-v1-31d',
+  text: 'Optional. I choose to upload my police clearance. (synthetic words)',
+  withdrawConfirm: 'Swift stops using your police clearance now and deletes it. Your account is no longer recorded as police-cleared. (synthetic)',
+};
+const moverStatus = (checklist: string[], over: Record<string, unknown> = {}) => ({
+  roleKey: 'MOVER', checklist, documents: [], missing: checklist, roleVerified: false, optional: ['police_clearance'], policeClearanceConsent: TAXI_WORDS, ...over,
+});
+
+describe('[WEB-POLICE] the police clearance on the rider/driver Documents page', () => {
+  const writes: Array<{ method: string; path: string; body: unknown }> = [];
+  beforeEach(() => {
+    writes.length = 0;
+    mockApi(({ method, url, init }) => {
+      const path = url.pathname.replace('/api/v1', '');
+      writes.push({ method, path, body: init?.body instanceof FormData ? 'file' : init?.body ? JSON.parse(String(init.body)) : null });
+      if (path === '/verification/upload') return { body: { success: true, data: { url: 'verification/user-1/synthetic.enc' } } };
+      return { status: 201, body: { success: true, data: {} } };
+    });
+  });
+
+  it('a taxi driver: offered under Optional with its own box in the API’s words; files it with its own tick and version', async () => {
+    vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType: 'CAR' } as never);
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(TAXI) as never);
+    renderWithQuery(<DocumentsPage />);
+    const optional = (await screen.findByRole('heading', { name: 'Optional' })).closest('section') as HTMLElement;
+    expect(within(optional).getByText('Police Clearance Certificate')).toBeTruthy();
+    expect(within(optional).getByText('Optional. If Swift approves a current one, your account is recorded as police-cleared.')).toBeTruthy();
+    const box = within(optional).getByRole('checkbox', { name: /I choose to upload my police clearance/ }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    const cardButton = within(optional).getByText('Police Clearance Certificate').closest('button') as HTMLButtonElement;
+    expect(cardButton.disabled).toBe(true);
+    fireEvent.click(box);
+    expect(cardButton.disabled).toBe(false);
+    fireEvent.change(screen.getByLabelText('Choose a file for Police Clearance Certificate'), { target: { files: [new File(['synthetic'], 'synthetic.pdf', { type: 'application/pdf' })] } });
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({ method: 'POST', path: '/verification/documents', body: {
+      role: 'MOVER', docType: 'police_clearance', fileUrl: 'verification/user-1/synthetic.enc', consent: true, privacyNoticeVersion: 'web-v1',
+      consentTick: 'police_clearance_v1', consentVersion: 'taxi-v1-31d', consentVia: 'checkbox',
+    } });
+    // It never joins the required list's ordinary upload buttons.
+    expect(screen.getAllByRole('button', { name: 'Upload' })).toHaveLength(TAXI.length);
+  });
+
+  it.each([
+    ['a motorbike rider', 'MOTORCYCLE', ['drivers_licence', 'vehicle_registration', 'vehicle_insurance']],
+    ['a bicycle rider', 'BICYCLE', ['national_id']],
+  ])('%s is never offered one, even if a list named it', async (_name, vehicleType, checklist) => {
+    vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType } as never);
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(checklist) as never);
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText(`${checklist.length} document${checklist.length === 1 ? '' : 's'} still needed before you can go online.`);
+    expect(screen.queryByText(/Police Clearance/)).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Optional' })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /police clearance/ })).toBeNull();
+  });
+
+  it('[REVIEW-G S4-1] a taxi driver’s withdrawal names the mover checklist (role MOVER), after asking in the API’s words', async () => {
+    vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType: 'CAR' } as never);
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(TAXI, { documents: [
+      { id: 'p1', docType: 'police_clearance', status: 'PENDING', expiresAt: null, reviewNote: null, createdAt: '2026-10-30T12:00:00.000Z' },
+    ] }) as never);
+    renderWithQuery(<DocumentsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Withdraw my police clearance' }));
+    const ask = screen.getByRole('alertdialog', { name: 'Withdraw your police clearance?' });
+    expect(within(ask).getByText(TAXI_WORDS.withdrawConfirm)).toBeTruthy();
+    fireEvent.click(within(ask).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(writes).toEqual([{ method: 'POST', path: '/verification/police-clearance/withdraw', body: { role: 'MOVER' } }]));
+  });
+
+  it('a taxi driver without the API’s words: nothing is taken (no box, no file input)', async () => {
+    vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType: 'CAR' } as never);
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(TAXI, { policeClearanceConsent: undefined }) as never);
+    renderWithQuery(<DocumentsPage />);
+    expect(await screen.findByText(/its consent words did not load/)).toBeTruthy();
+    expect(screen.queryByLabelText('Choose a file for Police Clearance Certificate')).toBeNull();
+  });
+
+  it('a police clearance in a mover’s required list never gets the privacy-notice upload', async () => {
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(['national_id', 'police_clearance'], { optional: [] }) as never);
+    renderWithQuery(<DocumentsPage />);
+    await screen.findByText('National ID or Digital ID card');
+    expect(screen.queryByText(/Police Clearance/)).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Upload' })).toHaveLength(1);
+  });
+});

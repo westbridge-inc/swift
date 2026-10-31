@@ -12,8 +12,9 @@ import { getStoreVat } from '@/lib/store-vat-read';
 import { VAT_DOCUMENT_ROW } from '@/lib/store-vat-words';
 import {
   DOCUMENT_CONSENT_TEXT, DOCUMENT_PHOTO_HINT, DOCUMENT_REVIEW_PROMISE, DOCUMENTS_FOOTNOTE, FOOD_HANDLERS_DOC, OPTIONAL_HEADING, OPTIONAL_INTRO,
-  OWN_NAME_DOC, POLICE_CLEARANCE_DOC, POLICE_CLEARANCE_ON_THE_APP, REQUIRED_HEADING, REQUIRED_INTRO, docLabel, documentConsentGivenLine,
-  documentConsentOnRecord, emptyChecklistCopy, latestDocument, optionalDocHint, optionalDocTypes, ownNameApplies, vatDocumentStatusWord,
+  OWN_NAME_DOC, POLICE_CLEARANCE_DOC, POLICE_CLEARANCE_HOME_VISITS, POLICE_CLEARANCE_NO_WORDS, POLICE_CLEARANCE_STORE_TYPES, REQUIRED_HEADING,
+  REQUIRED_INTRO, docLabel, documentConsentGivenLine, documentConsentOnRecord, emptyChecklistCopy, latestDocument, optionalDocHint,
+  optionalDocTypes, ownNameApplies, policeClearanceWordsFrom, vatDocumentStatusWord,
 } from '@/lib/store-documents';
 import { FoodHandlersCard } from '../settings/food-handlers-card';
 import { StoreFeeCard } from '../settings/store-fee-card';
@@ -28,8 +29,9 @@ const [CONSENT_BEFORE, CONSENT_AFTER] = DOCUMENT_CONSENT_TEXT.split('privacy not
  * type>, honest about every state (a failed read is never "nothing required"). The required steps with one consent
  * tick above them (the person's own: given on this visit, or their grant the ledger holds), the progress, each
  * document's card, the food handlers tick and the weekly-fee tick where the phone draws them, the own-name choices,
- * then the optional documents (the VAT certificate row among them). A police clearance is not taken here (its own
- * consent; see lib/store-documents).
+ * then the optional documents (the VAT certificate row among them). [POLICE-CLEARANCE CONSENT] A Services business's
+ * police clearance is sent on its own card with its OWN consent, in the API's words (lib/store-documents): never under
+ * the tick above; any other store is never offered one.
  */
 export function StoreDocumentChecklist({ storeId, vendorType, storeName }: { storeId: string; vendorType: string; storeName: string }) {
   const queryClient = useQueryClient();
@@ -54,8 +56,11 @@ export function StoreDocumentChecklist({ storeId, vendorType, storeName }: { sto
   if (!d) return <p role="status" className="text-sm text-[var(--swift-muted)]">Loading…</p>;
 
   const checklist = d.checklist ?? [];
-  // [POLICE-CLEARANCE CONSENT] An optional police clearance is left out, as the rider page (its own consent words).
-  const optional = optionalDocTypes(d).filter((docType) => docType !== POLICE_CLEARANCE_DOC);
+  // [POLICE-CLEARANCE CONSENT] Only a Services business is offered a police clearance (SERVICE_OPTIONAL); any other
+  // store type never sees one, whatever its list says. Its own consent is the API's words, or none is taken.
+  const offersPolice = POLICE_CLEARANCE_STORE_TYPES.has(vendorType);
+  const policeWords = offersPolice ? policeClearanceWordsFrom(d) : null;
+  const optional = optionalDocTypes(d).filter((docType) => docType !== POLICE_CLEARANCE_DOC || offersPolice);
   const latest = (docType: string) => latestDocument(d.documents, docType);
   const nextDoc = checklist.find((dt) => latest(dt)?.status !== 'APPROVED');
 
@@ -76,6 +81,14 @@ export function StoreDocumentChecklist({ storeId, vendorType, storeName }: { sto
 
   const card = (docType: string, isOptional: boolean) => {
     const doc = latest(docType);
+    if (docType === POLICE_CLEARANCE_DOC && !policeWords) {
+      return (
+        <div key={docType} className="sw-card p-5">
+          <p className="font-semibold">{docLabel(docType)}</p>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">{POLICE_CLEARANCE_NO_WORDS}</p>
+        </div>
+      );
+    }
     return (
       <DocumentCard
         key={docType}
@@ -84,8 +97,11 @@ export function StoreDocumentChecklist({ storeId, vendorType, storeName }: { sto
         doc={doc}
         isNext={!isOptional && docType === nextDoc}
         optionalHint={isOptional ? optionalDocHint(docType) : undefined}
+        // [VERIFY-DOCS] On the list (a business that offers home visits), it still never gates the store.
+        hint={!isOptional && docType === POLICE_CLEARANCE_DOC ? POLICE_CLEARANCE_HOME_VISITS : undefined}
         consented={consented}
         consentVia={consentVia}
+        policeConsent={docType === POLICE_CLEARANCE_DOC ? policeWords : null}
         onSent={refresh}
       />
     );
@@ -139,14 +155,6 @@ export function StoreDocumentChecklist({ storeId, vendorType, storeName }: { sto
               <div key={docType} className="sw-card p-5">
                 <p className="font-semibold">I trade under my own name</p>
                 <p className="mt-1 text-sm text-[var(--swift-muted)]">{doc.status === 'APPROVED' ? 'Checked by a person on our team.' : 'Signed — a person on our team is checking it against your ID.'}</p>
-              </div>
-            );
-          }
-          if (docType === POLICE_CLEARANCE_DOC) {
-            return (
-              <div key={docType} className="sw-card p-5">
-                <p className="font-semibold">{docLabel(docType)}</p>
-                <p className="mt-1 text-sm text-[var(--swift-muted)]">{POLICE_CLEARANCE_ON_THE_APP}</p>
               </div>
             );
           }
