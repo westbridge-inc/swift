@@ -6644,6 +6644,8 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditIn(tx, request.user.userId, 'APPROVE_STORE_VAT', 'Vendor', vendorId, facts, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }, process.env, new Date(), (id) => notifications.publishPersisted(id));
+    // [VAT-DOCS] An approval can move the store's prices (VAT added at checkout): search shows the new ones.
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data };
   });
 
@@ -6655,6 +6657,7 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditIn(tx, request.user.userId, 'REJECT_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }, process.env, new Date(), (id) => notifications.publishPersisted(id));
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data };
   });
 
@@ -6666,6 +6669,8 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditIn(tx, request.user.userId, 'REVOKE_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }, new Date(), (id) => notifications.publishPersisted(id));
+    // [VAT-DOCS] Withdrawn: the store's typed prices are back, in search too.
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: await storeVatView(tenantPrisma, vendorId) };
   });
 

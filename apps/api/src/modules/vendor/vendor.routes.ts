@@ -1740,7 +1740,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']).optional(),
     }).strict().parse(request.body);
     const { updateStoreVatSettings } = await import('../store-vat/store-vat-decisions');
-    return { success: true, data: await updateStoreVatSettings(app.prisma, vendorId, body) };
+    const data = await updateStoreVatSettings(app.prisma, vendorId, body);
+    // [VAT-DOCS] A "no" or a mode change can move the store's prices: search shows the new ones.
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data };
   });
 
   /** POST /vat/certificate — the store's GRA VAT registration certificate (uploaded first through
@@ -1778,7 +1781,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       await recordUploadConsent(app.prisma, { userId, tick: body.consentTick, subjectType: consentSubjectForRole(role), surface: consentSurfaceOf(request), ip: request.ip, docType: VAT_CERTIFICATE_DOC_TYPE });
     }
     reply.code(201);
-    return { success: true, data: await linkVatCertificate(app.prisma, vendorId, doc, process.env, claim) };
+    const data = await linkVatCertificate(app.prisma, vendorId, doc, process.env, claim);
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data };
   });
 
   /**
@@ -2098,6 +2103,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The notice committed with the move; fanning it out afterwards cannot undo either.
     if (pinNoticeId) await notifications.publishPersisted(pinNoticeId);
     await deleteQueuedPhotos(photoOrphans);
+    // [VAT-DOCS] A changed VAT number can take VAT off the store's prices (vat-pricing.ts): search shows them.
+    if (vatRegistrationNumber !== undefined) scheduleVendorSearchSync(app, vendorId);
 
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId });
