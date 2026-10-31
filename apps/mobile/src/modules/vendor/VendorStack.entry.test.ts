@@ -337,6 +337,7 @@ vi.mock('../../components/onboarding/WentLive', () => ({
 vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('../profile/screens/GetHelpScreen', () => ({ GetHelpScreen: 'GetHelpScreen' }));
 vi.mock('./NewOrderTakeover', () => ({ NewOrderTakeover: 'NewOrderTakeover' }));
+vi.mock('./VatDocumentRow', () => ({ VatDocumentRow: 'VatDocumentRow' })); // [VAT-DOCS] the Documents list's optional VAT row (its camera picker needs a device)
 vi.mock('./screens/VendorAccountScreen', () => ({ VendorAccountScreen: 'VendorAccountScreen' }));
 vi.mock('./screens/VendorBulkImportScreen', () => ({ VendorBulkImportScreen: 'VendorBulkImportScreen' }));
 vi.mock('./screens/VendorCategoryReviewScreen', () => ({ VendorCategoryReviewScreen: 'VendorCategoryReviewScreen' }));

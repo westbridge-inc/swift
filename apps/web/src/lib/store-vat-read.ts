@@ -9,9 +9,13 @@ export interface StoreVatView {
   available: boolean;
   status: StoreVatStatus;
   mode: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
+  /** [owner ruling 31 Oct 2026] An approved store's change of choice, waiting for a person (an older server sends none). */
+  modeRequested?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
   vatRegistrationNumber: string | null;
   /** True while this store's new orders carry VAT. */
   effective: boolean;
+  /** [VAT-DOCS] True while Swift adds VAT to the prices this store types (an older server sends none). */
+  addsVatToPrices?: boolean;
   approved: { number: string | null; registeredName: string | null; effectiveFrom: string | null; reviewedAt: string | null } | null;
   reviewNote: string | null;
   certificate: { id: string; status: string; state: string; reviewNote: string | null; createdAt: string; reviewedAt: string | null } | null;

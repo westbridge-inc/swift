@@ -889,6 +889,9 @@ export interface StoreVatPendingRow {
   name: string;
   vatRegistrationNumber: string | null;
   mode: string | null;
+  /** [owner ruling 31 Oct 2026] Set: an APPROVED store asks to change its price choice (POST /store-vat/:id/mode). */
+  status?: string;
+  modeRequested?: string | null;
   certificate: { id: string; status: string; state: string; createdAt: string } | null;
 }
 export interface StoreVatApproval {
@@ -909,6 +912,10 @@ export const rejectStoreVat = (vendorId: string, reason: string) =>
   apiFetch(`/api/v1/admin/store-vat/${encodeURIComponent(vendorId)}/reject`, { method: 'POST', body: JSON.stringify({ reason }), reason });
 export const revokeStoreVat = (vendorId: string, reason: string) =>
   apiFetch(`/api/v1/admin/store-vat/${encodeURIComponent(vendorId)}/revoke`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+/** [VAT-DOCS · owner ruling 31 Oct 2026] Approve or refuse an approved store's change of price choice: `mode` is the change
+ *  the reviewer saw (the server refuses one the store has since changed); a refusal's reason is what the store reads. */
+export const decideStoreVatMode = (vendorId: string, decision: { approve: boolean; mode: string }, reason: string) =>
+  apiFetch(`/api/v1/admin/store-vat/${encodeURIComponent(vendorId)}/mode`, { method: 'POST', body: JSON.stringify({ ...decision, reason }), reason });
 
 // [VERIFY-DOCS V3] The document reviewer grant. Opening, approving and
 // rejecting a document need it; `*` never implies it. A SUPER_ADMIN lists the

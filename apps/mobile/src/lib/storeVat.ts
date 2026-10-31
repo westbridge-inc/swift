@@ -75,9 +75,101 @@ export function orderVatLine(order: { vatRateBps?: unknown; vatAmount?: unknown;
   return `Includes VAT of ${money(amount)} (${rate}%)${by}`;
 }
 
+/** [VAT-DOCS · owner 30 Oct 2026] How a VAT-registered store's typed prices relate to VAT. */
+export type StoreVatMode = 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT';
+
+/** The two choices, in the owner's words (the same on the web dashboard). */
+export const VAT_MODE_CHOICES: ReadonlyArray<{ value: StoreVatMode; label: string }> = [
+  { value: 'PRICES_INCLUDE_VAT', label: 'My prices already include VAT' },
+  { value: 'ADD_VAT_AT_CHECKOUT', label: 'My prices do not include VAT' },
+];
+
+/** What each choice means for the customer (the rate always from the API). VAT Act s.90(2): the customer always sees
+ *  the full price, VAT included, before ordering: the VAT goes INTO the price, never as a surprise at checkout.
+ *  [REVIEW-F #2256 S3-1] Every item starts standard-rated, so in this mode an unmarked zero-rated item costs customers the
+ *  VAT too: said at the moment the store chooses. [S4-1] The VAT is the store's: never worded as Swift adding it. */
+export function vatModeHelp(mode: StoreVatMode, ratePercent: number): string {
+  return mode === 'ADD_VAT_AT_CHECKOUT'
+    ? `Once a person at Swift approves your certificate, ${ratePercent}% VAT is added to the price you type for each standard-rated item, so customers see and pay the full price, VAT included, before they order. Every item counts as standard-rated until you mark it zero-rated or exempt: mark those before a person approves, or customers pay VAT on them.`
+    : 'Customers pay the prices you type; receipts show the VAT inside them.';
+}
+
+/** [VAT-DOCS · owner ruling 31 Oct 2026] An APPROVED store that picks the other choice: a person checks the change first. */
+export const MODE_CHANGE_REVIEW_NOTE = 'A person at Swift checks a change of this choice before it applies. Until then your prices and what customers pay stay as they are.';
+
+/** [owner ruling 31 Oct 2026] The change of choice the store is waiting on (GET /vendor/vat `modeRequested`), or null. */
+export function modeRequestedLine(requested: StoreVatMode | null | undefined): string | null {
+  const label = VAT_MODE_CHOICES.find((c) => c.value === requested)?.label;
+  if (!label) return null;
+  return `You asked to change to “${label}”. A person at Swift will check the change. Until then your prices and what customers pay stay as they are.`;
+}
+
+/** Turning VAT off for a store whose VAT is added to its prices: the prices it typed come back. */
+export const turnOffAddedPricesLine = ' VAT stops being added to your prices: customers pay the prices you typed.';
+
+/** [REVIEW-F #2256 S4-2] A NEW item in a store whose VAT is added to its prices. */
+export function newItemBeforeVatHint(ratePercent: number): string {
+  return `Type the price before VAT: ${ratePercent}% VAT is added to standard-rated items.`;
+}
+
+/** [REVIEW-M #2255 S4-2 · security review #2256] A NEW option's extra price: as the price before VAT only where the editor
+ *  knows VAT is added (`vatAdded`, from vatPricingOf), else bare, so the server's refusal still guards a wrong client. */
+export function newOptionPrice(price: number, vatAdded: boolean): { additionalPrice: number; vatListedAdditionalPrice?: number } {
+  return vatAdded ? { additionalPrice: price, vatListedAdditionalPrice: price } : { additionalPrice: price };
+}
+
+/** [security review #2256] Whether VAT is added to the prices this store types, from the profile's store (GET
+ *  /vendor/profile `vatAddsToPrices`, `vatRatePercent`), which every role that edits the menu reads. The ONE word for both
+ *  the before-VAT wording and the payload. null while there is no store yet: no new price is sent then. */
+export function vatPricingOf(store: { vatAddsToPrices?: unknown; vatRatePercent?: unknown } | null | undefined): { adds: boolean; ratePercent: number } | null {
+  if (!store) return null;
+  const rate = typeof store.vatRatePercent === 'number' ? store.vatRatePercent : null;
+  return { adds: store.vatAddsToPrices === true && rate != null, ratePercent: rate ?? 0 };
+}
+
+/** [REVIEW-F #2256 S4-3] An option's extra price in the editor: what customers pay, saying so when VAT is in it. */
+export function optionPriceLabel(o: { additionalPrice?: unknown; vatListedAdditionalPrice?: unknown }): string {
+  const n = Number(o.additionalPrice);
+  if (!(n > 0)) return 'Free';
+  return `+${money(n)}${o.vatListedAdditionalPrice != null ? ' incl. VAT' : ''}`;
+}
+
+/** [VAT-DOCS] The optional row in a store's Documents list. Never required to go live. */
+export const VAT_DOCUMENT_ROW = {
+  title: 'VAT certificate (only if VAT-registered)',
+  body: 'Only if your business is registered for VAT with the GRA. You do not need it to go live.',
+} as const;
+
+/** [VAT-DOCS] An item's price as the store edits it: the price it typed before VAT while Swift adds VAT to it (the
+ *  server sends `vatListedPrice`), else the price itself. */
+export function editablePrice(item: { basePrice?: unknown; vatListedPrice?: unknown } | null | undefined): string {
+  if (!item) return '';
+  const typed = item.vatListedPrice ?? item.basePrice;
+  return typed == null ? '' : String(Number(typed));
+}
+
+/** [VAT-DOCS] The price field of an item save: an item Swift adds VAT to is edited by its price BEFORE VAT
+ *  (`vatListedPrice`); any other existing item by its price as typed (`basePrice`). [REVIEW-M #2255 S4-2 · security review
+ *  #2256] A NEW item in a store the editor knows adds VAT (`vatAdded`) sends its typed price as the price before VAT; any
+ *  other new item the bare price, so the server's refusal (409 VAT_PRICE_BEFORE_VAT) still guards a wrong client. */
+export function itemPricePayload(item: { vatListedPrice?: unknown } | null | undefined, price: number, vatAdded: boolean): { basePrice?: number; vatListedPrice?: number } {
+  if (!item) return vatAdded ? { basePrice: price, vatListedPrice: price } : { basePrice: price };
+  return item.vatListedPrice != null ? { vatListedPrice: price } : { basePrice: price };
+}
+
+/** [VAT-DOCS] The line under the price of an item Swift adds VAT to: what customers pay. */
+export function beforeVatNote(item: { basePrice?: unknown; vatListedPrice?: unknown } | null | undefined): string | null {
+  if (item?.vatListedPrice == null || item.basePrice == null) return null;
+  return `Before VAT. Customers pay ${money(Number(item.basePrice))} incl. VAT.`;
+}
+
 /** What the store's own VAT screen reads (GET /vendor/vat), as far as the status line needs it. */
 export interface StoreVatStatusView {
   status: 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'REVOKED';
+  /** [VAT-DOCS] An older server sends no mode words beyond these two. */
+  mode?: StoreVatMode | null;
+  /** [owner ruling 31 Oct 2026] The change of choice waiting for a person (an older server sends none). */
+  modeRequested?: StoreVatMode | null;
   effective: boolean;
   ratePercent: number;
   reviewNote: string | null;
@@ -105,7 +197,9 @@ export function storeVatStatusLine(v: StoreVatStatusView): string {
         : 'Send your GRA VAT registration certificate below. A person at Swift checks it before anything changes.';
     case 'APPROVED':
       if (!v.effective) return 'Approved, but VAT is not on your orders right now. Your prices and receipts show no VAT.';
-      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. Your prices include VAT at ${v.ratePercent}%, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
+      return `Approved from ${calendarDay(v.approved?.effectiveFrom)}. ${v.mode === 'ADD_VAT_AT_CHECKOUT'
+        ? `VAT at ${v.ratePercent}% is added to the prices you type for standard-rated items`
+        : `Your prices include VAT at ${v.ratePercent}%`}, and receipts say “VAT charged by ${v.approved?.registeredName ?? ''} · VAT reg. no. ${v.approved?.number ?? ''}”.`;
     case 'REJECTED':
       return `Not approved${v.reviewNote ? `: ${v.reviewNote}` : ''}. Correct it and send your certificate again.`;
     case 'REVOKED':

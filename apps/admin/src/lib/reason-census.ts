@@ -78,6 +78,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
     requiredBodyKeys: ['certificateDocId', 'vatNumber', 'registeredName', 'effectiveFrom', 'nameMatchesStore'] },
   { route: 'POST /store-vat/:vendorId/reject', helper: 'rejectStoreVat', args: ['vnd_1'], requiredBodyKeys: ['reason'] },
   { route: 'POST /store-vat/:vendorId/revoke', helper: 'revokeStoreVat', args: ['vnd_1'], requiredBodyKeys: ['reason'] },
+  // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice: approve or refuse what the reviewer saw.
+  { route: 'POST /store-vat/:vendorId/mode', helper: 'decideStoreVatMode', args: ['vnd_1', { approve: false, mode: 'PRICES_INCLUDE_VAT' }], requiredBodyKeys: ['approve', 'mode', 'reason'] },
   { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
   { route: 'PUT /staff/:userId/catalogue-approver', helper: 'setCatalogueApprover', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Pressable, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
@@ -36,12 +36,17 @@ export function DocumentChecklist({
   isError,
   onRetry,
   storeName,
+  optionalExtra,
   storeFee,
 }: {
   role: string;
   status: any;
   /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
   storeName?: string | null;
+  /** [VAT-DOCS · owner 30 Oct 2026] A row the screen adds to the Optional documents (a store owner's "VAT certificate
+   *  (only if VAT-registered)", modules/vendor/VatDocumentRow). `withHeading`: true when no other optional document
+   *  put the "Optional" heading up, so the row brings its own (and nothing shows when the row hides itself). */
+  optionalExtra?: (withHeading: boolean) => ReactNode;
   /** [RETIER PR-A2] the store whose weekly fee may need its owner's tick, and whether the person looking owns it */
   storeFee?: StoreFeeScope | null;
   isLoading?: boolean;
@@ -261,8 +266,9 @@ export function DocumentChecklist({
               />
             );
           })}
+          {optionalExtra?.(false)}
         </View>
-      ) : null}
+      ) : optionalExtra?.(true) ?? null}
       <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'flex-start', borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md }}>
         <MaterialCommunityIcons name="shield-check-outline" size={16} color={color.text.muted} style={{ marginTop: 1 }} />
         <T variant="micro" tone="muted" style={{ marginLeft: space.sm, flex: 1 }}>

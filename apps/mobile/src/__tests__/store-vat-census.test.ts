@@ -67,7 +67,9 @@ describe('[O-5] the phone’s VAT words', () => {
   it('the certificate upload carries the recorded document consent words and tick', () => {
     const section = read('modules/vendor/StoreVatSection.tsx');
     expect(section).toContain('accessibilityLabel={DOCUMENT_CONSENT_TEXT}');
-    expect(section).toContain('disabled={!consented}');
+    // [VAT-DOCS] the consent tick still gates every send (a first claim also waits for its number and price choice)
+    expect(section).toContain('disabled={!consented || !claimReady}');
+    expect(section).toContain('if (!consented || !claimReady || send.isPending) return;');
     const hooks = read('hooks/storeVatCertificate.ts');
     expect(hooks).toContain("consentTick: 'document_v1'");
     expect(hooks).toMatch(/const PRIVACY_NOTICE_VERSION = 'v1'/);
@@ -78,5 +80,54 @@ describe('[O-5] the phone’s VAT words', () => {
     const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
     expect(editor).toContain('...(vatRate != null ? { vatClass } : {})');
     expect(editor).toContain("useStoreVat(myRole === 'OWNER' && !samplePreview)");
+  });
+
+  // [VAT-DOCS · owner 30 Oct 2026] "Add VAT at checkout": one submission, the price before VAT, the optional Documents row.
+  it('a first VAT claim sends the number and the price choice WITH the certificate (one submission)', () => {
+    const section = read('modules/vendor/StoreVatSection.tsx');
+    expect(section).toContain('...(firstClaim && mode ? { claim: { vatRegistrationNumber: number.trim(), mode } } : {})');
+    expect(section).toContain('VAT_MODE_CHOICES.map');
+    expect(section).not.toContain('not available yet');
+    expect(read('hooks/storeVatCertificate.ts')).toContain('...(claim ?? {})');
+  });
+
+  it('the item editor edits the price before VAT of an item Swift adds VAT to (never the VAT-inclusive price)', () => {
+    const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
+    expect(editor).toContain('useState<string>(editablePrice(existing))');
+    expect(editor).toContain('...itemPricePayload(existing, priceNum, vatAdded)');
+    expect(editor).not.toMatch(/\bbasePrice: priceNum\b/);
+  });
+
+  // [VAT-DOCS · owner ruling 31 Oct 2026 · REVIEW-M #2256 N1] An approved store's change of choice waits for a person and the
+  // store is told; the save never sends a built-in choice the store did not make.
+  it('a change of price choice: the store is told a person checks it; the save sends only a choice the store made', () => {
+    const section = read('modules/vendor/StoreVatSection.tsx');
+    expect(section).toContain("{changeNeedsPerson ? <T variant=\"label\" tone=\"muted\" testID=\"store-vat-mode-review\">{MODE_CHANGE_REVIEW_NOTE}</T> : null}");
+    expect(section).toContain('const waitingLine = modeRequestedLine(v.modeRequested);');
+    expect(section).toContain('setMode(v.modeRequested ?? v.mode ?? null);');
+    const hook = read('hooks/storeVat.ts');
+    expect(hook).toContain('...(answer.mode ? { mode: answer.mode } : {})');
+    expect(hook).not.toContain("?? 'PRICES_INCLUDE_VAT'");
+  });
+
+  it('[REVIEW-M #2255 S4-2 · REVIEW-F #2256 S4-3] new options carry the typed price; an option’s price says when VAT is in it', () => {
+    const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
+    expect(editor).toContain('data: { name, ...newOptionPrice(Number(d.price) || 0, vatAdded) },');
+    expect(editor).toContain('{optionPriceLabel(o)}');
+    // [security review #2256] One word, from the profile every role reads, for the wording AND the payload.
+    expect(editor).toContain('const vatPricing = vatPricingOf(store);');
+    expect(editor).toContain('...itemPricePayload(existing, priceNum, vatAdded),');
+    expect(editor).toContain('{ optionGroups: draftOptionGroupsPayload(draftGroups, vatAdded) }');
+    expect(editor).toContain("placeholder={beforeVatNote(existing) || (!existing && vatAdded) ? 'Price before VAT (GYD)' : 'Price (GYD)'}");
+    expect(editor).toContain('{newItemBeforeVatHint(vatPricing.ratePercent)}');
+    expect(editor).toContain("placeholder={vatAdded ? '+GYD before VAT' : '+GYD'}");
+    expect(editor).toContain('&& (existing != null || vatPricing != null);');
+    expect(editor).not.toContain('storeVat.data?.addsVatToPrices');
+  });
+
+  it('every store owner’s Documents list carries the optional VAT certificate row', () => {
+    expect(read('modules/vendor/screens/BusinessSetup.tsx')).toContain("optionalExtra={myRole === 'OWNER' ? (withHeading) => <VatDocumentRow withHeading={withHeading} /> : undefined}");
+    expect(read('modules/vendor/screens/VendorAccountScreen.tsx')).toContain('optionalExtra={(withHeading) => <VatDocumentRow withHeading={withHeading} inline={false} />}');
+    expect(read('components/onboarding/DocumentChecklist.tsx')).toContain('optionalExtra?.(true)');
   });
 });

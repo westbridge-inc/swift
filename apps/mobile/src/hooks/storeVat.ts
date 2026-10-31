@@ -5,6 +5,7 @@ import { getAuthSessionSnapshot, requireAuthSessionSnapshot, useAuthStore } from
 import { useVendorPreview } from '../stores/vendorPreview';
 import { previewMutation } from '../lib/vendorPreviewData';
 import { guardVendorOperation } from './useVendorMutation';
+import type { StoreVatMode } from '../lib/storeVat';
 
 // ---------------------------------------------------------------------------
 // [STORE-VAT · owner O-5] The store's VAT on the phone (OWNER only; the API refuses anyone else). The owner says
@@ -18,8 +19,12 @@ export interface StoreVatView {
   available: boolean;
   status: StoreVatStatus;
   mode: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
+  /** [owner ruling 31 Oct 2026] An approved store's change of choice, waiting for a person (an older server sends none). */
+  modeRequested?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' | null;
   vatRegistrationNumber: string | null;
   effective: boolean;
+  /** [VAT-DOCS] True while Swift adds VAT to the prices this store types (an older server sends none). */
+  addsVatToPrices?: boolean;
   approved: { number: string | null; registeredName: string | null; effectiveFrom: string | null; reviewedAt: string | null } | null;
   reviewNote: string | null;
   certificate: { id: string; status: string; state: string; reviewNote: string | null; createdAt: string; reviewedAt: string | null } | null;
@@ -71,9 +76,10 @@ export function useUpdateStoreVat() {
   const qc = useQueryClient();
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   return useMutation({
-    mutationFn: guardVendorOperation(previewReadOnly((answer: { registered: boolean; vatRegistrationNumber?: string }) =>
+    mutationFn: guardVendorOperation(previewReadOnly((answer: { registered: boolean; vatRegistrationNumber?: string; mode?: StoreVatMode }) =>
       bound(storeId, (session) => unwrap<StoreVatView>(vendorApi.updateVat(
-        answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, mode: 'PRICES_INCLUDE_VAT' } : { registered: false },
+        // [REVIEW-M #2256 N1] The choice only when the store made one: never a built-in default that could ask to switch it.
+        answer.registered ? { registered: true, vatRegistrationNumber: answer.vatRegistrationNumber, ...(answer.mode ? { mode: answer.mode } : {}) } : { registered: false },
         session, storeId,
       ))))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'vat'] }),
