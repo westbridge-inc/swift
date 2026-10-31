@@ -112,10 +112,19 @@ export function newItemBeforeVatHint(ratePercent: number): string {
   return `Type the price before VAT: ${ratePercent}% VAT is added to standard-rated items.`;
 }
 
-/** [REVIEW-M #2255 S4-2] A NEW option's extra price, as the store typed it: sent as both fields (the server reads the
- *  price before VAT first, and refuses a bare extra price on a store that adds VAT). */
-export function newOptionPrice(price: number): { additionalPrice: number; vatListedAdditionalPrice: number } {
-  return { additionalPrice: price, vatListedAdditionalPrice: price };
+/** [REVIEW-M #2255 S4-2 · security review #2256] A NEW option's extra price: as the price before VAT only where the editor
+ *  knows VAT is added (`vatAdded`, from vatPricingOf), else bare, so the server's refusal still guards a wrong client. */
+export function newOptionPrice(price: number, vatAdded: boolean): { additionalPrice: number; vatListedAdditionalPrice?: number } {
+  return vatAdded ? { additionalPrice: price, vatListedAdditionalPrice: price } : { additionalPrice: price };
+}
+
+/** [security review #2256] Whether VAT is added to the prices this store types, from the profile's store (GET
+ *  /vendor/profile `vatAddsToPrices`, `vatRatePercent`), which every role that edits the menu reads. The ONE word for both
+ *  the before-VAT wording and the payload. null while there is no store yet: no new price is sent then. */
+export function vatPricingOf(store: { vatAddsToPrices?: unknown; vatRatePercent?: unknown } | null | undefined): { adds: boolean; ratePercent: number } | null {
+  if (!store) return null;
+  const rate = typeof store.vatRatePercent === 'number' ? store.vatRatePercent : null;
+  return { adds: store.vatAddsToPrices === true && rate != null, ratePercent: rate ?? 0 };
 }
 
 /** [REVIEW-F #2256 S4-3] An option's extra price in the editor: what customers pay, saying so when VAT is in it. */
@@ -140,11 +149,11 @@ export function editablePrice(item: { basePrice?: unknown; vatListedPrice?: unkn
 }
 
 /** [VAT-DOCS] The price field of an item save: an item Swift adds VAT to is edited by its price BEFORE VAT
- *  (`vatListedPrice`); any other existing item by its price as typed (`basePrice`). [REVIEW-M #2255 S4-2] A NEW item
- *  sends its typed price as both (the server reads `vatListedPrice` first and refuses a bare basePrice on a store that
- *  adds VAT, where it could not tell whether VAT is in it). */
-export function itemPricePayload(item: { vatListedPrice?: unknown } | null | undefined, price: number): { basePrice?: number; vatListedPrice?: number } {
-  if (!item) return { basePrice: price, vatListedPrice: price };
+ *  (`vatListedPrice`); any other existing item by its price as typed (`basePrice`). [REVIEW-M #2255 S4-2 · security review
+ *  #2256] A NEW item in a store the editor knows adds VAT (`vatAdded`) sends its typed price as the price before VAT; any
+ *  other new item the bare price, so the server's refusal (409 VAT_PRICE_BEFORE_VAT) still guards a wrong client. */
+export function itemPricePayload(item: { vatListedPrice?: unknown } | null | undefined, price: number, vatAdded: boolean): { basePrice?: number; vatListedPrice?: number } {
+  if (!item) return vatAdded ? { basePrice: price, vatListedPrice: price } : { basePrice: price };
   return item.vatListedPrice != null ? { vatListedPrice: price } : { basePrice: price };
 }
 

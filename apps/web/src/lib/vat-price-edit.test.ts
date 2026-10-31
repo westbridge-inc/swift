@@ -15,12 +15,16 @@ describe('[VAT-DOCS] editing the price of an item Swift adds VAT to', () => {
   });
 
   it('a save sends vatListedPrice for such an item, basePrice otherwise (and for a new item)', () => {
-    expect(itemPricePayload(added, 250)).toEqual({ vatListedPrice: 250 });
-    expect(itemPricePayload(plain, 650)).toEqual({ basePrice: 650 });
+    expect(itemPricePayload(added, 250, true)).toEqual({ vatListedPrice: 250 });
+    expect(itemPricePayload(plain, 650, true)).toEqual({ basePrice: 650 });
     // [REVIEW-M #2255 S4-2] A NEW item / option says its price is the one the store typed (the server refuses a bare price
     // on a store that adds VAT, where it could not tell whether VAT is in it).
-    expect(itemPricePayload(null, 50)).toEqual({ basePrice: 50, vatListedPrice: 50 });
-    expect(newOptionPrice(25)).toEqual({ additionalPrice: 25, vatListedAdditionalPrice: 25 });
+    // [security review #2256] ...and only where the editor KNOWS VAT is added to the store's prices (it asked for the price
+    // before VAT): anywhere else the bare price, so the server's refusal still stands guard if the client is wrong.
+    expect(itemPricePayload(null, 50, true)).toEqual({ basePrice: 50, vatListedPrice: 50 });
+    expect(itemPricePayload(null, 50, false)).toEqual({ basePrice: 50 });
+    expect(newOptionPrice(25, true)).toEqual({ additionalPrice: 25, vatListedAdditionalPrice: 25 });
+    expect(newOptionPrice(25, false)).toEqual({ additionalPrice: 25 });
   });
 
   it('[REVIEW-F #2256 S4-2] a new item in a store that adds VAT asks for the price before VAT (the same words as the phone)', () => {

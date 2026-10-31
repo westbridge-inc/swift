@@ -45,6 +45,7 @@ const menuTools = {
   },
 };
 type Dialog = import('./menu-tools').MenuDialogState;
+type VatPricing = import('./menu-tools').VatPricing;
 
 /** [TAP-AUDIT] The item's own photo, as the app shows it (drawn by the tools chunk); none = the placeholder. */
 function RowPhoto({ url }: { url: string | null | undefined }) {
@@ -174,9 +175,15 @@ export default function InventoryPage() {
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
   const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
   // [BOOK-S5b · owner A4] The selected store's word that "Confirm bookings automatically" can be chosen (switch on).
-  const profileStores = (profile.data as { vendors?: Array<{ id: string; instantBookingAvailable?: unknown }> } | undefined)?.vendors ?? [];
+  const profileStores = (profile.data as { vendors?: Array<{ id: string; instantBookingAvailable?: unknown; vatAddsToPrices?: unknown; vatRatePercent?: unknown }> } | undefined)?.vendors ?? [];
   const profileStore = profileStores.find((v) => v.id === storeId) ?? (profileStores.length === 1 ? profileStores[0] : undefined);
   const instantAvailable = profileStore?.instantBookingAvailable === true;
+  // [VAT-DOCS · security review #2256] Whether VAT is added to this store's prices, for every role that edits the menu (the
+  // profile, not the owner-only VAT read): one word for the before-VAT wording and the payload. null until it has loaded.
+  // A store the profile does not list (or an older server): the bare price, which the server refuses if it is wrong.
+  const vatPricing: VatPricing = profile.isSuccess
+    ? { adds: profileStore?.vatAddsToPrices === true && typeof profileStore.vatRatePercent === 'number', ratePercent: Number(profileStore?.vatRatePercent) || 0 }
+    : null;
   const vat = useQuery({ queryKey: storeKey(storeId, 'vat'), queryFn: getStoreVat, enabled: isOwner });
   const vatRate = vat.data && vat.data.status !== 'NONE' ? vat.data.ratePercent : null;
   const vatEffective = vat.data?.effective === true;
@@ -372,7 +379,7 @@ export default function InventoryPage() {
         </p>
       )}
       {tools && dialog && <tools.MenuDialog dialog={dialog} storeId={storeId} sections={sections} counts={perSection} vendorType={vendorType}
-        instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} vatAdded={vat.data?.addsVatToPrices === true} onClose={() => setDialog(null)} />}
+        instantAvailable={instantAvailable} vatRate={vatRate} vatEffective={vatEffective} vatPricing={vatPricing} onClose={() => setDialog(null)} />}
     </div>
   );
 }

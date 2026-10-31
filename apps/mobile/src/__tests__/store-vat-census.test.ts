@@ -94,7 +94,7 @@ describe('[O-5] the phone’s VAT words', () => {
   it('the item editor edits the price before VAT of an item Swift adds VAT to (never the VAT-inclusive price)', () => {
     const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
     expect(editor).toContain('useState<string>(editablePrice(existing))');
-    expect(editor).toContain('...itemPricePayload(existing, priceNum)');
+    expect(editor).toContain('...itemPricePayload(existing, priceNum, vatAdded)');
     expect(editor).not.toMatch(/\bbasePrice: priceNum\b/);
   });
 
@@ -112,9 +112,17 @@ describe('[O-5] the phone’s VAT words', () => {
 
   it('[REVIEW-M #2255 S4-2 · REVIEW-F #2256 S4-3] new options carry the typed price; an option’s price says when VAT is in it', () => {
     const editor = read('modules/vendor/screens/VendorItemEditorScreen.tsx');
-    expect(editor).toContain('data: { name, ...newOptionPrice(Number(d.price) || 0) },');
+    expect(editor).toContain('data: { name, ...newOptionPrice(Number(d.price) || 0, vatAdded) },');
     expect(editor).toContain('{optionPriceLabel(o)}');
-    expect(editor).toContain('{newItemBeforeVatHint(storeVat.data.ratePercent)}');
+    // [security review #2256] One word, from the profile every role reads, for the wording AND the payload.
+    expect(editor).toContain('const vatPricing = vatPricingOf(store);');
+    expect(editor).toContain('...itemPricePayload(existing, priceNum, vatAdded),');
+    expect(editor).toContain('{ optionGroups: draftOptionGroupsPayload(draftGroups, vatAdded) }');
+    expect(editor).toContain("placeholder={beforeVatNote(existing) || (!existing && vatAdded) ? 'Price before VAT (GYD)' : 'Price (GYD)'}");
+    expect(editor).toContain('{newItemBeforeVatHint(vatPricing.ratePercent)}');
+    expect(editor).toContain("placeholder={vatAdded ? '+GYD before VAT' : '+GYD'}");
+    expect(editor).toContain('&& (existing != null || vatPricing != null);');
+    expect(editor).not.toContain('storeVat.data?.addsVatToPrices');
   });
 
   it('every store owner’s Documents list carries the optional VAT certificate row', () => {

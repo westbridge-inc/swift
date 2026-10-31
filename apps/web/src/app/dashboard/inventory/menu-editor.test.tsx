@@ -29,6 +29,8 @@ let holdReads: boolean;
 /** [REVIEW-F #2142] Writes that hang (a slow line): to prove a second press sends nothing while the first is out. */
 let holdSectionPost = false;
 let holdItemPost = false;
+// [VAT-DOCS · security review #2256] The profile's stores (vatAddsToPrices is read by every role that edits the menu).
+let profileVendors: Row[] = [];
 
 const body = (r: ApiRequest) => (typeof r.init?.body === 'string' ? JSON.parse(r.init.body) : r.init?.body);
 
@@ -49,6 +51,7 @@ beforeEach(() => {
   holdReads = false;
   holdSectionPost = false;
   holdItemPost = false;
+  profileVendors = [];
   mockApi(async (r) => {
     const { url, method } = r;
     const path = url.pathname;
@@ -59,7 +62,7 @@ beforeEach(() => {
     if (path === '/api/v1/vendor/items' && method === 'GET') return { body: { data: items } };
     if (path === '/api/v1/vendor/categories' && method === 'GET') return { body: { data: sections } };
     if (path === '/api/v1/vendor/stores') return { body: { data: { stores: [{ id: 'store-1', name: 'Mart', vendorType, isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true }], selectedId: 'store-1', myRole: role } } };
-    if (path === '/api/v1/vendor/profile') return { body: { data: { myRole: role, vendors: [] } } };
+    if (path === '/api/v1/vendor/profile') return { body: { data: { myRole: role, vendors: profileVendors } } };
     if (path === '/api/v1/vendor/items' && method === 'POST' && holdItemPost) return new Promise<never>(() => {});
     if (path === '/api/v1/vendor/items' && method === 'POST') {
       const b = body(r);
@@ -135,14 +138,52 @@ describe('[TAP-AUDIT] the web adds and edits items like the app', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(writes.map((w) => `${w.method} ${w.url.pathname}`)).toEqual(['POST /api/v1/vendor/items', 'POST /api/v1/vendor/items/new-1/image']);
     expect(body(writes[0]!)).toMatchObject({
-      // [REVIEW-M #2255 S4-2] A new item and its new choices carry the prices as typed (before VAT where VAT is added).
-      categoryId: 'mains', name: 'Chow mein', basePrice: 700, vatListedPrice: 700, isAvailable: true, bulk: 'normal',
-      optionGroups: [{ name: 'Size', isRequired: true, minSelect: 1, maxSelect: 1, options: [
-        { name: 'Small', additionalPrice: 0, vatListedAdditionalPrice: 0 }, { name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 },
-      ] }],
+      categoryId: 'mains', name: 'Chow mein', basePrice: 700, isAvailable: true, bulk: 'normal',
+      optionGroups: [{ name: 'Size', isRequired: true, minSelect: 1, maxSelect: 1, options: [{ name: 'Small', additionalPrice: 0 }, { name: 'Large', additionalPrice: 200 }] }],
     });
     expect((writes[1]!.init?.body as FormData).get('file')).toBeTruthy();
     expect(await screen.findByRole('article', { name: 'Chow mein' })).toBeTruthy();
+  });
+
+  it('[security review #2256] a MANAGER of a store whose VAT is added: the new item and its choices ask for, and send, the price before VAT', async () => {
+    role = 'MANAGER';
+    profileVendors = [{ id: 'store-1', name: 'Mart', vatAddsToPrices: true, vatRatePercent: 14 }];
+    renderWithQuery(<InventoryPage />);
+    await screen.findByRole('article', { name: 'Roti' });
+    await click(await screen.findByRole('button', { name: '+ Add item' }));
+    const editor = await dialog();
+    await waitFor(() => expect(within(editor).getByLabelText('Price before VAT (GYD)')).toBeTruthy());
+    expect(within(editor).getByText('Type the price before VAT: 14% VAT is added to standard-rated items.')).toBeTruthy();
+    await type(editor, 'Item name', 'Chow mein');
+    await type(editor, 'Price before VAT (GYD)', '700');
+    await type(editor, 'New group (e.g. Size, Toppings)', 'Size');
+    await click(within(editor).getByRole('button', { name: 'Add option group' }));
+    const group = within(editor).getByRole('group', { name: 'Group Size' });
+    await type(group, 'Choice for Size', 'Large');
+    await type(group, 'Extra price before VAT for Size', '200');
+    await click(within(group).getByRole('button', { name: 'Add choice to Size' }));
+    await click(within(editor).getByRole('button', { name: 'Mains' }));
+    await click(within(editor).getByRole('button', { name: 'Add item' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(body(writes[0]!)).toMatchObject({
+      basePrice: 700, vatListedPrice: 700,
+      optionGroups: [{ name: 'Size', options: [{ name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 }] }],
+    });
+  });
+
+  it('a store whose VAT is not added sends the bare prices (the server refuses them if that is wrong)', async () => {
+    profileVendors = [{ id: 'store-1', name: 'Mart', vatAddsToPrices: false, vatRatePercent: 14 }];
+    renderWithQuery(<InventoryPage />);
+    await screen.findByRole('article', { name: 'Roti' });
+    await click(await screen.findByRole('button', { name: '+ Add item' }));
+    const editor = await dialog();
+    await type(editor, 'Item name', 'Chow mein');
+    await type(editor, 'Price (GYD)', '700');
+    await click(within(editor).getByRole('button', { name: 'Mains' }));
+    await click(within(editor).getByRole('button', { name: 'Add item' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(body(writes[0]!)).not.toHaveProperty('vatListedPrice');
+    expect(body(writes[0]!)).toMatchObject({ basePrice: 700 });
   });
 
   it('Edit item opens with the item as saved (bulk kept), sends the edit, and a choice added or removed goes to the server at once', async () => {
@@ -173,7 +214,7 @@ describe('[TAP-AUDIT] the web adds and edits items like the app', () => {
     await click(within(size).getByRole('button', { name: 'Remove Small' }));
     await waitFor(() => expect(within(size).queryByText('Small')).toBeNull());
     expect(writes.slice(1).map((w) => `${w.method} ${w.url.pathname}`)).toEqual(['POST /api/v1/vendor/option-groups/g-size/options', 'DELETE /api/v1/vendor/options/o-small']);
-    expect(body(writes[1]!)).toEqual({ name: 'Large', additionalPrice: 200, vatListedAdditionalPrice: 200 });
+    expect(body(writes[1]!)).toEqual({ name: 'Large', additionalPrice: 200 });
   });
 
   it('Delete asks once ("Delete item?"), then the row leaves', async () => {

@@ -52,7 +52,7 @@ import {
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import {
-  beforeVatNote, editablePrice, itemPricePayload, newItemBeforeVatHint, newOptionPrice, optionPriceLabel, vatClassChoices, type VatClass,
+  beforeVatNote, editablePrice, itemPricePayload, newItemBeforeVatHint, newOptionPrice, optionPriceLabel, vatClassChoices, vatPricingOf, type VatClass,
 } from '../../../lib/storeVat';
 import { useStoreVat } from '../../../hooks/storeVat';
 import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
@@ -75,14 +75,14 @@ export type DraftOptionGroup = {
 
 /** The create request's `optionGroups`, exactly what the store typed (the server checks every name, as it does for
  *  a group added later). */
-export function draftOptionGroupsPayload(groups: DraftOptionGroup[]) {
+export function draftOptionGroupsPayload(groups: DraftOptionGroup[], vatAdded = false) {
   return groups.map((g) => ({
     name: g.name,
     isRequired: g.isRequired,
     minSelect: g.isRequired ? 1 : 0,
     maxSelect: g.maxSelect,
     // [REVIEW-M #2255 S4-2] A new option's price as the store typed it (before VAT where VAT is added).
-    options: g.options.map((o) => ({ name: o.name, ...newOptionPrice(o.additionalPrice) })),
+    options: g.options.map((o) => ({ name: o.name, ...newOptionPrice(o.additionalPrice, vatAdded) })),
   }));
 }
 
@@ -111,7 +111,13 @@ export function saveRefusal(error: unknown): string | null {
  * instead of waiting on the menu query. On a NEW item (no id yet) the groups and
  * choices are a draft the editor sends with the item ([TAP-AUDIT], `staged`).
  */
-function ModifiersSection({ item, staged }: { item: any; staged?: { groups: DraftOptionGroup[]; set: Dispatch<SetStateAction<DraftOptionGroup[]>> } }) {
+function ModifiersSection({ item, staged, vatPricing }: {
+  item: any;
+  staged?: { groups: DraftOptionGroup[]; set: Dispatch<SetStateAction<DraftOptionGroup[]>> };
+  /** [security review #2256] The store's VAT word from the profile (vatPricingOf): wording and payload agree. */
+  vatPricing: { adds: boolean; ratePercent: number } | null;
+}) {
+  const vatAdded = vatPricing?.adds === true;
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const [savedGroups, setGroups] = useState<any[]>(item?.optionGroups ?? []);
   const groups: any[] = staged
@@ -157,7 +163,7 @@ function ModifiersSection({ item, staged }: { item: any; staged?: { groups: Draf
     if (readOnly) return;
     const d = draft(groupId);
     const name = d.name.trim();
-    if (!name || addOption.isPending) return;
+    if (!name || addOption.isPending || vatPricing == null) return;
     if (staged) {
       const additionalPrice = Number(d.price) || 0;
       staged.set((gs) => gs.map((g) => (g.key === groupId ? { ...g, options: [...g.options, { key: nextDraftKey(), name, additionalPrice }] } : g)));
@@ -167,7 +173,7 @@ function ModifiersSection({ item, staged }: { item: any; staged?: { groups: Draf
     const owner = requireAuthSessionSnapshot();
     const opt = await addOption.mutateAsync({
       groupId,
-      data: { name, ...newOptionPrice(Number(d.price) || 0) },
+      data: { name, ...newOptionPrice(Number(d.price) || 0, vatAdded) },
       authSession: owner,
     });
     requireAuthSessionForPrincipal(owner);
@@ -266,7 +272,8 @@ function ModifiersSection({ item, staged }: { item: any; staged?: { groups: Draf
               style={{ width: 96 }}
               value={draft(g.id).price}
               onChangeText={(t: string) => setDrafts((s) => ({ ...s, [g.id]: { ...draft(g.id), price: t } }))}
-              placeholder="+GYD"
+              placeholder={vatAdded ? '+GYD before VAT' : '+GYD'}
+              accessibilityLabel={vatAdded ? `Extra price before VAT for ${g.name}` : `Extra price for ${g.name}`}
               keyboardType="number-pad"
             />
             <Pressable onPress={() => submitOption(g.id)} disabled={readOnly || addOption.isPending}>
@@ -440,6 +447,10 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   // A sample preview has no VAT; a manager does not see it (the business's tax registration is the owner's).
   const samplePreview = useVendorPreview((st) => st.previewType) != null;
   const storeVat = useStoreVat(myRole === 'OWNER' && !samplePreview);
+  // [VAT-DOCS · security review #2256] Whether VAT is added to this store's prices: the profile's word, which every role
+  // that edits the menu reads (the VAT read above is the owner's). The ONE word for the before-VAT wording and the payload.
+  const vatPricing = vatPricingOf(store);
+  const vatAdded = vatPricing?.adds === true;
   const vatRate = storeVat.data && storeVat.data.status !== 'NONE' ? storeVat.data.ratePercent : null;
   const vatEffective = storeVat.data?.effective === true;
   const [vatClass, setVatClass] = useState<VatClass>((existing?.vatClass as VatClass | undefined) ?? 'STANDARD');
@@ -489,7 +500,9 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
   const priceNum = Number(price);
   const valid =
-    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || hoursProblem == null);
+    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || hoursProblem == null)
+    // A new item's price waits for the store's VAT word (it decides whether the price is before VAT).
+    && (existing != null || vatPricing != null);
   const busy = save.isPending || uploadImage.isPending;
   // [IMAGES-E2E PR4] Only a photo Swift keeps is drawn (an outside address is not shown to customers either).
   const previewUri = localPhoto?.uri ?? (isKeptPhoto(existing?.imageUrl) ? storePhotoUrl(existing?.imageUrl, HERO_PHOTO_WIDTH) : null) ?? undefined;
@@ -552,7 +565,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
         categoryId,
         name: name.trim(),
         description: description.trim() || undefined,
-        ...itemPricePayload(existing, priceNum),
+        ...itemPricePayload(existing, priceNum, vatAdded),
         isAvailable: available,
         isPopular: popular,
         ...(isService
@@ -567,7 +580,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
               stockQuantity: stock.trim() === '' ? null : Number.isFinite(stockNum as number) ? stockNum : undefined,
               lowStockThreshold: lowStock.trim() === '' ? null : Number(lowStock) >= 0 ? Number(lowStock) : undefined,
               // [TAP-AUDIT] A new item's groups and choices travel with it (one request, not one per choice).
-              ...(!existing && draftGroups.length > 0 ? { optionGroups: draftOptionGroupsPayload(draftGroups) } : {}),
+              ...(!existing && draftGroups.length > 0 ? { optionGroups: draftOptionGroupsPayload(draftGroups, vatAdded) } : {}),
             }),
       },
     });
@@ -644,11 +657,11 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
         <View style={{ gap: space.md }}>
           <LabeledInput value={name} onChangeText={setName} placeholder="Item name" />
-          <LabeledInput value={price} onChangeText={setPrice} placeholder={beforeVatNote(existing) || (!existing && storeVat.data?.addsVatToPrices) ? 'Price before VAT (GYD)' : 'Price (GYD)'} keyboardType="decimal-pad" />
+          <LabeledInput value={price} onChangeText={setPrice} placeholder={beforeVatNote(existing) || (!existing && vatAdded) ? 'Price before VAT (GYD)' : 'Price (GYD)'} keyboardType="decimal-pad" />
           {/* [VAT-DOCS] What customers pay for an item Swift adds VAT to (the saved price, from the server). */}
           {beforeVatNote(existing) ? <T variant="caption" tone="muted" testID="item-before-vat-note">{beforeVatNote(existing)}</T> : null}
-          {!existing && storeVat.data?.addsVatToPrices ? (
-            <T variant="caption" tone="muted" testID="item-new-before-vat-hint">{newItemBeforeVatHint(storeVat.data.ratePercent)}</T>
+          {!existing && vatPricing?.adds ? (
+            <T variant="caption" tone="muted" testID="item-new-before-vat-hint">{newItemBeforeVatHint(vatPricing.ratePercent)}</T>
           ) : null}
           <InlineInput value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
         </View>
@@ -851,9 +864,9 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
         )}
 
         {existing && !isService ? (
-          <ModifiersSection item={existing} />
+          <ModifiersSection item={existing} vatPricing={vatPricing} />
         ) : !isService ? (
-          <ModifiersSection item={null} staged={{ groups: draftGroups, set: setDraftGroups }} />
+          <ModifiersSection item={null} staged={{ groups: draftGroups, set: setDraftGroups }} vatPricing={vatPricing} />
         ) : null}
 
         <T variant="label" weight="semibold" tone="muted" style={{ marginTop: space.lg, marginBottom: space.sm }}>
@@ -881,6 +894,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
           label={
             readOnly
               ? 'Read-only preview'
+              : !existing && vatPricing == null
+                ? 'Loading the store’s prices…'
               : !name.trim()
                 ? 'Name the item first'
                 : !(Number.isFinite(priceNum) && priceNum >= 0)

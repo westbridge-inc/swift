@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MODE_CHANGE_REVIEW_NOTE, VAT_DOCUMENT_ROW, VAT_MODE_CHOICES, beforeVatNote, editablePrice, itemPricePayload, modeRequestedLine, newItemBeforeVatHint,
-  newOptionPrice, optionPriceLabel, storeVatStatusLine, turnOffAddedPricesLine, vatModeHelp,
+  newOptionPrice, optionPriceLabel, storeVatStatusLine, turnOffAddedPricesLine, vatModeHelp, vatPricingOf,
 } from './storeVat';
 
 // ---------------------------------------------------------------------------
@@ -53,12 +53,23 @@ describe('[VAT-DOCS] editing the price of an item Swift adds VAT to', () => {
   });
 
   it('a save sends the price before VAT for such an item (the server adds the VAT), basePrice otherwise', () => {
-    expect(itemPricePayload(added, 250)).toEqual({ vatListedPrice: 250 });
-    expect(itemPricePayload(plain, 650)).toEqual({ basePrice: 650 });
+    expect(itemPricePayload(added, 250, true)).toEqual({ vatListedPrice: 250 });
+    expect(itemPricePayload(plain, 650, true)).toEqual({ basePrice: 650 });
     // [REVIEW-M #2255 S4-2] A NEW item says its price is the one the store typed (the server refuses a bare basePrice on a
     // store that adds VAT: it could not tell whether VAT is in it); the same number, so any server reads it right.
-    expect(itemPricePayload(undefined, 50)).toEqual({ basePrice: 50, vatListedPrice: 50 });
-    expect(newOptionPrice(25)).toEqual({ additionalPrice: 25, vatListedAdditionalPrice: 25 });
+    // [security review #2256] ...only where the editor KNOWS VAT is added (it asked for the price before VAT); anywhere else
+    // the bare price, so the server's refusal still guards a client that has it wrong.
+    expect(itemPricePayload(undefined, 50, true)).toEqual({ basePrice: 50, vatListedPrice: 50 });
+    expect(itemPricePayload(undefined, 50, false)).toEqual({ basePrice: 50 });
+    expect(newOptionPrice(25, true)).toEqual({ additionalPrice: 25, vatListedAdditionalPrice: 25 });
+    expect(newOptionPrice(25, false)).toEqual({ additionalPrice: 25 });
+  });
+
+  it('[security review #2256] the word comes from the profile every role reads (never the owner-only VAT read)', () => {
+    expect(vatPricingOf({ vatAddsToPrices: true, vatRatePercent: 14 })).toEqual({ adds: true, ratePercent: 14 });
+    expect(vatPricingOf({ vatAddsToPrices: false, vatRatePercent: 14 })).toEqual({ adds: false, ratePercent: 14 });
+    expect(vatPricingOf({})).toEqual({ adds: false, ratePercent: 0 }); // an older server: the bare price
+    expect(vatPricingOf(null)).toBeNull(); // not loaded: no new price is sent
   });
 
   it('[REVIEW-F #2256 S4-2] a new item in a store that adds VAT asks for the price before VAT', () => {

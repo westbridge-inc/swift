@@ -13,16 +13,18 @@ export function editablePrice(item: Priced): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** The price part of an item save. [REVIEW-M #2255 S4-2] A NEW item sends its typed price as both fields (the server reads
- *  `vatListedPrice` first and refuses a bare basePrice on a store that adds VAT, where it could not tell whether VAT is in it). */
-export function itemPricePayload(item: Priced, price: number): { basePrice?: number; vatListedPrice?: number } {
-  if (!item) return { basePrice: price, vatListedPrice: price };
+/** The price part of an item save. [REVIEW-M #2255 S4-2 · security review #2256] A NEW item in a store whose VAT is added
+ *  (`vatAdded`: the profile's `vatAddsToPrices`, the same word that made the field ask for the price before VAT) sends the
+ *  typed price as the price before VAT; anywhere else the bare price, so the server's refusal (409 VAT_PRICE_BEFORE_VAT)
+ *  still guards a client that has it wrong. */
+export function itemPricePayload(item: Priced, price: number, vatAdded: boolean): { basePrice?: number; vatListedPrice?: number } {
+  if (!item) return vatAdded ? { basePrice: price, vatListedPrice: price } : { basePrice: price };
   return item.vatListedPrice != null ? { vatListedPrice: price } : { basePrice: price };
 }
 
-/** [REVIEW-M #2255 S4-2] A NEW option's extra price as the store typed it (the same rule as a new item). */
-export function newOptionPrice(price: number): { additionalPrice: number; vatListedAdditionalPrice: number } {
-  return { additionalPrice: price, vatListedAdditionalPrice: price };
+/** A NEW option's extra price (the same rule as a new item). */
+export function newOptionPrice(price: number, vatAdded: boolean): { additionalPrice: number; vatListedAdditionalPrice?: number } {
+  return vatAdded ? { additionalPrice: price, vatListedAdditionalPrice: price } : { additionalPrice: price };
 }
 
 /** [REVIEW-F #2256 S4-2] A NEW item in a store whose VAT is added to its prices (the same words as the phone). */
