@@ -94,6 +94,23 @@ export function riderPhotoUrl(rider: RiderLike): string | null {
   return url && /^https?:\/\//.test(url) ? url : null;
 }
 
+// ─── Names on the board card (owner 30 Oct 21:47Z) ────────────────────────────────────────────────
+type NamesOrder = { customer?: { firstName?: unknown } | null; rider?: { user?: { firstName?: unknown } | null } | null } | null | undefined;
+
+/**
+ * The names a board card shows at a glance: the customer's first name, and the rider's first name
+ * once a rider is assigned (the name the store checks at the hand-over). Never a last name, a phone
+ * number or an address, whatever the reply carries; the order window keeps its own contact card.
+ */
+export function boardNames(order: NamesOrder): { customer: string | null; rider: string | null } {
+  return { customer: word(order?.customer?.firstName), rider: word(order?.rider?.user?.firstName) };
+}
+
+export const BOARD_NAME_WORDS = {
+  customer: (name: string) => `Customer: ${name}`,
+  rider: (name: string) => `Rider: ${name}`,
+} as const;
+
 export const HANDOVER_WORDS = {
   toRider: 'Handed to rider',
   toCustomer: 'Handed to customer',

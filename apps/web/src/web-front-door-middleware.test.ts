@@ -199,7 +199,7 @@ const ROUTE_CLASS: Record<string, 'ordering' | 'open'> = {
   '/login': 'open', '/signup': 'open',
   // Partner consoles (stores, riders, drivers, advertisers) work before launch.
   '/dashboard': 'open', '/dashboard/inventory': 'open', '/dashboard/inventory/import': 'open', '/dashboard/notifications': 'open',
-  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/settings/vat-report': 'open', '/dashboard/weekly-fee': 'open', '/dashboard/weekly-fee/statement': 'open', '/dashboard/weekly-fee/pay-all': 'open', '/weekly-fee': 'open',
+  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/qr': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/settings/vat-report': 'open', '/dashboard/weekly-fee': 'open', '/dashboard/weekly-fee/statement': 'open', '/dashboard/weekly-fee/pay-all': 'open', '/weekly-fee': 'open',
   '/dashboard/branches': 'open', '/dashboard/branches/add': 'open', '/dashboard/team': 'open', // [CHAINS PR2]
   '/portal': 'open', '/portal/account': 'open', '/portal/documents': 'open', '/portal/history': 'open',
   '/portal/notifications': 'open', '/portal/weekly-fee': 'open',

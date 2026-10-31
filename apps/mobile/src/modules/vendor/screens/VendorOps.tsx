@@ -68,6 +68,7 @@ import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeO
 import { HANDOVER_WORDS, pickupCheckWords, withHandoverSteps } from '../storeHandover';
 import { mmgDisputePaused } from '../order-dispute';
 import { RiderHandoverLine } from '../RiderHandoverLine';
+import { BoardNames } from '../BoardNames';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
@@ -170,6 +171,8 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
           {paymentMethodWords(order.paymentMethod) ? ` · ${paymentMethodWords(order.paymentMethod)}` : ''}
         </T>
       </View>
+      {/* [STORE-LINK+NAMES · owner 30 Oct] Who it is for, and who carries it: first names, at a glance. */}
+      <BoardNames order={order} />
       {/* What to make — the kitchen reads this off the card */}
       {lines.length > 0 ? (
         <View style={{ marginTop: space.sm, borderRadius: radius.md, backgroundColor: color.surface.subtle, paddingHorizontal: space.md, paddingVertical: space.sm }}>
