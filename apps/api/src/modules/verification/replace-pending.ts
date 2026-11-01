@@ -4,8 +4,10 @@
  * "I can't change a submitted document if I accidentally sent the wrong one." A new upload of the same
  * document (same account, role and type) while an earlier copy is still waiting for a reviewer replaces
  * that copy:
- *  - the earlier copy becomes SUPERSEDED — kept for audit, never deleted (its file, ledger and history
- *    stay; retention rules apply to it as to any superseded submission) — and can no longer be decided;
+ *  - the earlier copy becomes SUPERSEDED — its row, ledger and history stay for audit — and can no longer
+ *    be decided. [DOC-SECURITY G5] Its image does not stay: for a partner's PERSONAL document the
+ *    image-policy sweep purges it 30 days after the replacement (image-policy.ts, the
+ *    documents.personal_image_days window), through the shred, probe and receipt path; a legal hold keeps it;
  *  - its open review case closes, so the queue shows only the newest copy, which gets its own fresh case
  *    (a reviewer who had claimed the old copy is told it was replaced if they try to decide it);
  *  - an APPROVED document stays locked: renewal rules are unchanged (submitDocument still refuses a new
