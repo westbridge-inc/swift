@@ -28,9 +28,6 @@ export const ENUM_LABELS = {
   VendorType: {
     RESTAURANT: 'Restaurant', SUPERMARKET: 'Supermarket', STORE: 'Store', SERVICE: 'Service business',
   },
-  VendorTier: {
-    UNREGISTERED: 'Unregistered seller', REGISTERED: 'Registered business',
-  },
   OrderStatus: {
     PENDING: 'Waiting to be accepted', ACCEPTED: 'Accepted', PREPARING: 'Being prepared',
     READY_FOR_PICKUP: 'Ready for pickup', RIDER_ASSIGNED: 'Rider assigned',

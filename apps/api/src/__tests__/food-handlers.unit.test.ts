@@ -4,7 +4,8 @@
  *  - A REGISTERED restaurant no longer has to upload a food handler's certificate: it may (RESTAURANT_OPTIONAL — still
  *    uploadable, still reviewed by a person, still shown on the storefront while it is current). Its owner instead
  *    TICKS "Everyone who handles food here holds a current food handler's certificate." (vendor/food-handlers.ts).
- *  - A self-declared (UNREGISTERED) food seller — a home cook — keeps the certificate REQUIRED. Chefs and caterers keep theirs.
+ *  - Chefs and caterers keep the certificate REQUIRED. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] The self-declared
+ *    (UNREGISTERED) home cook, who also kept it, is gone with its tier (unregistered-tier-removed.test.ts).
  *  - [REVIEW-G #2053 S4-4] The electrician gets the GEI licence floor the solar installer has.
  *
  * These are the list/verdict pins; food-handlers.test.ts proves the gate end to end on a database.
@@ -27,8 +28,8 @@ describe('[FOOD-PERMIT] the restaurant lists', () => {
     expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT_OPTIONAL']).toEqual([CERT]);
   });
 
-  it('a home cook (self-declared tier) keeps it required; chef and caterer keep theirs', () => {
-    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT_UNREGISTERED']).toContain(CERT);
+  it('chef and caterer keep it required; [CHECKLIST-LEGAL] there is no self-declared tier any more', () => {
+    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT_UNREGISTERED']).toBeUndefined();
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER_TRADE_CHEF']).toEqual([CERT]);
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER_TRADE_CATERER']).toEqual([CERT, 'eating_house_registration']);
     expect(SERVICE_TRADE_LAUNCH_FLOOR['chef']).toContain(CERT);
@@ -44,16 +45,16 @@ describe('[FOOD-PERMIT] the restaurant lists', () => {
   });
 
   it('the config version moves above 2026-10-22.1 (an owner-signed seed carries the new lists)', () => {
-    // [DEPT-PRICE] 2026-10-29.1 carries these lists on, with the department-store fee at 45,000 (dept-price.unit.test.ts)
-    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-29.1');
+    // [DEPT-PRICE] 2026-10-29.1 carries these lists on, with the department-store fee at 45,000 (dept-price.unit.test.ts);
+    // [CHECKLIST-LEGAL] 2026-11-01.1 without the self-declared tier's lists (unregistered-tier-removed.test.ts)
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-11-01.1');
   });
 });
 
 describe('[FOOD-PERMIT] who ticks', () => {
-  it('a registered restaurant only: never a home cook, never another store type', () => {
-    expect(foodHandlerTickApplies({ vendorType: 'RESTAURANT', tier: 'REGISTERED' })).toBe(true);
-    expect(foodHandlerTickApplies({ vendorType: 'RESTAURANT', tier: 'UNREGISTERED' })).toBe(false);
-    for (const vendorType of ['SUPERMARKET', 'STORE', 'SERVICE']) expect(foodHandlerTickApplies({ vendorType, tier: 'REGISTERED' }), vendorType).toBe(false);
+  it('a restaurant only, never another store type ([CHECKLIST-LEGAL] no tier to ask about)', () => {
+    expect(foodHandlerTickApplies({ vendorType: 'RESTAURANT' })).toBe(true);
+    for (const vendorType of ['SUPERMARKET', 'STORE', 'SERVICE']) expect(foodHandlerTickApplies({ vendorType }), vendorType).toBe(false);
   });
 
   it('the words are the owner’s, at a pinned version', () => {

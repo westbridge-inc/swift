@@ -133,17 +133,13 @@ export function assertOwnerInGoodStanding(stores: readonly StandingStore[], owne
   }
 }
 
-/** [CHAINS] A branch is born a registered seller (the tier column's default, written out): the add-a-branch terms
- *  ask a restaurant branch for its food handlers tick by this tier (vendor/food-handlers.ts). */
-export const BRANCH_TIER = 'REGISTERED' as const;
-
 /** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
 async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean; publicPhone?: string | null } = {}) {
   return tx.vendor.create({
     data: {
       ownerId,
       // [CHAINS · COORD ruling] A branch waits for a person at Swift to approve it before it can go live.
-      ...(opts.branch ? { personApprovalRequired: true, tier: BRANCH_TIER } : {}),
+      ...(opts.branch ? { personApprovalRequired: true } : {}),
       // [REVIEW-F #2220 S3-1] The number customers can call, published by the owner on the add-a-branch form.
       ...(opts.publicPhone ? { publicPhone: opts.publicPhone } : {}),
       name: business.name,
@@ -395,7 +391,7 @@ export class PartnerService {
   ): Promise<{ id: string; name: string; status: string; ownerId: string }> {
     assertStorePinInMarket(business.latitude, business.longitude);
     const publicPhone = publicPhoneForWrite(setup.publicPhone);
-    if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType, tier: BRANCH_TIER })) {
+    if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType })) {
       throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
     }
     await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
