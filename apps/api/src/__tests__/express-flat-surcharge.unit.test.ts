@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { UserRole } from '@prisma/client';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import * as markup from '../utils/markup';
@@ -9,6 +10,8 @@ import {
 import { DEFAULT_COURIER_RATES, estimateCourierFee } from '../modules/courier/courier.service';
 import { planVendorGroup, priceBasket, type BasketPromo, type VendorPlan } from '../modules/order/cart-plans';
 import { renderReceiptHtml } from '../modules/order/receipt';
+import { LEGAL_VERSION, PRIVACY, TERMS } from '../modules/legal/legal.routes';
+import { MATERIAL_CHANGES, NON_MATERIAL_CHANGES, PRO_AGREEMENT_VERSION, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling, 1 Nov 2026] EXPRESS delivery on a store or food order is the
@@ -229,5 +232,31 @@ describe('a Swift-paid free-delivery code covers the normal fee, never the expre
     expect(routes).toContain("description = `Free delivery (express still adds $${EXPRESS_DELIVERY_SURCHARGE.toLocaleString()} GYD)`;");
     const admin = readFileSync(join(REPO, 'apps/admin/src/app/promos/page.tsx'), 'utf8');
     expect(admin).toContain(`'Free delivery (the normal delivery fee; an express order still pays its GY$${GYD(EXPRESS_DELIVERY_SURCHARGE)})'`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Owner ruling, 1 Nov 2026] The express wording on the Delivery policy is a
+// change to legal wording, so LEGAL_VERSION moves (the GUARDRAILS law: bump +
+// pinned hashes + legal:sync). Pre-launch, so it is classed non-material:
+// nobody is asked to accept again. The served Terms/Privacy/agreements change
+// only their "Last updated" date (legal-version-binding.test.ts pins them).
+// ---------------------------------------------------------------------------
+
+describe('LEGAL_VERSION 2026-11-01 for the express Delivery-policy wording [owner 1 Nov 2026]', () => {
+  it('is served, dated 1 November 2026, and classed non-material exactly once', () => {
+    expect(LEGAL_VERSION).toBe('2026-11-01');
+    expect(TERMS).toContain('1 November 2026');
+    expect(PRIVACY).toContain('1 November 2026');
+    expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-11-01')).toHaveLength(1);
+    expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-11-01');
+    expect(NON_MATERIAL_CHANGES.find((c) => c.version === '2026-11-01')!.why).toMatch(/express/i);
+  });
+
+  it('nobody is asked again: the newest material version stays 2026-10-28.1, and a pro who accepted the agreement stays accepted', () => {
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
+    expect(acceptanceStatus({ tosVersion: '2026-10-29.2', roles: ['CUSTOMER'] as UserRole[] }).needsAcceptance).toBe(false);
+    expect(acceptanceStatus({ tosVersion: '2026-10-28.1', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[] }).needsAcceptance).toBe(false);
+    expect(acceptanceStatus({ tosVersion: '2026-10-29.2', roles: ['CUSTOMER'] as UserRole[], pro: { acceptedVersion: PRO_AGREEMENT_VERSION } }).needsAcceptance).toBe(false);
   });
 });

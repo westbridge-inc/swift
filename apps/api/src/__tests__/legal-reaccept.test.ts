@@ -324,12 +324,13 @@ describe('GET/POST /auth/legal-acceptance', () => {
   // asked with the same summaries as at 2026-10-28.1, and a person at 2026-10-28.1 is not asked.
   // [BOOK-P3 · COORD (b)] Served now as 2026-10-29.1 (non-material: the free cancel after a move): the same again.
   // [BILL-PRO] Served now as 2026-10-29.2 (material for Providers only): a customer gets the same answer as at 2026-10-29.
-  it('[2026-10-28.1 material, served under 2026-10-29.2] people are asked once, with exactly what changed materially since they accepted', async () => {
+  // [EXPRESS-FEE · owner 1 Nov] Served now as 2026-11-01 (non-material, pre-launch): the same again.
+  it('[2026-10-28.1 material, served under 2026-11-01] people are asked once, with exactly what changed materially since they accepted', async () => {
     const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
     const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
     const v281 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-28.1')!.summary;
-    expect(LEGAL_VERSION).toBe('2026-10-29.2');
+    expect(LEGAL_VERSION).toBe('2026-11-01');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
     for (const [accepted, summary] of [
       ['2026-10-17', [...v21, ...v251, ...v27, ...v281]], ['2026-10-18', [...v21, ...v251, ...v27, ...v281]], ['2026-10-21', [...v251, ...v27, ...v281]], ['2026-10-25', [...v251, ...v27, ...v281]],

@@ -27,7 +27,8 @@ import { installDdl } from './helpers/install-ddl';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { lockProviderTime } from '../modules/services/provider-calendar';
-import { PRO_AGREEMENT_VERSION, recordReacceptance } from '../modules/legal/reaccept';
+import { PRO_AGREEMENT_VERSION, compareLegalVersions, recordReacceptance } from '../modules/legal/reaccept';
+import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 
 const AGREEMENT_VERSION = PRO_AGREEMENT_VERSION;
 
@@ -263,7 +264,9 @@ describe('[COORD 16:13Z] a pro is bookable from their list only after accepting 
     const row = await runWithoutTenant(() => app.prisma.consentRecord.findFirst({
       where: { subjectId: pro.userId, documentType: 'vendor_agreement' }, orderBy: { capturedAt: 'desc' }, select: { documentVersion: true, action: true },
     }));
-    expect(row).toEqual({ documentVersion: AGREEMENT_VERSION, action: 'granted' });
+    // The tick is recorded at the SERVED version (2026-11-01 since EXPRESS-FEE), at or after the agreement's own.
+    expect(row).toEqual({ documentVersion: LEGAL_VERSION, action: 'granted' });
+    expect(compareLegalVersions(row!.documentVersion, AGREEMENT_VERSION)).toBeGreaterThanOrEqual(0);
     expect((await list()).statusCode).toBe(200);
   });
 
