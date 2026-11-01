@@ -83,3 +83,16 @@ export function displayMmgNumber(number: string): string {
   const national = number.startsWith(GY_PREFIX) ? number.slice(GY_PREFIX.length) : number;
   return national.length === 7 ? `${GY_PREFIX} ${national.slice(0, 3)} ${national.slice(3)}` : number;
 }
+
+/**
+ * [WEB-SETTINGS API · REVIEW-G #2277 S4-2] The store's MMG number as a manager or staff member reads it: "+592 ••• •234".
+ * Only the owner changes where the money goes and only the owner reads the whole number; the last three digits let a
+ * manager tell the store's number from another. The same mask as the website (apps/web/src/lib/mmg-mask.ts). A value
+ * of any other shape is masked whole; nothing to show stays null.
+ */
+export function maskedMmgNumber(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const digits = raw.replace(/\D/g, '');
+  const national = digits.length === 10 && digits.startsWith('592') ? digits.slice(3) : digits;
+  return national.length === 7 ? `${GY_PREFIX} ••• •${national.slice(-3)}` : `${GY_PREFIX} ••• ••••`;
+}

@@ -102,7 +102,7 @@ import {
   storeVisibleReview,
 } from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
-import { mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
+import { maskedMmgNumber, mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
 import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
 import { BRANCH_TIER, PartnerService, branchLimit } from '../partner/partner.service';
@@ -140,14 +140,26 @@ const VAT_RECORD_OWNER_ONLY = {
   vatCertificateDocId: undefined, vatModeRequested: undefined, vatReviewNote: undefined, vatReviewedBy: undefined, vatReviewedAt: undefined,
 } as const;
 
+/** [WEB-SETTINGS API · REVIEW-G #2277 S4-2] A manager or staff member reads the store's MMG number (live and staged)
+ *  masked: the owner alone changes where the money goes, and the phone's manager card only shows it (build 12 shows
+ *  the masked text as is). */
+function mmgNumberMaskedForNonOwner(view: { mmgNumber: string | null; mmgNumberPending: string | null }) {
+  return { mmgNumber: maskedMmgNumber(view.mmgNumber), mmgNumberPending: maskedMmgNumber(view.mmgNumberPending) };
+}
+
+/** [WEB-SETTINGS API] The store's own details: the owner's to change (PUT /profile). */
+const STORE_DETAIL_FIELDS = ['name', 'description', 'addressLine1', 'addressLine2', 'city', 'region'] as const;
+
 const updateVendorProfileSchema = z.object({
-  name: z.string().trim().min(1).max(100).optional(),
+  // [WEB-SETTINGS API · COORD 31 Oct 2026] The minimums are sign-up's (partner/business-input.ts businessSchema: name 2,
+  // street address 3, city 2): a profile edit cannot leave a store with less than sign-up asked for.
+  name: z.string().trim().min(2).max(100).optional(),
   description: z.string().max(2000).optional(),
   phone: z.string().max(20).optional(),
   email: z.string().email().optional(),
-  addressLine1: z.string().max(200).optional(),
+  addressLine1: z.string().trim().min(3).max(200).optional(),
   addressLine2: z.string().max(200).optional(),
-  city: z.string().max(100).optional(),
+  city: z.string().trim().min(2).max(100).optional(),
   region: z.string().max(100).optional(),
   latitude: z.number().min(-90).max(90).optional(),
   longitude: z.number().min(-180).max(180).optional(),
@@ -1581,7 +1593,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
-      : safeVendors.map((v) => ({ ...v, subscription: undefined, ...VAT_RECORD_OWNER_ONLY }));
+      : safeVendors.map((v) => ({ ...v, subscription: undefined, ...VAT_RECORD_OWNER_ONLY, ...mmgNumberMaskedForNonOwner(v) }));
     return {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
@@ -2066,17 +2078,29 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = access;
     // [PIN-OWNER] Either coordinate makes this an owner action, even when the
     // pair is incomplete. Refuse before validation or any profile/money write.
-    const supplied = request.body as { latitude?: unknown; longitude?: unknown } | null;
+    const supplied = request.body as ({ latitude?: unknown; longitude?: unknown } & Record<string, unknown>) | null;
     if (supplied?.latitude !== undefined || supplied?.longitude !== undefined) requireRole(access, 'OWNER');
+    // [WEB-SETTINGS API · COORD 31 Oct 2026] The store's name, description and address are the owner's to change (the
+    // phone offers them to nobody, the website to the owner only). Judged on the fields SENT, before validation or any
+    // read or write, as the pin is. No shipped app sends them (builds 9-12 send money, number, rule and capacity settings).
+    if (supplied && STORE_DETAIL_FIELDS.some((field) => supplied[field] !== undefined)) requireRole(access, 'OWNER');
     const body = updateVendorProfileSchema.parse(request.body);
     if (body.name !== undefined) {
       // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
-      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, tradesUnderOwnName: true, owner: { select: { user: { select: { phone: true } } } } } });
+      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, tradesUnderOwnName: true, isVerified: true, firstLiveAt: true, owner: { select: { user: { select: { phone: true } } } } } });
       assertNameNotReserved(body.name, current?.owner.user.phone, current?.name);
       // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name was checked by a person as THAT name
       // (Business Names (Registration) Act s.3); a new name is a new legal question, so it is not changed in the app.
       if (current?.tradesUnderOwnName && body.name.trim() !== current.name) {
         throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under your own name, which a person checked. To use a different name, register it as a business name first, then switch the store to it under Documents.');
+      }
+      // [WEB-SETTINGS API · COORD 31 Oct 2026] A store a person at Swift checked was checked under THIS name (its
+      // documents, its listing): a new name would go live with no person ever looking at it, so it is not changed here;
+      // support changes it after a check. Keyed on a durable mark (ever live: firstLiveAt, never cleared; or verified
+      // now), so a store whose documents lapsed cannot rename around the check. A store nobody has checked yet renames
+      // freely and its words are judged at once (storeCheck below); the person who approves it sees that name.
+      if (current && (current.firstLiveAt !== null || current.isVerified) && body.name.trim() !== current.name.trim()) {
+        throw new AppError(409, 'CHECKED_NAME_RENAME', 'A person at Swift checked your store under this name, so it can’t be changed here. To use a new name, contact Swift support: we check the new name first.');
       }
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
@@ -2244,6 +2268,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(access.role !== 'OWNER' ? VAT_RECORD_OWNER_ONLY : {}),
         ...link,
         ...storeMoneySurfaceView(link),
+        ...(access.role !== 'OWNER' ? mmgNumberMaskedForNonOwner(storeMoneySurfaceView(link)) : {}),
         ...(await storeMoneySurfaceHolds(app.prisma, vendorId)),
         // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
         storeCheck: partnerStoreView(storeCheckOf(vendor)),
