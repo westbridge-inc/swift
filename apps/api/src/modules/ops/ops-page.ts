@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 import { NotificationService } from '../notification/notification.service';
 import { openOpsAlert } from '../safety/ops-alert';
 import { opsPageCounter } from '../../plugins/observability';
+import { runAsSystem } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // [R048-006] A PLATFORM PAGE IS SUCCESSFUL ONLY WITH DURABLE DELIVERY INTENT
@@ -38,8 +39,27 @@ export type PageOutcome =
   | { status: 'pending'; opsAlertId: string }
   | { status: 'deduped' };
 
+/**
+ * [TENANT-WALL] A platform page is platform work whatever noticed the
+ * condition: a load balancer's /health probe (no session, no tenant), a
+ * signed-in request (bound to ITS caller's tenant), or a job. Its row has no
+ * tenant (kind PLATFORM, tenantId null), so the open-page lookup and the
+ * resolve run in the platform scope under this one named capability. Before,
+ * /health's lookup was refused under the tenant wall (TENANT_CONTEXT_REQUIRED,
+ * swallowed: the scheduler-stall page never fired), and a signed-in caller's
+ * lookup could never see a platform row (no dedupe, no resolve).
+ */
+export const OPS_PAGE_CAPABILITY = 'ops-page';
+
 export async function pageOps(
   deps: { prisma: PrismaClient; redis: Redis; notifications: NotificationService; resolveRecipients?: () => Promise<string[]> },
+  input: PageInput,
+): Promise<PageOutcome> {
+  return runAsSystem(OPS_PAGE_CAPABILITY, () => pageOpsInPlatformScope(deps, input));
+}
+
+async function pageOpsInPlatformScope(
+  deps: Parameters<typeof pageOps>[0],
   input: PageInput,
 ): Promise<PageOutcome> {
   // an open page with this title is already the durable intent — do not open another
@@ -76,7 +96,7 @@ export async function pageOps(
 
 /** The paged condition cleared: close its open page(s) so the outbox stays truthful. */
 export async function resolveOpsPage(prisma: PrismaClient, title: string, reason = 'condition-cleared'): Promise<number> {
-  const r = await prisma.opsAlert.updateMany({ where: { kind: 'PLATFORM', title, closedAt: null }, data: { closedAt: new Date(), closeReason: reason } });
+  const r = await runAsSystem(OPS_PAGE_CAPABILITY, () => prisma.opsAlert.updateMany({ where: { kind: 'PLATFORM', title, closedAt: null }, data: { closedAt: new Date(), closeReason: reason } }));
   if (r.count > 0) opsPageCounter.labels('resolved').inc(r.count);
   return r.count;
 }
