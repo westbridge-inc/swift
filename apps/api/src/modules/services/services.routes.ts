@@ -28,7 +28,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
-import { runAsSystem } from '../../plugins/tenant-context';
+import { enterTenant, runAsSystem } from '../../plugins/tenant-context';
 import { assertProviderProfileWording, isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { offersLegalServices } from '../compliance/prohibited-items';
@@ -142,6 +142,13 @@ export async function servicesRoutes(app: FastifyInstance) {
       // outranks it (same doctrine as public.routes' resolver).
       const t = await app.prisma.tenant.findUnique({ where: { id: 'swift-default' }, select: { isActive: true } });
       if (!t?.isActive) throw new NotFoundError('ServiceCatalog');
+      // [TENANT-WALL] Resolving the guest's marketplace is not binding it: the
+      // browse reads providers (a model with no tenant of its own) through their
+      // accounts, and under the tenant wall an unbound read sees no account at
+      // all, so every guest got an empty list. Bind what was resolved, as the
+      // public storefronts and the market do; a signed-in caller keeps the
+      // tenant authentication bound.
+      enterTenant('swift-default');
     }
     return tenantId ?? 'swift-default';
   }
