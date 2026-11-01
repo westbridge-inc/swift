@@ -103,7 +103,7 @@ describe('checkout money math', () => {
     expect(order.total).toBe(order.subtotal + order.deliveryFee - 200);
   });
 
-  it('express multiplies the delivery fee by exactly 1.5', async () => {
+  it('express adds exactly GYD 1,000 to the delivery fee [owner 1 Nov 2026]', async () => {
     const std = await makeCustomer();
     const stdRes = await cartAndCheckout(std, {});
     const stdFee = stdRes.json().data.orders[0].deliveryFee;
@@ -112,7 +112,7 @@ describe('checkout money math', () => {
     const expRes = await cartAndCheckout(exp, { express: true });
     const expOrder = expRes.json().data.orders[0];
     expect(expOrder.isExpress).toBe(true);
-    expect(expOrder.deliveryFee).toBe(Math.round(stdFee * 1.5));
+    expect(expOrder.deliveryFee).toBe(stdFee + 1000);
   });
 
   it('passes the tip through untouched into the total', async () => {

@@ -208,7 +208,7 @@ const checkoutSchema = z.object({
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   fulfillmentSelections: fulfillmentSelectionsSchema.optional(),
-  // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
+  // Priority delivery: the delivery fee + the flat express premium (utils/markup.ts), dispatched ahead of standard orders
   express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
   // mode: where the service happens when the business offers BOTH — at their
@@ -640,7 +640,7 @@ async function buildCartResponse(
   // client. [E01] `expressTotal` is the same basket priced by the same pricer
   // with every delivery at its express fee — exact even when a promo's basis
   // depends on the fee — and IS `totalAmount` when the quote asked for express.
-  // Zero surcharge for services / pickup / free delivery.
+  // Zero surcharge for services and pickup (no rider).
   const expressSurcharge = sumOf(plans.map((p) => p.expressSurcharge));
   const expressTotal = choices.express === true
     ? totalAmount

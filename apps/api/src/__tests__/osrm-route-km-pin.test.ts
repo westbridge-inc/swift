@@ -265,7 +265,7 @@ describe('every caller of routeKm answers the same bytes, as today', () => {
     expect((await post('/api/v1/courier/estimate', parcel)).body).toBe(COURIER_FALLBACK_BODY);
   });
 
-  it('the delivery planner (the cart quote and checkout): 10.15 km → 1215, express 1823', async () => {
+  it('the delivery planner (the cart quote and checkout): 10.15 km → 1215, express 2215 (+ the flat 1,000)', async () => {
     vi.stubGlobal('fetch', answer(body('10150', '1620')));
     const osrm = new OsrmMapsProvider(OSRM);
     const plan = await planVendorGroup({
@@ -277,6 +277,6 @@ describe('every caller of routeKm answers the same bytes, as today', () => {
       express: false,
       routeKm: (from, to) => osrm.routeKm(from, to),
     });
-    expect(plan).toMatchObject({ distanceKm: 10.15, distanceSource: 'osrm', standardDeliveryFee: 1215, deliveryFee: 1215, expressSurcharge: 608 });
+    expect(plan).toMatchObject({ distanceKm: 10.15, distanceSource: 'osrm', standardDeliveryFee: 1215, deliveryFee: 1215, expressSurcharge: 1000 });
   });
 });

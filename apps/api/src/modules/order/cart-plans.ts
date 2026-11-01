@@ -23,8 +23,9 @@
  *   - one plan order: the tip rides the FIRST delivery plan and a platform code
  *     fills plans in order, so the quote's per-vendor rows and the orders
  *     checkout writes must be built in the same order — groupLinesByVendor;
- *   - a plan's fee is `deliveryFeeFromRates(canonical km)`; express multiplies
- *     it through `expressDeliveryFee`; PICKUP and APPOINTMENT plans carry none;
+ *   - a plan's fee is `deliveryFeeFromRates(canonical km)`; express adds the
+ *     flat premium through `expressDeliveryFee`; PICKUP and APPOINTMENT plans
+ *     carry none;
  *   - a plan's minimum compares THAT vendor's subtotal with ITS OWN minimum —
  *     never the combined basket against one vendor's;
  *   - the client never computes a total the server owns; it renders these.
@@ -159,7 +160,7 @@ export async function planVendorGroup(ctx: {
   /** Where a DELIVERY goes. Null only in the quote (see QUOTE_FALLBACK_KM). */
   destination: LatLng | null;
   deliveryRates: DeliveryRates;
-  /** Priority delivery: the fee carries the rider's 1.5x premium. */
+  /** Priority delivery: the fee carries the rider's flat premium (markup.ts). */
   express: boolean;
   routeKm: (from: LatLng, to: LatLng) => Promise<{ km: number; source: RouteSource | null }>;
 }): Promise<VendorPlan> {
@@ -182,8 +183,10 @@ export async function planVendorGroup(ctx: {
     }
     standardDeliveryFee = deliveryFeeFromRates(distanceKm, ctx.deliveryRates);
   }
-  // Express mirrors the courier EXPRESS multiplier; the premium is the
-  // rider's cash upside. Zero off DELIVERY (expressDeliveryFee(0) is 0).
+  // [owner 1 Nov 2026] Express = the standard fee + the flat premium, any
+  // distance; the premium is the rider's cash upside. Only a DELIVERY plan
+  // carries it: PICKUP and APPOINTMENT have no rider, so their premium is zero
+  // HERE — the helper itself would add the surcharge even to a zero fee.
   const expressFee = ctx.fulfillment === 'DELIVERY' ? expressDeliveryFee(standardDeliveryFee) : 0;
   const minOrderAmount = Number(ctx.vendor.minOrderAmount);
   return {

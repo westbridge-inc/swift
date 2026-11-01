@@ -480,7 +480,7 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     });
   });
 
-  it('express charges exactly 1.5x the delivery fee and flags the order — pickup ignores it', async () => {
+  it('express charges the delivery fee + a flat GYD 1,000 and flags the order — pickup ignores it [owner 1 Nov 2026]', async () => {
     // Baseline: the same cart at standard speed
     await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
     const std = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, customer.token);
@@ -491,18 +491,18 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(stdFee).toBeGreaterThan(0);
     expect(stdOrder.isExpress).toBe(false);
 
-    // Express: same route, 1.5x fee, flag persisted, premium in the total
+    // Express: same route, the fee + 1,000, flag persisted, premium in the total
     await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
     const exp = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', express: true }, customer.token);
     expect(exp.statusCode).toBe(200);
     const expOrder = exp.json().data.order ?? exp.json().data.orders[0];
     createdOrderIds.push(expOrder.id);
-    expect(Number(expOrder.deliveryFee)).toBe(Math.round(stdFee * 1.5));
+    expect(Number(expOrder.deliveryFee)).toBe(stdFee + 1000);
     expect(expOrder.isExpress).toBe(true);
 
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: expOrder.id } });
     expect(db.isExpress).toBe(true);
-    expect(Number(db.totalAmount)).toBe(Number(db.subtotalBase) + Math.round(stdFee * 1.5));
+    expect(Number(db.totalAmount)).toBe(Number(db.subtotalBase) + stdFee + 1000);
 
     // Express is meaningless for pickup — no fee, no flag
     await addToCart(customer.token, supermarket.vendorId, riceId, 1);

@@ -219,7 +219,7 @@ describe('the per-vendor planner', () => {
   });
   const routeKm = async () => ({ km: 3.456789, source: 'haversine' as const });
 
-  it('DELIVERY: canonical km (2 dp) prices the fee; express is the one helper’s 1.5× premium', async () => {
+  it('DELIVERY: canonical km (2 dp) prices the fee; express is the one helper’s flat premium', async () => {
     const plain = await planVendorGroup({ vendor, lines: [line(1200, 1)], fulfillment: 'DELIVERY', destination: { lat: 6.81, lng: -58.17 }, deliveryRates: DEFAULT_DELIVERY_RATES, express: false, routeKm });
     expect(plain.distanceKm).toBe(3.46);
     expect(plain.distanceSource).toBe('haversine');

@@ -112,7 +112,7 @@ interface CheckoutInput {
   promoCode?: string;
   /** Per-vendor fulfillment choice; DELIVERY when omitted */
   fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
-  /** Priority delivery: 1.5x the delivery fee, dispatched ahead of standard
+  /** Priority delivery: the delivery fee + the flat express premium (utils/markup.ts), dispatched ahead of standard
    *  orders, premium goes to the rider. DELIVERY groups only. */
   express?: boolean;
   /** Requested appointment slots for APPOINTMENT listings in the cart.
@@ -1846,8 +1846,9 @@ export class OrderService {
             billableKmSource: plan.distanceKm > 0 ? plan.distanceSource : null,
             isExpress: input.express === true && plan.fulfillment === 'DELIVERY',
             // LIFECYCLE_V2: born held (hidden from the vendor, free-cancel
-            // window open). Express skips the hold — the customer paid 1.5x
-            // for priority; making them wait would break the product promise.
+            // window open). Express skips the hold — the customer paid the
+            // express premium for priority; making them wait would break the
+            // product promise.
             // A booking skips it too [E20]: its free-cancel window is already
             // slot-relative, so a hold would only delay the provider.
             holdExpiresAt:
