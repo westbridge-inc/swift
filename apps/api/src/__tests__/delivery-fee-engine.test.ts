@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateDeliveryFee, expressDeliveryFee, EXPRESS_DELIVERY_MULTIPLIER } from '../utils/markup';
+import { calculateDeliveryFee, expressDeliveryFee, EXPRESS_DELIVERY_SURCHARGE } from '../utils/markup';
 
 // FUL-003 (fulfillment prompt Part 5B): the delivery fee is the number every
 // money path hinges on — yet it had NO dedicated test. Lock the contract:
@@ -52,10 +52,11 @@ describe('delivery-fee engine (FUL-003, Part 5B)', () => {
     expect(calculateDeliveryFee(5, 1000, 300, 1)).not.toBe(calculateDeliveryFee(5, 500, 200, 2));
   });
 
-  it('express is derived FROM the standard fee (one source) at ×1.5, strictly higher', () => {
+  it('express is derived FROM the standard fee (one source): the fee + a flat GYD 1,000 [owner 1 Nov 2026]', () => {
     const standard = calculateDeliveryFee(5, 500, 200, 2); // 1100
-    expect(EXPRESS_DELIVERY_MULTIPLIER).toBe(1.5);
-    expect(expressDeliveryFee(standard)).toBe(Math.round(standard * EXPRESS_DELIVERY_MULTIPLIER)); // 1650
+    expect(EXPRESS_DELIVERY_SURCHARGE).toBe(1000);
+    expect(expressDeliveryFee(standard)).toBe(standard + EXPRESS_DELIVERY_SURCHARGE); // 2100
+    expect(expressDeliveryFee(standard)).toBe(2100);
     expect(expressDeliveryFee(standard)).toBeGreaterThan(standard); // the premium is the rider's upside
   });
 });

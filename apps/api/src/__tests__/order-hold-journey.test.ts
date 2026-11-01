@@ -997,7 +997,7 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     const order = await placeOrder(buyer, store, 1, { paymentMethod: 'CASH', express: true });
     const row = await orderRow(order.id);
     expect(row.isExpress).toBe(true);
-    expect(row.holdExpiresAt).toBeNull(); // the customer paid 1.5x to skip the wait
+    expect(row.holdExpiresAt).toBeNull(); // the customer paid the express premium to skip the wait
 
     const alerted = await storeHeard(store, order);
     expect([...alerted.sockets].sort()).toEqual(['notification', 'order:new', 'vendor:order_alert']);

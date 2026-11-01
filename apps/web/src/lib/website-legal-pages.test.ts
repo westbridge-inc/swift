@@ -56,7 +56,11 @@ describe('refunds (research E5, ¶12, ¶13, ¶15)', () => {
 
 describe('delivery (research E3)', () => {
   it('the fee figures', () => {
-    expect(DELIVERY).toContain('GYD 500 for the first 3 km, then GYD 100 per km; express is 1.5 times the standard fee.');
+    // [Owner 1 Nov 2026] Express is the standard fee + a flat GYD 1,000, any distance (it was 1.5 times the fee).
+    expect(DELIVERY).toContain('GYD 500 for the first 3 km, then GYD 100 per km; express adds GYD 1,000 to the standard fee, whatever the distance.');
+    expect(DELIVERY).toContain('Express delivery, where offered, adds GYD 1,000 for each store in your order that is delivered to you.');
+    expect(DELIVERY).toContain("const UPDATED = '1 November 2026';");
+    expect(DELIVERY).not.toMatch(/1\.5 times|one and a half/i);
   });
 
   it('held: no sentence the strike code contradicts', () => {

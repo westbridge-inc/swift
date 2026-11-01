@@ -484,16 +484,19 @@ describe('E01 — promotions are priced by the one basket pricer on both sides',
     }
 
     for (const express of [false, true]) {
-      it(`free delivery removes exactly the fee charged (express ${express})`, async () => {
-        const { q } = await farDelivery(() => platformCode('FREE', 'FREE_DELIVERY', 0), express);
-        expect(q.discount).toBe(q.deliveryFee);
-        expect(q.totalAmount).toBe(3000 + 200);
+      it(`free delivery removes the normal fee only — express still pays its 1,000 (express ${express}) [owner 1 Nov 2026]`, async () => {
+        const { q, orders } = await farDelivery(() => platformCode('FREE', 'FREE_DELIVERY', 0), express);
+        expect(q.discount).toBe(q.standardDeliveryFee);
+        expect(q.deliveryFee).toBe(q.standardDeliveryFee + (express ? 1000 : 0));
+        expect(q.totalAmount).toBe(3000 + 200 + (express ? 1000 : 0));
+        // The order keeps the whole fee (what the rider is paid); only the normal part was discounted.
+        expect(orders.map((o) => [Number(o.deliveryFee), Number(o.discount)])).toEqual([[q.deliveryFee, q.standardDeliveryFee]]);
       });
 
-      it(`a platform code larger than goods + fee stops at goods + THIS speed’s fee, never the tip (express ${express})`, async () => {
+      it(`a platform code larger than goods + fee stops at goods + the NORMAL fee, never the express 1,000 or the tip (express ${express}) [COORD 1 Nov 2026]`, async () => {
         const { q } = await farDelivery(() => platformCode('HUGE', 'FIXED_AMOUNT', 9000), express);
-        expect(q.discount).toBe(3000 + q.deliveryFee);
-        expect(q.totalAmount).toBe(200);
+        expect(q.discount).toBe(3000 + q.standardDeliveryFee);
+        expect(q.totalAmount).toBe(200 + (express ? 1000 : 0));
       });
 
       it(`a store’s own code stops at the goods — the rider’s fee is not the store’s to give (express ${express})`, async () => {

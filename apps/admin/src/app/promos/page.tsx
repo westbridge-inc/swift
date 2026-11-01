@@ -50,7 +50,7 @@ export default function PromosPage() {
       title: `Create the promo code ${body.code}?`,
       body: (
         <p>
-          {body.discountType === 'PERCENTAGE' ? `${body.discountValue}% off` : body.discountType === 'FIXED_AMOUNT' ? `GY$${body.discountValue.toLocaleString()} off` : 'Free delivery'}
+          {body.discountType === 'PERCENTAGE' ? `${body.discountValue}% off` : body.discountType === 'FIXED_AMOUNT' ? `GY$${body.discountValue.toLocaleString()} off` : 'Free delivery (the normal delivery fee; an express order still pays its GY$1,000)'}
           , valid {gyCalendarDay(body.validFrom)} to {gyCalendarDay(body.validUntil)}{body.maxUses ? `, at most ${body.maxUses} uses` : ''}.
         </p>
       ),

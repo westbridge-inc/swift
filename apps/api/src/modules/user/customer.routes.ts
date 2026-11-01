@@ -26,7 +26,7 @@ import { capacitySentence, storeRiderBacklog } from '../dispatch/delivery-capaci
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
+import { EXPRESS_DELIVERY_SURCHARGE, deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { storeVatEffective } from '../store-vat/store-vat';
@@ -208,7 +208,7 @@ const checkoutSchema = z.object({
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   fulfillmentSelections: fulfillmentSelectionsSchema.optional(),
-  // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
+  // Priority delivery: the delivery fee + the flat express premium (utils/markup.ts), dispatched ahead of standard orders
   express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
   // mode: where the service happens when the business offers BOTH — at their
@@ -609,7 +609,7 @@ async function buildCartResponse(
   // cart's persisted tip.
   const tip = resolveTip(choices.tipAmount, cart.tipAmount);
   const priceWith = (feeOf: (p: VendorPlan) => number) => priceBasket({
-    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p) })),
+    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p), standardDeliveryFee: p.standardDeliveryFee })),
     promo,
     tip,
   });
@@ -640,7 +640,7 @@ async function buildCartResponse(
   // client. [E01] `expressTotal` is the same basket priced by the same pricer
   // with every delivery at its express fee — exact even when a promo's basis
   // depends on the fee — and IS `totalAmount` when the quote asked for express.
-  // Zero surcharge for services / pickup / free delivery.
+  // Zero surcharge for services and pickup (no rider).
   const expressSurcharge = sumOf(plans.map((p) => p.expressSurcharge));
   const expressTotal = choices.express === true
     ? totalAmount
@@ -4011,7 +4011,8 @@ export async function customerRoutes(app: FastifyInstance) {
         description = `$${Number(promo.discountValue).toLocaleString()} GYD off`;
         break;
       case 'FREE_DELIVERY':
-        description = 'Free delivery';
+        // [owner 1 Nov 2026] The code covers the normal fee; express still adds its flat premium.
+        description = `Free delivery (express still adds $${EXPRESS_DELIVERY_SURCHARGE.toLocaleString()} GYD)`;
         break;
     }
     if (promo.minOrderAmount) {

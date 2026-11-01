@@ -525,7 +525,7 @@ export const customerApi = {
     scheduledFor?: string;
     promoCode?: string;
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
-    /** Priority delivery: 1.5x delivery fee, dispatched first */
+    /** Priority delivery: the server's flat premium on the fee (the quote's expressSurcharge), dispatched first */
     express?: boolean;
     /** [L09 · price lock] The quote's total and line prices the customer saw. */
     expectedTotal?: number;

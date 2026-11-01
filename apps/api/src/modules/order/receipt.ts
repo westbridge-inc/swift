@@ -21,6 +21,9 @@ type ReceiptOrder = {
   paymentStatus: string;
   subtotalCustomer: unknown;
   deliveryFee: unknown;
+  /** [owner 1 Nov 2026] An express order's delivery row says so (the fee includes the express premium, which a
+   *  free-delivery code never covers), read from the order's own flag, never recomputed. */
+  isExpress?: boolean | null;
   /** [ALG-18] The frozen billable distance, when the order carries one. */
   billableKm?: unknown;
   billableKmSource?: string | null;
@@ -202,7 +205,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <table>
     ${rows}
     <tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>
-    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
+    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider${order.isExpress ? ' (express)' : ''}</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
     ${distance ? `<tr class="totals"><td>Distance (${esc(distance.sourceLabel)})</td><td class="num">${esc(distance.label)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
     ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}

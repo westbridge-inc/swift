@@ -112,7 +112,7 @@ interface CheckoutInput {
   promoCode?: string;
   /** Per-vendor fulfillment choice; DELIVERY when omitted */
   fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
-  /** Priority delivery: 1.5x the delivery fee, dispatched ahead of standard
+  /** Priority delivery: the delivery fee + the flat express premium (utils/markup.ts), dispatched ahead of standard
    *  orders, premium goes to the rider. DELIVERY groups only. */
   express?: boolean;
   /** Requested appointment slots for APPOINTMENT listings in the cart.
@@ -1039,6 +1039,8 @@ export class OrderService {
       /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
       distanceSource: RouteSource | null;
       deliveryFee: number;
+      /** [owner + COORD 1 Nov 2026] The fee without the express premium: the most any code may take from the fee. */
+      standardDeliveryFee: number;
       subtotal: number;
       orderItems: Array<{
         itemId: string; name: string; quantity: number; basePrice: number;
@@ -1378,7 +1380,7 @@ export class OrderService {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, standardDeliveryFee: plan.standardDeliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
@@ -1417,7 +1419,7 @@ export class OrderService {
     //   - each plan's discount share, tip and total (orderTotal) are the
     //     numbers the orders below are written with.
     const priced = priceBasket({
-      plans: plans.map((p) => ({ vendorId: p.vendor.id, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
+      plans: plans.map((p) => ({ vendorId: p.vendor.id, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: p.deliveryFee, standardDeliveryFee: p.standardDeliveryFee })),
       promo: promoTerms ? { ...promoTerms, vendorId: promoVendorId } : null,
       tip,
     });
@@ -1846,8 +1848,9 @@ export class OrderService {
             billableKmSource: plan.distanceKm > 0 ? plan.distanceSource : null,
             isExpress: input.express === true && plan.fulfillment === 'DELIVERY',
             // LIFECYCLE_V2: born held (hidden from the vendor, free-cancel
-            // window open). Express skips the hold — the customer paid 1.5x
-            // for priority; making them wait would break the product promise.
+            // window open). Express skips the hold — the customer paid the
+            // express premium for priority; making them wait would break the
+            // product promise.
             // A booking skips it too [E20]: its free-cancel window is already
             // slot-relative, so a hold would only delay the provider.
             holdExpiresAt:

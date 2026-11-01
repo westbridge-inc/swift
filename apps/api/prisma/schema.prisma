@@ -2255,9 +2255,10 @@ model Order {
   promiseRevisionReason String?
   promiseRevisions      Int       @default(0)
   actualDeliveryTime    Int?
-  /// Priority delivery (§4.2 parity with courier speed tiers): customer pays
-  /// 1.5x the delivery fee, the order dispatches ahead of standard ones, and
-  /// the whole premium goes to the rider (cash, no commission).
+  /// Priority delivery: the customer pays the delivery fee plus a flat
+  /// premium (utils/markup.ts EXPRESS_DELIVERY_SURCHARGE, owner 1 Nov 2026),
+  /// the order dispatches ahead of standard ones, and the whole premium goes
+  /// to the rider (cash, no commission).
   isExpress             Boolean   @default(false)
   scheduledFor          DateTime?
   /// LIFECYCLE_V2 hold (spec Part A): while in the FUTURE the order is HIDDEN

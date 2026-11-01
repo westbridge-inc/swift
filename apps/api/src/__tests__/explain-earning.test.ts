@@ -28,7 +28,7 @@ describe('one sentence from stored fields', () => {
 
   it('delivery pay: amount, distance with its engine, the rail', () => {
     expect(explainEarning({ type: 'DELIVERY_FEE', amount: '700.00' }, cashDelivery)).toBe('GY$700 — delivery pay for 2.1 km (routed). Cash in hand.');
-    expect(explainEarning({ type: 'DELIVERY_FEE', amount: 1050 }, { ...cashDelivery, isExpress: true })).toBe('GY$1,050 — delivery pay for 2.1 km (routed), express. Cash in hand.');
+    expect(explainEarning({ type: 'DELIVERY_FEE', amount: 1700 }, { ...cashDelivery, isExpress: true })).toBe('GY$1,700 — delivery pay for 2.1 km (routed), express. Cash in hand.');
     expect(explainEarning({ type: 'COURIER_FEE', amount: 900 }, { ...cashDelivery, orderType: 'COURIER', billableKmSource: 'haversine' })).toBe('GY$900 — courier pay for 2.1 km (estimated). Cash in hand.');
   });
 
