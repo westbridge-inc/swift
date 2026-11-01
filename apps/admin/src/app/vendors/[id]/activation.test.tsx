@@ -25,7 +25,7 @@ function storeOf(status: string) {
   return {
     id: 'vendor-target', name: 'Target Store', status, vendorType: 'RESTAURANT', isFeatured: false, acceptingOrders: false,
     city: 'Georgetown', addressLine1: 'Test address', phone: 'test-phone', averageRating: 5, totalRatings: 0, mmgPayUrl: null,
-    createdAt: '2026-08-01T00:00:00.000Z', recentOrders: [], subscription: null, tier: 'UNREGISTERED',
+    createdAt: '2026-08-01T00:00:00.000Z', recentOrders: [], subscription: null, tier: 'REGISTERED',
     owner: { user: { id: 'owner-1', firstName: 'Store', lastName: 'Owner', phone: 'owner-phone', email: null, status: 'ACTIVE' }, vendors: [] },
     _count: { items: 0, orders: 0 },
   };
@@ -114,7 +114,9 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     const { user } = page();
     await user.click(await screen.findByRole('button', { name: 'Activate now…' }));
     const dialog = screen.getByRole('dialog', { name: 'Activate Target Store now?' });
-    expect(dialog.textContent).toContain("Only this store is activated. A valid business registration also promotes the owner's other stores to registered sellers and lifts their unregistered-seller limits.");
+    expect(dialog.textContent).toContain('Only this store is activated.');
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] no tier is promoted or lifted any more
+    expect(dialog.textContent).not.toMatch(/unregistered|promotes/i);
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Activate store' }));
     expect((await screen.findByRole('status')).textContent).toContain('Target Store is live and can take orders.');

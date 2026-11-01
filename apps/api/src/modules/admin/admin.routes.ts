@@ -11,7 +11,6 @@ import { recordExternalProcessingDecision } from '../verification/external-proce
 import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
-import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction, runWithoutTenant } from '../../plugins/prisma';
 import { countWaiting, type WaitingKey } from './dashboard-waiting';
@@ -2024,8 +2023,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!vendor) throw new NotFoundError('Vendor', id);
 
     const isFeatured = featured !== undefined ? featured : !vendor.isFeatured;
-    // [DOC-1 §3.6 · P3-2] No promoted placement at the unregistered tier.
-    if (isFeatured) assertPromotable(vendor);
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Every store may be featured: the self-declared tier that could not be
+    // (no promoted placement) is removed.
 
     const updated = await app.prisma.vendor.update({
       where: { id },

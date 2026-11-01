@@ -30,9 +30,6 @@ const EXPIRING_DOC_TYPES = [
   // The restaurant licence, sanitary certificate and trade licence ask for their YEAR (reviewerTypes).
   // [ROLE-DOCS · owner 21 Oct 2026] no liquor licence: alcohol is banned outright and no gate names it.
   'sanitary_certificate', 'trade_licence',
-  // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
-  // validity like a licence, so the console must ask for its date too.
-  'self_declaration_unregistered',
   // [TRADES · 13 Oct 2026; R15] the service-trade licences and certificates. The ones checked again
   // every January ask for the certificate's YEAR instead of a date (reviewerTypes 'certificateYear').
   'pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration',

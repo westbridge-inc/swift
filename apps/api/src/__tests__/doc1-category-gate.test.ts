@@ -147,10 +147,10 @@ afterAll(async () => {
 describe('[DOC-1 P18-2] documents control what can be sold', () => {
   it('the registry holds the §18.1 types (inactive, provisional) and exactly the §18.3 gate rows', async () => {
     const types = await system(() => app.prisma.docType.findMany({ where: { code: { in: EXTRA_DOC_TYPES.map((t) => registryCode('GY', t.legacyCode)) } } }));
-    // + the §3.2 unregistered-trader self-declaration (P3-2), seeded with the addendum types
-    // [ROLE-DOCS] the liquor licence, pharmacy authorisation and NIS employer registration are no longer seeded
-    expect(EXTRA_DOC_TYPES.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'sanitary_certificate', 'self_declaration_unregistered', 'trade_licence']);
-    expect(types.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'sanitary_certificate', 'self_declaration_unregistered', 'trade_licence']);
+    // [ROLE-DOCS] the liquor licence, pharmacy authorisation and NIS employer registration are no longer seeded;
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] nor the unregistered trader's self-declaration (a retired type now)
+    expect(EXTRA_DOC_TYPES.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'sanitary_certificate', 'trade_licence']);
+    expect(types.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'sanitary_certificate', 'trade_licence']);
     expect(types.every((t) => !t.isActive)).toBe(true);
     expect(types.filter((t) => t.needsSpecimen).map((t) => t.legacyCode).sort()).toEqual(['digital_id']);
     const gates = await system(() => app.prisma.categoryDocumentGate.findMany({ where: { countryCode: 'GY' }, include: { requiredDocType: { select: { legacyCode: true } } } }));

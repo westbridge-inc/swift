@@ -197,7 +197,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     body: (
       <p>
         Every required document is approved. Swift runs the same activation it runs when the last document is approved:
-        the store goes live and its free trial starts. Only this store is activated. A valid business registration also promotes the owner&apos;s other stores to registered sellers and lifts their unregistered-seller limits.
+        the store goes live and its free trial starts. Only this store is activated.
       </p>
     ),
     confirmLabel: 'Activate store',
@@ -589,7 +589,9 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
               <Row label="Address">{v.addressLine1}</Row>
               <Row label="Phone">{v.phone ? <PhoneReveal phone={v.phone} revealed={revealed[`store:${v.id}`]} onReveal={revealFor(`store:${v.id}`, `Show the store's full number for ${v.name}?`, "The store's number is shown.", (reason) => revealVendorPartyPhone(id, 'store', reason))} /> : null}</Row>
               <Row label="Rating"><span className="mc-numbers">{ratingText(v.averageRating, v.totalRatings)}</span></Row>
-              <Row label="Registration">{v.tier ? label('VendorTier', v.tier) : null}</Row>
+              {/* [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No self-declared tier any more: a store stands on a registered
+                  business name or on its owner's own name (vendor/own-name.ts), and the checklist asks for that. */}
+              <Row label="Registration">{v.tradesUnderOwnName === true ? 'Owner’s own name (no business name registration)' : v.tradesUnderOwnName === false ? 'Business name registration' : null}</Row>
               <Row label="Menu items"><span className="mc-numbers">{v._count?.items ?? 0}</span></Row>
               <Row label="Lifetime orders"><span className="mc-numbers">{v._count?.orders ?? 0}</span></Row>
               <Row label="MMG pay link">{v.mmgPayUrl ? 'Attached' : 'Not attached'}</Row>

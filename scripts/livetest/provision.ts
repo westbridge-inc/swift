@@ -82,7 +82,7 @@ export function requireAdminPhone(raw: string | undefined): string {
  *  no roster taxi driver held both and none could go online. */
 const EXPIRING = new Set([
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit', 'road_service_licence',
-  'drivers_licence', 'vehicle_registration', 'food_handler_cert', 'gra_restaurant_licence', 'self_declaration_unregistered',
+  'drivers_licence', 'vehicle_registration', 'food_handler_cert', 'gra_restaurant_licence',
   // [VERIFY-DOCS · ruling 8] the two licences that replaced the hire-car permit: the person's (3 years) and the car's (1 year)
   'hire_car_driver_licence', 'hire_car_vehicle_licence',
   // the other registry types that expire (store certificates checked every January, the service trades' documents)

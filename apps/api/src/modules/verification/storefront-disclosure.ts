@@ -6,8 +6,8 @@ import { validExpiryOr } from './document-validity';
  * The ECT Act supplier-information block is a COMPILED artifact, never hand-written
  * prose: every legally required element is sourced from a VALID document record (its
  * submission's extracted fields), or from a fallback the spec names and LABELS
- * (PROPRIETOR = the verified proprietor's name "trading as …" for an unregistered
- * business; SELF_DECLARED = the address the vendor typed; ACCOUNT = the verified account
+ * (PROPRIETOR = the verified proprietor's name "trading as …" for a business with no
+ * registered business name, such as a trader under their own name; SELF_DECLARED = the address the vendor typed; ACCOUNT = the verified account
  * contact; PLATFORM = the operator block from the ONE OPERATOR constant). A required element with no
  * source leaves the block INCOMPLETE — it never falls back to self-reported text for a
  * legal fact. Nothing is stored: the block is derived on every read, so a lapsed licence

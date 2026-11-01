@@ -34,7 +34,7 @@ const READERS = [
   'modules/verification/evidence.ts',
   'modules/verification/category-gate.ts',
   'modules/verification/storefront-disclosure.ts',
-  'modules/vendor/vendor-tier.ts',
+  'modules/vendor/registration-record.ts',
   'modules/verification/mover-document-authority.ts',
   'modules/verification/verification.service.ts',
   'modules/verification/renewal-schedule.ts',
