@@ -10,7 +10,10 @@ import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { customerRoute } from '@/lib/customer-routes';
 import { DEMO_ENDED_NOTICE, takeDemoEndedNotice } from '@/lib/demo-ended';
 import { safeInternalPath } from '@/lib/safe-return-path';
-import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
+import { AuthError, AuthHeading, AuthPage, CODE_NOT_SEEN_HINT, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
+import { loadSignedIn } from '@/components/signed-in-loader';
+import type { SignedIn, SignedInAlready as SignedInAlreadyComponent } from '@/components/signed-in-already';
+import { sendCooldownOf, sendLabel, useSendCooldown } from '@/lib/otp-cooldown';
 
 const CUSTOMER_ROUTES = ['/order', '/cart', '/checkout', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
 
@@ -70,14 +73,32 @@ function LoginInner() {
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const cooldown = useSendCooldown();
+  const [codeNotice, setCodeNotice] = useState<string | null>(null);
+  // [SIGNUP-PHONE] A browser already signed in is not asked for a code again (components/signed-in-already).
+  const [signedIn, setSignedIn] = useState<{ who: SignedIn; Card: typeof SignedInAlreadyComponent } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadSignedIn().then((m) => m.probeSignedIn().then((who) => { if (alive && who) setSignedIn({ who, Card: m.SignedInAlready }); })).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const busyNow = useRef(false);
 
   async function handleSend() {
     if (busyNow.current || !returnReady) return;
     busyNow.current = true;
     setError(null); setBusy(true);
+    setCodeNotice(null);
     try { await sendOtp(fullPhone(phone)); setStep('code'); }
-    catch (e) { setError((e as Error).message); }
+    catch (e) {
+      // A wait is not an error: the button counts down; a code already on its way is entered, not asked for again.
+      const wait = sendCooldownOf(e);
+      if (!wait) setError((e as Error).message);
+      else {
+        cooldown.start(wait.seconds);
+        if (wait.codeAlreadySent) { setCodeNotice('We already sent a code to this number. Enter it below.'); setStep('code'); }
+      }
+    }
     finally { busyNow.current = false; setBusy(false); }
   }
 
@@ -103,14 +124,16 @@ function LoginInner() {
     <AuthPage onBrandClick={clearStorefrontContinuation}>
       <section aria-labelledby="login-title" className="flex flex-col gap-6">
         {demoEnded ? <p className="sw-note sw-note-info" role="status" data-testid="demo-ended">{DEMO_ENDED_NOTICE}</p> : null}
-        {step === 'phone' ? (
+        {signedIn && step === 'phone' ? (
+          <signedIn.Card who={signedIn.who} here="/login" titleId="login-title" home={isCustomer && next ? next : undefined} onSignedOut={() => setSignedIn(null)} />
+        ) : step === 'phone' ? (
           <>
             <AuthHeading id="login-title" eyebrow={isCustomer ? 'Sign in or create an account' : 'Swift for businesses and earners'} title="What’s your number?">
               {isCustomer ? 'We’ll text a 6-digit code to confirm it’s you.' : 'Sign in with the phone number on your Swift account. We’ll text you a 6-digit code.'}
             </AuthHeading>
             <PhoneField id="login-phone" value={phone} onChange={setPhone} onEnter={() => void handleSend()} autoFocus />
-            <button type="button" onClick={() => void handleSend()} disabled={busy || !returnReady || !phoneReady(phone)} className="sw-btn sw-btn-block">
-              {busy ? 'Sending…' : 'Continue'}
+            <button type="button" onClick={() => void handleSend()} disabled={busy || !returnReady || !phoneReady(phone) || cooldown.secondsLeft > 0} className="sw-btn sw-btn-block">
+              {busy ? 'Sending…' : sendLabel(cooldown.secondsLeft, 'Continue')}
             </button>
           </>
         ) : (
@@ -122,8 +145,13 @@ function LoginInner() {
               </button>
             </AuthHeading>
             <CodeBoxes id="login-code" value={code} onChange={setCode} onEnter={() => void handleVerify()} />
+            {codeNotice ? <p className="sw-caption" role="status">{codeNotice}</p> : null}
+            <p className="sw-caption">{CODE_NOT_SEEN_HINT}</p>
             <button type="button" onClick={() => void handleVerify()} disabled={busy || !returnReady || code.trim().length < 6} className="sw-btn sw-btn-block">
               {busy ? 'Signing in…' : 'Verify'}
+            </button>
+            <button type="button" onClick={() => void handleSend()} disabled={busy || !returnReady || cooldown.secondsLeft > 0} className="sw-btn sw-btn-block sw-btn-outline">
+              {sendLabel(cooldown.secondsLeft, 'Send a new code')}
             </button>
           </>
         )}

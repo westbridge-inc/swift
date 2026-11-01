@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
+import { guyanaPhone } from '@/lib/guyana-phone';
 
 /**
  * [WEB-REDESIGN] Sign-in in the owner's design: the mark at the top of a
@@ -25,9 +26,9 @@ export const DIAL_CODE = '+592';
 export function fullPhone(local: string): string {
   const trimmed = local.trim();
   const digits = trimmed.replace(/\D/g, '');
-  if (trimmed.startsWith('+')) return `+${digits}`;
-  if (digits.startsWith('592') && digits.length >= 10) return `+${digits}`;
-  return `${DIAL_CODE}${digits}`;
+  if (trimmed.startsWith('+') && !digits.startsWith('592')) return `+${digits}`;
+  // [SIGNUP-PHONE] A Guyana number, however typed (a trunk 0, "(592)", "00592" too), is the same number sign-up sends.
+  return guyanaPhone(trimmed);
 }
 
 /** Enough to send: seven digits after +592, or eight after another code. */
@@ -121,6 +122,9 @@ export function CodeBoxes({ id, value, onChange, onEnter }: { id: string; value:
     </div>
   );
 }
+
+/** [SIGNUP-PHONE · owner 1 Nov 2026] Under the code box on sign-up and sign-in: where a code that has not shown up went. */
+export const CODE_NOT_SEEN_HINT = "Can't see the code? It comes from 'Swift'. Check your Messages filters (Unknown Senders / Transactions) or spam folder.";
 
 export function AuthError({ children }: { children: ReactNode }) {
   return <p className="sw-note sw-note-error" role="alert" aria-live="assertive">{children}</p>;
