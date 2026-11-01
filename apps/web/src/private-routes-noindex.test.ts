@@ -71,7 +71,6 @@ const PRIVATE_PAGES = [
   'dashboard/team/page.tsx', // [CHAINS PR2] the store's team (names and phones)
   'dashboard/documents/page.tsx', // [OPEN-EARLY PR-2] a store's own documents (owner only)
   'dashboard/promotions/page.tsx', // [WEB-SETTINGS PR-B] a store's own promo codes (managers and owners)
-  'dashboard/seller-status/page.tsx', // [WEB-SETTINGS PR-B] a store's tier, limits and registration (managers and owners)
   'dashboard/categories/page.tsx', // [WEB-SETTINGS PR-B] a store's listings and category suggestions (managers and owners)
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',

@@ -9,7 +9,7 @@ import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
 import { CatalogueApproverAccess } from '@/components/verification/CatalogueApproverAccess';
-import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
+import { CustomerIdRetired } from '@/components/verification/CustomerIdRetired';
 import { approveDoc, rejectDoc, errorCode, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
@@ -293,7 +293,8 @@ export default function VerificationPage() {
           {l.label}<span aria-hidden="true"> {laneCounts ? (l.value === 'all' ? laneCounts.operator + laneCounts.customer : laneCounts[l.value]) : '—'}</span>
         </button>)}</div>
         {counts.isError && <p className="rc-muted">Lane counts unavailable. <button onClick={() => void counts.refetch()}>Retry counts</button></p>}
-        {lane !== 'operator' && <p className="rc-muted">Customer IDs are shown deliberately in this lane. Every document view is audit-logged.</p>}
+        {/* [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] Swift keeps no customer IDs: this lane holds service providers' documents. */}
+        {lane !== 'operator' && <p className="rc-muted">This lane holds service providers&apos; documents, filed with their customer account. Swift keeps no customer IDs. Every document view is audit-logged.</p>}
       </div>
       {!applicant ? <>
         <button className="rc-filter-toggle" aria-expanded={filtersOpen} aria-controls="review-filters" onClick={() => setFiltersOpen(!filtersOpen)}>Filters{search || role || type || age ? " · active" : ""}</button>
@@ -347,16 +348,7 @@ export default function VerificationPage() {
             {reviewNote(selected.docType, selected.role) && <p className="rc-muted rc-review-note">{reviewNote(selected.docType, selected.role)}</p>}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {gyDate(selected.expiresAt)}</span>}</div>
-            <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {
-              setNotice(withdrawNotice(applicant.name, accountTrustLevel));
-              await Promise.all([
-                client.invalidateQueries({ queryKey: ['verification'] }),
-                client.invalidateQueries({ queryKey: ['verification-history'] }),
-                client.invalidateQueries({ queryKey: ['verification-counts'] }),
-                client.invalidateQueries({ queryKey: ['document-custody', doc.id] }),
-              ]);
-              openApplicant(null);
-            }} />
+            <CustomerIdRetired key={`cid-${selected.id}`} doc={selected} />
             {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn || needsCertificateYear || needsRegistrationKind || needsOwnName) && <div className="rc-fields">
               {needsRegistrationKind && <label>What this certificate is<select aria-label="What this certificate is" value={registrationKind} onChange={(e) => setRegistrationKind(e.target.value as '' | 'BUSINESS_NAME' | 'COMPANY')} disabled={busy}><option value="">Choose…</option><option value="BUSINESS_NAME">Business name (sole trader or partnership): renewed every year</option><option value="COMPANY">Company: certificate of incorporation, never expires</option></select><small>{registrationKind === 'BUSINESS_NAME' ? 'Type the year it is registered for. The store goes offline on 16 January if it is not renewed.' : 'A company’s incorporation certificate never expires.'}</small></label>}
               {needsOwnName && <label className="rc-check"><input type="checkbox" aria-label="Own name checked against the ID" checked={ownNameConfirmed} onChange={(e) => setOwnNameConfirmed(e.target.checked)} disabled={busy} />The store name in the declaration is the owner’s true surname, with nothing added except their first names or initials, as printed on their ID. If not, reject it: the store must register its business name.</label>}
