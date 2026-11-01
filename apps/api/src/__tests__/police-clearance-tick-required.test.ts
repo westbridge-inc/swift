@@ -7,7 +7,8 @@ import {
 
 // ---------------------------------------------------------------------------
 // [WEB-POLICE · COORD 31 Oct 2026, option (a)] A police clearance (a criminal record: sensitive data, DPA s.9(1)(a)) is
-// never filed with NO consent tick at all. The tick each client in use sends stays accepted:
+// never filed with NO consent tick at all (builds <= 11 / vc7, never publicly released, send none and are refused; the
+// production OTA gives them a tick). The ticks the current clients send stay accepted:
 //  - the website and the launch OTA: the clearance's own tick (police_clearance_v1, with the words' version);
 //  - build 12 / Android vc8, in the stores' review: the generic document tick (document_v1) — their JS has no police
 //    words, so refusing it would refuse every police clearance from the store builds and from staging under review.

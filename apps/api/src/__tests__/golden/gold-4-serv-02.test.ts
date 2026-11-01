@@ -94,6 +94,8 @@ async function submitDocs(owner: { userId: string; token: string }, docTypes: st
       fileUrl: await ownedVerificationFixture(app.prisma, owner.userId, `auto-approve-${docType}`),
       consent: true,
       privacyNoticeVersion: 'v1',
+      // [WEB-POLICE (a)] a police clearance needs a consent tick: send the build-12 one
+      ...(docType === 'police_clearance' ? { consentTick: 'document_v1' } : {}),
     }, owner.token);
     expect(submitted.statusCode).toBe(201);
     expect(submitted.json().data.status).toBe('APPROVED');

@@ -216,6 +216,7 @@ describe('Auto-approved KYC documents lapse', () => {
       fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'auto-approve-clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
+      consentTick: 'document_v1', // [WEB-POLICE (a)] a police clearance needs a tick: the build-12 body
     }, u.token);
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('APPROVED');
