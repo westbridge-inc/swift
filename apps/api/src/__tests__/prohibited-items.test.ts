@@ -1185,7 +1185,7 @@ describe('[§8 · store names] a store whose own words mention banned goods is h
     inject('POST', `/api/v1/admin/catalogue-review/stores/${vendorId}/approve`, token, { wordsHash }, reason ? { 'x-swift-reason': reason } : {});
   const approvedHashOf = async (vendorId: string) => (await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { nameReviewApprovedHash: true } })).nameReviewApprovedHash;
 
-  it('an existing store named for banned goods is hidden with its items everywhere until a person with the grant approves its exact words; a rename brings the check back', async () => {
+  it('an existing store named for banned goods is hidden with its items everywhere until a person with the grant approves its exact words; changed words bring the check back', async () => {
     const lat = Number(`6.82${NUM}`);
     const lng = -58.14;
     const held = await storeAt(`Rum Shop ${RUN}`, lat, lng);
@@ -1237,15 +1237,22 @@ describe('[§8 · store names] a store whose own words mention banned goods is h
     expect((await catalogueChecksFor(app.prisma, [held.breadId])).get(held.breadId)).toEqual({ state: 'CLEAR' });
     expect((await queueStores()).map((q) => q.vendorId)).not.toContain(held.id);
 
-    // A rename by the partner is judged at once: held again, the old approval no longer matches.
-    const renamed = await inject('PUT', '/api/v1/vendor/profile', held.token, { name: `Gin Corner ${RUN}` });
-    expect(renamed.statusCode).toBe(200);
-    expect(renamed.json().data.storeCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'gin' });
+    // [WEB-SETTINGS API] This store is live (a person checked it): it keeps the name it was checked under.
+    const rename = await inject('PUT', '/api/v1/vendor/profile', held.token, { name: `Gin Corner ${RUN}` });
+    expect(rename.statusCode).toBe(409);
+    expect(rename.json().error.code).toBe('CHECKED_NAME_RENAME');
+    expect(await pages(held)).toEqual([200, 200, 200]);
+    // Changed words are judged at once: held again (its name still says rum), the old approval no longer matches.
+    const reworded = await inject('PUT', '/api/v1/vendor/profile', held.token, { description: `Gin and tonics ${RUN}` });
+    expect(reworded.statusCode).toBe(200);
+    expect(reworded.json().data.storeCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', prohibitedClass: 'ALCOHOL' });
     expect(await pages(held)).toEqual([404, 404, 404]);
-    expect((await queueStores()).find((q) => q.vendorId === held.id)?.wordsHash).not.toBe(listed.wordsHash);
-    // Renamed out of the word: nothing left to check.
-    const out = await inject('PUT', '/api/v1/vendor/profile', held.token, { name: `Coconut Corner ${RUN}` });
-    expect(out.json().data.storeCheck).toBeNull();
+    const again = (await queueStores()).find((q) => q.vendorId === held.id)!;
+    expect(again.wordsHash).not.toBe(listed.wordsHash);
+    // The old words' approval does not stand for the new words; the new words, seen and approved, show it again.
+    expect((await approveStore(admin.token, held.id, listed.wordsHash)).json().error.code).toBe('STORE_CHANGED');
+    expect((await approveStore(admin.token, held.id, again.wordsHash)).statusCode).toBe(200);
+    resetHiddenItemIdsCacheForTests();
     expect(await pages(held)).toEqual([200, 200, 200]);
   });
 

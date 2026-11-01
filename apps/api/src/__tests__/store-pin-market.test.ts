@@ -272,14 +272,13 @@ describe('[DS269 F1] a moved pin is on the record, and the owner hears of a move
   it('[PIN-OWNER] a manager can still edit the profile without coordinates', async () => {
     const store = await storeAtGeorgetown();
     const manager = await managerOf(store);
-    const description = 'Fresh roti every morning.';
-
-    const res = await putProfile(manager.token, store.vendorId, { description });
+    // A setting managers keep (the description is the owner's since WEB-SETTINGS API).
+    const res = await putProfile(manager.token, store.vendorId, { maxConcurrentOrders: 7 });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.description).toBe(description);
+    expect(res.json().data.maxConcurrentOrders).toBe(7);
     const saved = await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } });
-    expect(saved.description).toBe(description);
+    expect(saved.maxConcurrentOrders).toBe(7);
     expect(await pinOf(store.vendorId)).toEqual(GEORGETOWN);
     expect(await pinAudits(store.vendorId)).toHaveLength(0);
   });

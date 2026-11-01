@@ -380,8 +380,9 @@ describe('2. approved: VAT added INTO every standard-rated price the customer se
       for (const field of RECORD) expect(manager[field], `manager ${field}`).toBeUndefined();
       // What every menu role needs stays: whether VAT is added to the prices it types, and at what rate.
       expect(manager).toMatchObject({ vatAddsToPrices: true, vatRatePercent: 14 });
-      // The profile save answers the manager with the same record stripped.
-      const saved = await call('PUT', '/api/v1/vendor/profile', managerToken, { description: 'Soap and rice' }, { 'x-vendor-id': vendorId });
+      // The profile save answers the manager with the same record stripped (a setting a manager may save: the store's
+      // description is the owner's since WEB-SETTINGS API).
+      const saved = await call('PUT', '/api/v1/vendor/profile', managerToken, { requirePickupCode: false }, { 'x-vendor-id': vendorId });
       expect(saved.statusCode, saved.body).toBe(200);
       for (const field of RECORD) expect((saved.json().data as Record<string, unknown>)[field], `manager save ${field}`).toBeUndefined();
     } finally {
