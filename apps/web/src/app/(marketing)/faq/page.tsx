@@ -115,10 +115,12 @@ const FAQ: QA[] = [
     q: 'I run a business. What do I need to sign up?',
     a: (
       <>
-        Owner ID, business registration, a photo of your storefront, and any licence your kind of
-        business needs (a restaurant adds its GRA licence and confirms that everyone who handles its food holds a
-        current food handler&apos;s certificate; a cook selling without a registered business uploads their own food
-        handler&apos;s certificate). A person reviews them.{' '}
+        {/* [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] no seller without a registration: a registered business name,
+            or the own-name declaration; [(d)] the licence carries the GRA's own name */}
+        Owner ID, a business registration (or, if your store&apos;s name is your own name, a short signed declaration
+        instead), a photo of your storefront, and any licence your kind of business needs (a restaurant adds its GRA
+        Food Restaurant Licence and confirms that everyone who handles its food holds a current food handler&apos;s
+        certificate). A person reviews them.{' '}
         {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
         <ReviewTime live="Most businesses clear review within a day." /> Your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}

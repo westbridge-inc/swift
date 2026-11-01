@@ -413,6 +413,13 @@ export async function enforceRegistryCompletenessAtBoot(
   return gaps;
 }
 
+/** [CHECKLIST-LEGAL · COORD 1 Nov 2026 (d), delegated] A type whose name is not its code made readable: the issuer's own
+ *  name for it. Written on create AND on every seed, so a row an older seed named from the code takes it too (the
+ *  category gate's refusal reads the row's name). Every other row keeps the name it was created with. */
+export const REGISTRY_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  gra_restaurant_licence: 'GRA Food Restaurant Licence',
+};
+
 /** Idempotent: upserts every document class and requirement set the country checklists describe. */
 export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySeedResult> {
   const countries = await prisma.countryConfig.findMany({ select: { code: true, documentChecklists: true } });
@@ -432,7 +439,7 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       await prisma.docType.upsert({
         where: { code: registryCode(c.code, legacyCode) },
         create: {
-          code: registryCode(c.code, legacyCode), countryCode: c.code, legacyCode, displayName: humanize(legacyCode),
+          code: registryCode(c.code, legacyCode), countryCode: c.code, legacyCode, displayName: REGISTRY_DISPLAY_NAMES[legacyCode] ?? humanize(legacyCode),
           bucket, subjectKind: SUBJECT_OF[bucket], issuer: 'UNVERIFIED (legal facts pending)',
           imagePolicy: IMAGE_POLICY_OF_BUCKET[bucket], persistRetentionDays: retentionFor(IMAGE_POLICY_OF_BUCKET[bucket]),
           hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, expirySource: validity !== undefined ? 'PRINTED' : 'NONE',
@@ -441,6 +448,7 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
         },
         update: {
           legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
+          ...(REGISTRY_DISPLAY_NAMES[legacyCode] !== undefined && { displayName: REGISTRY_DISPLAY_NAMES[legacyCode] }),
           // a retired type's row is the code's description only: its expiry source follows the same truth as on create
           ...(RETIRED_DOC_TYPES.includes(legacyCode) && { expirySource: validity !== undefined ? 'PRINTED' : 'NONE' }),
         },

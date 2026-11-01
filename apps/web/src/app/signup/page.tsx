@@ -14,7 +14,7 @@ import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
-import { isHirePlate, MOVER_VEHICLES, partnerDoorRole, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
+import { BIKE_WITH_A_MOTOR, isHirePlate, MOVER_VEHICLES, partnerDoorRole, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
 // [PERF] The map picker (with its place search and location code) is needed
 // only on a store's "Place your store on the map" step, so it no longer rides
 // in the sign-up page's first load. Its stylesheet stays in the page, so the
@@ -445,7 +445,10 @@ export default function SignupPage() {
                   {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
                   <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
               </>
-            ) : null}
+            ) : (
+              // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] a bicycle is pedal only; a bike with a motor is a motorbike
+              <p className={styles.smallCopy}>{BIKE_WITH_A_MOTOR}</p>
+            )}
             {feeBlock({ role: 'MOVER', type: veh.vehicleType })}
             <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
             {mover === 'DRIVER' ? (

@@ -141,7 +141,9 @@ export default function DriversPage() {
             ))}
           </ul>
           <p className="mt-6 text-sm text-[var(--swift-muted)]">
-            Riding a bicycle? You will not be asked for a licence, registration or motor insurance.
+            Riding a pedal bicycle? You will not be asked for a licence, registration or motor insurance. A bike with a
+            motor, such as an e-bike or an e-scooter, signs up as a motorbike, with a motorbike&apos;s licence,
+            registration and insurance.
           </p>
 
           {/* [OPEN-EARLY] Two doors, each opening sign-up on its own option: a delivery rider and a taxi driver. */}
