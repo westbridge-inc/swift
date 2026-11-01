@@ -115,6 +115,13 @@ COPY apps/mobile/src/lib/ownNameCopy.ts apps/mobile/src/lib/ownNameCopy.ts
 # [WEB-SETTINGS] The store's MMG number card speaks the phone's hold sentence and its "takes effect" time (each imports nothing).
 COPY apps/mobile/src/lib/mmgHold.ts apps/mobile/src/lib/mmgHold.ts
 COPY apps/mobile/src/lib/stepUp.ts apps/mobile/src/lib/stepUp.ts
+# [WEB-SETTINGS PR-B] Seller status speaks the phone's tier words (modules/vendor/tier-view.ts, pure), which reads
+# the Guyana day of a declaration (lib/documentExpiry.ts -> lib/storeVat.ts -> lib/money.ts; appointmentTime.ts is
+# copied above).
+COPY apps/mobile/src/modules/vendor/tier-view.ts apps/mobile/src/modules/vendor/tier-view.ts
+COPY apps/mobile/src/lib/documentExpiry.ts apps/mobile/src/lib/documentExpiry.ts
+COPY apps/mobile/src/lib/storeVat.ts apps/mobile/src/lib/storeVat.ts
+COPY apps/mobile/src/lib/money.ts apps/mobile/src/lib/money.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

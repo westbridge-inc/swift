@@ -317,6 +317,18 @@ export default function SettingsPage() {
           <Link href="/dashboard/branches" className="sw-chip">Branches</Link>
         </div>
       )}
+      {/* [WEB-SETTINGS PR-B] The phone's Account > Promotions, Seller status and Review your categories (manager and owner). */}
+      {seesBranches && (
+        <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-bold">Grow your store</h2>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Run promo codes, see your seller status and limits, and review the categories customers find you under.</p>
+          </div>
+          <Link href="/dashboard/promotions" className="sw-chip">Promotions</Link>
+          <Link href="/dashboard/seller-status" className="sw-chip">Seller status</Link>
+          <Link href="/dashboard/categories" className="sw-chip">Categories</Link>
+        </div>
+      )}
       {/* [WEB-SETTINGS] Where the store is (owner) and its MMG number (owner edits, manager sees it masked), as the phone's Account. */}
       <Suspense fallback={null}>
         <StoreLocationCard storeId={storeId} />
