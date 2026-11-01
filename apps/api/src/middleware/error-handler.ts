@@ -6,6 +6,24 @@ import { isDevelopment } from '../utils/runtime-mode';
 import { requestLogContext } from '../utils/logger-config';
 import { captureError } from '../plugins/observability';
 
+/**
+ * [VIEWER-FIX] What a 5xx log line may say about its error: its class, its
+ * code, and the model and operation a database refusal names. Only plain
+ * identifiers travel, never a message, URL, key or value (the logger's `err`
+ * serializer redacts the error itself, so without these a 500 said nothing).
+ */
+const LOG_IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+export function serverErrorLogFields(error: unknown): Record<string, string> {
+  const e = (error ?? {}) as { constructor?: { name?: unknown }; code?: unknown; model?: unknown; operation?: unknown };
+  const fields: Record<string, string> = {};
+  const keep = (key: string, value: unknown) => { if (typeof value === 'string' && LOG_IDENTIFIER.test(value)) fields[key] = value; };
+  keep('errorClass', e.constructor?.name);
+  keep('errorCode', e.code);
+  keep('model', e.model);
+  keep('operation', e.operation);
+  return fields;
+}
+
 export function registerErrorHandler(app: FastifyInstance) {
   const respond = (error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
     // Zod validation errors
@@ -46,6 +64,12 @@ export function registerErrorHandler(app: FastifyInstance) {
 
     // Fastify built-in errors (rate limit, etc.)
     if ('statusCode' in error && typeof error.statusCode === 'number') {
+      // [VIEWER-FIX] An error carrying its own 5xx status (the tenant wall's
+      // TENANT_CONTEXT_REQUIRED, a transaction refusal) is our fault as much as
+      // an unknown one: it is logged too, by class, code and route template.
+      if (error.statusCode >= 500) {
+        request.log.error({ ...serverErrorLogFields(error), statusCode: error.statusCode, ...requestLogContext(request) }, 'Unhandled error');
+      }
       return reply.status(error.statusCode).send({
         success: false,
         error: {
@@ -76,7 +100,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     }
 
     // Unknown errors
-    request.log.error({ err: error, ...requestLogContext(request) }, 'Unhandled error');
+    request.log.error({ err: error, ...serverErrorLogFields(error), ...requestLogContext(request) }, 'Unhandled error');
     // SWIFT-AUD-D7-02: an error-rate SPIKE pages (dedup'd via the exact-count
     // trigger + a redis NX guard). Per-minute window counter; fire-and-caught
     // — accounting must never slow the error response, and minimal test
