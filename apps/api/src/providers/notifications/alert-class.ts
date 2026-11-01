@@ -124,7 +124,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_application_abandoned', 'verification_forced_offline', 'verification_vehicle_lapsed',
-    'verification_l2', 'trust_l3', 'compliance_review_failed',
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] verification_l2 is gone with the customer ID (nothing sends it).
+    'trust_l3', 'compliance_review_failed',
     // [SEC-PII] A person's own deletion request: delayed by an open review (why and when), then done. Informational,
     // standard like the other account notices; never a loud class.
     'erasure_delayed', 'erasure_completed',
