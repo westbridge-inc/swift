@@ -515,10 +515,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /rides/drivers/:id/vehicle-identity': c('C3', 'rides.vehicle.write'),
 
   // ── Verification ────────────────────────────────────────────────────────
-  'GET /verification/queue': c('C0', 'verification.read'),
+  // [DOC-SECURITY G3] The queue lists people's identity papers by name: a document reviewer's read, like
+  // opening the file (`*` never implies the grant), and a sensitive read (C1) that leaves an access row.
+  'GET /verification/queue': reviewed(c('C1', 'verification.read')),
   // [DOC-1 §8.4 · P8-4] SUPPORT sees status counts, never a document, a name or a phone (DOC-INV-19).
   'GET /verification/queue/counts': c('C0', 'verification.counts'),
-  // [VERIFY-DOCS V3] The four document doors also demand the explicit reviewer grant.
+  // [VERIFY-DOCS V3] The four document doors also demand the explicit reviewer grant (and the queue, above).
   'PUT /verification/:id/approve': reviewed(c('C3', 'verification.decide', E.verification)),
   'PUT /verification/:id/reject': reviewed(c('C3', 'verification.decide', E.verification)),
   'PUT /verification/:id/revoke': reviewed(c('C3', 'verification.decide', E.verification)),

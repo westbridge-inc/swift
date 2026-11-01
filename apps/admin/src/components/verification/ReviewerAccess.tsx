@@ -55,7 +55,12 @@ export function ReviewerAccess() {
     });
     if (!outcome) return;
     setResult(outcome);
-    await client.invalidateQueries({ queryKey: ['document-reviewers'] });
+    // [DOC-SECURITY G3] The queue itself is a reviewer's read: it is read again with the new permission.
+    await Promise.all([
+      client.invalidateQueries({ queryKey: ['document-reviewers'] }),
+      client.invalidateQueries({ queryKey: ['verification'] }),
+      client.invalidateQueries({ queryKey: ['verification-history'] }),
+    ]);
   };
 
   return <section className="rc-reviewers" aria-label="Document reviewers">

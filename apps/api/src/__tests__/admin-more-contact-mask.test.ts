@@ -22,6 +22,8 @@ import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 //   GET /integrity/appeals          the number of each person with an open appeal
 //   GET /verification/queue         the applicant's number
 // Each now masks (and the wa.me link is withheld) unless the live grant holds vendor/mover/user .contact.read.
+// [DOC-SECURITY G3] The review queue goes further: it is a document reviewer's read (`documents.review`, never
+// implied by `*`), and it masks the applicant's number for EVERY grant, contact capability included.
 // ---------------------------------------------------------------------------
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
@@ -86,9 +88,9 @@ beforeAll(async () => {
   ids.appellant = await person(phones.appellant, ['CUSTOMER']);
   ids.enforcement = (await system(() => app.prisma.enforcementAction.create({ data: { accountId: ids.appellant, level: 'DENY_TRIAL', reasonCode: 'SYNTHETIC', signalsFired: [], decidedBy: 'SYSTEM', appeal: 'OPEN' } as never }))).id;
 
-  await adminWith('readers', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'verification.read', 'integrity.read', 'integrity.identity.read']);
-  await adminWith('contacts', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'verification.read', 'integrity.read', 'integrity.identity.read', 'user.contact.read', 'mover.contact.read', 'vendor.contact.read']);
-  await adminWith('all', 'SUPER_ADMIN', ['*']);
+  await adminWith('readers', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'verification.read', 'integrity.read', 'integrity.identity.read', 'documents.review']);
+  await adminWith('contacts', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'verification.read', 'integrity.read', 'integrity.identity.read', 'user.contact.read', 'mover.contact.read', 'vendor.contact.read', 'documents.review']);
+  await adminWith('all', 'SUPER_ADMIN', ['*', 'documents.review']);
   await adminWith('moverOnly', 'SUPER_ADMIN', ['billing.read', 'billing.san.read', 'mover.contact.read']);
 });
 
@@ -134,11 +136,17 @@ describe('[SEC-PII #2170 S3-2] five more admin reads mask phone numbers without 
     expect((await get(reads().san.url, tokens['readers']!)).json().data.holder.phone).toMatch(masked(phones.rider));
   });
 
-  it('the matching contact capability (or *) shows the full number, as before', async () => {
+  it('the matching contact capability (or *) shows the full number, as before — except on the review queue', async () => {
     for (const token of ['contacts', 'all']) {
       for (const [name, r] of Object.entries(reads())) {
         const res = await get(r.url, tokens[token]!);
         expect(res.statusCode, name).toBe(200);
+        // [DOC-SECURITY G3] The queue masks for every grant: the full number is the person page's audited reveal.
+        if (name === 'queue') {
+          expect(res.payload, `${token} ${name}`).not.toContain(r.phone);
+          expect(res.payload, `${token} ${name}`).toMatch(new RegExp(`•+${r.phone.slice(-4)}`));
+          continue;
+        }
         expect(res.payload, `${token} ${name}`).toContain(r.phone);
       }
       const row = (await get(reads().collections.url, tokens[token]!)).json().data.find((c: { subscriptionId: string }) => c.subscriptionId === ids.vendorSub);

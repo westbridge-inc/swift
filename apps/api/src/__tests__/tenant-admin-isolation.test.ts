@@ -1318,10 +1318,6 @@ describe('tenant-qualified admin access', () => {
   });
 
   it('hides foreign verification documents and rejects their read or decision without side effects', async () => {
-    const queue = await adminRequest('GET', '/api/v1/admin/verification/queue?status=PENDING&limit=100');
-    expect(queue.statusCode).toBe(200);
-    expect(queue.json().data.map((doc: { id: string }) => doc.id)).not.toContain(TENANT_B_VERIFICATION_DOC_ID);
-
     const beforeDocument = await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({
       where: { id: TENANT_B_VERIFICATION_DOC_ID },
       select: { status: true, reviewedBy: true, reviewedAt: true, expiresAt: true, updatedAt: true },
@@ -1346,6 +1342,10 @@ describe('tenant-qualified admin access', () => {
       },
     }));
     const asReviewer = { authorization: `Bearer ${reviewerToken}` };
+    // [DOC-SECURITY G3] The queue is a document reviewer's read too: the same local reviewer lists it.
+    const queue = await adminRequest('GET', '/api/v1/admin/verification/queue?status=PENDING&limit=100', undefined, asReviewer);
+    expect(queue.statusCode).toBe(200);
+    expect(queue.json().data.map((doc: { id: string }) => doc.id)).not.toContain(TENANT_B_VERIFICATION_DOC_ID);
     expectNotFound(await adminRequest('PUT', `/api/v1/admin/verification/${TENANT_B_VERIFICATION_DOC_ID}/approve`, {}, asReviewer));
     expectNotFound(await adminRequest('GET', `/api/v1/admin/verification/${TENANT_B_VERIFICATION_DOC_ID}/document-url`, undefined, asReviewer));
 

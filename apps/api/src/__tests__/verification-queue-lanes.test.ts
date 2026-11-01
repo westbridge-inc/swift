@@ -47,7 +47,8 @@ async function makeUser(n: number, roles: Array<'CUSTOMER' | 'MOVER' | 'VENDOR_O
     data: {
       phone: `${PHONE_PREFIX}${String(n).padStart(2, '0')}`, firstName: 'Lane', lastName: `User${n}`,
       roles, activeRole: roles[0]!, isPhoneVerified: true, selfieCapturedAt: new Date(),
-      ...(roles.includes('ADMIN') ? { admin: { create: { permissions: ['*'] } } } : {}),
+      // [DOC-SECURITY G3] The queue is a document reviewer's read: `*` alone is refused it.
+      ...(roles.includes('ADMIN') ? { admin: { create: { permissions: ['*', 'documents.review'] } } } : {}),
     },
   });
   userIds.push(user.id);

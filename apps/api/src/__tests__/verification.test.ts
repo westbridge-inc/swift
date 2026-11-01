@@ -1169,7 +1169,8 @@ describe('[A-19] the reviewer can see what they are asked to cross-check', () =>
       expect(withDriver.user!.driver).toHaveProperty('vehicleMake');
     } else {
       // no driver applicant in this fixture run — assert the selection exists
-      const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
+      // [DOC-SECURITY G3] The queue's allow-listed selection lives beside the row it builds.
+      const routes = readFileSync(join(__dirname, '../modules/admin/review-queue-row.ts'), 'utf8');
       expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
     }
   });

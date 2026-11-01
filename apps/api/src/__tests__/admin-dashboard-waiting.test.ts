@@ -140,9 +140,15 @@ describe('[ADMIN-AUDIT S2-1] Today counts every queue that waits for a person', 
     const w = await waiting(superAdmin.token);
     expect(w.queues.map((q) => q.key)).toEqual(WAITING_QUEUES.map((q) => q.key));
     expect(w.queues.slice(0, 3).map((q) => q.key)).toEqual(['opsAlerts', 'supportSafety', 'supportSafetyInProgress']);
-    for (const q of w.queues) expect(q.door, q.key).toBe(true);
+    // [DOC-SECURITY G3] Every row is a door — except documents: the Review Center's queue is a document reviewer's
+    // read, which `*` never confers. The count still shows; the door opens with the grant.
+    for (const q of w.queues) expect(q.door, q.key).toBe(q.key !== 'documents');
     expect(w.notCounted).toEqual([]);
     for (const q of w.queues) expect(q.count, q.key).not.toBeNull();
+    const reviewer = await makeUser('SUPER_ADMIN', ['*', 'documents.review']);
+    const rw = await waiting(reviewer.token);
+    for (const q of rw.queues) expect(q.door, `with the grant: ${q.key}`).toBe(true);
+    expect(rw.count('documents')).toBe(w.count('documents'));
 
     const json = async (url: string) => { const r = await call(superAdmin.token, url); expect(r.statusCode, url).toBe(200); return r.json(); };
     expect(w.count('opsAlerts')).toBe((await json('/api/v1/safety/ops-alerts')).data.length);
