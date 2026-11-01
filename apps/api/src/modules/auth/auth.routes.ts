@@ -21,6 +21,9 @@ import { zPhone } from '../../utils/phone';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { openSealedPhoto, photoSealingAvailable, sealedPhotoParts, sealPhoto, SEALED_AVATAR_TTL_SECONDS, verifySealedAvatarLink } from '../../providers/storage/sealed-photo';
+import { isProduction } from '../../utils/runtime-mode';
+import { runAsSystem } from '../../plugins/tenant-context';
 import {
   browserClientOf,
   clearSessionCookies,
@@ -307,12 +310,22 @@ export async function authRoutes(app: FastifyInstance) {
 
     await scanUpload(buffer, { surface: 'avatar', log: request.log });
     const storage = getStorageProvider();
-    const { url } = await storage.upload({
-      buffer,
-      filename: canonicalFilename,
-      mimeType: file.mimetype,
-      folder: `avatars/${request.user.userId}`,
-    });
+    // [DOC-SECURITY G2] Sealed like a verification document (providers/storage/sealed-photo.ts): the bucket only
+    // ever holds ciphertext, the key is wrapped by MASTER_KEK. Production never boots without one; a development
+    // server with none keeps the plain photo, as before.
+    let url: string;
+    if (photoSealingAvailable()) {
+      url = await sealPhoto(app.prisma, storage, { buffer, declaredMimeType: file.mimetype, ownerId: request.user.userId, folder: 'avatars' });
+    } else if (isProduction()) {
+      throw new AppError(503, 'PHOTO_SEALING_UNAVAILABLE', 'Photo upload is temporarily unavailable. Try again later.');
+    } else {
+      ({ url } = await storage.upload({
+        buffer,
+        filename: canonicalFilename,
+        mimeType: file.mimetype,
+        folder: `avatars/${request.user.userId}`,
+      }));
+    }
 
     // [REPORT-022 F-022-21] conditional write: a deletion finishing between
     // auth and this point cannot re-personalize the tombstone with a fresh
@@ -409,6 +422,34 @@ export async function authRoutes(app: FastifyInstance) {
     // avatar — returning the raw S3/R2 key here hands back something it
     // cannot render, moments after a successful upload.
     return reply.send({ success: true, data: { user: { ...user, avatar: await resolveAvatarUrl(user.avatar) } } });
+  });
+
+  // [DOC-SECURITY G2] GET /selfie/:userId/:file?expires&sig — a sealed profile photo, opened by the signed link the
+  // API mints where it decided to show it (resolveAvatarUrl), as a presigned bucket link was before. The signature
+  // IS the authority (no session: an <img> loads it). It opens only the photo the account points at NOW (a replaced
+  // or erased photo's links die), decrypted in memory. Every refusal is the same 404.
+  app.get<{ Params: { userId: string; file: string }; Querystring: { expires?: string; sig?: string } }>('/selfie/:userId/:file', async (request, reply) => {
+    const refuse = () => reply.code(404).header('Cache-Control', 'no-store').send({ success: false, error: { code: 'PHOTO_UNAVAILABLE', message: 'This photo is not available.' } });
+    const { userId, file } = request.params;
+    const expires = Number(request.query.expires);
+    const sig = typeof request.query.sig === 'string' ? request.query.sig : '';
+    if (!verifySealedAvatarLink(userId, file, expires, sig)) return refuse();
+    const photo = await runAsSystem('signup-selfie-sealed-read', async () => {
+      const owner = await app.prisma.user.findUnique({ where: { id: userId }, select: { avatar: true } });
+      const parts = sealedPhotoParts(owner?.avatar);
+      if (!owner?.avatar || !parts || parts.folder !== 'avatars' || parts.ownerId !== userId || parts.file !== file) return null;
+      return openSealedPhoto(app.prisma, getStorageProvider(), { fileKey: owner.avatar, ownerId: userId }).catch(() => null);
+    });
+    if (!photo) return refuse();
+    const maxAge = Math.max(0, Math.min(SEALED_AVATAR_TTL_SECONDS, expires - Math.floor(Date.now() / 1000)));
+    return reply
+      .type(photo.mimeType)
+      .header('Cache-Control', `private, max-age=${maxAge}`)
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Content-Disposition', 'inline')
+      // The link is the authority, like the presigned bucket link before it: the console and the website load it from their own origin.
+      .header('Cross-Origin-Resource-Policy', 'cross-origin')
+      .send(photo.bytes);
   });
 
   // ── Email + password (secondary to phone OTP) ──────────────────────────

@@ -10,6 +10,8 @@ import { EvidenceService } from './evidence.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { photoSealingAvailable, sealPhoto } from '../../providers/storage/sealed-photo';
+import { isProduction } from '../../utils/runtime-mode';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
@@ -510,13 +512,16 @@ export async function safetyRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
     const scan = await scanUpload(buffer, { surface: 'liveness', log: request.log });
-    const { url } = await getStorageProvider().upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `liveness/${request.user.userId}`,
-    });
-    await recordUnscannedUpload(app.prisma, scan, { surface: 'liveness', fileKey: url, buffer, storage: getStorageProvider() });
+    const storage = getStorageProvider();
+    // [DOC-SECURITY G2] Sealed like a verification document (providers/storage/sealed-photo.ts): ciphertext only in
+    // the bucket, the key wrapped by MASTER_KEK. Production never boots without one; a development server with none
+    // keeps the plain photo, as before. A rescan after the bypass opens it with its envelope row (sealed).
+    const sealed = photoSealingAvailable();
+    if (!sealed && isProduction()) throw new AppError(503, 'PHOTO_SEALING_UNAVAILABLE', 'Photo upload is temporarily unavailable. Try again later.');
+    const url = sealed
+      ? await sealPhoto(app.prisma, storage, { buffer, declaredMimeType: file.mimetype, ownerId: request.user.userId, folder: 'liveness' })
+      : (await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `liveness/${request.user.userId}` })).url;
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'liveness', fileKey: url, buffer, sealed, storage });
     const result = await liveness.check({ userId: request.user.userId, profile, selfieUrl: url });
     return { success: true, data: result };
   });

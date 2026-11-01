@@ -1,4 +1,5 @@
 import { cashInHandWindows } from '../dispatch/cash-in-hand';
+import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
@@ -1051,7 +1052,8 @@ export async function driverRoutes(app: FastifyInstance) {
           firstName: driver.user.firstName,
           lastName: driver.user.lastName,
           // [O-1] Never the driver's number here: no build ever read it, and the order room is not a directory.
-          avatar: driver.user.avatar,
+          // [DOC-SECURITY G2] A loadable link, never the stored key.
+          avatar: await resolveAvatarUrl(driver.user.avatar),
           vehicleMake: driver.vehicleMake,
           vehicleModel: driver.vehicleModel,
           vehicleColor: driver.vehicleColor,
