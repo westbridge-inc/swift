@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
-import PromotionsPage, { PROMO_WORDS } from './page';
+import PromotionsPage from './page';
+import { PROMO_WORDS } from './promo-words';
 
 // ---------------------------------------------------------------------------
 // [WEB-SETTINGS PR-B · owner 31 Oct 2026] A store's own promo codes on the website, as the phone's Account >
@@ -14,7 +15,7 @@ import PromotionsPage, { PROMO_WORDS } from './page';
 
 const NOW = Date.now();
 const writes: Array<{ method: string; path: string; body: unknown }> = [];
-function api(opts: { role?: string; promos?: unknown[]; fail?: boolean; refuse?: string } = {}) {
+function api(opts: { role?: string; roleFail?: boolean; promos?: unknown[]; fail?: boolean; refuse?: string; kept?: boolean } = {}) {
   let promos = opts.promos ?? [
     { id: 'p1', code: 'SAVE20', description: '20% off', discountType: 'PERCENTAGE', discountValue: '20', minOrderAmount: '2000', validUntil: new Date(NOW + 86_400_000).toISOString(), isActive: true, currentUses: 3 },
     { id: 'p2', code: 'OLD500', description: 'old', discountType: 'FIXED_AMOUNT', discountValue: '500', minOrderAmount: null, validUntil: new Date(NOW - 86_400_000).toISOString(), isActive: true, currentUses: 0 },
@@ -23,6 +24,7 @@ function api(opts: { role?: string; promos?: unknown[]; fail?: boolean; refuse?:
     const path = url.pathname.replace('/api/v1', '');
     const body = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : null;
     if (method !== 'GET') writes.push({ method, path, body });
+    if (path === '/vendor/stores' && opts.roleFail) return { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'Something went wrong' } } };
     if (path === '/vendor/stores') return { body: { success: true, data: { stores: [{ id: 'store-1', name: 'Sample Kitchen' }], selectedId: 'store-1', myRole: opts.role ?? 'OWNER' } } };
     if (path === '/vendor/promos' && method === 'GET') {
       if (opts.fail) return { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'Something went wrong' } } };
@@ -33,6 +35,7 @@ function api(opts: { role?: string; promos?: unknown[]; fail?: boolean; refuse?:
       promos = [{ id: 'p3', ...body, isActive: true, currentUses: 0 }, ...promos];
       return { body: { success: true, data: promos[0] } };
     }
+    if (path.startsWith('/vendor/promos/') && method === 'DELETE' && opts.kept) return { body: { success: true, data: { deleted: false, deactivated: true } } };
     if (path.startsWith('/vendor/promos/') && method === 'DELETE') { promos = promos.filter((p) => (p as { id: string }).id !== path.split('/').pop()); return { body: { success: true, data: { deleted: true } } }; }
     if (path.startsWith('/vendor/promos/') && method === 'PUT') return { body: { success: true, data: {} } };
     return { body: { success: true, data: {} } };
@@ -132,6 +135,79 @@ describe('[WEB-SETTINGS PR-B] promotions (web)', () => {
     renderWithQuery(<PromotionsPage />);
     expect(await screen.findByText(PROMO_WORDS.staff)).toBeTruthy();
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/vendor/promos'))).toBe(false);
+  });
+
+  // [REVIEW-F #2281 S3-2] A keyboard types "1,000": the minimum is read, never dropped; an unreadable one blocks.
+  it('a typed minimum is read with commas and GY$, and an unreadable one blocks the launch', async () => {
+    api();
+    const { user } = renderWithQuery(<PromotionsPage />);
+    await user.click(await screen.findByRole('button', { name: 'New promotion' }));
+    await user.type(screen.getByLabelText('Code'), 'SAVE500');
+    await user.type(screen.getByLabelText('What customers see'), 'GY$500 off orders over GY$1,000');
+    await user.click(screen.getByRole('radio', { name: 'GYD off' }));
+    await user.type(screen.getByLabelText('Discount (GYD)'), 'GY$ 500');
+    await user.type(screen.getByLabelText('Minimum order (optional)'), 'abc');
+    expect(screen.getByRole('button', { name: PROMO_WORDS.setMinimum })).toHaveProperty('disabled', true);
+    await user.clear(screen.getByLabelText('Minimum order (optional)'));
+    await user.type(screen.getByLabelText('Minimum order (optional)'), '1,000');
+    await user.click(screen.getByRole('button', { name: 'Launch promotion' }));
+    await waitFor(() => expect(writes.filter((w) => w.method === 'POST')).toHaveLength(1));
+    expect(writes[0]!.body).toMatchObject({ discountValue: 500, minOrderAmount: 1000 });
+  });
+
+  // [REVIEW-F #2281 S4-3] The server's rules first, so its refusal is never just "Invalid request data".
+  it('a short code, a code with spaces and a percentage over 100 are named before anything is sent', async () => {
+    api();
+    const { user } = renderWithQuery(<PromotionsPage />);
+    await user.click(await screen.findByRole('button', { name: 'New promotion' }));
+    await user.type(screen.getByLabelText('What customers see'), 'Big sale');
+    await user.type(screen.getByLabelText('Code'), 'AB');
+    expect(screen.getByRole('button', { name: PROMO_WORDS.codeShort })).toBeTruthy();
+    await user.type(screen.getByLabelText('Code'), 'C 20');
+    expect(screen.getByRole('button', { name: PROMO_WORDS.codeChars })).toBeTruthy();
+    await user.clear(screen.getByLabelText('Code'));
+    await user.type(screen.getByLabelText('Code'), 'BIG-150');
+    await user.type(screen.getByLabelText('Discount (%)'), '150');
+    expect(screen.getByRole('button', { name: PROMO_WORDS.overHundred })).toHaveProperty('disabled', true);
+    await user.clear(screen.getByLabelText('Discount (%)'));
+    await user.type(screen.getByLabelText('Discount (%)'), '100');
+    expect(screen.getByRole('button', { name: 'Launch promotion' })).toHaveProperty('disabled', false);
+    expect(writes).toHaveLength(0);
+  });
+
+  it('a used code the server keeps (paused) is said so, not "deleted"; focus returns to the page heading', async () => {
+    api({ kept: true });
+    const { user } = renderWithQuery(<PromotionsPage />);
+    const live = (await screen.findByText('SAVE20')).closest('li')!;
+    await user.click(within(live).getByRole('button', { name: 'Delete promo SAVE20' }));
+    await user.click(screen.getByRole('button', { name: 'Delete promo' }));
+    expect(await screen.findByText(PROMO_WORDS.kept)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Promotions' })));
+  });
+
+  it('Cancel puts focus back on "New promotion"', async () => {
+    api();
+    const { user } = renderWithQuery(<PromotionsPage />);
+    await user.click(await screen.findByRole('button', { name: 'New promotion' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'New promotion' })));
+  });
+
+  // [REVIEW-F #2281 S4-1]
+  it('a failed role read says so and offers no form, never "Checking…" for ever', async () => {
+    api({ roleFail: true });
+    renderWithQuery(<PromotionsPage />);
+    expect(await screen.findByRole('button', { name: /Try again|Retry/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'New promotion' })).toBeNull();
+    expect(screen.queryByText('Checking your promo codes…')).toBeNull();
+  });
+
+  it('no form is offered while the role is still being read', async () => {
+    const fetchMock = mockApi(({ url }: ApiRequest) => (url.pathname.endsWith('/vendor/stores') ? new Promise(() => {}) : { body: { success: true, data: [] } }));
+    renderWithQuery(<PromotionsPage />);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/vendor/stores'))).toBe(true));
+    expect(screen.getByRole('status').textContent).toBe('Checking your promo codes…');
+    expect(screen.queryByRole('button', { name: 'New promotion' })).toBeNull();
   });
 
   it('every sentence is the phone\'s own (VendorAccountScreen PromosSection)', () => {

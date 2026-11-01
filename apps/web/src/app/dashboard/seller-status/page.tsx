@@ -1,26 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { money } from '@/lib/vendor-api';
 import { getTier } from '@/lib/store-extras-api';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { capLine, declarationLine, registrationLine, tierLabel, type TierView } from '../../../../../mobile/src/modules/vendor/tier-view';
+import { TIER_WORDS } from './tier-words';
 
-/** The phone's words (VendorTierScreen; the test reads them there). */
-export const TIER_WORDS = {
-  staff: 'Seller status is shown to the store’s manager and owner.',
-  near: 'You are near a limit. Orders past it are refused until the day or week rolls over.',
-  promotedLater: 'Promoted placement opens once your business is registered.',
-  noLimits: 'No order or sales limits apply. Promoted placement is open to you.',
-  steps: [
-    '1. Register your business name with the Deeds and Commercial Registries Authority (DCRA).',
-    '2. Get the Business Registration Certificate.',
-    '3. Upload it under your documents. The limits lift the day it is verified, and we tell you.',
-  ],
-} as const;
 
 function Bar({ fraction, hot, label }: { fraction: number; hot: boolean; label: string }) {
   const pct = Math.round(fraction * 100);
@@ -38,7 +27,8 @@ function Bar({ fraction, hot, label }: { fraction: number; hot: boolean; label: 
  */
 export default function SellerStatusPage() {
   const storeId = useStoreId();
-  const { manager, known, role } = useStoreRole();
+  const queryClient = useQueryClient();
+  const { manager, known, role, failed } = useStoreRole();
   const q = useQuery({ queryKey: storeKey(storeId, 'tier'), queryFn: getTier, enabled: manager, refetchInterval: 60_000 });
   const t = q.data as TierView | undefined;
 
@@ -56,7 +46,10 @@ export default function SellerStatusPage() {
         <h1 className="sw-title mt-2">Seller status</h1>
       </div>
 
-      {q.isError ? (
+      {failed ? (
+        // [REVIEW-F #2281 S4-1] The role could not be read: say so, never "Checking…" for ever.
+        <DataUnavailable what="your store details" onRetry={() => void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'my-role') })} />
+      ) : q.isError ? (
         <DataUnavailable what="your seller status" error={q.error} onRetry={() => void q.refetch()} />
       ) : !t || !label || !orders || !sales ? (
         <p role="status" className="sw-card p-6 text-sm text-[var(--swift-muted)]">Checking your seller status…</p>
@@ -95,7 +88,7 @@ export default function SellerStatusPage() {
                 {TIER_WORDS.steps.map((step) => <p key={step}>{step}</p>)}
                 <div className="flex flex-wrap gap-2 pt-2">
                   {role === 'OWNER' && <Link href="/dashboard/documents" className="sw-chip">Documents</Link>}
-                  <Link href="/account/help" className="sw-chip">Need help registering? Ask a person</Link>
+                  <Link href="/contact" className="sw-chip">Need help registering? Ask a person</Link>
                 </div>
               </div>
             )}

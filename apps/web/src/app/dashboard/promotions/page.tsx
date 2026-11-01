@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
@@ -9,12 +9,8 @@ import { money } from '@/lib/vendor-api';
 import { createPromo, deletePromo, getPromos, setPromoActive, type Promo } from '@/lib/store-extras-api';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { Modal } from '@/components/modal';
+import { PROMO_WORDS, readAmount } from './promo-words';
 
-/** The phone's words (VendorAccountScreen PromosSection; the test reads them there). */
-export const PROMO_WORDS = {
-  none: 'No codes yet — run your first promotion and it shows on your storefront.',
-  staff: 'Promotions are run by the store’s manager and owner.',
-} as const;
 
 const DAYS = [3, 7, 14, 30] as const;
 const input = 'mt-1 w-full rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-2 text-sm font-normal';
@@ -34,7 +30,7 @@ function terms(p: Promo): string {
 export default function PromotionsPage() {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
-  const { manager, known } = useStoreRole();
+  const { manager, known, failed } = useStoreRole();
   const promos = useQuery({ queryKey: storeKey(storeId, 'promos'), queryFn: getPromos, enabled: manager });
   const refresh = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'promos') });
 
@@ -46,14 +42,27 @@ export default function PromotionsPage() {
   const [minOrder, setMinOrder] = useState('');
   const [days, setDays] = useState<number>(7);
   const [removing, setRemoving] = useState<Promo | null>(null);
+  const [kept, setKept] = useState<string | null>(null);
+  // [REVIEW-F #2281 S4-2] When the form or a row goes away, focus goes somewhere on purpose, never to the page's top.
+  const [focusTo, setFocusTo] = useState<'new' | 'heading' | null>(null);
+  const newRef = useRef<HTMLButtonElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!focusTo) return;
+    (focusTo === 'new' ? newRef.current : headingRef.current)?.focus();
+    setFocusTo(null);
+  }, [focusTo]);
+
+  const v = readAmount(value);
+  const minimum = readAmount(minOrder);
 
   const create = useMutation({
     mutationFn: () => createPromo({
       code: code.trim().toUpperCase(),
       description: desc.trim(),
       discountType: kind,
-      discountValue: Number(value),
-      ...(Number(minOrder) > 0 ? { minOrderAmount: Number(minOrder) } : {}),
+      discountValue: v ?? 0,
+      ...(minimum !== null && minimum > 0 ? { minOrderAmount: minimum } : {}),
       validUntil: new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString(),
     }),
     onSuccess: () => {
@@ -62,27 +71,45 @@ export default function PromotionsPage() {
       setDesc('');
       setValue('');
       setMinOrder('');
+      setFocusTo('new');
       void refresh();
     },
   });
   const toggle = useMutation({ mutationFn: (p: Promo) => setPromoActive(p.id, !p.isActive), onSettled: () => { void refresh(); } });
-  const remove = useMutation({ mutationFn: (id: string) => deletePromo(id), onSettled: () => { void refresh(); } });
+  const remove = useMutation({
+    mutationFn: (id: string) => deletePromo(id),
+    onMutate: () => setKept(null),
+    // The server keeps a code customers used (paused, so its orders still read): the page says so instead of "deleted".
+    onSuccess: (r: { data?: { deactivated?: unknown } } | undefined) => { if (r?.data?.deactivated === true) setKept(PROMO_WORDS.kept); },
+    onSettled: () => { setFocusTo('heading'); void refresh(); },
+  });
 
   if (known && !manager) return <p className="sw-card p-6 text-sm text-[var(--swift-muted)]">{PROMO_WORDS.staff}</p>;
 
-  const v = Number(value);
-  const missing = !code.trim() ? 'Enter a code' : !desc.trim() ? 'Describe it for customers' : !(Number.isFinite(v) && v > 0) ? 'Set the discount' : null;
+  // [REVIEW-F #2281 S4-3] The server's own rules, checked first so its refusal is never just "Invalid request data".
+  const typed = code.trim();
+  const missing = !typed ? 'Enter a code'
+    : typed.length < 3 ? PROMO_WORDS.codeShort
+    : !/^[A-Za-z0-9-]+$/.test(typed) ? PROMO_WORDS.codeChars
+    : !desc.trim() ? 'Describe it for customers'
+    : !(v !== null && v > 0) ? 'Set the discount'
+    : kind === 'PERCENTAGE' && v > 100 ? PROMO_WORDS.overHundred
+    : minimum !== null && !(minimum >= 0) ? PROMO_WORDS.setMinimum
+    : null;
   const list = promos.data ?? [];
 
   return (
     <div className="max-w-3xl space-y-5">
       <div>
         <Link href="/dashboard/settings" className="text-sm font-semibold text-[var(--swift-muted)] hover:underline">Back to settings</Link>
-        <h1 className="sw-title mt-2">Promotions</h1>
+        <h1 ref={headingRef} tabIndex={-1} className="sw-title mt-2">Promotions</h1>
         <p className="sw-caption mt-1">Codes your store funds. Customers enter a code at checkout in the Swift app.</p>
       </div>
 
-      {promos.isError ? (
+      {failed ? (
+        // [REVIEW-F #2281 S4-1] The role could not be read: say so, never "Checking…" for ever.
+        <DataUnavailable what="your store details" onRetry={() => void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'my-role') })} />
+      ) : promos.isError ? (
         <DataUnavailable what="your promo codes" error={promos.error} onRetry={() => void promos.refetch()} />
       ) : (
         <div className="sw-card p-6">
@@ -118,6 +145,7 @@ export default function PromotionsPage() {
               })}
             </ul>
           )}
+          {kept && <p role="status" className="mt-2 text-sm text-[var(--swift-muted)]">{kept}</p>}
           {(toggle.error || remove.error) && (
             <p role="alert" className="mt-2 text-sm text-[var(--swift-red)]">{((toggle.error || remove.error) as Error).message}</p>
           )}
@@ -166,12 +194,12 @@ export default function PromotionsPage() {
                 >
                   {create.isPending ? 'Launching…' : missing ?? 'Launch promotion'}
                 </button>
-                <button type="button" className="px-2 text-sm font-semibold text-[var(--swift-muted)]" onClick={() => setShowForm(false)}>Cancel</button>
+                <button type="button" className="px-2 text-sm font-semibold text-[var(--swift-muted)]" onClick={() => { setShowForm(false); setFocusTo('new'); }}>Cancel</button>
               </div>
             </div>
-          ) : (
-            <button type="button" className="sw-chip mt-4" onClick={() => setShowForm(true)}>New promotion</button>
-          )}
+          ) : known && manager ? (
+            <button ref={newRef} type="button" className="sw-chip mt-4" onClick={() => setShowForm(true)}>New promotion</button>
+          ) : null}
         </div>
       )}
 

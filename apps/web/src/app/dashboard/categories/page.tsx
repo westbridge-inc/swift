@@ -1,22 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { getCategorySuggestions, resolveCategorySuggestion, type CategoryGroup } from '@/lib/store-extras-api';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { CATEGORY_WORDS } from './category-words';
 
-/** The phone's words (VendorCategoryReviewScreen; the test reads them there). */
-export const CATEGORY_WORDS = {
-  staff: 'Categories are reviewed by the store’s manager and owner.',
-  browse: 'Customers browse the Market by category.',
-  emptyTitle: 'Nothing to review',
-  emptyBody: 'Every listing that could be categorised has been. New suggestions appear here when you add items.',
-  final: 'Either answer is final — we won’t ask about the same listing again.',
-  failed: 'Couldn’t save that — try again.',
-} as const;
 
 /**
  * [WEB-SETTINGS PR-B · owner 31 Oct 2026] "Review your categories" on the website: the phone's
@@ -27,10 +19,13 @@ export const CATEGORY_WORDS = {
 export default function CategoriesPage() {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
-  const { manager, known } = useStoreRole();
+  const { manager, known, failed } = useStoreRole();
   const key = storeKey(storeId, 'category-suggestions');
   const q = useQuery({ queryKey: key, queryFn: getCategorySuggestions, enabled: manager });
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  // [REVIEW-F #2281 S4-2] An answer removes its row: focus goes to what happened, never to the top of the page.
+  const noticeRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { if (notice) noticeRef.current?.focus(); }, [notice]);
 
   const resolve = useMutation({
     mutationFn: (v: { id: string; action: 'accept' | 'dismiss'; name: string }) => resolveCategorySuggestion(v.id, v.action),
@@ -59,10 +54,13 @@ export default function CategoriesPage() {
       </div>
 
       {notice && (
-        <p role={notice.ok ? 'status' : 'alert'} className={`text-sm font-semibold ${notice.ok ? 'text-green-700' : 'text-[var(--swift-red)]'}`}>{notice.text}</p>
+        <p ref={noticeRef} tabIndex={-1} role={notice.ok ? 'status' : 'alert'} className={`text-sm font-semibold ${notice.ok ? 'text-green-700' : 'text-[var(--swift-red)]'}`}>{notice.text}</p>
       )}
 
-      {q.isError ? (
+      {failed ? (
+        // [REVIEW-F #2281 S4-1] The role could not be read: say so, never "Checking…" for ever.
+        <DataUnavailable what="your store details" onRetry={() => void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'my-role') })} />
+      ) : q.isError ? (
         <DataUnavailable what="your category suggestions" error={q.error} onRetry={() => void q.refetch()} />
       ) : q.isPending ? (
         <p role="status" className="sw-card p-6 text-sm text-[var(--swift-muted)]">Checking your listings…</p>
@@ -84,7 +82,7 @@ export default function CategoriesPage() {
                       type="button"
                       className="sw-chip min-h-11"
                       disabled={resolve.isPending}
-                      aria-label={`Not ${s.name} — dismiss this suggestion for ${group.itemName}`}
+                      aria-label={`Not this: ${s.name} for ${group.itemName} — dismiss this suggestion`}
                       onClick={() => act(s.id, 'dismiss', s.name)}
                     >
                       Not this

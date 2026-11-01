@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
-import SellerStatusPage, { TIER_WORDS } from './page';
+import SellerStatusPage from './page';
+import { TIER_WORDS } from './tier-words';
 
 // ---------------------------------------------------------------------------
 // [WEB-SETTINGS PR-B · owner 31 Oct 2026] Seller status on the website, as the phone's VendorTierScreen: GET
@@ -23,9 +24,10 @@ const REGISTERED = {
   registration: { onFile: true, recordId: 'rec-1' }, declaration: null,
 };
 
-function api(opts: { role?: string; tier?: unknown; fail?: boolean } = {}) {
+function api(opts: { role?: string; roleFail?: boolean; tier?: unknown; fail?: boolean } = {}) {
   return mockApi(({ url }: ApiRequest) => {
     const path = url.pathname.replace('/api/v1', '');
+    if (path === '/vendor/stores' && opts.roleFail) return { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'Something went wrong' } } };
     if (path === '/vendor/stores') return { body: { success: true, data: { stores: [{ id: 'store-1', name: 'Sample Kitchen' }], selectedId: 'store-1', myRole: opts.role ?? 'OWNER' } } };
     if (path === '/vendor/tier') {
       if (opts.fail) return { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'Something went wrong' } } };
@@ -57,7 +59,7 @@ describe('[WEB-SETTINGS PR-B] seller status (web)', () => {
     expect(screen.getByText('Self-declaration approved · valid to 1 Oct 2027')).toBeTruthy();
     for (const step of TIER_WORDS.steps) expect(screen.getByText(step)).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Documents' }).getAttribute('href')).toBe('/dashboard/documents');
-    expect(screen.getByRole('link', { name: 'Need help registering? Ask a person' }).getAttribute('href')).toBe('/account/help');
+    expect(screen.getByRole('link', { name: 'Need help registering? Ask a person' }).getAttribute('href')).toBe('/contact');
   });
 
   it('a registered store: no limits, no steps', async () => {
@@ -82,6 +84,14 @@ describe('[WEB-SETTINGS PR-B] seller status (web)', () => {
     renderWithQuery(<SellerStatusPage />);
     expect(await screen.findByRole('button', { name: /Try again|Retry/ })).toBeTruthy();
     expect(screen.queryByText(/seller —|Registered seller/)).toBeNull();
+  });
+
+  // [REVIEW-F #2281 S4-1]
+  it('a failed role read says so, never "Checking…" for ever', async () => {
+    api({ roleFail: true });
+    renderWithQuery(<SellerStatusPage />);
+    expect(await screen.findByRole('button', { name: /Try again|Retry/ })).toBeTruthy();
+    expect(screen.queryByText('Checking your seller status…')).toBeNull();
   });
 
   it('staff are told who sees it, and nothing is read', async () => {
