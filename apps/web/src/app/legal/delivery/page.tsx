@@ -62,7 +62,7 @@ export default function DeliveryPage() {
           to the standard fee, whatever the distance. You see the exact fee in your cart and at checkout, before you
           place the order.
         </li>
-        <li>Express delivery, where offered, adds GYD 1,000 to the delivery fee of each store that delivers your order.</li>
+        <li>Express delivery, where offered, adds GYD 1,000 for each store in your order that is delivered to you.</li>
         <li>{site.tradeName} takes no part of the delivery fee and adds nothing to the store&apos;s prices.</li>
         <li>
           Prices are in {site.currencyName} ({site.currencyCode}). You pay in cash when the order is handed over, or by

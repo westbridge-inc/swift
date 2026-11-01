@@ -126,7 +126,7 @@ describe('the words say a flat GYD 1,000', () => {
   it('the website Delivery policy states the flat amount, from the one constant', () => {
     const page = readFileSync(join(REPO, 'apps/web/src/app/legal/delivery/page.tsx'), 'utf8').replace(/\s+/g, ' ');
     expect(page).toContain(`express adds GYD ${GYD(EXPRESS_DELIVERY_SURCHARGE)} to the standard fee, whatever the distance.`);
-    expect(page).toContain(`Express delivery, where offered, adds GYD ${GYD(EXPRESS_DELIVERY_SURCHARGE)} to the delivery fee of each store that delivers your order.`);
+    expect(page).toContain(`Express delivery, where offered, adds GYD ${GYD(EXPRESS_DELIVERY_SURCHARGE)} for each store in your order that is delivered to you.`);
     expect(page).not.toMatch(/1\.5 times|one and a half/i);
   });
 

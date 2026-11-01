@@ -40,7 +40,8 @@ import { currentMoverDocuments } from './helpers/current-mover-documents';
 //             zone (CJIA, Ogle) pays 295/km after 3 km. Class multipliers
 //             apply. No fixed fares; the server ignores any mover-sent fare.
 //   Delivery  500 covers 3 km, then 100/km, surge 1.0 (rounded up to a whole
-//             dollar); express ×1.5; pickup orders pay no delivery fee.
+//             dollar); express adds a flat 1,000 at any distance (owner 1 Nov
+//             2026); pickup orders pay no delivery fee.
 //   Courier   800 + 120/km + the size surcharge, × the speed; nearest dollar.
 //
 // Route distances are fixed per destination by a stand-in routing engine, so
@@ -371,7 +372,7 @@ describe('delivery — cart quote = order = rider offer = receipt', () => {
     ['5 km', 5, false, 'DELIVERY', 700],
     ['10 km', 10, false, 'DELIVERY', 1200],
     ['4.37 km (637, a whole dollar)', 4.37, false, 'DELIVERY', 637],
-    ['5 km express (×1.5)', 5, true, 'DELIVERY', 1050],
+    ['5 km express (700 + the flat 1,000)', 5, true, 'DELIVERY', 1700],
     ['pickup: no delivery fee, however far', 10, false, 'PICKUP', 0],
   ] as const)('%s → fee %s', async (_label, km, express, fulfillment, fee) => {
     const drop = at({ lat: 6.8095 + Math.round(km * 100) * 0.00001 + (express ? 0.0005 : 0) + (fulfillment === 'PICKUP' ? 0.001 : 0), lng: -58.159 }, km);
