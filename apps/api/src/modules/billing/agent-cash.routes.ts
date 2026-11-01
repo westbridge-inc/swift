@@ -9,6 +9,12 @@ import { validateSanShape, maskDisplayName, formatSan } from './san';
 import { NotificationService } from '../notification/notification.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { weeklyFeeAmount } from './subscription-fee';
+import type { PrismaClient } from '@prisma/client';
+import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
+import { subscriptionOwnerTenant } from '../subscription/subscription-owner';
+import { resolvePublicMarketTenant } from '../search/search-scope';
+import { pageOps } from '../ops/ops-page';
+import { log } from '../../utils/logger';
 
 // Channel A (webhook) + Channel A' (bill inquiry) [san spec 4.1/4.2] —
 // BUILT FIRST, ENABLED LAST: both 503 until AGENT_CASH_WEBHOOK_SECRET is
@@ -130,6 +136,31 @@ function verifySignature(req: FastifyRequest): { ok: boolean; code?: string } {
   return { ok: true };
 }
 
+/**
+ * [TENANT-WALL] An agent-cash callback carries no session, so nothing binds a
+ * tenant, and under the tenant wall every unbound read and write of the
+ * channel was refused (TENANT_CONTEXT_REQUIRED): each callback answered 500.
+ * A callback belongs to the operator that OWNS the account it names: after
+ * its signature verifies, ONE named system read by the account number finds
+ * that operator (a live subscription's owner, or the operator a released
+ * number was retired in) and nothing else; the callback then runs bound to it.
+ */
+export const AGENT_CASH_CALLBACK_CAPABILITY = 'agent-cash-callback';
+/** [TENANT-WALL] The last resort of a payment no operator can be named for: its raw row is still written (never drop money). */
+export const AGENT_CASH_UNATTRIBUTED_CAPABILITY = 'agent-cash-unattributed';
+export const AGENT_CASH_UNATTRIBUTED_PAGE_TITLE = 'MMG agent payment with no operator: match or refund it';
+
+export async function agentCashAccountOwnerTenant(prisma: PrismaClient, accountNumber: string): Promise<string | null> {
+  const shape = validateSanShape(accountNumber);
+  if (!shape.ok) return null;
+  return runAsSystem(AGENT_CASH_CALLBACK_CAPABILITY, async () => {
+    const sub = await prisma.subscription.findUnique({ where: { san: shape.san }, select: { id: true } });
+    if (sub) return subscriptionOwnerTenant(prisma, sub.id);
+    const retired = await prisma.sanTombstone.findUnique({ where: { san: shape.san }, select: { tenantId: true } });
+    return retired?.tenantId ?? null;
+  });
+}
+
 export async function agentCashRoutes(app: FastifyInstance) {
   // Scoped raw-body capture: signature verification needs the exact bytes
   // BEFORE JSON parsing. A preParsing tee (buffer + re-stream) instead of
@@ -164,7 +195,15 @@ export async function agentCashRoutes(app: FastifyInstance) {
       payerMsisdn: z.string().max(30).optional(),
     }).parse(request.body ?? {});
 
-    const result = await svc.ingest({
+    // [TENANT-WALL] The cash already changed hands, so the payment is recorded
+    // whatever its account number says: bound to the operator that owns the
+    // account; an unknown or malformed number to the operator that owns this
+    // biller channel (the public operator), where a person matches or refunds
+    // it. If not exactly one operator can be named, the raw row is still written
+    // under its own system capability and operations are paged.
+    const operator = (await agentCashAccountOwnerTenant(app.prisma, body.accountNumber))
+      ?? await resolvePublicMarketTenant(app).catch(() => null);
+    const ingest = () => svc.ingest({
       externalId: body.transactionId,
       channel: 'MMG_AGENT_WEBHOOK',
       mmgTxnId: body.transactionId,
@@ -175,6 +214,16 @@ export async function agentCashRoutes(app: FastifyInstance) {
       agentRef: body.agentId,
       payerMsisdn: body.payerMsisdn,
       raw: request.body as never,
+    });
+    const result = operator ? await runWithTenant(operator, ingest) : await runAsSystem(AGENT_CASH_UNATTRIBUTED_CAPABILITY, async () => {
+      const recorded = await ingest();
+      await pageOps({ prisma: app.prisma, redis: app.redis, notifications }, {
+        key: 'ops_page:agent-cash-unattributed',
+        title: AGENT_CASH_UNATTRIBUTED_PAGE_TITLE,
+        body: 'An MMG agent payment arrived for an account number Swift does not know, and no single operator could be named for this biller channel (set PUBLIC_TENANT_ID). The money is recorded as unmatched; match it to an account or refund it.',
+        data: { kind: 'ops_agent_cash_unattributed', paymentId: recorded.paymentId },
+      }).catch((err: unknown) => log().error({ err }, '[TENANT-WALL] unattributed agent payment page failed; the payment itself is recorded'));
+      return recorded;
     });
     // 200 always once we own the money [spec 4.1].
     return reply.status(200).send(
@@ -197,38 +246,45 @@ export async function agentCashRoutes(app: FastifyInstance) {
     const body = z.object({ accountNumber: z.string().min(1).max(30) }).parse(request.body ?? {});
     const shape = validateSanShape(body.accountNumber);
     if (!shape.ok) return reply.send({ valid: false, reason: shape.code });
-    const res = await resolveSan(app.prisma, shape.san);
-    if (!res.ok) return reply.send({ valid: false, reason: res.code });
+    // [TENANT-WALL] Answered in the operator that owns the account (see
+    // agentCashAccountOwnerTenant); a number nobody owns is unknown, and the
+    // inquiry writes nothing either way.
+    const ownerTenant = await agentCashAccountOwnerTenant(app.prisma, shape.san);
+    if (!ownerTenant) return reply.send({ valid: false, reason: 'SAN_UNKNOWN' });
+    return runWithTenant(ownerTenant, async () => {
+      const res = await resolveSan(app.prisma, shape.san);
+      if (!res.ok) return reply.send({ valid: false, reason: res.code });
 
-    const sub = res.subscription;
-    const [vendor, balance] = await Promise.all([
-      sub.vendorId ? app.prisma.vendor.findUnique({ where: { id: sub.vendorId }, select: { name: true, city: true } }) : null,
-      app.prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
-    ]);
-    let holderName = 'Swift partner';
-    let city: string | null = null;
-    if (vendor) {
-      holderName = vendor.name;
-      city = vendor.city;
-    } else {
-      const person = sub.riderId
-        ? await app.prisma.rider.findUnique({ where: { id: sub.riderId }, select: { user: { select: { firstName: true } } } })
-        : sub.driverId
-          ? await app.prisma.driver.findUnique({ where: { id: sub.driverId }, select: { user: { select: { firstName: true } } } })
-          : null;
-      if (person) holderName = person.user.firstName;
-    }
-    // Amount-due math [3.4], the single source of truth: next week's fee
-    // minus whatever already sits in the wallet, floored at zero.
-    const weekly = weeklyFeeAmount(sub);
-    const amountDue = Math.max(0, weekly - Number(balance?.balance ?? 0));
-    return reply.send({
-      valid: true,
-      displayName: maskDisplayName(holderName, city),
-      accountNumber: formatSan(shape.san),
-      amountDueGyd: amountDue.toFixed(2),
-      weeklyFeeGyd: weekly.toFixed(2),
-      currency: 'GYD',
+      const sub = res.subscription;
+      const [vendor, balance] = await Promise.all([
+        sub.vendorId ? app.prisma.vendor.findUnique({ where: { id: sub.vendorId }, select: { name: true, city: true } }) : null,
+        app.prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
+      ]);
+      let holderName = 'Swift partner';
+      let city: string | null = null;
+      if (vendor) {
+        holderName = vendor.name;
+        city = vendor.city;
+      } else {
+        const person = sub.riderId
+          ? await app.prisma.rider.findUnique({ where: { id: sub.riderId }, select: { user: { select: { firstName: true } } } })
+          : sub.driverId
+            ? await app.prisma.driver.findUnique({ where: { id: sub.driverId }, select: { user: { select: { firstName: true } } } })
+            : null;
+        if (person) holderName = person.user.firstName;
+      }
+      // Amount-due math [3.4], the single source of truth: next week's fee
+      // minus whatever already sits in the wallet, floored at zero.
+      const weekly = weeklyFeeAmount(sub);
+      const amountDue = Math.max(0, weekly - Number(balance?.balance ?? 0));
+      return reply.send({
+        valid: true,
+        displayName: maskDisplayName(holderName, city),
+        accountNumber: formatSan(shape.san),
+        amountDueGyd: amountDue.toFixed(2),
+        weeklyFeeGyd: weekly.toFixed(2),
+        currency: 'GYD',
+      });
     });
   });
 }
