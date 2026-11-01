@@ -15,7 +15,7 @@
  * read from PlatformConfig each sweep and 30 days when unset, so the lawyer's numbers are a
  * settings change. A value outside 1..3650 is ignored — a typo never deletes everything at once.
  */
-import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
+import type { DocState, Prisma, PrismaClient, UserRole } from '@prisma/client';
 import { BUCKET_OF } from './doc-registry';
 
 type Db = Prisma.TransactionClient | PrismaClient;
@@ -62,3 +62,14 @@ export const NON_PERSONAL_DOC_TYPES: readonly string[] = Object.entries(BUCKET_O
   .map(([docType]) => docType);
 
 export const isPersonalDocType = (docType: string): boolean => !NON_PERSONAL_DOC_TYPES.includes(docType);
+
+/**
+ * [DOC-SECURITY G5] The states a submission rests in once it is no longer current: replaced (a newer copy
+ * before review, or a renewal after approval), revoked, or expired. None of them can be decided again (each
+ * leads only to PURGED, doc-state.ts), so a PERSONAL one keeps no image: it goes the same window after it
+ * stopped being current, through the same purge. Its record and history stay.
+ */
+export const NO_LONGER_CURRENT_STATES = ['SUPERSEDED', 'REVOKED', 'EXPIRED'] as const satisfies readonly DocState[];
+
+/** The states whose image the image policy may purge: an approval in force, or one no longer current. */
+export const IMAGE_PURGE_STATES: readonly DocState[] = ['COMMITTED', ...NO_LONGER_CURRENT_STATES];

@@ -25,7 +25,7 @@ import { identityReviewOpenFor, INVESTIGATION_HOLD_PLACER } from './investigatio
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
-import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_WHERE, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
+import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, IMAGE_PURGE_STATES, isPersonalDocType, PARTNER_DOCUMENT_WHERE, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
@@ -1885,11 +1885,14 @@ export class VerificationService {
       where: { id: docId },
       select: { id: true, userId: true, fileUrl: true, docType: true, state: true, legalHoldId: true, imagePurgedAt: true, user: { select: { tenantId: true } } },
     });
-    if (!doc || doc.state !== 'COMMITTED' || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
+    // [DOC-SECURITY G5] An approval in force, or one no longer current (replaced, revoked, expired). Never a copy
+    // still waiting for a decision, and never a rejected one (the retention reaper deletes those whole).
+    if (!doc || !doc.state || !IMAGE_PURGE_STATES.includes(doc.state) || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
+    const state = doc.state;
     const storage = getStorageProvider();
-    // [Row 243] The image is destroyed only under the person's lock and only while still unheld.
+    // [Row 243] The image is destroyed only under the person's lock and only while still unheld, in the state it was read in.
     const evidence = await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
-      { state: 'COMMITTED', imagePurgedAt: null, fileUrl: doc.fileUrl });
+      { state, imagePurgedAt: null, fileUrl: doc.fileUrl });
     if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
     if (evidence.probe === 'FAILED') {
@@ -1898,7 +1901,7 @@ export class VerificationService {
     }
     const done = await this.projectionTransaction(async (tx) => {
       const won = await tx.verificationDocument.updateMany({
-        where: { id: doc.id, imagePurgedAt: null, legalHoldId: null, state: 'COMMITTED' },
+        where: { id: doc.id, imagePurgedAt: null, legalHoldId: null, state },
         data: { imagePurgedAt: now, fileUrl: '' },
       });
       if (won.count !== 1) return false;

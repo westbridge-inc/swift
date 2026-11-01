@@ -372,6 +372,8 @@ describe('Services — provider verification + qualification badge', () => {
         fileUrl: await ownedVerificationFixture(app.prisma, provider.userId, `auto-approve-${docType}`),
         consent: true,
         privacyNoticeVersion: 'v1',
+        // [WEB-POLICE (a)] a police clearance needs a consent tick: send the build-12 one
+        ...(docType === 'police_clearance' ? { consentTick: 'document_v1' } : {}),
       }, provider.token);
       expect(submitted.statusCode).toBe(201);
       expect(submitted.json().data.status).toBe('APPROVED');

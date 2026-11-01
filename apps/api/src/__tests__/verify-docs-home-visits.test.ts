@@ -185,11 +185,18 @@ describe('[home visits] what the owner is shown', () => {
     expect(after.missing).toEqual(['police_clearance']);
   });
 
-  it('a build-9 owner uploads the police clearance from the checklist it shows', async () => {
+  // [WEB-POLICE · option (a), COORD 1 Nov] A build-9 body (no consent tick) is refused and nothing is stored; the
+  // build-12 body (the generic document tick) still files the clearance from the checklist it shows.
+  it('a build-9 owner (no consent tick) is refused the police clearance; a build-12 owner (document_v1) uploads it', async () => {
     const store = await serviceStore('MOBILE');
     const fileUrl = await ownedVerificationFixture(app.prisma, store.userId, `hv-b9-${RUN}`);
-    const res = await app.inject({ method: 'POST', url: '/api/v1/verification/documents', headers: { authorization: `Bearer ${store.token}` },
+    const refused = await app.inject({ method: 'POST', url: '/api/v1/verification/documents', headers: { authorization: `Bearer ${store.token}` },
       payload: { role: 'SERVICE', docType: 'police_clearance', fileUrl, consent: true, privacyNoticeVersion: 'v1' } });
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(refused.json().error.code).toBe('POLICE_CLEARANCE_CONSENT_REQUIRED');
+    expect(await app.prisma.verificationDocument.count({ where: { userId: store.userId, docType: 'police_clearance' } })).toBe(0);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/verification/documents', headers: { authorization: `Bearer ${store.token}` },
+      payload: { role: 'SERVICE', docType: 'police_clearance', fileUrl, consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1' } });
     expect(res.statusCode, res.body).toBe(201);
   });
 });

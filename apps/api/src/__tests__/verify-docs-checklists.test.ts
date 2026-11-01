@@ -126,12 +126,14 @@ const status = (token: string, vehicleType?: VehicleType) => app.inject({
   headers: { authorization: `Bearer ${token}` },
 });
 
-/** Exactly build 9's submit call (apps/mobile/src/services/api.ts at the store build). */
+/** Exactly build 9's submit call (apps/mobile/src/services/api.ts at the store build) — except a police clearance,
+ *  which needs a consent tick since option (a) (WEB-POLICE, COORD 1 Nov): it sends build 12's generic one. */
 async function submit(m: { userId: string; token: string }, docType: string) {
   const fileUrl = await ownedVerificationFixture(app.prisma, m.userId, `vd-${docType}`);
+  const tick = docType === 'police_clearance' ? { consentTick: 'document_v1' } : {};
   return app.inject({
     method: 'POST', url: '/api/v1/verification/documents', headers: { authorization: `Bearer ${m.token}` },
-    payload: { role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'v1' },
+    payload: { role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'v1', ...tick },
   });
 }
 
