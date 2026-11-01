@@ -591,7 +591,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
               <Row label="Rating"><span className="mc-numbers">{ratingText(v.averageRating, v.totalRatings)}</span></Row>
               {/* [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No self-declared tier any more: a store stands on a registered
                   business name or on its owner's own name (vendor/own-name.ts), and the checklist asks for that. */}
-              <Row label="Registration">{v.tradesUnderOwnName === true ? 'Owner’s own name (no business name registration)' : v.tradesUnderOwnName === false ? 'Business name registration' : null}</Row>
+              <Row label="Registration">{v.tradesUnderOwnName === true ? 'Owner’s own name (no business name registration)' : v.tradesUnderOwnName === false ? 'Business registration (business name or company)' : null}</Row>
               <Row label="Menu items"><span className="mc-numbers">{v._count?.items ?? 0}</span></Row>
               <Row label="Lifetime orders"><span className="mc-numbers">{v._count?.orders ?? 0}</span></Row>
               <Row label="MMG pay link">{v.mmgPayUrl ? 'Attached' : 'Not attached'}</Row>

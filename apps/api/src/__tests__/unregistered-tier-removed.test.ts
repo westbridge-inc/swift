@@ -190,6 +190,9 @@ describe('[CHECKLIST-LEGAL (a)] the route, the seller status and a store row fro
     // polite, and it names both ways in: register the business name, or trade under your own name
     expect(error.message).toMatch(/register/i);
     expect(error.message).toMatch(/own name/i);
+    // [REVIEW-F S4-1] it never says a registration is the only way in and then offers the own-name way
+    expect(error.message).toMatch(/^Swift takes registered businesses, and traders who sell under their own name\./);
+    expect(error.message).not.toMatch(/without a business registration/);
     // an empty or old-shaped body gets the same answer (no validation error first)
     expect((await call('POST', '/api/v1/vendor/onboarding/declaration', o, {})).statusCode).toBe(410);
     await system(async () => {

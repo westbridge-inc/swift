@@ -1689,10 +1689,11 @@ export async function vendorRoutes(app: FastifyInstance) {
    * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] POST /onboarding/declaration — the self-declared (unregistered) tier
    * is REMOVED: only a registered business, or a trader under their own name, joins Swift. The route that signed a
    * store onto the tier answers 410 for any client that still calls it (no shipped app does: builds 9-12 never offered
-   * it), names the two ways in, and writes nothing. Answered before the body is read, so an old-shaped body gets the
-   * same polite answer.
+   * it), names the two ways in, and writes nothing. The same hands as before (the store's OWNER; anyone else is refused
+   * as on every store route), answered before the body is read, so an old-shaped body gets the same polite answer.
    */
-  app.post('/onboarding/declaration', auth, async () => {
+  app.post('/onboarding/declaration', auth, async (request) => {
+    await requireVendor(app, request, 'OWNER');
     throw new AppError(410, 'UNREGISTERED_TIER_REMOVED', UNREGISTERED_TIER_REMOVED_WORDS);
   });
 

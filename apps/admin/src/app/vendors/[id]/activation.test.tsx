@@ -68,6 +68,16 @@ function serve(status: string, checklist: unknown, onWrite?: (_r: ApiRequest) =>
 
 const page = () => renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
 
+/** The store page for a store that trades under its owner's own name (true) or a business registration (false). */
+function renderWithQueryFor(tradesUnderOwnName: boolean) {
+  mockApi((request) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target') return { body: { success: true, data: { ...storeOf('ACTIVE'), tradesUnderOwnName } } };
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/activation-checklist') return { body: { success: true, data: checklistOf('LIVE', { storeStatus: 'ACTIVE' }) } };
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  });
+  return page();
+}
+
 describe('[MC-PR2] a store waiting for documents', () => {
   it('lists every required document with its state and the rejection note, says what happens next, and links the owner in the Review Center', async () => {
     serve('PENDING_APPROVAL', checklistOf('NEEDS_DOCUMENTS'));
@@ -187,6 +197,17 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     page();
     expect(await screen.findByText(/The owner's account is banned or suspended/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
+  });
+
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) · REVIEW-F S4-2] No tier row: the store stands on a business registration
+  // (a business name or a company) or on its owner's own name.
+  it('the Registration row names the way the store joined, never a tier', async () => {
+    for (const [own, words] of [[false, 'Business registration (business name or company)'], [true, 'Owner’s own name (no business name registration)']] as const) {
+      const view = renderWithQueryFor(own);
+      expect(await screen.findByText(words)).toBeTruthy();
+      expect(screen.queryByText(/Unregistered|Self-declared|tier/i)).toBeNull();
+      view.unmount();
+    }
   });
 
   it('the store of an owner who closed their account offers nothing and says why', async () => {

@@ -296,22 +296,22 @@ async function storeSees(store: Store, orderId: string) {
   };
 }
 
-/** The store's own counters: the dashboard overview, the popular-items card,
- *  busy hours and the tier meter. The store is fresh per case, so every one of
- *  them counts only that case's orders. */
+/** The store's own counters: the dashboard overview, the popular-items card
+ *  and busy hours. The store is fresh per case, so every one of them counts
+ *  only that case's orders. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) — a DELIBERATE
+ *  change] No tier meter: the self-declared tier and its caps are removed. */
 async function storeDashboard(store: Store) {
   const overview = await call('GET', '/api/v1/vendor/analytics/overview', store.owner.token);
   const popular = await call('GET', '/api/v1/vendor/analytics/popular-items', store.owner.token);
   const busy = await call('GET', '/api/v1/vendor/analytics/busy-hours', store.owner.token);
-  const tier = await call('GET', '/api/v1/vendor/tier', store.owner.token);
-  for (const res of [overview, popular, busy, tier]) expect(res.statusCode, res.body).toBe(200);
+  for (const res of [overview, popular, busy]) expect(res.statusCode, res.body).toBe(200);
   const o = overview.json().data;
   const item = (popular.json().data as Array<{ id: string; totalOrdered: number; recentOrders: number }>).find((i) => i.id === store.itemId);
   return {
     today: o.today.orders as number, week: o.week.orders as number, month: o.month.orders as number,
     pending: o.pendingOrders as number, totalOrders: o.vendor.totalOrders as number,
     itemTotalOrdered: item?.totalOrdered ?? null, itemRecent: item?.recentOrders ?? null,
-    busyHours: busy.json().data.total as number, tierToday: tier.json().data.usage.ordersToday as number,
+    busyHours: busy.json().data.total as number,
   };
 }
 /** The store counts an order in the GUYANA day it was placed (#1491). The
@@ -322,7 +322,7 @@ async function countedToday(orderId: string): Promise<0 | 1> {
   const { placedAt } = await orderRow(orderId);
   return placedAt >= startOfGuyanaDay(guyanaDayKey(new Date())) ? 1 : 0;
 }
-const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0, tierToday: 0 };
+const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0 };
 
 /** The store's low-stock notices for its item: inbox rows and pushes. */
 async function lowStockNotices(store: Store) {
@@ -602,7 +602,7 @@ describe.each([
     expect(row.status).toBe('PENDING'); // release is visibility, not a transition
     // Counted by the store's own counters at the release — once.
     const today = await countedToday(order.id);
-    const counted = { today, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: today };
+    const counted = { today, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1 };
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, banner: true, dashboard: counted });
 
     // Exactly once: every later sweep is a no-op on every channel and counter.

@@ -22,4 +22,4 @@ export async function validRegistrationRecord(db: Db, ownerUserId: string, now =
 /** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] What a client that still asks for the removed self-declared tier is
  *  told (POST /vendor/onboarding/declaration answers 410): polite, and it names the two ways in. */
 export const UNREGISTERED_TIER_REMOVED_WORDS =
-  'Swift no longer takes stores without a business registration. To sell on Swift, register your business name with the Deeds and Commercial Registries Authority (DCRA) and upload the certificate under Documents. If your store’s name is your own name (your surname, with only your first names or initials), choose “I trade under my own name” there instead.';
+  'Swift takes registered businesses, and traders who sell under their own name. To sell on Swift, register your business name with the Deeds and Commercial Registries Authority (DCRA) and upload the certificate under Documents. If your store’s name is your own name (your surname, with only your first names or initials), choose “I trade under my own name” there instead.';
