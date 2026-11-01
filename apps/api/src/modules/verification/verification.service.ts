@@ -52,6 +52,7 @@ import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../bill
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { SEALED_PHOTO_KEY_WHERE } from '../../providers/storage/sealed-photo';
 import { assertClaimableUpload } from './upload-window';
 import { liveDuplicateHolders } from './duplicate-holders';
 import {
@@ -3393,7 +3394,8 @@ export class VerificationService {
     // The applicant's last activity: a submission, a decision of ours, an upload.
     const [docs, upload] = await Promise.all([
       this.prisma.verificationDocument.findMany({ where: { userId }, select: { createdAt: true, reviewedAt: true } }),
-      this.prisma.encryptedObject.findFirst({ where: { createdBy: userId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+      // [DOC-SECURITY G2] An upload of the application: a sealed photo (a profile photo, a shift selfie) is not one.
+      this.prisma.encryptedObject.findFirst({ where: { createdBy: userId, NOT: SEALED_PHOTO_KEY_WHERE }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
     ]);
     let last = upload?.createdAt.getTime() ?? 0;
     for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);

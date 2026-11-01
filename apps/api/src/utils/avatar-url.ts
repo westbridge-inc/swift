@@ -1,9 +1,12 @@
 import { getStorageProvider } from '../providers/storage/storage-provider';
+import { isSealedPhotoKey, sealedAvatarUrl } from '../providers/storage/sealed-photo';
 
 /**
  * [F-024-09] Resolve a stored avatar value into something a client can render.
  *
- * Three shapes live in `users.avatar`:
+ * Four shapes live in `users.avatar`:
+ *  - [DOC-SECURITY G2] a SEALED photo (`…/avatars/<user>/<name>.enc`): ciphertext, opened only through
+ *    the API's own short-lived signed link (providers/storage/sealed-photo.ts);
  *  - absolute http(s) URLs (legacy/dev seeds) — pass through;
  *  - `/uploads/...` paths from the LOCAL provider — public static route,
  *    pass through (clients prefix their API base);
@@ -18,6 +21,10 @@ import { getStorageProvider } from '../providers/storage/storage-provider';
  */
 export async function resolveAvatarUrl(raw: string | null | undefined): Promise<string | null> {
   if (!raw) return null;
+  // [DOC-SECURITY G2] A sealed photo is ciphertext in the bucket (and on local disk): only the API's signed link opens it.
+  if (isSealedPhotoKey(raw)) {
+    try { return sealedAvatarUrl(raw); } catch { return null; }
+  }
   if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/')) return raw;
   try {
     return await getStorageProvider().getSignedUrl(raw, 3600);
