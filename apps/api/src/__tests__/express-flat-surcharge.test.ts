@@ -11,6 +11,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { cashMathForOffer } from '../modules/dispatch/dispatch.service';
 import { fixtureTag, testPhone } from './helpers/fixture-ids';
+import { renderReceiptHtml } from '../modules/order/receipt';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling, 1 Nov 2026] Store/food EXPRESS = the normal delivery fee + a
@@ -30,6 +31,9 @@ let orders: OrderService;
 const userIds: string[] = [];
 const orderIds: string[] = [];
 const riderIds: string[] = [];
+const promoIds: string[] = [];
+const MMG_HOST = 'pay.example.com';
+const savedEnv: Record<string, string | undefined> = {};
 let seq = 0;
 const VENDOR = { latitude: 6.8013, longitude: -58.1551 };
 let vendorId: string;
@@ -45,7 +49,7 @@ async function makeCustomer(at: { latitude: number; longitude: number }) {
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
   await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'flat', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
   const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Flat', city: 'Georgetown', region: 'Demerara-Mahaica', ...at, isDefault: true } });
-  return { token, addressId: addr.id };
+  return { userId: user.id, token, addressId: addr.id };
 }
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload: unknown, token: string) {
@@ -67,6 +71,11 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+  // A promo code on a delivery needs the direct-MMG rail (cash delivery promos are refused, SPS-F-0022): the store's
+  // pay link, dormant behind STORE_MMG_PAY_LINK, as cart-quote-parity runs it.
+  for (const k of ['MMG_PAY_URL_ALLOWED_HOSTS', 'STORE_MMG_PAY_LINK']) savedEnv[k] = process.env[k];
+  process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = MMG_HOST;
+  process.env['STORE_MMG_PAY_LINK'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -80,7 +89,7 @@ beforeAll(async () => {
   const ownerUser = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Flat', lastName: 'Vend', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
   userIds.push(ownerUser.id);
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
-  const vendor = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: 'Flat Express Diner', slug: `flat-${fixtureTag()}`, vendorType: 'RESTAURANT', phone: testPhone(), addressLine1: '1 Flat', city: 'Georgetown', region: 'Demerara-Mahaica', ...VENDOR, deliveryRadius: 25, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true } });
+  const vendor = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: 'Flat Express Diner', slug: `flat-${fixtureTag()}`, vendorType: 'RESTAURANT', phone: testPhone(), addressLine1: '1 Flat', city: 'Georgetown', region: 'Demerara-Mahaica', ...VENDOR, deliveryRadius: 25, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, mmgPayUrl: `https://${MMG_HOST}/pay/${fixtureTag(6)}` } });
   vendorId = vendor.id;
   const cat = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
   const item = await app.prisma.item.create({ data: { vendorId, categoryId: cat.id, name: 'Flat Plate', basePrice: ITEM_PRICE, isAvailable: true } });
@@ -91,12 +100,17 @@ afterAll(async () => {
   if (orderIds.length) await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
   if (userIds.length) await app.prisma.order.deleteMany({ where: { customerId: { in: userIds } } });
   if (riderIds.length) await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
+  if (promoIds.length) await app.prisma.promoCode.deleteMany({ where: { id: { in: promoIds } } });
   if (userIds.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.address.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.cart.deleteMany({ where: { customerId: { in: userIds } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  }
+  for (const [k, v] of Object.entries(savedEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
   }
   await app.close();
 });
@@ -147,5 +161,53 @@ describe('express = the delivery fee + GYD 1,000, quoted, charged and paid to th
     await orders.createEarnings(row.id, app.prisma, false);
     const pay = await app.prisma.earning.findMany({ where: { orderId: row.id }, select: { type: true, amount: true, riderId: true } });
     expect(pay.map((e) => ({ ...e, amount: Number(e.amount) }))).toEqual([{ type: 'DELIVERY_FEE', amount: standardFee + 1000, riderId }]);
+  });
+});
+
+describe('a Swift-paid free-delivery code covers the normal fee only [owner 1 Nov 2026]', () => {
+  it('express + free delivery: the customer pays goods + 1,000, checkout charges that quote, the rider is owed the whole fee, the receipt says so', async () => {
+    const c = await makeCustomer({ latitude: 6.8613, longitude: -58.1551 });
+    expect((await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token)).statusCode).toBe(201);
+    expect((await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token)).statusCode).toBe(200);
+    const promo = await app.prisma.promoCode.create({
+      data: {
+        code: `FLATFREE${fixtureTag(6).toUpperCase()}`, description: 'free delivery', discountType: 'FREE_DELIVERY', discountValue: 0, applicableTo: [],
+        validFrom: new Date(Date.now() - 86400000), validUntil: new Date(Date.now() + 86400000), maxUsesPerUser: 5, funder: 'PLATFORM',
+      },
+    });
+    promoIds.push(promo.id);
+    const cart = await app.prisma.cart.findUniqueOrThrow({ where: { customerId: c.userId } });
+    await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: promo.id } });
+
+    const quoted = await inject('GET', '/api/v1/customer/cart?express=true', undefined, c.token);
+    expect(quoted.statusCode, quoted.body).toBe(200);
+    const q = quoted.json().data;
+    const standardFee: number = q.standardDeliveryFee;
+    expect(standardFee).toBeGreaterThan(500);
+    expect(q).toMatchObject({ express: true, deliveryFee: standardFee + 1000, expressSurcharge: 1000, discount: standardFee, totalAmount: ITEM_PRICE + 1000 });
+
+    const placed = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY', express: true, promoCode: promo.code, tipAmount: 0, expectedTotal: q.totalAmount }, c.token);
+    expect(placed.statusCode, placed.body).toBe(200);
+    const answer = placed.json().data.orders[0];
+    orderIds.push(answer.id);
+    expect(answer).toMatchObject({ isExpress: true, deliveryFee: standardFee + 1000, discount: standardFee, total: ITEM_PRICE + 1000 });
+    expect(placed.json().data.paymentAction?.amount).toBe(ITEM_PRICE + 1000);
+
+    // The rider is owed the whole express fee: the store (paid by MMG) owes it, and the earning is all of it.
+    const riderId = await makeRider();
+    await app.prisma.order.update({ where: { id: answer.id }, data: { riderId, paymentStatus: 'CAPTURED' } });
+    await orders.createEarnings(answer.id, app.prisma, false);
+    const pay = await app.prisma.earning.findMany({ where: { orderId: answer.id }, select: { type: true, amount: true } });
+    expect(pay.map((e) => ({ ...e, amount: Number(e.amount) }))).toEqual([{ type: 'DELIVERY_FEE', amount: standardFee + 1000 }]);
+    const owed = await app.prisma.deliveryCashSettlement.findUniqueOrThrow({ where: { orderId: answer.id } });
+    expect(Number(owed.amount)).toBe(standardFee + 1000);
+
+    // The receipt: express delivery pay, the free-delivery discount of the normal fee, and the total paid.
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: answer.id } });
+    const html = renderReceiptHtml({ ...row, status: 'DELIVERED', vendor: null, customer: null, items: [{ name: 'Flat Plate', quantity: 1, totalCustomer: ITEM_PRICE }] } as never);
+    const gy = (n: number) => `GY$${n.toLocaleString('en-US')} GYD`;
+    expect(html).toContain(`<tr class="totals"><td>Delivery pay for your rider (express)</td><td class="num">${gy(standardFee + 1000)}</td></tr>`);
+    expect(html).toContain(`<tr class="totals"><td>Discount</td><td class="num">−${gy(standardFee)}</td></tr>`);
+    expect(html).toContain(`<tr class="grand"><td>Total</td><td class="num">${gy(ITEM_PRICE + 1000)}</td></tr>`);
   });
 });

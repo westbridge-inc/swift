@@ -7,7 +7,8 @@ import {
   type DeliveryRates,
 } from '../utils/markup';
 import { DEFAULT_COURIER_RATES, estimateCourierFee } from '../modules/courier/courier.service';
-import { planVendorGroup, priceBasket } from '../modules/order/cart-plans';
+import { planVendorGroup, priceBasket, type BasketPromo, type VendorPlan } from '../modules/order/cart-plans';
+import { renderReceiptHtml } from '../modules/order/receipt';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling, 1 Nov 2026] EXPRESS delivery on a store or food order is the
@@ -145,5 +146,79 @@ describe('the words say a flat GYD 1,000', () => {
     expect(cart).toContain('+{money(c.expressSurcharge)} — all of it goes to your rider.');
     // No arithmetic on the fee or the surcharge: the screen prints what the quote says.
     expect(cart).not.toMatch(/expressSurcharge\s*(?:=[^=]|[*+\-/])|deliveryFee\s*[*+]\s*\d/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Owner ruling, 1 Nov 2026] A Swift-paid FREE-DELIVERY code covers the NORMAL
+// delivery fee only. On an express order the customer still pays the +1,000
+// and the rider still gets all of it (the order's delivery fee, express
+// included, is what the rider is paid). The quote and checkout price through
+// the same priceBasket, so the cap holds in both.
+// ---------------------------------------------------------------------------
+
+describe('a Swift-paid free-delivery code covers the normal fee, never the express +1,000 [owner 1 Nov 2026]', () => {
+  const vendor = (id: string) => ({ id, name: `Store ${id}`, latitude: 6.8015, longitude: -58.156, minOrderAmount: '0' });
+  const line = (vendorId: string) => ({ quantity: 1, selectedOptions: {}, item: { vendorId, fulfillment: 'DELIVERY', basePrice: '1800', optionGroups: [] } });
+  const plan = (id: string, km: number, express: boolean): Promise<VendorPlan> => planVendorGroup({
+    vendor: vendor(id), lines: [line(id)], fulfillment: 'DELIVERY', destination: { lat: 6.81, lng: -58.17 },
+    deliveryRates: DEFAULT_DELIVERY_RATES, express, routeKm: async () => ({ km, source: 'osrm' as const }),
+  });
+  const FREE: BasketPromo = { discountType: 'FREE_DELIVERY', discountValue: 0, funder: 'PLATFORM', vendorId: null };
+
+  it('express: the code takes the 500 standard fee; the customer pays goods + 1,000; the order still carries the 1,500 fee', async () => {
+    const fast = await plan('a', 2, true);
+    expect(fast).toMatchObject({ standardDeliveryFee: 500, deliveryFee: 1500 });
+    const priced = priceBasket({ plans: [fast], promo: FREE, tip: 0 });
+    expect(priced.discount).toBe(500);
+    expect(priced.perPlan[0]).toEqual({ discount: 500, tip: 0, total: 1800 + 1000, allocation: { goods: 0, delivery: 500, tip: 0, total: 500 } });
+    expect(priced.grandTotal).toBe(2800);
+  });
+
+  it('standard speed: the code still removes the whole (standard) fee, as before', async () => {
+    const plain = await plan('a', 2, false);
+    const priced = priceBasket({ plans: [plain], promo: FREE, tip: 0 });
+    expect(priced.discount).toBe(500);
+    expect(priced.perPlan[0]!.total).toBe(1800);
+  });
+
+  it('two express stores: each store’s normal fee is free, each +1,000 is paid', async () => {
+    const priced = priceBasket({ plans: [await plan('a', 2, true), await plan('b', 12.5, true)], promo: FREE, tip: 200 });
+    expect(priced.discount).toBe(500 + 1450);
+    expect(priced.perPlan.map((p) => p.total)).toEqual([1800 + 1000 + 200, 1800 + 1000]);
+    expect(priced.perPlan.map((p) => p.allocation?.delivery)).toEqual([500, 1450]);
+  });
+
+  it('a lower cap still caps, and a store-funded free-delivery code still takes nothing from the rider’s fee', async () => {
+    const fast = await plan('a', 2, true);
+    expect(priceBasket({ plans: [fast], promo: { ...FREE, maxDiscount: 300 }, tip: 0 }).perPlan[0]!.total).toBe(1800 + 1500 - 300);
+    expect(priceBasket({ plans: [fast], promo: { ...FREE, funder: 'VENDOR', vendorId: 'a' }, tip: 0 }).discount).toBe(0);
+  });
+
+  it('scope: the ruling is about free-delivery codes; a platform amount-off code larger than the order is unchanged', async () => {
+    const fast = await plan('a', 2, true);
+    const huge = priceBasket({ plans: [fast], promo: { discountType: 'FIXED_AMOUNT', discountValue: 9000, funder: 'PLATFORM', vendorId: null }, tip: 0 });
+    expect(huge.discount).toBe(1800 + 1500);
+  });
+
+  it('the receipt says plainly that the delivery was express, beside the discount', () => {
+    const order = {
+      orderNumber: 'SW-TEST-1', placedAt: new Date('2026-11-01T15:00:00Z'), status: 'DELIVERED', orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
+      paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', subtotalCustomer: 1800, deliveryFee: 1500, tipAmount: 0, discount: 500,
+      totalAmount: 2800, deliveryAddress: '1 Flat', vendor: null, customer: null, items: [{ name: 'Plate', quantity: 1, totalCustomer: 1800 }],
+    };
+    const express = renderReceiptHtml({ ...order, isExpress: true });
+    expect(express).toContain('<tr class="totals"><td>Delivery pay for your rider (express)</td><td class="num">GY$1,500 GYD</td></tr>');
+    expect(express).toContain('<tr class="totals"><td>Discount</td><td class="num">−GY$500 GYD</td></tr>');
+    expect(express).toContain('<tr class="grand"><td>Total</td><td class="num">GY$2,800 GYD</td></tr>');
+    const standard = renderReceiptHtml({ ...order, deliveryFee: 500, totalAmount: 1800, isExpress: false });
+    expect(standard).toContain('<tr class="totals"><td>Delivery pay for your rider</td><td class="num">GY$500 GYD</td></tr>');
+  });
+
+  it('the words that describe a free-delivery code say the express extra is not included', () => {
+    const routes = readFileSync(join(REPO, 'apps/api/src/modules/user/customer.routes.ts'), 'utf8');
+    expect(routes).toContain("description = `Free delivery (express still adds $${EXPRESS_DELIVERY_SURCHARGE.toLocaleString()} GYD)`;");
+    const admin = readFileSync(join(REPO, 'apps/admin/src/app/promos/page.tsx'), 'utf8');
+    expect(admin).toContain(`'Free delivery (the normal delivery fee; an express order still pays its GY$${GYD(EXPRESS_DELIVERY_SURCHARGE)})'`);
   });
 });

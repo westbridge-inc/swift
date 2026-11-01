@@ -126,7 +126,7 @@ function receiptOf(order: Order, items: Array<{ name: string; quantity: number; 
   return renderReceiptHtml({ ...order, status: 'DELIVERED', vendor: null, customer: null, items } as never);
 }
 const receiptTotal = (html: string) => /<tr class="grand"><td>Total<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1];
-const receiptDeliveryPay = (html: string) => /Delivery pay for your rider<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
+const receiptDeliveryPay = (html: string) => /Delivery pay for your rider(?: \(express\))?<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
 
 async function purge() {
   await sys(async () => {

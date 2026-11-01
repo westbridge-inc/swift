@@ -1039,6 +1039,8 @@ export class OrderService {
       /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
       distanceSource: RouteSource | null;
       deliveryFee: number;
+      /** [owner 1 Nov 2026] The fee without the express premium (a free-delivery code's limit). */
+      standardDeliveryFee: number;
       subtotal: number;
       orderItems: Array<{
         itemId: string; name: string; quantity: number; basePrice: number;
@@ -1378,7 +1380,7 @@ export class OrderService {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, standardDeliveryFee: plan.standardDeliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
@@ -1417,7 +1419,7 @@ export class OrderService {
     //   - each plan's discount share, tip and total (orderTotal) are the
     //     numbers the orders below are written with.
     const priced = priceBasket({
-      plans: plans.map((p) => ({ vendorId: p.vendor.id, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
+      plans: plans.map((p) => ({ vendorId: p.vendor.id, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: p.deliveryFee, standardDeliveryFee: p.standardDeliveryFee })),
       promo: promoTerms ? { ...promoTerms, vendorId: promoVendorId } : null,
       tip,
     });

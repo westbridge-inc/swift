@@ -212,6 +212,12 @@ export interface BasketPlan {
   fulfillment: PlanFulfillment;
   subtotal: number;
   deliveryFee: number;
+  /** [owner 1 Nov 2026] The fee without the express premium. A free-delivery
+   *  code covers this much and no more: on an express plan the customer still
+   *  pays the premium, and the rider (paid the whole deliveryFee) still gets
+   *  all of it. Required, so a caller cannot forget it and let a code pay the
+   *  premium. */
+  standardDeliveryFee: number;
 }
 
 /** The promo terms plus the vendor a store's own code belongs to (null or
@@ -250,6 +256,8 @@ export interface PricedBasket {
  *   - [REPORT-034 S1 · M-32] the discount is clamped to what its funder may
  *     absorb — goods, plus the delivery fee only for a platform code, never
  *     the tip;
+ *   - [owner 1 Nov 2026] a free-delivery code's fee is the STANDARD fee: it
+ *     never covers the express premium (every other code is unchanged);
  *   - [REPORT-012 F-012-01] the tip rides the first DELIVERY plan, and a basket
  *     with no DELIVERY plan charges none;
  *   - the discount is spread plan by plan (goods first, then a platform code's
@@ -265,16 +273,19 @@ export function priceBasket(input: {
   const promoPlanIndex = promo?.vendorId ? plans.findIndex((p) => p.vendorId === promo.vendorId) : -1;
   const promoApplies = promo != null && (promoPlanIndex >= 0 || !promo.vendorId);
   const targets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
+  // [owner 1 Nov 2026] The fee a code may take from: a free-delivery code
+  // covers the normal fee only, never the express premium.
+  const promoFee = (p: BasketPlan) => (promo?.discountType === 'FREE_DELIVERY' ? Math.min(p.deliveryFee, p.standardDeliveryFee) : p.deliveryFee);
 
   let discount = 0;
   if (promo && promoApplies) {
     const basis = targets.reduce(
-      (b, i) => ({ subtotal: b.subtotal + plans[i]!.subtotal, deliveryFee: b.deliveryFee + plans[i]!.deliveryFee }),
+      (b, i) => ({ subtotal: b.subtotal + plans[i]!.subtotal, deliveryFee: b.deliveryFee + promoFee(plans[i]!) }),
       { subtotal: 0, deliveryFee: 0 },
     );
     // [ALG-24] The one promo switch, then the one capacity clamp.
     const capacity = targets.reduce(
-      (sum, i) => sum + promoCapacity(promo.funder, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promo.discountType),
+      (sum, i) => sum + promoCapacity(promo.funder, { subtotal: plans[i]!.subtotal, deliveryFee: promoFee(plans[i]!) }, promo.discountType),
       0,
     );
     discount = Math.min(promoDiscount(promo, basis), Math.max(0, capacity));
@@ -288,7 +299,7 @@ export function priceBasket(input: {
   const perPlan = plans.map((plan, i): PricedPlan => {
     let allocation: PromoAllocation | null = null;
     if (promo && promoApplies && targets.includes(i) && remaining > 0) {
-      allocation = allocatePromo(promo.funder, remaining, { subtotal: plan.subtotal, deliveryFee: plan.deliveryFee }, promo.discountType);
+      allocation = allocatePromo(promo.funder, remaining, { subtotal: plan.subtotal, deliveryFee: promoFee(plan) }, promo.discountType);
       remaining -= allocation.total;
     }
     const planDiscount = allocation?.total ?? 0;
