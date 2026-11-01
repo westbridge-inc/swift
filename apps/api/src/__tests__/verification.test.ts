@@ -407,6 +407,7 @@ describe('Provider auto-decisions (swappable interface)', () => {
       fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
+      consentTick: 'document_v1', // [WEB-POLICE (a)] a police clearance needs a tick: the build-12 body
     }, vendorToken);
     expect(clearance.statusCode).toBe(201);
     expect(clearance.json().data.status).toBe('APPROVED');
@@ -922,6 +923,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
       fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
+      consentTick: 'document_v1', // [WEB-POLICE (a)] a police clearance needs a tick: the build-12 body
     }, vendorToken);
     expect(renewal.statusCode).toBe(201);
 

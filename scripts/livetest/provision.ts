@@ -112,11 +112,28 @@ export async function uploadDoc(owner: Session, label: string): Promise<{ url?: 
   return { url: res.json?.data?.url, res };
 }
 
+/** The police clearance's own consent words, as GET /verification/status shows them (null when none are offered). */
+export type PoliceWords = { tick: string; version: string } | null | undefined;
+
+/** [WEB-POLICE (a)] The consent tick a client sends with a document, as the website and the phone do: a police
+ *  clearance carries its own tick + the words' version when the status offers them (else build 12's generic
+ *  document tick, still accepted); every other document carries the generic document tick. A police clearance
+ *  with no tick at all is refused (POLICE_CLEARANCE_CONSENT_REQUIRED). */
+export function consentTickBody(docType: string, police: PoliceWords): Record<string, string> {
+  if (docType === 'police_clearance' && police?.tick && police.version) return { consentTick: police.tick, consentVersion: police.version };
+  return { consentTick: 'document_v1' };
+}
+
 /** Upload + submit one checklist document; returns the new document id. */
-export async function submitDoc(owner: Session, role: string, docType: string, label: string): Promise<{ id?: string; res: Res }> {
+export async function submitDoc(owner: Session, role: string, docType: string, label: string, police?: PoliceWords): Promise<{ id?: string; res: Res }> {
   const up = await uploadDoc(owner, `${label}-${docType}`);
   if (!up.url) return { res: up.res };
-  const res = await POST('/verification/documents', { role, docType, fileUrl: up.url, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION }, owner.token);
+  const words = docType === 'police_clearance' && police === undefined
+    ? (await GET(`/verification/status?role=${role}`, owner.token)).json?.data?.policeClearanceConsent ?? null
+    : police;
+  const res = await POST('/verification/documents', {
+    role, docType, fileUrl: up.url, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, ...consentTickBody(docType, words),
+  }, owner.token);
   return { id: res.json?.data?.id, res };
 }
 
@@ -175,7 +192,7 @@ export async function ensureChecklist(admin: Session, owner: Session, role: stri
   const live = (t: string) => docs.find((d) => d.docType === t && ['APPROVED', 'PENDING'].includes(d.status));
   for (const docType of (st.missing ?? []) as string[]) {
     if (live(docType)) continue;
-    const s = await submitDoc(owner, role, docType, label);
+    const s = await submitDoc(owner, role, docType, label, st.policeClearanceConsent ?? null);
     if (!s.id) log(`    ${label}: submit ${docType} → ${s.res.status} ${codeOf(s.res)} ${s.res.text.slice(0, 160)}`);
   }
   st = (await GET(q, owner.token)).json?.data;

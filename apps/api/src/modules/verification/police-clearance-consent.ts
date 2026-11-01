@@ -44,6 +44,24 @@ export function policeClearanceKind(role: string): PoliceClearanceKind | null {
   return null;
 }
 
+/** The stable code of the refusal below (POST /verification/documents answers it with a 400). */
+export const POLICE_CLEARANCE_CONSENT_REQUIRED = 'POLICE_CLEARANCE_CONSENT_REQUIRED' as const;
+export const POLICE_CLEARANCE_CONSENT_REQUIRED_MESSAGE = 'A police clearance needs its own consent. Update Swift (or open it again), then tick the box beside it and upload again.';
+
+/**
+ * [WEB-POLICE · COORD 31 Oct 2026, option (a)] A police clearance is never filed with NO consent tick at all. The
+ * website and the launch OTA send the clearance's own tick (police_clearance_v1, checked against the words' version by
+ * the route), and build 12 / Android vc8 — the store builds, whose JS has no police words — send the generic document
+ * tick (document_v1), which stays accepted so those builds keep working. Builds <= 11 / vc7 (never publicly released;
+ * the production OTA reaches them) send no tick at all and are refused here (COORD ruling 1 Nov), as is a direct call
+ * with no tick: the refusal tells them to update or reopen Swift so the box is shown.
+ * FOLLOW-UP, option (b): once the launch OTA is live and a minimum-app-version gate retires build 12's JS, require
+ * police_clearance_v1 for a police clearance (refuse document_v1 too). Existing clearances are untouched either way.
+ */
+export function policeClearanceTickMissing(body: { docType: string; consentTick?: string | null }): boolean {
+  return body.docType === POLICE_CLEARANCE_DOC_TYPE && !body.consentTick;
+}
+
 type SettingsDb = Pick<PrismaClient, 'platformConfig'> | Prisma.TransactionClient;
 
 /** The longer of the two windows that delete a clearance's image, in days (a setting the sweeps ignore is not promised). */

@@ -34,7 +34,7 @@ import { NON_MATERIAL_CHANGES, MATERIAL_CHANGES } from '../modules/legal/reaccep
 // ---------------------------------------------------------------------------
 
 const runBase = 592_089_100_000 + Math.floor(Math.random() * 800_000);
-const PHONES = { taxi: `+${runBase + 1}`, words: `+${runBase + 2}`, admin: `+${runBase + 3}`, old: `+${runBase + 4}`, held: `+${runBase + 5}`, dsar: `+${runBase + 6}` };
+const PHONES = { taxi: `+${runBase + 1}`, words: `+${runBase + 2}`, admin: `+${runBase + 3}`, old: `+${runBase + 4}`, held: `+${runBase + 5}`, dsar: `+${runBase + 6}`, noTick: `+${runBase + 8}` };
 const ALL_PHONES = [...Object.values(PHONES), `+${runBase + 7}`];
 
 let app: FastifyInstance;
@@ -253,6 +253,16 @@ describe('[POLICE-CLEARANCE] the upload records its own consent; a withdrawal er
     const res = await uploadPolice(driver, 'pc-build12', { consentTick: 'document_v1' });
     expect(res.statusCode, res.body).toBe(201);
     expect(await app.prisma.consentRecord.count({ where: { subjectId: driver.userId, documentType: 'document_processing_consent' } })).toBe(1);
+  });
+
+  it('[WEB-POLICE (a)] a police clearance with no consent tick at all is refused, and nothing is stored or recorded', async () => {
+    const driver = await taxiDriver(PHONES.noTick);
+    const consentsBefore = await app.prisma.consentRecord.count({ where: { subjectId: driver.userId } });
+    const res = await uploadPolice(driver, 'pc-no-tick', {});
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('POLICE_CLEARANCE_CONSENT_REQUIRED');
+    expect(await app.prisma.verificationDocument.count({ where: { userId: driver.userId, docType: 'police_clearance' } })).toBe(0);
+    expect(await app.prisma.consentRecord.count({ where: { subjectId: driver.userId } })).toBe(consentsBefore);
   });
 });
 
