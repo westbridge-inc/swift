@@ -130,16 +130,17 @@ async function closedAccount(tx: Prisma.TransactionClient, userId: string) {
  * open for the account-erasure retry (and the open-account unclaimed sweep). Never throws: the caller's answer does
  * not depend on it. Returns what happened, for the caller's log and tests.
  */
-export type UnusedCustomerUpload = 'selfie' | 'id';
+// The upload's kind, never a document type (DOC-INV-2: document type strings live in the registry).
+export type UnusedCustomerUpload = 'customer-selfie' | 'customer-id';
 const UNUSED_UPLOAD_RECEIPT: Readonly<Record<UnusedCustomerUpload, { docTypeCode: string; deletedBy: string; what: string; label: string }>> = {
-  selfie: { docTypeCode: 'unused_customer_selfie', deletedBy: 'customer-id-intake', what: 'unused customer selfie', label: 'customer-id:discard-unused-selfie' },
-  id: { docTypeCode: 'unused_customer_id', deletedBy: 'customer-id-not-needed', what: 'unused customer ID', label: 'customer-id:discard-unused-id' },
+  'customer-selfie': { docTypeCode: 'unused_customer_selfie', deletedBy: 'customer-id-intake', what: 'unused customer selfie', label: 'customer-id:discard-unused-selfie' },
+  'customer-id': { docTypeCode: 'unused_customer_id', deletedBy: 'customer-id-not-needed', what: 'unused customer ID', label: 'customer-id:discard-unused-id' },
 };
 
 export async function discardUnusedCustomerSelfie(
   db: PrismaClient, storage: StorageProvider, userId: string, fileKey: string, log?: Log,
 ): Promise<'ERASED' | 'NOT_OWN' | 'CLAIMED' | 'HELD' | 'PENDING'> {
-  return discardUnusedCustomerUpload(db, storage, userId, fileKey, 'selfie', log);
+  return discardUnusedCustomerUpload(db, storage, userId, fileKey, 'customer-selfie', log);
 }
 
 export async function discardUnusedCustomerUpload(

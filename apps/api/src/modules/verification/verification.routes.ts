@@ -428,8 +428,8 @@ export async function verificationRoutes(app: FastifyInstance) {
     const sent = (value: unknown) => (typeof value === 'string' && value.length >= 5 && value.length <= 2048 ? value : null);
     const idUpload = sent(body.idDocumentUrl);
     const selfieUpload = sent(body.selfieUrl);
-    if (idUpload) await discardUnusedCustomerUpload(app.prisma, storage, request.user.userId, idUpload, 'id', request.log);
-    if (selfieUpload && selfieUpload !== idUpload) await discardUnusedCustomerUpload(app.prisma, storage, request.user.userId, selfieUpload, 'selfie', request.log);
+    if (idUpload) await discardUnusedCustomerUpload(app.prisma, storage, request.user.userId, idUpload, 'customer-id', request.log);
+    if (selfieUpload && selfieUpload !== idUpload) await discardUnusedCustomerUpload(app.prisma, storage, request.user.userId, selfieUpload, 'customer-selfie', request.log);
     throw new AppError(410, 'CUSTOMER_ID_NOT_NEEDED', CUSTOMER_ID_NOT_NEEDED_WORDS);
   });
 }

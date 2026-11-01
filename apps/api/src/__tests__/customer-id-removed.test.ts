@@ -265,6 +265,42 @@ describe('[CHECKLIST-LEGAL (b)] the stored customer IDs are withdrawn and delete
     expect((await envelope(h.fileUrl)).shreddedAt).toBeInstanceOf(Date);
   });
 
+  // [REVIEW-G S2-2] The sweep is destructive and unattended: its scope is pinned. Only a customer's own ID is withdrawn
+  // and deleted; a partner document of the same person, another person's partner document, and this type filed for a
+  // partner role are left exactly as they were (the scope is checked on the reads and again at every write).
+  it('the retirement touches only customer IDs: partner documents, and the type filed for a partner role, are left alone', async () => {
+    const both = await person();
+    const own = await storedId(both, 'ON_FILE');
+    const other = await person();
+    const partnerDoc = async (c: { id: string; token: string }, docType: string, role: 'MOVER', status: 'APPROVED' | 'PENDING') => {
+      const fileUrl = await upload(c.token, readable());
+      const doc = await system(() => app.prisma.verificationDocument.create({ data: {
+        userId: c.id, role, docType, fileUrl, consentAt: new Date(), privacyNoticeVersion: '2026-10-29.2', status,
+        ...(status === 'APPROVED' ? { reviewedBy: 'fixture-reviewer', reviewedAt: new Date() } : {}),
+      } }));
+      return { docId: doc.id, fileUrl };
+    };
+    const kept = [
+      await partnerDoc(both, 'national_id', 'MOVER', 'APPROVED'), // the same person's partner ID
+      await partnerDoc(other, 'drivers_licence', 'MOVER', 'PENDING'), // another person's partner document
+      await partnerDoc(other, 'identity_l2', 'MOVER', 'APPROVED'), // the type, filed for a partner role
+    ];
+    const before = await Promise.all(kept.map((k) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: k.docId }, select: { state: true, status: true, purgedAt: true, fileUrl: true, reviewNote: true } }))));
+
+    await system(() => service.retireCustomerIds());
+
+    // the customer's own ID went
+    expect((await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: own.docId }, select: { purgedAt: true } }))).purgedAt).toBeInstanceOf(Date);
+    // nothing else moved: same state, same status, same bytes, no receipt
+    for (const [i, k] of kept.entries()) {
+      const after = await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: k.docId }, select: { state: true, status: true, purgedAt: true, fileUrl: true, reviewNote: true } }));
+      expect(after, k.docId).toEqual(before[i]);
+      expect(after.purgedAt).toBeNull();
+      expect((await envelope(k.fileUrl)).shreddedAt).toBeNull();
+      expect(await system(() => app.prisma.deletionReceipt.count({ where: { submissionId: k.docId } }))).toBe(0);
+    }
+  });
+
   it('a reviewer can no longer approve a customer ID', async () => {
     const c = await person();
     const { docId } = await storedId(c, 'WAITING');

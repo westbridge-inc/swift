@@ -122,6 +122,11 @@ export const CUSTOMER_ID_RETIRED_NOTE = 'RETIRED: Swift no longer keeps customer
 export const CUSTOMER_ID_RETIRED_ACTOR = 'customer-id-retired';
 /** The states a stored customer ID is withdrawn from: on file, or waiting for a person. */
 const RETIRABLE_CUSTOMER_ID_STATES = ['COMMITTED', 'REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUESTED'] as const;
+/**
+ * [REVIEW-G S2-2] The retirement sweep's scope, on every read AND every write it makes: a customer's own ID and nothing
+ * else. A partner document (any other type, or this type filed for a partner role) is never withdrawn or deleted by it.
+ */
+const CUSTOMER_ID_SCOPE = { docType: IDENTITY_DOC_TYPE, role: 'CUSTOMER' } as const satisfies Prisma.VerificationDocumentWhereInput;
 
 /** Checklist docTypes that ARE a government identity document. These are not
  *  merely OCR-checked: the portrait is face-matched against the operator's
@@ -3140,7 +3145,7 @@ export class VerificationService {
   async retireCustomerIds(batch = 200): Promise<{ withdrawn: number; purged: number; held: number; failed: number }> {
     const run = { withdrawn: 0, purged: 0, held: 0, failed: 0 };
     const standing = await this.prisma.verificationDocument.findMany({
-      where: { docType: IDENTITY_DOC_TYPE, purgedAt: null, state: { in: [...RETIRABLE_CUSTOMER_ID_STATES] } },
+      where: { ...CUSTOMER_ID_SCOPE, purgedAt: null, state: { in: [...RETIRABLE_CUSTOMER_ID_STATES] } },
       select: { userId: true }, distinct: ['userId'], take: batch,
     });
     for (const { userId } of standing) {
@@ -3150,14 +3155,15 @@ export class VerificationService {
       }
     }
     const stored = await this.prisma.verificationDocument.findMany({
-      where: { docType: IDENTITY_DOC_TYPE, purgedAt: null },
+      where: { ...CUSTOMER_ID_SCOPE, purgedAt: null },
       select: { id: true, userId: true, fileUrl: true, docType: true, legalHoldId: true, user: { select: { tenantId: true } } },
       orderBy: [{ legalHoldId: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }], take: batch,
     });
     for (const doc of stored) {
       if (doc.legalHoldId) { run.held += 1; continue; }
       try {
-        const outcome = await this.purgeDocumentNow(doc, CUSTOMER_ID_RETIRED_ACTOR, { requireRetentionElapsed: false, shredFields: true });
+        // the scope again at the deletion itself, under the person's lock (shredUnlessHeld and the final transition)
+        const outcome = await this.purgeDocumentNow(doc, CUSTOMER_ID_RETIRED_ACTOR, { requireRetentionElapsed: false, shredFields: true, still: CUSTOMER_ID_SCOPE });
         if (outcome === 'PURGED') run.purged += 1; else if (outcome === 'PROBE_FAILED') run.failed += 1;
       } catch (err) {
         run.failed += 1;
@@ -3173,14 +3179,14 @@ export class VerificationService {
     await this.projectionTransaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-decision-authority */`;
       const docs = await tx.verificationDocument.findMany({
-        where: { userId, docType: IDENTITY_DOC_TYPE, purgedAt: null, state: { in: [...RETIRABLE_CUSTOMER_ID_STATES] } },
+        where: { userId, ...CUSTOMER_ID_SCOPE, purgedAt: null, state: { in: [...RETIRABLE_CUSTOMER_ID_STATES] } },
         select: { id: true, state: true },
       });
       const note = { reviewNote: CUSTOMER_ID_RETIRED_NOTE, expiresAt: null };
       for (const doc of docs) {
         const won = doc.state === 'COMMITTED'
-          ? await hopDocState(tx, { id: doc.id, userId }, 'COMMITTED', 'REVOKED', note)
-          : await hopDocState(tx, { id: doc.id, userId }, doc.state as 'REVIEW_QUEUED' | 'IN_REVIEW' | 'INFO_REQUESTED', 'EXPIRED', note);
+          ? await hopDocState(tx, { id: doc.id, userId, ...CUSTOMER_ID_SCOPE }, 'COMMITTED', 'REVOKED', note)
+          : await hopDocState(tx, { id: doc.id, userId, ...CUSTOMER_ID_SCOPE }, doc.state as 'REVIEW_QUEUED' | 'IN_REVIEW' | 'INFO_REQUESTED', 'EXPIRED', note);
         if (!won) continue;
         withdrawn += 1;
         await tx.reviewCase.updateMany({ where: { submissionId: doc.id, closedAt: null }, data: { closedAt: new Date() } });
