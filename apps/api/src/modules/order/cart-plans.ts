@@ -212,11 +212,12 @@ export interface BasketPlan {
   fulfillment: PlanFulfillment;
   subtotal: number;
   deliveryFee: number;
-  /** [owner 1 Nov 2026] The fee without the express premium. A free-delivery
-   *  code covers this much and no more: on an express plan the customer still
-   *  pays the premium, and the rider (paid the whole deliveryFee) still gets
-   *  all of it. Required, so a caller cannot forget it and let a code pay the
-   *  premium. */
+  /** [owner + COORD rulings 1 Nov 2026] The fee without the express premium.
+   *  No code takes more than this from the delivery fee — not a free-delivery
+   *  code, not an amount-off code larger than the order: on an express plan the
+   *  customer still pays the premium, and the rider (paid the whole deliveryFee)
+   *  still gets all of it. Required, so a caller cannot forget it and let a code
+   *  pay the premium. */
   standardDeliveryFee: number;
 }
 
@@ -256,8 +257,9 @@ export interface PricedBasket {
  *   - [REPORT-034 S1 · M-32] the discount is clamped to what its funder may
  *     absorb — goods, plus the delivery fee only for a platform code, never
  *     the tip;
- *   - [owner 1 Nov 2026] a free-delivery code's fee is the STANDARD fee: it
- *     never covers the express premium (every other code is unchanged);
+ *   - [owner + COORD rulings 1 Nov 2026] of a plan's fee, a code may take only
+ *     the STANDARD part: no code (free delivery, or an amount-off code larger
+ *     than the order) ever covers the express premium;
  *   - [REPORT-012 F-012-01] the tip rides the first DELIVERY plan, and a basket
  *     with no DELIVERY plan charges none;
  *   - the discount is spread plan by plan (goods first, then a platform code's
@@ -273,9 +275,9 @@ export function priceBasket(input: {
   const promoPlanIndex = promo?.vendorId ? plans.findIndex((p) => p.vendorId === promo.vendorId) : -1;
   const promoApplies = promo != null && (promoPlanIndex >= 0 || !promo.vendorId);
   const targets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
-  // [owner 1 Nov 2026] The fee a code may take from: a free-delivery code
-  // covers the normal fee only, never the express premium.
-  const promoFee = (p: BasketPlan) => (promo?.discountType === 'FREE_DELIVERY' ? Math.min(p.deliveryFee, p.standardDeliveryFee) : p.deliveryFee);
+  // [owner + COORD rulings 1 Nov 2026] The fee a code may take from: the
+  // normal fee only, never the express premium, whatever the code.
+  const promoFee = (p: BasketPlan) => Math.min(p.deliveryFee, p.standardDeliveryFee);
 
   let discount = 0;
   if (promo && promoApplies) {

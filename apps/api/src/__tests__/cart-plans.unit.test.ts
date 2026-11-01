@@ -37,10 +37,11 @@ function rng(seed: number) {
 
 type Promo = { discountType: string; discountValue: unknown; maxDiscount?: unknown; funder?: string | null; vendorId?: string | null };
 
-/** [owner 1 Nov 2026] The one deliberate change since main 4ecd1264: a
- *  free-delivery code's fee basis is the STANDARD fee — it never covers the
- *  express premium. Every other code keeps the whole fee. */
-const promoFeeOf = (p: BasketPlan, promo: Promo | null) => (promo?.discountType === 'FREE_DELIVERY' ? p.standardDeliveryFee : p.deliveryFee);
+/** [owner + COORD rulings 1 Nov 2026] The one deliberate change since main
+ *  4ecd1264: a code's fee basis is the STANDARD fee — no code (free delivery,
+ *  or an amount-off code larger than the order) ever covers the express
+ *  premium; the rule is the same for every type. */
+const promoFeeOf = (p: BasketPlan) => p.standardDeliveryFee;
 
 /** main 4ecd1264 OrderService.checkout + validatePromoCode, the pricing lines
  *  only, verbatim apart from the plan shape ({ vendor: { id } } → vendorId)
@@ -60,10 +61,10 @@ function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: n
     if (promo.vendorId) {
       const plan = plans.find((p) => p.vendorId === promo.vendorId)!;
       subtotal = plan.subtotal;
-      deliveryFeeBasis = promoFeeOf(plan, promo);
+      deliveryFeeBasis = promoFeeOf(plan);
     } else {
       subtotal = plans.reduce((s, p) => s + p.subtotal, 0);
-      deliveryFeeBasis = plans.reduce((s, p) => s + promoFeeOf(p, promo), 0);
+      deliveryFeeBasis = plans.reduce((s, p) => s + promoFeeOf(p), 0);
     }
     discount = promoDiscount(promo, { subtotal, deliveryFee: deliveryFeeBasis });
     promoVendorId = promo.vendorId ?? null;
@@ -72,7 +73,7 @@ function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: n
   const promoFunder = promoTerms?.funder ?? null;
   const promoPlanIdxForCap = promoVendorId ? plans.findIndex((p) => p.vendorId === promoVendorId) : -1;
   const discountCapacity = (promoPlanIdxForCap >= 0 ? [promoPlanIdxForCap] : plans.map((_, i) => i)).reduce(
-    (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: promoFeeOf(plans[i]!, promoTerms) }, promoTerms?.discountType ?? null),
+    (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: promoFeeOf(plans[i]!) }, promoTerms?.discountType ?? null),
     0,
   );
   discount = Math.min(discount, Math.max(0, discountCapacity));
@@ -86,7 +87,7 @@ function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: n
   const discountTargets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
   for (const i of discountTargets) {
     if (remainingDiscount <= 0) break;
-    const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: promoFeeOf(plans[i]!, promoTerms) }, promoTerms?.discountType ?? null);
+    const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: promoFeeOf(plans[i]!) }, promoTerms?.discountType ?? null);
     discountAlloc[i] = parts.total;
     discountParts[i] = parts;
     remainingDiscount -= parts.total;
@@ -195,8 +196,8 @@ describe('a single-vendor quote is priced exactly as before', () => {
   function mainQuoteArithmetic(subtotal: number, deliveryFee: number, promo: Promo | null, tip: number, standardDeliveryFee: number) {
     let discount = 0;
     if (promo) {
-      // [owner 1 Nov 2026] A free-delivery code's basis is the standard fee (promoFeeOf above).
-      const feeBasis = promo.discountType === 'FREE_DELIVERY' ? standardDeliveryFee : deliveryFee;
+      // [owner + COORD 1 Nov 2026] A code's fee basis is the standard fee (promoFeeOf above).
+      const feeBasis = standardDeliveryFee;
       discount = promoDiscount(promo, { subtotal, deliveryFee: feeBasis });
       discount = Math.min(discount, promoCapacity(promo.funder, { subtotal, deliveryFee: feeBasis }, promo.discountType));
     }

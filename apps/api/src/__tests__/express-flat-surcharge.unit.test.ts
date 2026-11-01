@@ -153,8 +153,10 @@ describe('the words say a flat GYD 1,000', () => {
 // [Owner ruling, 1 Nov 2026] A Swift-paid FREE-DELIVERY code covers the NORMAL
 // delivery fee only. On an express order the customer still pays the +1,000
 // and the rider still gets all of it (the order's delivery fee, express
-// included, is what the rider is paid). The quote and checkout price through
-// the same priceBasket, so the cap holds in both.
+// included, is what the rider is paid). [COORD ruling, same day] The same for
+// a Swift amount-off code larger than the order: it stops at goods + the
+// normal fee. The quote and checkout price through the same priceBasket, so
+// the cap holds in both.
 // ---------------------------------------------------------------------------
 
 describe('a Swift-paid free-delivery code covers the normal fee, never the express +1,000 [owner 1 Nov 2026]', () => {
@@ -195,10 +197,17 @@ describe('a Swift-paid free-delivery code covers the normal fee, never the expre
     expect(priceBasket({ plans: [fast], promo: { ...FREE, funder: 'VENDOR', vendorId: 'a' }, tip: 0 }).discount).toBe(0);
   });
 
-  it('scope: the ruling is about free-delivery codes; a platform amount-off code larger than the order is unchanged', async () => {
+  it('[COORD ruling 1 Nov] a Swift amount-off code larger than the order stops at goods + the normal fee: express is still paid', async () => {
     const fast = await plan('a', 2, true);
     const huge = priceBasket({ plans: [fast], promo: { discountType: 'FIXED_AMOUNT', discountValue: 9000, funder: 'PLATFORM', vendorId: null }, tip: 0 });
-    expect(huge.discount).toBe(1800 + 1500);
+    expect(huge.discount).toBe(1800 + 500);
+    expect(huge.perPlan[0]).toMatchObject({ total: 1000, allocation: { goods: 1800, delivery: 500, tip: 0, total: 2300 } });
+    // At standard speed the same code still takes goods + the whole (standard) fee, as before.
+    const plain = await plan('a', 2, false);
+    expect(priceBasket({ plans: [plain], promo: { discountType: 'FIXED_AMOUNT', discountValue: 9000, funder: 'PLATFORM', vendorId: null }, tip: 0 }).perPlan[0]!.total).toBe(0);
+    // A percentage code is taken from the goods only, and a store's own code never touches the fee: both unchanged.
+    expect(priceBasket({ plans: [fast], promo: { discountType: 'PERCENTAGE', discountValue: 10, funder: 'PLATFORM', vendorId: null }, tip: 0 }).discount).toBe(180);
+    expect(priceBasket({ plans: [fast], promo: { discountType: 'FIXED_AMOUNT', discountValue: 9000, funder: 'VENDOR', vendorId: 'a' }, tip: 0 }).discount).toBe(1800);
   });
 
   it('the receipt says plainly that the delivery was express, beside the discount', () => {

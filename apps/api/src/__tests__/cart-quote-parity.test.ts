@@ -493,10 +493,10 @@ describe('E01 — promotions are priced by the one basket pricer on both sides',
         expect(orders.map((o) => [Number(o.deliveryFee), Number(o.discount)])).toEqual([[q.deliveryFee, q.standardDeliveryFee]]);
       });
 
-      it(`a platform code larger than goods + fee stops at goods + THIS speed’s fee, never the tip (express ${express})`, async () => {
+      it(`a platform code larger than goods + fee stops at goods + the NORMAL fee, never the express 1,000 or the tip (express ${express}) [COORD 1 Nov 2026]`, async () => {
         const { q } = await farDelivery(() => platformCode('HUGE', 'FIXED_AMOUNT', 9000), express);
-        expect(q.discount).toBe(3000 + q.deliveryFee);
-        expect(q.totalAmount).toBe(200);
+        expect(q.discount).toBe(3000 + q.standardDeliveryFee);
+        expect(q.totalAmount).toBe(200 + (express ? 1000 : 0));
       });
 
       it(`a store’s own code stops at the goods — the rider’s fee is not the store’s to give (express ${express})`, async () => {

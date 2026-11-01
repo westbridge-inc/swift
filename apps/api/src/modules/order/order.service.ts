@@ -1039,7 +1039,7 @@ export class OrderService {
       /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
       distanceSource: RouteSource | null;
       deliveryFee: number;
-      /** [owner 1 Nov 2026] The fee without the express premium (a free-delivery code's limit). */
+      /** [owner + COORD 1 Nov 2026] The fee without the express premium: the most any code may take from the fee. */
       standardDeliveryFee: number;
       subtotal: number;
       orderItems: Array<{
