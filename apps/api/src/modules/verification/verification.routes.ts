@@ -9,7 +9,8 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
-import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
+import { documentOwnerTenant, documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
+import { runWithTenant } from '../../plugins/tenant-context';
 import { createHash } from 'node:crypto';
 import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
@@ -377,16 +378,26 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!doc || doc.purgedAt || !doc.fileUrl) {
       throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
     }
-    // [VERIFY-DOCS V3] ...and that reviewer must STILL be one, on every load:
-    // revoking the grant, suspending or demoting the reviewer kills links that
-    // are already open. Same tenant as the person whose document it is.
-    if (!(await isActiveDocumentReviewer(app.prisma, reviewer, doc.userId))) {
-      throw documentReviewerRequired();
-    }
-    const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
-    // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
-    // staff before its rescan answers CLEAN, whatever link was minted.
-    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
+    // [VIEWER-FIX] No session binds a tenant here: the rest runs bound to the
+    // operator of the person whose document it is, read by one named system
+    // capability (documentOwnerTenant). Under the tenant wall an unbound read
+    // of `users` is refused, which answered every view link with a 500.
+    const ownerTenant = await documentOwnerTenant(app.prisma, doc.userId);
+    if (!ownerTenant) throw documentReviewerRequired();
+    const fileUrl = doc.fileUrl;
+    const meta = await runWithTenant(ownerTenant, async () => {
+      // [VERIFY-DOCS V3] ...and that reviewer must STILL be one, on every load:
+      // revoking the grant, suspending or demoting the reviewer kills links that
+      // are already open. Same tenant as the person whose document it is.
+      if (!(await isActiveDocumentReviewer(app.prisma, reviewer, doc.userId))) {
+        throw documentReviewerRequired();
+      }
+      const object = await resolveVerificationObject(app.prisma, { fileKey: fileUrl, userId: doc.userId, documentId: docId });
+      // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
+      // staff before its rescan answers CLEAN, whatever link was minted.
+      { const refusal = uploadScanRefusal(await documentScanState(app.prisma, fileUrl)); if (refusal) throw refusal; }
+      return object;
+    });
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 

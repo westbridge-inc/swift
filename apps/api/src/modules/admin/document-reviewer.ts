@@ -26,6 +26,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { DOCUMENT_REVIEWER_CAPABILITY } from './admin-authority';
 import { consoleRoleOf } from '../auth/console-role';
+import { runAsSystem } from '../../plugins/tenant-context';
 
 export { DOCUMENT_REVIEWER_CAPABILITY };
 
@@ -68,6 +69,24 @@ export async function isActiveDocumentReviewer(
   if (!holdsDocumentReviewerGrant(reviewer.admin?.permissions)) return false;
   const owner = await prisma.user.findUnique({ where: { id: documentOwnerUserId }, select: { tenantId: true } });
   return !!owner && owner.tenantId === reviewer.tenantId;
+}
+
+/**
+ * [VIEWER-FIX] The render link is loaded without a session, so nothing has
+ * bound a tenant, and under the tenant wall `users` cannot be read unbound
+ * (TENANT_UNSCOPED_ACCESS=deny refuses it; the walled login would see no
+ * row). The render route therefore learns the operator of the person whose
+ * document it is through this ONE named system read, answering only that
+ * tenant id, and only after the link's signature has been verified. The
+ * reviewer check and the object lookups then run bound to that tenant
+ * (runWithTenant), so the wall itself confines who can be found there.
+ */
+export const DOCUMENT_RENDER_LINK_CAPABILITY = 'verification-render-link';
+
+export async function documentOwnerTenant(prisma: Pick<PrismaClient, 'user'>, documentOwnerUserId: string): Promise<string | null> {
+  const owner = await runAsSystem(DOCUMENT_RENDER_LINK_CAPABILITY, () =>
+    prisma.user.findUnique({ where: { id: documentOwnerUserId }, select: { tenantId: true } }));
+  return owner?.tenantId ?? null;
 }
 
 /**

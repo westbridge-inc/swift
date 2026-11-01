@@ -300,8 +300,13 @@ export class SystemWorkOutsideTransactionError extends Error {
 export class TenantContextRequiredError extends Error {
   readonly code = 'TENANT_CONTEXT_REQUIRED';
   readonly statusCode = 500;
+  /** [VIEWER-FIX] Named on the error itself so the 5xx log line can say which read was refused. */
+  readonly model: string;
+  readonly operation: string;
   constructor(model: string, operation: string, mode: TenantMode) {
     super(`[TEN-01] ${model}.${operation} reached the database with no tenant bound (${mode}); bind a tenant or use runAsSystem(capability)`);
+    this.model = model;
+    this.operation = operation;
   }
 }
 let unscopedLogBudget = 200;
