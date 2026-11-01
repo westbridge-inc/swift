@@ -9,6 +9,15 @@ const read = (p: string) => readFileSync(join(__dirname, p), 'utf8');
 const API = join(__dirname, '..', '..', '..', '..', 'api', 'src', 'modules');
 const PLATFORM_CONFIG = readFileSync(join(API, 'ops', 'platform-config.ts'), 'utf8');
 const SERVICE_CATALOG = readFileSync(join(API, 'services', 'service-catalog.ts'), 'utf8');
+const VEHICLE_CLASSES = readFileSync(join(API, '..', 'config', 'vehicle-classes.ts'), 'utf8');
+const VERIFICATION = readFileSync(join(API, 'verification', 'verification.service.ts'), 'utf8');
+
+/** One vehicle's docProfiles from config/vehicle-classes VEHICLE_CLASSES, read off the server's own source. */
+function docProfiles(type: string): string[] {
+  const m = VEHICLE_CLASSES.match(new RegExp(`\\n\\s*${type}: \\{[^}]*?docProfiles: \\[([^\\]]*)\\]`));
+  if (!m) throw new Error(`${type} has no docProfiles in vehicle-classes`);
+  return [...(m[1] ?? '').matchAll(/'([A-Z_]+)'/g)].map((x) => x[1] ?? '');
+}
 
 /** One launch checklist from DEFAULT_DOCUMENT_CHECKLISTS, read off the server's own source. */
 function checklist(key: string): string[] {
@@ -27,6 +36,22 @@ describe('the drivers page names each vehicle’s real documents', () => {
     expect(TAXI_DOCUMENTS).toHaveLength(7);
   });
 
+  it('[REVIEW-G S4] each card is the server’s vehicle -> checklist map, and its documents are those profiles', () => {
+    for (const v of VEHICLE_DOCUMENTS) {
+      for (const type of v.vehicleTypes) expect(docProfiles(type)).toEqual(v.profiles);
+      expect([...v.docs]).toEqual(v.profiles.flatMap(checklist));
+    }
+  });
+
+  it('[REVIEW-F S2 · R13] every motor card says the insurance must permit use for hire or reward, the rule the server enforces', () => {
+    expect(VERIFICATION).toMatch(/INSURANCE_NOT_HIRE: 'This policy does not permit use for hire or reward\./);
+    expect(VEHICLE_CLASSES).toMatch(/docProfiles\.includes\('MOVER_MOTOR'\)/);
+    for (const v of VEHICLE_DOCUMENTS) {
+      if (v.profiles.includes('MOVER_MOTOR')) expect(v.note).toMatch(/insurance must permit use for hire or reward/);
+      else expect(v.note).not.toMatch(/hire or reward/);
+    }
+  });
+
   it('shows one card per vehicle, a motorised bicycle signing up as a motorbike', () => {
     expect(VEHICLE_DOCUMENTS.map((v) => v.vehicle)).toEqual(['Motorbike rider', 'Bicycle rider', 'Taxi driver']);
     expect(VEHICLE_DOCUMENTS[0]?.note).toMatch(/bicycle with any kind of motor signs up as a motorbike/i);
@@ -34,10 +59,9 @@ describe('the drivers page names each vehicle’s real documents', () => {
     expect(page).toMatch(/VEHICLE_DOCUMENTS\.map/);
   });
 
-  it('no longer says four documents, a government ID for everyone, or HIRE cover for every rider', () => {
+  it('no longer says four documents or a government ID for everyone', () => {
     expect(page).not.toMatch(/Four documents/i);
     expect(page).not.toMatch(/government ID/i);
-    expect(page).not.toMatch(/HIRE cover/i);
   });
 });
 
