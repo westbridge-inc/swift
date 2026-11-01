@@ -279,7 +279,8 @@ export async function assertRideGates(
     }
   }
   if (restriction === 'restricted') {
-    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides need your ID on file. Add your ID in the app — a person will look at it before rides unlock.');
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] No ID lifts it any more: the strikes age out, or a person lifts it.
+    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed cash payments, rides are paused on this account. They open again when those strikes are 90 days old, or sooner if a person at Swift reviews it: contact us from Help.');
   }
 
   // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer is never asked for a
@@ -288,9 +289,9 @@ export async function assertRideGates(
   // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Nor an ID: the master plan §5 gate
   // (L2 — the customer's ID on file — before a first ride, 403 ID_VERIFICATION_REQUIRED) is removed.
   // It was Swift's own 8 Oct choice, not a legal duty. Builds 11/12 and vc7/vc8 open their "Add your
-  // ID" door only on that code, which no ride path sends any more, so they stop asking too. The ID
-  // a customer chooses to add stays optional (and kept as before); STRIKE_RESTRICTED above is a
-  // separate rule after repeated failed payments.
+  // ID" door only on that code, which no ride path sends any more, so they stop asking too.
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Swift keeps no customer ID at all now; STRIKE_RESTRICTED above is
+  // a separate rule after repeated failed payments, lifted by time or by a person.
   return user;
 }
 

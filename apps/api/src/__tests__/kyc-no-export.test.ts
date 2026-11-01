@@ -76,9 +76,8 @@ describe('configured human-review approval flow never exports document reference
       const id = await service.submitDocument(mover, 'MOVER', 'national_id', await ownedVerificationFixture(app.prisma, mover), 'v1');
       // [ROLE-DOCS] a delivery rider is no longer offered a police clearance: a taxi document stands in for the rejection leg
       const clearance = await service.submitDocument(mover, 'MOVER', 'hire_car_driver_licence', await ownedVerificationFixture(app.prisma, mover), 'v1');
-      const customer = await applicant('CUSTOMER');
-      const identity = await service.submitIdentity(customer, await ownedVerificationFixture(app.prisma, customer), 'v1');
-      for (const doc of [id, clearance, identity]) {
+      // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] no customer-ID intake any more: the partner legs are the whole path
+      for (const doc of [id, clearance]) {
         expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
         expect(doc.kycRef).toMatch(/^manual_/);
         expect(await app.prisma.reviewCase.count({ where: { submissionId: doc.id, closedAt: null } })).toBe(1);

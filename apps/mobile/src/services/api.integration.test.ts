@@ -603,11 +603,6 @@ describe('Axios auth interceptor integration', () => {
         consent: true,
         privacyNoticeVersion: 'v1',
       }, accountA),
-      verificationApi.submitIdentity({
-        idDocumentUrl: '/a-id.jpg',
-        consent: true,
-        privacyNoticeVersion: 'v1',
-      }, accountA),
       partnerApi.become({ role: 'MOVER' }, accountA),
       courierApi.uploadProof('order-a', form, accountA),
       courierApi.proof('order-a', { proofPhotoUrl: '/a-proof.jpg', outcome: 'paid', gps: { lat: 6.8, lng: -58.1 } }, accountA),
@@ -655,7 +650,8 @@ describe('Axios auth interceptor integration', () => {
 
     // [M-28] +1: the courier collect step joined the captured-session matrix.
     // [E16] +2: the courier pickup-proof upload and confirmation joined it.
-    expect(seen).toHaveLength(43);
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] -1: the customer ID submission is gone (Swift asks for no customer ID).
+    expect(seen).toHaveLength(42);
     expect(seen.every((request) => request.authorization === 'Bearer access-a-1')).toBe(true);
     expect(seen.every((request) => !request.keys.includes('_swiftAuthBindingId'))).toBe(true);
     expect(auth.current).toEqual(accountB);

@@ -137,6 +137,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-11-01',
     why: 'The Delivery policy now says express delivery adds GYD 1,000 to the standard delivery fee, whatever the distance (before, express was priced as a multiple of the fee). The Terms, the Privacy Policy and the agreements change only their date. It lands before launch, so no customer has used Swift under the old price, and nobody is asked again.',
   },
+  {
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 17:31Z (b) · COORD: minor, NON-material, no forced re-accept; DRAFT until counsel]
+    version: '2026-11-01.1',
+    why: 'Swift asks for less and keeps less: a customer is never asked for an ID any more, and the IDs customers added before are withdrawn and deleted (unless a legal or safety hold keeps one until it ends). The Terms and the Privacy Policy now say so. No one is asked for more and nothing is taken from anyone, so nobody is asked again.',
+  },
 ];
 
 /**

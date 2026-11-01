@@ -12,6 +12,7 @@ import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
 import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { CUSTOMER_ID_DOC_TYPE } from '../verification/retention-rules';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 import { assertTripMayEndUnpaidOn } from '../rides/taxi-stop-rules';
 import { assertFailureSource, captureHandoverEvidence, handoverBinding } from './handover-evidence';
@@ -117,10 +118,19 @@ function rideDurationMinutes(order: { pickedUpAt: Date | null; taxiDuration: num
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] The audit action a person at Swift records when they lift a
+ *  strike restriction from Help (POST /admin/users/:id/strike-restriction/lift). Strikes given before it no longer
+ *  restrict ordering; they still count toward the ban. */
+export const STRIKE_RESTRICTION_LIFTED = 'STRIKE_RESTRICTION_LIFTED';
+
 /**
  * Strike consequences at placement, free of service cycles so checkout and
- * ride-request can import it directly: restricted -> verified-only (L2+),
+ * ride-request can import it directly: restricted -> ordering paused,
  * banned -> no ordering at all. Thresholds come from CountryConfig.
+ * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] A customer ID no longer lifts the restriction (Swift keeps none,
+ * and L2 is retired): it stays until the strikes are 90 days old, or until a person at Swift lifts it from Help — then
+ * only strikes given after the lift restrict again. It applies at every trust level: an earned L3 was exempt only
+ * because L3 used to stand on an ID.
  */
 export async function orderingRestriction(
   prisma: PrismaClient | Prisma.TransactionClient,
@@ -128,7 +138,7 @@ export async function orderingRestriction(
 ): Promise<'restricted' | 'banned' | null> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { countryCode: true, trustLevel: true },
+    select: { countryCode: true },
   });
   if (!user) return null;
 
@@ -149,8 +159,18 @@ export async function orderingRestriction(
   });
 
   if (strikes >= rules.strikeBanThreshold) return 'banned';
-  if (strikes >= rules.strikeRestrictThreshold && user.trustLevel === 'L1') return 'restricted';
-  return null;
+  if (strikes < rules.strikeRestrictThreshold) return null;
+  // A person's lift of THIS account (never one recorded on a linked account) wipes the strikes given before it, for the
+  // restriction only. Read only on this rare path, never on an ordinary checkout.
+  const lifted = await prisma.auditLog.findFirst({
+    where: { action: STRIKE_RESTRICTION_LIFTED, entity: 'User', entityId: userId },
+    orderBy: { createdAt: 'desc' }, select: { createdAt: true },
+  });
+  if (!lifted) return 'restricted';
+  const since = await prisma.strike.count({
+    where: { userId: { in: strikeUserIds }, createdAt: { gte: new Date(Math.max(Date.now() - 90 * DAY_MS, lifted.createdAt.getTime())) } },
+  });
+  return since >= rules.strikeRestrictThreshold ? 'restricted' : null;
 }
 
 /** The trust badge a mover sees before fronting cash for a customer (§4d):
@@ -1113,27 +1133,53 @@ export class CashRulesService {
   // L3 — earned trust
   // -------------------------------------------------------------------------
 
-  /** Completed paid orders + zero strikes + account age -> reduced friction. */
+  /** Completed paid orders + zero strikes + account age -> reduced friction. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026
+   *  (b), Q2] Earned from L1 directly on the same rule (L2, which needed a customer ID, is retired); an account still
+   *  marked L2 is promoted the same way. [COORD security review] Never a way around a check: the strikes counted are
+   *  the person's (every account linked to the same identity, as the restriction counts them) and an identity under
+   *  review is not promoted; an account whose trust a person withdrew (a person's REJECT of its customer ID, or any
+   *  REVOKED decision on its documents) or that is under an integrity hold is never promoted automatically; and L3 never
+   *  raises a rider's float by itself (FloatService: a person must have approved the rider's partner documents). */
   async maybePromoteToL3(userId: string, countryCode: string): Promise<boolean> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { trustLevel: true, createdAt: true },
     });
-    if (!user || user.trustLevel !== 'L2') return false;
+    if (!user || user.trustLevel === 'L3') return false;
 
     const rules = await this.configFor(countryCode);
     const ageDays = (Date.now() - user.createdAt.getTime()) / DAY_MS;
     if (ageDays < rules.l3MinAccountAgeDays) return false;
 
-    const strikes = await this.prisma.strike.count({ where: { userId } });
+    const authority = await identityAuthority(this.prisma, userId);
+    if (authority.status === 'REVIEW_REQUIRED') return false;
+    const strikes = await this.prisma.strike.count({ where: { userId: { in: authority.memberIds } } });
     if (strikes > 0) return false;
+
+    const submitted = await this.prisma.verificationDocument.findMany({ where: { userId }, select: { id: true, docType: true } });
+    if (submitted.length > 0) {
+      const customerIds = submitted.filter((d) => d.docType === CUSTOMER_ID_DOC_TYPE).map((d) => d.id);
+      const withdrawn = await this.prisma.reviewDecision.count({
+        where: {
+          outcome: 'REJECT',
+          OR: [
+            { reasonCode: 'REVOKED', case: { submissionId: { in: submitted.map((d) => d.id) } } },
+            ...(customerIds.length > 0 ? [{ case: { submissionId: { in: customerIds } } }] : []),
+          ],
+        },
+      });
+      if (withdrawn > 0) return false;
+    }
+    const { hasActiveHold } = await import('../integrity/enforcement');
+    if ((await hasActiveHold(this.prisma, userId)).held) return false;
 
     const paidOrders = await this.prisma.order.count({
       where: { customerId: userId, status: { in: ['DELIVERED', 'COMPLETED'] }, paymentStatus: 'CAPTURED' },
     });
     if (paidOrders < rules.l3MinPaidOrders) return false;
 
-    await this.prisma.user.update({ where: { id: userId }, data: { trustLevel: 'L3' } });
+    const raised = await this.prisma.user.updateMany({ where: { id: userId, trustLevel: { not: 'L3' } }, data: { trustLevel: 'L3' } });
+    if (raised.count !== 1) return false;
     // D.3 — L3 raises the rider's float limit (no-op for non-riders).
     await new FloatService(this.prisma).recomputeForUser(userId);
     await this.notifications.send({

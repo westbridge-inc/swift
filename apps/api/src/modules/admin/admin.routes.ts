@@ -35,7 +35,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
-import { CashRulesService } from '../cash/cash-rules.service';
+import { CashRulesService, orderingRestriction, STRIKE_RESTRICTION_LIFTED } from '../cash/cash-rules.service';
 import { resolveHeldDoorCash } from '../cash/door-cash-hold';
 import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
@@ -98,7 +98,7 @@ import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
-import { transitionUserStatusAuthority } from '../mover-authority';
+import { assertAccountActionAuthority, lockUserRoleAuthority, transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
@@ -1526,6 +1526,51 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: updated };
+  });
+
+  /**
+   * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] A person at Swift lifts a strike restriction from Help. Before
+   * the ruling only the customer's ID lifted it; Swift keeps no customer ID now, so it stays until the strikes are 90
+   * days old, or until a person reviews the account and lifts it here. The strikes given before the lift stop
+   * restricting THIS account's ordering and rides (they still count toward the ban, which this never lifts, and a
+   * linked account is not lifted by it). The same hands and the same authority as a suspension: the actor's role, read
+   * from the database inside the transaction, must outrank the target's (never their own account, never a peer), and
+   * an actor linked to the target's identity is refused. A stated reason is required (x-swift-reason). The audit row
+   * the restriction reads is written in the same transaction, after every check; the customer is told after it commits.
+   */
+  app.post('/users/:id/strike-restriction/lift', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const header = request.headers['x-swift-reason'];
+    const reason = (typeof header === 'string' ? header : '').trim();
+    if (reason.length === 0) throw new AppError(400, 'REASON_REQUIRED', 'Say why you are lifting this restriction.');
+    const actorId = request.user.userId;
+    if (actorId === id) throw new ForbiddenError('You cannot act on an account at an equal or higher role, or on your own');
+    const target = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
+    if (!target) throw new NotFoundError('User', id);
+    // A person linked to the target's identity (one human, several accounts) never lifts their own restriction.
+    const linked = await identityAuthority(app.prisma, id);
+    if (linked.memberIds.includes(actorId)) throw new ForbiddenError('You cannot act on an account linked to your own');
+    const restriction = await app.prisma.$transaction(async (tx) => {
+      const authority = await lockUserRoleAuthority(tx, id);
+      const actor = await tx.user.findUnique({ where: { id: actorId }, select: { roles: true } });
+      if (!actor) throw new ForbiddenError('Acting account not found');
+      // The suspension rule: the actor must outrank the target. (A lift is not an unban: a ban is refused below.)
+      assertAccountActionAuthority({ role: consoleRoleOf(actor.roles) ?? '' }, { roles: authority.roles }, { targetStatus: 'ACTIVE', lifts: 'SUSPENDED' });
+      const before = await orderingRestriction(tx, id);
+      if (before === 'banned') {
+        throw new AppError(409, 'STRIKE_BANNED', 'This account has too many strikes for a lift: ordering is switched off. Review it as a ban instead.');
+      }
+      if (before !== 'restricted') throw new AppError(409, 'NOT_RESTRICTED', 'This account is not restricted: there is nothing to lift.');
+      await auditIn(tx, actorId, STRIKE_RESTRICTION_LIFTED, 'User', id, { reason }, request);
+      return orderingRestriction(tx, id);
+    });
+    await notifications.send({
+      userId: id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Ordering is open again',
+      body: 'A person at Swift reviewed your account. You can order and ride again.',
+    });
+    return { success: true, data: { userId: id, restriction } };
   });
 
   // ─── Vendors ───────────────────────────────────────────────────────────

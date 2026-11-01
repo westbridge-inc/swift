@@ -4,12 +4,9 @@ import { CERTIFICATE_YEAR_DOC_TYPES, IDENTITY_DOC_TYPES, ISSUE_DATE_DOC_TYPES, L
 // The two type lists live in the registry's own text (DOC-INV-2); re-exported for this module's callers.
 export { ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES };
 
-/** The synthetic L2 flow always receives a government identity document. */
-const L2_IDENTITY_DOC_TYPE = 'identity_l2';
-const IDENTITY_NUMBER_DOC_TYPES = new Set<string>([
-  ...IDENTITY_DOC_TYPES,
-  L2_IDENTITY_DOC_TYPE,
-]);
+/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] The partner identity documents only: the customer's ID (the synthetic
+ *  L2 flow) is gone, so no customer ID number can become an identity key any more. */
+const IDENTITY_NUMBER_DOC_TYPES = new Set<string>([...IDENTITY_DOC_TYPES]);
 
 /**
  * Convert only a declared identity-document identifier into a HARD integrity
@@ -51,7 +48,7 @@ export function approvedIdentityDocumentNumber(
  * person. It lives in its own namespace (`DL:`): a licence number never
  * matches an identity-card number made of the same characters.
  *
- * A CUSTOMER's ID (`identity_l2`) is NOT here, by rule of 11 Oct 2026
+ * A CUSTOMER's ID (`identity_l2`) is NOT here, by rule of 11 Oct 2026 (and since 1 Nov 2026 Swift takes none at all)
  * (coordinator, under the owner's delegation): "no ID-number duplicate check
  * at launch (collects less data; revisit after launch)". The 6 Oct ruling was
  * written for partner and mover documents. So the console asks nothing for a

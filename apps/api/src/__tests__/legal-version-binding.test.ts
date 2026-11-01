@@ -348,6 +348,19 @@ const PUBLISHED: Record<
     driver_agreement: '65168219ab4b9e6781eaf545510294db837f80bcb2a98cd0067cd43c428aa1f0',
     vendor_agreement: '62c6c9d31e881482d6e8303c10a012abb75a75b25a5305959cb6aacb2625e115',
   },
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) · COORD: minor, NON-material · DRAFT until counsel] Swift no longer
+  // takes or keeps a customer's ID. Terms s.3: a customer never needs an ID or a photo (the sentence on when the app
+  // asked for one is gone). Privacy s.1 (verification documents are partners' only; Swift asks no customer for an ID and
+  // keeps none), s.3 (the customer-ID basis is gone), s.5 (the automatic customer-ID check is gone), s.6 (IDs added
+  // before 1 November 2026 are withdrawn and deleted, a hold excepted). Same day as 2026-11-01 (EXPRESS-FEE), so the
+  // agreements keep their 2026-11-01 hashes; putting those six passages back reproduces the 2026-11-01 Terms and
+  // Privacy pins exactly.
+  '2026-11-01.1': {
+    terms: '27829c43404ec23ba2c302b440e800dff03622e61ec32d478de8580e44bc45dc',
+    privacy: '391aaeb3180cf5a049202cddc2c0bbce9cc3e0ed1f39908ada0d1a2a05a2fbdd',
+    driver_agreement: '65168219ab4b9e6781eaf545510294db837f80bcb2a98cd0067cd43c428aa1f0',
+    vendor_agreement: '62c6c9d31e881482d6e8303c10a012abb75a75b25a5305959cb6aacb2625e115',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

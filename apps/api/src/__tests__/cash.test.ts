@@ -558,14 +558,17 @@ describe('Strike consequences — the prankster customer gets restricted', () =>
     }
   }
 
-  it('2 strikes: L1 restricted, L2 still flows; 4 strikes: banned outright', async () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1 — a DELIBERATE change to this pin] A customer ID no longer lifts
+  // the restriction (Swift keeps none; L2 is retired): it holds at every level until the strikes age out or a person at
+  // Swift lifts it (customer-id-removed.test.ts).
+  it('2 strikes: restricted at every level, L2 included; 4 strikes: banned outright', async () => {
     const prankster = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await strikeTimes(prankster.userId, 2);
 
     expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('restricted');
 
     await app.prisma.user.update({ where: { id: prankster.userId }, data: { trustLevel: 'L2' } });
-    expect(await orderingRestriction(app.prisma, prankster.userId)).toBeNull();
+    expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('restricted');
 
     await strikeTimes(prankster.userId, 2);
     expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('banned');
@@ -583,8 +586,9 @@ describe('Strike consequences — the prankster customer gets restricted', () =>
     }, prankster.token);
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('STRIKE_RESTRICTED');
-    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a restricted account's ID waits for a person (STRIKES hold).
-    expect(res.json().error.message).toMatch(/ID on file[\s\S]*a person will look at it/);
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] the words name the way out, never an ID
+    expect(res.json().error.message).toMatch(/90 days old[\s\S]*a person at Swift reviews it/);
+    expect(res.json().error.message).not.toMatch(/\bID\b/);
   });
 
   it('a banned customer cannot check out at all', async () => {

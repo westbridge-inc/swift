@@ -63,7 +63,6 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { publicStorefrontSeller } from '../verification/storefront-seller';
-import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -990,11 +989,8 @@ export async function customerRoutes(app: FastifyInstance) {
         // time — a private object's key is unrenderable by any client.
         avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
-        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
-        // truthfully (additive): NONE · ON_FILE (on file, no person reviewed it) · CHECKED (a person
-        // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
-        // Never fails the profile: an unreadable answer is left out, and the app then claims nothing.
-        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel).catch(() => undefined),
+        // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No `idCheck` any more: Swift keeps no customer ID. Builds 9-12
+        // read a missing answer as "claims nothing" (their own words under "Your ID").
         role: user.activeRole,
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,

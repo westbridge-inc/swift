@@ -43,7 +43,6 @@ vi.mock('../../../services/api', () => ({
 }));
 vi.mock('../../../lib/payLink', () => ({ openPayLink: vi.fn() }));
 vi.mock('../../../lib/appQueryPolicy', () => ({ retryRead: () => false }));
-vi.mock('../../../lib/customerIdCopy', () => ({ profileIdRowSub: () => '' }));
 vi.mock('../../../kit/toast', () => ({ toast: { error: fx.toastError, success: vi.fn(), show: vi.fn() } }));
 vi.mock('../../../kit/controls', async () => {
   const R = await import('react');

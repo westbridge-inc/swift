@@ -174,7 +174,6 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     ['a taxi watchdog release', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'PENDING' }, 'Taxi'],
     ['a taxi watchdog custody warning', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'RIDE_IN_PROGRESS' }, 'Taxi'],
     // [PUSH-ROUTING] Rows that used to open nothing.
-    ['an ID-on-file notice', { kind: 'verification_l2', audience: 'customer' }, 'IdentityVerification'],
     ['a store reply to their review', { kind: 'review_response', ratingId: 'r1', vendorId: 'v1' }, 'VendorReviews'],
     ['a support ticket update', { kind: 'support_update', ticketId: 't1' }, 'GetHelp'],
     ['a drivers-are-back notice', { kind: 'supply_returned', audience: 'customer', pool: 'DRIVER' }, 'Taxi'],
