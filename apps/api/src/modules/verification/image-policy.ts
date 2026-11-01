@@ -3,8 +3,13 @@
  *
  * [R24 · research C4] First, for PARTNERS: every committed PERSONAL document's image, once
  * the decision on it is older than the window (30 days; retention-rules). A customer's ID is
- * never touched here (kept while the account is open). Then the registry law, for types whose
- * legal facts were verified:
+ * never touched here (kept while the account is open).
+ *
+ * [DOC-SECURITY G5] Then every PERSONAL partner document that is no longer current — replaced
+ * (before review, or by a renewal), revoked or expired — once it has been so for the same window,
+ * and never sooner than the window after the decision on it. Its record and state stay.
+ *
+ * Then the registry law, for types whose legal facts were verified:
  *
  * A committed submission whose document type is ACTIVE in the registry (the registry
  * law: a type's rules engage when its legal facts are verified) with image policy
@@ -19,7 +24,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { VerificationService } from './verification.service';
 import {
-  configuredDays, DAY_MS, DEFAULT_PERSONAL_IMAGE_DAYS, NON_PERSONAL_DOC_TYPES, PARTNER_DOCUMENT_WHERE, PERSONAL_IMAGE_DAYS_KEY,
+  configuredDays, DAY_MS, DEFAULT_PERSONAL_IMAGE_DAYS, NO_LONGER_CURRENT_STATES, NON_PERSONAL_DOC_TYPES, PARTNER_DOCUMENT_WHERE, PERSONAL_IMAGE_DAYS_KEY,
 } from './retention-rules';
 
 export interface ImagePolicyRun { candidates: number; purged: number; probeFailed: number; skipped: number }
@@ -54,6 +59,22 @@ export async function applyImagePolicy(
   });
   run.candidates += personal.length;
   for (const d of personal) tally(await service.purgeImageAfterReview(d.id, 'partner-image-retention', now));
+
+  // [DOC-SECURITY G5] A partner's PERSONAL document that is no longer current: a copy replaced before review, an
+  // approval superseded by a renewal, a revoked approval, a lapsed document. None can be decided again, and none
+  // had a sweep: each kept its image for good. Its clock is the row's last change (the replacement, revocation or
+  // expiry; a later change, such as a hold released, only waits longer), and never sooner than the window after
+  // the decision on it. The same path (shred, probe, receipt); a legal hold wins at its final step.
+  const noLongerCurrent = await prisma.verificationDocument.findMany({
+    where: {
+      state: { in: [...NO_LONGER_CURRENT_STATES] }, AND: [PARTNER_DOCUMENT_WHERE, { OR: [{ reviewedAt: null }, { reviewedAt: { lte: decidedBefore } }] }],
+      docType: { notIn: [...NON_PERSONAL_DOC_TYPES] },
+      updatedAt: { lte: decidedBefore }, imagePurgedAt: null, purgedAt: null, legalHoldId: null, fileUrl: { not: '' },
+    },
+    select: { id: true }, orderBy: { updatedAt: 'asc' }, take: batch,
+  });
+  run.candidates += noLongerCurrent.length;
+  for (const d of noLongerCurrent) tally(await service.purgeImageAfterReview(d.id, 'partner-image-retention', now));
 
   const purgeTypes = await prisma.docType.findMany({
     where: { isActive: true, imagePolicy: 'PURGE_AFTER_REVIEW' },
