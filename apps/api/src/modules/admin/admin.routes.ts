@@ -9,6 +9,7 @@ import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, 
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
 import { withPreviousDecisions } from '../verification/previous-decision';
+import { REVIEW_QUEUE_SELECT, reviewQueueRow } from './review-queue-row';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
@@ -42,7 +43,6 @@ import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { EVIDENCE_REFERENCE_MAX, EVIDENCE_REFERENCE_MIN, EVIDENCE_REFERENCE_SHAPE } from '../billing/evidence-reference';
-import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
 import { signupSelfieFor } from '../verification/signup-selfie';
@@ -6457,18 +6457,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const [documents, total] = await Promise.all([
       tenantPrisma.verificationDocument.findMany({
         where,
-        include: {
-          // [A-19] The reviewer is asked to tick "cross-checked against the
-          // H-plate" — so the plate has to be ON THE SCREEN. It was not sent at
-          // all, which made that checkbox an assertion about something the
-          // operator could not see.
-          user: {
-            select: {
-              id: true, firstName: true, lastName: true, phone: true, countryCode: true,
-              driver: { select: { licensePlate: true, vehicleMake: true, vehicleModel: true, vehicleType: true } },
-            },
-          },
-        },
+        // [DOC-SECURITY G3] An allow-list (review-queue-row.ts): never the storage key,
+        // the provider reference, a typed policy number or the reviewer's note.
+        // [A-19] It carries the applicant's plate: the reviewer ticks "cross-checked against the H-plate".
+        select: REVIEW_QUEUE_SELECT,
         orderBy: { createdAt: 'asc' }, // oldest first — review in arrival order
         skip,
         take: limit,
@@ -6490,9 +6482,9 @@ export async function adminRoutes(app: FastifyInstance) {
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
     // [VERIFY-DOCS] Each row says what the reviewer must type to approve it.
-    // [SEC-PII · #2170 S3-2] The applicant's number masked unless the live grant holds user.contact.read.
-    const applicantContact = holdsPersonContact(request, 'user');
-    const rows = withEarlier.map((document) => ({ ...(applicantContact || !document.user ? document : { ...document, user: maskOwnPhone(document.user) }), reviewerTypes: reviewerTypedFields(document.docType) }));
+    // [DOC-SECURITY G3 · supersedes #2170 S3-2 here] The applicant's number is masked for every grant:
+    // the console shows its last digits only, and the full number is the person page's audited reveal.
+    const rows = withEarlier.map((document) => reviewQueueRow(document));
 
     return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });

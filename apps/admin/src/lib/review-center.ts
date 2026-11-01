@@ -27,6 +27,7 @@ export interface ReviewDocument {
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
   user?: {
+    /** `phone` arrives masked (its last 4 digits only) [DOC-SECURITY G3]: the full number is the person page's audited reveal. */
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
     driver?: { licensePlate?: string; vehicleMake?: string; vehicleModel?: string; vehicleType?: string } | null;
   };
