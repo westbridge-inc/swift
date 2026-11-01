@@ -132,6 +132,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-29.1',
     why: 'Terms section 7: while Swift\u2019s instant appointment booking is switched on, if the business or provider moves a customer\u2019s appointment, the customer can also cancel it free in the app for 60 minutes after being told (or until it starts, if that is sooner), even within 2 hours of its start. Before this, a moved appointment kept only the 2-hour rule. It gives customers more, takes nothing from anyone and asks no one for more, so nobody is asked again.',
   },
+  {
+    // [EXPRESS-FEE · owner ruling 1 Nov 2026: bump for the Delivery-policy wording; pre-launch, no re-acceptance]
+    version: '2026-11-01',
+    why: 'The Delivery policy now says express delivery adds GYD 1,000 to the standard delivery fee, whatever the distance (before, express was priced as a multiple of the fee). The Terms, the Privacy Policy and the agreements change only their date. It lands before launch, so no customer has used Swift under the old price, and nobody is asked again.',
+  },
 ];
 
 /**

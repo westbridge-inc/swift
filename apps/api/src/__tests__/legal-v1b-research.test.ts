@@ -75,7 +75,7 @@ describe('Terms of Service (Part 4)', () => {
 describe('Privacy Policy (Part 4)', () => {
   it.each([
     // [EMAIL-HTTPS · 2026-10-27] the "as of" date is LAST_UPDATED: it moves with the new day's version.
-    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 29 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
+    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 1 November 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
     // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] taxi rides and larger orders no longer need a customer's ID.
     ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and the ID a customer adds (asked for only after repeated failed deliveries or payments, or for a high-value promotion), for safety and fraud prevention.</li>"],
@@ -182,7 +182,8 @@ describe('one version for the whole batch', () => {
   // [TERMS · owner 29 Oct, non-material] pro appointments booked from a provider's list (Terms s.7) as 2026-10-29.
   // [BOOK-P3 · COORD (b), non-material] the free cancel after a business's or provider's move (Terms s.7) as 2026-10-29.1.
   // [BILL-PRO] the Business Agreement covers Providers (s.12), material for Providers only, as 2026-10-29.2.
-  it('is 2026-10-29.2', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-29.2');
+  // [EXPRESS-FEE · owner 1 Nov 2026, non-material] the bump for the express Delivery-policy wording, as 2026-11-01.
+  it('is 2026-11-01', () => {
+    expect(LEGAL_VERSION).toBe('2026-11-01');
   });
 });
