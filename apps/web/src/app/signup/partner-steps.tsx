@@ -17,6 +17,7 @@ import { AGREEMENT, agreementAsk, businessAsk, EXAMPLE, LIMIT, taxiAsk } from '@
 import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT, type MoverRole } from '@/lib/signup-roles';
 import type { StoreLocationPicker as StoreLocationPickerComponent } from '@/components/store-location-picker';
 import { loadStorePicker } from './store-picker-loader';
+import { readBusinessDraft, saveBusinessDraft } from './business-draft';
 // [Row 628] The weekly fee block (its price read, words and tick) loads on the partner steps only.
 import type { WeeklyFee as WeeklyFeeComponent } from './weekly-fee';
 import type { FeeState } from '@/lib/signup-fee';
@@ -122,8 +123,9 @@ const NEW_BUSINESS: BusinessDraft = { biz: { name: '', vendorType: 'RESTAURANT',
 /** [FLOW-QA F9] `note`: said under the heading when an existing account adds a business or a vehicle to itself. */
 export function BusinessStep({ shell, draft, onDraft, note = null }: { shell: StepShell; draft: BusinessDraft | null; onDraft: (_draft: BusinessDraft) => void; note?: string | null }) {
   const { phone, busy, wrap, setError, done } = shell;
-  const [d, setD] = useState<BusinessDraft>(() => draft ?? NEW_BUSINESS);
-  useEffect(() => { onDraft(d); }, [d, onDraft]);
+  // [FLOW-QA2 NEW-6] After a refresh the page holds no draft: what this tab kept comes back (never a tick).
+  const [d, setD] = useState<BusinessDraft>(() => draft ?? readBusinessDraft() ?? NEW_BUSINESS);
+  useEffect(() => { onDraft(d); saveBusinessDraft(d); }, [d, onDraft]);
   const { biz, nameBasis, ownNameTick, storePin } = d;
   const setBiz = (next: BusinessDraft['biz']) => setD((cur) => ({ ...cur, biz: next }));
   const setNameBasis = (next: BusinessDraft['nameBasis']) => setD((cur) => ({ ...cur, nameBasis: next }));

@@ -7,7 +7,7 @@ import { ChevronLeft } from 'lucide-react';
 import { hasProviderProfile, sessionProbe } from '@/lib/auth';
 import { sendOtp } from '@/lib/otp-send';
 import { markSignedIn } from '@/lib/session-hint';
-import { ACCOUNT_STEPS, clearDraft, readBusinessDraft, readDraft, saveBusinessDraft, saveDraft, stepOf, stepUrl } from '@/lib/signup-draft';
+import { ACCOUNT_STEPS, clearDraft, readDraft, saveDraft, stepOf, stepUrl } from '@/lib/signup-draft';
 import { roleHome } from '@/lib/role-home';
 import { otpVerifyRefusal } from '@/lib/otp-send-refusal';
 import { verifyOtp, registerAccount } from '@/lib/customer-account';
@@ -91,7 +91,6 @@ export default function SignupPage() {
   // load on demand: partner-steps.tsx).
   const [bizDraft, setBizDraft] = useState<PartnerStepsModule.BusinessDraft | null>(null);
   const [vehDraft, setVehDraft] = useState<PartnerStepsModule.VehicleDraft | null>(null);
-  useEffect(() => { if (bizDraft) saveBusinessDraft(bizDraft); }, [bizDraft]);
   // [FLOW-QA F6] One history entry per step, and what was typed kept for this tab (lib/signup-draft).
   const fromHistory = useRef(false);
   const stepNow = useRef<Step>('role');
@@ -107,8 +106,6 @@ export default function SignupPage() {
       restoringTo.current = wanted;
       if (draft.role === 'CUSTOMER' || draft.role === 'VENDOR' || draft.role === 'RIDER' || draft.role === 'DRIVER') setRole(draft.role);
       setPhone(draft.phone); setFirst(draft.first); setLast(draft.last);
-      // [FLOW-QA2 NEW-6] a refresh on the business step keeps what was typed there too
-      if (wanted === 'business') setBizDraft(readBusinessDraft());
       setStep(wanted);
     } else if (wanted) {
       // an old step address with nothing kept for it: start at the beginning, without an extra entry
