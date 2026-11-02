@@ -14,6 +14,8 @@ import { readFileSync } from 'node:fs';
 const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 const HOOK = strip(readFileSync(new URL('./dispatchOffers.ts', import.meta.url), 'utf8'));
 const CARD = strip(readFileSync(new URL('../modules/mover/screens/MoverHomeScreen.tsx', import.meta.url), 'utf8'));
+// [promo-film finding 2 Nov 2026] The cash box is its own component (OfferCashMath), drawn by the card.
+const CASH = strip(readFileSync(new URL('../modules/mover/screens/OfferCashMath.tsx', import.meta.url), 'utf8'));
 
 describe('the app asks the server for its live offer', () => {
   const body = HOOK.slice(HOOK.indexOf('export function useDispatchOffers('), HOOK.indexOf('return {\n    offer,'));
@@ -41,9 +43,12 @@ describe('the app asks the server for its live offer', () => {
 describe('the card renders live and recovered offers through one path', () => {
   it('reads the ETA and the cash box from the offer object — never from a side channel', () => {
     expect(CARD).toContain('offer.etaMinutes != null');
-    expect(CARD).toContain('offer.cashMath ?');
+    expect(CARD).toContain('<OfferCashMath cashMath={offer.cashMath}');
+    expect(CASH).toContain('if (!cashMath) return null;');
     // A cash box is rendered or absent; nothing on the client computes money.
-    expect(CARD).not.toMatch(/collectFromCustomer\s*[-+*/]/);
-    expect(CARD).not.toMatch(/payToVendor\s*[-+*/]/);
+    for (const src of [CARD, CASH]) {
+      expect(src).not.toMatch(/collectFromCustomer\s*[-+*/]/);
+      expect(src).not.toMatch(/payToVendor\s*[-+*/]/);
+    }
   });
 });
