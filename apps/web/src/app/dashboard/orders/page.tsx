@@ -142,7 +142,8 @@ export default function OrdersPage() {
         // [WEB-ONBOARDING] a store never approved yet is told what is left, never "The board is live."
         store.data?.status === 'PENDING_APPROVAL'
           ? <NotLiveGuide store={store.data} manager={manager} owner={role === 'OWNER'} />
-          : store.data?._count?.orders === 0
+          // [REVIEW S4] the first-order guide says the board is live: only a live store gets it
+          : store.data?._count?.orders === 0 && storeLive
             ? <FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
             : <BoardQuiet lastOrderAt={lastOrderAt} />
       ) : <div className="sw-order-board">{board.map(c => <section key={c.key} aria-label={`${c.label} orders`} className="min-w-0 space-y-3">
